@@ -337,24 +337,12 @@ def _resolved_people(agent_name: str, role: str) -> List[str]:
 
 
 def _can_open(agent_name: str, email: str) -> bool:
-    """Can this person reach a gated approval on `agent_name`? (trinity-enterprise#881)
-
-    A decision is made in the Workspace (the agent on the person's roster:
-    owned or shared) or in Operations (an operator or admin with access to the
-    agent). A platform account is asked `can_user_access_agent` — owner, shared
-    or admin, which covers both doors; an email with no account only has the
-    Workspace, so the agent must be shared with it. Fails closed: an unreadable
-    lookup is "cannot open", which refuses by name rather than waits silently."""
-    try:
-        user = db.get_user_by_email(email)
-        if user:
-            return bool(db.can_user_access_agent(user["username"], agent_name))
-        from client_portal.service import agent_on_roster
-        return bool(agent_on_roster(agent_name, email, include_owned=False))
-    except Exception:  # noqa: BLE001
-        logger.warning("[SkillGate] could not tell whether an approver can open %s",
-                       agent_name, exc_info=True)
-        return False
+    """Can this approver reach a gated approval on `agent_name`? The rule is
+    `role_addressing.can_open_agent` (trinity-enterprise#881; moved there for
+    trinity-enterprise#1007 so an ask to a canon role applies the same one).
+    This name stays the gate's seam: `_approvers` reads it, and the tests
+    patch it."""
+    return role_addressing.can_open_agent(agent_name, email)
 
 
 def _approvers(agent_name: str, role: str) -> List[str]:
@@ -425,6 +413,51 @@ def read_gates(agent_name: str) -> Dict[str, SkillGate]:
             503, "gate_unavailable",
             f"Could not check whether this request to {agent_name} needs approval; "
             "nothing was run. Try again shortly.")
+
+
+# trinity#3402: refusals the SAME request gets again on every retry, until a
+# person changes the request or the agent's gate setup. A room records the posts
+# behind one (as it does a hold) so later wakes do not refuse them forever. Every
+# other refusal clears by itself — an unreadable map, a rate or queue cap, an
+# agent that is down, an ask that could not be raised — and the room delivers
+# the post again.
+STANDING_REFUSALS = frozenset({
+    "mixed_approvers",
+    "request_too_long",
+    "role_unassigned",
+    "approver_cannot_open_agent",
+    "gated_skill_not_installed",
+    "gated_skill_ambiguous",
+    "gated_skill_unreadable",
+})
+
+
+def gate_hold_on_write(agent_name: str, text: Optional[str]) -> Dict[str, str]:
+    """trinity#3402: the `gate_hold` a public-link or channel row is WRITTEN with
+    — `{"gate_hold": "named"}` when its text invokes a skill gated on
+    `agent_name`, else `{}` (the ordinary write is unchanged).
+
+    Only for senders who can never self-approve (a public visitor, a channel
+    user): for them such a message never runs as itself, so it is kept out of
+    every later prompt from the moment it is stored — a turn built while this
+    one is still inside the gate's check, and group chatter the gate never sees.
+    The verdict overwrites the mark (`mark_public_chat_messages_held`). An
+    unreadable gate map stores the row unmarked: nothing would ever clear a
+    `named` mark, so a turn that then ran would lose its message from every
+    later prompt. The verdict still marks each turn the gate holds or refuses
+    (the dispatch-time read refuses `gate_unavailable` while the map is still
+    unreadable). The gap is a message invoking a gated skill that is stored
+    during the blip and never dispatched: group chatter, or a turn that fails
+    before its dispatch."""
+    from db.public_chat import GATE_HOLD_NAMED
+
+    if not text:
+        return {}
+    try:
+        gates = read_gates(agent_name)
+    except SkillGateRefused:
+        return {}
+    return {"gate_hold": GATE_HOLD_NAMED} if find_gated_invocations(text, gates) else {}
 
 
 def _skill_list(names: List[str]) -> str:
@@ -1280,9 +1313,9 @@ _marker_locks: Dict[Tuple[int, str], Any] = {}
 
 def spawn_gate_marker_sync(agent_name: str, *, only_if_gated: bool = True) -> bool:
     """Fire-and-forget `sync_gate_marker`; True when a sync was scheduled.
-    `only_if_gated` (start and recreate) skips the exec for an agent with no
-    gates, and for an unreadable map, so an agent start costs nothing while
-    the gate is unused. A heal passes False. Never raises."""
+    `only_if_gated` (a recreate, whose fresh layer has no marker to remove)
+    skips the exec for an agent with no gates, and for an unreadable map. A
+    start and a heal pass False. Never raises."""
     import asyncio
 
     if only_if_gated:
@@ -1331,6 +1364,9 @@ DISPATCH_FIELDS: Dict[str, str] = {
     "source_channel_chat_id": FREEZE,
     "source_channel_thread": FREEZE,
     "source_channel_client": FREEZE,
+    # trinity#2328: the caller's per-task turn cap is a property of the task,
+    # like its model and timeout — the approved run keeps it.
+    "max_turns": FREEZE,
     # trinity#3653: set on a requester's wake-up only; an approved run is the
     # requester's own request and never carries a binding agent of its own.
     "source_channel_agent": DROP,
@@ -1646,6 +1682,7 @@ async def _dispatch_approved(record: Dict[str, Any], execution_id: str) -> str:
         system_prompt=system_prompt,
         timeout_seconds=frozen.get("timeout_seconds"),
         async_mode=True,
+        max_turns=frozen.get("max_turns"),
     )
     row = db.create_task_execution(
         agent_name=agent,

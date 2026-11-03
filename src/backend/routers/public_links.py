@@ -4,6 +4,11 @@ Owner endpoints for managing public agent links (Phase 12.2).
 
 These endpoints require authentication and are used by agent owners
 to create, manage, and revoke public shareable links.
+
+A public link opens the agent to anonymous visitors, so every route here takes
+a person (`require_person`, trinity-enterprise#719), checked before the
+ownership lookup. The reads are gated the same as the writes: each returns the
+link's URL, and its token is the capability.
 """
 import json
 from datetime import datetime
@@ -13,7 +18,7 @@ from typing import List
 from models import User
 from db.public_links import parse_link_expiry
 from database import db, PublicLinkCreate, PublicLinkUpdate, PublicLinkWithUrl
-from dependencies import get_current_user, OwnedAgentByName, CurrentUser
+from dependencies import get_current_user, OwnedAgentByName, CurrentUser, require_person
 from services.docker_service import get_agent_container
 from config import FRONTEND_URL
 from services.settings_service import get_public_chat_url
@@ -66,7 +71,8 @@ def _link_to_response(link: dict, include_usage: bool = True) -> PublicLinkWithU
     )
 
 
-@router.post("/{agent_name}/public-links", response_model=PublicLinkWithUrl)
+@router.post("/{agent_name}/public-links", response_model=PublicLinkWithUrl,
+             dependencies=[Depends(require_person)])
 async def create_public_link(
     agent_name: OwnedAgentByName,
     link_request: PublicLinkCreate,
@@ -105,7 +111,8 @@ async def create_public_link(
     return _link_to_response(link, include_usage=False)
 
 
-@router.get("/{agent_name}/public-links", response_model=List[PublicLinkWithUrl])
+@router.get("/{agent_name}/public-links", response_model=List[PublicLinkWithUrl],
+            dependencies=[Depends(require_person)])
 async def list_public_links(
     agent_name: OwnedAgentByName,
     request: Request
@@ -120,7 +127,8 @@ async def list_public_links(
     return [_link_to_response(link) for link in links]
 
 
-@router.get("/{agent_name}/public-links/{link_id}", response_model=PublicLinkWithUrl)
+@router.get("/{agent_name}/public-links/{link_id}", response_model=PublicLinkWithUrl,
+            dependencies=[Depends(require_person)])
 async def get_public_link(
     agent_name: OwnedAgentByName,
     link_id: str,
@@ -139,7 +147,8 @@ async def get_public_link(
     return _link_to_response(link)
 
 
-@router.put("/{agent_name}/public-links/{link_id}", response_model=PublicLinkWithUrl)
+@router.put("/{agent_name}/public-links/{link_id}", response_model=PublicLinkWithUrl,
+            dependencies=[Depends(require_person)])
 async def update_public_link(
     agent_name: OwnedAgentByName,
     link_id: str,
@@ -158,11 +167,16 @@ async def update_public_link(
         raise HTTPException(status_code=404, detail="Public link not found")
 
     # Update the link
+    # #3584: an `expires_at` the request SENT as null/empty removes the expiry;
+    # an absent one leaves it alone (a rename or toggle must not clear it).
+    clear_expiry = ("expires_at" in update_request.model_fields_set
+                    and not update_request.expires_at)
     updated_link = db.update_public_link(
         link_id=link_id,
         name=update_request.name,
         enabled=update_request.enabled,
-        expires_at=update_request.expires_at
+        expires_at=update_request.expires_at or None,
+        clear_expiry=clear_expiry,
     )
 
     # Broadcast event
@@ -179,7 +193,7 @@ async def update_public_link(
     return _link_to_response(updated_link)
 
 
-@router.delete("/{agent_name}/public-links/{link_id}")
+@router.delete("/{agent_name}/public-links/{link_id}", dependencies=[Depends(require_person)])
 async def delete_public_link(
     agent_name: OwnedAgentByName,
     link_id: str,

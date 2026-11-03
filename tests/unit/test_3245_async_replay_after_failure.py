@@ -377,7 +377,9 @@ def test_every_slot_reaper_failure_carries_the_tag():
 # admit_chat_request (/chat)
 # ---------------------------------------------------------------------------
 
-SCOPE = f"agent:{AGENT}"
+# trinity-enterprise#830: a client-chosen key is claimed under the CALLER's
+# scope — `make_caller_scope(AGENT, _user())`, i.e. principal `user:1`.
+SCOPE = f"agent:{AGENT}:caller:user:1"
 RECEIPT_STATUSES = ["accepted", "queued", "queued_timeout"]
 
 
@@ -397,7 +399,7 @@ def _row(svc, key):
 
 
 def _task(svc, key):
-    return svc.das.begin_task_idempotency(name=AGENT, idempotency_key=key)
+    return svc.das.begin_task_idempotency(name=AGENT, idempotency_key=key, current_user=_user())
 
 
 def _user():
@@ -789,8 +791,11 @@ class TestAC2EndToEnd:
         def send():
             return asyncio.run(execute_parallel_task(
                 request=ParallelTaskRequest(message="do it", async_mode=True), name=AGENT,
+                # mcp_scope/mcp_key_id as a real User carries them: ent#830 scopes
+                # the key to this caller, and a bare MagicMock reads as a new
+                # machine credential on every call.
                 current_user=MagicMock(id=1, email="u@e.com", username="u", role="user",
-                                       agent_name=None),
+                                       agent_name=None, mcp_scope=None, mcp_key_id=None),
                 x_source_agent=None, x_via_mcp=None, idempotency_key="k-ac2",
                 x_event_trigger=None, x_internal_secret=None,
             ))
@@ -878,8 +883,10 @@ def test_both_seams_reclaim_right_after_begin():
                    if isinstance(s, ast.Assign) and isinstance(s.value, ast.Call)
                    and ast.unparse(s.value.func) == "idempotency_service.begin")
         nxt = body[idx + 1]
+        # #3298: the stale in_flight claim is reclaimed first, then the ended
+        # receipt — both straight after `begin`, with nothing in between.
         assert isinstance(nxt, ast.Assign) and ast.unparse(nxt) == \
-            "idem = _reclaim_ended_receipt(idem, name=name)", seam
+            "idem = _reclaim_ended_receipt(_reclaim_stale_claim(idem, name=name), name=name)", seam
 
 
 _CLAIM_WRITERS = {"complete", "fail", "upgrade_snapshot", "attach_execution"}

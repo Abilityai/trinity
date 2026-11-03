@@ -464,6 +464,22 @@ _CANARY_SCHEMA_SQL = """
             requested_at TEXT NOT NULL DEFAULT '',
             status TEXT NOT NULL DEFAULT 'pending'
         );
+        -- #4000: the RD-04/RD-05 collector's join (only the columns it reads).
+        CREATE TABLE agent_git_config (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            sync_enabled INTEGER DEFAULT 1
+        );
+        CREATE TABLE agent_sync_state (
+            agent_name TEXT PRIMARY KEY,
+            last_sync_at TEXT,
+            git_dir_bytes INTEGER,
+            pack_count INTEGER,
+            loose_objects INTEGER,
+            maintenance_failures INTEGER DEFAULT 0,
+            git_stats_at TEXT,
+            updated_at TEXT
+        );
         CREATE TABLE mcp_api_keys (
             id TEXT PRIMARY KEY,
             user_id TEXT NOT NULL,
@@ -1131,6 +1147,81 @@ class TestInvariantS01:
 
         assert s01.check(snap) == []
 
+    def test_sql_grace_suppresses_pre_admission_row(self, canary_db, reload_canary):
+        """#3952: a scheduler-created row sits `running` with no slot until
+        execute-task admits it (push ZADD) or enqueues it (pull RUNNING→QUEUED).
+        That took ~7.4 s in the field; a 30 s-old unslotted row is not drift."""
+        import time
+        _add_agent(canary_db, "a1")
+        aged = datetime.utcfromtimestamp(time.time() - 30).isoformat() + "Z"
+        _add_execution(canary_db, "e-pre-admit", "a1", "running", started_at=aged)
+
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import s01_slot_row_bijection as s01
+
+        assert s01.check(snap) == []
+
+    def test_sql_grace_expires(self, canary_db, reload_canary):
+        """#3952: past SQL_GRACE_SECONDS an unslotted running row fires."""
+        import time
+        from canary.invariants import s01_slot_row_bijection as s01
+
+        _add_agent(canary_db, "a1")
+        aged = datetime.utcfromtimestamp(
+            time.time() - s01.SQL_GRACE_SECONDS - 1
+        ).isoformat() + "Z"
+        _add_execution(canary_db, "e-orphan", "a1", "running", started_at=aged)
+
+        snap = reload_canary["canary"].collect_snapshot()
+        violations = s01.check(snap)
+        assert len(violations) == 1
+        assert violations[0].observed_state["in_sql_only"] == ["e-orphan"]
+
+    def test_redis_grace_not_widened(self, canary_db, reload_canary):
+        """#3952 widens only the SQL side: a 30 s-old slot with no running row
+        is still `in_redis_only`."""
+        import time
+        _add_agent(canary_db, "a1")
+        reload_canary["redis"].zadd("agent:slots:a1", {"e-gone": time.time() - 30})
+
+        snap = reload_canary["canary"].collect_snapshot()
+        from canary.invariants import s01_slot_row_bijection as s01
+
+        violations = s01.check(snap)
+        assert len(violations) == 1
+        assert violations[0].observed_state["in_redis_only"] == ["e-gone"]
+
+    def test_unparseable_started_at_fires_without_breaking_other_agents(
+        self, reload_canary
+    ):
+        """#3952: one bad `started_at` counts as old (fires) and does not raise
+        out of check() for the whole fleet."""
+        from canary.snapshot import Snapshot, AgentSnapshot
+        from canary.invariants import s01_slot_row_bijection as s01
+
+        snap = Snapshot(
+            snapshot_time="2026-04-30T12:00:00Z",
+            agents=[
+                AgentSnapshot(
+                    name=name, is_system=False, max_parallel=3,
+                    execution_timeout_seconds=900, slot_ids=set(),
+                    running_exec_ids={"e1"},
+                    running_started_at={"e1": ts},
+                )
+                for name, ts in (("bad", "not-a-time"), ("ok", "2026-04-30T00:00:00Z"))
+            ],
+        )
+        violations = s01.check(snap)
+        assert sorted(v.observed_state["agent_name"] for v in violations) == ["bad", "ok"]
+
+    def test_sql_grace_shorter_than_canary_cycle(self, canary_service):
+        """#3952: a grace at or past the cycle would hide a real orphan for a
+        whole extra cycle."""
+        from canary.invariants import s01_slot_row_bijection as s01
+        from services.canary_service import CANARY_INTERVAL_SECONDS
+
+        assert s01.GRACE_SECONDS < s01.SQL_GRACE_SECONDS < CANARY_INTERVAL_SECONDS
+
     def test_grace_does_not_suppress_durable_mismatch(self, canary_db, reload_canary):
         """Old `started_at` + old ZSET score → real leak, must fire."""
         _add_agent(canary_db, "a1")
@@ -1460,6 +1551,7 @@ class TestRunner:
             "L-03",
             "B-01", "B-02", "B-08",
             "R-01",
+            "RD-04", "RD-05",
         }
         assert results["S-01"] == []
         assert results["S-02"] == []
@@ -1486,6 +1578,9 @@ class TestRunner:
         # B-02 / R-01 are green on a clean platform.
         assert results["B-02"] == []
         assert results["R-01"] == []
+        # RD-04 / RD-05 (#4000): no git-bound agents seeded.
+        assert results["RD-04"] == []
+        assert results["RD-05"] == []
 
     def test_run_invariants_subset(self, canary_db, reload_canary):
         _add_agent(canary_db, "a1")
@@ -4078,6 +4173,7 @@ class TestIssue1540EngineSeam:
 
         from db.tables import (
             access_requests,
+            agent_git_config,
             agent_ownership,
             agent_public_links,
             agent_reports,
@@ -4085,6 +4181,7 @@ class TestIssue1540EngineSeam:
             agent_shared_files,
             agent_sharing,
             agent_skills,
+            agent_sync_state,
             agent_tags,
             chat_sessions,
             mcp_api_keys,
@@ -4106,6 +4203,8 @@ class TestIssue1540EngineSeam:
             access_requests,
             agent_reports,
             mcp_api_keys,
+            agent_git_config,  # #4000: RD-04/RD-05 collector
+            agent_sync_state,
         ]
         engine = engine_mod.get_engine()
         # Clean slate: (re)create just the canary tables on PG (no ForeignKeys in
@@ -4207,6 +4306,7 @@ class TestIssue1540EngineSeam:
 
         from db.tables import (
             access_requests,
+            agent_git_config,
             agent_ownership,
             agent_public_links,
             agent_reports,
@@ -4214,6 +4314,7 @@ class TestIssue1540EngineSeam:
             agent_shared_files,
             agent_sharing,
             agent_skills,
+            agent_sync_state,
             agent_tags,
             chat_sessions,
             mcp_api_keys,
@@ -4235,6 +4336,8 @@ class TestIssue1540EngineSeam:
             access_requests,
             agent_reports,
             mcp_api_keys,
+            agent_git_config,  # #4000: RD-04/RD-05 collector
+            agent_sync_state,
         ]
         engine = engine_mod.get_engine()
         for tbl in reversed(canary_tables):

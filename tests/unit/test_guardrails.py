@@ -231,8 +231,8 @@ def test_runtime_config_uses_baseline_when_no_env(tmp_path):
     assert result.returncode == 0, result.stderr
     assert runtime.exists()
     data = json.loads(runtime.read_text())
-    assert data["max_turns_chat"] == 50
-    assert data["max_turns_task"] == 50  # Raised from 20 in Issue #361
+    assert data["max_turns_chat"] == 200  # raised from 50 in trinity-enterprise#471
+    assert data["max_turns_task"] == 200  # 20 -> 50 (#361) -> 200 (trinity-enterprise#471)
 
 
 def test_runtime_config_applies_overrides(tmp_path):
@@ -261,7 +261,7 @@ def test_runtime_config_ignores_malformed_env(tmp_path):
     result, runtime = _run_write_config(tmp_path, env_value="{not json")
     assert result.returncode == 0
     data = json.loads(runtime.read_text())
-    assert data["max_turns_chat"] == 50  # baseline preserved
+    assert data["max_turns_chat"] == 200  # baseline preserved
 
 
 def test_runtime_config_drops_junk_list_items(tmp_path):

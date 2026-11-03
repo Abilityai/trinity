@@ -1,5 +1,17 @@
 <template>
-  <div class="min-h-screen bg-gray-50 dark:bg-gray-900">
+  <div
+    class="bg-gray-50 dark:bg-gray-900"
+    :class="isBoundedTab ? 'min-h-dvh flex flex-col' : 'min-h-screen'"
+  >
+    <!--
+      #3451: on the four list tabs the page is the window. The list takes the
+      height the header, tabs and panel chrome leave and scrolls inside its own
+      BoundedRegion (design-system p28); below the region's 20rem floor the page
+      scrolls by the shortfall only. Every link from here down to the region is
+      a flex column growing from a 0px basis — see BoundedRegion for why
+      `flex-1` regrows the page. Health and Reports keep the plain page
+      (AgentDetail's FULLSCREEN_TABS is the precedent for a per-tab layout).
+    -->
     <NavBar />
 
     <!--
@@ -9,11 +21,14 @@
       max-w-7xl so the wide Health grid / Executions table breathe; the
       narrow operator card-feed tabs re-constrain themselves to max-w-3xl.
     -->
-    <main class="max-w-7xl mx-auto py-6 px-4 sm:px-6">
+    <main
+      class="max-w-7xl mx-auto py-6 px-4 sm:px-6"
+      :class="{ 'w-full grow basis-0 flex flex-col': isBoundedTab }"
+    >
       <!-- Page Header -->
       <div class="mb-6">
         <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Operations</h1>
-        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
+        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400" data-testid="ops-subtitle">
           {{ subtitle }}
         </p>
         <!-- #2915: the visible escalation — counts from the list response, never
@@ -89,76 +104,82 @@
       </div>
 
       <!-- Needs Response Tab (narrow card feed) -->
-      <div v-if="activeTab === 'needs-response'" class="max-w-3xl mx-auto">
+      <div v-if="activeTab === 'needs-response'" class="max-w-3xl mx-auto w-full grow basis-0 flex flex-col">
         <!-- Failed REFRESH (#1926) — the 5s poll stopped landing. The cards
              below are real but stale, and an operator reading a queue must
-             know that; blanking them would be worse. -->
+             know that; blanking them would be worse. Above the region, so it
+             stays in view however deep the operator has scrolled. -->
         <InlineError
           v-if="queueRefreshFailed"
           class="mb-3"
           message="Couldn't refresh the queue — showing the last items that loaded."
-          :detail="operatorQueueStore.error"
+          :detail="staleQueueError"
           retryable
           @retry="operatorQueueStore.fetchItems"
-          @dismiss="operatorQueueStore.error = null"
+          @dismiss="dismissStaleQueue"
         />
 
-        <!-- Loading state (#1926) — before the first poll returns we do NOT
-             know the queue is empty; claiming "All caught up" is optimistic
-             success (principle 15). -->
-        <div v-if="queueFirstLoad" class="text-center py-16" aria-busy="true">
-          <!-- #1921: card-shaped placeholders in the list's own footprint. The
-               centred 16-unit circle was a different shape and size from the
-               queue cards it became, so the page jumped when items landed. The
-               #1926 point this block exists for is unchanged: before the first
-               poll returns we do NOT claim "All caught up". -->
-          <div class="space-y-3 text-left">
-            <div
-              v-for="n in 3"
-              :key="n"
-              class="rounded-lg border border-gray-200 dark:border-gray-700 p-4 space-y-3 animate-pulse motion-reduce:animate-none"
-            >
-              <div class="h-4 w-1/3 rounded bg-gray-200 dark:bg-gray-800"></div>
-              <div class="h-3 w-5/6 rounded bg-gray-100 dark:bg-gray-800/60"></div>
-              <div class="h-3 w-2/3 rounded bg-gray-100 dark:bg-gray-800/60"></div>
+        <!-- #3451: the region wraps the whole state chain, so a poll that keeps
+             the feed keeps this node and the operator's place in it. The inset
+             leaves room for an expanded card's ring and shadow. -->
+        <BoundedRegion label="Items that need a response" data-testid="ops-list-region" class="-mx-1 px-1 py-1">
+          <!-- Loading state (#1926) — before the first poll returns we do NOT
+               know the queue is empty; claiming "All caught up" is optimistic
+               success (principle 15). -->
+          <div v-if="queueFirstLoad" class="text-center py-16" aria-busy="true">
+            <!-- #1921: card-shaped placeholders in the list's own footprint. The
+                 centred 16-unit circle was a different shape and size from the
+                 queue cards it became, so the page jumped when items landed. The
+                 #1926 point this block exists for is unchanged: before the first
+                 poll returns we do NOT claim "All caught up". -->
+            <div class="space-y-3 text-left">
+              <div
+                v-for="n in 3"
+                :key="n"
+                class="rounded-lg border border-gray-200 dark:border-gray-700 p-4 space-y-3 animate-pulse motion-reduce:animate-none"
+              >
+                <div class="h-4 w-1/3 rounded bg-gray-200 dark:bg-gray-800"></div>
+                <div class="h-3 w-5/6 rounded bg-gray-100 dark:bg-gray-800/60"></div>
+                <div class="h-3 w-2/3 rounded bg-gray-100 dark:bg-gray-800/60"></div>
+              </div>
             </div>
+            <span class="sr-only">Checking the queue…</span>
           </div>
-          <span class="sr-only">Checking the queue…</span>
-        </div>
 
-        <!-- Failed state (#1926) -->
-        <LoadFailed
-          v-else-if="queueLoadFailed"
-          title="Couldn't load the queue"
-          message="We can't tell whether your agents need you. Check your connection and try again."
-          :detail="operatorQueueStore.error"
-          :retrying="operatorQueueStore.loading"
-          @retry="operatorQueueStore.fetchItems"
-        />
-
-        <!-- Empty state — a fetch succeeded and returned zero -->
-        <div v-else-if="operatorQueueStore.openItems.length === 0" class="text-center py-16">
-          <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-status-success-100 dark:bg-status-success-900/20 mb-4">
-            <svg class="w-8 h-8 text-status-success-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-            </svg>
-          </div>
-          <h3 class="text-lg font-medium text-gray-900 dark:text-white">All caught up</h3>
-          <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Your agents are working independently. Nice.</p>
-        </div>
-
-        <!-- Card feed -->
-        <div v-else class="space-y-3">
-          <QueueCard
-            v-for="item in operatorQueueStore.openItems"
-            :key="item.id"
-            :item="item"
+          <!-- Failed state (#1926) -->
+          <LoadFailed
+            v-else-if="queueLoadFailed"
+            title="Couldn't load the queue"
+            message="We can't tell whether your agents need you. Check your connection and try again."
+            :detail="operatorQueueStore.error"
+            :retrying="operatorQueueStore.loading"
+            @retry="operatorQueueStore.fetchItems"
           />
-        </div>
+
+          <!-- Empty state — a fetch succeeded and returned zero -->
+          <div v-else-if="operatorQueueStore.openItems.length === 0" class="text-center py-16">
+            <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-status-success-100 dark:bg-status-success-900/20 mb-4">
+              <svg class="w-8 h-8 text-status-success-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
+              </svg>
+            </div>
+            <h3 class="text-lg font-medium text-gray-900 dark:text-white">All caught up</h3>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Your agents are working independently. Nice.</p>
+          </div>
+
+          <!-- Card feed -->
+          <div v-else class="space-y-3">
+            <QueueCard
+              v-for="item in operatorQueueStore.openItems"
+              :key="item.id"
+              :item="item"
+            />
+          </div>
+        </BoundedRegion>
       </div>
 
       <!-- Notifications Tab (narrow card feed) -->
-      <div v-if="activeTab === 'notifications'" class="max-w-3xl mx-auto">
+      <div v-if="activeTab === 'notifications'" class="max-w-3xl mx-auto w-full grow basis-0 flex flex-col">
         <NotificationsPanel />
       </div>
 
@@ -168,7 +189,7 @@
       </div>
 
       <!-- Executions Tab (fleet execution list) -->
-      <div v-if="activeTab === 'executions'">
+      <div v-if="activeTab === 'executions'" class="grow basis-0 flex flex-col">
         <ExecutionsPanel />
       </div>
 
@@ -178,31 +199,33 @@
       </div>
 
       <!-- Resolved Items Tab (narrow card feed) -->
-      <div v-if="activeTab === 'resolved'" class="max-w-3xl mx-auto">
-        <div v-if="queueFirstLoad" class="text-center py-16" aria-busy="true">
-          <p class="text-sm text-gray-500 dark:text-gray-400">Loading resolved items…</p>
-        </div>
+      <div v-if="activeTab === 'resolved'" class="max-w-3xl mx-auto w-full grow basis-0 flex flex-col">
+        <BoundedRegion label="Resolved items" data-testid="ops-list-region" class="-mx-1 px-1 py-1">
+          <div v-if="queueFirstLoad" class="text-center py-16" aria-busy="true">
+            <p class="text-sm text-gray-500 dark:text-gray-400">Loading resolved items…</p>
+          </div>
 
-        <LoadFailed
-          v-else-if="queueLoadFailed"
-          title="Couldn't load resolved items"
-          message="The queue didn't load. Check your connection and try again."
-          :detail="operatorQueueStore.error"
-          :retrying="operatorQueueStore.loading"
-          @retry="operatorQueueStore.fetchItems"
-        />
-
-        <div v-else-if="operatorQueueStore.resolvedItems.length === 0" class="text-center py-16">
-          <p class="text-sm text-gray-500 dark:text-gray-400">No resolved items yet</p>
-        </div>
-
-        <div v-else class="space-y-2">
-          <ResolvedCard
-            v-for="item in operatorQueueStore.resolvedItems"
-            :key="item.id"
-            :item="item"
+          <LoadFailed
+            v-else-if="queueLoadFailed"
+            title="Couldn't load resolved items"
+            message="The queue didn't load. Check your connection and try again."
+            :detail="operatorQueueStore.error"
+            :retrying="operatorQueueStore.loading"
+            @retry="operatorQueueStore.fetchItems"
           />
-        </div>
+
+          <div v-else-if="operatorQueueStore.resolvedItems.length === 0" class="text-center py-16">
+            <p class="text-sm text-gray-500 dark:text-gray-400">No resolved items yet</p>
+          </div>
+
+          <div v-else class="space-y-2">
+            <ResolvedCard
+              v-for="item in operatorQueueStore.resolvedItems"
+              :key="item.id"
+              :item="item"
+            />
+          </div>
+        </BoundedRegion>
       </div>
     </main>
 
@@ -234,10 +257,12 @@ import ExecutionsPanel from '../components/ExecutionsPanel.vue'
 import ReportsPanelFleet from '../components/ReportsPanelFleet.vue'
 import LoadFailed from '../components/LoadFailed.vue'
 import InlineError from '../components/InlineError.vue'
+import BoundedRegion from '../components/BoundedRegion.vue'
 import { useOperatorQueueStore } from '../stores/operatorQueue'
 import { useNotificationsStore } from '../stores/notifications'
 import { useAgentsStore } from '../stores/agents'
 import { useAuthStore } from '../stores/auth'
+import { pendingResponsesPhrase, resolvedPhrase } from '../utils/operatorQueueRead'
 
 const route = useRoute()
 const router = useRouter()
@@ -261,9 +286,25 @@ const queueLoadFailed = computed(
   () => !operatorQueueStore.hasLoaded && !!operatorQueueStore.error
 )
 // We have items, but the newest poll failed — the feed is stale, not wrong.
+// #3451: stale until a read SUCCEEDS. `loadList` clears `error` as each read
+// starts, so a banner gated on `error` alone went away for every in-flight poll
+// during an outage and came back when it failed — and above the bounded list
+// each blink moved the feed. Only a read landing clean clears it: a write's
+// prologue (`bulkCancel`, `clearResolved`) also clears `error`, re-reading nothing.
+const staleQueueError = ref(operatorQueueStore.error || null)
+watch(() => operatorQueueStore.error, (error) => {
+  if (error) staleQueueError.value = error
+})
+watch(() => operatorQueueStore.loading, (loading, wasLoading) => {
+  if (wasLoading && !loading && !operatorQueueStore.error) staleQueueError.value = null
+})
 const queueRefreshFailed = computed(
-  () => operatorQueueStore.hasLoaded && !!operatorQueueStore.error
+  () => operatorQueueStore.hasLoaded && !!staleQueueError.value
 )
+function dismissStaleQueue() {
+  operatorQueueStore.error = null
+  staleQueueError.value = null
+}
 
 // Health is admin-only; non-admins must not reach it even via deep link.
 const VALID_TABS = ['needs-response', 'notifications', 'health', 'executions', 'reports', 'resolved']
@@ -280,12 +321,25 @@ const activeTab = ref(resolveTab(route.query.tab))
 
 const isOperatorTab = computed(() => OPERATOR_TABS.includes(activeTab.value))
 
+// #3451: the tabs whose list scrolls inside the window (see the template's root).
+const BOUNDED_TABS = ['needs-response', 'notifications', 'executions', 'resolved']
+const isBoundedTab = computed(() => BOUNDED_TABS.includes(activeTab.value))
+
 const subtitle = computed(() => {
   if (activeTab.value === 'health') {
     return 'Fleet-wide health status and alerts'
   }
   if (activeTab.value === 'executions') {
     return 'All task runs across your fleet'
+  }
+  // #3302: the Resolved list is a window; its subtitle states the total
+  // (design-system principle 28).
+  if (activeTab.value === 'resolved') {
+    const line = resolvedPhrase({
+      total: operatorQueueStore.resolvedTotal,
+      shown: operatorQueueStore.resolvedItems.length,
+    })
+    if (line) return line
   }
 
   const queueCount = operatorQueueStore.pendingCount
@@ -297,7 +351,14 @@ const subtitle = computed(() => {
   }
 
   const parts = []
-  if (queueCount > 0) parts.push(`${queueCount} pending ${queueCount === 1 ? 'response' : 'responses'}`)
+  if (queueCount > 0) {
+    parts.push(pendingResponsesPhrase({
+      count: queueCount,
+      shown: operatorQueueStore.openItems.length,
+      complete: operatorQueueStore.pendingComplete,
+      exact: operatorQueueStore.pendingCountExact,
+    }))
+  }
   if (notifCount > 0) parts.push(`${notifCount} ${notifCount === 1 ? 'notification' : 'notifications'}`)
   return parts.join(', ')
 })

@@ -30,7 +30,7 @@
       class="mt-1 flex min-h-[38px] items-center rounded-md border border-gray-200 bg-gray-50 px-3 text-sm text-gray-700 dark:border-gray-750 dark:bg-gray-900 dark:text-gray-300"
       data-testid="github-token-saved"
     >
-      Using your saved GitHub token (Settings → GitHub token).
+      Using your saved GitHub token (Settings → MCP Keys → Personal GitHub Token).
     </p>
     <BaseInput
       v-else

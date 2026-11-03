@@ -16,7 +16,7 @@ Tables are organized by feature area:
 - Settings: system_settings
 - Public Links: agent_public_links, public_link_verifications, public_link_usage
 - Public Chat: public_chat_sessions, public_chat_messages, public_user_memory, public_user_memory_writes
-- Tandem: agent_role_readiness, seat_decisions
+- Tandem: agent_role_readiness, seat_decisions, seat_ask_class_state
 - Git: agent_git_config
 - Skills: agent_skills
 - Tags: agent_tags
@@ -103,6 +103,7 @@ TABLES = {
             a2a_scope TEXT DEFAULT 'public',  -- inert since ent#885; drop under #746
             a2a_keyless_internal INTEGER DEFAULT 1,  -- inert since ent#885; drop under #746
             operator_resume_enabled INTEGER DEFAULT 0,
+            memory_opt_out INTEGER DEFAULT 0,
             tts_voice_replies_enabled INTEGER DEFAULT 0,
             tts_voice_id TEXT,
             tts_voice_telegram_enabled INTEGER DEFAULT 1,
@@ -302,6 +303,12 @@ TABLES = {
             -- #2843: the conversation this turn continues; at most one running
             -- row per (agent, key). NULL = no conversation guard.
             conversation_key TEXT,
+            -- ent#862: AAuth peer identity that triggered this execution,
+            -- e.g. aauth:agent@peer.example.com. NULL for non-AAuth callers.
+            a2a_caller_identity TEXT,
+            -- #3380: the /chat thread this turn answers, so a watchdog-claimed
+            -- result can still write its reply there. NULL = not a /chat turn.
+            chat_session_id TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,
@@ -678,7 +685,10 @@ TABLES = {
             attachments TEXT,
             -- #3166: the execution (turn) that wrote the row. NULL on rows from
             -- before the column and on rows no turn wrote (completion reports).
-            execution_id TEXT
+            execution_id TEXT,
+            -- trinity#3402: as `public_chat_messages.gate_hold` — a turn the
+            -- gate held or refused, and its notice, never replayed to the agent.
+            gate_hold TEXT
         )
     """,
 
@@ -754,7 +764,7 @@ TABLES = {
             room_id TEXT NOT NULL,
             kind TEXT NOT NULL,                        -- agent | user | workspace_user
             identity TEXT NOT NULL,                    -- agent name, user id, or verified email
-            role TEXT NOT NULL DEFAULT 'member',       -- member | scribe | moderator
+            role TEXT NOT NULL DEFAULT 'member',       -- member | scribe | moderator | collaborator
             joined_at TEXT NOT NULL,
             left_at TEXT,
             -- THE delta-injection cursor: the highest seq this participant has seen.
@@ -763,6 +773,10 @@ TABLES = {
             -- Session-tab cold-fallback counter.
             cached_session_id TEXT,
             consecutive_resume_failures INTEGER NOT NULL DEFAULT 0,
+            -- trinity-enterprise#701: the first seq a PERSON may read. 0 = the
+            -- whole transcript (the creator, every row before #701); a person
+            -- seated mid-conversation starts at the seq after the last message.
+            visible_from_seq INTEGER NOT NULL DEFAULT 0,
             UNIQUE(room_id, kind, identity)
         )
     """,
@@ -780,6 +794,23 @@ TABLES = {
             execution_id TEXT,                         -- schedule_executions.id (nullable)
             created_at TEXT NOT NULL,
             UNIQUE(room_id, seq)
+        )
+    """,
+
+    # trinity#3402 — the room messages one agent's skill gate stopped: a post
+    # it held (or refused for good) and the notice line, per agent. Every wake
+    # of that agent leaves them out of what it is shown and of what the gate
+    # scans; other agents still read them. `gate_hold` is the request id or
+    # `refused:<code>`. No `enterprise_` prefix: on the room tables that prefix
+    # is the three legacy names' history.
+    "room_gate_holds": """
+        CREATE TABLE IF NOT EXISTS room_gate_holds (
+            room_id TEXT NOT NULL,
+            agent_name TEXT NOT NULL,
+            seq INTEGER NOT NULL,
+            gate_hold TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (room_id, agent_name, seq)
         )
     """,
 
@@ -1073,6 +1104,12 @@ TABLES = {
             cost REAL,
             sender_email TEXT,
             sender_label TEXT,
+            -- trinity#3402: NULL for an ordinary row. Otherwise the row is a
+            -- gated request that did not run as itself, or the platform's
+            -- answer to one, and is never replayed to the agent: the request
+            -- id the gate raised (`gate-…`), `refused:<code>`, or `named`
+            -- (written naming a gated skill, before its verdict).
+            gate_hold TEXT,
             FOREIGN KEY (session_id) REFERENCES public_chat_sessions(id) ON DELETE CASCADE
         )
     """,
@@ -1100,6 +1137,39 @@ TABLES = {
             status TEXT NOT NULL,
             changed_at TEXT NOT NULL,
             changed_by TEXT NOT NULL
+        )
+    """,
+
+    # ent#641 (P12): the autonomy dial's earned half — one row per (agent,
+    # seat, ask class). The row records what was EARNED: the state, the
+    # evidence it rests on, and `evidence_expires_at` (the EARLIEST review_by
+    # of the window — evidence stops existing when its first record does).
+    # Everything that can change underneath it — the instance level, the
+    # agent's autonomy switch, the clock — is ANDed at READ time
+    # (`services/autonomy_dial_service.live_verdict`), never written here: a
+    # materialised verdict outlives its own evidence silently, and a level
+    # change would otherwise be an unbounded fleet-wide write. The instance
+    # LEVEL is not here at all — it is one validated `system_settings` key.
+    "seat_ask_class_state": """
+        CREATE TABLE IF NOT EXISTS seat_ask_class_state (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            seat_email TEXT NOT NULL,
+            ask_class TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'on_request',
+            blocked_by TEXT NOT NULL DEFAULT '[]',
+            evidence TEXT NOT NULL DEFAULT '{}',
+            evidence_hash TEXT,
+            evidence_expires_at TEXT,
+            guard_metric TEXT NOT NULL DEFAULT 'not_assessed',
+            held INTEGER NOT NULL DEFAULT 0,
+            held_by TEXT,
+            held_at TEXT,
+            promoted_at TEXT,
+            demoted_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(agent_name, seat_email, ask_class)
         )
     """,
 
@@ -1166,6 +1236,56 @@ TABLES = {
         )
     """,
 
+    # trinity-enterprise#1022 (MEM-002): retrieval memory — one row per extracted
+    # fact. `user_email = ''` is the AGENT scope, shared with the agent's owner;
+    # every other person has their own scope. NOT NULL + '' (never NULL) so the
+    # partial unique index below holds on both engines (NULL is distinct in a
+    # unique index on SQLite and PostgreSQL alike). `embedding` is the fact's
+    # float32 little-endian vector, L2-normalised; `text_hash` is the dedupe key.
+    # Forget is a soft delete that records who, so the owner view can show it.
+    "agent_memory_facts": """
+        CREATE TABLE IF NOT EXISTS agent_memory_facts (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            user_email TEXT NOT NULL DEFAULT '',
+            text TEXT NOT NULL,
+            text_hash TEXT NOT NULL,
+            embedding BLOB NOT NULL,
+            embedding_model TEXT NOT NULL,
+            source TEXT NOT NULL,
+            execution_id TEXT,
+            updated_by_execution_id TEXT,
+            recall_count INTEGER DEFAULT 0,
+            last_recalled_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            deleted_at TEXT,
+            deleted_by TEXT
+        )
+    """,
+
+    # trinity-enterprise#1022: the fact journal. One row per op on a fact or on a
+    # candidate that never became one (add / update / delete / none / screened /
+    # prune / recall / forget), keyed to the execution that did it, with the
+    # candidate the extractor proposed, the text it replaced and the neighbours
+    # the reconciler was shown. Append-only; pruned by age, never edited.
+    "agent_memory_fact_events": """
+        CREATE TABLE IF NOT EXISTS agent_memory_fact_events (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            user_email TEXT NOT NULL DEFAULT '',
+            fact_id TEXT,
+            op TEXT NOT NULL,
+            execution_id TEXT,
+            candidate_text TEXT,
+            previous_text TEXT,
+            neighbour_ids TEXT,
+            score REAL,
+            actor TEXT,
+            created_at TEXT NOT NULL
+        )
+    """,
+
     # -------------------------------------------------------------------------
     # Git Tables
     # -------------------------------------------------------------------------
@@ -1214,6 +1334,7 @@ TABLES = {
             pack_count INTEGER,
             loose_objects INTEGER,
             maintenance_failures INTEGER DEFAULT 0,
+            git_stats_at TEXT,  -- #4000: when the agent last measured the three stats above
             diverged_since TEXT,
             dirty_files INTEGER,
             dirty_since TEXT,
@@ -1314,6 +1435,12 @@ TABLES = {
     # tab reads it from the assignment row, because the per-injection result
     # map is session-scoped and an operator who never sees it must still see
     # the conflict.
+    #
+    # trinity-enterprise#529: `follows_bundled_pin` is 1 while the seeded
+    # default still points where the platform put it (the seed sets it; an admin
+    # change to url/ref/ref_type clears it), and the boot follow moves such a
+    # row to a newer `DEFAULT_SKILL_SOURCE_REF`. `followed_from_ref` /
+    # `followed_at` record the latest follow for the Settings line.
     "skill_sources": """
         CREATE TABLE IF NOT EXISTS skill_sources (
             id TEXT PRIMARY KEY,
@@ -1331,6 +1458,9 @@ TABLES = {
             created_by TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
+            follows_bundled_pin INTEGER NOT NULL DEFAULT 0,
+            followed_from_ref TEXT,
+            followed_at TEXT,
             UNIQUE(url, ref)
         )
     """,
@@ -1864,6 +1994,39 @@ TABLES = {
         )
     """,
 
+    # Nevermined card delegation (trinity-enterprise#966). The organization is
+    # a singleton (id = 'default'); its widget secret and agent API key live in
+    # one AES-256-GCM envelope and are never returned by any route. Nevermined
+    # holds the card and the mandate; Trinity keeps only the delegation id.
+    "nevermined_organization": """
+        CREATE TABLE IF NOT EXISTS nevermined_organization (
+            id TEXT PRIMARY KEY,
+            org_id TEXT NOT NULL,
+            environment TEXT NOT NULL,
+            encrypted_credentials TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            updated_by TEXT
+        )
+    """,
+
+    "agent_delegations": """
+        CREATE TABLE IF NOT EXISTS agent_delegations (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            delegation_id TEXT NOT NULL,
+            payment_method_id TEXT,
+            provider TEXT,
+            environment TEXT NOT NULL,
+            api_key_injected INTEGER NOT NULL DEFAULT 0,
+            created_by TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            revoked_at TEXT,
+            revoked_by TEXT,
+            agent_deleted_at TEXT
+        )
+    """,
+
     # -------------------------------------------------------------------------
     # Agent Event Subscription Tables (EVT-001)
     # -------------------------------------------------------------------------
@@ -1977,6 +2140,9 @@ TABLES = {
             response_snapshot TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
+            -- #3298: the claimer's owner token; attach/complete/release are
+            -- compare-and-set on it, so a reclaimed claim's late writer is a no-op.
+            claim_token TEXT,
             PRIMARY KEY (scope, idempotency_key)
         )
     """,
@@ -2291,6 +2457,9 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_seat_decisions_seat ON seat_decisions(agent_name, seat_email, status)",
     "CREATE INDEX IF NOT EXISTS idx_seat_decisions_review ON seat_decisions(agent_name, review_by)",
 
+    # Autonomy dial (ent#641)
+    "CREATE INDEX IF NOT EXISTS idx_seat_ask_class_state_seat ON seat_ask_class_state(agent_name, seat_email)",
+
     # System views indexes
     "CREATE INDEX IF NOT EXISTS idx_system_views_owner ON system_views(owner_id)",
 
@@ -2342,6 +2511,10 @@ INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_nvm_config_agent ON nevermined_agent_config(agent_name)",
     "CREATE INDEX IF NOT EXISTS idx_nvm_payment_log_agent ON nevermined_payment_log(agent_name, created_at DESC)",
     "CREATE INDEX IF NOT EXISTS idx_nvm_payment_log_execution ON nevermined_payment_log(execution_id)",
+    # trinity-enterprise#966 — one active binding per agent; a deleted agent's
+    # kept row is not active.
+    "CREATE INDEX IF NOT EXISTS idx_agent_delegations_agent ON agent_delegations(agent_name, created_at DESC)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_delegations_active ON agent_delegations(agent_name) WHERE revoked_at IS NULL AND agent_deleted_at IS NULL",
 
     # Agent event subscription indexes (EVT-001)
     "CREATE INDEX IF NOT EXISTS idx_event_subs_subscriber ON agent_event_subscriptions(subscriber_agent)",
@@ -2383,6 +2556,18 @@ INDEXES = [
 
     # Idempotency key index (RELIABILITY-006, #525) — drives the TTL purge sweep
     "CREATE INDEX IF NOT EXISTS idx_idempotency_created ON idempotency_keys(created_at)",
+
+    # Retrieval memory (trinity-enterprise#1022): the scope read is a range scan;
+    # the partial unique index turns a two-worker duplicate into an IntegrityError
+    # the writer catches, instead of a second copy of the same fact.
+    "CREATE INDEX IF NOT EXISTS idx_agent_memory_facts_scope "
+    "ON agent_memory_facts(agent_name, user_email, deleted_at)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_memory_facts_live_hash "
+    "ON agent_memory_facts(agent_name, user_email, text_hash) WHERE deleted_at IS NULL",
+    "CREATE INDEX IF NOT EXISTS idx_agent_memory_fact_events_fact "
+    "ON agent_memory_fact_events(agent_name, fact_id, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_agent_memory_fact_events_execution "
+    "ON agent_memory_fact_events(agent_name, execution_id)",
 
     # Subscription credentials indexes (SUB-001)
     "CREATE INDEX IF NOT EXISTS idx_subscriptions_name ON subscription_credentials(name)",
@@ -2629,6 +2814,10 @@ _PG_TABLE_SUBS = [
      "DEFAULT (to_char((now() at time zone 'utc'), 'YYYY-MM-DD HH24:MI:SS'))"),
     (_re.compile(r"DEFAULT\s+CURRENT_TIMESTAMP", _re.IGNORECASE),
      "DEFAULT (to_char((now() at time zone 'utc'), 'YYYY-MM-DD HH24:MI:SS'))"),
+    # trinity-enterprise#1022: a binary column. SQLite's BLOB is BYTEA on
+    # PostgreSQL; the SQLAlchemy side (`tables.py`) declares `LargeBinary`, which
+    # the Alembic baseline renders the same way.
+    (_re.compile(r"\bBLOB\b", _re.IGNORECASE), "BYTEA"),
     # Per-column dialect override (trinity-enterprise#478). `col TEXT /* pg:X */`
     # is a plain TEXT column with a comment on SQLite and column type X on
     # PostgreSQL. It exists so `metric_points.dims` can be the JSONB the frozen

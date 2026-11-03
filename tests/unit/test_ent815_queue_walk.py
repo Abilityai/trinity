@@ -97,7 +97,7 @@ def walk_redis(monkeypatch):
     patched on the service module the route actually calls."""
     from routers import operator_queue as route
     r = fakeredis.FakeRedis(decode_responses=True)
-    monkeypatch.setitem(route.operator_queue_service.list_for_principal.__globals__,
+    monkeypatch.setattr(route.operator_queue_service.deps,
                         "get_breaker_redis", lambda: r)
     return r
 
@@ -747,7 +747,7 @@ def test_k_a_walk_without_redis_is_a_503_and_offset_paging_still_works(
     from routers import operator_queue as route
     tok = _valid_token(qdb)
     broken = None if fault == "unreachable" else _RaisingRedis(fault)
-    monkeypatch.setitem(route.operator_queue_service.list_for_principal.__globals__,
+    monkeypatch.setattr(route.operator_queue_service.deps,
                         "get_breaker_redis", lambda: broken)
     params = {"limit": 2}
     if fault != "hgetall":

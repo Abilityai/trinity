@@ -27,6 +27,8 @@ If two-factor authentication applies to the account (requires an entitlement), a
 
 When you sign up via email (if whitelisted), you receive the **role recorded on your whitelist entry** — `user` unless the admin picked another role when adding the email (Settings → Access → Email Whitelist has a role picker, default `user`).
 
+Adding a whitelist entry takes an admin's signed-in session, whichever role is picked, `user` included: the entry gives the person a signed-in session at that role on their first sign-in. An API key gets a 403, even an admin's own key.
+
 Being granted access to an agent — sharing, or an approved access request — does **not** create a platform account. The person signs in to the [Workspace](../sharing-and-access/workspace.md) with a code emailed to them. Whitelist rows that sharing wrote before this changed are still there, and the accounts they produce are Workspace-only `user` accounts.
 
 Admins can change a user's role at any time via Settings. To give someone the operator UI, raise them to `operator`.
@@ -48,6 +50,7 @@ Admins can change a user's role at any time via Settings. To give someone the op
 | Turn usage sharing on or off | Admin, **human only** |
 | Mint a **Portal delegate** MCP key | Admin, **human only** |
 | Mint an **Ops (read-only)** MCP key | Admin, **interactive browser session only** — no key of any scope can mint one |
+| Mint an **Ops (operational writes)** MCP key | Admin, **interactive browser session only** — no key of any scope can mint one |
 | Create or list MCP keys | operator or above, **signed-in session only** — no key of any scope can create or list them |
 | Change your own sign-in email or personal GitHub token | `operator` and above, **signed-in session only**; a new sign-in email also needs the 6-digit code mailed to it. A Workspace-only `user` asks an admin |
 
@@ -71,6 +74,8 @@ For monitoring integrations that must keep working under enforced two-factor, an
 An agent's **Settings › People** pane can also show a role select on each person's row; the role it sets applies on every agent. Every change there asks you to confirm it first; lowering someone to `user` reminds you they lose the operator UI on every agent. Where a person has no account yet, the row can offer **Give a platform account**, which creates their account right away (as `user`, unless an earlier allow-list entry set another role) so you can assign them to the agent; they then sign in at `/login`.
 
 The change takes effect on their next request. You cannot change your own role, and the role can only be changed from a signed-in session (an API key is refused); every change is recorded in the audit log. Lowering a role also lowers the person's email-whitelist entry to match, so a later sign-in with that address cannot bring the old role back. Raising a role leaves that entry as it was.
+
+**Inviting a person.** Where invitations are available, **Settings → Access → User Management** has an **Invite a person** form (name, work email, role, which defaults to `user`, and an expiry, which defaults to 14 days) and a list of every invitation: its status (pending, accepted, expired or revoked), who sent it, when it was sent and accepted, and which terms version the person accepted. Pending invitations can be resent or revoked. Revoking an invitation, or letting it expire, stops that email signing in; an account that never accepted the terms is suspended. When the platform requires terms acceptance, an invited `user` sees the terms on their first sign-in and must accept them (or sign out) before the Workspace opens; publishing a new terms version asks everyone to accept again. While acceptance is required, inviting is refused until a terms version is published.
 
 ## For Agents
 

@@ -17,7 +17,6 @@ tests/test_cb_probe_execution_close.py
 tests/test_cli_admin_login.py
 tests/test_cli_profiles.py
 tests/test_github_pat_propagation_unit.py
-tests/test_ip_rate_limit_fix.py
 tests/test_public_chat_history.py
 tests/test_public_links.py
 tests/test_public_user_memory.py

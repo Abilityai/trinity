@@ -31,14 +31,14 @@ The sections below say which pane holds each setting. Everything is also availab
 
 ### Permissions to Change Itself
 
-An agent's own key acts for its owner, so without a fence it could rewrite any agent its owner holds. Trinity fences those changes behind permissions that an instance admin grants per agent. No agent holds any of them by default. People and the system agent never need them.
+An agent's own key acts for its owner, so without a fence it could rewrite any agent its owner holds. Trinity fences those changes behind permissions that an instance admin grants per agent. No agent holds any of them by default. People never need them, and neither does the system agent, except that its key is refused wherever a change takes a person or an agent holding the permission. A schedule's webhook is one such change; so are an agent's read-only mode, resources, timeout, public-channel model and guardrails, and a skill's approval gate.
 
 The **Permissions to change itself** card under **Settings › Guardrails › Bounds** shows one toggle per permission, with what it allows, what is refused without it, and who granted it and when:
 
 | Toggle | Permission | Lets the agent | Without it |
 |--------|-----------|----------------|------------|
 | **Change skills** | `skills.manage` | Assign, unassign and re-deliver skills, and set skill approval gates on other agents — see [Skills and Playbooks](../automation/skills-and-playbooks.md#who-can-change-an-agents-skills) | Every skill change is refused, its own included |
-| **Change other agents' schedules** | `schedules.manage` | Create, change, enable, disable or delete another agent's schedules and their webhooks | It still manages its own schedules, never another agent's |
+| **Change other agents' schedules** | `schedules.manage` | Create, change, enable, disable or delete another agent's schedules, and manage any schedule's webhook, its own included | It still manages its own schedules but not their webhooks, and never another agent's |
 | **Change instructions** | `instructions.manage` | Write `CLAUDE.md`, `AGENTS.md` and `.claude/` files (not skills) through the Files API, and reset an agent to `main` while keeping its state | Those writes are refused, its own instructions included |
 | **Manage other agents** | `agents.manage` | Create, deploy and delete agents, deploy a system, and change an agent's model, resources, timeout, public-channel model, read-only mode and guardrails | It can still spawn and discard short-lived (ephemeral) helpers |
 | **Start projects** | `projects.manage` | Start a project on its owner's behalf, on installations that offer projects | It still works on projects it is already on |
@@ -54,9 +54,13 @@ The owner and admins see the card; anyone else does not. Only an instance admin,
 
 **When an agent is refused.** An agent without the permission gets a `403` that names it (`skill_management_not_permitted`, `schedule_management_not_permitted`, `instruction_management_not_permitted`, `agent_management_not_permitted` or `project_management_not_permitted`), and the refusal is audited. The message tells the agent to raise a question to its operator whose title includes the permission id (for example `schedules.manage`). The card lists those open requests under **Open permission requests**, with a link to Operations. Answering the request grants nothing: an admin grants the permission on this card.
 
+**In the audit log.** Each call an agent makes on one of these permissions is recorded as `capability_used`, with the agent, its key, the permission and the target. It means the permission let the call through, not that the change succeeded. A refusal is `capability_refused`; a grant or revocation is `capability_grant` or `capability_revoke`. Entries written before this was added use `skill_manager_grant` and `skill_manager_revoke` for **Change skills**.
+
 **After upgrading.** No agent holds the schedule, instruction or agent permissions after the upgrade that introduces them. An orchestrating agent that creates agents, writes another agent's schedules or instructions, or reconfigures agents is refused until an admin grants the permission.
 
-The fence covers the platform's routes, not the agent's own container: an agent can still edit files in its own workspace with its own tools.
+Read the five permissions over MCP with `get_agent_capability_grants` (an agent key reads itself or an agent it spawned; a person key reads as the agent's owner or an admin). Granting stays on this card.
+
+The fence covers the platform's routes, not the agent's own container: an agent can still edit files in its own workspace with its own tools. A permission reaches only agents the same owner owns, and never the system agent.
 
 ### Parallel Capacity
 

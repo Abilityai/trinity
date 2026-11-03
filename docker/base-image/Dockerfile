@@ -35,7 +35,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip \
     && rm -rf /var/lib/apt/lists/*
 
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
     apt-get install -y nodejs && \
     rm -rf /var/lib/apt/lists/*
 
@@ -237,10 +237,14 @@ COPY ./hooks/bash-guardrail.py /opt/trinity/hooks/bash-guardrail.py
 COPY ./hooks/file-guardrail.py /opt/trinity/hooks/file-guardrail.py
 COPY ./hooks/output-scanner.py /opt/trinity/hooks/output-scanner.py
 COPY ./hooks/read-only-guard.py /opt/trinity/hooks/read-only-guard.py
+COPY ./hooks/turn-tier-guard.py /opt/trinity/hooks/turn-tier-guard.py
+COPY ./hooks/file_path_policy.py /opt/trinity/hooks/file_path_policy.py
 # trinity-enterprise#752: the gated-skill hook (bootstrap + decision).
 COPY ./hooks/skill-gate.py /opt/trinity/hooks/skill-gate.py
 COPY ./hooks/_skill_gate.py /opt/trinity/hooks/_skill_gate.py
 COPY ./hooks/write-runtime-config.py /opt/trinity/hooks/write-runtime-config.py
+# trinity-enterprise#1001: pins the traffic-routing env names in managed settings.
+COPY ./hooks/write-routing-env.py /opt/trinity/hooks/write-routing-env.py
 # trinity-enterprise#787: build-time smoke for the GUARD-002 registration.
 COPY ./hooks/guard002-smoke.py /opt/trinity/hooks/guard002-smoke.py
 COPY ./hooks/guardrails-baseline.json /opt/trinity/guardrails-baseline.json
@@ -291,9 +295,20 @@ RUN chown -R root:root /etc/claude-code && \
 # everything still in shell form.
 RUN mkdir -p /etc/claude-code/managed-settings.d
 COPY ./hooks/managed-settings.d/50-skill-gate.json /etc/claude-code/managed-settings.d/50-skill-gate.json
+COPY ./hooks/managed-settings.d/60-turn-tier-guard.json /etc/claude-code/managed-settings.d/60-turn-tier-guard.json
 RUN chown -R root:root /etc/claude-code/managed-settings.d && \
     chmod 0755 /etc/claude-code/managed-settings.d && \
-    chmod 0444 /etc/claude-code/managed-settings.d/50-skill-gate.json
+    chmod 0444 /etc/claude-code/managed-settings.d/50-skill-gate.json \
+                /etc/claude-code/managed-settings.d/60-turn-tier-guard.json
+
+# trinity-enterprise#1001 — the routing env names (`ANTHROPIC_BASE_URL`, the
+# proxy and TLS-trust names) are pinned by their own policy drop-in, because
+# Claude Code applies `env` from the agent-writable user and workspace settings
+# too. Built here under `env -i`, so the image ships every name pinned to "";
+# startup.sh rewrites it with the container's own values before the agent
+# server starts, so a proxy set on the container keeps working.
+RUN env -i /usr/local/bin/python3 -I -S /opt/trinity/hooks/write-routing-env.py && \
+    test "$(stat -c '%U:%G %a' /etc/claude-code/managed-settings.d/60-routing-env.json)" = "root:root 444"
 
 # `~/.claude` still belongs to the agent — Claude Code writes its own state there
 # (`.claude/projects/`, plugin cache). What is NO LONGER shipped is a

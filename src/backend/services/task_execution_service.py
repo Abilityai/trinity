@@ -153,6 +153,19 @@ def _served_person_for(execution_id: Optional[str], triggered_by: Optional[str])
         return None
 
 
+def _default_model_for(agent_name: str) -> Optional[str]:
+    """The model a turn with no explicit model runs on.
+
+    The platform default is a Claude model id, so only a Claude Code agent gets
+    it. A Codex or Gemini agent gets ``None`` and runs on its own model
+    (``AGENT_RUNTIME_MODEL`` from its template, or the CLI default): handed
+    ``claude-sonnet-4-6``, Codex is refused by OpenAI with a 404.
+    """
+    if _resolve_agent_runtime(agent_name) != "claude-code":
+        return None
+    return settings_service.get_platform_default_model()
+
+
 def _resolve_agent_runtime(agent_name: str) -> str:
     """Best-effort resolve an agent's runtime for the platform prompt (#1187).
 
@@ -273,8 +286,15 @@ _AUTONOMOUS_TRIGGERS = frozenset(
     # was missing all along stays silent whenever the first attempt failed
     # before reaching the agent (capacity, timeout) and only the retry got far
     # enough to show it.
+    #
+    # #4105: `self_task` is the `agent` case with the caller and the target the
+    # same agent. Its reply goes back to that agent (and, if a chat session was
+    # named, into it after the fact), so no person reads it live. `skill_gate`
+    # is the `operator_response` shape: the wake of a requester after someone
+    # else decided its gated request, run with nobody reading its reply.
     {"schedule", "webhook", "loop", "event", "fan_out", "agent", "reminder",
-     "a2a", "operator_response", "operator_ending", "retry"}
+     "a2a", "operator_response", "operator_ending", "retry", "self_task",
+     "skill_gate"}
 )
 
 
@@ -296,28 +316,29 @@ async def _alert_skill_not_found(
     """Raise an Operating Room item + notification when a scheduled/triggered
     slash-command no-ops because its skill is missing (#1410).
 
-    Best-effort and idempotent-per-series: skips creation when a pending
-    ``skill_not_found`` item already exists for this agent+command, so a
-    recurring schedule doesn't flood the queue between operator responses.
+    Reported through the platform-alert seam (#3254): one row per
+    (agent, command), subject ``skill_not_found:<command>``, rewritten in
+    place by each further run, so a recurring schedule doesn't flood the
+    queue between operator responses. No place in this module learns that a
+    command resolves (the dispatch path's check cannot tell "resolved" from
+    "not a slash command"), so each run re-reads it and the kind's 14-day
+    lifetime ends a row nobody re-read. A pending pre-#3246 row for the same
+    command still stands for it until the upgrade sweep stamps it.
     Never raises — a failed alert must not turn the (already-FAILED) terminal
     write into an exception.
 
     #1677: this emitter is agent-INFLUENCEABLE — distinct unknown commands
-    defeat the per-command dedup — so the queue item is created through
-    ``operator_queue_service.create_bounded_alert`` (per-(agent, type)
-    pending-depth budget). Order is pinned **dedup → budget → both creates**:
-    a benign repeat of an already-pending command at cap must stay a silent
-    no-op, never a false "compromised" episode alert. A ``False`` return
-    suppresses the paired notification too — a notification must never
-    outlive its queue item.
+    defeat the per-command dedup — so the kind is budgeted (per-(agent, type)
+    pending depth, applied inside the seam's locked create). A repeat of a
+    pending command is an update there and is never refused at the cap, so it
+    never raises a false "compromised" episode alert. The paired notification
+    is sent only when a NEW row was created — a notification must never
+    outlive its queue item, and a pending row gets one.
     """
     try:
-        # Lazy import — the budget seam lives with the rest of the
-        # operator-queue ingestion policy (cycle-free; rare path).
-        from services.operator_queue_service import (
-            _truncate_with_marker,
-            create_bounded_alert,
-        )
+        # Lazy imports — the seam and the truncation helper (cycle-free; rare path).
+        from services import platform_alerts
+        from services.operator_queue_service import _truncate_with_marker
 
         # #1677: truncate the agent-derived command for EVERY surface it is
         # echoed into (question, context, notification, log line).
@@ -326,14 +347,14 @@ async def _alert_skill_not_found(
         existing = db.list_operator_queue_items(
             status="pending", type="skill_not_found", agent_name=agent_name
         )
-        already = any(
+        legacy = any(
             (it.get("context") or {}).get("command") == command_display
+            and not it.get("subject")
             for it in existing
         )
-        if already:
+        if legacy:
             return
 
-        now = utc_now_iso()
         title = "Scheduled command references a missing skill"
         question = (
             f"{agent_name}'s scheduled command '{command_display}' did not resolve to an "
@@ -342,25 +363,21 @@ async def _alert_skill_not_found(
             f"(.claude/skills/{command_display.lstrip('/').split()[0]}/SKILL.md) or fix the "
             f"schedule's command."
         )
-        item = {
-            "id": f"skill-not-found-{agent_name}-{now}",
-            "agent_name": agent_name,
-            "type": "skill_not_found",
-            "status": "pending",
-            "priority": "high",
-            "title": title,
-            "question": question,
-            "context": {
+        outcome = platform_alerts.observe(
+            agent_name, "skill_not_found", command_display,
+            title=title,
+            question=question,
+            priority="high",
+            context={
                 "command": command_display,
                 "triggered_by": triggered_by,
                 "execution_id": execution_id or "",
             },
-            "created_at": now,
-        }
-        created = await create_bounded_alert(agent_name, item)
-        if not created:
-            # #1677: at-cap or fail-closed — the queue item was suppressed, so
-            # the notification below is suppressed WITH it. The
+        )
+        if outcome != platform_alerts.OBSERVED_CREATED:
+            # #1677: `updated` is a repeat of a pending command, which already
+            # had its notification; at-cap, failed or snoozed wrote no new row.
+            # The notification goes only with a new row. The
             # FAILED/SKILL_NOT_FOUND execution row remains the primary
             # observability surface.
             return
@@ -690,6 +707,7 @@ def build_pull_queue_payload(
     attempt: Optional[int] = None,
     images: Optional[list] = None,
     collaboration_activity_id: Optional[str] = None,
+    max_turns: Optional[int] = None,
 ) -> Optional[PersistentTaskPayload]:
     """The #2391 producer gate: the overflow payload that lets THIS producer put
     a row on the durable queue, or ``None`` to keep today's ``"reject"`` policy.
@@ -767,6 +785,7 @@ def build_pull_queue_payload(
         timeout_seconds=timeout_seconds,
         async_mode=True,
         resume_session_id=resume_session_id,
+        max_turns=max_turns,
     )
     return PersistentTaskPayload(
         request=request,
@@ -943,10 +962,53 @@ async def dispatch_and_await_terminal(
     return result_from_execution_row(result.execution_id) or result
 
 
+async def start_dispatch_activity(
+    *,
+    agent_name: str,
+    message: str,
+    execution_id: Optional[str],
+    triggered_by: str,
+    source_agent_name: Optional[str],
+    source_user_id: Optional[int],
+    parent_activity_id: Optional[str],
+    extra_activity_details: Optional[dict],
+) -> Optional[str]:
+    """Open the CHAT_START dispatch activity. Shared by push dispatch
+    (``execute_task`` step 3) and the pull claim (#3932), so the two paths
+    write the same timeline bar.
+
+    Best-effort — a tracking failure logs and returns ``None`` (the
+    turn proceeds without a paired activity, as before).
+    """
+    activity_id: Optional[str] = None
+    activity_details = {
+        "message_preview": message[:100] if message else "",
+        "source_agent": source_agent_name,
+        "execution_id": execution_id,
+        "triggered_by": triggered_by,
+    }
+    if extra_activity_details:
+        activity_details.update(extra_activity_details)
+    try:
+        activity_id = await activity_service.track_activity(
+            agent_name=agent_name,
+            activity_type=ActivityType.CHAT_START,
+            user_id=source_user_id,
+            triggered_by=triggered_by,
+            parent_activity_id=parent_activity_id,
+            related_execution_id=execution_id,
+            details=activity_details,
+        )
+    except Exception as e:
+        logger.warning(f"[TaskExecService] Failed to track activity start: {e}")
+    return activity_id
+
+
 def _close_unclaimed_turn(agent_name: str, execution_id: str, status, error: str) -> None:
     """#3114: a claim-wait CAS winner (unclaimed FAILED, caller-away CANCELLED)
     closes its dispatch activity and emits the terminal event, as every other
-    terminal writer does. Fire-and-forget; a running loop is guaranteed here."""
+    terminal writer does. Also the a2a queued-cancel close (#3651). Fire-and-
+    forget; every caller runs inside a request or task, so a loop is running."""
     activity_service.spawn_close_execution_activity(execution_id, status, error=error)
     event_dispatch_service.spawn_task_terminal_event(
         agent_name, execution_id, terminal_status=status, summary_or_error=error,
@@ -1006,9 +1068,21 @@ def result_from_execution_row(execution_id: str) -> Optional[TaskExecutionResult
         TaskExecutionStatus.SUCCESS.value, TaskExecutionStatus.CANCELLED.value
     )
     error_code, error = _split_error_code(error)
+    # #3487: a pulled turn that walked the subscription pool carries the same
+    # summary a pushed one returns (`subscription_switch`, #3470 shape).
+    subscription_switch = None
+    try:
+        walk_state = json.loads(getattr(execution, "backlog_metadata", None) or "{}").get(
+            "subscription_walk"
+        )
+        if isinstance(walk_state, dict) and isinstance(walk_state.get("summary"), dict):
+            subscription_switch = walk_state["summary"]
+    except (TypeError, ValueError, AttributeError):
+        subscription_switch = None
     return TaskExecutionResult(
         execution_id=execution_id,
         status=status,
+        subscription_switch=subscription_switch,
         response=(getattr(execution, "response", None) or "") if keeps_response else "",
         cost=getattr(execution, "cost", None),
         context_used=getattr(execution, "context_used", None),
@@ -1568,6 +1642,10 @@ class TaskExecutionService:
         # #3127: the agent-to-agent /chat collaboration activity. Only a pull
         # pilot's queue reads it (the pull sink closes it); ignored on push.
         collaboration_activity_id: Optional[str] = None,
+        # #2328: the caller's per-task turn cap (`POST /task` `max_turns`). Sent
+        # to the agent, which applies it to `--max-turns`; None ⇒ the agent's
+        # own guardrail. Queued for a pull pilot, frozen by the skill gate.
+        max_turns: Optional[int] = None,
     ) -> TaskExecutionResult:
         """
         Execute a task on an agent container with full lifecycle management.
@@ -1598,10 +1676,11 @@ class TaskExecutionService:
         if timeout_seconds is None:
             timeout_seconds = db.get_execution_timeout(agent_name)
 
-        # #831: Resolve null model → platform default so the agent always receives
-        # a concrete model string. Avoids the stale "sonnet" hardcode in base-image.
+        # #831: Resolve null model → platform default so a Claude Code agent
+        # always receives a concrete model string. Avoids the stale "sonnet"
+        # hardcode in base-image.
         if model is None:
-            model = settings_service.get_platform_default_model()
+            model = _default_model_for(agent_name)
 
         # Dispatch circuit breaker (#526): combined global master-switch AND
         # per-agent opt-in. Drives the acquire() gate (this path), the
@@ -1697,6 +1776,7 @@ class TaskExecutionService:
             attempt=attempt,
             images=images,
             collaboration_activity_id=collaboration_activity_id,
+            max_turns=max_turns,
         )
 
         # Wrap entire execution flow to ensure execution status is updated on any failure.
@@ -1735,6 +1815,7 @@ class TaskExecutionService:
                         source_channel_chat_id=source_channel_chat_id,
                         source_channel_thread=source_channel_thread,
                         source_channel_client=source_channel_client,
+                        max_turns=max_turns,
                     ),
                 )
 
@@ -1754,7 +1835,7 @@ class TaskExecutionService:
                 return admission_denied
 
             # ---- 3. Track activity start -------------------------------------
-            activity_id = await self._start_dispatch_activity(
+            activity_id = await start_dispatch_activity(
                 agent_name=agent_name,
                 message=message,
                 execution_id=execution_id,
@@ -1795,6 +1876,20 @@ class TaskExecutionService:
                 except Exception as e:
                     logger.warning(f"[TaskExecService] Failed to mark execution dispatched: {e}")
 
+            # trinity-enterprise#1022: a headless run (agent scope) recalls what
+            # the agent and its owner already know about this request. Awaited
+            # here, off the event loop inside the service; None when memory is
+            # off, the run serves a person (their own caller prompt carries
+            # their memory), or anything fails.
+            try:
+                from services import memory_service
+                memory_block = await memory_service.task_memory_block(agent_name, execution_id, message)
+            except Exception as e:  # noqa: BLE001 — fail-open
+                logger.debug(f"[TaskExecService] memory block skipped: {e}")
+                memory_block = None
+            if memory_block:
+                system_prompt = "\n\n".join(p for p in (memory_block, system_prompt) if p)
+
             # ---- 4. Call agent with retry --------------------------------
             effective_system_prompt = self._compose_effective_system_prompt(
                 agent_name=agent_name,
@@ -1824,6 +1919,9 @@ class TaskExecutionService:
                 # Claude-runtime agent on a new base image; everyone else ignores
                 # it and runs synchronously (200 → sync fallback below).
                 "async_result": async_dispatch,
+                # #2328: the caller's per-task turn cap. Both retries copy the
+                # payload (`{**payload, ...}`), so they keep it too.
+                "max_turns": max_turns,
             }
 
             response = await self._call_agent_with_retries(
@@ -2236,47 +2334,6 @@ class TaskExecutionService:
                 )
 
         return slot_acquired, None
-
-    async def _start_dispatch_activity(
-        self,
-        *,
-        agent_name: str,
-        message: str,
-        execution_id: Optional[str],
-        triggered_by: str,
-        source_agent_name: Optional[str],
-        source_user_id: Optional[int],
-        parent_activity_id: Optional[str],
-        extra_activity_details: Optional[dict],
-    ) -> Optional[str]:
-        """Step 3 of execute_task: open the CHAT_START dispatch activity.
-
-        Best-effort — a tracking failure logs and returns ``None`` (the
-        turn proceeds without a paired activity, as before).
-        """
-        activity_id: Optional[str] = None
-        # ---- 3. Track activity start -------------------------------------
-        activity_details = {
-            "message_preview": message[:100] if message else "",
-            "source_agent": source_agent_name,
-            "execution_id": execution_id,
-            "triggered_by": triggered_by,
-        }
-        if extra_activity_details:
-            activity_details.update(extra_activity_details)
-        try:
-            activity_id = await activity_service.track_activity(
-                agent_name=agent_name,
-                activity_type=ActivityType.CHAT_START,
-                user_id=source_user_id,
-                triggered_by=triggered_by,
-                parent_activity_id=parent_activity_id,
-                related_execution_id=execution_id,
-                details=activity_details,
-            )
-        except Exception as e:
-            logger.warning(f"[TaskExecService] Failed to track activity start: {e}")
-        return activity_id
 
     async def _breaker_fast_fail(
         self,
@@ -3101,9 +3158,22 @@ class TaskExecutionService:
         # #3012: Claude Code refused the model. An agent image older than #3012
         # answers that 503, which read as auth below and rotated the agent
         # through every subscription. No subscription can fix it — never switch.
-        from services.failure_classifier import is_model_rejection
+        from services.failure_classifier import (
+            is_model_rejection,
+            is_prompt_too_long,
+            is_turn_limit,
+        )
         model_rejected = is_model_rejection(error_msg)
-        if not state.subscription_switch_attempted and not model_rejected:
+        # #3984 / #3849: a turn that hit its cap, or a prompt the API refused
+        # for its length, fails the same way on every credential. The length
+        # rejection answers 503 (zero tokens), so the status test below would
+        # otherwise switch on it and code it AUTH for the dispatch breaker.
+        credential_independent = is_turn_limit(error_msg) or is_prompt_too_long(error_msg)
+        if (
+            not state.subscription_switch_attempted
+            and not model_rejected
+            and not credential_independent
+        ):
             try:
                 from services.subscription_auto_switch import (
                     handle_subscription_failure,
@@ -3130,6 +3200,19 @@ class TaskExecutionService:
         if model_rejected:
             logger.warning(f"[TaskExecService] Model rejected on {agent_name}: {error_msg[:200]}")
             error_code = TaskExecutionErrorCode.MODEL_UNSUPPORTED
+        elif agent_status_code == 403:
+            # ent#926: the agent refused the turn for who it is for (a runtime
+            # that cannot scope it). A refusal, not an outage or an auth fault.
+            error_code = TaskExecutionErrorCode.TURN_REFUSED
+        elif agent_status_code == 422 and is_turn_limit(error_msg):
+            # #3988: the turn stopped at its cap. Coded so the caller is told to
+            # raise the cap or split the task, not that the agent is down. The
+            # shape check stays: a request-validation 422 is not a turn limit.
+            logger.warning(f"[TaskExecService] Turn limit reached on {agent_name}: {error_msg[:200]}")
+            error_code = TaskExecutionErrorCode.MAX_TURNS
+        elif agent_status_code == 503 and is_prompt_too_long(error_msg):
+            logger.warning(f"[TaskExecService] Prompt too long on {agent_name}: {error_msg[:200]}")
+            error_code = TaskExecutionErrorCode.AGENT_ERROR
         elif agent_status_code == 503:
             logger.warning(f"[TaskExecService] Auth failure detected on {agent_name}: {error_msg[:200]}")
             error_code = TaskExecutionErrorCode.AUTH
@@ -3167,7 +3250,7 @@ class TaskExecutionService:
             execution_id=execution_id,
             status=TaskExecutionStatus.FAILED,
             error=f"{error_msg}{walk_trail}",
-            error_code=error_code,  # MODEL_UNSUPPORTED (#3012) / AUTH (503) / BILLING (429, #2638) / None
+            error_code=error_code,  # MODEL_UNSUPPORTED (#3012) / AUTH (503) / BILLING (429, #2638) / MAX_TURNS (422, #3988) / None
             metadata=partial_metadata,
             # #1853: thread the agent's salvaged transcript + session id onto
             # the FAILED envelope so apply_result persists them (mirrors

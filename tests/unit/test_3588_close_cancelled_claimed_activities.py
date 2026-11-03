@@ -352,7 +352,7 @@ class TestCloseCompanionActivities:
 
     def test_non_terminal_row_is_a_no_op(self, db_backend, monkeypatch):
         """Re-queue safety: a lease-reaper re-queue means the companions belong
-        to the re-delivered attempt (same guard as `_close_queued_activities`)."""
+        to the re-delivered attempt (the re-queue guard in `close_companion_activities`)."""
         _fresh(monkeypatch)
         _seed_exec("exec-c3", "running")
         _seed_activity("collab-c3", "agent_collaboration", "exec-c3")

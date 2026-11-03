@@ -41,7 +41,7 @@ from models import (
     User,
 )
 from database import db, SystemSetting, SystemSettingUpdate
-from dependencies import get_current_user, assert_admin
+from dependencies import get_current_user, assert_admin, require_interactive
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services import operator_intake_service, telemetry_sharing_service
 
@@ -150,12 +150,17 @@ async def list_email_whitelist(
 @router.post("/email-whitelist")
 async def add_email_to_whitelist(
     request: Request,
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_interactive)
 ):
     """
     Add an email to the whitelist.
 
-    Admin-only endpoint.
+    Admin-only, and a signed-in session only, for every role (trinity-enterprise#717).
+    The entry yields an interactive session at its role when the person first
+    signs in, so a key must not be able to mint it: `require_interactive` refuses
+    every key-authenticated caller, including an admin's own user-scoped key and
+    the system key that `assert_admin` admits (#2323). Both checks run before
+    the body is read, so a refused caller gets 403, never a validation 422.
     """
     from database import EmailWhitelistAdd
 

@@ -6,13 +6,13 @@ Trinity is **the operating system for the AI-native company** — open source, s
 
 ## Concepts
 
-**Autonomous Agent** -- An AI system that plans and executes tasks independently. Each agent runs as an isolated Docker container with pre-installed languages (Python 3.13, Node.js 20, Go 1.23) and a pluggable agent runtime: Claude Code (the default), Gemini CLI, or OpenAI Codex (see [Agent Runtimes](../agents/agent-runtimes.md)). Agents persist memory across sessions, delegate to other agents, and run on schedules without human intervention.
+**Autonomous Agent** -- An AI system that plans and executes tasks independently. Each agent runs as an isolated Docker container with pre-installed languages (Python 3.13, Node.js 24, Go 1.23) and a pluggable agent runtime: Claude Code (the default), Gemini CLI, or OpenAI Codex (see [Agent Runtimes](../agents/agent-runtimes.md)). Agents persist memory across sessions, delegate to other agents, and run on schedules without human intervention.
 
 **Agent Container** -- An isolated Docker container with standardized interfaces for credentials, tools, and MCP server integrations.
 
 **Template** -- A GitHub repository or local directory that defines an agent's initial configuration, including CLAUDE.md, template.yaml, .mcp.json.template, and credential declarations.
 
-**MCP (Model Context Protocol)** -- The protocol agents use to communicate with each other and with external tools. Trinity's MCP server exposes 168 tools for fleet management, credential injection, scheduling, file sharing, per-user memory, channel messaging, and more.
+**MCP (Model Context Protocol)** -- The protocol agents use to communicate with each other and with external tools. Trinity's MCP server exposes 176 tools for fleet management, credential injection, scheduling, file sharing, per-user memory, channel messaging, and more.
 
 **System Agent** -- An auto-deployed platform orchestrator (`trinity-system`) that manages fleet operations such as health checks, scaling, and coordination. It is deployed when the backend starts, or — on an install whose admin is created in the browser — right after that account exists.
 
@@ -47,7 +47,7 @@ All platform operations are available through the REST API and the MCP server.
 |-----------|-----------|------|---------|
 | Frontend | Vue.js 3 + Tailwind CSS | 80 | Web dashboard and chat UI |
 | Backend | FastAPI (Python) | 8000 | REST API, 600+ endpoints across 80+ routers |
-| MCP Server | FastMCP, Streamable HTTP | 8080 | 168 tools for agent-to-agent and agent-to-platform communication |
+| MCP Server | FastMCP, Streamable HTTP | 8080 | 176 tools for agent-to-agent and agent-to-platform communication |
 | Vector | Log aggregation | 8686 | Structured logging from all containers |
 | Redis | Event bus and cache | 6379 | Real-time event stream, rate limits, transient secrets |
 | Database | SQLite or PostgreSQL | -- | Platform state. A local `start.sh` install uses SQLite, which reached end-of-support on 2026-09-01; a fresh server or one-click install (`start.sh --hosted`) starts on a bundled PostgreSQL |

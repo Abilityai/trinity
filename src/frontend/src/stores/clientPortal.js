@@ -19,6 +19,7 @@ import {
 } from '@/components/portal/portalBriefingState'
 import axios from 'axios'
 import { notifyPlatformUnauthorized, setPlatformUnauthorizedHandler } from '@/utils/platformSession'
+import { notifyTermsRefusal } from '@/utils/termsGate'
 import { useAuthStore } from './auth'
 // A cycle by shape (that store reads this one's `clientEmail`), safe by use:
 // neither side touches the other at module evaluation, only inside actions.
@@ -251,6 +252,14 @@ function installRotationInterceptor() {
           // Pinia not active (module-scope request, or teardown): no session to
           // reason about, so there is nothing to bounce.
         }
+      } else if (error?.response?.status === 403) {
+        // trinity-enterprise#1054: the terms gate refuses a Workspace-only
+        // PLATFORM account, never a client's portal session — same local gate.
+        try {
+          if (useClientPortalStore().isPlatformSession) notifyTermsRefusal(error)
+        } catch {
+          // Pinia not active: no session, nothing to send anywhere.
+        }
       }
       return Promise.reject(error)
     },
@@ -366,6 +375,8 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // control is not rendered at all. Named for the capability, not the
     // provider (ent#354).
     realtimeVoice: { available: false, reason: null },
+    // trinity-enterprise#1046. Same fail-closed reading as the field above.
+    directVoice: { available: false, reason: null, provider: null },
     // ent#403 — the curated model list the composer may offer, from the roster.
     // Instance-level, so it rides the roster and not every card; empty is the
     // fail-closed value and renders no control, exactly like the two flags
@@ -461,6 +472,14 @@ export const useClientPortalStore = defineStore('clientPortal', {
     _suggestionsInFlight: null, // the running load, shared by both placements
     _suggestionsLoadSeq: 0,     // only the LATEST load may write
     _suggestionsDismissed: [],  // keys dismissed since the last load STARTED
+    // ent#641 — the autonomy dial: what this agent may do unprompted for me.
+    autonomyAgent: null,
+    _autonomyGeneration: 0,
+    autonomy: null,           // PortalAutonomyDial
+    autonomyLoaded: false,
+    autonomyError: null,
+    autonomyActionError: null,
+    autonomyBusy: null,       // ask_class in flight
     reportPayloads: {},
     // id -> {total, loaded}; present only for a payload the server actually
     // windowed, so a bounded document never renders a paging footer.
@@ -635,6 +654,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       // would read a stale one as authoritative.
       this.multiAgentChatAvailable = false
       this.realtimeVoice = { available: false, reason: null }
+      this.directVoice = { available: false, reason: null, provider: null }
       // ent#403: a per-session capability like the two above — a different
       // client signing in on the same browser must not inherit this list.
       this.modelOptions = []
@@ -804,7 +824,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // is unavailable.
     async startPortalChat(agentName, message, sessionId = null,
                     { newThread = false, openCanvasId = null, model = null, replyToMessageId = null,
-                      attachments = null, tags = null } = {}) {
+                      attachments = null, tags = null, voiceCallId = null } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat/stream`,
         {
@@ -824,6 +844,8 @@ export const useClientPortalStore = defineStore('clientPortal', {
           // keeps only names in this caller's own uploads, and stores them on
           // the user row so a reload shows them.
           attachments: attachments && attachments.length ? attachments : null,
+          // trinity-enterprise#1046 — this turn is part of the live Direct call.
+          voice_call_id: voiceCallId || null,
           // trinity-enterprise#631 — the people this message tags (addresses,
           // as picked). Only when there are some: every other body is unchanged.
           ...(tags && tags.length ? { tags } : {}),
@@ -959,7 +981,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       try {
         const { data } = await portalHttp.post(
           '/api/rooms',
-          { name: name || 'New chat', agents: agentNames },
+          { name: name || 'New room', agents: agentNames },
           { headers: this.authHeader }
         )
         return data
@@ -1319,6 +1341,63 @@ export const useClientPortalStore = defineStore('clientPortal', {
 
     clearSuggestionError() { this.suggestionError = null },
 
+    // ---- ent#641: the autonomy dial --------------------------------------
+
+    resetAgentAutonomy(agentName = null) {
+      this._autonomyGeneration += 1
+      this.autonomyAgent = agentName
+      this.autonomy = null
+      this.autonomyLoaded = false
+      this.autonomyError = null
+      this.autonomyActionError = null
+      this.autonomyBusy = null
+    },
+
+    async loadAgentAutonomy(agentName) {
+      if (this.autonomyAgent !== agentName) this.resetAgentAutonomy(agentName)
+      const gen = this._autonomyGeneration
+      this.autonomyError = null
+      try {
+        const { data } = await portalHttp.get(
+          `/api/enterprise/client-portal/agents/${agentName}/autonomy`,
+          { headers: this.authHeader },
+        )
+        if (gen !== this._autonomyGeneration) return
+        this.autonomy = data
+        this.autonomyLoaded = true
+      } catch {
+        if (gen !== this._autonomyGeneration) return
+        this.autonomyError = 'The request failed. Check your connection and try again.'
+      }
+    },
+
+    /** hold (anyone, own seat) / release (owner only — a grant). */
+    async actOnAskClass(agentName, askClass, body) {
+      const gen = this._autonomyGeneration
+      this.autonomyActionError = null
+      this.autonomyBusy = askClass
+      try {
+        const { data } = await portalHttp.post(
+          `/api/enterprise/client-portal/agents/${agentName}/autonomy/classes/${encodeURIComponent(askClass)}`,
+          body, { headers: this.authHeader },
+        )
+        if (gen !== this._autonomyGeneration) return data
+        await this.loadAgentAutonomy(agentName)
+        return data
+      } catch (e) {
+        if (gen !== this._autonomyGeneration) return null
+        const d = e?.response?.data?.detail
+        this.autonomyActionError = {
+          askClass,
+          message: (d && typeof d === 'object' && d.message) || (typeof d === 'string' ? d : null)
+            || 'That did not work. Try again.',
+        }
+        return null
+      } finally {
+        if (gen === this._autonomyGeneration) this.autonomyBusy = null
+      }
+    },
+
     // ---- ent#638: the seat decision record ------------------------------
 
     resetAgentDecisions(agentName = null) {
@@ -1635,6 +1714,56 @@ export const useClientPortalStore = defineStore('clientPortal', {
       }
     },
 
+    // trinity-enterprise#701 — a person leaves a room. The room is gone for
+    // them afterwards (the server answers its uniform 404).
+    async leaveRoom(roomId) {
+      this._requireRooms()
+      try {
+        const { data } = await portalHttp.post(
+          `/api/rooms/${encodeURIComponent(roomId)}/leave`, {}, { headers: this.authHeader }
+        )
+        return data
+      } catch (err) {
+        throw this._noteRoomsRefusal(err)
+      }
+    },
+
+    // trinity-enterprise#701 — seating a colleague. Offered only when the room
+    // says `can_seat_people`; these calls do NOT go through
+    // `_noteRoomsRefusal`, because a refusal here is about seating, never a
+    // sign that rooms themselves are unavailable.
+    async fetchSeatablePeople(roomId, q) {
+      const { data } = await portalHttp.get(
+        `/api/enterprise/rooms/${encodeURIComponent(roomId)}/seatable`,
+        { headers: this.authHeader, params: { q } }
+      )
+      return Array.isArray(data?.people) ? data.people : []
+    },
+
+    async seatPerson(roomId, username, { showHistory = false } = {}) {
+      const { data } = await portalHttp.post(
+        `/api/enterprise/rooms/${encodeURIComponent(roomId)}/people`,
+        { username, show_history: showHistory }, { headers: this.authHeader }
+      )
+      return data
+    },
+
+    async removePerson(roomId, username) {
+      const { data } = await portalHttp.delete(
+        `/api/enterprise/rooms/${encodeURIComponent(roomId)}/people/${encodeURIComponent(username)}`,
+        { headers: this.authHeader }
+      )
+      return data
+    },
+
+    async showPersonHistory(roomId, username) {
+      const { data } = await portalHttp.post(
+        `/api/enterprise/rooms/${encodeURIComponent(roomId)}/people/${encodeURIComponent(username)}/history`,
+        {}, { headers: this.authHeader }
+      )
+      return data
+    },
+
     // The client's conversation threads with an agent (most-recent first) — the
     // chat-history list backing the session switcher.
     //
@@ -1660,12 +1789,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // `@/api` here would put a second credential decision in this file for a
     // single diagnostic.
     //
-    // /review correction: an earlier version of this note claimed `@/api` would
-    // bounce an operator on a 401 where `portalHttp` would not. It would not —
-    // `portalHttp`'s own 401 handler calls `_onPlatformSessionLost` for exactly
-    // a platform session, which logs out and pushes `/login`. The difference is
-    // a router push versus `@/api`'s hard `window.location.href`, so the choice
-    // stands but the reason recorded for it did not.
+    // Not the bounce: since #2791 `@/api` and `portalHttp` report a 401 to the
+    // same handler (`notifyPlatformUnauthorized`), and neither hard-navigates.
+    // A dead platform session ends the same way through either — `/login`,
+    // carrying this page to come back to (#3444).
     //
     // Fail-soft on purpose: the caller treats any refusal as "no notice". The
     // endpoint is `assert_admin`-gated, which is the authority; the client-side
@@ -1717,10 +1844,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // ent#534 — start a real-time voice call bound to a Workspace thread. The
     // platform-principal route (uniform 404 for anyone else); the audio socket
     // the response names is the OSS one and takes the platform JWT.
-    async startWorkspaceVoice(agentName, portalSessionId, voiceName = null) {
+    async startWorkspaceVoice(agentName, portalSessionId, voiceName = null, mode = 'live') {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/voice/start`,
-        { portal_session_id: portalSessionId, voice_name: voiceName },
+        { portal_session_id: portalSessionId, voice_name: voiceName, mode },
         { headers: this.authHeader }
       )
       return data
@@ -2397,6 +2524,25 @@ export const useClientPortalStore = defineStore('clientPortal', {
         { response, response_text: responseText, ...(acknowledgeDivergence ? { acknowledge_divergence: true } : {}) },
         { headers: this.authHeader },
       )
+      return this.mergeAnsweredAsk(askId, data)
+    },
+
+    // trinity-enterprise#1066 — the secret field's one call. The value travels
+    // in the BODY of one POST (never a URL, never stored here, never logged);
+    // what comes back is the ask, ended `provided` by name, merged like any
+    // other answer.
+    async provideCredential(askId, value) {
+      const { data } = await portalHttp.post(
+        `/api/enterprise/client-portal/asks/${askId}/credential`,
+        { value },
+        { headers: this.authHeader },
+      )
+      return this.mergeAnsweredAsk(askId, data)
+    },
+
+    // The answered row replaces the waiting one (shared by `answerAsk` and
+    // `provideCredential`).
+    mergeAnsweredAsk(askId, data) {
       this.asks = data && data.id === askId
         ? this.asks.map((a) => (a.id === askId ? data : a))
         : this.asks.filter((a) => a.id !== askId)
@@ -2550,6 +2696,11 @@ export const useClientPortalStore = defineStore('clientPortal', {
         this.realtimeVoice = {
           available: data.realtime_voice?.available === true,
           reason: typeof data.realtime_voice?.reason === 'string' ? data.realtime_voice.reason : null,
+        }
+        this.directVoice = {
+          available: data.direct_voice?.available === true,
+          reason: typeof data.direct_voice?.reason === 'string' ? data.direct_voice.reason : null,
+          provider: typeof data.direct_voice?.provider === 'string' ? data.direct_voice.provider : null,
         }
         // ent#403: same strictness, same fail-closed direction — an older
         // backend without the field, or a shape that is not an array, reads as

@@ -54,6 +54,9 @@ services:
       - GEMINI_TRANSCRIPTION_MODEL=${GEMINI_TRANSCRIPTION_MODEL:-gemini-3.5-flash}  # Telegram voice transcription
       - VOICE_MODEL=${VOICE_MODEL:-models/gemini-3.1-flash-live-preview}  # Gemini Live model override (#1076: non-empty default so an unset var doesn't inject "")
       - VOICE_ENABLED=${VOICE_ENABLED:-true}  # Voice mode (default on when GEMINI_API_KEY set)
+      - DIRECT_VOICE_ENABLED=${DIRECT_VOICE_ENABLED:-}
+      - GEMINI_STT_MODEL=${GEMINI_STT_MODEL:-gemini-3.5-transcribe}
+      - GEMINI_TTS_MODELS=${GEMINI_TTS_MODELS:-gemini-3.8-flash-lite-tts,gemini-3.8-flash-tts}
       - WORKSPACE_VOICE_MAX_DURATION=${WORKSPACE_VOICE_MAX_DURATION:-1800}  # Workspace voice call cap, seconds (ent#534)
       # Brain Orb (#58 static render / scope) + voice tile (#60, needs GEMINI_API_KEY).
       # Both default OFF; must reach the container or the flags stay false (config.py).
@@ -91,6 +94,7 @@ services:
       # tuning lever rather than a dead feature — but this service uses an explicit
       # environment list, so forward them or the .env knobs do nothing (#1056 class).
       - NEVERMINED_MAX_INFLIGHT=${NEVERMINED_MAX_INFLIGHT:-8}  # concurrent verify/settle calls, fleet-wide
+      - NEVERMINED_DELEGATION_MAX_INFLIGHT=${NEVERMINED_DELEGATION_MAX_INFLIGHT:-4}  # concurrent Nevermined delegation verify/revoke calls, fleet-wide
       - NEVERMINED_FACILITATOR_WAIT_SECONDS=${NEVERMINED_FACILITATOR_WAIT_SECONDS:-5.0}  # wait for a slot before "busy, retry"
       # Outbound voice replies via shared TTS (epic #24; Telegram #25). The key
       # gates the feature (empty ⇒ adapters deliver text). Must reach the
@@ -292,6 +296,8 @@ services:
       # FULL non-empty default — a bare :- would arrive set-but-empty and shadow
       # the code default (#1076 class).
       - PUBLIC_ACCESS_REQUESTS_ENABLED=${PUBLIC_ACCESS_REQUESTS_ENABLED:-false}
+      # Original PDF delivery is opt-in; extraction stays in the agent.
+      - ALLOW_PDF_UPLOADS=${ALLOW_PDF_UPLOADS:-false}
       - OPERATOR_INTAKE_ENABLED=${OPERATOR_INTAKE_ENABLED:-true}
       - DO_NOT_TRACK=${DO_NOT_TRACK:-0}
       - OPERATOR_INTAKE_URL=${OPERATOR_INTAKE_URL:-https://intake.abilityai.dev/v1/operator-intake}
@@ -457,7 +463,10 @@ services:
     read_only: false
     tmpfs:
       - /tmp:noexec,nosuid,size=100m
-    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload --no-server-header
+    # --no-proxy-headers (trinity-enterprise#873): no forwarded address is ever
+    # believed in dev — Vite is not a trusted proxy, so requests are attributed
+    # to their socket peer. Topology and trust are deliberately unchanged here.
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload --no-server-header --no-proxy-headers
     mem_limit: 4g
     cpus: 4
 

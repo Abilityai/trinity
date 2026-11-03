@@ -16,7 +16,10 @@ Ratchet rules, one test each: (1) an unclassified route fails, naming the key
 and the ways out; (2) a stale entry in any list fails; (3) a baseline entry that
 is now gated fails — the baseline only shrinks; (4) the baseline is exactly
 `FROZEN_BASELINE_COUNT`; (5) a key in two lists fails; (6) a duplicate key fails;
-(7, runtime file) a stored `METHOD /path` that the app does not register fails.
+(7, runtime file) a stored `METHOD /path` that the app does not register fails;
+(8) an `AGENT_CALLABLE_SELF` entry whose route carries no recognised self-gate
+fails — and a self-gated route with no entry is unclassified (rule 1), so an
+agent-key self-gate is never a way to skip the review (trinity-enterprise#840).
 
 The self-tests plant sources in a temp tree and run them through the same walker
 — each rule is shown to bite on a deliberately broken input.
@@ -101,7 +104,13 @@ class TestRouteCensus:
     def test_rule5_no_key_is_in_two_lists(self, classified):
         _, failures = classified
         assert not _of(failures, rc.TWO_LISTS), "\n".join(_of(failures, rc.TWO_LISTS))
-        tables = [rc.AGENT_CALLABLE, rc.OWN_AUTH, rc.DELEGATED, rc.ADMIN_WIDENED]
+        tables = [
+            rc.AGENT_CALLABLE_SELF,
+            rc.AGENT_CALLABLE_ANY,
+            rc.OWN_AUTH,
+            rc.DELEGATED,
+            rc.ADMIN_WIDENED,
+        ]
         seen = set()
         for t in tables:
             assert not (seen & set(t)), seen & set(t)
@@ -110,6 +119,10 @@ class TestRouteCensus:
     def test_rule6_no_duplicate_keys(self, classified):
         _, failures = classified
         assert not _of(failures, rc.DUPLICATE), "\n".join(_of(failures, rc.DUPLICATE))
+
+    def test_rule8_every_self_entry_carries_its_gate(self, classified):
+        _, failures = classified
+        assert not _of(failures, rc.SELF_UNGATED), "\n".join(_of(failures, rc.SELF_UNGATED))
 
     def test_every_widening_is_listed_and_every_delegated_test_exists(self, classified):
         _, failures = classified
@@ -121,18 +134,23 @@ class TestRouteCensus:
         assert census.websockets == rc.WEBSOCKET_ROUTES
 
     def test_every_listed_entry_carries_a_method_path_and_a_reason(self):
-        for table in (rc.AGENT_CALLABLE, rc.OWN_AUTH):
-            for key, (mp, reason) in table.items():
-                assert mp.split(" ", 1)[0] in {
-                    "GET",
-                    "POST",
-                    "PUT",
-                    "PATCH",
-                    "DELETE",
-                    "HEAD",
-                }, key
-                assert mp.split(" ", 1)[1].startswith("/"), key
-                assert reason.strip(), key
+        rows = [(k, v[0], v[1]) for t in (rc.AGENT_CALLABLE_SELF, rc.OWN_AUTH) for k, v in t.items()]
+        rows += [(k, mp, reason) for k, (mp, reason, _sibling) in rc.AGENT_CALLABLE_ANY.items()]
+        for key, mp, reason in rows:
+            assert mp.split(" ", 1)[0] in {
+                "GET",
+                "POST",
+                "PUT",
+                "PATCH",
+                "DELETE",
+                "HEAD",
+            }, key
+            assert mp.split(" ", 1)[1].startswith("/"), key
+            assert reason.strip(), key
+        # trinity-enterprise#840: the sibling question is answered per route,
+        # in its own field, not by omission.
+        for key, (_mp, _reason, sibling) in rc.AGENT_CALLABLE_ANY.items():
+            assert sibling.strip(), key
         for key, (mp, scopes, reason) in rc.ADMIN_WIDENED.items():
             assert (
                 mp.startswith(("GET ", "POST ", "PUT ", "PATCH ", "DELETE "))
@@ -173,6 +191,8 @@ class TestTheRoutesThisChangeGates:
     ]
     INTERACTIVE = [
         "routers/agent_config.py::set_agent_capability_grant",
+        # trinity-enterprise#717: every whitelist role yields an interactive sign-in.
+        "routers/settings/whitelist.py::add_email_to_whitelist",
         "routers/users.py::update_my_email",
         "routers/users.py::set_my_github_pat",
         "routers/users.py::clear_my_github_pat",
@@ -194,19 +214,19 @@ class TestTheRoutesThisChangeGates:
         assert classified[0][key] == "interactive"
 
     @pytest.mark.parametrize(
-        "key",
+        "key,cls",
         [
-            "routers/agents.py::agent_heartbeat",
-            "routers/agents.py::agent_execution_result",
-            "routers/reports.py::create_report",
-            "routers/notifications.py::create_notification",
-            "routers/schedules.py::create_schedule",
-            "routers/schedules.py::enable_schedule",
-            "routers/schedules.py::disable_schedule",
+            ("routers/agents.py::agent_heartbeat", "agent_callable_any"),
+            ("routers/agents.py::agent_execution_result", "agent_callable_any"),
+            ("routers/reports.py::create_report", "agent_callable_self"),
+            ("routers/notifications.py::create_notification", "agent_callable_any"),
+            ("routers/schedules.py::create_schedule", "agent_callable_any"),
+            ("routers/schedules.py::enable_schedule", "agent_callable_any"),
+            ("routers/schedules.py::disable_schedule", "agent_callable_any"),
         ],
     )
-    def test_the_agent_runtime_surface_stays_agent_callable(self, classified, key):
-        assert classified[0][key] == "agent_callable"
+    def test_the_agent_runtime_surface_stays_agent_callable(self, classified, key, cls):
+        assert classified[0][key] == cls
 
 
 # ===========================================================================
@@ -218,6 +238,7 @@ from fastapi import APIRouter, Depends
 from dependencies import (
     get_current_user, require_person, require_interactive, require_admin,
     require_admin_allowing, assert_person, assert_admin, reject_non_interactive_principal,
+    assert_own_agent, get_self_acting_agent, get_owned_agent, CurrentUser,
 )
 router = APIRouter()
 """
@@ -233,7 +254,7 @@ def _run(root: Path, baseline=None, **tables):
     census = rc.walk(root=root)
     tables = {
         k: tables.get(k, {})
-        for k in ("admin_widened", "agent_callable", "own_auth", "delegated")
+        for k in ("admin_widened", "agent_callable_self", "agent_callable_any", "own_auth", "delegated")
     }
     classes, failures = rc.classify(census, baseline or {}, **tables)
     return census, classes, failures
@@ -453,7 +474,8 @@ class TestSelfTests:
         """,
         )
         msgs = _of(failures, rc.UNCLASSIFIED)
-        assert msgs and "routers/a.py::h" in msgs[0] and "AGENT_CALLABLE" in msgs[0]
+        assert msgs and "routers/a.py::h" in msgs[0]
+        assert "AGENT_CALLABLE_ANY" in msgs[0] and "assert_own_agent" in msgs[0]
 
     def test_a_listed_route_passes(self, tmp_path):
         _plant(
@@ -466,9 +488,9 @@ class TestSelfTests:
         """,
         )
         _, classes, failures = _run(
-            tmp_path, agent_callable={"routers/a.py::h": ("GET /x", "a use")}
+            tmp_path, agent_callable_any={"routers/a.py::h": ("GET /x", "a use", "a sibling")}
         )
-        assert classes == {"routers/a.py::h": "agent_callable"} and not failures
+        assert classes == {"routers/a.py::h": "agent_callable_any"} and not failures
 
     def test_add_api_route_resolves_to_the_definition_file(self, tmp_path):
         _plant(
@@ -591,7 +613,7 @@ class TestSelfTests:
         _, _, failures = _run(
             tmp_path,
             baseline={"routers/a.py::h": "GET /x"},
-            agent_callable={"routers/a.py::h": ("GET /x", "r")},
+            agent_callable_any={"routers/a.py::h": ("GET /x", "r", "s")},
         )
         assert _of(failures, rc.TWO_LISTS)
 
@@ -645,3 +667,238 @@ class TestSelfTests:
     def test_a_live_route_the_walker_missed_fails(self):
         failures = rc.path_failures(set(), {"routers/a.py::h": ["GET /x"]}, {})
         assert failures and failures[0][0] == rc.UNCLASSIFIED
+
+
+# ===========================================================================
+# trinity-enterprise#840: the agent-key self-gate, recognised AND listed
+# ===========================================================================
+
+_SELF = {"routers/a.py::h": ("POST /api/agents/{name}/x", "a use the agent makes on itself")}
+
+
+def _self_route(body: str, *, decorator='@router.post("/agents/{name}/x")', **kw):
+    """One handler under `decorator`, with `body` as its body."""
+    return f"""
+            {decorator}
+            async def h(name: str, current_user=Depends(get_current_user)):
+{textwrap.indent(textwrap.dedent(body), " " * 16)}
+        """
+
+
+class TestSelfGateRecognition:
+    def _classes(self, tmp_path, src, *, imports=True, **tables):
+        _plant(tmp_path, "routers/a.py", src, imports=imports)
+        return _run(tmp_path, **tables)
+
+    def test_a_listed_first_statement_gate_is_agent_callable_self(self, tmp_path):
+        census, classes, failures = self._classes(
+            tmp_path,
+            _self_route('''"""Docstring first is fine."""
+assert_own_agent(current_user, name, detail="mine only")
+return 1'''),
+            agent_callable_self=_SELF,
+        )
+        assert classes == {"routers/a.py::h": "agent_callable_self"} and not failures
+        gate = census.routes["routers/a.py::h"].self_gate
+        assert (gate.kind, gate.principal, gate.agent, gate.refusal) == (
+            "assert_own_agent", "current_user", "name", False)
+
+    def test_a_self_gated_route_with_no_entry_is_unclassified(self, tmp_path):
+        """The review the census exists to force: the self-gate alone never
+        classifies a route, so a self-scoped GRANT written with it fails until
+        someone lists it with a reason (and the reviewer reading that reason is
+        what keeps it out)."""
+        _, classes, failures = self._classes(
+            tmp_path, _self_route("assert_own_agent(current_user, name)\nreturn 1"))
+        msgs = _of(failures, rc.UNCLASSIFIED)
+        assert not classes and msgs and "AGENT_CALLABLE_SELF" in msgs[0] and "GRANT" in msgs[0]
+
+    def test_an_entry_without_the_gate_fails(self, tmp_path):
+        _, classes, failures = self._classes(
+            tmp_path, _self_route("return 1"), agent_callable_self=_SELF)
+        assert not classes and _of(failures, rc.SELF_UNGATED)
+
+    def test_the_hand_copied_inline_gate_is_not_recognised(self, tmp_path):
+        """The shape this issue retires: correct, and invisible to the census."""
+        _, _, failures = self._classes(
+            tmp_path,
+            _self_route('''if current_user.agent_name and current_user.agent_name != name:
+    raise HTTPException(status_code=403, detail="no")
+return 1'''),
+            agent_callable_self=_SELF,
+        )
+        assert _of(failures, rc.SELF_UNGATED)
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            # after another statement
+            "db.read(name)\nassert_own_agent(current_user, name)",
+            # nested in an if
+            "if name:\n    assert_own_agent(current_user, name)",
+            # on a name that is not the principal
+            "assert_own_agent(name, name)",
+            # against a parameter that is not the path agent
+            "assert_own_agent(current_user, other)",
+            # keyword arguments: the census reads the two positional ones
+            "assert_own_agent(current_user=current_user, agent_name=name)",
+        ],
+        ids=["not-first", "nested", "wrong-principal", "wrong-agent", "keywords"],
+    )
+    def test_a_misplaced_or_misaimed_gate_is_not_recognised(self, tmp_path, body):
+        src = _self_route(body).replace("async def h(name: str,", "async def h(name: str, other: str,")
+        _, classes, failures = self._classes(tmp_path, src, agent_callable_self=_SELF)
+        assert not classes and _of(failures, rc.SELF_UNGATED)
+
+    def test_a_dependency_that_is_not_the_principal_is_not_recognised(self, tmp_path):
+        """Only a `get_current_user` principal reads an agent name: a gate
+        called on another dependency's value (an agent NAME, here) would read
+        none and pass every caller."""
+        src = """
+            @router.post("/agents/{name}/x")
+            async def h(name: str, owned=Depends(get_owned_agent), current_user=Depends(get_current_user)):
+                assert_own_agent(owned, name)
+        """
+        _, classes, failures = self._classes(tmp_path, src, agent_callable_self=_SELF)
+        assert not classes and _of(failures, rc.SELF_UNGATED)
+
+    def test_the_agent_must_be_the_one_every_path_names(self, tmp_path):
+        """`name` compared, but the path names the agent `{agent_name}`."""
+        _, classes, failures = self._classes(
+            tmp_path,
+            _self_route("assert_own_agent(current_user, name)",
+                        decorator='@router.post("/agents/{agent_name}/x")'),
+            agent_callable_self=_SELF,
+        )
+        assert not classes and _of(failures, rc.SELF_UNGATED)
+
+    @pytest.mark.parametrize("gate", ["assert_own_agent(current_user, name)",
+                                      "assert_own_agent(current_user, agent_name)"])
+    def test_a_path_naming_both_agent_parameters_is_never_recognised(self, tmp_path, gate):
+        """Ambiguous: the gate could fence one agent while the handler acts on
+        the other, and the capability fences read `agent_name` first."""
+        src = _self_route(gate, decorator='@router.post("/agents/{agent_name}/peers/{name}")')
+        src = src.replace("async def h(name: str,", "async def h(name: str, agent_name: str,")
+        _, classes, failures = self._classes(tmp_path, src, agent_callable_self=_SELF)
+        assert not classes and _of(failures, rc.SELF_UNGATED)
+        both = """
+            @router.post("/agents/{agent_name}/peers/{name}")
+            async def h(agent_name: str, name: str = Depends(get_self_acting_agent)):
+                return 1
+        """
+        _, classes, failures = self._classes(tmp_path, both, agent_callable_self=_SELF)
+        assert not classes and _of(failures, rc.SELF_UNGATED)
+
+    def test_a_second_registration_clears_the_self_gate(self, tmp_path):
+        """A decorated, self-gated handler ALSO registered with `add_api_route`
+        serves a path the gate was never checked against: fail closed."""
+        _plant(
+            tmp_path,
+            "routers/a.py",
+            """
+            @router.post("/agents/{name}/x")
+            async def h(name: str, current_user=Depends(get_current_user)):
+                assert_own_agent(current_user, name)
+
+            router.add_api_route("/elsewhere", h, methods=["PUT"])
+        """,
+        )
+        census, classes, failures = _run(tmp_path, agent_callable_self=_SELF)
+        assert census.routes["routers/a.py::h"].self_gate is None
+        assert not classes and _of(failures, rc.SELF_UNGATED)
+
+    def test_an_aliased_or_locally_defined_gate_is_not_recognised(self, tmp_path):
+        aliased = """
+            from fastapi import APIRouter, Depends
+            from dependencies import get_current_user, assert_own_agent as gate
+            router = APIRouter()
+
+            @router.post("/agents/{name}/x")
+            async def h(name: str, current_user=Depends(get_current_user)):
+                gate(current_user, name)
+        """
+        _, classes, failures = self._classes(
+            tmp_path, aliased, imports=False, agent_callable_self=_SELF)
+        assert not classes and _of(failures, rc.SELF_UNGATED)
+        local = """
+            def assert_own_agent(user, agent):
+                return None
+
+            @router.post("/agents/{name}/x")
+            async def h(name: str, current_user=Depends(get_current_user)):
+                assert_own_agent(current_user, name)
+        """
+        _, classes, failures = self._classes(tmp_path, local, agent_callable_self=_SELF)
+        assert not classes and _of(failures, rc.SELF_UNGATED)
+
+    def test_the_module_attribute_spelling_and_the_currentuser_alias_count(self, tmp_path):
+        src = """
+            from fastapi import APIRouter
+            import dependencies
+            from dependencies import CurrentUser
+            router = APIRouter()
+
+            @router.post("/agents/{name}/x")
+            async def h(name: str, current_user: CurrentUser):
+                dependencies.assert_own_agent(current_user, name, refusal=make_404)
+        """
+        census, classes, failures = self._classes(
+            tmp_path, src, imports=False, agent_callable_self=_SELF)
+        assert classes == {"routers/a.py::h": "agent_callable_self"} and not failures
+        assert census.routes["routers/a.py::h"].self_gate.refusal is True
+
+    def test_get_self_acting_agent_is_a_self_gate(self, tmp_path):
+        src = """
+            @router.get("/agents/{name}/asks/{request_id}")
+            async def h(request_id: str, name: str = Depends(get_self_acting_agent)):
+                return 1
+        """
+        census, classes, failures = self._classes(
+            tmp_path, src, agent_callable_self={
+                "routers/a.py::h": ("GET /api/agents/{name}/asks/{request_id}", "its own ask")})
+        assert classes == {"routers/a.py::h": "agent_callable_self"} and not failures
+        gate = census.routes["routers/a.py::h"].self_gate
+        assert (gate.kind, gate.principal, gate.agent) == ("get_self_acting_agent", None, "name")
+
+    def test_an_add_api_route_target_is_never_self_recognised(self, tmp_path):
+        """No literal decorator path to check the agent against: fail closed."""
+        _plant(
+            tmp_path,
+            "routers/a.py",
+            """
+            async def h(name: str, current_user=Depends(get_current_user)):
+                assert_own_agent(current_user, name)
+
+            router.add_api_route("/agents/{name}/x", h, methods=["POST"])
+        """,
+        )
+        _, classes, failures = _run(tmp_path, agent_callable_self=_SELF)
+        assert not classes and _of(failures, rc.SELF_UNGATED)
+
+    def test_a_self_gated_baseline_entry_fails(self, tmp_path):
+        _, _, failures = self._classes(
+            tmp_path,
+            _self_route("assert_own_agent(current_user, name)"),
+            baseline={"routers/a.py::h": "POST /api/agents/{name}/x"},
+            agent_callable_self=_SELF,
+        )
+        assert _of(failures, rc.GATED_IN_BASELINE)
+
+    def test_a_self_gated_route_listed_as_any_is_stale(self, tmp_path):
+        _, _, failures = self._classes(
+            tmp_path,
+            _self_route("assert_own_agent(current_user, name)"),
+            agent_callable_any={"routers/a.py::h": ("POST /api/agents/{name}/x", "r", "s")},
+        )
+        assert any("AGENT_CALLABLE_SELF" in m for m in _of(failures, rc.STALE))
+        assert _of(failures, rc.UNCLASSIFIED)  # and it still has no SELF entry
+
+    def test_a_person_gate_beside_the_self_gate_wins(self, tmp_path):
+        """The strictest class: a person-only route makes the self-gate moot."""
+        src = """
+            @router.post("/agents/{name}/x")
+            async def h(name: str, current_user=Depends(require_person)):
+                assert_own_agent(current_user, name)
+        """
+        _, classes, failures = self._classes(tmp_path, src)
+        assert classes == {"routers/a.py::h": "person"} and not failures

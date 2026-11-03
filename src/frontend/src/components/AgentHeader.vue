@@ -24,8 +24,11 @@
     › Danger zone; the Workspace and the voice call → the Workspace (ent#950).
   -->
   <div class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg mb-4 relative" data-testid="agent-header-container">
-    <!-- Overlapping Avatar (AVATAR-001) - centered on left edge of card (50% in, 50% out) -->
-    <div class="absolute left-0 top-3 z-10 group -translate-x-1/2">
+    <!-- Overlapping Avatar (AVATAR-001) - centered on left edge of card (50% in, 50% out)
+         from `sm` up. Below `sm` it sits inside the card above the name: hung off
+         the edge it covered the card's border, and the 64px it needed on each
+         side left a phone's header a third narrower (#3542). -->
+    <div class="relative ml-4 mt-4 w-fit group sm:absolute sm:left-0 sm:top-3 sm:z-10 sm:ml-0 sm:mt-0 sm:-translate-x-1/2">
       <div class="rounded-full border-[3px] border-action-primary-400 dark:border-action-primary-500 shadow-lg overflow-hidden">
         <div class="relative w-28 h-28">
           <Transition name="avatar-crossfade">
@@ -91,7 +94,7 @@
     </div>
 
     <!-- ROW 1: Identity + Primary Action -->
-    <div class="p-4 pb-3 pl-16">
+    <div class="p-4 pb-3 sm:pl-16">
       <!-- #2197 — `flex-wrap` + `gap-y-3`. Identity and the action buttons are
            both rigid (a name, the context chart, a Running toggle), so on a
            single non-wrapping row their combined min-content simply widened the
@@ -285,12 +288,15 @@
          dominated the measurement: toggles + Tags on the left and the live
          CPU/MEM/uptime cluster on the right add up to ~790px of min-content,
          so the page body scrolled horizontally from 1023px down. -->
-    <div class="pl-16 pr-4 py-2.5 border-t border-gray-100 dark:border-gray-750 flex flex-wrap items-center gap-y-2" data-testid="agent-header-row-settings">
-      <!-- Left side: Mode toggles + Tags. `flex-1 min-w-0`: the tags block
-           takes whatever the live cluster leaves and its chips truncate, so
-           the row fits on one line wherever toggles + live cluster fit — and
-           the wrap point no longer moves when the tags arrive. -->
-      <div class="flex flex-wrap items-center gap-y-2 min-w-0 flex-1">
+    <div class="pl-4 sm:pl-16 pr-4 py-2.5 border-t border-gray-100 dark:border-gray-750 flex flex-wrap items-center gap-y-2" data-testid="agent-header-row-settings">
+      <!-- Left side: Mode toggles + Tags. From `sm` up, `grow shrink sm:basis-0
+           min-w-0` (flex-1): the tags block takes whatever the live cluster
+           leaves and its chips truncate, so the row fits on one line wherever
+           toggles + live cluster fit — and the wrap point no longer moves when
+           the tags arrive. Below `sm` the live cluster fills the line by
+           itself, so a zero basis left this block 0px wide and "+ Add tag"
+           drew over CPU/MEM; `basis-full` gives it its own line (#3542). -->
+      <div class="flex flex-wrap items-center gap-y-2 min-w-0 grow shrink basis-full sm:basis-0">
         <!-- Autonomy Toggle (not for system agents) -->
         <div v-if="canEditIdentity" class="flex items-center">
           <AutonomyToggle
@@ -419,14 +425,19 @@
     <!-- ROW 4: the GitHub line — only when a repository is connected. No
          Pull / Push / Refresh here (the Git tab owns the verbs). The live
          status lands after first paint, so the row is RESERVED up front for
-         an agent whose template is a GitHub repository (`gitExpected`): a
-         skeleton while the status is in flight, a sentence while the agent
-         is stopped (the status is only readable from a running container),
-         and the line once it is bound. A local-template agent gets the row
-         only if its status turns out to name a remote. -->
+         an agent known to have a repository (`gitExpected`): a skeleton
+         while the status is in flight, a sentence while the agent is
+         stopped (the status is only readable from a running container),
+         and the line once it is bound. An agent with no repo on record gets
+         the row only if its status turns out to name a remote.
+         Every branch carries the SAME content floor as the bound line
+         (`min-h-[1.5rem]`, AgentHeaderMeta's own), so the row is one height
+         before and after the status lands (#3872, principle 6): the old
+         row-level 2.25rem floor sat below what the bound line needs, and the
+         header shifted 5px even when the row was reserved. -->
     <div
       v-if="gitBound || gitExpected"
-      class="px-4 py-2 border-t border-gray-100 dark:border-gray-750 flex items-center min-w-0 min-h-[2.25rem]"
+      class="px-4 py-2 border-t border-gray-100 dark:border-gray-750 flex items-center min-w-0"
       data-testid="agent-header-git"
     >
       <AgentHeaderMeta
@@ -438,10 +449,10 @@
       />
       <span
         v-else-if="agent.status === 'running' && gitStatus === null"
-        class="block h-3 w-72 max-w-full rounded bg-gray-200 dark:bg-gray-750 animate-pulse motion-reduce:animate-none"
+        class="flex items-center min-h-[1.5rem] min-w-0 max-w-full"
         aria-busy="true"
-      ><span class="sr-only">Loading repository state…</span></span>
-      <span v-else class="text-[12.5px] text-gray-600 dark:text-gray-400" data-testid="agent-header-git-idle">
+      ><span class="block h-3 w-72 max-w-full rounded bg-gray-200 dark:bg-gray-750 animate-pulse motion-reduce:animate-none" aria-hidden="true"></span><span class="sr-only">Loading repository state…</span></span>
+      <span v-else class="flex items-center min-h-[1.5rem] text-[12.5px] text-gray-600 dark:text-gray-400" data-testid="agent-header-git-idle">
         {{ agent.status === 'running' ? 'No repository connected.' : 'Repository state is read from the running agent — start it to see the branch and sync.' }}
       </span>
     </div>
@@ -692,10 +703,18 @@ const activeSlots = computed(() => {
 })
 
 const gitBound = computed(() => !!(props.gitStatus?.git_enabled && props.gitStatus?.remote_url))
-// The one fact about the repository known at first paint: an agent deployed
-// from a `github:` template has one. (`agent.git_mode` is null for these on a
-// live payload, so it cannot be the signal.) Reserves row 4 so it never pops.
-const gitExpected = computed(() => typeof props.agent.template === 'string' && props.agent.template.startsWith('github:'))
+// What is known about the repository at first paint, so row 4 never pops.
+// #3872: the detail payload's `git_configured` — the persisted git config,
+// which survives stops and recovery and is what the backend itself treats as
+// "GitHub-backed". The template string alone was the signal before, and it is
+// false for an agent deployed locally and bound afterwards (a `local:` label,
+// or none — #1811): for those the row appeared only when the status landed.
+// The `github:` template keeps reserving against a backend without the flag.
+// (`agent.git_mode` is null on a live payload, so it cannot be the signal.)
+const gitExpected = computed(() => (
+  props.agent.git_configured === true
+  || (typeof props.agent.template === 'string' && props.agent.template.startsWith('github:'))
+))
 
 const router = useRouter()
 

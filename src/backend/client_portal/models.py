@@ -248,10 +248,21 @@ class PortalRealtimeVoice(BaseModel):
     reason: Optional[str] = None
 
 
+class PortalDirectVoice(BaseModel):
+    """Whether THIS principal may start a Direct call (trinity-enterprise#1046), why
+    not when not, and which speech provider it would use. Fail-closed, and None reason
+    for a portal-token client, for the reasons on `PortalRealtimeVoice`."""
+    available: bool = False
+    reason: Optional[str] = None
+    provider: Optional[str] = None
+
+
 class PortalVoiceStartRequest(BaseModel):
     """Start a voice call bound to a Workspace thread (ent#534)."""
     portal_session_id: str = Field(..., min_length=1, max_length=64)
     voice_name: Optional[str] = None
+    # trinity-enterprise#1046. Absent means today's call.
+    mode: Literal["live", "direct"] = "live"
 
 
 class PortalVoiceStartResponse(BaseModel):
@@ -259,6 +270,12 @@ class PortalVoiceStartResponse(BaseModel):
     websocket_url: str
     portal_session_id: str
     max_duration_seconds: int
+    # trinity-enterprise#1046: Direct only. `early_speech` is False on a runtime that
+    # speaks only once its turn has finished, and the status line says so.
+    mode: str = "live"
+    provider: Optional[str] = None
+    runtime: Optional[str] = None
+    early_speech: Optional[bool] = None
 
 
 class PortalRoster(BaseModel):
@@ -267,6 +284,8 @@ class PortalRoster(BaseModel):
     agents: list[PortalAgentCard]
     # ent#534 — see PortalRealtimeVoice. Resolved once per roster load.
     realtime_voice: PortalRealtimeVoice = Field(default_factory=PortalRealtimeVoice)
+    # trinity-enterprise#1046. Resolved once per roster load, like the field above.
+    direct_voice: PortalDirectVoice = Field(default_factory=PortalDirectVoice)
     # #2128 — whether a chat may include MORE THAN ONE agent on this instance.
     # Named for the capability, never the module or the edition: this payload
     # goes to an operator's customer, who can neither buy a missing module nor
@@ -363,7 +382,7 @@ class PortalChatRequest(BaseModel):
     """A client's chat turn to a rostered agent. ``session_id`` targets a specific
     thread; when omitted the turn lands in the client's most-recent session (or a
     new one if they've never chatted with this agent)."""
-    message: str = Field(min_length=1, max_length=8000)
+    message: str = Field(min_length=1, max_length=100_000)
     session_id: Optional[str] = None
     # ent#451: ask for a FRESH thread rather than the client's most recent one.
     # An absent `session_id` alone could not say this — it also means "I don't
@@ -371,6 +390,9 @@ class PortalChatRequest(BaseModel):
     # conversation. Ignored when `session_id` names a thread: the id is a fact,
     # this is an intent. Defaults False so no existing caller changes behaviour.
     new_thread: bool = False
+    # trinity-enterprise#1046: this turn belongs to the caller's live Direct call on
+    # this thread. Honoured on the streaming route, after `turn_may_join_call`.
+    voice_call_id: Optional[str] = Field(default=None, max_length=64)
     # ent#555 — which canvas the client has open on screen, so "add a column to
     # this" resolves without asking. Client-supplied and therefore VALIDATED
     # server-side against the agent's own visible canvases; an unrecognised
@@ -834,6 +856,64 @@ class PortalSeatDecisionAction(BaseModel):
     reason: Optional[str] = Field(None, max_length=2000)
     review_by: Optional[str] = Field(None, max_length=32)
     fields: Optional[dict] = None
+
+
+class PortalAskClassState(BaseModel):
+    """ent#641 — one ask class of one seat, as the panel sees it.
+
+    `state` is the LIVE verdict (the earned state ANDed with the instance
+    ceiling, the agent's autonomy switch and the clock); `earned_state` is what
+    the evidence bought, so a person can tell "not yet earned" from "earned but
+    the dial is down". `blocked_by` is every reason, never just the first."""
+    ask_class: str
+    seat: str
+    state: Literal["on_request", "graduated"]
+    earned_state: Literal["on_request", "graduated"]
+    unprompted: bool = False
+    blocked_by: list[str] = Field(default_factory=list)
+    evidence: dict = Field(default_factory=dict)
+    evidence_expires_at: Optional[str] = None
+    guard_metric: Literal["not_assessed", "capped", "clear"] = "not_assessed"
+    held: bool = False
+    writable: bool = False
+
+
+class PortalAutonomyDial(BaseModel):
+    """ent#641 — the seat's dial panel: the instance ceiling, the hard off, and
+    every readable seat's classes."""
+    agent_name: str
+    my_seat: str
+    level: str
+    level_label: str
+    ceiling_allows_unprompted: bool
+    agent_autonomy_enabled: bool
+    rating_window_days: int
+    rule_version: str
+    can_hold: bool = True
+    can_release: bool = False
+    classes: list[PortalAskClassState] = Field(default_factory=list)
+    other_seats: list[PortalAskClassState] = Field(default_factory=list)
+    #: blocker code -> the sentence the companion's prompt also uses
+    #: (`autonomy_dial_service.BLOCKER_TEXT`), so the panel never words it differently.
+    blocker_text: dict[str, str] = Field(default_factory=dict)
+
+
+class PortalAutonomyAction(BaseModel):
+    """hold (refuse unprompted work) / release (owner only — a grant)."""
+    action: Literal["hold", "release"]
+    seat: Optional[str] = Field(None, max_length=254)
+
+
+class PortalAutonomyGuard(BaseModel):
+    """Canon's hard cap for a class, recorded by the owner."""
+    guard_metric: Literal["not_assessed", "capped", "clear"]
+    seat: Optional[str] = Field(None, max_length=254)
+
+
+class PortalAutonomyResult(BaseModel):
+    class_: PortalAskClassState = Field(alias="class")
+
+    model_config = {"populate_by_name": True}
 
 
 class PortalSeatDecisionResult(BaseModel):

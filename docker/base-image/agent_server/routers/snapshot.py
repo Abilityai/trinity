@@ -24,6 +24,25 @@ from pathlib import Path
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 
+
+def _write_bytes_nofollow(rel: str, data: bytes, *, base: Path) -> None:
+    """`files.write_bytes_nofollow` (ent#822). Imported through the package
+    when there is one; by file path otherwise, so these primitives stay pure
+    — loadable with no package context, as `files.py` itself is (#1795)."""
+    if __package__:
+        from .files import write_bytes_nofollow
+    else:
+        import importlib.util
+        import sys
+        name = "trinity_agent_files_router"
+        if name not in sys.modules:
+            spec = importlib.util.spec_from_file_location(name, str(Path(__file__).resolve().parent / "files.py"))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            sys.modules[name] = module
+        write_bytes_nofollow = sys.modules[name].write_bytes_nofollow
+    write_bytes_nofollow(rel, data, base=base)
+
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
@@ -80,7 +99,6 @@ def restore_from_tar(
     """Extract tar entries that match paths into home_dir. Returns (restored, skipped)."""
     restored: list[str] = []
     skipped: list[str] = []
-    home_resolved = home_dir.resolve()
     with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r") as tf:
         for member in tf.getmembers():
             name = member.name
@@ -91,18 +109,19 @@ def restore_from_tar(
             ):
                 skipped.append(name)
                 continue
-            target = (home_dir / name).resolve()
-            try:
-                target.relative_to(home_resolved)
-            except ValueError:
-                skipped.append(name)
-                continue
             extracted = tf.extractfile(member)
             if extracted is None:
                 skipped.append(name)
                 continue
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(extracted.read())
+            # ent#822: written without following a link, so a link inside the
+            # home (a parent directory, or the file itself) cannot send the
+            # member onto another file there. That member is skipped; the rest
+            # still restore.
+            try:
+                _write_bytes_nofollow(name, extracted.read(), base=home_dir)
+            except HTTPException:
+                skipped.append(name)
+                continue
             restored.append(name)
     return sorted(restored), sorted(skipped)
 

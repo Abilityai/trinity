@@ -17,7 +17,7 @@ performance index, and for `idx_agent_evaluations_rating_target` it would
 silently turn "one rating per person per thing" into "one row per click".
 """
 
-from sqlalchemy import BigInteger, Column, Float, ForeignKey, Index, JSON, MetaData, PrimaryKeyConstraint, Table, Text, UniqueConstraint, text
+from sqlalchemy import BigInteger, Column, Float, ForeignKey, Index, JSON, LargeBinary, MetaData, PrimaryKeyConstraint, Table, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy import Integer as _Integer
 from sqlalchemy.types import TypeDecorator
@@ -126,6 +126,7 @@ agent_ownership = Table(
     # a dispatch on respond spends money, so it is never unconditional. Per-AGENT and
     # not per-request, so hosting asks cannot hand a client a spend button (ent#430 AC #3).
     Column("operator_resume_enabled", Integer),
+    Column("memory_opt_out", Integer),             # trinity-enterprise#1022: per-agent retrieval-memory opt-out (default 0)
     Column("tts_voice_replies_enabled", Integer),  # epic #24/#25: outbound voice-out toggle (shared agent-level)
     Column("tts_voice_id", Text),                  # epic #24/#25: ElevenLabs voice id for spoken replies
     Column("tts_voice_telegram_enabled", Integer),   # ent#117: per-channel voice-allowed flag
@@ -313,6 +314,7 @@ schedule_executions = Table(
     # (the pull claim relies on its IntegrityError), so autogenerate must not
     # propose dropping it.
     Column("conversation_key", Text),
+    Column("a2a_caller_identity", Text),
     Index(
         "idx_executions_one_running_turn",
         "agent_name", "conversation_key",
@@ -320,6 +322,8 @@ schedule_executions = Table(
         sqlite_where=text("status = 'running' AND conversation_key IS NOT NULL"),
         postgresql_where=text("status = 'running' AND conversation_key IS NOT NULL"),
     ),
+    # #3380 — the /chat thread this turn answers; NULL = not a /chat turn.
+    Column("chat_session_id", Text),
 )
 
 agent_loops = Table(
@@ -555,6 +559,7 @@ enterprise_portal_messages = Table(
     Column("voice_call_id", Text),  # ent#534: groups one voice call's rows
     Column("attachments", Text),    # #3265: JSON list on a user turn
     Column("execution_id", Text),   # #3166: the turn that wrote the row
+    Column("gate_hold", Text),      # #3402: held/refused by the gate — never replayed
 )
 
 # ent#359 — per-user star + read cursor for a Workspace chat of either kind
@@ -614,6 +619,7 @@ enterprise_room_participants = Table(
     Column("last_read_seq", Integer),
     Column("cached_session_id", Text),
     Column("consecutive_resume_failures", Integer),
+    Column("visible_from_seq", Integer),
 )
 
 enterprise_room_messages = Table(
@@ -629,6 +635,18 @@ enterprise_room_messages = Table(
     Column("content", Text),
     Column("execution_id", Text),
     Column("created_at", Text),
+)
+
+# trinity#3402 — the room messages one agent's skill gate stopped (DDL comment
+# in db/schema.py). The primary key is the ON CONFLICT target of the write.
+room_gate_holds = Table(
+    "room_gate_holds",
+    metadata,
+    Column("room_id", Text, primary_key=True),
+    Column("agent_name", Text, primary_key=True),
+    Column("seq", Integer, primary_key=True),
+    Column("gate_hold", Text, nullable=False),
+    Column("created_at", Text, nullable=False),
 )
 
 
@@ -931,6 +949,9 @@ public_chat_messages = Table(
     # #903: per-message speaker attribution for thread-scoped channel sessions.
     Column("sender_email", Text),
     Column("sender_label", Text),
+    # #3402: held/refused by the skill gate (or written naming a gated skill) —
+    # never replayed to the agent. See the DDL comment in db/schema.py.
+    Column("gate_hold", Text),
 )
 
 public_user_memory = Table(
@@ -960,6 +981,60 @@ public_user_memory_writes = Table(
     Column("written_at", Text),
     Column("undone_at", Text),
     Column("undone_by", Text),
+)
+
+# trinity-enterprise#1022 (MEM-002): retrieval memory facts — see the note in db/schema.py.
+# `user_email = ''` is the agent scope (shared with the owner); never NULL, so the
+# partial unique index on the live hash holds on both engines.
+agent_memory_facts = Table(
+    "agent_memory_facts",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text, nullable=False),
+    Column("user_email", Text, nullable=False, server_default=""),
+    Column("text", Text, nullable=False),
+    Column("text_hash", Text, nullable=False),
+    Column("embedding", LargeBinary, nullable=False),
+    Column("embedding_model", Text, nullable=False),
+    Column("source", Text, nullable=False),
+    Column("execution_id", Text),
+    Column("updated_by_execution_id", Text),   # the last run that rewrote or retired it (provenance)
+    Column("recall_count", Integer, server_default="0"),
+    Column("last_recalled_at", Text),
+    Column("created_at", Text, nullable=False),
+    Column("updated_at", Text, nullable=False),
+    Column("deleted_at", Text),
+    Column("deleted_by", Text),
+    Index("idx_agent_memory_facts_scope", "agent_name", "user_email", "deleted_at"),
+    Index(
+        "idx_agent_memory_facts_live_hash", "agent_name", "user_email", "text_hash",
+        unique=True,
+        sqlite_where=text("deleted_at IS NULL"),
+        postgresql_where=text("deleted_at IS NULL"),
+    ),
+)
+
+# trinity-enterprise#1022: the fact journal — one row per thing that happened to a
+# fact (or to a candidate that never became one), keyed to the execution that
+# did it. Append-only; the lineage behind every live fact and the corpus the
+# extraction prompt is tuned against. See the note in db/schema.py.
+agent_memory_fact_events = Table(
+    "agent_memory_fact_events",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text, nullable=False),
+    Column("user_email", Text, nullable=False, server_default=""),
+    Column("fact_id", Text),
+    Column("op", Text, nullable=False),
+    Column("execution_id", Text),
+    Column("candidate_text", Text),
+    Column("previous_text", Text),
+    Column("neighbour_ids", Text),
+    Column("score", Float),
+    Column("actor", Text),
+    Column("created_at", Text, nullable=False),
+    Index("idx_agent_memory_fact_events_fact", "agent_name", "fact_id", "created_at"),
+    Index("idx_agent_memory_fact_events_execution", "agent_name", "execution_id"),
 )
 
 # ent#527 / #663: the agent owner's readiness stamp — see the note in db/schema.py.
@@ -1000,6 +1075,29 @@ seat_decisions = Table(
     Column("closed_by", Text),
     Column("reconfirmed_at", Text),
     Column("source_execution_id", Text),
+    Column("created_at", Text),
+    Column("updated_at", Text),
+)
+
+# ent#641 (P12): the autonomy dial's earned half — see the note in db/schema.py.
+seat_ask_class_state = Table(
+    "seat_ask_class_state",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text),
+    Column("seat_email", Text),
+    Column("ask_class", Text),
+    Column("state", Text),
+    Column("blocked_by", Text),
+    Column("evidence", Text),
+    Column("evidence_hash", Text),
+    Column("evidence_expires_at", Text),
+    Column("guard_metric", Text),
+    Column("held", Integer),
+    Column("held_by", Text),
+    Column("held_at", Text),
+    Column("promoted_at", Text),
+    Column("demoted_at", Text),
     Column("created_at", Text),
     Column("updated_at", Text),
 )
@@ -1049,6 +1147,7 @@ agent_sync_state = Table(
     Column("pack_count", Integer),  # #1595: packs from `git count-objects -v`
     Column("loose_objects", Integer),  # #1595: loose objects (gc-health signal)
     Column("maintenance_failures", Integer),  # #1595: consecutive failed maintenance
+    Column("git_stats_at", Text),  # #4000: when the agent measured the git stats (ISO-Z)
     # trinity-enterprise#706: the divergence / dirt episode clocks (ISO-Z, set
     # once, cleared on return to 0), the porcelain change count, and the last
     # push that actually landed. All nullable, no backfill.
@@ -1150,6 +1249,12 @@ skill_sources = Table(
     Column("created_by", Text),
     Column("created_at", Text),
     Column("updated_at", Text),
+    # trinity-enterprise#529: 1 while the seeded default still points where the
+    # platform put it; the boot follow moves only such a row, and records the
+    # move in the two columns after it.
+    Column("follows_bundled_pin", Integer),
+    Column("followed_from_ref", Text),
+    Column("followed_at", Text),
 )
 
 agent_tags = Table(
@@ -1625,6 +1730,43 @@ nevermined_payment_log = Table(
     Column("created_at", Text),
 )
 
+# trinity-enterprise#966 — see the DDL comment in db/schema.py.
+nevermined_organization = Table(
+    "nevermined_organization",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("org_id", Text, nullable=False),
+    Column("environment", Text, nullable=False),
+    Column("encrypted_credentials", Text, nullable=False),
+    Column("created_at", Text, nullable=False),
+    Column("updated_at", Text, nullable=False),
+    Column("updated_by", Text),
+)
+
+agent_delegations = Table(
+    "agent_delegations",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text, nullable=False),
+    Column("delegation_id", Text, nullable=False),
+    Column("payment_method_id", Text),
+    Column("provider", Text),
+    Column("environment", Text, nullable=False),
+    Column("api_key_injected", Integer, nullable=False, server_default="0"),
+    Column("created_by", Text, nullable=False),
+    Column("created_at", Text, nullable=False),
+    Column("revoked_at", Text),
+    Column("revoked_by", Text),
+    Column("agent_deleted_at", Text),
+    Index(
+        "uq_agent_delegations_active",
+        "agent_name",
+        unique=True,
+        sqlite_where=text("revoked_at IS NULL AND agent_deleted_at IS NULL"),
+        postgresql_where=text("revoked_at IS NULL AND agent_deleted_at IS NULL"),
+    ),
+)
+
 agent_event_subscriptions = Table(
     "agent_event_subscriptions",
     metadata,
@@ -1712,6 +1854,7 @@ idempotency_keys = Table(
     Column("response_snapshot", Text),
     Column("created_at", Text),
     Column("updated_at", Text),
+    Column("claim_token", Text),  # #3298: owner token of the in_flight claim
 )
 
 # Agent compatibility results (#668) — latest snapshot per agent (upserted).

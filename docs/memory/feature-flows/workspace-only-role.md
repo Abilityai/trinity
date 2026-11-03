@@ -41,7 +41,8 @@ me a platform account.
 
 ```
 get_current_user(request, token)                    dependencies.py
-  └─ resolve_platform_user_unfloored(request, token)   every scope fence, unchanged
+  └─ resolve_platform_user_unfloored(request, token)   every scope fence, the suspension check,
+                                                       then the terms gate (ent#1054, auth.md §2.13)
   └─ enforce_operator_floor(request, user)
         is_workspace_only_role(user.role)?  no  → return     (operator, creator, admin)
         user.connector_agent set → return     (the ent#46 fence already confined it)
@@ -101,6 +102,27 @@ member: every canvas audience (`agent_page.canvas_audience_for`), the agent's wh
 runs included (`agent_page._client_scope`), voice and model choice. The narrower client view
 (`roster` canvases, their own work) is for people without a platform account. Decided at #837;
 nothing new is exposed, since a `user` saw all of it on Agent Detail before.
+
+**One Workspace whichever door (#3922, ruled option b).** The Workspace's own code page
+gives a platform account no client session. `client_portal.service.platform_login_admits`
+decides "platform account" as `/login` would: a `users` row exists, and either it has a
+password (`/api/token` takes the email, e.g. the admin) or the platform email login admits it
+(email login on, the login policy allows codes, the address allow-listed). The user row is
+required because an allow-list row is not an account: sharing and access-request approval
+wrote allow-list rows for outside clients before trinity-enterprise#837, and `/login` would
+create a user for such a client and drop the #3139 viewer scope. An account with neither (no
+password, not allow-listed, e.g. SSO-created) keeps the client door; `/login`'s code path
+would refuse it. Such an address gets a code at
+`/auth/request` even with nothing shared to it, and once the code verifies `/auth/verify`
+answers **409** `{"reason": "platform_login_required"}` and mints nothing. The verdict
+comes only after a correct code, so it tells nobody but the inbox owner that the account
+exists. `Portal.vue` then sends the person to `/login?redirect=<the Workspace page>&email=<address>`;
+`/login` fills the address and says "This email has a Trinity account. Sign in here to open
+your Workspace." Every platform login (`auth._finalizeLogin`: password, email, SSO, after 2FA)
+also ends a Workspace client sign-in left in the browser, because `clientPortal.authHeader`
+sends a held portal token before the platform JWT. An address the platform login cannot
+admit keeps the client door unchanged. Residual: a portal session minted for a platform
+address before #3922 keeps the client view until it ends or a `/login` supersedes it.
 
 **Known limit (follow-up):** the loop routes keep their pre-#837 reach — a member lists every
 loop on a reachable agent and may stop any of them.
@@ -200,7 +222,7 @@ self-signup and SSO first sign-in keep writing.
 
 | File | Change |
 |---|---|
-| `utils/workspaceOnly.js` | `isWorkspaceOnlyRole` (exactly `'user'`; an unknown role is not), `landingAfterSignIn`, `operatorRouteRedirect`, `isWorkspaceOnlyRefusal`, `reactToWorkspaceOnly`, `setWorkspaceOnlyHandler` / `notifyWorkspaceOnly` (one reaction per 2 s burst), `WORKSPACE_ONLY_ROLE_LABEL` |
+| `utils/workspaceOnly.js` | `isWorkspaceOnlyRole` (exactly `'user'`; an unknown role is not), `landingAfterSignIn`, `operatorRouteRedirect` (leaves `/terms` alone, `isTermsPath`, ent#1054), `isWorkspaceOnlyRefusal`, `reactToWorkspaceOnly`, `setWorkspaceOnlyHandler` / `notifyWorkspaceOnly` (one reaction per 2 s burst), `WORKSPACE_ONLY_ROLE_LABEL` |
 | `router/index.js` | on a `requiresAuth` route a `user` goes to `/workspace` (`/agents/:name/*` → `/workspace?agent=:name`), before the entitlement branch; a cached `user` role is confirmed with `GET /api/users/me` first, so an account raised since its last sign-in is not bounced; authenticated `/login` → role landing |
 | `views/Login.vue` | `afterLogin` and the SSO callback use `landingAfterSignIn`; a pointer "Was an agent shared with you? Sign in to the Workspace" |
 | `main.js`, `api.js` | response interceptors report a 403 `workspace_only` to the handler: re-read the profile, `router.replace('/workspace')` unless already on a Workspace / canvas / chat / sign-in page (path via `pathForVerdict`, #3406) |
@@ -216,9 +238,12 @@ self-signup and SSO first sign-in keep writing.
 ## Sequence — a `user` signs in
 
 ```
-/login → POST /api/auth/email/verify → _finalizeLogin → GET /api/users/me (marked) → role "user"
+/workspace code page → POST …/client-portal/auth/verify → 409 platform_login_required (#3922)
+      → /login?redirect=<Workspace page>&email=<address>
+/login → POST /api/auth/email/verify → _finalizeLogin (ends any Workspace client sign-in)
+      → GET /api/users/me (marked) → role "user"
       → landingAfterSignIn(redirect, "user") → /workspace
-/workspace → App.vue connect() → POST /api/ws/ticket (marked) → /ws
+/workspace → App.vue token watch → followToken → POST /api/ws/ticket (marked) → /ws (#3445)
            → GET /api/enterprise/client-portal/my-agents (portal door) → roster
 operator URL → router guard → /workspace          any operator route → 403 workspace_only
 ```

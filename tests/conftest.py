@@ -362,6 +362,7 @@ def _restore_sys_modules_baseline_762():
 
 from testkit.api_client import TrinityApiClient, ApiConfig
 from testkit import readiness as _readiness_2889
+from testkit import randomly_guard as _randomly_guard_2891
 from testkit.cleanup import (
     ResourceTracker,
     cleanup_test_agent,
@@ -373,16 +374,27 @@ from testkit.cleanup import (
 )
 
 
+@pytest.hookimpl(tryfirst=True)
 def pytest_configure(config):
     """Configure custom markers.
 
     Also clean up leftover test agents from prior runs to avoid quota exhaustion.
+
+    #2891: `tryfirst` so the pytest-randomly guard runs BEFORE the plugin's own
+    `pytest_configure` resolves an implicit seed — after that, an opted-in run
+    and a silently shuffled one are indistinguishable.
     """
+    _randomly_guard_2891.enforce(config)
     config.addinivalue_line("markers", "smoke: mark test as smoke test (fast, no agent)")
     config.addinivalue_line("markers", "slow: mark test as slow running (chat execution)")
     config.addinivalue_line("markers", "requires_agent: test requires a running agent")
     config.addinivalue_line("markers", "unit: unit tests that don't need backend")
     config.addinivalue_line("markers", "integration: tests requiring a running Docker stack (#589)")
+
+
+def pytest_sessionstart(session):
+    """#2891: an opted-in shuffle announces itself — seed, reproduce, disable."""
+    _randomly_guard_2891.announce(session)
 
 
 def pytest_addoption(parser):

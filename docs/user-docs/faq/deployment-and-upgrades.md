@@ -4,11 +4,11 @@
 
 ## What hardware and operating system do I need to run Trinity?
 
-Locally you need Docker Desktop (version 24 or later recommended, which includes Docker Compose), Git, `openssl` on your PATH, and 8 GB of RAM available to Docker — Trinity runs entirely in containers, so nothing else is installed on the host. For a server, use a Linux VPS or dedicated machine (Ubuntu 22.04 LTS or later recommended) with Docker Engine 24+, the Docker Compose plugin, a minimum of 8 GB RAM, and outbound HTTPS (image pulls and model API calls). See [Local Development](../guides/deploying/local-development.md) and [Single-Server Deployment](../guides/deploying/single-server.md).
+Locally you need Docker Desktop (version 24 or later recommended, which includes Docker Compose), Git, `openssl` on your PATH, and 8 GB of RAM available to Docker — Trinity runs entirely in containers, so nothing else is installed on the host. For a server, use a Linux VPS or dedicated machine (Ubuntu 22.04 LTS or later recommended) with Docker Engine 24+, the Docker Compose plugin, 8 GB RAM (4 vCPU / 8 GB is the recommended starting size), and outbound HTTPS (image pulls and model API calls). See [Local Development](../guides/deploying/local-development.md), [Single-Server Deployment](../guides/deploying/single-server.md) and [Sizing Your Server](../guides/deploying/capacity-planning.md).
 
 ## How many agents can I run on one machine?
 
-RAM is the practical ceiling — Trinity itself doesn't cap fleet size. Each agent runs as its own Docker container with a configurable memory limit (options range from 1g to 64g, and an admin can set fleet-wide defaults for new containers), so budget your host memory against the limits you assign. The docs recommend 8 GB minimum and 16 GB for running multiple agents; watch host memory and CPU against the thresholds in the monitoring guide as your fleet grows. See [Agent Configuration](../agents/agent-configuration.md) and [Monitoring](../guides/deploying/monitoring.md).
+Trinity doesn't cap fleet size, and the number of agents matters less than how many run at the same moment. An idle agent uses about 50–100 MB of memory and almost no CPU; a running one uses about 0.5 GB for a typical task and up to its own limit (4 GB and 2 cores by default) for heavy work such as builds or a headless browser. Agent limits are ceilings, not reservations, so they can add up to more than the host has. As observed on running instances, 4 vCPU / 8 GB handles about 8 agents with about 2 running at a time, and 4 vCPU / 16 GB about 20 agents with about 6 at a time. Watch disk too: it fills before memory on most instances. See [Sizing Your Server](../guides/deploying/capacity-planning.md), [Agent Configuration](../agents/agent-configuration.md) and [Monitoring](../guides/deploying/monitoring.md).
 
 ## I claimed my new instance in the browser — when does the system agent appear?
 
@@ -64,7 +64,7 @@ Yes, with the same provisioned install: on a fresh Ubuntu 24.04 Vultr instance w
 
 ## Can I run Trinity on a cheap VPS?
 
-Yes — any Linux VM that runs Docker works, and the ops agent repo ships provisioning guides for Hetzner Cloud, GCP, AWS, DigitalOcean, and localhost in its `provision/` directory. With prebuilt images (`start.sh --hosted`) a fresh VM is serving in about two minutes. Plan for 8 GB of RAM if you intend to run a real agent fleet (the DigitalOcean image boots on 4 GB for one or two agents), plus enough disk for Docker images, logs, and the database. See [Single-Server Deployment](../guides/deploying/single-server.md) and [Ops Agent](../guides/deploying/ops-agent.md).
+Yes — any Linux VM that runs Docker works, and the ops agent repo ships provisioning guides for Hetzner Cloud, GCP, AWS, DigitalOcean, and localhost in its `provision/` directory. With prebuilt images (`start.sh --hosted`) a fresh VM is serving in about two minutes. Plan for 8 GB of RAM if you intend to run a real agent fleet (the DigitalOcean image boots on 4 GB for one or two agents), plus enough disk for Docker images, logs, and the database — see [Sizing Your Server](../guides/deploying/capacity-planning.md). See [Single-Server Deployment](../guides/deploying/single-server.md) and [Ops Agent](../guides/deploying/ops-agent.md).
 
 ## Does Trinity run on ARM hosts?
 

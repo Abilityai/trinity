@@ -63,9 +63,26 @@ import tempfile as _tempfile  # noqa: E402
 # Per-process tmp path so two concurrent `pytest unit/` invocations on the
 # same dev machine don't race on the same SQLite file. The DB is initialized
 # eagerly at conftest load (via the `import database` preload below), so the
-# race window without this PID suffix would be measurable. CI runs one
-# process per matrix job and is unaffected either way.
-os.environ.setdefault(
+# race window without this PID suffix would be measurable.
+#
+# #4051: per PROCESS, including each xdist worker. The xdist controller loads
+# this conftest first, so a plain `setdefault` stamped the CONTROLLER's pid and
+# every worker inherited it: under `-n auto` all workers shared one SQLite file.
+# A value this conftest defaulted is recorded in `_DEFAULTED_ENV`, and any
+# process that inherits it re-derives the value from its own pid. A value set
+# from outside (a developer's own TRINITY_DB_PATH) is still left alone.
+_DEFAULTED_ENV = "TRINITY_UNIT_TESTS_DEFAULTED_ENV"
+_defaulted_by_us = set(filter(None, os.environ.get(_DEFAULTED_ENV, "").split(",")))
+
+
+def _pin_per_process(name: str, value: str) -> None:
+    if name in os.environ and name not in _defaulted_by_us:
+        return
+    os.environ[name] = value
+    _defaulted_by_us.add(name)
+
+
+_pin_per_process(
     "TRINITY_DB_PATH",
     str(Path(_tempfile.gettempdir()) / f"trinity-unit-tests-{os.getpid()}.db"),
 )
@@ -73,17 +90,18 @@ os.environ.setdefault(
 # `~/.trinity/retained-results`; the `/api/task` and `/api/chat` handlers write
 # there on every terminal, so a handler test would otherwise leave files in the
 # developer's real home. Same per-process isolation as the DB path.
-os.environ.setdefault(
+_pin_per_process(
     "TRINITY_RETAINED_RESULTS_DIR",
     str(Path(_tempfile.gettempdir()) / f"trinity-unit-retained-{os.getpid()}"),
 )
 # #2958: `reset_session()` and a successful chat turn write/clear the chat
 # session keep-set marker (default `/home/developer/.trinity/chat-session.json`).
 # Same per-process isolation; tests that assert on it point it at tmp_path.
-os.environ.setdefault(
+_pin_per_process(
     "TRINITY_CHAT_SESSION_FILE",
     str(Path(_tempfile.gettempdir()) / f"trinity-unit-chat-session-{os.getpid()}.json"),
 )
+os.environ[_DEFAULTED_ENV] = ",".join(sorted(_defaulted_by_us))
 
 # Ensure src/backend is importable before test modules are collected.
 #
@@ -116,6 +134,23 @@ _BASE_IMAGE_DIR = _AGENT_SERVER_DIR.parent
 _BASE_IMAGE_STR = str(_BASE_IMAGE_DIR)
 if _BASE_IMAGE_STR not in sys.path:
     sys.path.insert(0, _BASE_IMAGE_STR)
+
+# #4052: unit files share `tests/conftest.py` helpers through a bare
+# `from conftest import ensure_schema_tables` / `stubbed_modules`, which
+# resolves by sys.path order. ~60 unit files insert `tests/unit` at
+# `sys.path[0]` (for `_route_census`, `_gate_world`, ...), and once one of
+# them runs first, `conftest` resolved to THIS file: it was executed a second
+# time as a top-level module (signal guard, sys.modules baselines and all) and
+# the import failed. Pin the name to `tests/conftest.py` by path instead. The
+# loader is lazy, so the file still runs only on first use, as before; a run
+# where pytest already loaded `tests/conftest.py` as `conftest` keeps it.
+if "conftest" not in sys.modules:
+    _parent_conftest_spec = importlib.util.spec_from_file_location(
+        "conftest", Path(__file__).resolve().parent.parent / "conftest.py"
+    )
+    _parent_conftest_spec.loader = importlib.util.LazyLoader(_parent_conftest_spec.loader)
+    sys.modules["conftest"] = importlib.util.module_from_spec(_parent_conftest_spec)
+    _parent_conftest_spec.loader.exec_module(sys.modules["conftest"])
 
 
 def _preload_backend_utils():
@@ -346,6 +381,16 @@ def _restore_unit_sys_modules() -> None:
             continue
         if any(_k == p or _k.startswith(p + ".") for p in _POP_PREFIXES):
             sys.modules.pop(_k, None)
+            _drop_stale_binding(_k)
+
+
+def _drop_stale_binding(name: str) -> None:
+    """#3390: after the pop above, `from services import X` would keep handing out
+    the popped copy while `from services.X import y` imports a fresh one. Only the
+    backend's own packages: a third-party package keeps its bindings."""
+    parent = sys.modules.get(name.rpartition(".")[0])
+    if str(getattr(parent, "__file__", "")).startswith(_BACKEND_STR):
+        _module_split_guard.unbind(name)
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +420,59 @@ def _no_foreign_process_signals(request):
             f"{request.node.nodeid} signalled a process outside the test session:\n"
             + "\n".join(refused)
         )
+
+
+# ---------------------------------------------------------------------------
+# #3390: no test may leave a package attribute and its sys.modules entry on two
+# different copies of one module (tests/module_split_guard.py has the why).
+# Hooks rather than an autouse fixture: the teardown hook runs after the item's
+# LAST teardown, class and module fixtures included, which a fixture would miss
+# and which the alphabetical autouse order would make fragile.
+# TRINITY_SPLIT_GUARD=off disables it (the guard's own test uses that as its
+# control run).
+# ---------------------------------------------------------------------------
+_msg_spec = importlib.util.spec_from_file_location(
+    "module_split_guard", Path(__file__).resolve().parent.parent / "module_split_guard.py"
+)
+_module_split_guard = importlib.util.module_from_spec(_msg_spec)
+_msg_spec.loader.exec_module(_module_split_guard)
+sys.modules.setdefault("module_split_guard", _module_split_guard)  # one instance for the tests
+
+_SPLIT_GUARD = (
+    None if os.environ.get("TRINITY_SPLIT_GUARD", "").strip().lower() == "off"
+    else _module_split_guard.Guard()
+)
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_runtest_setup(item):
+    if _SPLIT_GUARD is not None:
+        _SPLIT_GUARD.before_test()
+    return (yield)
+
+
+@pytest.hookimpl(wrapper=True, tryfirst=True)
+def pytest_runtest_teardown(item, nextitem):
+    if _SPLIT_GUARD is None:
+        return (yield)
+    module = item.getparent(pytest.Module)
+    last_in_module = nextitem is None or nextitem.getparent(pytest.Module) is not module
+    try:
+        result = yield
+    finally:
+        _, unrepairable = _SPLIT_GUARD.after_test(last_in_module=last_in_module)
+    if unrepairable:
+        pytest.fail(
+            f"{module.nodeid if module else item.nodeid} left {', '.join(unrepairable)} on two "
+            "copies once its tests and fixtures finished (#3390): the package attribute "
+            "holds one module object and sys.modules another, and the sys.modules entry is "
+            "not the one that was there before, so the guard cannot tell which copy to keep. "
+            "Put back what the test or a fixture put into sys.modules: "
+            "monkeypatch.setitem(sys.modules, ...) and "
+            "module_split_guard.evict(monkeypatch, ...) restore both halves at teardown.",
+            pytrace=False,
+        )
+    return result
 
 
 @pytest.fixture(autouse=True)
@@ -434,3 +532,20 @@ def pytest_collectstart(collector):
             _v = _SYS_MODULES_BASELINE_VALUES.get(_k)
             if _v is not None:
                 sys.modules[_k] = _v
+
+
+# ---------------------------------------------------------------------------
+# #2891: a silently randomized run refuses to start; an opted-in one announces
+# its seed. Both conftests call the same policy (`testkit/randomly_guard.py`),
+# because this island never loads the parent conftest (`norecursedirs = ..`).
+# ---------------------------------------------------------------------------
+from testkit import randomly_guard as _randomly_guard_2891  # noqa: E402
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_configure(config):
+    _randomly_guard_2891.enforce(config)
+
+
+def pytest_sessionstart(session):
+    _randomly_guard_2891.announce(session)

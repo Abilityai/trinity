@@ -30,10 +30,11 @@ from dependencies import (
     CurrentUser,
     OwnedAgentByName,
     assert_admin,
+    assert_person,
     get_current_user,
     oauth2_scheme,
-    reject_agent_principal,
     require_admin,
+    require_person,
     resolve_platform_user_unfloored,
 )
 from models import (
@@ -50,7 +51,7 @@ from services import sync_waiter
 from services.pull_pilot import pull_queue_allowance
 
 from database import db
-from . import agent_page, chat_previews, role_card, seat_decisions, service
+from . import agent_page, autonomy, chat_previews, role_card, seat_decisions, service
 from .models import (
     PortalSessionRename,
     PortalRatingRequest,
@@ -87,6 +88,10 @@ from .models import (
     PortalSeatDecisionRecord,
     PortalSeatDecisionAction,
     PortalSeatDecisionResult,
+    PortalAutonomyDial,
+    PortalAutonomyAction,
+    PortalAutonomyGuard,
+    PortalAutonomyResult,
     PortalAgentReports,
     PortalChatState,
     PortalSessionSummary,
@@ -316,6 +321,10 @@ def portal_auth_verify(body: PortalAuthVerify, request: Request):
         raise HTTPException(status_code=401, detail="Invalid or expired code")
 
     record_otp_attempt(otp_scope, success=True)
+    if token is service.PLATFORM_LOGIN_REQUIRED:
+        # #3922: the code was right, but this is a platform account. It signs in
+        # at `/login`, so it gets the team view, not a client session.
+        raise HTTPException(status_code=409, detail={"reason": "platform_login_required"})
     return PortalSession(token=token, email=email)
 
 
@@ -475,7 +484,8 @@ def list_agent_clients(agent_name: OwnedAgentByName, current_user: CurrentUser):
     )
 
 
-@router.post("/agents/{agent_name}/clients/{email}/logout", response_model=PortalLogoutResult)
+@router.post("/agents/{agent_name}/clients/{email}/logout", response_model=PortalLogoutResult,
+             dependencies=[Depends(require_person)])
 async def logout_agent_client(agent_name: OwnedAgentByName, email: str,
                               request: Request, current_user: CurrentUser):
     """End every live portal session for this client (ent#281).
@@ -484,11 +494,12 @@ async def logout_agent_client(agent_name: OwnedAgentByName, email: str,
     client's whole roster, so there is no per-agent session to end. Non-
     destructive: the client may sign in again immediately unless also blocked.
 
-    Human-only: ending a person's access is an operator decision, and an
-    agent-scoped key resolves to its owner, so without this a prompt-injected
-    agent could sign clients out of the agent it runs as.
+    Human-only: ending a person's access is an operator decision, so the route
+    takes a person (`require_person`, trinity-enterprise#719) before the
+    ownership lookup. The inline check below is the same allowlist, for direct
+    callers.
     """
-    reject_agent_principal(current_user)
+    assert_person(current_user)
     try:
         result = service.logout_client(email)
     except ClientPortalError as e:
@@ -498,7 +509,8 @@ async def logout_agent_client(agent_name: OwnedAgentByName, email: str,
     return PortalLogoutResult(**result)
 
 
-@router.post("/agents/{agent_name}/clients/{email}/block", response_model=PortalBlockResult)
+@router.post("/agents/{agent_name}/clients/{email}/block", response_model=PortalBlockResult,
+             dependencies=[Depends(require_person)])
 async def block_agent_client(agent_name: OwnedAgentByName, email: str, body: PortalBlockRequest,
                              request: Request, current_user: CurrentUser):
     """Bar this client from signing in again, anywhere, and end their sessions.
@@ -507,13 +519,11 @@ async def block_agent_client(agent_name: OwnedAgentByName, email: str, body: Por
     at an agent they own, but the effect is platform-wide, so ownership alone is
     not enough authority.
 
-    `assert_admin` is NOT sufficient on its own: it rejects *connector*
-    principals, but an agent-scoped key resolves to its owner **carrying the
-    owner's role**, so on a default admin-owned install it would pass. That is
-    the trinity-ops-agent#232 shape the retention-acknowledge endpoint hit.
-    `reject_agent_principal` is what makes this human-only.
+    The route takes a person (`require_person`, trinity-enterprise#719) before
+    the ownership lookup, and `assert_admin` then requires that person to be an
+    admin. The inline `assert_person` is the same allowlist, for direct callers.
     """
-    reject_agent_principal(current_user)
+    assert_person(current_user)
     assert_admin(current_user, detail="Blocking a client requires admin access")
     try:
         result = service.block_client(
@@ -529,7 +539,8 @@ async def block_agent_client(agent_name: OwnedAgentByName, email: str, body: Por
     return PortalBlockResult(**result)
 
 
-@router.delete("/agents/{agent_name}/clients/{email}/block", response_model=PortalUnblockResult)
+@router.delete("/agents/{agent_name}/clients/{email}/block", response_model=PortalUnblockResult,
+               dependencies=[Depends(require_person)])
 async def unblock_agent_client(agent_name: OwnedAgentByName, email: str,
                                request: Request, current_user: CurrentUser):
     """Lift the block. Admin + human-only, mirroring block exactly.
@@ -541,7 +552,7 @@ async def unblock_agent_client(agent_name: OwnedAgentByName, email: str,
     again and gets a fresh one), and no data was ever removed — block is not
     delete.
     """
-    reject_agent_principal(current_user)
+    assert_person(current_user)
     assert_admin(current_user, detail="Unblocking a client requires admin access")
     try:
         result = service.unblock_client(email)
@@ -716,10 +727,16 @@ def portal_chat_state(previews: bool = Query(False),
     arrival and first unread message id, read in the SAME statement as the
     counts (`chat_previews`). Without it the payload is the ent#359 shape,
     unchanged — None fields are dropped, and no entry carries them."""
+    # trinity-enterprise#959: the room participant this credential reads as —
+    # membership in THAT identity space is what a room's count is scoped to.
+    room_reader = service.room_reader_of(principal)
+    sees_all_rooms = service.room_sees_all(principal)
     if previews:
         return chat_previews.get_chat_state_with_previews(
-            principal.email, principal.is_platform)
-    return service.get_chat_state(principal.email)
+            principal.email, principal.is_platform, room_reader=room_reader,
+            sees_all_rooms=sees_all_rooms)
+    return service.get_chat_state(principal.email, room_reader=room_reader,
+                                  sees_all_rooms=sees_all_rooms)
 
 
 @router.put("/chat-state/{chat_kind}/{chat_id}/star", status_code=204)
@@ -748,9 +765,12 @@ def portal_unstar_chat(chat_kind: str, chat_id: str,
 def portal_mark_chat_read(chat_kind: str, chat_id: str,
                           principal: PortalPrincipal = Depends(get_portal_principal)):
     """Advance this viewer's read cursor — clears the chat's unread count and
-    its share of the agent row's badge."""
+    its share of the agent row's badge. A room's cursor moves only for a
+    credential actively in the room (trinity-enterprise#959); otherwise the
+    same 204, with nothing written."""
     try:
-        service.mark_chat_read(principal.email, chat_kind, chat_id)
+        service.mark_chat_read(principal.email, chat_kind, chat_id,
+                               room_reader=service.room_reader_of(principal))
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     return Response(status_code=204)
@@ -880,6 +900,70 @@ async def portal_agent_role(
         admit_objectives=admit_objectives)
 
 
+@router.get("/agents/{agent_name}/autonomy", response_model=PortalAutonomyDial)
+def portal_agent_autonomy(
+    agent_name: str,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """What this agent may do unprompted for you, per kind of ask (ent#641).
+
+    Roster-gated like every route here, then seat-filtered: a roster member
+    never sees another seat's ask-class slugs. Reads persist nothing — the
+    verdict is recomputed from the decision record, the rating history and the
+    live conjuncts (instance level, the agent's autonomy switch, the clock)."""
+    email = principal.email
+    _require_roster(agent_name, email, principal.is_platform)
+    return autonomy.page(agent_name, email, is_platform=principal.is_platform)
+
+
+@router.post("/agents/{agent_name}/autonomy/classes/{ask_class}",
+             response_model=PortalAutonomyResult)
+def portal_agent_autonomy_act(
+    agent_name: str,
+    ask_class: str,
+    body: PortalAutonomyAction,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Hold a class on-request, or release it (ent#641).
+
+    Asymmetric on purpose: **hold** is a refusal anyone may make for their own
+    seat; **release** re-enables unprompted work and is the agent owner's alone
+    (a grant, Invariant #8). There is no promote — promotion is earned."""
+    email = principal.email
+    _require_roster(agent_name, email, principal.is_platform)
+    from services import rate_limiter
+    rate_limiter.enforce(f"portal_autonomy:{email}", 30, 60)
+    try:
+        return autonomy.act(agent_name, email, is_platform=principal.is_platform,
+                            ask_class=ask_class, action=body.action, seat=body.seat)
+    except autonomy.AutonomyRefused as e:
+        raise HTTPException(status_code=e.status_code, detail=e.as_detail())
+
+
+@router.post("/agents/{agent_name}/autonomy/classes/{ask_class}/guard",
+             response_model=PortalAutonomyResult)
+def portal_agent_autonomy_guard(
+    agent_name: str,
+    ask_class: str,
+    body: PortalAutonomyGuard,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Record canon's guard-metric cap for a class (owner only, ent#641): a
+    class that moves another role's held metric can never graduate on rating
+    history alone. The default is `not_assessed`, so an unreviewed class says
+    so rather than reading as cleared."""
+    email = principal.email
+    _require_roster(agent_name, email, principal.is_platform)
+    from services import rate_limiter
+    rate_limiter.enforce(f"portal_autonomy:{email}", 30, 60)
+    try:
+        return autonomy.set_guard(agent_name, email, is_platform=principal.is_platform,
+                                  ask_class=ask_class, guard_metric=body.guard_metric,
+                                  seat=body.seat)
+    except autonomy.AutonomyRefused as e:
+        raise HTTPException(status_code=e.status_code, detail=e.as_detail())
+
+
 @router.get("/agents/{agent_name}/decisions", response_model=PortalSeatDecisions)
 def portal_seat_decisions(
     agent_name: str,
@@ -893,6 +977,22 @@ def portal_seat_decisions(
     return seat_decisions.page(agent_name, email, is_platform=principal.is_platform)
 
 
+def _require_person(principal: PortalPrincipal) -> None:
+    """403 `person_required` for a caller that is not a person (trinity-enterprise#719).
+
+    Readiness, the canvas pin and the seat-decision record and actions are an
+    owner's grants, each recorded as a person's act. This door also serves a
+    system-scoped key for the Workspace's uses (#2198), so these routes ask the
+    question the ask endings ask (`asks/router.py`): is the caller a person? The
+    answer depends only on the caller, so it is given before the roster or any
+    of the agent's rows is read, and says nothing about the agent.
+    """
+    if not principal.is_person:
+        from dependencies import HUMAN_ONLY_DETAIL
+
+        raise HTTPException(status_code=403, detail=dict(HUMAN_ONLY_DETAIL))
+
+
 @router.post("/agents/{agent_name}/decisions", response_model=PortalSeatDecisionResult)
 def portal_seat_decision_record(
     agent_name: str,
@@ -902,7 +1002,8 @@ def portal_seat_decision_record(
     """The person records a decision for their seat (ent#638). Prose where a
     field belongs is refused with a receipt naming each field (`decision_prose_only`);
     no alternatives → `decision_is_a_note`; a direction decision is kept as `routed`
-    with the canon hint."""
+    with the canon hint. A person only (`_require_person`)."""
+    _require_person(principal)
     email = principal.email
     _require_roster(agent_name, email, principal.is_platform)
     from services import rate_limiter
@@ -924,7 +1025,9 @@ def portal_seat_decision_act(
 ):
     """close / reverse / reconfirm / supersede (correct) an ACTIVE decision of
     the caller's seat — or any seat, for the owner. A non-active target is a
-    NAMED 409 (`decision_not_active`); another seat's id is the uniform 404."""
+    NAMED 409 (`decision_not_active`); another seat's id is the uniform 404.
+    A person only (`_require_person`)."""
+    _require_person(principal)
     email = principal.email
     _require_roster(agent_name, email, principal.is_platform)
     from services import rate_limiter
@@ -945,7 +1048,9 @@ def portal_agent_role_readiness(
 ):
     """The owner flips a companion `calibrating` ⇄ `ready` (#663). Anyone
     else — a shared user, an external client — gets a NAMED 403
-    (`readiness_owner_only`); the agent never reaches this door."""
+    (`readiness_owner_only`); the agent never reaches this door, and a caller
+    that is not a person gets `person_required` (`_require_person`)."""
+    _require_person(principal)
     email = principal.email
     _require_roster(agent_name, email, principal.is_platform)
     from services import rate_limiter
@@ -1149,7 +1254,9 @@ async def portal_pin_canvas(
 
     Audited: a pin is what decides which canvas a whole roster sees first, so it
     is an administrative act on a shared surface, not a per-viewer preference.
+    A person only (`_require_person`).
     """
+    _require_person(principal)
     _require_roster(agent_name, principal.email, principal.is_platform)
     _require_canvas_manager(agent_name, principal)
     if not db.set_agent_canvas_pinned(agent_name, canvas_id, body.pinned):
@@ -1238,6 +1345,28 @@ def portal_agent_report_detail(
     return report
 
 
+def _refuse_secret_in_message(message: str) -> None:
+    """trinity-enterprise#1066: a message that LOOKS like a credential is refused
+    BEFORE admission — before the reply context, the title decision, the
+    session row, the execution row and (on the streaming route) the
+    Idempotency-Key — so nothing anywhere holds the text. The secret field a
+    `credential` ask opens is where a value goes; the composer is where it
+    must not. The refusal names the SHAPE that matched and never the text.
+    Shared by both chat routes for the ent#403 reason: the two must not
+    disagree about what is admitted.
+    """
+    from utils.credential_sanitizer import secret_shape
+
+    shape = secret_shape(message)
+    if shape is not None:
+        raise HTTPException(status_code=422, detail={
+            "code": "secret_in_message",
+            "shape": shape,
+            "message": "That looks like a secret. Nothing was stored. Ask the agent for the "
+                       "credential and use the secret field it opens.",
+        })
+
+
 @router.post("/agents/{agent_name}/chat", response_model=PortalChatResponse)
 async def portal_chat(
     agent_name: str,
@@ -1273,6 +1402,9 @@ async def portal_chat(
         f"portal_chat_hourly:{email}:{agent_name}", PORTAL_CHAT_HOURLY_LIMIT, 3600,
         detail=_CHAT_LIMIT_DETAIL,
     )
+    # trinity-enterprise#1066: a pasted secret is refused here, before anything
+    # below reads, titles or stores the message.
+    _refuse_secret_in_message(body.message)
     # ent#403: normalise blank → None, then authorise, then allow-list. The
     # policy is one function shared with the streaming route below — enforcement
     # at BOTH router entry points, because this route runs an inline path and
@@ -1497,6 +1629,7 @@ async def portal_voice_start(
             email=principal.email,
             is_platform=principal.is_platform,
             portal_session_id=body.portal_session_id,
+            mode=body.mode,
             user_id=user.id,
             user_label=user.email or user.username,
             voice_name=body.voice_name,
@@ -1978,6 +2111,14 @@ async def portal_chat_stream(
     include_owned = principal.is_platform
 
     _require_roster(agent_name, email, include_owned)
+    # trinity-enterprise#1046: a turn may join only the caller's own live Direct call
+    # on this thread. Uniform 404, like any other id the caller cannot see.
+    if body.voice_call_id:
+        from services import direct_voice_service
+        if not principal.is_platform or not direct_voice_service.turn_may_join_call(
+            body.voice_call_id, agent_name=agent_name, email=email, portal_session_id=body.session_id,
+        ):
+            raise HTTPException(status_code=404, detail="Call not found")
     rate_limiter.enforce(
         f"portal_chat:{email}:{agent_name}", PORTAL_CHAT_BURST_LIMIT, 60, detail=_CHAT_LIMIT_DETAIL
     )
@@ -1985,6 +2126,10 @@ async def portal_chat_stream(
         f"portal_chat_hourly:{email}:{agent_name}", PORTAL_CHAT_HOURLY_LIMIT, 3600,
         detail=_CHAT_LIMIT_DETAIL,
     )
+    # trinity-enterprise#1066: same guard as the synchronous route, and BEFORE
+    # the idempotency scope is built — a refused message must not consume the
+    # key (the ent#403 rule for a refused model).
+    _refuse_secret_in_message(body.message)
     # Invariant #18: a producer boundary that creates an execution accepts an
     # Idempotency-Key. This route creates one, so a retried dispatch — a proxy
     # replay, a client timeout-and-resend — would otherwise run and BILL the
@@ -2057,6 +2202,7 @@ async def portal_chat_stream(
             attachments=await service.resolve_turn_attachments(
                 agent_name, email, getattr(body, "attachments", None)),
             person_tags=person_tags,   # trinity-enterprise#631, same rule
+            voice_call_id=body.voice_call_id,   # trinity-enterprise#1046, checked above
         )
     except service.ChatTagError as e:
         idempotency_service.fail(decision)
@@ -2119,6 +2265,72 @@ async def portal_terminate_execution(
         raise HTTPException(status_code=e.status_code, detail=e.detail)
 
 
+async def attach_execution_stream(agent_name: str, execution_id: str, queued_hold):
+    """The agent's stream for one turn, as SSE text. One home for the Workspace's
+    watcher and the Direct call's speech (trinity-enterprise#1046)."""
+    # The agent answers 404 in TWO harmless situations, and treating either
+    # as fatal is what made a mid-turn reload look broken:
+    #
+    #   too early — the client subscribes the instant it gets the 202, but
+    #     the turn passes through admission, capacity and the resume lock
+    #     before the agent registers it. Measured at ~1-2s on a warm agent.
+    #   too late  — the turn is over and the agent has dropped its buffered
+    #     log. Nothing is wrong; the reply is in history.
+    #
+    # So: retry briefly while the turn is still live, and end the stream
+    # cleanly (never `error`) when it simply is not streamable. The client
+    # reads the persisted reply on `stream_end` either way.
+    agent_url = f"http://agent-{agent_name}:8000/api/executions/{execution_id}/stream"
+    try:
+        # #3114: on a pull pilot the turn can wait on the durable queue
+        # until a worker claims it. Hold while the row is queued; the attach
+        # window below starts from the claim.
+        async for tick in queued_hold:
+            yield tick
+        deadline = asyncio.get_event_loop().time() + _STREAM_ATTACH_TIMEOUT_S
+        async with agent_httpx_client(agent_name, timeout=None) as client:
+            while True:
+                async with client.stream("GET", agent_url) as response:
+                    if response.status_code == 200:
+                        async for chunk in response.aiter_text():
+                            yield chunk
+                        return
+                    if response.status_code != 404:
+                        yield f"data: {json.dumps({'type': 'error', 'message': f'Agent returned {response.status_code}'})}\n\n"
+                        yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
+                        return
+                # 404 — is this turn still worth waiting for?
+                if not service.get_turn_inflight_matches(execution_id):
+                    # Finished (or never ran). Not an error: end cleanly so
+                    # the client goes and reads the reply.
+                    yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
+                    return
+                if asyncio.get_event_loop().time() >= deadline:
+                    logger.info(
+                        "[PortalStream] gave up attaching to %s on %s after %ss",
+                        execution_id, agent_name, _STREAM_ATTACH_TIMEOUT_S,
+                    )
+                    yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
+                    return
+                await asyncio.sleep(_STREAM_ATTACH_POLL_S)
+    except httpx.ConnectError:
+        yield f"data: {json.dumps({'type': 'error', 'message': 'Failed to connect to agent'})}\n\n"
+        yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
+    except Exception as e:  # noqa: BLE001 — the stream must always terminate cleanly
+        logger.error("[PortalStream] error streaming %s from %s: %s", execution_id, agent_name, e)
+        yield f"data: {json.dumps({'type': 'error', 'message': 'Stream interrupted'})}\n\n"
+        yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
+
+
+def direct_call_stream(agent_name: str, execution_id: str):
+    """The same stream, for the Direct call's bridge. The caller has already proved the
+    execution is the person's own."""
+    return attach_execution_stream(
+        agent_name, execution_id,
+        sync_waiter.wait_while_queued(execution_id, pull_queue_allowance(agent_name)),
+    )
+
+
 @router.get("/agents/{agent_name}/executions/{execution_id}/stream")
 async def portal_stream_execution(
     agent_name: str,
@@ -2150,64 +2362,9 @@ async def portal_stream_execution(
     if not container or container.status != "running":
         raise HTTPException(status_code=503, detail="Agent is not running")
 
-    async def proxy_stream():
-        # The agent answers 404 in TWO harmless situations, and treating either
-        # as fatal is what made a mid-turn reload look broken:
-        #
-        #   too early — the client subscribes the instant it gets the 202, but
-        #     the turn passes through admission, capacity and the resume lock
-        #     before the agent registers it. Measured at ~1-2s on a warm agent.
-        #   too late  — the turn is over and the agent has dropped its buffered
-        #     log. Nothing is wrong; the reply is in history.
-        #
-        # So: retry briefly while the turn is still live, and end the stream
-        # cleanly (never `error`) when it simply is not streamable. The client
-        # reads the persisted reply on `stream_end` either way.
-        agent_url = f"http://agent-{agent_name}:8000/api/executions/{execution_id}/stream"
-        try:
-            # #3114: on a pull pilot the turn can wait on the durable queue
-            # until a worker claims it. Hold while the row is queued; the attach
-            # window below starts from the claim.
-            async for tick in sync_waiter.wait_while_queued(
-                execution_id, pull_queue_allowance(agent_name)
-            ):
-                yield tick
-            deadline = asyncio.get_event_loop().time() + _STREAM_ATTACH_TIMEOUT_S
-            async with agent_httpx_client(agent_name, timeout=None) as client:
-                while True:
-                    async with client.stream("GET", agent_url) as response:
-                        if response.status_code == 200:
-                            async for chunk in response.aiter_text():
-                                yield chunk
-                            return
-                        if response.status_code != 404:
-                            yield f"data: {json.dumps({'type': 'error', 'message': f'Agent returned {response.status_code}'})}\n\n"
-                            yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
-                            return
-                    # 404 — is this turn still worth waiting for?
-                    if not service.get_turn_inflight_matches(execution_id):
-                        # Finished (or never ran). Not an error: end cleanly so
-                        # the client goes and reads the reply.
-                        yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
-                        return
-                    if asyncio.get_event_loop().time() >= deadline:
-                        logger.info(
-                            "[PortalStream] gave up attaching to %s on %s after %ss",
-                            execution_id, agent_name, _STREAM_ATTACH_TIMEOUT_S,
-                        )
-                        yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
-                        return
-                    await asyncio.sleep(_STREAM_ATTACH_POLL_S)
-        except httpx.ConnectError:
-            yield f"data: {json.dumps({'type': 'error', 'message': 'Failed to connect to agent'})}\n\n"
-            yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
-        except Exception as e:  # noqa: BLE001 — the stream must always terminate cleanly
-            logger.error("[PortalStream] error streaming %s from %s: %s", execution_id, agent_name, e)
-            yield f"data: {json.dumps({'type': 'error', 'message': 'Stream interrupted'})}\n\n"
-            yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
-
+    queued_hold = sync_waiter.wait_while_queued(execution_id, pull_queue_allowance(agent_name))
     return StreamingResponse(
-        proxy_stream(),
+        attach_execution_stream(agent_name, execution_id, queued_hold),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

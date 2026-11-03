@@ -18,7 +18,7 @@ from typing import List, Optional
 from sqlalchemy.exc import OperationalError
 
 from database import db
-from services import ask_service, skill_gate_service
+from services import ask_service, credential_ask_policy, skill_gate_service
 from services.operator_queue_choices import (
     SOMETHING_ELSE,
     ReservedAnswerError,
@@ -33,7 +33,9 @@ logger = logging.getLogger(__name__)
 # Only these reach a client. `alert` is included because an informational update
 # is one of the three things ent#364 asks for; anything else an agent invents is
 # not rendered rather than rendered as an unknown kind.
-_VISIBLE_KINDS = ("question", "approval", "alert")
+# trinity-enterprise#1066: `credential` — rendered as a masked secret field,
+# answered only through `provide_credential`.
+_VISIBLE_KINDS = ("question", "approval", "alert", "credential")
 
 
 class AsksUnavailable(Exception):
@@ -247,6 +249,22 @@ def _linked_request_id(item: dict, key: str,
     return other.get("request_id")
 
 
+def _project_attachment(context: dict) -> Optional[dict]:
+    """`{id, task_id, event}` from the platform-written project keys
+    (trinity-enterprise#981), or None without a project id. Platform-written
+    only: the keys are stripped from agent content at both ingestion
+    boundaries, so what is read here is what the platform attached."""
+    from services.operator_queue_service import (
+        _WORKSPACE_PROJECT_EVENT_KEY, _WORKSPACE_PROJECT_ID_KEY, _WORKSPACE_PROJECT_TASK_KEY)
+    pid = context.get(_WORKSPACE_PROJECT_ID_KEY)
+    if not isinstance(pid, str) or not pid:
+        return None
+    task, event = context.get(_WORKSPACE_PROJECT_TASK_KEY), context.get(_WORKSPACE_PROJECT_EVENT_KEY)
+    return {"id": pid,
+            "task_id": task if isinstance(task, str) and task else None,
+            "event": event if isinstance(event, str) and event else None}
+
+
 def _project(item: dict, *, viewer_email: Optional[str] = None,
              resume_requested: Optional[bool] = None,
              is_platform: bool = False) -> WorkspaceAsk:
@@ -268,6 +286,7 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
     # stripped from agent content like the two keys above.
     discussion = context.get("workspace_discussion_id")
     from services.operator_queue_service import is_aged
+    project = _project_attachment(context)
     ended_at, ended_by = _ending_of(item, viewer_email)
     agent_ending = ask_service.agent_ending_kind(item) if ended_by == "agent" else None
     return WorkspaceAsk(
@@ -290,6 +309,7 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
         chat_id=chat_id if isinstance(chat_id, str) else None,
         raised_in_turn=raised_in_turn,
         discussion_chat_id=discussion if isinstance(discussion, str) and discussion else None,
+        project=project,
         resume_requested=resume_requested,
         sync=_coarse_sync(item),
         aging=bool(is_aged(item)),
@@ -305,6 +325,9 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
         agent_ending=agent_ending,
         ending_reason=(item.get("disposition_reason") or None)
         if agent_ending == ask_service.WITHDRAWN else None,
+        # trinity-enterprise#1066: the variable's NAME, for a credential ask only.
+        credential_name=(credential_ask_policy.credential_name_of(context)
+                         if item.get("type") == "credential" else None),
     )
 
 
@@ -441,10 +464,21 @@ def list_asks_page(email: str, is_platform: bool, agent_name: Optional[str] = No
                      if chat_id is not None and offset == 0 else [])
         allowed = {a for a in db.list_operator_queue_agent_names(**filters)
                    if _on_roster(a, email, is_platform, strict=True)}
-        if allowed:
-            total = db.count_operator_queue_items(accessible_agent_names=allowed, **filters)
-            items = db.list_operator_queue_items(accessible_agent_names=allowed,
-                                                 limit=limit, offset=offset, **filters)
+        # trinity-enterprise#981: a row the platform raised about the viewer
+        # reaches them by address — the platform chose this row's addressee;
+        # the roster was never its fence. One reserved sub-family
+        # (`ADDRESSEE_REACH_ID_PREFIXES`, raised by the gate, addressed to the
+        # viewer), OR'd beside the access set INSIDE the SQL, for the page and
+        # its count alike. So an empty access set is no longer "nothing": a
+        # viewer on no roster at all may still have such a row.
+        reach = _reach_prefixes()
+        if allowed or reach:
+            total = db.count_operator_queue_items(
+                accessible_agent_names=allowed, addressee_reach_request_id_prefixes=reach,
+                **filters)
+            items = db.list_operator_queue_items(
+                accessible_agent_names=allowed, addressee_reach_request_id_prefixes=reach,
+                limit=limit, offset=offset, **filters)
         else:
             total, items = 0, []
     except AsksUnavailable:
@@ -504,6 +538,22 @@ def list_asks(email: str, is_platform: bool, agent_name: Optional[str] = None,
     return list_asks_page(email, is_platform, agent_name, include_ended=include_ended).items
 
 
+def _reach_prefixes() -> tuple:
+    """The request-id family that reaches its addressee by address
+    (trinity-enterprise#981) — read from the one constant, so the list's SQL
+    branch and the per-ask door (`_owned_ask`) key on the same prefixes."""
+    from services.operator_queue_service import ADDRESSEE_REACH_ID_PREFIXES
+    return tuple(ADDRESSEE_REACH_ID_PREFIXES)
+
+
+def _reaches_by_address(item: dict) -> bool:
+    """Is this a row the platform addressed to its reader — reserved
+    sub-prefix AND `raised_by == 'gate'` — so the roster is not its fence
+    (trinity-enterprise#981)? Who the reader is stays `_is_addressed_to`."""
+    from services.operator_queue_service import is_addressee_reach
+    return is_addressee_reach(item)
+
+
 def _owned_ask(item_id: str, email: str, is_platform: bool, *, strict: bool = False) -> dict:
     """The ask row, when it is one THIS viewer may read — else the uniform 404.
 
@@ -515,6 +565,11 @@ def _owned_ask(item_id: str, email: str, is_platform: bool, *, strict: bool = Fa
     disagree about who owns an ask. The kind check is the list's own
     `_VISIBLE_KINDS`: an ask no list shows is not answerable either.
 
+    trinity-enterprise#981: a row the platform raised about the viewer
+    (`_reaches_by_address`) is theirs by address — the platform chose this
+    row's addressee; the roster was never its fence — so for that one family
+    the roster is not asked. The addressee match comes first either way.
+
     `strict` is the READ mode: an unreadable roster raises `AsksUnavailable`
     (503) instead of looking like "not yours" — asked only after the addressee
     matched, so it discloses nothing about someone else's ask. The answer path
@@ -525,7 +580,8 @@ def _owned_ask(item_id: str, email: str, is_platform: bool, *, strict: bool = Fa
         not item
         or not _is_addressed_to(item, email)
         or item.get("type") not in _VISIBLE_KINDS
-        or not _on_roster(item.get("agent_name") or "", email, is_platform, strict=strict)
+        or not (_reaches_by_address(item)
+                or _on_roster(item.get("agent_name") or "", email, is_platform, strict=strict))
     ):
         raise AskError(404, "not_found", "Ask not found")
     return item
@@ -601,11 +657,20 @@ def answer_ask(item_id: str, email: str, is_platform: bool,
     except ReservedAnswerError as e:
         # #3242: the reserved "(something else)" decision, refused by name.
         raise AskError(422, e.code, str(e))
+    except ask_service.CredentialAnswerRefused as e:
+        # trinity-enterprise#1066: a credential ask takes its value through the
+        # secret field (`provide_credential`), never a typed answer — which
+        # would persist the secret on the row and in the agent's wake.
+        raise AskError(422, e.code,
+                       "This ask is answered through the secret field it opened, "
+                       "not with a typed answer.")
     except ask_service.AskNotFound:
         raise AskError(409, "already_resolved", "This ask was just answered elsewhere.")
-    except ask_service.AskNotAddressee:
-        # trinity-enterprise#751: a gated-skill approval addressed to someone else.
-        raise AskError(403, "not_addressee", "This approval was addressed to someone else.")
+    except ask_service.AskNotAddressee as e:
+        # trinity-enterprise#751: a gated-skill approval addressed to someone else;
+        # #1042: an ask to a canon role the person is not seated in.
+        raise AskError(403, "not_addressee",
+                       e.role_message() or "This approval was addressed to someone else.")
     except ask_service.AskConflict as conflict:
         # A lost race writes nothing and dispatches nothing — the sink only
         # reaches its observers on a compare-and-set it WON. Still pending means
@@ -634,6 +699,84 @@ def answer_ask(item_id: str, email: str, is_platform: bool,
     # when one of them raised, so a spawn that failed reports false. Reading the
     # opt-in here is a report of intent — see `_resume_requested`.
     agent = updated.get("agent_name") or item.get("agent_name") or ""
+    dispatched = bool(ending.observers_ok and _resume_requested(agent))
+    return _project(updated, viewer_email=email, resume_requested=dispatched,
+                    is_platform=is_platform)
+
+
+async def provide_credential(item_id: str, email: str, is_platform: bool, value: str, *,
+                             actor_ip: Optional[str] = None,
+                             endpoint: Optional[str] = None,
+                             request_id: Optional[str] = None) -> WorkspaceAsk:
+    """The secret field's sink (trinity-enterprise#1066): store ``value`` as the
+    credential a `credential` ask names, then answer the ask BY NAME.
+
+    The same door checks as `answer_ask` — the viewer's own ask (uniform 404,
+    which also covers a kind other than `credential`), pending, not expired,
+    not diverged — all BEFORE the value is handled, so a refusal here has
+    touched nothing. Then `credential_sink.set_env_value` (the one leaf that
+    holds the value: staged into the scrub first and fail-closed, the agent
+    running, one line of its `.env` through its own read + inject, a name-only
+    audit row), and only then the ask sink with `via_credential_sink=True` and
+    the word `provided` as the answer — the row, the write-back and the wake
+    carry that word and the variable's name, never the value.
+
+    A compare-and-set lost AFTER the write — the ask was dismissed or ended
+    while the value was being stored — is 409 `already_resolved` with
+    `credential_written: true`: the audit row exists and nothing is rolled
+    back. Re-asking is cheap; un-writing is not.
+
+    A diverged ask (#2915) is refused outright here, with no acknowledge path:
+    the field posts once, and a credential typed for a question the agent has
+    since rewritten must be asked for again.
+
+    `async` because the sink talks to the agent; the ask sink's compare-and-set
+    is synchronous and runs on the loop like the operator routes run it.
+    """
+    from services import credential_sink
+
+    item = _owned_ask(item_id, email, is_platform)
+    if item.get("type") != "credential":
+        # the same refusal as "not yours": a typed answer belongs to the other
+        # route, and this one must not confirm which ids are credential asks
+        raise AskError(404, "not_found", "Ask not found")
+    if item.get("status") != "pending":
+        raise AskError(400, "already_resolved",
+                       f"This ask is already {item.get('status')}.")
+    if _is_expired(item):
+        raise AskError(409, "expired", "This ask expired before it was answered.")
+    if item.get("sync_state") in ("changed", "closed_by_filer"):
+        raise AskError(409, "item_diverged",
+                       "The agent changed this ask after you opened it; ask it to request "
+                       "the credential again.",
+                       {"sync": _coarse_sync(item)})
+    name = (item.get("context") or {}).get("credential_name")         if isinstance(item.get("context"), dict) else None
+    agent = item.get("agent_name") or ""
+
+    try:
+        await credential_sink.set_env_value(
+            agent, name, value, actor_email=email, ask_id=item_id,
+            actor_ip=actor_ip, endpoint=endpoint, request_id=request_id)
+    except credential_sink.CredentialSinkError as e:
+        raise AskError(e.status_code, e.code, e.message, dict(e.data))
+
+    try:
+        ending = ask_service.answer(
+            item, response="provided", response_text=None,
+            actor=ask_service.Actor(email=email, ip=actor_ip, endpoint=endpoint),
+            responded_by_id=None, via_credential_sink=True,
+        )
+    except (ask_service.AskNotFound, ask_service.AskConflict):
+        raise AskError(409, "already_resolved",
+                       "The credential was stored, but this ask ended before it could be "
+                       "marked answered; the agent will ask again if it still needs it.",
+                       {"credential_written": True})
+    except ask_service.AskNotAddressee as e:
+        raise AskError(403, "not_addressee",
+                       e.role_message() or "This ask was addressed to someone else.")
+    updated = ending.rows[0]
+    logger.info("[WorkspaceAsks] %s answered by %s through the secret field (client=%s)",
+                item_id, email, not is_platform)
     dispatched = bool(ending.observers_ok and _resume_requested(agent))
     return _project(updated, viewer_email=email, resume_requested=dispatched,
                     is_platform=is_platform)
@@ -1010,8 +1153,10 @@ def _origin(item: dict, run: Optional[dict], email: str):
             session = portal_db.get_portal_session(chat, agent, email)
             if session:
                 filed = item.get("created_at")
+                # trinity#3402: the person's own chat as they saw it, held turns too.
                 rows = portal_db.get_portal_messages(
                     agent, email, limit=ORIGIN_MESSAGES, session_id=chat, before=filed,
+                    include_held=True,
                 ) if filed else []
                 messages = []
                 for m in rows:

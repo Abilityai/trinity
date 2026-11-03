@@ -348,10 +348,10 @@ ordered check is belt+braces):
    unbound-channel suppression — never fire a send destined to fail).
 
 Consent writes are human-only: the `allow_proactive` arm of
-`PUT /api/agents/{name}/telegram/groups/{id}` calls `reject_agent_principal`
-(an agent-scoped key resolves to the owner and could self-grant consent —
-ent#223's own post-ship pitfall); `trigger_mode`/welcome updates stay
-agent-callable.
+`PUT /api/agents/{name}/telegram/groups/{id}` calls `assert_person` (only a
+signed-in session or the person's own `user` key passes; every machine
+principal is refused — ent#223's grant-vs-use line); `trigger_mode`/welcome
+updates stay agent-callable.
 
 **Rendering (D5):** `html.escape(summary, quote=False)` BEFORE
 `TelegramAdapter().format_response` (`_markdown_to_html` escapes nothing;
@@ -394,17 +394,19 @@ the text rather than silently attributing its work. Failure is stated
 ("Didn't finish — <status>"), never a silent vanish, and the detail is capped at
 `_MAX_REPORT_CHARS`.
 
-No new transport, and — stated honestly — **no poll either**. An earlier version
-of this paragraph said the Workspace polls its threads so AC #7's "degrades to
-poll" holds by construction. It does not: `PortalConversation.vue` loads history
-on mount and on an agent/session prop change, `stores/clientPortal.js` says
-outright that `refreshThreads()` is event-driven rather than periodic, and the
-only interval in the Workspace is the 20s asks poll in `views/Portal.vue`, which
-calls `fetchAsks()` and nothing else. So the row is durable and never lost, but a
-client sitting on the thread sees it at their next reload or thread switch rather
-than while they watch. An idle history poll is the tracked follow-up; until it
-exists this doc does not claim the delivery it would provide. The deliver closure
-also calls `touch_portal_session(...,
+No new transport, and no history poll of its own — the open thread **rides the
+shell's 20s tick** (trinity#3439). Before #3439 this paragraph said, honestly,
+that a client sitting on the thread saw the report at their next reload or
+thread switch: `PortalConversation.vue` loaded history on mount and on an
+agent/session change only, and the 20s tick in `views/Portal.vue` refreshed the
+sidebar's rows but not the open transcript — the badge lit on the chat the
+person was reading while the chat itself did not change. Now the conversation
+watches its OWN row in the thread list the shell already hands it
+(`message_count|last_message_at`), reads the newest rows when it moves, appends
+the ones it has not seen (by id — the same `reconcileTail` the ent#747 ask-result
+poll rides), and asks the shell to mark the thread read because the person is
+looking at it. AC #7's "degrades to poll" holds by construction again. The
+deliver closure also calls `touch_portal_session(...,
 added=1)` — every other writer of a portal message does, and `last_message_at`
 is what orders the sidebar; a report filed into a thread that never moved is a
 notification pointing at the middle of a list, which is the same silence this

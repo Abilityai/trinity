@@ -34,6 +34,8 @@ The `PreToolUse` hook on `Bash` matches commands against a deny-list of dangerou
 
 When a command is blocked, the agent sees a clear denial message with the reason. The event is logged to `/logs/guardrails.jsonl`.
 
+On an agent with [gated skills](../guides/keeping-agents-in-bounds.md), the deny-list also refuses starting a coding-agent CLI: `claude`, `codex` or `gemini` as a command, for example `claude -p "hello"` or `cd repo && codex exec "fix it"`. Naming one is fine (`ls .claude`, `grep claude notes.md`, `which codex`), and so is a command that starts no session: `--version`, `--help`, `mcp`, and `plugin` on `claude` and `codex`. Adding `-p` or `--print` to `mcp` or `plugin` starts a session, so that is refused. The rule applies to the whole agent while it has at least one gate, from the moment the gate is saved, and per-agent overrides cannot remove it. An agent with no gates is not affected. Any skill on a gated agent that runs `claude -p` for a sub-step stops working, not only the gated one; rewrite that step as described in the [Recommended Trinity Prompt](recommended-fleet-prompt.md#what-the-trinity-prompt-is).
+
 ### 2. Credential File Protection
 
 The `PreToolUse` hook on `Edit`, `Write`, `MultiEdit`, and `NotebookEdit` blocks modifications to sensitive paths:
@@ -71,8 +73,8 @@ Every Claude Code invocation enforces a maximum turn count via `--max-turns`. Ge
 
 | Mode | Default | Range |
 |------|---------|-------|
-| Chat | 50 turns | 1-500 |
-| Task/Headless | 50 turns | 1-500 |
+| Chat | 200 turns | 1-500 |
+| Task/Headless | 200 turns | 1-500 |
 
 This prevents runaway loops that burn through API credits.
 
@@ -96,6 +98,8 @@ Owners can tighten guardrails for specific agents. Overrides are additive -- you
 | `extra_bash_deny` | list (max 50) | Additional bash patterns to block |
 | `extra_path_deny` | list (max 50) | Additional paths to protect |
 | `disallowed_tools` | list (max 50) | Claude Code tools to disable |
+
+A task that stops at its turn limit fails with HTTP `422` and the error code `max_turns` (on the `X-Trinity-Error-Code` response header), and the execution's error reads *Task exceeded turn limit*. This applies to whichever cap stopped the task: the `max_turns_task` guardrail, or a tighter per-task `max_turns` sent with `POST /api/agents/{name}/task`. Retrying the same task stops at the same limit. The error text names the cap that bound and its remedy: if the guardrail stopped it, raise `max_turns_task`; if the caller's per-task `max_turns` stopped it, send a larger per-task value (it may not exceed the guardrail). Either way, splitting the work into smaller tasks also helps.
 
 ### Configure via UI
 
@@ -170,8 +174,8 @@ See [Backend API Docs](http://localhost:8000/docs) for full request/response sch
 ## Limitations
 
 - **Baseline cannot be relaxed** -- Per-agent overrides only add restrictions, never remove them.
-- **Restart required** -- Guardrail changes require stopping and starting the agent; the bar at the top of Settings lists the pending save and restarts the agent for you.
-- **Pattern matching** -- Bash deny-list uses regex patterns; creative command reformulation may evade detection.
+- **Restart required** -- Guardrail changes require stopping and starting the agent; the bar at the top of Settings lists the pending save and restarts the agent for you. The rule for gated skills is the exception: it follows the agent's gates with no restart.
+- **Pattern matching** -- Bash deny-list uses regex patterns; creative command reformulation may evade detection. The patterns do not parse quotes, so text inside a quoted string or heredoc that reads like a command can be refused too.
 - **Claude Code only** -- The hooks and the turn limit apply to Claude Code. Codex honours read-only mode through its sandbox; Gemini CLI turns are not covered.
 - **Partial UI coverage** -- Settings › Guardrails manages turn limits and Settings › General the execution timeout; deny lists and disallowed tools are configured via the API.
 

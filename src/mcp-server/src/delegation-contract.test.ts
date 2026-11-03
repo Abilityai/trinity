@@ -325,7 +325,7 @@ describe("ent#568 the async receipt chat_with_agent answers with", () => {
   /** The lead each one is rewritten to: liveness-neutral, because a replay can come after the end. */
   const LEAD: Record<string, string> = {
     accepted: "Accepted by 'agent-a' as ex_9 — it may still be running or already done.",
-    queued: "Queued on 'agent-a' as ex_9 while it was at capacity — it may have run since.",
+    queued: "Queued on 'agent-a' as ex_9 — it may have run since.",
     queued_timeout: "The platform stopped waiting for ex_9 on 'agent-a' — it may still be running.",
   };
 

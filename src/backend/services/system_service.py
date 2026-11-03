@@ -3,9 +3,11 @@ System manifest parsing and deployment service.
 
 Handles YAML parsing, validation, agent naming, and deployment orchestration.
 """
+import asyncio
 import json
 import os
 import stat
+import time
 import yaml
 
 from utils.safe_yaml import (
@@ -17,7 +19,7 @@ import re
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, List, Tuple, Optional
+from typing import Any, Callable, Dict, List, Set, Tuple, Optional
 
 from fastapi import HTTPException, Request
 
@@ -30,6 +32,15 @@ from models import (
     BundledManifestDetail,
     BundledManifestSummary,
     MANIFEST_MAX_BYTES,
+    SystemApplyAdoption,
+    SystemApplyBlocker,
+    SystemApplyChange,
+    SystemApplyDrift,
+    SystemApplyFailure,
+    SystemApplyMember,
+    SystemApplyPromptVerdict,
+    SystemApplyResponse,
+    SystemApplyViewVerdict,
     SystemDeployFailure,
     SystemDeployResponse,
     SystemSchedulePreview,
@@ -37,6 +48,7 @@ from models import (
 )
 from database import db
 from db_models import ScheduleCreate, SystemViewCreate
+from redis_breaker_util import LeaseState, SingleFlightLock, get_breaker_redis
 from utils.credential_sanitizer import redact_url_userinfo, sanitize_text
 
 logger = logging.getLogger(__name__)
@@ -50,14 +62,54 @@ _REASON_MAX_LEN = 500
 _KNOWN_MANIFEST_KEYS = frozenset({
     "name", "description", "prompt", "agents", "permissions",
     "default_tags", "system_view",
+    "naming",  # trinity-enterprise#1030
 })
+
+# trinity-enterprise#1030: keys read but left out of the unknown-key warning's
+# "Recognized keys are:" list, because that text is create-mode output pinned
+# byte-for-byte by `test_ent695_create_mode_golden.py` (AC6 of ent#695). The
+# key is recognised all the same: it is never an unknown key.
+_UNLISTED_MANIFEST_KEYS = frozenset({"naming"})
+
+# trinity-enterprise#1030: the values `naming:` may take. `prefixed` is today.
+MANIFEST_NAMING_MODES = ("prefixed", "bare")
+# #4131: a manifest key accepts what the platform's own name producers write —
+# the create route's `[a-z0-9_.-]` charset (`sanitize_agent_name`), including a
+# chained `_N` suffix from `get_next_agent_name` (`writer_2`, `writer_2_2`). An
+# exported suffixed member must parse again, in both naming modes.
+MANIFEST_KEY_RE = re.compile(r"^[a-z0-9]([a-z0-9_.-]*[a-z0-9_.])?$")
 
 # #2373: the per-agent equivalent. `parse_manifest` reads exactly these and
 # dropped everything else silently.
 _KNOWN_AGENT_KEYS = frozenset({
     "template", "resources", "folders", "schedules", "tags",
     "kind",  # trinity-enterprise#704
+    "skills", "skill_sets", "grants", "gates",  # trinity-enterprise#1030
+    "seat", "person_seats",  # trinity-enterprise#1030 CP4
+    "deploy",  # trinity-enterprise#1030 CP5
 })
+
+# trinity-enterprise#1030: the per-agent twin of `_UNLISTED_MANIFEST_KEYS` —
+# read, never unknown, but left out of the pinned "Recognised per-agent keys
+# are:" text.
+_UNLISTED_AGENT_KEYS = frozenset({"skills", "skill_sets", "grants", "gates",
+                                  "seat", "person_seats", "deploy"})
+
+# trinity-enterprise#1030 CP5 (T6 = A): nothing platform-side records a
+# `deploy: false` member, so no export can carry one. Every export says so in
+# its text, where a reconciler diffing it against its committed file sees it.
+DECLARED_ONLY_EXPORT_HEADER = ("# unobserved: declared-only members (deploy: false) are not "
+                               "stored platform-side and are not exported")
+
+# trinity-enterprise#1030 CP5: what a `deploy: false` member may carry and
+# nothing reads — `template` is the only key it is checked against (catalog),
+# and `folders` / explicit `permissions` are refused outright.
+_DECLARED_ONLY_IGNORED_KEYS = ("skills", "skill_sets", "grants", "gates", "seat",
+                               "person_seats", "schedules", "tags", "resources", "kind")
+
+# trinity-enterprise#1030 CP3: the fields one `gates:` entry may carry — the
+# gate map's own write request (`SkillGateSetRequest`).
+_GATE_ENTRY_KEYS = ("approver", "deadline_hours")
 
 
 # --- Manifest YAML hardening (#1884, shared since ent#314) ----------------
@@ -114,6 +166,32 @@ def _load_manifest_yaml(yaml_str: str):
     )
 
 
+def _parse_gates(agent_name, value) -> Optional[Dict[str, Dict[str, Any]]]:
+    """trinity-enterprise#1030 CP3: `gates: {<skill>: {approver, deadline_hours}}`.
+    A skill with no fields (`{}` or null) asks for the gate map's defaults.
+    The shape is refused by name; the VALUES are the gate map's to judge
+    (`validate_gate_changes`, at plan time), so one validator answers."""
+    if value is None:
+        return None
+    shape = (f"Agent '{agent_name}' gates must be a map of skill name to "
+             f"{{approver, deadline_hours}}")
+    if not isinstance(value, dict):
+        raise ValueError(shape)
+    out: Dict[str, Dict[str, Any]] = {}
+    for skill, spec in value.items():
+        if spec is None:
+            spec = {}
+        if not isinstance(spec, dict):
+            raise ValueError(shape)
+        extra = sorted(str(k) for k in spec if k not in _GATE_ENTRY_KEYS)
+        if extra:
+            raise ValueError(
+                f"Agent '{agent_name}' gate '{skill}': unknown key(s): {', '.join(extra)}. "
+                f"Recognised gate keys are: {', '.join(_GATE_ENTRY_KEYS)}.")
+        out[str(skill)] = {k: spec[k] for k in _GATE_ENTRY_KEYS if k in spec}
+    return out
+
+
 def parse_manifest(yaml_str: str) -> SystemManifest:
     """
     Parse YAML string into SystemManifest.
@@ -147,6 +225,7 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
     # and those are precisely the fields people try first. A manifest that half
     # works while saying nothing is worse than one that is refused.
     unknown_agent_keys = {}
+    from services.system_apply import seats as apply_seats  # trinity-enterprise#1030 CP4
     for agent_name, agent_config in data["agents"].items():
         if not isinstance(agent_config, dict):
             raise ValueError(f"Agent '{agent_name}' config must be an object")
@@ -157,6 +236,14 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
         if extra:
             unknown_agent_keys[str(agent_name)] = extra
 
+        for list_key in ("skills", "skill_sets", "grants"):  # trinity-enterprise#1030
+            value = agent_config.get(list_key)
+            if value is not None and not (
+                    isinstance(value, list) and all(isinstance(v, str) for v in value)):
+                raise ValueError(f"Agent '{agent_name}' {list_key} must be a list of names")
+        if "deploy" in agent_config and not isinstance(agent_config["deploy"], bool):
+            raise ValueError(f"Agent '{agent_name}' deploy must be true or false")
+
         agents[agent_name] = SystemAgentConfig(
             template=agent_config["template"],
             resources=agent_config.get("resources"),
@@ -164,6 +251,15 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
             schedules=agent_config.get("schedules"),
             tags=agent_config.get("tags"),  # ORG-001 Phase 4
             kind=agent_config.get("kind"),  # trinity-enterprise#704
+            skills=agent_config.get("skills"),  # trinity-enterprise#1030
+            skill_sets=agent_config.get("skill_sets"),
+            grants=agent_config.get("grants"),  # trinity-enterprise#1030 CP2
+            gates=_parse_gates(agent_name, agent_config.get("gates")),  # CP3
+            # CP4: the shapes are refused by name; a person seat never names a person.
+            seat=apply_seats.parse_seat(agent_name, agent_config.get("seat")),
+            person_seats=apply_seats.parse_person_seats(
+                agent_name, agent_config.get("person_seats")),
+            deploy=agent_config.get("deploy", True),  # trinity-enterprise#1030 CP5
         )
 
     # Parse permissions
@@ -190,8 +286,14 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
                 shared=sv_data.get("shared", True)
             )
 
+    # trinity-enterprise#1030: absent is `prefixed` (today). Any present value
+    # is carried as text so `validate_manifest` names the refusal — YAML reads
+    # `naming: yes` as a boolean and `naming: 1` as an int.
+    naming = data["naming"] if "naming" in data else "prefixed"
+
     return SystemManifest(
         name=data["name"],
+        naming=naming if isinstance(naming, str) else str(naming),
         description=data.get("description"),
         prompt=data.get("prompt"),
         agents=agents,
@@ -233,11 +335,21 @@ def validate_manifest(manifest: SystemManifest) -> List[str]:
             "lowercase alphanumeric and hyphens, start/end with alphanumeric"
         )
 
+    # trinity-enterprise#1030: under `bare` a key is the agent's full name. The
+    # agent-name rule below already holds for both modes, and a key equal to
+    # the system name is allowed (an agent may be named like its system).
+    if manifest.naming not in MANIFEST_NAMING_MODES:
+        raise ValueError(
+            f"Invalid naming '{manifest.naming}': naming must be 'prefixed' or 'bare'"
+        )
+
     # Validate agent names
     for agent_name in manifest.agents.keys():
-        if not re.match(r'^[a-z0-9][a-z0-9-]*[a-z0-9]$|^[a-z0-9]$', agent_name):
+        if not MANIFEST_KEY_RE.match(agent_name):
             raise ValueError(
-                f"Invalid agent name '{agent_name}': must be lowercase alphanumeric and hyphens"
+                f"Invalid agent name '{agent_name}': must be lowercase alphanumeric, "
+                "hyphens, underscores or dots, starting with a letter or digit and "
+                "not ending with a hyphen"
             )
 
     # Validate template references
@@ -277,6 +389,40 @@ def validate_manifest(manifest: SystemManifest) -> List[str]:
                 for target in targets:
                     if target not in agent_names:
                         raise ValueError(f"Unknown agent in permissions: {target}")
+            # trinity-enterprise#1030 CP5: a member that is not deployed has
+            # no edges to declare.
+            for source, targets in manifest.permissions.explicit.items():
+                for short in [source, *targets]:
+                    if not manifest.agents[short].deploy:
+                        raise ValueError(
+                            f"Permissions name declared-only member '{short}' (deploy: false): "
+                            f"a member that is not deployed can neither call nor be called")
+
+        # trinity-enterprise#1030 CP5: a preset is derived, so it resolves over
+        # the deployed members only and says so; never a refusal.
+        declared_only = sorted(s for s, c in manifest.agents.items() if not c.deploy)
+        if manifest.permissions.preset in ("full-mesh", "orchestrator-workers") and declared_only:
+            warnings.append(
+                f"Permission preset '{manifest.permissions.preset}' resolves over deployed "
+                f"members only; declared-only members (deploy: false) get no edges: "
+                f"{', '.join(declared_only)}.")
+
+    # trinity-enterprise#1030 CP5: a declared-only member mounts nothing.
+    for agent_name, config in manifest.agents.items():
+        if not config.deploy and config.folders is not None:
+            raise ValueError(
+                f"Agent '{agent_name}' is declared-only (deploy: false) and cannot declare "
+                f"folders: a member that is not deployed shares and mounts nothing")
+        # Everything else it declares is parsed and never applied or
+        # reported; say so once, naming every such key.
+        if not config.deploy:
+            ignored = [key for key in _DECLARED_ONLY_IGNORED_KEYS
+                       if getattr(config, key) is not None]
+            if ignored:
+                warnings.append(
+                    f"Agent '{agent_name}' is declared-only (deploy: false); ignored key(s): "
+                    f"{', '.join(ignored)}. A member that is not deployed is named, never "
+                    f"configured: nothing it declares is written or reported.")
 
     # Validate schedules (if any)
     for agent_name, config in manifest.agents.items():
@@ -309,6 +455,11 @@ def validate_manifest(manifest: SystemManifest) -> List[str]:
                 "'reports-to-*' carry the org chart and can only be set by a "
                 "human operator through the tags API"
             )
+
+    # The system name is a tag writer too: `configure_tags` applies it to every
+    # agent the manifest creates, so it meets the same reserved-prefix rule as
+    # the manifest's own tags (trinity-enterprise#719).
+    _reject_org_tag(manifest.name, "System name")
 
     # Validate default_tags
     if manifest.default_tags:
@@ -344,7 +495,7 @@ def validate_manifest(manifest: SystemManifest) -> List[str]:
             warnings.append(
                 f"Agent '{_agent}': ignored unknown key(s): {', '.join(_keys)}. "
                 f"Recognised per-agent keys are: "
-                f"{', '.join(sorted(_KNOWN_AGENT_KEYS))}."
+                f"{', '.join(sorted(_KNOWN_AGENT_KEYS - _UNLISTED_AGENT_KEYS))}."
             )
 
     if manifest.unknown_keys:
@@ -352,7 +503,7 @@ def validate_manifest(manifest: SystemManifest) -> List[str]:
             "Ignored unknown top-level key(s): "
             f"{', '.join(manifest.unknown_keys)}. "
             "Recognized keys are: "
-            f"{', '.join(sorted(_KNOWN_MANIFEST_KEYS))}."
+            f"{', '.join(sorted(_KNOWN_MANIFEST_KEYS - _UNLISTED_MANIFEST_KEYS))}."
         )
 
     return warnings
@@ -383,9 +534,30 @@ def get_next_agent_name(base_name: str) -> str:
     return f"{base_name}_{n}"
 
 
+def _member_name(system_name: str, short: str, naming: str = "prefixed") -> str:
+    """THE one rule for a member's agent name (trinity-enterprise#1030).
+
+    `prefixed` (today): `<system>-<short>`. `bare`: the manifest key IS the
+    name. Every site that names a member calls this — three f-string copies of
+    one rule is how #2373 became a bug in three places.
+    """
+    return short if naming == "bare" else f"{system_name}-{short}"
+
+
+def member_name(manifest: SystemManifest, short: str) -> str:
+    """The agent name of manifest key `short`, under the manifest's `naming`."""
+    return _member_name(manifest.name, short, manifest.naming)
+
+
+def declared_names(manifest: SystemManifest) -> Dict[str, str]:
+    """{short: agent name} for every declared member, in manifest order."""
+    return {short: member_name(manifest, short) for short in manifest.agents}
+
+
 def resolve_agent_names(
     system_name: str,
-    agents: Dict[str, SystemAgentConfig]
+    agents: Dict[str, SystemAgentConfig],
+    naming: str = "prefixed",
 ) -> Tuple[Dict[str, str], List[str]]:
     """
     Resolve short agent names to final names, handling conflicts.
@@ -393,6 +565,8 @@ def resolve_agent_names(
     Args:
         system_name: The system name prefix
         agents: Dict of short_name -> agent config
+        naming: `prefixed` (today) or `bare` (trinity-enterprise#1030); a
+            taken name is `_N`-suffixed under both, as create mode always has
 
     Returns:
         Tuple of (name_mapping, warnings)
@@ -403,7 +577,7 @@ def resolve_agent_names(
     warnings = []
 
     for short_name in agents.keys():
-        base_name = f"{system_name}-{short_name}"
+        base_name = _member_name(system_name, short_name, naming)
         final_name = get_next_agent_name(base_name)
         name_mapping[short_name] = final_name
 
@@ -817,7 +991,8 @@ def system_member_names(system_name: str, agent_names: List[str]) -> List[str]:
     return system_membership(system_name, agent_names).members
 
 
-def system_membership(system_name: str, agent_names: List[str]) -> SystemMembership:
+def system_membership(system_name: str, agent_names: List[str],
+                      naming: Optional[str] = None) -> SystemMembership:
     """Which agents belong to `system_name` (#2373).
 
     THE ONE membership predicate. `get_system`, `restart_system` and
@@ -846,7 +1021,20 @@ def system_membership(system_name: str, agent_names: List[str]) -> SystemMembers
     of the other are ambiguous whenever no tag distinguishes them — deployed
     before tagging, or during a tag-read outage. Tagging is what removes the
     ambiguity, and every system deployed since ent#124 has it.
+
+    `naming` (#4131): under `bare` a prefix is no evidence of anything, so the
+    prefix step is dropped and membership is the tag. Only apply knows the
+    naming (it holds the manifest). With `None` (restart, get, export: nothing
+    stores the naming) bare is INFERRED the way export infers it — tags
+    readable and every tagged member unprefixed — and the prefix step is then
+    dropped too; a prefixed system keeps the union above. The tag read still
+    runs under `bare`, so an outage reports `tags_readable=False` (apply
+    refuses) instead of adopting over a guess.
     """
+    if naming is not None and naming not in MANIFEST_NAMING_MODES:
+        raise ValueError(
+            f"Invalid naming '{naming}': naming must be 'prefixed' or 'bare'"
+        )
     if not system_name or not agent_names:
         return SystemMembership(members=[])
     tags_readable = True
@@ -869,8 +1057,13 @@ def system_membership(system_name: str, agent_names: List[str]) -> SystemMembers
     tagged = [n for n in agent_names if system_name in (tags_by_agent.get(n) or [])]
 
     prefix = f"{system_name}-"
+    if naming is None and tags_readable and tagged and not any(
+            n.startswith(prefix) for n in tagged):
+        naming = "bare"  # #4131 (D): export's own inference
     narrowed = []
     for name in agent_names:
+        if naming == "bare":
+            break  # #4131: no prefix step for a bare system
         if not name.startswith(prefix) or name in tagged:
             continue
         # A longer sibling system's member (`acme-extra-worker` under `acme`) is
@@ -1004,6 +1197,86 @@ def configure_tags(
 # view that merely filters the same tag — is this string plus the system tag in
 # `filter_tags`. One constant, formatted by the writer and by every reader, so
 # the two cannot drift into two vocabularies for one fact.
+async def assign_manifest_skills(
+    agent_names: Dict[str, str],
+    agents_config: Dict[str, SystemAgentConfig],
+    current_user: User,
+    *,
+    gates_unlanded: Optional[set] = None,
+) -> List[str]:
+    """Create mode's `skills:` / `skill_sets:` phase (trinity-enterprise#1030).
+
+    Assigns each created member's declared skills, then its sets, through the
+    assign routes' sequence. Returns warnings; never raises past one member.
+    An agent key assigns only if it holds skills.manage — the skill routes'
+    own capability (T8) — and is told what was held back. A name the library
+    cannot assign is skipped with the route's refusal code. A skill whose
+    declared gate did not land, or a set carrying one, is held back and named
+    (ent#753: gated before delivered).
+    """
+    from dependencies import acting_agent_name, capability_refusal
+    from db.capability_grants import CAPABILITY_SKILLS_MANAGE
+    from services import skill_assignment_service
+    from services.system_apply import gates as apply_gates
+    from services.system_apply import skills as apply_skills
+
+    unlanded = gates_unlanded or set()
+    warnings: List[str] = []
+    wanted = {short: apply_skills.declared(cfg) for short, cfg in agents_config.items()
+              if short in agent_names and (cfg.skills or cfg.skill_sets)}
+    if not wanted:
+        return warnings
+    refusal = capability_refusal(current_user, CAPABILITY_SKILLS_MANAGE)
+    if refusal is not None:
+        held = ", ".join(f"{agent_names[s]}: {', '.join(n + [f'set:{x}' for x in sets])}"
+                         for s, (n, sets) in wanted.items())
+        warnings.append(f"Skills not assigned: this key does not hold skills.manage "
+                        f"({refusal[0]}). Held back: {held}.")
+        return warnings
+    acting = acting_agent_name(current_user)
+    for short, (names, set_names) in wanted.items():
+        name = agent_names[short]
+        ok = []
+        held = apply_gates.unlanded_in(name, names, unlanded)
+        for n in names:
+            verdict = apply_skills.library_verdict_skill(n)
+            if n in held:
+                warnings.append(f"Skill '{n}' not assigned to '{name}': "
+                                f"{apply_gates.not_written_reason([n])}.")
+            elif verdict is None:
+                ok.append(n)
+            else:
+                warnings.append(f"Skill '{n}' not assigned to '{name}': {verdict[0]}.")
+        try:
+            if ok:
+                line = apply_skills.deploy_delivery_warning(
+                    name, await skill_assignment_service.assign_and_deliver(
+                        name, ok, current_user, acting_agent=acting))
+                if line:
+                    warnings.append(line)
+            for set_name in set_names:
+                verdict = apply_skills.library_verdict_set(set_name)
+                if verdict is not None:
+                    warnings.append(f"Skill set '{set_name}' not assigned to '{name}': "
+                                    f"{verdict[0]} ({verdict[1]}).")
+                    continue
+                held_by_set = apply_skills.set_held_for_gates(name, set_name, unlanded)
+                if held_by_set:
+                    warnings.append(f"Skill set '{set_name}' not assigned to '{name}': "
+                                    f"{apply_gates.not_written_reason(held_by_set)}.")
+                    continue
+                line = apply_skills.deploy_delivery_warning(
+                    name, await skill_assignment_service.assign_set_and_deliver(
+                        name, set_name, current_user, acting_agent=acting))
+                if line:
+                    warnings.append(line)
+        except Exception as e:  # noqa: BLE001 — the next member still gets its skills
+            reason, _ = _failure_reason(e)
+            logger.exception(f"Skill assignment failed for '{name}'")
+            warnings.append(f"Failed to assign skills to '{name}': {reason}")
+    return warnings
+
+
 SYSTEM_VIEW_AUTO_DESCRIPTION = "Auto-created for {system_name} system deployment"
 
 
@@ -1089,7 +1362,8 @@ async def start_all_agents(agent_names: List[str]) -> Dict[str, str]:
     return results
 
 
-def _member_short_name(full_name: str, system_name: str) -> Optional[str]:
+def _member_short_name(full_name: str, system_name: str,
+                       naming: str = "prefixed") -> Optional[str]:
     """The manifest key for a member, or None when it cannot have one.
 
     #2373 review (C1): a manifest agent key IS the short name, and the short name
@@ -1103,7 +1377,12 @@ def _member_short_name(full_name: str, system_name: str) -> Optional[str]:
     re-deploy — the round trip broken by the export, not the import. Returning
     None lets each caller SKIP and report, which is what AC #3 asks for: drop or
     scope the edge, never blind-slice it.
+
+    trinity-enterprise#1030: under `naming: bare` the key IS the full name, so
+    every member has one.
     """
+    if naming == "bare":
+        return full_name
     prefix = f"{system_name}-"
     if not full_name.startswith(prefix):
         return None
@@ -1111,17 +1390,70 @@ def _member_short_name(full_name: str, system_name: str) -> Optional[str]:
     return short or None
 
 
-def export_manifest(system_name: str, agents: List[Dict]) -> str:
+def _export_readable(viewer: Optional[User], name: str) -> Dict[str, bool]:
+    """Which of a member's governance groups `viewer` may read in an export, by
+    the direct read routes' own gates, so an export never says more than they
+    do. `grants` and `seat` are owner-tier; `gates` has its own allowlist. No
+    principal reads none of them."""
+    from fastapi import HTTPException
+    from dependencies import assert_skill_gates_readable, get_owned_agent_by_name
+
+    def passes(gate) -> bool:
+        if viewer is None:
+            return False
+        try:
+            gate(agent_name=name, current_user=viewer)
+            return True
+        except HTTPException:
+            return False
+        except Exception as e:  # noqa: BLE001 — one bad read never loses the export
+            logger.warning(f"Failed to check export access to {name}: {e}")
+            return False
+
+    owner_tier = passes(get_owned_agent_by_name)
+    return {"grants": owner_tier, "seat": owner_tier,
+            "gates": passes(assert_skill_gates_readable)}
+
+
+def _export_resources(name: str, label_resources: Optional[Dict]) -> Optional[Dict]:
+    """A member's effective resources, as apply compares them: a stored override
+    first, per key, then the label. Exporting the label alone would revert an
+    override that is waiting for a restart. Raises on a failed read."""
+    stored = db.get_resource_limits(name) or {}
+    merged = {**(label_resources or {}), **{k: v for k, v in stored.items() if v}}
+    return merged or None
+
+
+def export_manifest(system_name: str, agents: List[Dict], *,
+                    naming: Optional[str] = None,
+                    viewer: Optional[User] = None) -> str:
     """
     Export a system as a YAML manifest.
 
     Args:
         system_name: The system prefix
         agents: List of agent dictionaries from Docker
+        naming: trinity-enterprise#1030 — `prefixed` or `bare` overrides; None
+            infers `bare` when no member carries the `<system>-` prefix and
+            `prefixed` otherwise (today's export, unprefixed members omitted)
+        viewer: the caller. Grants, gates and seats appear only where the direct
+            read routes would show them to it; what is withheld is named.
 
     Returns:
-        YAML string representing the system configuration
+        YAML string representing the system configuration. When members were
+        omitted, the first line is a `# unobserved:` comment naming them: a
+        text diff sees it, the parser does not.
     """
+    if naming is not None and naming not in MANIFEST_NAMING_MODES:
+        raise ValueError(
+            f"Invalid naming '{naming}': naming must be 'prefixed' or 'bare'"
+        )
+    if naming is None:
+        # Unambiguous only when NO member carries the prefix; all-prefixed and
+        # mixed both keep today's export.
+        naming = "bare" if agents and all(
+            _member_short_name(a['name'], system_name) is None for a in agents) else "prefixed"
+
     # #2373: the members, resolved ONCE through the shared predicate. The
     # permission branches below decide what is "inside the system", and they
     # must agree with `get_system`/`restart_system` about that — the caller
@@ -1134,6 +1466,10 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
     # be a strict subset of `agents` and permission edges to real members would
     # be dropped from the backup in silence.
     member_names = {a['name'] for a in agents}
+    # #4132: by name, so two exports of one system are byte-identical whatever
+    # order the roster read returned — members, edges and every header list
+    # follow this order.
+    agents = sorted(agents, key=lambda a: a['name'])
 
     # Extract short names (remove system prefix)
     agent_configs = {}
@@ -1152,13 +1488,19 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
     # what it could not represent. Renaming them into the prefix would rewrite
     # the fleet from an export path.
     unprefixed: List[str] = []
+    # trinity-enterprise#1030: reads that failed, named in a `# unobserved:`
+    # header so an export never reads as "nothing here" when it means "unknown".
+    unobserved_reads: List[str] = []
+    withheld: List[str] = []
+    # #4132: members whose person seats an export can never state.
+    person_seats_unread: List[str] = []
     prefix = f"{system_name}-"
     for agent in agents:
         full_name = agent['name']
         # ONE rule for "what is this member's manifest key", shared with both
         # permission loops (#2373 review C1) — a guarded slice here and a blind
         # one there is exactly how the two loops drifted apart.
-        short_name = _member_short_name(full_name, system_name)
+        short_name = _member_short_name(full_name, system_name, naming)
         if short_name is None:
             unprefixed.append(full_name)
             continue
@@ -1187,9 +1529,18 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
             "template": template
         }
 
-        # Get resources (if available from labels)
-        if agent.get('resources'):
-            config["resources"] = agent['resources']
+        # Effective resources. An unreadable override is named, never replaced
+        # by the label, which could revert it on re-apply.
+        try:
+            resources = _export_resources(full_name, agent.get('resources'))
+            if resources:
+                config["resources"] = dict(sorted(resources.items()))
+        except Exception as e:
+            logger.warning(f"Failed to get the resources of {full_name}: {e}")
+            unobserved_reads.append(f"resources of {full_name}")
+
+        readable = _export_readable(viewer, full_name)
+        withheld.extend(f"{group} of {full_name}" for group, ok in readable.items() if not ok)
 
         # trinity-enterprise#704: `kind` round-trips (PR #3022 review). `kind`
         # is not persisted, so it is read back from the binding: a pull-only
@@ -1205,16 +1556,20 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
         except Exception as e:
             logger.warning(f"Failed to get git config for {full_name}: {e}")
 
-        # Get folders config from database
+        # Get folders config from database. #4128: `get_agent_folder_config`
+        # never existed, and the row is a pydantic model, not a dict — the read
+        # apply's snapshot makes, by attribute. A failed read is named: an
+        # absent `folders` would otherwise read as "both off".
         try:
-            folder_config = db.get_agent_folder_config(full_name)
-            if folder_config and (folder_config['expose_enabled'] or folder_config['consume_enabled']):
+            folder_config = db.get_shared_folder_config(full_name)
+            if folder_config is not None and (folder_config.expose_enabled or folder_config.consume_enabled):
                 config["folders"] = {
-                    "expose": bool(folder_config['expose_enabled']),
-                    "consume": bool(folder_config['consume_enabled'])
+                    "expose": bool(folder_config.expose_enabled),
+                    "consume": bool(folder_config.consume_enabled)
                 }
         except Exception as e:
             logger.warning(f"Failed to get folder config for {full_name}: {e}")
+            unobserved_reads.append(f"folders of {full_name}")
 
         # Get schedules from database
         try:
@@ -1228,7 +1583,7 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
                         "enabled": bool(s.enabled),
                         "timezone": s.timezone
                     }
-                    for s in schedules
+                    for s in sorted(schedules, key=lambda s: s.name)
                 ]
         except Exception as e:
             logger.warning(f"Failed to get schedules for {full_name}: {e}")
@@ -1238,11 +1593,70 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
             agent_tags = db.get_agent_tags(full_name)
             # Filter out the system prefix tag (auto-applied on import)
             # so export shows only explicitly configured tags
-            non_prefix_tags = [t for t in agent_tags if t != system_name]
+            non_prefix_tags = sorted(t for t in agent_tags if t != system_name)
             if non_prefix_tags:
                 config["tags"] = non_prefix_tags
         except Exception as e:
             logger.warning(f"Failed to get tags for {full_name}: {e}")
+
+        # trinity-enterprise#1030: individual skill assignments and held sets.
+        # A failed read is NAMED in the text, never an absent key, which a
+        # reconciler would read as "assign nothing".
+        try:
+            from services.system_apply import skills as apply_skills
+            skill_names, set_names = apply_skills.read_member(full_name)
+            if skill_names:
+                config["skills"] = skill_names
+            if set_names:
+                config["skill_sets"] = set_names
+        except Exception as e:
+            logger.warning(f"Failed to get skills for {full_name}: {e}")
+            unobserved_reads.append(f"skills of {full_name}")
+
+        # trinity-enterprise#1030 CP2: held admin capabilities.
+        if readable["grants"]:
+            try:
+                from services.system_apply import grants as apply_grants
+                grant_names = apply_grants.read_member(full_name)
+                if grant_names:
+                    config["grants"] = grant_names
+            except Exception as e:
+                logger.warning(f"Failed to get grants for {full_name}: {e}")
+                unobserved_reads.append(f"grants of {full_name}")
+
+        # trinity-enterprise#1030 CP3: the explicit approval map. Library
+        # defaults and tombstones are state the library drives, not target
+        # state, so only `set` rows are the manifest's.
+        if readable["gates"]:
+            try:
+                from services.system_apply import gates as apply_gates
+                gate_map = apply_gates.export_member(full_name)
+                if gate_map:
+                    config["gates"] = gate_map
+            except Exception as e:
+                logger.warning(f"Failed to get gates for {full_name}: {e}")
+                unobserved_reads.append(f"gates of {full_name}")
+
+        # trinity-enterprise#1030 CP4: the seat the agent holds, when an
+        # assignment module can say. Person seats are not exported: the seam
+        # answers per seat and never lists who fills what.
+        if readable["seat"]:
+            try:
+                from services.system_apply import seats as apply_seats
+                held_seat = apply_seats.export_member(full_name)
+                if held_seat:
+                    config["seat"] = held_seat
+            except apply_seats.SeatUnobserved:
+                # No provider can say: named in the text like a failed read, but
+                # an expected state of the install, so not logged.
+                unobserved_reads.append(f"seat of {full_name}")
+            except Exception as e:
+                logger.warning(f"Failed to get the seat of {full_name}: {e}")
+                unobserved_reads.append(f"seat of {full_name}")
+        # #4132: the seam answers per seat and never lists who fills what, so
+        # the person seats a member needs can never be read back — for any
+        # caller, so the line names every member, not only seat-readable ones.
+        person_seats_unread.append(full_name)
 
         agent_configs[short_name] = config
 
@@ -1275,92 +1689,51 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
         "description": f"Exported system configuration for {system_name}",
         "agents": agent_configs
     }
+    if naming == "bare":
+        # trinity-enterprise#1030: emitted only for bare, so a prefixed
+        # export's text is today's.
+        manifest_dict = {"name": system_name, "naming": "bare",
+                         **{k: v for k, v in manifest_dict.items() if k != "name"}}
 
-    # Get permissions (try to detect preset pattern)
+    # Get permissions (try to detect preset pattern). Read through
+    # `get_permitted_agents` (target names), the facade method apply's
+    # snapshot uses; `get_agent_permissions` never existed, so until
+    # trinity-enterprise#1030 every export dropped this block behind a
+    # WARNING.
+    #
+    # #4128: ONE pass over every member. The block used to probe `agents[0]`
+    # and only looked further if that member had edges, so a system whose
+    # first member had none exported no edges at all. Edges are filtered to
+    # members before anything is compared (#2373: an edge leaving the system
+    # cannot be represented), and the mesh is stated over the members that
+    # have a manifest key — a tag-only member has none and the header names it.
     try:
-        # Check first agent's permissions to infer pattern
-        if agents:
-            first_agent = agents[0]['name']
-            perms = db.get_agent_permissions(first_agent)
+        edges: Dict[str, List[str]] = {}
+        for agent in agents:
+            short_name = _member_short_name(agent['name'], system_name, naming)
+            if short_name is None:
+                continue
+            targets = {
+                _member_short_name(target, system_name, naming)
+                for target in db.get_permitted_agents(agent['name'])
+                if target in member_names
+            }
+            edges[short_name] = sorted(t for t in targets if t is not None and t != short_name)
 
-            if perms:
-                # Try to detect full-mesh pattern
-                all_agents_names = [a['name'] for a in agents]
-                permitted_targets = [p["target_agent"] for p in perms]
-
-                # Full-mesh: agent can call all other agents
-                expected_targets = [n for n in all_agents_names if n != first_agent]
-                if set(permitted_targets) == set(expected_targets):
-                    # Verify other agents also have full-mesh
-                    is_full_mesh = True
-                    for agent in agents:
-                        agent_perms = db.get_agent_permissions(agent['name'])
-                        expected = [n for n in all_agents_names if n != agent['name']]
-                        actual = [p["target_agent"] for p in agent_perms]
-                        if set(actual) != set(expected):
-                            is_full_mesh = False
-                            break
-
-                    if is_full_mesh:
-                        manifest_dict["permissions"] = {"preset": "full-mesh"}
-                    else:
-                        # Export explicit permissions
-                        # #2373: the sibling branch below filters on membership
-                        # and this one did not — a permission edge pointing
-                        # OUTSIDE the system was blind-sliced into a garbage
-                        # short name, which then failed validate_manifest's
-                        # "unknown agent in permissions" check on re-deploy. The
-                        # round trip was broken by the export, not the import.
-                        explicit_perms = {}
-                        for agent in agents:
-                            # #2373 review (C1): prefix-safe on BOTH sides of the
-                            # edge. A tag-only member has no manifest key, so its
-                            # edges cannot be represented — skip rather than emit
-                            # a sliced-to-garbage key that breaks the round trip.
-                            short_name = _member_short_name(agent['name'], system_name)
-                            if short_name is None:
-                                continue
-                            agent_perms = db.get_agent_permissions(agent['name'])
-                            targets = [
-                                t for t in (
-                                    _member_short_name(p["target_agent"], system_name)
-                                    for p in agent_perms
-                                    if p["target_agent"] in member_names
-                                ) if t is not None
-                            ]
-                            if targets:
-                                explicit_perms[short_name] = targets
-
-                        if explicit_perms:
-                            manifest_dict["permissions"] = {"explicit": explicit_perms}
-                else:
-                    # Export explicit permissions
-                    explicit_perms = {}
-                    for agent in agents:
-                        # #2373 review (C1): see the sibling branch — membership
-                        # admits tag-only members, which have no manifest key.
-                        short_name = _member_short_name(agent['name'], system_name)
-                        if short_name is None:
-                            continue
-                        agent_perms = db.get_agent_permissions(agent['name'])
-                        # #2373: membership, not the prefix — `acme` must not
-                        # export an edge to an `acme-extra` agent as though it
-                        # were its own member.
-                        targets = [
-                            t for t in (
-                                _member_short_name(p["target_agent"], system_name)
-                                for p in agent_perms
-                                if p["target_agent"] in member_names
-                            ) if t is not None
-                        ]
-                        if targets:
-                            explicit_perms[short_name] = targets
-
-                    if explicit_perms:
-                        manifest_dict["permissions"] = {"explicit": explicit_perms}
+        keyed = set(edges)
+        # Fewer than two keyed members is never a mesh: with no edge to state,
+        # `full-mesh` would read as a claim about the topology.
+        if len(keyed) >= 2 and all(set(v) == keyed - {k} for k, v in edges.items()):
+            manifest_dict["permissions"] = {"preset": "full-mesh"}
+        elif any(edges.values()):
+            manifest_dict["permissions"] = {"explicit": {k: v for k, v in edges.items() if v}}
 
     except Exception as e:
         logger.warning(f"Failed to export permissions for system {system_name}: {e}")
+        # trinity-enterprise#1030: an absent `permissions:` reads as "no
+        # edges"; say in the text that they were not read.
+        manifest_dict.pop("permissions", None)
+        unobserved_reads.append("permissions")
 
     # #2373: the instance-global `trinity_prompt` is NOT exported.
     #
@@ -1374,6 +1747,28 @@ def export_manifest(system_name: str, agents: List[Dict]) -> str:
 
     # Convert to YAML
     yaml_output = yaml.dump(manifest_dict, default_flow_style=False, sort_keys=False, allow_unicode=True)
+
+    if person_seats_unread:
+        yaml_output = (f"# unobserved: person seats are not exported (the assignment module "
+                       f"answers per seat and never lists them): "
+                       f"{', '.join(person_seats_unread)}\n" + yaml_output)
+    yaml_output = DECLARED_ONLY_EXPORT_HEADER + "\n" + yaml_output  # CP5, T6 = A
+    if withheld:
+        # The same line whether or not anything is held: it reports the caller's
+        # reach, never the member's state.
+        yaml_output = (f"# unobserved: not readable by this caller: {', '.join(withheld)}\n"
+                       f"{yaml_output}")
+    if unobserved_reads:
+        yaml_output = (f"# unobserved: could not be read: {', '.join(unobserved_reads)}\n"
+                       + yaml_output)
+    if unprefixed:
+        # trinity-enterprise#1030: the log line above reaches an operator; a
+        # reconciler diffing this text against its committed file needs the
+        # omission IN the text. A comment, so the parser never sees it.
+        yaml_output = (
+            f"# unobserved: members omitted (no '{prefix}' prefix): "
+            f"{', '.join(sorted(unprefixed))}\n" + yaml_output
+        )
 
     return yaml_output
 
@@ -1549,7 +1944,7 @@ def _assess_manifest(yaml_text: str) -> Tuple[Optional[SystemManifest], bool, Op
             (
                 short,
                 _preflight_template(
-                    f"{manifest.name}-{short}", short, cfg.template, cfg.resources
+                    member_name(manifest, short), short, cfg.template, cfg.resources
                 ),
             )
             for short, cfg in manifest.agents.items()
@@ -1590,7 +1985,7 @@ def _summarize_manifest(path: Path, yaml_text: str) -> BundledManifestSummary:
     )
     try:
         summary.already_deployed = any(
-            agent_exists(f"{manifest.name}-{short}") for short in manifest.agents
+            agent_exists(name) for name in declared_names(manifest).values()
         )
     except Exception:  # noqa: BLE001 — a DB hiccup must not blank the catalog
         logger.warning(
@@ -1784,6 +2179,20 @@ def _failure_reason(exc: Exception) -> Tuple[str, Optional[int]]:
     return reason[:_REASON_MAX_LEN], status_code
 
 
+def _configured_preview(cfg: SystemAgentConfig) -> Dict[str, Dict[str, int]]:
+    """trinity-enterprise#1030 CP6: what a created member is configured with
+    after create — counts per group, for the preview's one line. Empty (no
+    key at all) when the member declares none of them. A held-back write is
+    named in `warnings`, not here."""
+    counts = {
+        "skills": len(cfg.skills or []), "skill_sets": len(cfg.skill_sets or []),
+        "gates": len(cfg.gates or {}), "grants": len(cfg.grants or []),
+        "seat": 1 if cfg.seat else 0, "person_seats": len(cfg.person_seats or []),
+    }
+    counts = {k: v for k, v in counts.items() if v}
+    return {"configured": counts} if counts else {}
+
+
 async def deploy_manifest(
     manifest_yaml: str,
     current_user: User,
@@ -1829,11 +2238,29 @@ async def deploy_manifest(
             raise HTTPException(status_code=400, detail=str(e))
 
         # 3. Resolve agent names (handle conflicts)
+        # trinity-enterprise#1030 CP5: a `deploy: false` member is skipped and
+        # listed, never created; every later phase reads `agent_names`.
+        declared_only = [_member_name(manifest.name, s, manifest.naming)
+                         for s, c in manifest.agents.items() if not c.deploy]
         agent_names, name_warnings = resolve_agent_names(
             manifest.name,
-            manifest.agents
+            {s: c for s, c in manifest.agents.items() if c.deploy},
+            naming=manifest.naming,
         )
+        if not agent_names:
+            # #4130: every member is `deploy: false` — a property of the
+            # manifest, named before any read (apply reports on them instead).
+            raise HTTPException(status_code=400, detail=(
+                "nothing_to_deploy: every member is declared-only (deploy: false); deploy "
+                "creates nothing. Remove deploy: false from a member, or use apply to "
+                "report on them"))
         all_warnings = validation_warnings + name_warnings
+        if declared_only:
+            # The response contract is pinned (ent#695 AC6), so the skip is
+            # listed where every caller already reads: the warnings.
+            all_warnings.append(
+                f"Not deployed — declared-only (deploy: false): {', '.join(declared_only)}. "
+                f"Deploy creates no agent for them and changes nothing they name.")
 
         # 4. If dry_run, return preview
         if dry_run:
@@ -1841,7 +2268,10 @@ async def deploy_manifest(
                 {
                     "name": final_name,
                     "short_name": short_name,
-                    "template": manifest.agents[short_name].template
+                    "template": manifest.agents[short_name].template,
+                    # trinity-enterprise#1030 CP6: only when the member declares
+                    # one of the new groups, so every other preview is byte-identical.
+                    **_configured_preview(manifest.agents[short_name]),
                 }
                 for short_name, final_name in agent_names.items()
             ]
@@ -1900,6 +2330,27 @@ async def deploy_manifest(
                     status_code=status_code,
                 ))
 
+            # trinity-enterprise#1030 CP2: the preview already says which grants
+            # this caller's credential cannot write.
+            from services.system_apply import grants as apply_grants
+            held_back = apply_grants.deploy_hold_back_warning(
+                agent_names, manifest.agents, current_user)
+            if held_back:
+                all_warnings.append(held_back)
+            from services.system_apply import gates as apply_gates
+            gates_held_back = apply_gates.deploy_hold_back_warning(
+                agent_names, manifest.agents, current_user)
+            if gates_held_back:
+                all_warnings.append(gates_held_back)
+            else:
+                # ent#753: the refusal the write would give, named before it runs.
+                all_warnings.extend(apply_gates.preview_warnings(agent_names, manifest.agents))
+            from services.system_apply import seats as apply_seats
+            seats_held_back = apply_seats.deploy_hold_back_warning(
+                agent_names, manifest.agents, current_user)
+            if seats_held_back:
+                all_warnings.append(seats_held_back)
+
             return SystemDeployResponse(
                 # "valid" keeps its meaning — a manifest that will deploy. A
                 # preview that found blockers reports `invalid`, matching the
@@ -1909,6 +2360,7 @@ async def deploy_manifest(
                 system_name=manifest.name,
                 agents_created=[],
                 agents_to_create=agents_to_create,
+                agents_declared_only=declared_only,
                 prompt_updated=bool(manifest.prompt),
                 warnings=all_warnings,
                 failed=preview_failed,
@@ -1930,6 +2382,8 @@ async def deploy_manifest(
         created_agents = []
         failed: list[SystemDeployFailure] = []
         for short_name, config in manifest.agents.items():
+            if short_name not in agent_names:  # declared-only (CP5)
+                continue
             final_name = agent_names[short_name]
 
             try:
@@ -1995,6 +2449,7 @@ async def deploy_manifest(
                 status="failed",
                 system_name=manifest.name,
                 agents_created=[],
+                agents_declared_only=declared_only,
                 prompt_updated=False,
                 warnings=all_warnings,
                 failed=failed
@@ -2096,6 +2551,74 @@ async def deploy_manifest(
             logger.exception(f"Tag configuration failed for system '{manifest.name}'")
             all_warnings.append(f"Failed to configure tags: {reason}")
 
+        # The two phases below judge skills.manage themselves, with no fence to
+        # record it: one `capability_used` per member the grant decides for
+        # (trinity-enterprise#871). A caller without it writes none and is told.
+        from db.capability_grants import CAPABILITY_SKILLS_MANAGE
+        from dependencies import record_capability_use
+        for short, cfg in manifest.agents.items():
+            if short in created_map and (cfg.gates or cfg.skills or cfg.skill_sets):
+                await record_capability_use(request, current_user, CAPABILITY_SKILLS_MANAGE,
+                                            target=created_map[short])
+
+        # 10a. The approval map (trinity-enterprise#1030 CP3), BEFORE the
+        # skills: a gate is in place before the skill it governs is delivered
+        # (ent#753). Written only by a caller holding skills.manage (T8);
+        # otherwise listed as held back. Best-effort, like 7-10.
+        gates_unlanded: set = set()
+        if any(cfg.gates for cfg in manifest.agents.values()):
+            from services.system_apply import gates as apply_gates
+            gates_unlanded = apply_gates.declared_keys(created_map, manifest.agents)
+            try:
+                all_warnings.extend(await apply_gates.deploy(
+                    created_map, manifest.agents, current_user, request,
+                    unlanded=gates_unlanded))
+            except Exception as e:
+                reason, _ = _failure_reason(e)
+                logger.exception(f"Gate phase failed for system '{manifest.name}'")
+                all_warnings.append(f"Failed to write gates: {reason}")
+
+        # 10b. Skills and skill sets (trinity-enterprise#1030), after the tags
+        # and before the starts, so a created member's first start delivers
+        # them. Best-effort, like 7-10.
+        if any(cfg.skills or cfg.skill_sets for cfg in manifest.agents.values()):
+            try:
+                all_warnings.extend(await assign_manifest_skills(
+                    created_map, manifest.agents, current_user,
+                    gates_unlanded=gates_unlanded))
+            except Exception as e:
+                reason, _ = _failure_reason(e)
+                logger.exception(f"Skill assignment failed for system '{manifest.name}'")
+                all_warnings.append(f"Failed to assign skills: {reason}")
+
+        # 10c. Admin grants (trinity-enterprise#1030 CP2): written only for an
+        # admin in a signed-in session — `deploy_system` is agent-callable
+        # through `agents.manage`, so any other caller is told what was held
+        # back. Best-effort, like 7-10b.
+        if any(cfg.grants for cfg in manifest.agents.values()):
+            from services.system_apply import grants as apply_grants
+            try:
+                all_warnings.extend(await apply_grants.deploy(
+                    created_map, manifest.agents, current_user, request))
+            except Exception as e:
+                reason, _ = _failure_reason(e)
+                logger.exception(f"Grant phase failed for system '{manifest.name}'")
+                all_warnings.append(f"Failed to write grants: {reason}")
+
+        # 10d. The seat each created member holds (trinity-enterprise#1030
+        # CP4), through the assignment module's optional writer only, and —
+        # like 10c — only for an admin in a signed-in session; otherwise every
+        # declared seat is listed as held back. Person seats are never filled.
+        # Best-effort, like 7-10c.
+        if any(cfg.seat is not None for cfg in manifest.agents.values()):
+            from services.system_apply import seats as apply_seats
+            try:
+                all_warnings.extend(apply_seats.deploy(created_map, manifest.agents, current_user))
+            except Exception as e:
+                reason, _ = _failure_reason(e)
+                logger.exception(f"Seat phase failed for system '{manifest.name}'")
+                all_warnings.append(f"Failed to write seats: {reason}")
+
         # 11. Create System View (ORG-001 Phase 4, optional)
         # create_system_view self-guards (returns None on error).
         system_view_id = None
@@ -2134,6 +2657,7 @@ async def deploy_manifest(
             status="partial" if failed else "deployed",
             system_name=manifest.name,
             agents_created=created_agents,
+            agents_declared_only=declared_only,
             prompt_updated=prompt_updated,
             permissions_configured=permissions_count,
             schedules_created=schedules_count,
@@ -2149,3 +2673,2096 @@ async def deploy_manifest(
     except Exception as e:
         logger.exception(f"System deployment failed: {e}")
         raise HTTPException(status_code=500, detail=f"Deployment failed: {str(e)}")
+
+
+# ============================================================================
+# Apply mode (trinity-enterprise#695): reconcile a live system to its manifest.
+#
+# `deploy_manifest` above is CREATE mode and stays exactly as it is (AC6): it
+# can only create, so re-sending a manifest whose agents exist builds `_N`
+# copies. Apply is the sibling verb (`POST /api/systems/apply`): per declared
+# member, absent -> create, present -> update the declared fields in place,
+# present but undeclared -> report as drift. Four parts, in this order:
+#
+#   read_apply_snapshot   reads only; a failed read is a retryable blocker,
+#                         never an empty value (create fails OPEN, apply CLOSED)
+#   resolve_apply_plan    pure; per-member verdicts and the ordered write-set
+#   execute_apply_plan    writes only, each outcome from the writer's return
+#   apply_manifest        snapshot + plan -> refuse, or lock -> re-snapshot +
+#                         re-plan under the lock -> execute under a lease keeper
+#
+# Requirement: docs/memory/requirements/roadmap.md §16.5.4.
+# ============================================================================
+
+# Blocker codes. The first five are RETRYABLE: nothing about the manifest is
+# wrong, a read or the lock failed (the router answers 503 when only these
+# are present, 409 otherwise).
+APPLY_RETRYABLE_BLOCKERS = frozenset({
+    "membership_tags_unreadable",
+    "roster_unreadable",
+    "member_reads_unavailable",
+    "apply_in_progress",
+    "apply_lock_unavailable",
+})
+
+# One detail for EVERY declared name the caller may not manage (another user's
+# agent, a shared-with-me agent, a soft-deleted name, a reserved volume base,
+# a container nobody owns). Byte-identical apart from the name, which the
+# caller supplied, so the code and the text never say which of those it is
+# (Invariant #8). It adds no existence oracle: `POST /api/agents` already
+# answers 409 to any creator for a name that is taken, soft-deleted or
+# volume-reserved (`crud._check_name_availability`), and create mode's dry
+# run warns `_2` for a live one.
+_NAME_UNAVAILABLE_DETAIL = (
+    "The agent name '{name}' is in use or reserved by an agent you cannot manage."
+)
+_NAME_UNAVAILABLE_REMEDY = (
+    "Rename this member in the manifest, or have the agent's owner or an admin "
+    "run apply."
+)
+
+
+def _apply_blocker(
+    code: str, member: Optional[str], detail: str, remedy: str
+) -> "SystemApplyBlocker":
+    return SystemApplyBlocker(
+        code=code,
+        member=member,
+        detail=detail,
+        remedy=remedy,
+        retryable=code in APPLY_RETRYABLE_BLOCKERS,
+    )
+
+
+def _read_error(exc: Exception) -> str:
+    """What a caller is told about a failed READ: the exception class only.
+    A database error's message carries the SQL text and its parameters, which
+    belong in the server log, not in an API response."""
+    logger.warning("system apply: read failed (%s): %s", type(exc).__name__, exc)
+    return type(exc).__name__
+
+
+def _read_failed(member: Optional[str], what: str, exc: Optional[Exception] = None) -> "SystemApplyBlocker":
+    """A read apply depends on failed: retryable, never "absent" (P-B)."""
+    reason = f" ({_read_error(exc)})" if exc is not None else ""
+    return _apply_blocker(
+        "member_reads_unavailable",
+        member,
+        f"Could not read {what}{reason}.",
+        "Retry; apply never treats an unreadable value as absent.",
+    )
+
+
+@dataclass
+class ApplyMemberState:
+    """What the snapshot knows about one DECLARED member.
+
+    `status` is `absent` (the name is free: create it), `unavailable` (taken
+    by something the caller may not manage: the uniform refusal) or `managed`
+    (a live agent the caller may manage: reconcile it). The per-member reads
+    are populated only for a `managed` member that passed every gate.
+    """
+
+    short_name: str
+    name: str
+    status: str = "absent"
+    owner_username: Optional[str] = None
+    labels: Optional[Dict[str, str]] = None
+    tags: List[str] = field(default_factory=list)
+    edges: List[str] = field(default_factory=list)
+    schedules: List = field(default_factory=list)
+    folders: Optional[object] = None  # db_models.SharedFolderConfig, or None
+    resource_limits: Optional[Dict[str, Optional[str]]] = None
+    restart_pending: bool = False
+    blocked: bool = False
+    # trinity-enterprise#1030: a `naming: bare` member that is live and
+    # manageable but carries no system tag. Adopted by the plan (one additive
+    # tag write), never refused as claimed: that inference is prefix-based and
+    # does not exist for a bare name.
+    untagged: bool = False
+    # trinity-enterprise#1030: individually assigned skills and held sets,
+    # read only when the member declares `skills:` / `skill_sets:`.
+    skills: List[str] = field(default_factory=list)
+    skill_sets: List[str] = field(default_factory=list)
+    # trinity-enterprise#1030 CP2: held capabilities, read only when the
+    # member declares `grants:`.
+    grants: List[str] = field(default_factory=list)
+    # trinity-enterprise#1030 CP3: every stored gate row by skill key
+    # (tombstones included), read only when the member declares `gates:`.
+    gates: Dict[str, dict] = field(default_factory=dict)
+    # trinity-enterprise#1043: every skill the member holds (casefolded; set-
+    # derived included), read with the gates, so the plan knows which declared
+    # gate sits on a skill that keeps running if its write fails.
+    skill_names: Set[str] = field(default_factory=set)
+    # trinity-enterprise#1068: the held skills an assigned set names
+    # (casefolded) — an unassign cannot take one without its siblings, so a
+    # failed gate on it stays report-only (`skill_held_via_set`).
+    skill_via_sets: Set[str] = field(default_factory=set)
+    # trinity-enterprise#1030 CP4: the seat the member holds (None = not
+    # observed on this install) and each declared person seat's status.
+    seat: Optional[Dict[str, object]] = None
+    person_seats: Dict[Tuple[str, str], str] = field(default_factory=dict)
+    # trinity-enterprise#1030 CP5: a `deploy: false` member. Only two facts
+    # are read: whether its name is live, and whether its template is one the
+    # catalog offers. Nothing else is read, gated or written.
+    declared_only: bool = False
+    live: bool = False
+    template_in_catalog: Optional[bool] = None
+    # #4131: the declared-only name is an agent on the caller's roster that
+    # carries the system tag, so restart and teardown reach it.
+    tagged_by_system: bool = False
+    # #4131: an untagged roster agent holding the name is a member by the
+    # `<system>-` prefix alone (prefixed mode), so restart reaches it by name.
+    prefixed_by_system: bool = False
+
+
+@dataclass
+class ApplySnapshot:
+    """Everything apply read, and every blocker the reads or gates produced."""
+
+    system_name: str
+    roster: List[str]
+    membership: SystemMembership
+    members: Dict[str, ApplyMemberState]
+    blockers: List["SystemApplyBlocker"]
+    caller_id: int
+    caller_username: str
+    caller_role: str
+    caller_is_admin: bool
+    stored_prompt: Optional[str] = None
+    # The fleet default a member to create gets when it declares no resources
+    # (`_manifest_default_resources`, a settings read): read here so a failure
+    # is a blocker, never an exception after the first write.
+    default_resources: Optional[Dict[str, str]] = None
+    views: List = field(default_factory=list)
+    # trinity-enterprise#1030: one library verdict per declared skill / set
+    # name (None = assignable), read once for the whole manifest.
+    skill_verdicts: Dict = field(default_factory=dict)
+    skill_set_verdicts: Dict = field(default_factory=dict)
+    # trinity-enterprise#1030 CP2: does the CALLER pass the grant route's gate
+    # (`dependencies.is_interactive_admin`)? Decides write vs. held-back report
+    # for every `grants:` and `seat:` entry; never a blocker.
+    grant_writer: bool = False
+    # trinity-enterprise#1068: `apply_unassign_on_failed_gate`, read once here
+    # so the dry run and the run decide the same consequence.
+    unassign_on_failed_gate: bool = True
+
+
+def _member_container(name: str):
+    """The one per-member container read apply makes (a test seam).
+
+    `get_agent_container` turns every Docker error into None, so a caller must
+    never read None as "no container" for a name the tri-state roster already
+    showed: the snapshot treats it as a read failure.
+    """
+    from services.docker_service import get_agent_container
+    return get_agent_container(name)
+
+
+def _container_labels(container) -> Optional[Dict[str, str]]:
+    if container is None:
+        return None
+    try:
+        labels = (container.attrs or {}).get("Config", {}).get("Labels")
+    except Exception:  # noqa: BLE001 — an unreadable container is a read failure
+        return None
+    return dict(labels) if isinstance(labels, dict) else None
+
+
+async def _restart_pending(name: str, container) -> bool:
+    """Does the stored config differ from what this container runs?
+
+    The platform's OWN start-path drift predicates, so apply's
+    `restart_required` cannot disagree with what the next start will do:
+    computed every run from the container, never from this run's writes,
+    so an override stored by an earlier apply keeps reporting until a restart.
+    """
+    from services.agent_service.helpers import (
+        check_resource_limits_match,
+        check_shared_folder_mounts_match,
+    )
+    resources_match = check_resource_limits_match(container, name)
+    # strict: a failed source-volume inspect raises (a read failure, P-B)
+    # instead of reading as "mounts match".
+    folders_match = await check_shared_folder_mounts_match(container, name, strict=True)
+    return not (resources_match and folders_match)
+
+
+def _evidence_remedy(name: str, system_name: str, declared: bool) -> str:
+    if declared:
+        return (
+            f"Add this system's tag to '{name}' with the additive "
+            f"`POST /api/agents/{name}/tags/{system_name}` (or the MCP `tag_agent` "
+            f"tool); not `PUT /api/agents/{name}/tags`, which replaces the whole set."
+        )
+    return (
+        f"If '{name}' belongs to '{system_name}', add the tag '{system_name}' "
+        f"(`POST /api/agents/{name}/tags/{system_name}`). If it belongs to another "
+        f"system (e.g. '{system_name}-extra'), tag it with THAT system's name, "
+        f"which takes it out of this one. Or rename it."
+    )
+
+
+def _template_in_catalog(template: str) -> bool:
+    """trinity-enterprise#1030 CP5: is a declared-only member's template one
+    the catalog offers? `github:` asks the catalog (#3545); `local:` asks the
+    one resolver create mode uses (curated root, then the deploy-local store),
+    so "in the catalog" means "a deploy would find it". Raises on a failed
+    read; an id the resolver refuses is not in the catalog."""
+    from services import template_service
+    if template.startswith("github:"):
+        return template_service.is_catalog_github_template(template[len("github:"):])
+    from services.agent_service import crud
+    try:
+        path = crud._resolve_local_template_dir(template[len("local:"):])
+    except HTTPException:
+        return False
+    return (path / "template.yaml").exists()
+
+
+async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> ApplySnapshot:
+    """Read what apply needs to plan. Reads only, never writes (AC4).
+
+    Roster: the live ownership rows (a recovered agent with no container
+    included) the caller may manage, by the name classification's predicate (a live owner +
+    `can_user_share_agent` + `agent_may_reach(manage=True)`): an agent merely
+    shared with the caller, or a container nobody owns, is outside it, so it
+    never blocks the run or shows as drift. The tri-state container list is
+    still read (an unreadable Docker refuses) — never
+    `get_accessible_agents`, which is built on `list_all_agents_fast` and
+    returns `[]` without a Docker client, so the evidence gate would pass over
+    an empty membership (#2196 class). The ownership rows bring in a recovered
+    agent with no container.
+
+    Each declared name is classified GLOBALLY, never from the caller's roster:
+    taken (a container, the #1790 predicate, or a reserved volume base)
+    AND a live agent the caller may manage (the deploy-local predicate,
+    `can_user_share_agent` + `agent_may_reach(manage=True)`) -> the specific
+    gates, then reconcile; taken but not manageable -> one uniform
+    `member_name_unavailable`; free -> create. Never "absent -> create" for a
+    taken name, so apply cannot suffix.
+    """
+    from dependencies import agent_may_reach, assert_admin, is_interactive_admin
+
+    from services import docker_service
+    from services.agent_service.crud import agent_name_is_taken
+
+    system = manifest.name
+    blockers: List[SystemApplyBlocker] = []
+
+    try:
+        assert_admin(current_user)
+        caller_is_admin = True
+    except HTTPException:
+        caller_is_admin = False
+
+    snapshot = ApplySnapshot(
+        system_name=system,
+        roster=[],
+        membership=SystemMembership(members=[]),
+        members={},
+        blockers=blockers,
+        caller_id=current_user.id,
+        caller_username=current_user.username,
+        caller_role=current_user.role,
+        caller_is_admin=caller_is_admin,
+        grant_writer=is_interactive_admin(current_user),
+    )
+
+    # 1. Roster (see the docstring).
+    states = docker_service.agent_container_states()
+    roster_ok = docker_ok = states is not None
+    if states is None:
+        blockers.append(_apply_blocker(
+            "roster_unreadable", None,
+            "Docker could not be asked which agent containers exist.",
+            "Retry when Docker is reachable. An unreadable Docker would read as "
+            "'no members, no drift', so apply refuses instead.",
+        ))
+        states = {}
+    try:
+        live_rows = set(db.get_all_agent_metadata().keys())
+    except Exception as e:  # noqa: BLE001 — fail closed (P-B)
+        roster_ok = False
+        live_rows = set()
+        blockers.append(_apply_blocker(
+            "roster_unreadable", None,
+            f"Could not read the agent ownership rows ({_read_error(e)}).",
+            "Retry; apply never plans over a roster it could not read.",
+        ))
+    if roster_ok:
+        try:
+            # A live owner row first (`bool(owner)`): an admin
+            # passes `can_user_share_agent` for ANY name, so a container with no
+            # live owner row (nobody's to manage; its tag route 404s) would
+            # otherwise refuse an admin's run or show as drift.
+            snapshot.roster = [
+                n for n in sorted(live_rows)
+                if db.can_user_share_agent(current_user.username, n)
+                and agent_may_reach(current_user, n, manage=True)
+            ]
+        except Exception as e:  # noqa: BLE001
+            roster_ok = False
+            blockers.append(_apply_blocker(
+                "roster_unreadable", None,
+                f"Could not check access to the agents ({_read_error(e)}).",
+                "Retry; apply never plans over a roster it could not read.",
+            ))
+
+    # 2. Membership through THE one predicate, and the evidence gate (AC5).
+    declared = declared_names(manifest)
+    if roster_ok:
+        snapshot.membership = system_membership(system, snapshot.roster, naming=manifest.naming)
+        if not snapshot.membership.tags_readable:
+            blockers.append(_apply_blocker(
+                "membership_tags_unreadable", None,
+                "The agents' tags could not be read, so membership can only be "
+                "guessed from names.",
+                "Retry; apply refuses on unverified membership rather than guess.",
+            ))
+
+    # 3. Each declared name, classified globally.
+    for short, name in declared.items():
+        state = ApplyMemberState(short_name=short, name=name)
+        snapshot.members[short] = state
+        try:
+            taken = (
+                name in states
+                or agent_name_is_taken(name)
+                or db.is_volume_base_reserved(name)
+            )
+        except Exception as e:  # noqa: BLE001
+            blockers.append(_read_failed(name, f"whether '{name}' exists", e))
+            state.blocked = True
+            continue
+        if not manifest.agents[short].deploy:  # trinity-enterprise#1030 CP5
+            state.declared_only, state.live = True, bool(taken)
+            state.tagged_by_system = bool(  # #4131
+                roster_ok and snapshot.membership.tags_readable
+                and snapshot.membership.evidence.get(name) in ("tag", "both"))
+            state.prefixed_by_system = bool(
+                roster_ok and snapshot.membership.tags_readable
+                and snapshot.membership.evidence.get(name) == "prefix")
+            try:
+                state.template_in_catalog = _template_in_catalog(manifest.agents[short].template)
+            except Exception as e:  # noqa: BLE001
+                blockers.append(_read_failed(name, f"the template catalog for '{name}'", e))
+                state.blocked = True
+            if not taken and not docker_ok:
+                state.blocked = True  # P-B: liveness unknown
+            continue
+        if not taken:
+            if not docker_ok:
+                # P-B: with Docker unreadable a name held only by a container
+                # reads as free; its verdict is unknown, never `create`.
+                state.blocked = True
+            continue  # absent -> create
+
+        try:
+            owner = db.get_agent_owner(name)
+            manageable = bool(owner) and bool(
+                db.can_user_share_agent(current_user.username, name)
+            ) and agent_may_reach(current_user, name, manage=True)
+        except Exception as e:  # noqa: BLE001
+            blockers.append(_read_failed(name, f"who manages '{name}'", e))
+            state.blocked = True
+            continue
+        if not manageable:
+            state.status = "unavailable"
+            state.blocked = True
+            blockers.append(_apply_blocker(
+                "member_name_unavailable", name,
+                _NAME_UNAVAILABLE_DETAIL.format(name=name),
+                _NAME_UNAVAILABLE_REMEDY,
+            ))
+            continue
+
+        # A live agent the caller may manage: only now the specific gates.
+        state.status = "managed"
+        state.owner_username = owner.get("owner_username")
+        try:
+            is_system = bool(owner.get("is_system")) or bool(db.is_system_agent(name))
+            ephemeral = db.get_agent_ephemeral_info(name)
+        except Exception as e:  # noqa: BLE001
+            blockers.append(_read_failed(name, f"the kind of agent '{name}' is", e))
+            state.blocked = True
+            continue
+        if ephemeral is None:
+            # The name is known to exist; an empty follow-up read is a read
+            # failure, not an absence (P-B).
+            blockers.append(_read_failed(name, f"the kind of agent '{name}' is"))
+            state.blocked = True
+            continue
+        gate = None
+        if is_system:
+            gate = ("member_is_system_agent",
+                    f"'{name}' is a system agent; apply never reconfigures one.",
+                    "Remove it from the manifest.")
+        elif ephemeral.get("is_ephemeral"):
+            gate = ("member_is_ephemeral",
+                    f"'{name}' is an ephemeral agent (budgeted, discarded at its budget).",
+                    "Remove it from the manifest, or let it be discarded and re-apply.")
+        elif not docker_ok:
+            # Docker could not be asked: `roster_unreadable` already refuses
+            # the run, and "no container" is unknown here, not absent (P-B,
+            # #2196) — never a `member_container_missing` that says otherwise.
+            state.blocked = True
+            continue
+        elif name not in states:
+            gate = ("member_container_missing",
+                    f"'{name}' has an ownership row but no container.",
+                    f"Start '{name}' (its container is rebuilt from the workspace "
+                    "volume), then re-apply.")
+        elif (roster_ok and snapshot.membership.tags_readable
+              and name not in snapshot.membership.members and manifest.naming == "bare"):
+            # trinity-enterprise#1030 (T1 = A): `naming: bare` + the declared
+            # name + a person's credential is the explicit statement; the plan
+            # adopts it. Residual, stated: a bare agent tagged with ANOTHER
+            # bare system's name cannot be told apart (no prefix evidence), so
+            # the plan SHOWS its tags and membership stays a union.
+            state.untagged = True
+        elif roster_ok and snapshot.membership.tags_readable and name not in snapshot.membership.members:
+            gate = ("member_claimed_by_another_system",
+                    f"'{name}' carries another system's tag that claims it.",
+                    f"Remove that tag from '{name}' if it belongs to '{system}', or "
+                    "rename this member in the manifest.")
+        if gate is not None:
+            blockers.append(_apply_blocker(gate[0], name, gate[1], gate[2]))
+            state.blocked = True
+            continue
+        if snapshot.membership.evidence.get(name) == "prefix":
+            state.blocked = True  # refused below by the evidence gate (AC5)
+            continue
+
+        # The member passed every gate: read what the plan compares.
+        try:
+            state.tags = list(db.get_agent_tags(name) or [])
+            state.edges = list(db.get_permitted_agents(name) or [])
+            state.schedules = list(db.list_agent_schedules(name) or [])
+            state.folders = db.get_shared_folder_config(name)
+            state.resource_limits = db.get_resource_limits(name)
+            from services.system_apply import skills as apply_skills
+            if apply_skills.declares(manifest.agents[state.short_name]):  # trinity-enterprise#1030
+                state.skills, state.skill_sets = apply_skills.read_member(name)
+            if manifest.agents[state.short_name].grants is not None:  # trinity-enterprise#1030 CP2
+                from services.system_apply import grants as apply_grants
+                state.grants = apply_grants.read_member(name)
+            if manifest.agents[state.short_name].gates is not None:  # trinity-enterprise#1030 CP3
+                from services.system_apply import gates as apply_gates
+                state.gates = apply_gates.read_member(name)
+                state.skill_names = apply_gates.read_held_skills(name)  # trinity-enterprise#1043
+                state.skill_via_sets = apply_gates.read_held_via_sets(name)  # trinity-enterprise#1068
+            from services.system_apply import seats as apply_seats
+            if apply_seats.declares(manifest.agents[state.short_name]):  # trinity-enterprise#1030 CP4
+                state.seat, state.person_seats = apply_seats.read_member(
+                    name, manifest.agents[state.short_name])
+        except Exception as e:  # noqa: BLE001
+            blockers.append(_read_failed(name, f"the configuration of '{name}'", e))
+            state.blocked = True
+            continue
+        try:
+            container = _member_container(name)
+            state.labels = _container_labels(container)
+            if state.labels is None:
+                blockers.append(_read_failed(name, f"the container of '{name}'"))
+                state.blocked = True
+                continue
+            state.restart_pending = await _restart_pending(name, container)
+        except Exception as e:  # noqa: BLE001
+            blockers.append(_read_failed(name, f"the container of '{name}'", e))
+            state.blocked = True
+            continue
+
+    # The evidence gate, literally (AC5): ANY computed member, declared or
+    # not, matched by name only. Before any write, and before the lock.
+    if roster_ok and snapshot.membership.tags_readable:
+        unavailable = {s.name for s in snapshot.members.values() if s.status == "unavailable"}
+        declared_set = set(declared.values())
+        # #4131: a `deploy: false` member is never written, so the gate (which
+        # protects writes) does not apply, and "add the tag" would make it
+        # restart-reachable. Excluded in both naming modes.
+        declared_only = {s.name for s in snapshot.members.values() if s.declared_only}
+        for member in snapshot.membership.members:
+            if (snapshot.membership.evidence.get(member) != "prefix" or member in unavailable
+                    or member in declared_only):
+                continue
+            is_declared = member in declared_set
+            blockers.append(_apply_blocker(
+                "membership_evidence_prefix_only", member,
+                f"'{member}' is matched to '{system}' by its name only; no deploy "
+                f"ever tagged it{'' if is_declared else ', and the manifest does not declare it'}.",
+                _evidence_remedy(member, system, is_declared),
+            ))
+
+    # 3b. trinity-enterprise#1030: the library verdict for every declared
+    # skill and set, once for the manifest.
+    if any(cfg.skills or cfg.skill_sets for cfg in manifest.agents.values()):
+        from services.system_apply import skills as apply_skills
+        try:
+            snapshot.skill_verdicts, snapshot.skill_set_verdicts = (
+                apply_skills.read_library(manifest))
+        except Exception as e:  # noqa: BLE001
+            blockers.append(_read_failed(None, "the skills library", e))
+
+    # 4. The default resources for members to create that declare none.
+    if any(st.status == "absent" and not st.blocked and not manifest.agents[st.short_name].resources
+           for st in snapshot.members.values()):
+        try:
+            snapshot.default_resources = dict(_manifest_default_resources())
+        except Exception as e:  # noqa: BLE001
+            blockers.append(_read_failed(None, "the default agent resources", e))
+
+    # trinity-enterprise#1068: the per-install switch, once per apply.
+    if any(cfg.gates for cfg in manifest.agents.values()):
+        try:
+            from services.settings_service import get_ops_setting
+            snapshot.unassign_on_failed_gate = bool(
+                get_ops_setting("apply_unassign_on_failed_gate", as_type=bool))
+        except Exception as e:  # noqa: BLE001
+            blockers.append(_read_failed(None, "the apply_unassign_on_failed_gate setting", e))
+
+    # 5. The platform prompt and the system view (only when the manifest asks).
+    if manifest.prompt:
+        try:
+            setting = db.get_setting("trinity_prompt")
+            snapshot.stored_prompt = setting.value if setting is not None else None
+        except Exception as e:  # noqa: BLE001
+            blockers.append(_read_failed(None, "the platform prompt", e))
+    if manifest.system_view:
+        try:
+            # Own or shared views only: never another user's private view.
+            snapshot.views = list(db.list_user_system_views(str(current_user.id)) or [])
+        except Exception as e:  # noqa: BLE001
+            blockers.append(_read_failed(None, "your system views", e))
+
+    return snapshot
+
+
+# ----------------------------------------------------------------------------
+# Schedule matching: the seam schedule identity (trinity-enterprise#694 /
+# trinity#1198) plugs into.
+#
+# No identity column exists on `agent_schedules` (`db/tables.py`), so the
+# default policy matches by exact name, unique on BOTH sides, and fails closed
+# otherwise. The policy is a function over the declaration and the candidate
+# rows rather than a scalar key, because the id-first search those issues
+# describe is two-stage with an extra outcome: declared id -> stored id; no id
+# match but the same name -> `unlinked` (reported, never adopted). The writers
+# consume ACTIONS, never matches, so that policy replaces this one without
+# touching a writer.
+# ----------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class ScheduleMatch:
+    """How one declared schedule relates to the member's live rows."""
+
+    kind: str  # "matched" | "missing" | "unlinked" | "ambiguous"
+    row: Optional[object] = None
+    rows: Tuple = ()
+
+
+def schedule_match_policy(declared_entry: dict, live_rows) -> ScheduleMatch:
+    """The default policy: exact name, unique on both sides.
+
+    Never produces `unlinked`: with no identity to link by, every row is
+    "unlinked", so the #1198 rule read literally ("never adopt an unlinked
+    row") would make an in-place update impossible (AC2). Two live rows with
+    the declared name are `ambiguous`, which refuses the run.
+    """
+    same = [r for r in live_rows if getattr(r, "name", None) == declared_entry.get("name")]
+    if not same:
+        return ScheduleMatch("missing")
+    if len(same) > 1:
+        return ScheduleMatch("ambiguous", rows=tuple(same))
+    return ScheduleMatch("matched", row=same[0])
+
+
+@dataclass(frozen=True)
+class ScheduleAction:
+    """What apply does about one declared entry or one live row.
+
+    `create` / `update` are writes; `in_sync` is nothing; `enabled_differs`,
+    `undeclared` and `unlinked` are reports; `ambiguous` and `declared_twice`
+    are blockers.
+    """
+
+    kind: str
+    name: str
+    entry: Optional[dict] = None
+    row: Optional[object] = None
+    fields: Dict = field(default_factory=dict)   # update: column -> declared value
+    current: Dict = field(default_factory=dict)  # update: column -> live value
+
+
+# The manifest keys a MATCHED row is compared on, the `Schedule` column each
+# maps to, and whether the key is always compared. `timezone` and
+# `description` only when the entry declares them: comparing the defaults
+# `_build_schedule_create` fills in would reset a row's `Europe/Berlin` to UTC
+# and wipe a template's `purpose:` description. `enabled` is
+# never compared for a write.
+_SCHEDULE_DECLARED_FIELDS = (
+    ("cron", "cron_expression", True),
+    ("message", "message", True),
+    ("timezone", "timezone", False),
+    ("description", "description", False),
+)
+
+
+def resolve_declared_schedule_actions(
+    declared, live, *, match: Callable = schedule_match_policy
+) -> List[ScheduleAction]:
+    """Diff a member's declared schedules against its live rows (pure).
+
+    * declared, no match -> `create` (through the shared `_build_schedule_create`);
+    * matched -> `update` of only the declared fields that differ, or `in_sync`;
+      a different `enabled` is reported (`enabled_differs`), never written, so
+      apply cannot arm a row a template left off (#1198 §5) nor disarm one an
+      operator turned on;
+    * a live row no entry names -> `undeclared` (reported, left as it is: a
+      declared RENAME is therefore a `create` plus the old row reported, still
+      armed as it was, never presented as an update);
+    * two live rows with one name -> `ambiguous`; one name declared twice ->
+      `declared_twice` (both refuse the run; the writers never guess).
+    """
+    entries = list(declared or [])
+    counts: Dict = {}
+    for entry in entries:
+        counts[entry.get("name")] = counts.get(entry.get("name"), 0) + 1
+
+    actions: List[ScheduleAction] = []
+    named = set()
+    twice_reported = set()
+    for entry in entries:
+        name = entry.get("name")
+        named.add(name)
+        if counts[name] > 1:
+            if name not in twice_reported:
+                twice_reported.add(name)
+                actions.append(ScheduleAction("declared_twice", name, entry=entry))
+            continue
+        found = match(entry, live)
+        if found.kind == "missing":
+            actions.append(ScheduleAction("create", name, entry=entry))
+            continue
+        if found.kind == "ambiguous":
+            actions.append(ScheduleAction("ambiguous", name, entry=entry))
+            continue
+        if found.kind == "unlinked":
+            actions.append(ScheduleAction("unlinked", name, entry=entry, row=found.row))
+            continue
+        row = found.row
+        fields, current = {}, {}
+        for key, column, always in _SCHEDULE_DECLARED_FIELDS:
+            if not always and key not in entry:
+                continue
+            if entry.get(key) != getattr(row, column, None):
+                fields[column] = entry.get(key)
+                current[column] = getattr(row, column, None)
+        actions.append(ScheduleAction(
+            "update" if fields else "in_sync", name,
+            entry=entry, row=row, fields=fields, current=current,
+        ))
+        # P-F: a schedule the manifest creates is armed unless it says
+        # otherwise, so that is what "the manifest wants" means here too.
+        wanted = bool(entry.get("enabled", True))
+        if wanted != bool(getattr(row, "enabled", False)):
+            actions.append(ScheduleAction(
+                "enabled_differs", name, entry=entry, row=row,
+                fields={"enabled": wanted},
+                current={"enabled": bool(getattr(row, "enabled", False))},
+            ))
+
+    for row in live:
+        if getattr(row, "name", None) not in named:
+            actions.append(ScheduleAction("undeclared", row.name, row=row))
+    return actions
+
+
+# ----------------------------------------------------------------------------
+# The plan: pure over the manifest and the snapshot (P-D: the dry run and the
+# real run compute it with the same functions).
+# ----------------------------------------------------------------------------
+
+# Field coverage census. Every `SystemManifest` /
+# `SystemAgentConfig` field and every schedule key `_build_schedule_create`
+# reads appears here exactly once, so a new manifest key fails CI
+# (`test_ent695_apply_engine.py`) until someone decides what apply does with
+# it. `inert`: neither mode writes it anywhere.
+APPLY_FIELD_CLASSES = frozenset({"reconciled", "report-only", "create-only", "inert"})
+APPLY_FIELD_CLASSIFICATION: Dict[str, Tuple[str, str]] = {
+    "SystemManifest.name": ("reconciled", "the system tag and every member's name"),
+    "SystemManifest.description": ("inert", "neither mode stores it"),
+    "SystemManifest.prompt": ("reconciled", "admin only (P-F exception 3)"),
+    "SystemManifest.agents": ("reconciled", "absent -> create, present -> update"),
+    "SystemManifest.permissions": ("reconciled", "edges added; extras reported, never removed"),
+    "SystemManifest.default_tags": ("reconciled", "added, never replaced"),
+    "SystemManifest.system_view": ("reconciled", "created when absent; differences reported"),
+    "SystemManifest.naming": ("reconciled", "how a short name maps to a member name; prefixed is today"),
+    "SystemManifest.unknown_keys": ("report-only", "warnings from validate_manifest"),
+    "SystemManifest.unknown_agent_keys": ("report-only", "warnings from validate_manifest"),
+    "SystemAgentConfig.template": ("report-only", "template_differs; used to create"),
+    "SystemAgentConfig.resources": ("reconciled", "declared keys win as overrides (P-F exception 2)"),
+    "SystemAgentConfig.folders": ("reconciled", "declared keys only on an existing member"),
+    "SystemAgentConfig.schedules": ("reconciled", "matched by name; see schedule.*"),
+    "SystemAgentConfig.tags": ("reconciled", "added, never replaced"),
+    "SystemAgentConfig.kind": ("create-only", "nothing readable stores it"),
+    "SystemAgentConfig.skills": ("reconciled", "library skills assigned when missing; extras reported"),
+    "SystemAgentConfig.skill_sets": ("reconciled", "skill sets assigned when missing; extras reported"),
+    "SystemAgentConfig.grants": ("reconciled", "capabilities granted when missing, by an admin in a "
+                                 "signed-in session only (else grant_requires_interactive_admin); "
+                                 "extras reported, never revoked"),
+    "SystemAgentConfig.gates": ("reconciled", "explicit skill gates set or rewritten through the "
+                                "gate map's own write; undeclared gates reported, never cleared"),
+    "SystemAgentConfig.seat": ("reconciled", "the canon seat the agent holds, written only through "
+                               "an assignment module's optional writer; unobserved without it"),
+    "SystemAgentConfig.deploy": ("report-only", "false names a member without running it "
+                                 "(declared_only): template_in_catalog / template_not_in_catalog / "
+                                 "declared_only_member_live reported; never created, reconciled "
+                                 "or deleted"),
+    "SystemAgentConfig.person_seats": ("report-only", "seats a person must fill, by role and kind, "
+                                       "never a person; reported filled / vacant / unobserved, "
+                                       "never filled"),
+    "schedule.name": ("reconciled", "the match key"),
+    "schedule.cron": ("reconciled", "updated in place"),
+    "schedule.message": ("reconciled", "updated in place"),
+    "schedule.enabled": ("create-only", "never written on a matched row; enabled_differs"),
+    "schedule.timezone": ("reconciled", "only when declared"),
+    "schedule.description": ("reconciled", "only when declared"),
+}
+
+# The order the executor writes in, by kind (phase-major, as create mode does),
+# and each kind's `failed[].step`: the name the write itself reports, so a
+# skipped write and an attempted one never use two names for one writer.
+_APPLY_OP_STEP = {
+    "tag": "tag", "edge": "permissions", "folders": "folders", "resources": "resources",
+    "created_resources": "resources", "schedule_create": "schedules",
+    "schedule_update": "schedules", "created_schedules": "schedules",
+    # trinity-enterprise#1030 CP3: the approval map BEFORE the skill phases,
+    # so a skill is gated before it is delivered (ent#753).
+    "gate_set": "gates",
+    # trinity-enterprise#1030: after every other member write (the gates a
+    # skill brings are written with it, before delivery), before the starts.
+    "skill_assign": "skills", "skill_set_assign": "skill_sets",
+    # trinity-enterprise#1030 CP2: a capability after the member's skills, so a
+    # created member starts holding what the manifest says it holds.
+    "grant": "grants",
+    # trinity-enterprise#1030 CP4: the agent's own seat, last, through the
+    # assignment module's optional writer.
+    "seat_set": "seat",
+}
+_APPLY_OP_PHASES = tuple(_APPLY_OP_STEP)
+
+
+@dataclass
+class ApplyOp:
+    """One write the executor makes. `member` is the agent it names."""
+
+    kind: str
+    member: Optional[str]
+    short_name: str
+    args: Dict = field(default_factory=dict)
+
+
+@dataclass
+class ApplyMemberPlan:
+    name: str
+    short_name: str
+    verdict: str  # "create" | "update" | "unchanged" | "blocked"
+    config: SystemAgentConfig
+    creating: bool = False
+    changes: List["SystemApplyChange"] = field(default_factory=list)
+    ops: List[ApplyOp] = field(default_factory=list)
+    restart_required: bool = False
+    # trinity-enterprise#1030 CP6: config groups the platform could not observe.
+    unobserved: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ApplyPlan:
+    system_name: str
+    agent_names: Dict[str, str]  # short -> final, the full declared map
+    members: Dict[str, ApplyMemberPlan]
+    drift: List["SystemApplyDrift"]
+    blockers: List["SystemApplyBlocker"]
+    prompt: "SystemApplyPromptVerdict"
+    system_view: "SystemApplyViewVerdict"
+    prompt_op: Optional[ApplyOp] = None
+    view_op: Optional[ApplyOp] = None
+    warnings: List[str] = field(default_factory=list)
+    default_resources: Optional[Dict[str, str]] = None
+    adopted: List["SystemApplyAdoption"] = field(default_factory=list)
+    # #4130: the plan's adoption line, so a refused or real run can drop or
+    # restate it by identity.
+    adoption_warning: Optional[str] = None
+    # trinity-enterprise#1030: `SystemApplyResponse.summary`, per config group.
+    summary: Dict[str, Dict] = field(default_factory=dict)
+    # trinity-enterprise#1068: the snapshot's switch, stamped on each held
+    # skill's `gate_set` op.
+    unassign_on_failed_gate: bool = True
+
+
+def _apply_change(field_name: str, action: str, code: str, *, current=None,
+                  desired=None, note: Optional[str] = None) -> "SystemApplyChange":
+    return SystemApplyChange(field=field_name, action=action, code=code,
+                             current=current, desired=desired, note=note)
+
+
+def _normalized_tags(tags) -> List[str]:
+    """Lower/stripped, deduplicated, in declaration order: what `add_tag`
+    stores, so a declared `Prod` compares equal to a stored `prod` (AC1)."""
+    out: List[str] = []
+    for tag in tags:
+        normalized = str(tag).lower().strip()
+        if normalized and normalized not in out:
+            out.append(normalized)
+    return out
+
+
+def _desired_tags(system_name: str, default_tags, agent_tags) -> List[str]:
+    return _normalized_tags([system_name, *(default_tags or []), *(agent_tags or [])])
+
+
+def _desired_edges(agent_names: Dict[str, str], permissions) -> Dict[str, List[str]]:
+    """The edges the manifest wants, per source: what `set_permissions` would
+    STORE after create mode's writes — the last write per source wins (it is a
+    full replacement), self-edges dropped (it never stores one),
+    duplicates removed."""
+    write_set, _count = resolve_permission_edges(agent_names, permissions)
+    final: Dict[str, List[str]] = {}
+    for source, targets in write_set:
+        final[source] = list(targets)
+    return {
+        source: sorted({t for t in targets if t != source})
+        for source, targets in final.items()
+    }
+
+
+def _folders_error(folders) -> Optional[str]:
+    """`folders` must map `expose` / `consume` to booleans. Create mode does
+    not check (and stays as it is); apply must, or a `null` would compare
+    unequal on every run and break AC1."""
+    if folders is None:
+        return None
+    if not isinstance(folders, dict):
+        return "folders must be a mapping of expose / consume to true or false"
+    unknown = sorted(str(k) for k in folders if k not in ("expose", "consume"))
+    if unknown:
+        return f"unknown folders key(s): {', '.join(unknown)} (expected expose, consume)"
+    bad = sorted(str(k) for k, v in folders.items() if not isinstance(v, bool))
+    if bad:
+        return f"folders value(s) for {', '.join(bad)} must be true or false"
+    return None
+
+
+def _normalized_resources(resources) -> Tuple[Dict[str, str], Optional[str]]:
+    """The declared `cpu` / `memory`, through create's own validators."""
+    from services.agent_service.capabilities import normalize_cpu, normalize_memory
+    from services.agent_service.crud import _get_default_resource
+
+    if resources is None:
+        return {}, None
+    if not isinstance(resources, dict):
+        return {}, "resources must be a mapping of cpu / memory"
+    out: Dict[str, str] = {}
+    try:
+        if resources.get("cpu") not in (None, ""):
+            out["cpu"] = normalize_cpu(resources["cpu"], _get_default_resource("cpu"))
+        if resources.get("memory") not in (None, ""):
+            out["memory"] = normalize_memory(resources["memory"], _get_default_resource("memory"))
+    except ValueError as e:
+        return {}, _failure_reason(e)[0]
+    return out, None
+
+
+def _schedule_entry_error(entry: dict, *, cron: Optional[str] = None,
+                          timezone: Optional[str] = None) -> Optional[Tuple[str, str]]:
+    """(code, detail) when a row apply would create or update is invalid.
+
+    The scheduler's own parser (#1472, #1823), so a row apply writes can
+    always be armed. Create mode's gap (#2992: a manifest cron is never
+    parsed) is left alone (AC6).
+    """
+    from services.schedule_validation import validate_cron_expression, validate_timezone
+
+    try:
+        _build_schedule_create(entry)
+    except Exception as e:  # noqa: BLE001 — the writer's own model rejected it
+        return "schedule_definition_invalid", _failure_reason(e)[0]
+    cron = cron if cron is not None else entry.get("cron")
+    tz = timezone if timezone is not None else entry.get("timezone", "UTC")
+    try:
+        validate_timezone(tz)
+    except Exception as e:  # noqa: BLE001
+        return "schedule_timezone_invalid", _failure_reason(e)[0]
+    try:
+        validate_cron_expression(cron, tz or "UTC")
+    except Exception as e:  # noqa: BLE001
+        return "schedule_cron_invalid", _failure_reason(e)[0]
+    return None
+
+
+def _well_formed_schedule_entries(cfg: SystemAgentConfig, name: str, blockers: List) -> List[dict]:
+    """The declared schedule entries the writer's own model accepts.
+
+    `validate_manifest` checks only that `name` / `cron` / `message` are
+    PRESENT, so `{name: [daily]}` reaches here; matching hashes the name and
+    would raise an unnamed 500. Each rejected entry is a
+    `schedule_definition_invalid` blocker, and only accepted entries are
+    matched.
+    """
+    accepted = []
+    for index, entry in enumerate(cfg.schedules or []):
+        try:
+            _build_schedule_create(entry)
+        except Exception as e:  # noqa: BLE001 — ScheduleCreate rejected a field type
+            blockers.append(_apply_blocker(
+                "schedule_definition_invalid", name,
+                f"Schedule {index} of '{name}': {_failure_reason(e)[0]}",
+                "Give each schedule a string name, cron and message."))
+            continue
+        accepted.append(entry)
+    return accepted
+
+
+def _schedule_view(entry_or_row) -> Dict:
+    """The schedule fields a report shows. Never webhook tokens or secrets."""
+    if isinstance(entry_or_row, dict):
+        return {k: entry_or_row.get(k) for k in
+                ("name", "cron", "message", "enabled", "timezone", "description")
+                if k in entry_or_row}
+    row = entry_or_row
+    return {
+        "name": row.name, "cron": row.cron_expression, "message": row.message,
+        "enabled": bool(row.enabled), "timezone": row.timezone,
+        "description": row.description,
+    }
+
+
+def _plan_existing_member(mp: ApplyMemberPlan, state: ApplyMemberState, manifest: SystemManifest,
+                          snapshot: ApplySnapshot, desired_edges: Dict[str, List[str]],
+                          declared_final: set, normalized_resources: Dict[str, str],
+                          blockers: List) -> None:
+    """Changes and writes for a live member the caller may manage."""
+    from services.agent_service.crud import _get_default_resource
+
+    cfg, name, short = mp.config, mp.name, mp.short_name
+    labels = state.labels or {}
+
+    # Tags: additive. Extra tags are not drift and are not reported.
+    live_tags = set(_normalized_tags(state.tags))
+    missing = [t for t in _desired_tags(manifest.name, manifest.default_tags, cfg.tags)
+               if t not in live_tags]
+    if state.untagged and manifest.name in missing:
+        # trinity-enterprise#1030: the system tag on an untagged bare member
+        # is an ADOPTION — written by the same additive `tag` op, reported
+        # under its own code so the dry run cannot read as a routine tag.
+        mp.changes.append(_apply_change(
+            "members", "write", "member_adopted",
+            current=sorted(live_tags), desired=[manifest.name],
+            note=("declared under naming: bare; the system tag records membership from "
+                  "here on. If one of the current tags is another system's name, this "
+                  "agent will belong to two systems")))
+        mp.ops.append(ApplyOp("tag", name, short, {"tag": manifest.name}))
+        missing = [t for t in missing if t != manifest.name]
+    if missing:
+        mp.changes.append(_apply_change("tags", "write", "tag_missing",
+                                        current=sorted(live_tags), desired=missing))
+        mp.ops.extend(ApplyOp("tag", name, short, {"tag": t}) for t in missing)
+
+    # Edges: missing ones added; a live edge between two declared members that
+    # the manifest does not want is reported, never removed.
+    live_edges = set(state.edges)
+    wanted = desired_edges.get(name, [])
+    add = [t for t in wanted if t not in live_edges]
+    if add:
+        mp.changes.append(_apply_change("permissions", "write", "permission_missing",
+                                        current=sorted(live_edges & declared_final),
+                                        desired=add))
+        mp.ops.extend(ApplyOp("edge", name, short, {"target": t}) for t in add)
+    extra = sorted((live_edges & declared_final) - set(wanted) - {name})
+    if extra:
+        mp.changes.append(_apply_change(
+            "permissions", "report", "permission_extra", current=extra,
+            note="apply never removes an edge; remove it by hand if it is unwanted"))
+
+    # Folders: only the declared keys.
+    folder_write: Dict[str, bool] = {}
+    if isinstance(cfg.folders, dict):
+        live = {
+            "expose": bool(getattr(state.folders, "expose_enabled", False)),
+            "consume": bool(getattr(state.folders, "consume_enabled", False)),
+        }
+        for key in ("expose", "consume"):
+            if key in cfg.folders and cfg.folders[key] != live[key]:
+                folder_write[key] = cfg.folders[key]
+                mp.changes.append(_apply_change(f"folders.{key}", "write", "folder_differs",
+                                                current=live[key], desired=cfg.folders[key]))
+    if folder_write:
+        mp.ops.append(ApplyOp("folders", name, short, {
+            "expose_enabled": folder_write.get("expose"),
+            "consume_enabled": folder_write.get("consume"),
+        }))
+
+    # Resources: declared keys win as a per-agent override (P-F exception 2).
+    stored = dict(state.resource_limits or {})
+    resource_write: Dict[str, str] = {}
+    label_mismatch = False
+    for key, desired in normalized_resources.items():
+        effective = (stored.get(key) or labels.get(f"trinity.{key}")
+                     or _get_default_resource(key))
+        if desired != effective:
+            resource_write[key] = desired
+            mp.changes.append(_apply_change(f"resources.{key}", "write", "resource_differs",
+                                            current=effective, desired=desired,
+                                            note="takes effect at the member's next restart"))
+            if desired != labels.get(f"trinity.{key}"):
+                label_mismatch = True
+    if resource_write:
+        # The omitted key keeps its stored value: `set_resource_limits` writes
+        # both columns, and None would clear it.
+        mp.ops.append(ApplyOp("resources", name, short, {
+            "cpu": resource_write.get("cpu", stored.get("cpu")),
+            "memory": resource_write.get("memory", stored.get("memory")),
+        }))
+
+    # Template: reported, never recreated. `kind` is create-only.
+    live_template = labels.get("trinity.template") or ""
+    if live_template != cfg.template:
+        mp.changes.append(_apply_change(
+            "template", "report", "template_differs", current=live_template or None,
+            desired=cfg.template, note="apply never recreates an agent"))
+
+    # Schedules.
+    entries = _well_formed_schedule_entries(cfg, name, blockers)
+    for action in resolve_declared_schedule_actions(entries, state.schedules):
+        field_name = f"schedule:{action.name}"
+        if action.kind == "create":
+            error = _schedule_entry_error(action.entry)
+            if error:
+                blockers.append(_apply_blocker(error[0], name, f"Schedule '{action.name}': {error[1]}",
+                                               "Fix the schedule in the manifest."))
+                continue
+            mp.changes.append(_apply_change(field_name, "write", "schedule_create",
+                                            desired=_schedule_view(action.entry)))
+            # Created as the AGENT OWNER, like a template-materialized row, so
+            # the owner can still edit and delete it.
+            mp.ops.append(ApplyOp("schedule_create", name, short, {
+                "entry": action.entry, "owner_username": state.owner_username}))
+        elif action.kind == "update":
+            error = _schedule_entry_error(
+                action.entry,
+                cron=action.fields.get("cron_expression", action.row.cron_expression),
+                timezone=action.fields.get("timezone", action.row.timezone) or "UTC",
+            )
+            if error:
+                blockers.append(_apply_blocker(error[0], name, f"Schedule '{action.name}': {error[1]}",
+                                               "Fix the schedule in the manifest."))
+                continue
+            # `update_schedule` is owner-or-admin and returns None otherwise —
+            # silently. Refuse up front instead.
+            if not (snapshot.caller_role == "admin" or action.row.owner_id == snapshot.caller_id):
+                blockers.append(_apply_blocker(
+                    "schedule_not_updatable_by_caller", name,
+                    f"Schedule '{action.name}' on '{name}' belongs to another user; "
+                    "only its owner or an admin can change it.",
+                    "Ask the schedule's owner or an admin to run apply, or leave the "
+                    "schedule's declared fields as they are."))
+                continue
+            mp.changes.append(_apply_change(field_name, "write", "schedule_update",
+                                            current=action.current, desired=action.fields))
+            mp.ops.append(ApplyOp("schedule_update", name, short, {
+                "schedule_id": action.row.id, "fields": dict(action.fields)}))
+        elif action.kind == "enabled_differs":
+            mp.changes.append(_apply_change(
+                field_name, "report", "enabled_differs",
+                current=action.current["enabled"], desired=action.fields["enabled"],
+                note="apply never arms or disarms a schedule; toggle it by hand"))
+        elif action.kind == "undeclared":
+            mp.changes.append(_apply_change(
+                field_name, "report", "schedule_undeclared",
+                current=_schedule_view(action.row),
+                note="not in the manifest; left as it is"))
+        elif action.kind == "unlinked":
+            mp.changes.append(_apply_change(field_name, "report", "schedule_unlinked",
+                                            current=_schedule_view(action.row)))
+        elif action.kind == "ambiguous":
+            blockers.append(_apply_blocker(
+                "schedule_name_ambiguous", name,
+                f"'{name}' has more than one schedule named '{action.name}'.",
+                "Delete or rename the duplicate rows, then re-apply."))
+        elif action.kind == "declared_twice":
+            blockers.append(_apply_blocker(
+                "schedule_declared_twice", name,
+                f"The manifest declares schedule '{action.name}' twice for '{short}'.",
+                "Keep one entry per schedule name."))
+
+    # `restart_required`: the platform's own predicates over the container,
+    # plus what this run's writes would leave the container out of step with.
+    mp.restart_required = bool(state.restart_pending or label_mismatch or folder_write)
+
+
+def _plan_created_member(mp: ApplyMemberPlan, manifest: SystemManifest,
+                         desired_edges: Dict[str, List[str]],
+                         normalized_resources: Dict[str, str], blockers: List) -> None:
+    """Changes and writes for a member apply will create.
+
+    Create mode's semantics wherever create mode defines them (P-F), so a fresh
+    install comes out as create mode would build it, but for the two stated
+    differences, which need the post-create state and so are resolved by the
+    executor: a template's same-named schedule, and a template resource that
+    overrides a declared one.
+    """
+    cfg, name, short = mp.config, mp.name, mp.short_name
+
+    failure = _preflight_template(name, short, cfg.template, None)
+    if failure is not None:
+        blockers.append(_apply_blocker(
+            "template_unresolvable", name, f"Template '{cfg.template}': {failure.reason}",
+            "Fix the template reference in the manifest."))
+
+    tags = _desired_tags(manifest.name, manifest.default_tags, cfg.tags)
+    mp.changes.append(_apply_change("tags", "write", "tag_missing", current=[], desired=tags))
+    # The system tag is written by the executor right after create.
+    mp.ops.extend(ApplyOp("tag", name, short, {"tag": t}) for t in tags if t != manifest.name)
+
+    wanted = desired_edges.get(name, [])
+    if wanted:
+        mp.changes.append(_apply_change("permissions", "write", "permission_missing",
+                                        current=[], desired=wanted))
+        mp.ops.extend(ApplyOp("edge", name, short, {"target": t}) for t in wanted)
+
+    if isinstance(cfg.folders, dict) and cfg.folders and _folders_error(cfg.folders) is None:
+        # Both keys, an omitted one False, and nothing for `{}` (the template's
+        # settings stand): create's `configure_folders`.
+        expose = cfg.folders.get("expose", False)
+        consume = cfg.folders.get("consume", False)
+        mp.changes.append(_apply_change("folders", "write", "folder_differs",
+                                        desired={"expose": expose, "consume": consume}))
+        mp.ops.append(ApplyOp("folders", name, short,
+                              {"expose_enabled": expose, "consume_enabled": consume}))
+
+    if normalized_resources:
+        mp.changes.append(_apply_change(
+            "resources", "report", "pending_template_resolution", desired=normalized_resources,
+            note="compared with the template's resources once the member is created; a "
+                 "template value that differs is overridden before its first start"))
+        mp.ops.append(ApplyOp("created_resources", name, short,
+                              {"declared": dict(normalized_resources)}))
+
+    entries = _well_formed_schedule_entries(cfg, name, blockers)
+    for action in resolve_declared_schedule_actions(entries, []):
+        if action.kind == "declared_twice":
+            blockers.append(_apply_blocker(
+                "schedule_declared_twice", name,
+                f"The manifest declares schedule '{action.name}' twice for '{short}'.",
+                "Keep one entry per schedule name."))
+            continue
+        error = _schedule_entry_error(action.entry)
+        if error:
+            blockers.append(_apply_blocker(error[0], name, f"Schedule '{action.name}': {error[1]}",
+                                           "Fix the schedule in the manifest."))
+            continue
+        mp.changes.append(_apply_change(
+            f"schedule:{action.name}", "write", "pending_template_resolution",
+            desired=_schedule_view(action.entry),
+            note="created, or a same-named schedule from the template updated to these "
+                 "fields, after the member is created"))
+    if entries:
+        mp.ops.append(ApplyOp("created_schedules", name, short, {"entries": entries}))
+
+
+def _plan_skills(mp: ApplyMemberPlan, state: Optional[ApplyMemberState],
+                 snapshot: ApplySnapshot, blockers: List) -> None:
+    """trinity-enterprise#1030: `skills:` / `skill_sets:`. `state` is None for
+    a member apply will create."""
+    from services.system_apply import skills as apply_skills
+    apply_skills.plan(
+        mp, held_skills=None if state is None else state.skills,
+        held_sets=None if state is None else state.skill_sets,
+        skill_verdicts=snapshot.skill_verdicts, set_verdicts=snapshot.skill_set_verdicts,
+        blockers=blockers, apply_change=_apply_change, apply_blocker=_apply_blocker,
+        make_op=ApplyOp)
+
+
+def _plan_gates(mp: ApplyMemberPlan, state: Optional[ApplyMemberState], blockers: List,
+                unassign_on_failure: bool = True) -> None:
+    """trinity-enterprise#1030 CP3: `gates:`, validated through the gate
+    map's own public validator."""
+    from services.system_apply import gates as apply_gates
+    apply_gates.plan(
+        mp, stored=None if state is None else state.gates, blockers=blockers,
+        apply_change=_apply_change, apply_blocker=_apply_blocker, make_op=ApplyOp,
+        skill_names=None if state is None else state.skill_names,
+        via_sets=None if state is None else state.skill_via_sets,
+        unassign_on_failure=unassign_on_failure)
+
+
+_DECLARED_ONLY_LIVE_NOTE = (
+    "a live agent holds this name; apply never deletes it and never reconciles it. Remove "
+    "`deploy: false` to manage it as a member, or delete it by hand if it is unwanted")
+# #4131: `deploy: false` governs apply only. Restart and teardown reach a
+# declared-only name that is a member by the system tag (or, in prefixed mode,
+# by the `<system>-` prefix of an untagged name).
+_DECLARED_ONLY_TAGGED_NOTE = (
+    "this agent carries the system tag '{system}', so restarting the system restarts it "
+    "and a teardown of the system removes it; `deploy: false` governs apply only. Remove "
+    "the tag by hand (DELETE /api/agents/{name}/tags/{system}, or the untag_agent tool) "
+    "if it should stay out")
+_DECLARED_ONLY_PREFIXED_NOTE = (
+    "this agent is untagged but its name starts with '{system}-', so restarting the system "
+    "restarts it and a teardown of the system removes it; `deploy: false` governs apply "
+    "only. Rename the agent if it should stay out")
+_TEMPLATE_NOT_IN_CATALOG_NOTE = (
+    "apply never adds a template to the catalog; an admin adds it in Settings")
+
+
+def _plan_declared_only(mp: ApplyMemberPlan, state: ApplyMemberState,
+                        system: str = "") -> None:
+    """trinity-enterprise#1030 CP5: a `deploy: false` member is named, never
+    run — reports only, no op, whatever else it declares."""
+    if state.blocked:
+        mp.verdict = "blocked"
+        return
+    mp.verdict = "declared_only"
+    template = mp.config.template
+    if state.template_in_catalog:
+        mp.changes.append(_apply_change("template", "report", "template_in_catalog",
+                                        desired=template))
+    else:
+        mp.changes.append(_apply_change("template", "report", "template_not_in_catalog",
+                                        desired=template, note=_TEMPLATE_NOT_IN_CATALOG_NOTE))
+    if state.live:
+        mp.changes.append(_apply_change("members", "report", "declared_only_member_live",
+                                        current=mp.name, note=_DECLARED_ONLY_LIVE_NOTE))
+    if state.tagged_by_system:  # #4131
+        mp.changes.append(_apply_change(
+            "members", "report", "declared_only_member_tagged", current=mp.name,
+            note=_DECLARED_ONLY_TAGGED_NOTE.format(system=system, name=mp.name)))
+    elif state.prefixed_by_system:  # #4131
+        mp.changes.append(_apply_change(
+            "members", "report", "declared_only_member_prefixed", current=mp.name,
+            note=_DECLARED_ONLY_PREFIXED_NOTE.format(system=system)))
+
+
+def _plan_seats(mp: ApplyMemberPlan, state: Optional[ApplyMemberState],
+                snapshot: ApplySnapshot) -> None:
+    """trinity-enterprise#1030 CP4: `seat:` and `person_seats:`, through the
+    assignment module's optional hooks; unobserved without them. A seat is
+    written only when the caller passes the grant gate
+    (`snapshot.grant_writer`); else reported as held back."""
+    from services.system_apply import seats as apply_seats
+    apply_seats.plan(
+        mp, seat=None if state is None else state.seat,
+        people=None if state is None else state.person_seats, creating=state is None,
+        seat_writer=snapshot.grant_writer, apply_change=_apply_change, make_op=ApplyOp)
+
+
+def _plan_grants(mp: ApplyMemberPlan, state: Optional[ApplyMemberState],
+                 snapshot: ApplySnapshot, blockers: List) -> None:
+    """trinity-enterprise#1030 CP2: `grants:`. Written only when the caller
+    passes the grant route's gate (`snapshot.grant_writer`); else reported."""
+    from services.system_apply import grants as apply_grants
+    apply_grants.plan(
+        mp, held=None if state is None else state.grants, grant_writer=snapshot.grant_writer,
+        blockers=blockers, apply_change=_apply_change, apply_blocker=_apply_blocker,
+        make_op=ApplyOp)
+
+
+def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> ApplyPlan:
+    """The per-member verdicts, the drift, every blocker, and the write-set.
+
+    Pure over `manifest` and `snapshot` (the template preflight reads a local
+    template file, as create's dry run does). A member whose only differences
+    are reports is `unchanged`: AC1 counts writes.
+    """
+    system = manifest.name
+    agent_names = declared_names(manifest)
+    declared_final = set(agent_names.values())
+    blockers: List[SystemApplyBlocker] = list(snapshot.blockers)
+    # trinity-enterprise#1030 CP5: edges resolve over deployed members only.
+    desired_edges = _desired_edges(
+        {s: n for s, n in agent_names.items() if manifest.agents[s].deploy}, manifest.permissions)
+    warnings: List[str] = []
+
+    members: Dict[str, ApplyMemberPlan] = {}
+    for short, cfg in manifest.agents.items():
+        name = agent_names[short]
+        state = snapshot.members.get(short) or ApplyMemberState(short_name=short, name=name)
+        mp = ApplyMemberPlan(name=name, short_name=short, verdict="unchanged", config=cfg)
+        members[short] = mp
+        before = len(blockers)
+
+        if state.declared_only:  # trinity-enterprise#1030 CP5
+            _plan_declared_only(mp, state, manifest.name)
+            continue
+
+        folders_error = _folders_error(cfg.folders)
+        if folders_error:
+            blockers.append(_apply_blocker("folders_invalid", name, folders_error,
+                                           "Use `folders: {expose: true|false, consume: true|false}`."))
+        normalized_resources, resources_error = _normalized_resources(cfg.resources)
+        if resources_error:
+            blockers.append(_apply_blocker("resources_invalid", name, resources_error,
+                                           "Use a supported cpu / memory value, quoted."))
+
+        if state.status == "absent" and not state.blocked:
+            mp.creating = True
+            _plan_created_member(mp, manifest, desired_edges, normalized_resources, blockers)
+            _plan_gates(mp, None, blockers)
+            _plan_skills(mp, None, snapshot, blockers)
+            _plan_grants(mp, None, snapshot, blockers)
+            _plan_seats(mp, None, snapshot)
+            mp.verdict = "create"
+        elif state.status == "managed" and not state.blocked:
+            _plan_existing_member(mp, state, manifest, snapshot, desired_edges,
+                                  declared_final, normalized_resources, blockers)
+            _plan_gates(mp, state, blockers, snapshot.unassign_on_failed_gate)
+            _plan_skills(mp, state, snapshot, blockers)
+            _plan_grants(mp, state, snapshot, blockers)
+            _plan_seats(mp, state, snapshot)
+            mp.verdict = "update" if mp.ops else "unchanged"
+        else:
+            mp.verdict = "blocked"
+        if len(blockers) > before or state.blocked:
+            mp.verdict = "blocked"
+
+    # A member that consumes shared folders mounts every exposing agent it may
+    # call, so a new edge from it, or a peer's expose flipping, changes the
+    # mounts it must have. Predicted here; the real run re-reads the
+    # platform's predicate for every existing member after its writes.
+    expose_flips = any(
+        op.kind == "folders" and op.args.get("expose_enabled") is not None
+        for mp in members.values() for op in mp.ops)
+    for short, mp in members.items():
+        state = snapshot.members.get(short)
+        if mp.creating or mp.verdict == "blocked" or state is None or state.status != "managed":
+            continue
+        consumes = bool(getattr(state.folders, "consume_enabled", False))
+        for op in mp.ops:
+            if op.kind == "folders" and op.args.get("consume_enabled") is not None:
+                consumes = bool(op.args["consume_enabled"])
+        if consumes and (expose_flips or any(op.kind == "edge" for op in mp.ops)):
+            mp.restart_required = True
+
+    # Drift: tagged members the manifest does not declare (AC3). Reported,
+    # never touched. A prefix-only one never gets here: it blocks.
+    drift: List[SystemApplyDrift] = []
+    if snapshot.membership.tags_readable:
+        for member in snapshot.membership.members:
+            if member in declared_final:
+                continue
+            evidence = snapshot.membership.evidence.get(member)
+            if evidence not in ("tag", "both"):
+                continue
+            note = None
+            if any(re.fullmatch(re.escape(d) + r"_\d+(?:_\d+)*", member) for d in declared_final):
+                note = ("suffixed copy from an earlier create-mode deploy; apply never "
+                        "removes it")
+            drift.append(SystemApplyDrift(name=member, evidence=evidence, note=note))
+
+    # The platform prompt (P-F exception 3).
+    prompt_op = None
+    if not manifest.prompt:
+        prompt = SystemApplyPromptVerdict(verdict="not_declared")
+    elif snapshot.stored_prompt == manifest.prompt:
+        prompt = SystemApplyPromptVerdict(verdict="unchanged")
+    elif snapshot.caller_is_admin:
+        prompt = SystemApplyPromptVerdict(
+            verdict="update",
+            note="running agents pick up the new prompt at their next start")
+        prompt_op = ApplyOp("prompt", None, "", {"prompt": manifest.prompt})
+    else:
+        prompt = SystemApplyPromptVerdict(
+            verdict="requires_admin",
+            note="prompt_requires_admin: the platform-wide prompt changes every agent's "
+                 "instructions, so only an admin may change it; nothing was written")
+
+    # The auto-created system view.
+    view_op = None
+    if not manifest.system_view:
+        view = SystemApplyViewVerdict(verdict="not_requested")
+    else:
+        marker = SYSTEM_VIEW_AUTO_DESCRIPTION.format(system_name=system)
+        matches = [
+            v for v in snapshot.views
+            if getattr(v, "description", None) == marker
+            and system in [str(t).lower().strip() for t in (getattr(v, "filter_tags", None) or [])]
+        ]
+        if not matches:
+            view = SystemApplyViewVerdict(verdict="create")
+            view_op = ApplyOp("view", None, "", {})
+        elif len(matches) == 1:
+            found, wanted_view = matches[0], manifest.system_view
+            changes = [
+                _apply_change(f"system_view.{attr}", "report", "view_differs",
+                              current=getattr(found, live_attr, None), desired=value)
+                for attr, live_attr, value in (
+                    ("name", "name", wanted_view.name), ("icon", "icon", wanted_view.icon),
+                    ("color", "color", wanted_view.color),
+                    ("shared", "is_shared", wanted_view.shared))
+                if getattr(found, live_attr, None) != value
+            ]
+            view = SystemApplyViewVerdict(verdict="unchanged", id=found.id, changes=changes)
+        else:
+            view = SystemApplyViewVerdict(verdict="ambiguous")
+            warnings.append(
+                f"More than one system view is marked as {system}'s auto-created view; "
+                "apply created none and changed none.")
+
+    # trinity-enterprise#1030 (T1 = A): adoption is the moment an agent joins
+    # the system's restart and teardown, so it is listed on its own and said
+    # in plain words, never folded silently into `update`.
+    adopted = [
+        SystemApplyAdoption(name=mp.name, tags=list(c.current or []))
+        for mp in members.values() if mp.verdict != "blocked"
+        for c in mp.changes if c.code == "member_adopted"
+    ]
+    adoption_warning = _adoption_line(system, adopted, done=False)
+    if adoption_warning:
+        warnings.append(adoption_warning)
+
+    # trinity-enterprise#1030 CP2: a grant the caller's credential could not
+    # write is loud — a top-level summary entry and one warning line, beside
+    # the per-member report (theme 3: held-back writes are never only a line).
+    from services.system_apply import grants as apply_grants
+    grants_summary, grants_warning = apply_grants.summarize(members)
+    if grants_warning:
+        warnings.append(grants_warning)
+    # The same for a seat: the grant gate, the same loud shape.
+    from services.system_apply import seats as apply_seats
+    seats_held_back, seats_warning = apply_seats.summarize(members)
+    if seats_warning:
+        warnings.append(seats_warning)
+    # trinity-enterprise#1030 CP6: one summary per config group, each
+    # {write, report, unobserved}; and each member's unobserved groups.
+    from services.system_apply import summary as apply_summary
+    for mp in members.values():
+        if mp.verdict != "blocked":
+            mp.unobserved = apply_summary.member_unobserved(mp)
+    summary = apply_summary.build(
+        members, extras={"grants": {"held_back": grants_summary["held_back"]},
+                         "roles": {"held_back": seats_held_back}})
+
+    return ApplyPlan(
+        system_name=system, agent_names=agent_names, members=members, drift=drift,
+        blockers=blockers, prompt=prompt, system_view=view, prompt_op=prompt_op,
+        view_op=view_op, warnings=warnings, default_resources=snapshot.default_resources,
+        adopted=adopted, adoption_warning=adoption_warning, summary=summary,
+        unassign_on_failed_gate=snapshot.unassign_on_failed_gate,
+    )
+
+
+def _adoption_line(system: str, adopted: List["SystemApplyAdoption"], *, done: bool) -> Optional[str]:
+    """The adoption sentence: the plan's (`will be`), or a real run's over the
+    members whose system tag landed (`was` / `were`, #4130)."""
+    if not adopted:
+        return None
+    names = ", ".join(a.name for a in adopted)
+    count = f"{len(adopted)} agent{'s' if len(adopted) != 1 else ''}"
+    verb = ("were" if len(adopted) != 1 else "was") if done else "will be"
+    return (
+        f"{count} {verb} adopted into '{system}' by adding the tag '{system}': "
+        f"{names}. From then on, restarting the system restarts them and a "
+        f"teardown of the system removes them too."
+        # #4131: a default export infers `prefixed` once a member carries the
+        # prefix and would omit the bare members; name the explicit export.
+        + (f" Export this system with ?naming=bare (get_system_manifest naming=\"bare\"), "
+           f"since an adopted name starts with '{system}-'. While a tagged member's "
+           f"name starts with '{system}-', restart, teardown, the system view and export "
+           f"read the system as prefixed, so an untagged '{system}-*' agent is reached "
+           f"by name too."
+           if any(a.name.startswith(f"{system}-") for a in adopted) else ""))
+
+
+# ----------------------------------------------------------------------------
+# Execution under a lease, and the orchestrator.
+# ----------------------------------------------------------------------------
+
+APPLY_LOCK_TTL_SECONDS = 900
+# Renew every TTL/3 for the whole run: creation is serial and a `github:`
+# clone can outlive a fixed TTL.
+APPLY_LEASE_RENEW_SECONDS = APPLY_LOCK_TTL_SECONDS / 3
+
+
+class ApplyLeaseKeeper:
+    """Renews the apply lock from acquisition to release; raises a stop flag.
+
+    Any renewal result but OWNED — LOST (another holder, or a lapse), or
+    DEGRADED (Redis error) — stops the run: the in-flight write finishes and
+    every later write and start is reported `lock_lost`. Continuing on
+    DEGRADED would be the fail-open the lock exists to avoid.
+    Renewal is the atomic compare-and-expire, so a stale holder can never
+    extend a successor's lease.
+
+    The renewals run on the event loop, and the writes are synchronous: a
+    write that blocks the loop past the TTL lets the lease lapse in Redis
+    before the keeper runs again, and a successor may take it. So `ok` also
+    keeps a conservative local DEADLINE — the time a renewal (or the
+    acquisition) was ISSUED plus the TTL, minus a margin — and refuses every
+    write after it whether or not the keeper got to run. Ownership as Redis
+    sees it is never older than that deadline assumes.
+    """
+
+    def __init__(self, lock: SingleFlightLock, interval: float, *, ttl: float,
+                 issued_at: float):
+        self._lock = lock
+        self._interval = interval
+        self._ttl = ttl
+        self._margin = min(30.0, ttl * 0.1)
+        self._deadline = issued_at + ttl - self._margin
+        self._task: Optional["asyncio.Task"] = None
+        self.lost: Optional[LeaseState] = None
+
+    @property
+    def ok(self) -> bool:
+        if self.lost is None and time.monotonic() >= self._deadline:
+            self.lost = LeaseState.LOST  # may have lapsed while the loop was blocked
+        return self.lost is None
+
+    def _renew(self) -> LeaseState:
+        issued = time.monotonic()
+        state = self._lock.refresh_if_owned_atomic()
+        if state is LeaseState.OWNED:
+            self._deadline = issued + self._ttl - self._margin
+        return state
+
+    def start(self) -> None:
+        self._task = asyncio.create_task(self._run())
+
+    async def _run(self) -> None:
+        try:
+            while self.lost is None:
+                await asyncio.sleep(self._interval)
+                if not self.ok:
+                    return
+                state = await asyncio.to_thread(self._renew)
+                if state is not LeaseState.OWNED and self.lost is None:
+                    self.lost = state
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — an unknown is not ownership
+            self.lost = LeaseState.DEGRADED
+
+    def confirm(self) -> LeaseState:
+        """Renew now: ownership is confirmed immediately before the first write."""
+        if not self.ok:
+            return self.lost
+        state = self._renew()
+        if state is not LeaseState.OWNED and self.lost is None:
+            self.lost = state
+        return state
+
+    async def stop(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+
+
+@dataclass
+class ApplyOutcome:
+    """What a real run did, counted from the writers' return values."""
+
+    failed: List["SystemApplyFailure"] = field(default_factory=list)
+    created: List[str] = field(default_factory=list)
+    started: List[str] = field(default_factory=list)
+    succeeded: int = 0
+    writes_ok: Dict[str, int] = field(default_factory=dict)  # name -> landed writes
+    tags_written: List[str] = field(default_factory=list)
+    # #4130: (name, step, key) of every write that landed — `key` is what the
+    # write wrote (the skill, set, gate's skill, capability, seat, edge target,
+    # tag), None for a member-wide write — and (name, tag) of every tag that
+    # landed: the result counts and lists only what happened.
+    landed: set = field(default_factory=set)
+    tags_landed: set = field(default_factory=set)
+    member_failed: set = field(default_factory=set)
+    # (member, gate key) of every planned gate write that has not landed. Seeded
+    # with all of them, so a skipped or lost write holds its skill back too.
+    gates_unlanded: set = field(default_factory=set)
+    extra_changes: Dict[str, List] = field(default_factory=dict)
+    restart_required: Dict[str, bool] = field(default_factory=dict)
+    warnings: List[str] = field(default_factory=list)
+
+
+def _default_start_agent_fn():
+    """The start function, resolved at call time (same reason, and same unit
+    seam, as `_default_create_agent_fn`): the `routers/agents` facade over
+    `lifecycle.start_agent_internal`, one created member at a time."""
+    from routers.agents import start_agent_internal
+    return start_agent_internal
+
+
+def _member_agent_config(name: str, cfg: SystemAgentConfig,
+                         default_resources: Optional[Dict[str, str]]) -> AgentConfig:
+    """The `AgentConfig` create mode builds for a member, field for field
+    (bootstrap equivalence). The resources dict is copied so the create path's
+    template merge never writes into the parsed manifest; the fleet default
+    was read by the snapshot (create mode reads the same setting per member)."""
+    if not cfg.resources and default_resources is None:
+        raise ValueError("the default agent resources were not read")
+    return AgentConfig(
+        name=name,
+        template=cfg.template,
+        resources=dict(cfg.resources) if cfg.resources else dict(default_resources),
+        kind=cfg.kind,
+    )
+
+
+async def execute_apply_plan(
+    plan: ApplyPlan,
+    manifest: SystemManifest,
+    current_user: User,
+    request: Optional[Request],
+    create_agent_fn: Callable,
+    start_agent_fn: Callable,
+    lease: ApplyLeaseKeeper,
+) -> ApplyOutcome:
+    """Write the plan. Writes only; no exception escapes once a write happened.
+
+    Order: create each absent member and tag it with the system tag at once
+    -> keep only the writes that name members which exist (existing +
+    created), as create scopes to `created_map`, so nothing is ever written for
+    an agent whose create failed -> tags, edges, folders, resource overrides,
+    schedules (a created member's against a fresh post-create read), prompt,
+    view -> start the created members one at a time. The lease's stop flag is
+    checked before every write and every start.
+    """
+    out = ApplyOutcome()
+    system = plan.system_name
+    by_name = {mp.name: mp for mp in plan.members.values()}
+
+    def fail(name: str, short: str, step: str, reason: str, key=None) -> None:
+        out.failed.append(SystemApplyFailure(name=name, short_name=short, step=step,
+                                             reason=reason, key=_write_key(key)))
+        if name in by_name:
+            out.member_failed.add(name)
+
+    def lost(name: str, short: str, step: str, key=None) -> bool:
+        if lease.ok:
+            return False
+        fail(name, short, step, "lock_lost: the apply lock was lost before this write; re-apply",
+             key)
+        return True
+
+    async def attempt(name: str, short: str, step: str, write, key=None) -> bool:
+        """One write. `key` is what it writes (a string, or a list when one
+        write lands several, e.g. a skill assignment), so the result counts and
+        names each write by its own key, never per member and step (#4130)."""
+        if lost(name, short, step, key):
+            return False
+        try:
+            result = write()
+            if asyncio.iscoroutine(result):
+                result = await result
+        except Exception as e:  # noqa: BLE001 — recorded per write, the run continues (P-C)
+            fail(name, short, step, _failure_reason(e)[0], key)
+            return False
+        if result is False or result is None:
+            fail(name, short, step, "the write was refused or stored nothing", key)
+            return False
+        out.succeeded += 1
+        out.writes_ok[name] = out.writes_ok.get(name, 0) + 1
+        for k in (key if isinstance(key, (list, tuple)) else [key]):
+            out.landed.add((name, step, k))
+        return True
+
+    # 1. Create absent members; tag each with the system tag first.
+    for mp in plan.members.values():
+        if not mp.creating:
+            continue
+        # Built INSIDE the attempt: nothing may raise past a write (P-C).
+        created = await attempt(mp.name, mp.short_name, "create", lambda m=mp: _created(
+            create_agent_fn(config=_member_agent_config(m.name, m.config, plan.default_resources),
+                            current_user=current_user, request=request,
+                            skip_name_sanitization=True)))
+        if not created:
+            continue
+        out.created.append(mp.name)
+        tagged = await attempt(mp.name, mp.short_name, "tag",
+                               lambda n=mp.name: _tag_stored(n, system), key=system)
+        if tagged:
+            out.tags_written.append(mp.name)
+            out.tags_landed.add((mp.name, system))
+        else:
+            # The next apply would refuse it as name-only evidence; say so.
+            out.failed[-1].reason += (
+                f"; '{mp.name}' was created but not tagged '{system}', so the next apply "
+                f"refuses it until you add the tag (POST /api/agents/{mp.name}/tags/{system})")
+
+    exists = {mp.name for mp in plan.members.values()
+              if not mp.creating and mp.verdict != "declared_only"} | set(out.created)
+
+    # 2. The remaining writes, phase by phase, filtered to members that exist.
+    ops = [op for mp in plan.members.values() for op in mp.ops]
+    out.gates_unlanded = {(op.member, op.args["skill"]) for op in ops if op.kind == "gate_set"}
+    for phase in _APPLY_OP_PHASES:
+        for op in (o for o in ops if o.kind == phase):
+            step = _APPLY_OP_STEP[op.kind]
+            if op.member not in exists:
+                fail(op.member, op.short_name, step,
+                     "skipped_member_not_created: the member was not created")
+                continue
+            if op.kind == "edge" and op.args["target"] not in exists:
+                fail(op.member, op.short_name, step,
+                     f"skipped_member_not_created: '{op.args['target']}' was not created")
+                continue
+            try:
+                await _run_op(op, current_user, out, attempt, request=request)
+            except Exception as e:  # noqa: BLE001 — never lose the report after a write
+                fail(op.member, op.short_name, step, _failure_reason(e)[0])
+
+    # 3. The platform prompt and the view.
+    if plan.prompt_op is not None:
+        await attempt(system, "", "prompt",
+                      lambda: db.set_setting("trinity_prompt", plan.prompt_op.args["prompt"]))
+    if plan.view_op is not None:
+        await attempt(system, "", "system_view", lambda: create_system_view(
+            system_name=system, system_view=manifest.system_view,
+            default_tags=manifest.default_tags, owner_id=str(current_user.id)))
+
+    # 4. Start the members this run created, one at a time, never an existing one.
+    for name in out.created:
+        mp = by_name[name]
+        if await attempt(name, mp.short_name, "start", lambda n=name: _started(start_agent_fn(n))):
+            out.started.append(name)
+
+    # 5. `restart_required` for EVERY existing member once anything landed,
+    # from the platform's predicates over its container as it now is: a write
+    # on one member (a new edge, a peer's expose) changes which shared-folder
+    # mounts another must have.
+    if out.succeeded:
+        for mp in plan.members.values():
+            # #4130: a declared-only member is never run nor written; nothing to re-read.
+            if mp.creating or mp.verdict == "declared_only":
+                continue
+            try:
+                container = _member_container(mp.name)
+                if _container_labels(container) is None:
+                    raise RuntimeError("the container could not be read")
+                out.restart_required[mp.name] = await _restart_pending(mp.name, container)
+            except Exception:  # noqa: BLE001 — keep the plan's prediction, and say so
+                out.warnings.append(
+                    f"restart_required for '{mp.name}' could not be re-read after the "
+                    "writes; the plan's prediction is shown.")
+    return out
+
+
+def _write_key(key) -> Optional[str]:
+    """`SystemApplyFailure.key`: what the failed write was for, joined when
+    one write carries several."""
+    if isinstance(key, (list, tuple)):
+        return ", ".join(str(k) for k in key) or None
+    return None if key is None else str(key)
+
+
+async def _created(awaitable) -> bool:
+    await awaitable
+    return True
+
+
+async def _started(awaitable) -> bool:
+    await awaitable
+    return True
+
+
+def _tag_stored(name: str, tag: str) -> bool:
+    return tag in (db.add_agent_tag(name, tag) or [])
+
+
+async def _run_op(op: ApplyOp, current_user: User, out: ApplyOutcome, attempt,
+                  request: Optional[Request] = None) -> None:
+    name, short = op.member, op.short_name
+    if op.kind == "tag":
+        if await attempt(name, short, "tag", lambda: _tag_stored(name, op.args["tag"]),
+                         key=op.args["tag"]):
+            out.tags_landed.add((name, op.args["tag"]))
+            if name not in out.tags_written:
+                out.tags_written.append(name)
+    elif op.kind == "edge":
+        target = op.args["target"]
+        await attempt(name, short, "permissions", lambda: (
+            db.add_agent_permission(name, target, current_user.username) is not None
+            or bool(db.is_agent_permitted(name, target))), key=target)
+    elif op.kind == "folders":
+        await attempt(name, short, "folders", lambda: db.upsert_shared_folder_config(
+            agent_name=name, expose_enabled=op.args["expose_enabled"],
+            consume_enabled=op.args["consume_enabled"]))
+    elif op.kind == "resources":
+        await attempt(name, short, "resources", lambda: db.set_resource_limits(
+            name, memory=op.args["memory"], cpu=op.args["cpu"]))
+    elif op.kind == "created_resources":
+        await _apply_created_resources(op, out, attempt)
+    elif op.kind == "schedule_create":
+        await attempt(name, short, "schedules", lambda: db.create_schedule(
+            agent_name=name, username=op.args["owner_username"],
+            schedule_data=_build_schedule_create(op.args["entry"])))
+    elif op.kind == "schedule_update":
+        await attempt(name, short, "schedules", lambda: db.update_schedule(
+            op.args["schedule_id"], current_user.username, op.args["fields"]))
+    elif op.kind == "created_schedules":
+        await _apply_created_schedules(op, current_user, out, attempt)
+    elif op.kind in ("skill_assign", "skill_set_assign"):  # trinity-enterprise#1030
+        from dependencies import acting_agent_name
+        from services.system_apply import skills as apply_skills
+        await apply_skills.run(op, current_user, out, attempt, apply_change=_apply_change,
+                               acting_agent=acting_agent_name(current_user))
+    elif op.kind == "grant":  # trinity-enterprise#1030 CP2
+        from services.system_apply import grants as apply_grants
+        await apply_grants.run(op, current_user, out, attempt, request=request)
+    elif op.kind == "gate_set":  # trinity-enterprise#1030 CP3
+        from services.system_apply import gates as apply_gates
+        await apply_gates.run(op, current_user, out, attempt, request=request,
+                              apply_change=_apply_change)
+    elif op.kind == "seat_set":  # trinity-enterprise#1030 CP4
+        from services.system_apply import seats as apply_seats
+        await apply_seats.run(op, current_user, out, attempt)
+
+
+async def _apply_created_resources(op: ApplyOp, out: ApplyOutcome, attempt) -> None:
+    """A member apply created runs with its TEMPLATE's resources (create keeps
+    template-wins, AC6). A declared key the template overrode is written as an
+    override now, before the member's start, so the platform's start path
+    recreates it with the declared values once (P-A)."""
+    name, short = op.member, op.short_name
+    try:
+        labels = _container_labels(_member_container(name))
+    except Exception:  # noqa: BLE001
+        labels = None
+    if labels is None:
+        out.failed.append(SystemApplyFailure(
+            name=name, short_name=short, step="resources",
+            reason="the created member's container could not be read; its declared "
+                   "resources were not compared"))
+        out.member_failed.add(name)
+        return
+    differs = {k: v for k, v in op.args["declared"].items() if labels.get(f"trinity.{k}") != v}
+    changes = out.extra_changes.setdefault(name, [])
+    for key, desired in differs.items():
+        changes.append(_apply_change(
+            f"resources.{key}", "write", "resource_differs",
+            current=labels.get(f"trinity.{key}"), desired=desired,
+            note="the template's value; overridden before the member's first start"))
+    if differs:
+        await attempt(name, short, "resources", lambda: db.set_resource_limits(
+            name, memory=differs.get("memory"), cpu=differs.get("cpu")))
+
+
+async def _apply_created_schedules(op: ApplyOp, current_user: User, out: ApplyOutcome,
+                                   attempt) -> None:
+    """P-D's one re-read: the template materialized its own rows inside create,
+    so a created member's schedules are resolved against a FRESH read. If that
+    read fails they go to `failed[]`, never to an unfiltered create (the open
+    failure `create_schedules` falls back to)."""
+    name, short = op.member, op.short_name
+    try:
+        rows = list(db.list_agent_schedules(name) or [])
+    except Exception as e:  # noqa: BLE001
+        reason = _failure_reason(e)[0]
+        for entry in op.args["entries"]:
+            out.failed.append(SystemApplyFailure(
+                name=name, short_name=short, step="schedules",
+                reason=f"schedule '{entry.get('name')}': the post-create read failed ({reason})"))
+        out.member_failed.add(name)
+        return
+    changes = out.extra_changes.setdefault(name, [])
+    for action in resolve_declared_schedule_actions(op.args["entries"], rows):
+        field_name = f"schedule:{action.name}"
+        if action.kind == "create":
+            changes.append(_apply_change(field_name, "write", "schedule_create",
+                                         desired=_schedule_view(action.entry)))
+            await attempt(name, short, "schedules", lambda a=action: db.create_schedule(
+                agent_name=name, username=current_user.username,
+                schedule_data=_build_schedule_create(a.entry)))
+        elif action.kind == "update":
+            error = _schedule_entry_error(
+                action.entry,
+                cron=action.fields.get("cron_expression", action.row.cron_expression),
+                timezone=action.fields.get("timezone", action.row.timezone) or "UTC")
+            if error:
+                out.failed.append(SystemApplyFailure(
+                    name=name, short_name=short, step="schedules",
+                    reason=f"{error[0]}: schedule '{action.name}': {error[1]}"))
+                out.member_failed.add(name)
+                continue
+            changes.append(_apply_change(
+                field_name, "write", "schedule_update", current=action.current,
+                desired=action.fields,
+                note="the template's same-named schedule, updated to the manifest's fields"))
+            await attempt(name, short, "schedules", lambda a=action: db.update_schedule(
+                a.row.id, current_user.username, dict(a.fields)))
+        elif action.kind == "enabled_differs":
+            changes.append(_apply_change(
+                field_name, "report", "enabled_differs",
+                current=action.current["enabled"], desired=action.fields["enabled"],
+                note="the template's schedule keeps its own enabled state"))
+        elif action.kind == "undeclared":
+            changes.append(_apply_change(field_name, "report", "schedule_undeclared",
+                                         current=_schedule_view(action.row),
+                                         note="declared by the template, not the manifest"))
+        elif action.kind == "ambiguous":
+            out.failed.append(SystemApplyFailure(
+                name=name, short_name=short, step="schedules",
+                reason=f"schedule_name_ambiguous: more than one schedule named '{action.name}'"))
+            out.member_failed.add(name)
+
+
+def _apply_report(plan: ApplyPlan, warnings: List[str], *, dry_run: bool, status: str,
+                  outcome: Optional[ApplyOutcome] = None,
+                  extra_blockers: Tuple = ()) -> "SystemApplyResponse":
+    members = []
+    for mp in plan.members.values():
+        changes = list(mp.changes)
+        restart = mp.restart_required
+        applied = None
+        if outcome is not None:
+            if mp.name in outcome.extra_changes:
+                # The real run reports what it actually did for a created
+                # member's template-resolved fields (P-D).
+                changes = [c for c in changes if c.code != "pending_template_resolution"]
+                changes.extend(outcome.extra_changes[mp.name])
+            restart = outcome.restart_required.get(mp.name, restart)
+            # #4130: nothing is planned or attempted for a declared-only member.
+            applied = None if mp.verdict == "declared_only" else mp.name not in outcome.member_failed
+        members.append(SystemApplyMember(
+            name=mp.name, short_name=mp.short_name, verdict=mp.verdict, changes=changes,
+            restart_required=restart, applied=applied, unobserved=list(mp.unobserved)))
+    # #4130: a dry run (valid or invalid) shows the plan; a refused run adopted
+    # and wrote nothing; a real run names only the system tags and the writes
+    # that landed. `report` / `unobserved` stay plan counts.
+    adopted, plan_warnings, summary = list(plan.adopted), list(plan.warnings), dict(plan.summary)
+    if not dry_run and (outcome is not None or status == "refused"):
+        landed = outcome.landed if outcome is not None else set()
+        tags_landed = outcome.tags_landed if outcome is not None else set()
+        adopted = [a for a in plan.adopted if (a.name, plan.system_name) in tags_landed]
+        if plan.adoption_warning is not None:
+            line = _adoption_line(plan.system_name, adopted, done=True)
+            plan_warnings = [line if w is plan.adoption_warning else w for w in plan_warnings]
+            plan_warnings = [w for w in plan_warnings if w is not None]
+        from services.system_apply import summary as apply_summary
+        summary = apply_summary.build(
+            plan.members, landed=landed,
+            extra_changes=outcome.extra_changes if outcome is not None else None,
+            extras={g: {k: v for k, v in counts.items()
+                        if k not in ("write", "report", "unobserved")}
+                    for g, counts in plan.summary.items()})
+    response = SystemApplyResponse(
+        dry_run=dry_run,
+        system_name=plan.system_name,
+        status=status,
+        members=members,
+        drift=plan.drift,
+        blockers=[*plan.blockers, *extra_blockers],
+        prompt=plan.prompt,
+        system_view=plan.system_view,
+        failed=list(outcome.failed) if outcome else [],
+        warnings=[*warnings, *plan_warnings, *(outcome.warnings if outcome else [])],
+        adopted=adopted,
+        summary=summary,
+    )
+    if outcome is not None:
+        response._tags_written = list(outcome.tags_written)
+        response._created = list(outcome.created)
+        response._writes_ok = dict(outcome.writes_ok)
+    return response
+
+
+async def apply_manifest(
+    manifest_yaml: str,
+    current_user: User,
+    request: Optional[Request] = None,
+    *,
+    dry_run: bool,
+    create_agent_fn: Optional[Callable] = None,
+    start_agent_fn: Optional[Callable] = None,
+) -> "SystemApplyResponse":
+    """Reconcile a live system to a manifest (trinity-enterprise#695).
+
+    `parse_manifest` + `validate_manifest` (create's own, unchanged: every named
+    400, `agents: {}` included) -> snapshot -> plan -> a dry run returns here
+    -> blockers refuse with NO lock key written -> acquire the lock and start
+    the lease keeper -> snapshot and plan again under it -> blockers refuse and
+    release -> confirm ownership -> execute -> release.
+
+    `dry_run` has no default here on purpose: the request model's `True` is the
+    only default, so a caller cannot reach a real run by omission.
+    """
+    try:
+        try:
+            manifest = parse_manifest(manifest_yaml)
+        except ManifestError as e:
+            raise HTTPException(status_code=400, detail=f"{e.code}: {e}")
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        try:
+            warnings = validate_manifest(manifest)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+
+        snapshot = await read_apply_snapshot(manifest, current_user)
+        plan = resolve_apply_plan(manifest, snapshot)
+        if dry_run:
+            return _apply_report(plan, warnings, dry_run=True,
+                                 status="invalid" if plan.blockers else "valid")
+        if plan.blockers:
+            return _apply_report(plan, warnings, dry_run=False, status="refused")
+
+        lock = SingleFlightLock(f"system_apply:{manifest.name}", APPLY_LOCK_TTL_SECONDS,
+                                client=get_breaker_redis())
+        issued_at = time.monotonic()
+        if not lock.acquire():
+            return _apply_report(plan, warnings, dry_run=False, status="refused",
+                                 extra_blockers=(_lock_blocker(LeaseState.LOST, manifest.name),))
+        if not lock.held:
+            # `acquire()` failed OPEN (no Redis): apply never runs unlocked.
+            return _apply_report(plan, warnings, dry_run=False, status="refused",
+                                 extra_blockers=(_lock_blocker(LeaseState.DEGRADED, manifest.name),))
+
+        lease = ApplyLeaseKeeper(lock, APPLY_LEASE_RENEW_SECONDS,
+                                 ttl=APPLY_LOCK_TTL_SECONDS, issued_at=issued_at)
+        lease.start()
+        try:
+            snapshot = await read_apply_snapshot(manifest, current_user)
+            plan = resolve_apply_plan(manifest, snapshot)
+            if plan.blockers:
+                return _apply_report(plan, warnings, dry_run=False, status="refused")
+            state = lease.confirm()
+            if state is not LeaseState.OWNED:
+                return _apply_report(plan, warnings, dry_run=False, status="refused",
+                                     extra_blockers=(_lock_blocker(state, manifest.name),))
+            outcome = await execute_apply_plan(
+                plan, manifest, current_user, request,
+                create_agent_fn or _default_create_agent_fn(),
+                start_agent_fn or _default_start_agent_fn(),
+                lease,
+            )
+        finally:
+            await lease.stop()
+            lock.release_if_owned_atomic()
+
+        if not outcome.failed:
+            status = "applied"
+        elif outcome.succeeded == 0:
+            status = "failed"
+        else:
+            status = "partial"
+        return _apply_report(plan, warnings, dry_run=False, status=status, outcome=outcome)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(f"System apply failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Apply failed: {_failure_reason(e)[0]}")
+
+
+def _lock_blocker(state: LeaseState, system_name: str) -> "SystemApplyBlocker":
+    if state is LeaseState.LOST:
+        return _apply_blocker(
+            "apply_in_progress", None,
+            f"Another apply of '{system_name}' holds the lock.",
+            "Retry when it has finished.")
+    return _apply_blocker(
+        "apply_lock_unavailable", None,
+        "The apply lock could not be taken (Redis is unreachable or errored).",
+        "Retry when Redis is reachable; apply never runs without its lock.")

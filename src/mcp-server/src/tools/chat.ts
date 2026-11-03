@@ -164,7 +164,7 @@ function asyncReceipt<T extends object>(agent: string, response: T): T {
   if (r.status === "accepted") {
     lead = `Accepted by '${agent}' as ${id} — it may still be running or already done.`;
   } else if (r.status === "queued") {
-    lead = `Queued on '${agent}' as ${id} while it was at capacity — it may have run since.`;
+    lead = `Queued on '${agent}' as ${id} — it may have run since.`;
   } else if (r.status === "queued_timeout" && !String(r.message ?? "").includes("Do not re-send:")) {
     lead = `The platform stopped waiting for ${id} on '${agent}' — it may still be running.`;
   } else {
@@ -249,9 +249,29 @@ export const REPORT_BACK_DEFAULT_NOTE =
   "Report-back is on by default: when this run ends it posts its outcome into the Slack, Telegram or " +
   "Workspace conversation your turn is serving, if there is one and it allows such notes, possibly after " +
   "your reply; runs it delegates onward may post too. If you follow up yourself (or set a reminder to), add " +
-  "what is new; do not repeat the outcome. A repeat of an earlier identical request reports where that run " +
-  "was asked to; never re-send or reword this call to change that. To stop it on a later call, pass " +
-  "execution_id=\"manual\".";
+  "what is new; do not repeat the outcome. Repeating this exact call from this same turn replays this run " +
+  "instead of starting another; never re-send or reword this call to change that. To stop it on a later call, " +
+  "pass execution_id=\"manual\".";
+
+/**
+ * #3296: on a receipt the backend REPLAYED. Keys are scoped to the caller's
+ * turn, so a replay only answers a repeat from this same turn — the run it
+ * names was asked to report here. What it must not claim is a fresh request.
+ */
+export const REPORT_BACK_REPLAY_NOTE =
+  "This repeats an earlier identical call from this same turn (or an earlier attempt of this run): no new " +
+  "run was started, and the receipt names that earlier run. It reports into this conversation once when it " +
+  "ends, and may already have. Do not re-send this one.";
+
+/**
+ * #3296 review: a replay on the TYPED arm. The key does not carry a typed id
+ * (Invariant #18), so with no header turn two typed ids collapse onto one key,
+ * and the replayed run reports into the parent the FIRST call named.
+ */
+export const REPORT_BACK_TYPED_REPLAY_NOTE =
+  "This repeats an earlier identical call: no new run was started, and the receipt names that earlier " +
+  "run. It reports once, into the execution the earlier call named, which may not be the one you named " +
+  "now. Do not re-send this one.";
 
 /**
  * On `report_back: off` results of an opted-in call. Future-only, and never on a
@@ -366,12 +386,50 @@ export function resolveReportBack(input: ReportBackInput): ReportBackDecision {
  */
 function withReportBack<T extends object>(result: T, fields: ReportBackFields | undefined): T {
   if (!fields) return result;
+  // #3296: a replayed receipt says it repeats an earlier run rather than
+  // reading as a fresh request. A typed-arm `requested` carries no note on a
+  // fresh run (the caller asked); on a replay it says where the report goes,
+  // since the replayed run reports into the parent the FIRST call named.
+  if (
+    fields.report_back === "requested" &&
+    (result as { idempotent_replay?: unknown }).idempotent_replay === true
+  ) {
+    const note = fields.report_back_note !== undefined ? REPORT_BACK_REPLAY_NOTE : REPORT_BACK_TYPED_REPLAY_NOTE;
+    return { ...result, ...fields, report_back_note: note };
+  }
   const status = (result as { status?: unknown }).status;
   if (fields.report_back === "off" && (status === "queued_timeout" || status === "agent_busy" || status === "rate_limited")) {
     const { report_back_note: _note, ...rest } = fields;
     return { ...result, ...rest };
   }
   return { ...result, ...fields };
+}
+
+/**
+ * #3296 review: the turn a delegation's idempotency key is scoped to — the
+ * retry chain's ORIGINAL execution when the caller's turn is a scheduler retry
+ * (the backend links each retry to it in `retry_of_execution_id`), else the
+ * turn itself. Read from the caller's own execution row; any failure to read
+ * it falls back to the turn (the #3296 behaviour: a retry then runs a second
+ * child rather than the call failing). No turn → undefined, so the key stays
+ * byte-identical to the pre-#3296 one.
+ */
+export async function delegationTurnScope(
+  apiClient: TrinityClient,
+  sourceAgent: string | undefined,
+  callerTurn: string | undefined,
+): Promise<string | undefined> {
+  if (!callerTurn || !sourceAgent) return callerTurn;
+  try {
+    const row = await apiClient.getExecution(sourceAgent, callerTurn);
+    const root = row?.retry_of_execution_id;
+    return typeof root === "string" && root.length > 0 ? root : callerTurn;
+  } catch (err) {
+    console.warn(
+      `[#3296] retry-chain lookup failed for ${sourceAgent}/${callerTurn}; scoping to the turn: ${String(err)}`,
+    );
+    return callerTurn;
+  }
 }
 
 /** How a sequential `/chat` call ended, which decides what it says about report-back (#3295). */
@@ -532,6 +590,23 @@ export async function runAgentChat(
   // in-flight key is invalidated on deploy.
   const routeToken = usePullRouting ? "chat-pull-task" : (parallel ? "task" : "chat");
 
+  // #3296: the turn this delegation is made from is part of its identity. The
+  // same text from a LATER turn is a new delegation that must run and report
+  // into that turn; only a repeat from the same turn (a transport retry) may
+  // replay. The turn is the PLATFORM-stamped one (`callerTurn`, #2392), never
+  // the model-typed `execution_id`: Invariant #18 still holds — a re-send that
+  // only adds, drops or changes report-back (a typed id, `manual`) keeps its
+  // key, so it cannot run the work twice. Appended only when there is a turn,
+  // so a key without one is byte-identical to before and nothing in flight for
+  // user keys or manual sessions is invalidated.
+  //
+  // #3296 review: a scheduler retry is a NEW execution row
+  // (`retry_of_execution_id` → the chain's original), so scoping by the raw
+  // turn made every delegation of a retried scheduled run run a second child.
+  // The scope is the retry chain's original execution, as the backend
+  // records it; attempt 1 and its retries share one key and replay.
+  const turnScope = await delegationTurnScope(apiClient, sourceAgent, callerTurn);
+
   // RELIABILITY-006 (#525): deterministic key so a transport retry of this
   // exact call dedupes at the backend.
   const idempotencyKey = deriveMcpIdempotencyKey([
@@ -541,6 +616,7 @@ export async function runAgentChat(
     model,
     asyncMode ? "async" : "sync",
     message,
+    ...(turnScope ? [`turn:${turnScope}`] : []),
   ]);
 
   // Use parallel task mode or sequential chat mode based on parameter
@@ -1022,6 +1098,25 @@ export function createChatTools(
 
         console.log(`[Fan-Out] ${sourceAgent || "user"} -> ${agent_name}: ${tasks.length} tasks (concurrency=${max_concurrency || 3})`);
 
+        // #3944 (the #3296 rule, for fan_out): the turn this fan-out is made
+        // from is part of its identity. The same batch from a LATER turn is new
+        // work that must run; only a repeat from the same turn (a transport
+        // retry) may replay. The turn is the PLATFORM-stamped one (#2392), read
+        // from the session as `chat_with_agent` reads it, and scoped to the
+        // retry chain's original execution so a scheduler retry replays
+        // attempt 1's batch instead of dispatching it again. No turn → nothing
+        // appended, so the key is byte-identical to before.
+        const session = context?.session as McpAuthContext | undefined;
+        const callerTurn =
+          session?.executionId && session.executionId !== MANUAL_EXECUTION_ID
+            ? session.executionId
+            : undefined;
+        const turnScope = await delegationTurnScope(
+          apiClient,
+          session?.scope === "agent" ? session.agentName : undefined,
+          callerTurn,
+        );
+
         // RELIABILITY-006 (#525): deterministic key over the whole fan-out so a
         // transport retry replays the original batch instead of re-dispatching.
         const idempotencyKey = deriveMcpIdempotencyKey([
@@ -1033,6 +1128,7 @@ export function createChatTools(
           // #2524: an async call's replay snapshot is the ACCEPTED receipt, so
           // a sync call with the same tasks must not share its key.
           ...(async_mode ? ["async"] : []),
+          ...(turnScope ? [`turn:${turnScope}`] : []),
         ]);
 
         const response = await apiClient.fanOut(

@@ -624,7 +624,7 @@ def test_the_observers_are_only_ever_told_by_the_sink():
 def test_the_knob_is_owner_only():
     """Enabling means 'answers to this agent may now spend money' — owner's call."""
     source = _read("routers/agents.py")
-    block = source.split('@router.put("/{agent_name}/operator-resume")')[1][:400]
+    block = source.split('@router.put("/{agent_name}/operator-resume"')[1][:400]
     assert "OwnedAgentByName" in block
 
 

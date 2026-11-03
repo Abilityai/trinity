@@ -74,6 +74,10 @@ Use the sandbox for development: it is free and uses Twilio's shared sender `wha
 
 No. Twilio's WhatsApp API supports direct messages only, so WhatsApp groups are not available — this is a Twilio/WhatsApp platform limitation, not a Trinity setting. If you need group conversations, Telegram and Slack both support them. See [WhatsApp Integration](../integrations/whatsapp-integration.md).
 
+## Is Discord supported?
+
+Not as a built-in channel. The channels Trinity connects out of the box are Slack, Telegram and WhatsApp (through Twilio), plus public chat links and the Workspace. To reach an agent from another platform, have that system call the agent through Trinity's chat API, or fire one of its schedules through a webhook trigger. See [Webhook Triggers](../api-reference/webhook-triggers.md) and the [MCP & API FAQ](mcp-and-api.md).
+
 ## How do users verify their email from Telegram or WhatsApp?
 
 Users send `/login user@example.com` to the bot, receive a 6-digit code at that address, and reply `/login 123456` to complete verification. `/whoami` shows the currently verified email and `/logout` clears it. On Slack no command is needed — the workspace OAuth already provides each user's email. Verification matters for agents with a restricted access policy: unverified users are prompted to log in before the agent responds. See [Access Control](../sharing-and-access/access-control.md).

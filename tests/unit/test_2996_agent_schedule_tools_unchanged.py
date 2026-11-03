@@ -11,7 +11,7 @@ seeded in the real schema (`tests/db_harness.py`), so the `scope` resolution and
 the entry-point fences are the production ones. Each call asserts the stored
 state moved, not just the status code.
 
-Related: docs/memory/requirements/auth.md §2.8, `AGENT_CALLABLE` in
+Related: docs/memory/requirements/auth.md §2.8, `AGENT_CALLABLE_ANY` in
 tests/unit/_route_census.py.
 """
 

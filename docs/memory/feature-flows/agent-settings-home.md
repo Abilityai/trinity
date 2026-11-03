@@ -1,6 +1,6 @@
 # Feature: Agent Settings home
 
-> trinity#966 decision · trinity-enterprise#887 (rail, General, restart banner, incl. #353 timeout) · #890 (Guardrails) · #888 (Storage) · #891 (People) · #950 (header contents)
+> trinity#966 decision · trinity-enterprise#887 (rail, General, restart banner, incl. #353 timeout) · #890 (Guardrails) · #888 (Storage) · #891 (People) · #950 (header contents) · #951 (Credentials)
 
 ## Overview
 
@@ -13,8 +13,8 @@ As an agent owner I open one place to change what an agent is, what it may do, w
 ## Entry points
 
 - **UI**: Agent Detail → **Settings** (last tab) → rail
-- **URL**: `/agents/:name?tab=settings&section=general|guardrails|people|channels|integrations|storage`
-- **Legacy URLs**: `?tab=info|guardrails|credentials|folders|access` resolve to their pane
+- **URL**: `/agents/:name?tab=settings&section=general|credentials|guardrails|people|channels|integrations|storage`
+- **Legacy URLs**: `?tab=info|guardrails|credentials|folders|access` resolve to their pane (`credentials` → Credentials since #951, not Storage)
 
 ## Frontend layer
 
@@ -28,8 +28,9 @@ As an agent owner I open one place to change what an agent is, what it may do, w
 | `components/agent-settings/SettingsSection.vue`, `SettingRow.vue` | Section heading + card; label/hint left, value/verb right, inline editor below |
 | `GeneralPane.vue` | Identity (label, id rename, avatar, template description, tags), Model and funding, Execution (timeout #353, capacity, read-only, memory/CPU), Template (InfoPanel in a dialog), Danger zone |
 | `GuardrailsPane.vue` | Guardrail rules (GuardrailsPanel embedded), self-change permissions (ent#756), gated-skills count → Skills tab, autonomy read-only, cross-model validation (entitled), reliability |
+| `CredentialsPane.vue` | `CredentialsPanel` embedded (#951): guided setup, credential files, Quick Inject, upload, export/import. The file list says "agent stopped" or shows `LoadFailed` instead of "Not present" rows it could not read, and an agent with no `.env` gets a next action (Quick Inject, or **Add .env**) — keyed on `.env` because every agent has a platform-written `.mcp.json`. Credential changes need no restart, so nothing reports to the banner. Shown to the system agent too (it had the Credentials tab before #3798) |
 | `PeoplePane.vue` | `AccessPanel` embedded, unchanged |
-| `StoragePane.vue` + `GitHubAuthRow.vue` | Repository (bound repo, BindRepoPanel, GitHub token, git sync), Credentials, Shared folders, File sharing |
+| `StoragePane.vue` + `GitHubAuthRow.vue` | Repository (bound repo, BindRepoPanel, GitHub token, git sync), Shared folders, File sharing |
 | `ChannelsPane.vue` / `IntegrationsPane.vue` | Voice / Expose via MCP + Trinity access key, plus rows that open the tabs still holding the rest |
 | ~~`components/AgentLiveStrip.vue`~~ | Deleted by trinity-enterprise#955 — live CPU/memory and the 7-day spend row render in the header again (rows 2 and 3 below) |
 | `components/GitPanel.vue` | Gains Pull/Push (driven by AgentDetail's `useGitSync`); loses binding and token config |
@@ -61,6 +62,7 @@ No backend change. Endpoints used: `GET/PUT /api/agents/{name}/timeout`, `/capac
 - `tests/unit/agentSettingsHome.spec.js` — strip contents, alias resolution, pane visibility, search, restart registry
 - `tests/unit/agentSettingsHome.mount.spec.js` — rail navigation through the URL, banner, timeout validation / save / #929 conflict
 - `tests/unit/fileSharingPanelAudience.spec.js` — file sharing reports to the banner
+- `tests/unit/credentialsPane.mount.spec.js` — the Credentials pane hosts the panel and Storage does not; stopped / failed / empty file-list states (#951)
 
 ## Not yet
 

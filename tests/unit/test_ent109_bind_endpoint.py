@@ -93,6 +93,8 @@ def _user(*, agent_name=None, role="admin", username="alice"):
         email=f"{username}@example.com",
         role=role,
         agent_name=agent_name,
+        mcp_scope=None,
+        mcp_key_id=None,
     )
 
 
@@ -464,7 +466,9 @@ class TestIdempotency:
     async def test_key_is_verb_folded(self, endpoint):
         await _call(endpoint, idempotency_key="abc123")
         begin = next(c for c in endpoint.idem if c[0] == "begin")
-        assert begin[1] == "agent:bot"
+        assert begin[1] == "agent:bot:caller:user:1", (
+            "a header key is scoped to its caller (trinity-enterprise#830)"
+        )
         assert begin[2] == "bind_to_own_repo:abc123", (
             "a client reusing one key across verbs must not replay the wrong "
             "snapshot (learnings 2026-07-01)"

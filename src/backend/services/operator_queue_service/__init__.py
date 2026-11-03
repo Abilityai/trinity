@@ -1,0 +1,2401 @@
+"""
+Operator Queue Sync Service (OPS-001).
+
+Background service that polls agent containers for operator-queue.json files,
+syncs new requests to the database, and writes operator responses back to
+agent files.
+
+Polling cycle:
+  1. Get list of running agents
+  2. For each agent, read ~/.trinity/operator-queue.json
+  3. Detect new 'pending' entries -> create DB records, broadcast WebSocket
+  4. Detect 'acknowledged' entries -> update DB records
+  5. Write operator responses back to agent JSON files
+  6. Handle expired entries
+"""
+
+# #3785: this external block stays whole, first, even where `__init__` itself
+# no longer reads a name. A submodule may import at module level only what is
+# already imported here (test_3785's G13), so an ImportError fires before any
+# `_oq`-holding submodule has loaded; and several names here are read through
+# the package from outside (`oqs.time`, `oqs.to_utc_iso`, `oqs.rate_limiter`).
+# A name `__init__` stops reading keeps its line with a per-line F401 waiver
+# (`noqa: F401`) that says which of the two keeps it, so F401 still checks
+# every other import here.
+import asyncio  # noqa: F401 — kept for G13 (poller imports it)
+import base64  # noqa: F401 — kept for G13 (listing imports it)
+import hashlib
+import json
+import logging
+import os
+import re
+import time
+import uuid  # noqa: F401 — kept for G13 (listing and poller import it)
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Sequence, Tuple
+
+from services import rate_limiter
+from services.operator_queue_choices import (
+    OPTIONS_DROPPED_MARKER,
+    options_cap_violation,
+    title_cap_violation,
+)
+from utils.helpers import iso_cutoff, parse_iso_timestamp, to_utc_iso, utc_now_iso
+
+# #3785 (O2): the collaborators (`db`, `AgentClient`, …) are bound once, in
+# `deps`, and read as `deps.X`, never bound here — a stale
+# `monkeypatch.setattr(oqs, "db", …)` raises; patch `oqs.deps.X`. Imported
+# after every external import, so a failed first import leaves nothing stale.
+from . import deps
+
+logger = logging.getLogger(__name__)
+
+# WebSocket manager injected from main.py
+_websocket_manager = None
+
+QUEUE_FILE_PATH = ".trinity/operator-queue.json"
+DEFAULT_POLL_INTERVAL = 5  # seconds
+# #1525: after this many consecutive failed create attempts for the same request
+# id, quarantine it — stop re-attempting so one persistently-failing create can't
+# produce an unbounded ~5s ERROR loop. It's retried again after a process restart
+# (or if it leaves `pending` / gets created some other way).
+MAX_CREATE_ATTEMPTS = 3
+# Safety valve so the in-memory quarantine map can never grow without bound if an
+# agent streams unique failing ids; cleared wholesale past this size.
+_MAX_QUARANTINE_ENTRIES = 5000
+
+# =========================================================================
+# #1632: ingestion caps at the agent-authored create seam.
+#
+# #1402 makes the operator queue the approval channel for irreversible actions,
+# so a compromised / prompt-injected agent that floods plausible "approve this"
+# items causes operator fatigue → reflexive approval. XSS is already handled
+# (DOMPurify); the exposure is VOLUME + social engineering. These bound a
+# HOSTILE agent, not just a runaway. All env-tunable and generous by design —
+# the job is to cap abuse, not throttle real usage.
+# =========================================================================
+
+# DEPTH cap (primary, DB-measured ⇒ Redis-independent). Once an agent has this
+# many pending rows the sync STOPS ingesting new items — the fatigue metric is
+# depth, not rate, so a rate-aware drip can't accumulate a backlog.
+OPERATOR_QUEUE_MAX_PENDING_PER_AGENT = int(
+    os.getenv("OPERATOR_QUEUE_MAX_PENDING_PER_AGENT", "25")
+)
+# RATE cap (burst smoothing, Redis, fail-open) — per-agent + fleet-wide.
+OPERATOR_QUEUE_CREATE_RATE_LIMIT = int(os.getenv("OPERATOR_QUEUE_CREATE_RATE_LIMIT", "60"))
+OPERATOR_QUEUE_CREATE_RATE_WINDOW = int(os.getenv("OPERATOR_QUEUE_CREATE_RATE_WINDOW", "60"))
+OPERATOR_QUEUE_FLEET_CREATE_RATE_LIMIT = int(
+    os.getenv("OPERATOR_QUEUE_FLEET_CREATE_RATE_LIMIT", "300")
+)
+# Per-cycle scan bounds (C1: a deferred-not-dropped item + full-file rescan is a
+# per-cycle DoS on a 10k-item file). Skip a pathological file wholesale, and
+# never scan more than N requests per cycle.
+OPERATOR_QUEUE_MAX_FILE_BYTES = int(
+    os.getenv("OPERATOR_QUEUE_MAX_FILE_BYTES", str(2 * 1024 * 1024))
+)
+OPERATOR_QUEUE_MAX_SCAN_PER_CYCLE = int(os.getenv("OPERATOR_QUEUE_MAX_SCAN_PER_CYCLE", "500"))
+# Field size caps — truncate-with-marker (losing a real approval is worse than a
+# clamped one). title/question measured in chars; context/options serialized bytes.
+OPERATOR_QUEUE_TITLE_MAX = int(os.getenv("OPERATOR_QUEUE_TITLE_MAX", "300"))
+OPERATOR_QUEUE_QUESTION_MAX = int(os.getenv("OPERATOR_QUEUE_QUESTION_MAX", "4000"))
+OPERATOR_QUEUE_CONTEXT_MAX_BYTES = int(os.getenv("OPERATOR_QUEUE_CONTEXT_MAX_BYTES", "8192"))
+OPERATOR_QUEUE_OPTIONS_MAX_BYTES = int(os.getenv("OPERATOR_QUEUE_OPTIONS_MAX_BYTES", "4096"))
+# #3385: `type` is agent-authored free text. A plain constant, not an env knob:
+# it must stay above every platform type literal (the longest is 24 chars) or the
+# clamp would re-type a platform row.
+OPERATOR_QUEUE_TYPE_MAX = 64
+# #3243: the authoring caps on an agent's ask, refused (never truncated) on the
+# native path and held on the queue-file path. Floored at load so a mis-set env
+# cannot refuse every skill-gate approval (two short options) or every title.
+def _floored_env_cap(name: str, default: int, floor: int) -> int:
+    return max(floor, int(os.getenv(name, str(default))))
+
+
+OPERATOR_QUEUE_MAX_OPTIONS = _floored_env_cap("OPERATOR_QUEUE_MAX_OPTIONS", 5, 2)
+OPERATOR_QUEUE_OPTION_MAX_CHARS = _floored_env_cap("OPERATOR_QUEUE_OPTION_MAX_CHARS", 60, 16)
+OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS = _floored_env_cap("OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS", 120, 40)
+# trinity-enterprise#611: the frozen action an agent-raised ask carries (the
+# values a decision would submit). Refused above this on the native path.
+OPERATOR_QUEUE_PROPOSAL_MAX_BYTES = int(os.getenv("OPERATOR_QUEUE_PROPOSAL_MAX_BYTES", "8192"))
+OPERATOR_QUEUE_ID_MAX = int(os.getenv("OPERATOR_QUEUE_ID_MAX", "256"))
+OPERATOR_QUEUE_EXECUTION_ID_MAX = int(os.getenv("OPERATOR_QUEUE_EXECUTION_ID_MAX", "128"))
+# ent#364: RFC 5321 caps an address at 320 chars; anything longer is not an
+# email and never matches a roster row, so it is refused before the DB read.
+OPERATOR_QUEUE_EMAIL_MAX = int(os.getenv("OPERATOR_QUEUE_EMAIL_MAX", "320"))
+# Flood alert: one per over-cap episode (edge-triggered, #3130), un-guessable
+# id, budgeted (#1677); the cooldown is the minimum spacing between episodes.
+OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS = int(
+    os.getenv("OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS", "300")
+)
+# #3254 R9: a persisting flood episode is re-read at most this often, the #3255
+# base-image alarm's spacing (BASE_IMAGE_ALERT_COOLDOWN_SECONDS).
+OPERATOR_QUEUE_FLOOD_REREAD_SECONDS = 6 * 60 * 60
+
+# =========================================================================
+# #1677: budget for agent-INFLUENCEABLE platform alert emitters.
+#
+# The #1632 caps above bound the agent-authored FILE seam; platform direct-DB
+# creates bypass `_sync_agent` by construction. Most of those emitters are
+# platform-cadence-bound (edge-triggered, idempotent ids, leader-locked) —
+# but an emitter whose VOLUME an agent can drive (e.g. skill-not-found: one
+# high-priority item per distinct unknown slash-command, #1410) re-opens the
+# operator-fatigue channel #1632 closed. Such emitters route through
+# `create_bounded_alert` below: a per-(agent, registered-type) pending-DEPTH
+# cap — DB-measured ⇒ Redis-independent, the #1632 primary-bound mirror; no
+# rate cap, because depth is rate-independent (a fast spray only reaches the
+# cap faster). The caller-parity test
+# (tests/unit/test_1677_operator_alert_emitters.py) forces every
+# create_operator_queue_item call site to be classified platform-only or
+# routed through this helper — misclassification fails at CI, never quietly
+# at a load-bearing platform create (the poison-park fail-direction argument
+# for rejecting a db-sink default bound).
+# =========================================================================
+
+# Per-(agent, type) pending budget for budgeted platform alerts. Generous vs
+# the legit case (a broken agent produces 1-3 distinct unknown commands),
+# tight vs the exploit (100 distinct commands → cap + one episode alert).
+# Self-healing: operator resolution drops depth below the cap.
+OPERATOR_ALERT_MAX_PENDING_PER_TYPE = int(
+    os.getenv("OPERATOR_ALERT_MAX_PENDING_PER_TYPE", "5")
+)
+
+# The registered budgeted types — a closed, reviewed set (#1890 shape). An
+# unregistered `item["type"]` is refused fail-closed: a caller-trusted string
+# would mint a fresh budget per distinct value (unbounded cap keyspace), so
+# registration is a one-line reviewed act here, never a call-site decision.
+_BUDGETED_ALERT_TYPES = frozenset({
+    "skill_not_found",
+    # ent#499: a Workspace client's thumbs-down. No agent authors it, but the
+    # volume is driven by a person clicking, which is the same
+    # not-bound-by-platform-cadence side of the #1677 classification.
+    "workspace_problem_report",
+    # #2529: the per-Push `.gitignore` sweep's alert. Budgeted rather than
+    # exempted because `sync_to_github` is reachable from the `git_sync` MCP
+    # tool, which an agent-scoped key may call on itself — so an agent CAN drive
+    # the volume, which is the whole test the #1677 classification applies.
+    "gitignore_untracked",
+    # #2392: an effect refused on a pull-mode agent for lack of an execution id.
+    # Budgeted because the agent drives the volume — every send it attempts
+    # without an id is one refusal.
+    "effect_unguarded",
+    # #3130: the file seam's own flood alarm. An agent's filing volume is what
+    # trips it, so it is agent-influenceable by construction; as a raw create it
+    # was the dominant producer of the depth it reported on (386 of one agent's
+    # 435 rows). Edge-triggered at the emitter, budgeted here as the backstop.
+    "queue_flood",
+})
+
+# Shape guard for the episode alert's `last_triggered_by` triage field: a
+# platform trigger enum only — NEVER agent-controlled free text (G-04: the
+# episode alert is durable operator-visible state). Digits included because
+# the real enum carries them (`a2a`).
+_TRIGGERED_BY_RE = re.compile(r"[a-z0-9_]{1,32}")
+
+# Valid priority values — an agent-supplied unknown collapses to "medium".
+_VALID_PRIORITIES = {"critical", "high", "medium", "low"}
+
+# Reserved id prefix for role-assignment drift alerts (trinity-enterprise#500).
+# A NAMED public constant rather than a bare literal in the emitter, because the
+# emitter is CROSS-REPO: the registered module that raises these items imports
+# this name, so the reservation below and the id it produces cannot drift apart
+# across two repositories. (The house convention puts the constant in the
+# emitter's own module — `BASE_IMAGE_STALE_ALERT_PREFIX` in
+# `system_agent_service.py`. This is the deliberate deviation, and the reason is
+# exactly that the emitter is not in this repo.)
+ROLE_DRIFT_ALERT_PREFIX = "role-drift-"
+
+# trinity-enterprise#611 / #164: the id prefix of an ask the PLATFORM raises
+# through `ask_service.raise_ask` (the approval gate, `raised_by="gate"`, which
+# must use it). Reserved below like the alert prefixes. An agent that could
+# author one would pre-create the gate's id and have the gate's raise answered
+# as a replay of the AGENT's proposal; and since `is_platform_minted` keys on the
+# tuple, the reservation is also what keeps a gate row from waking the agent to
+# redo an action the gate resumes itself.
+GATE_ASK_ID_PREFIX = "gate-"
+
+# Platform-reserved id prefixes an agent must NOT author. If it could, it would
+# pre-create — and via create_item's on_conflict_do_nothing, silently suppress —
+# its own flood alarm or the #1402 poison alert (C2). Verified against source
+# (lease_reaper_service / agent_client / sync_health_service / task_execution_service
+# / validation_service, plus this service's own alert id).
+_RESERVED_ID_PREFIXES = (
+    "queue-flood-",      # this service's own flood alert
+    "poison-",           # lease_reaper_service poison-park (#1402)
+    "cb-dormant-",       # agent_client circuit-breaker-dormant alert
+    "sync-failing-",     # sync_health_service
+    "git-bloat-",        # sync_health_service
+    "sync-diverged-",    # sync_health_service divergence-freeze episode item
+                         # (trinity-enterprise#706) — deterministic id, so the
+                         # reservation is what keeps it unsuppressible
+    "skill-not-found-",  # task_execution_service
+    "val_",              # validation_service
+    "system-seed-",      # system_seed_service first-run seed alerts (ent#124)
+    "base-image-stale-", # system_agent_service staleness + start-failure (#1816)
+    "alert-budget-",     # this service's #1677 budget episode alert (deterministic
+                         # bucketed id — reservation is what keeps the DB
+                         # on-conflict dedup from being agent-pre-suppressible)
+    "effect-unguarded-", # idempotency_service refused-effect alarm (#2392)
+    "db-backup-",        # db_backup_service failure/staleness alarms (#2216)
+    "log-archive-",      # archive_storage unwritable-directory alarm (#2205)
+    "sub-headroom-",     # subscription_headroom_alerts weekly-window alarm (ent#434)
+    # skills legacy-adoption refusal (#2744). The family prefix, so it covers
+    # BOTH the steady-state `…-refused-<sha256(url)[:12]>` id and the two
+    # actionable branches' timestamped ids (and the historical rows). The
+    # steady-state id is derived from an admin-visible URL and is therefore
+    # GUESSABLE, and `_skills-sync` is uncreatable at agent CREATE but NOT on
+    # the rename path (`routers/agent_rename.py` keeps a leading `_`), so an
+    # owner-hijacked host could pre-create the id and suppress the alarm.
+    # `is_platform_minted` is keyed on this tuple too — it gates the ent#499
+    # responded write-back and the ent#329 respond→resume dispatch, and this
+    # item is one an operator is now EXPECTED to click through on.
+    "skills-legacy-adoption-",
+    "workspace-problem-",  # client_portal report-a-problem (ent#499) — reserved
+                           # so an agent cannot pre-create the id of a complaint
+                           # ABOUT ITSELF and silence it through ON CONFLICT
+    "portal-inbox-collision-",  # client_portal shared legacy inbox (ent#308).
+                           # Its text lists client addresses: reserved (#715) so
+                           # `is_platform_minted` keeps it out of the agent's file
+                           # and its resume turn, and so an agent cannot pre-create
+                           # the id and swallow the alert through ON CONFLICT
+    # git_service per-Push sweep alert (#2529). Reserved for the #1632 reason
+    # above, and — since ent#499 keyed `is_platform_minted` on this very tuple —
+    # this listing is ALSO what keeps the alert out of the agent's own
+    # `~/.trinity/operator-queue.json`. Correct: the sweep alarm is a platform
+    # alarm ABOUT the agent, not a loop the agent opened and is waiting on.
+    "gitignore-untracked-",
+    # #3246: four platform families that were never reserved. Reserving them
+    # also makes `is_platform_minted` true for their rows, which keeps them out
+    # of the agent's own file and its answer wake — intended: each is an alarm
+    # ABOUT the agent (or the install), not a loop the agent opened.
+    "skills-reconcile-",       # skill_service reconcile refusal (ent#236)
+    "skills-fleet-reinject-",  # skills_sync_service fleet re-inject failures (ent#236)
+    "retention-guard-",        # retention_guard prune refusal (#1644)
+    "ent615-git-token-scrub-", # git_service/token_scrub refusal + unreadable (ent#615)
+    ROLE_DRIFT_ALERT_PREFIX,  # role-assignment drift (trinity-enterprise#500) —
+                           # the role file lives in the AGENT'S OWN workspace, so
+                           # an unreserved prefix would let it pre-create the id
+                           # of the alert about its own configuration
+    GATE_ASK_ID_PREFIX,    # platform-raised asks (trinity-enterprise#611 / #164)
+    # trinity-enterprise#631: a PERSON's tag of another person. Reserved so an
+    # agent can neither forge one through its queue file (nothing lets an
+    # agent tag a person) nor pre-create a tag's deterministic id and swallow
+    # it through ON CONFLICT; `is_platform_minted` then also keeps the row out
+    # of the agent's file and its answer wake. Literal, not imported: this
+    # module is a leaf the tag service imports from.
+    "mention-",
+)
+
+# Agent ids must be id-shaped: a create PK can't be safely rewritten, so a
+# malformed / oversize id is rejected rather than clamped (C4).
+_ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
+
+# Inline truncation marker (kept short so the clamped field length stays ≤ cap).
+_TRUNC_MARKER = "…[truncated]"
+# #2376: one definition, imported. The respond-side validator has to exempt
+# items wearing this marker, and a second literal would drift the day either
+# side is reworded — leaving the sink accepting a placeholder as a decision.
+_OPTIONS_DROPPED_MARKER = OPTIONS_DROPPED_MARKER
+
+# #1632: single Redis key for the operator-queue sync leader (mirror monitoring
+# #1464). Only the lease-holder runs a poll cycle, so `--workers 2` doesn't
+# double-charge the rate limiter, double-broadcast the flood alert, or
+# double-scan agent files.
+_LEADER_KEY = "opqueue:leader"
+
+
+def _valid_execution_id(value) -> Optional[str]:
+    """#1632: an execution_id salvaged into a truncation marker must itself be
+    bounded and id-shaped — else a 100 KB execution_id smuggled through the
+    marker would defeat the context cap (C4)."""
+    if (
+        isinstance(value, str)
+        and 0 < len(value) <= OPERATOR_QUEUE_EXECUTION_ID_MAX
+        and _ID_RE.match(value)
+    ):
+        return value
+    return None
+
+
+def is_platform_minted(item) -> bool:
+    """Was this queue item raised by the PLATFORM rather than by the agent?
+
+    ent#499. The two agent-facing return paths — the responded write-back into
+    ``~/.trinity/operator-queue.json`` and the ent#329 respond→resume dispatch —
+    both exist to close a loop the AGENT opened: it parked a question, a human
+    answered, the answer goes back. A platform alarm opened no such loop. The
+    agent never asked, is not waiting, and in ent#499's case is the SUBJECT of
+    the complaint rather than its author.
+
+    Feeding those back is not merely useless, it is a disclosure: ent#499's body
+    carries a client's email and their verbatim words, which ent#366 deliberately
+    withholds from the rated agent (``comment_withheld``). Without this predicate
+    an operator clicking "Got it" hands both to that agent within one 5s sync
+    cycle, and — with ``operator_resume_enabled`` — spends one of its turns doing
+    it.
+
+    Keyed on the reserved id prefixes, which are already the platform's marker
+    for "an agent may not mint this id" (#1632). One predicate, both sinks, so
+    they cannot drift.
+    """
+    if isinstance(item, str):
+        candidate = item
+    elif isinstance(item, dict):
+        candidate = item.get("request_id") or item.get("id") or ""
+    else:
+        candidate = getattr(item, "request_id", "") or getattr(item, "id", "") or ""
+    return str(candidate).strip().lower().startswith(_RESERVED_ID_PREFIXES)
+
+
+# #715: the platform alarms whose TEXT is about a person — a Workspace client's
+# complaint (ent#499: their email and verbatim words, which ent#366 withholds from
+# the rated agent) and the client addresses behind a shared legacy inbox (ent#308,
+# whose id also carries an email slug), and the skill gate's rows
+# (trinity-enterprise#751: the approval card names the person who asked, the
+# notice the person who decided; `gate-` covers `gate-note-`). A subset of
+# `_RESERVED_ID_PREFIXES`, so no agent can mint a row into it.
+_ABOUT_A_PERSON_ID_PREFIXES = ("workspace-problem-", "portal-inbox-collision-", "gate-",
+                               # trinity-enterprise#631: who tagged whom, in what
+                               "mention-")
+
+
+def is_person_tag(item: Optional[dict]) -> bool:
+    """trinity-enterprise#631: is this row a person's tag of another person —
+    the reserved `mention-` id AND the type, never the agent-authored type
+    alone? The operator's door answers such a row as not there."""
+    from db.queue_mentions import is_person_tag as _is_tag
+    return _is_tag(item)
+
+
+def is_about_a_person(item: dict) -> bool:
+    """Is this row one of the platform's heads-ups ABOUT a person (#715)? They
+    are the operator's: the queue's reads never return one to a machine key."""
+    candidate = item.get("request_id") or ""
+    return str(candidate).strip().lower().startswith(_ABOUT_A_PERSON_ID_PREFIXES)
+
+
+# trinity-enterprise#815: the same tuple, public, for the SQL twin of
+# `is_about_a_person` — the list routes pass it to `_list_conditions` so the
+# exclusion runs BEFORE the limit. One tuple, read by SQL and Python alike.
+ABOUT_A_PERSON_ID_PREFIXES = _ABOUT_A_PERSON_ID_PREFIXES
+
+# trinity-enterprise#866: the rows about a person that are the agent OWNER's
+# alone. A Workspace client's complaint names the rater and quotes their words
+# (ent#499, trinity#3521); a person the agent is merely SHARED with is often a
+# client too, so reading it would tell one client which others rated the agent
+# and what they wrote — the facts `evaluations.py` already withholds from a
+# shared non-owner. Deliberately not the whole `_ABOUT_A_PERSON_ID_PREFIXES`:
+# a shared operator must still see and answer a skill gate's approval (`gate-`).
+OWNER_ONLY_ID_PREFIXES = ("workspace-problem-",)
+
+# trinity-enterprise#980: the gate asks that are their ADDRESSEE's alone (and
+# admins'). A project steward's proposal names people and tasks of a project
+# that not everyone who can use the agent may open — and the person it is
+# addressed to (the project's creator) need not own the steward: it may only be
+# shared with them. So this is keyed on the addressee (`addressed_to_email` or
+# `resolved_to`), never on who owns the agent — owner-keyed, it showed the row to
+# an owner who could not open the project and hid it from the one person who
+# can decide it. Under `gate-`, so it stays about-a-person and reserved.
+ADDRESSEE_ONLY_ID_PREFIXES = ("gate-addressee-only-",)
+
+
+def is_owner_only(item: dict) -> bool:
+    """Is this row readable only by its agent's owner (and admins)? Compared
+    like `is_about_a_person`, so the SQL twin excludes exactly the same rows."""
+    candidate = item.get("request_id") or ""
+    return str(candidate).strip().lower().startswith(OWNER_ONLY_ID_PREFIXES)
+
+
+def is_addressee_only(item: dict) -> bool:
+    """Is this row readable only by the person it is addressed to (and admins)
+    (trinity-enterprise#980)? Compared like `is_owner_only`."""
+    candidate = item.get("request_id") or ""
+    return str(candidate).strip().lower().startswith(ADDRESSEE_ONLY_ID_PREFIXES)
+
+
+# trinity-enterprise#981: the one sub-family of addressee-only rows that reaches
+# its addressee BY ADDRESS in the Workspace, with no roster check. The platform
+# chose this row's addressee; the roster was never its fence — such a row is
+# raised under a platform agent nobody is shared with, about the person it is
+# addressed to. Deliberately narrower than `ADDRESSEE_ONLY_ID_PREFIXES`: the
+# wider family (a proposal to a project's creator) keeps its roster fence, so a
+# share revoked afterwards still stops showing it. Inside that family, so the
+# Operating Room's addressee-only listing applies unchanged; under `gate-`, so
+# no agent can mint one. `is_addressee_reach` is the Python twin of the SQL
+# branch in `db/operator_queue._list_conditions`; both also require the row's
+# own `raised_by` column to say `gate` — the prefix alone is never the key.
+ADDRESSEE_REACH_ID_PREFIXES = ("gate-addressee-only-reach-",)
+
+
+def is_addressee_reach(item: dict) -> bool:
+    """Does this row reach its addressee by address alone
+    (trinity-enterprise#981)? The reserved sub-prefix AND `raised_by == 'gate'`
+    on the column itself. Who the addressee is stays `is_addressed_to`."""
+    candidate = item.get("request_id") or ""
+    return (item.get("raised_by") == "gate"
+            and str(candidate).strip().lower().startswith(ADDRESSEE_REACH_ID_PREFIXES))
+
+
+def is_addressed_to(item: dict, email: Optional[str]) -> bool:
+    """Is `email` this row's addressee — its single `addressed_to_email` or one
+    of its `resolved_to` — compared case-insensitively? The Python twin of the
+    SQL `addressed_to_email` filter (trinity-enterprise#816). An empty `email`
+    is nobody's addressee."""
+    viewer = (email or "").strip().lower()
+    if not viewer:
+        return False
+    if str(item.get("addressed_to_email") or "").strip().lower() == viewer:
+        return True
+    resolved = item.get("resolved_to") or []
+    if isinstance(resolved, str):
+        try:
+            resolved = json.loads(resolved)
+        except ValueError:
+            resolved = []
+    if not isinstance(resolved, list):
+        return False
+    return viewer in {str(p).strip().lower() for p in resolved}
+
+
+def _truncate_with_marker(text: str, max_len: int) -> str:
+    """Truncate so the RESULT (content + marker) is ≤ max_len chars."""
+    if len(text) <= max_len:
+        return text
+    keep = max(0, max_len - len(_TRUNC_MARKER))
+    return text[:keep] + _TRUNC_MARKER
+
+
+def _bounded_type(value):
+    """#3385: the ingest bound on an agent-authored `type` — truncate-with-marker,
+    strings only. Shared by the clamp and the #2915 fingerprint so a clamped
+    row never reads as a rewrite of its own oversize entry."""
+    return _truncate_with_marker(value, OPERATOR_QUEUE_TYPE_MAX) if isinstance(value, str) else value
+
+
+def _scalar_text(value):
+    """#3314: a JSON number/bool title or question is stored as its text, so the
+    stored value is the same on every DB backend and the fingerprint can match it.
+    Anything else is returned unchanged (str, None, and containers — a non-empty
+    container still fails the insert, as today). A FALSY scalar (0, 0.0, False)
+    is also returned unchanged: `create_item` stores the `or`-default for it
+    ("Agent request" / "(no details provided)"), and rows ingested before this
+    fix carry that default too, so stringifying it here would fingerprint "0"
+    against a row that says "Agent request" and flip every such pre-fix row to
+    409 `item_diverged` on the next sync."""
+    if isinstance(value, (bool, int, float)) and value:
+        return str(value)
+    return value
+
+
+def _primary_addressee(agent_name: str, email: str) -> Optional[str]:
+    """``email`` if it is the ONE person who fills ``agent_name``'s primary
+    role, else None (trinity-enterprise#1066). Fails CLOSED and never raises,
+    like `_validated_addressee`."""
+    try:
+        from services import role_addressing
+
+        single = role_addressing.resolve(agent_name, "primary").single
+    except Exception:  # noqa: BLE001 — unresolvable → unaddressed, per #1632
+        logger.warning("[OperatorQueue] primary of %s unresolvable; credential item "
+                       "left unaddressed (ent#1066)", agent_name, exc_info=True)
+        return None
+    return email if single and single.strip().lower() == email else None
+
+
+def _validated_addressee(agent_name: str, raw) -> Optional[str]:
+    """The email an ask is addressed to, or None (ent#364).
+
+    This is the one field on an agent-authored item that is an AUTHORIZATION
+    decision: it determines who may answer the ask and whose Workspace sidebar it
+    appears in. So it is validated here, at the same boundary that clamps every
+    other agent-supplied field, against the agent's own roster — an agent may
+    address only someone it was already shared with.
+
+    `include_owned=False` is the rule, not a default (see `agent_on_roster`'s
+    docstring): an external client's scope is exactly what was shared with them,
+    and the owned-agents branch would hand a client agents nobody gave them.
+
+    Fails CLOSED: a malformed value, an off-roster address, or a roster lookup that
+    raises all yield None — an operator ask — because addressing an ask we could
+    not validate is worse than not addressing it. Never raises, per this module's
+    #1632 contract.
+    """
+    if not isinstance(raw, str):
+        return None
+    email = raw.strip().lower()
+    if not email or len(email) > OPERATOR_QUEUE_EMAIL_MAX or "@" not in email:
+        return None
+    try:
+        from client_portal.service import agent_on_roster
+
+        if agent_on_roster(agent_name, email, include_owned=False):
+            return email
+        logger.info(
+            "[OperatorQueue] %s addressed an item to an off-roster email; "
+            "treating it as an operator ask (ent#364)",
+            agent_name,
+        )
+    except Exception:  # noqa: BLE001 — a roster read must never break ingestion
+        logger.warning(
+            "[OperatorQueue] could not validate the addressee for %s; "
+            "treating it as an operator ask (ent#364)",
+            agent_name,
+            exc_info=True,
+        )
+    return None
+
+
+# ent#429: the context key naming the chat an addressed ask belongs to. Written
+# by the platform (below), read by `client_portal/asks/service.py::_project` as
+# the client-facing `chat_id`, and stripped from anything the agent authored —
+# named here so the writer and the stripper cannot drift apart.
+_WORKSPACE_THREAD_KEY = "workspace_session_id"
+# ent#734: true only when the ask was raised BY the turn serving that chat. Main
+# is both a chat-turn ask's home (drawn as a tile there) and a background ask's
+# reply target (drawn in no chat), so `chat_id` alone cannot tell them apart.
+_WORKSPACE_TURN_KEY = "workspace_raised_in_turn"
+# trinity-enterprise#747: the chat the addressee opened to DISCUSS this ask.
+# Separate from the two keys above on purpose: discussing an ask moves neither
+# where it was raised nor where a background ask's reply goes.
+_WORKSPACE_DISCUSSION_KEY = "workspace_discussion_id"
+# trinity-enterprise#981: the project attachment of a row the platform raised
+# about a person — which project, which task, which event. Written only through
+# `ask_service.raise_ask(platform_context=...)` on a gate raise; read by
+# `client_portal/asks/service.py::_project` as the client-facing `project`.
+_WORKSPACE_PROJECT_ID_KEY = "workspace_project_id"
+_WORKSPACE_PROJECT_TASK_KEY = "workspace_project_task"
+_WORKSPACE_PROJECT_EVENT_KEY = "workspace_project_event"
+# Every context key the platform writes and no agent may author: stripped at both
+# ingestion boundaries and ignored when comparing an agent's content.
+_PLATFORM_CONTEXT_KEYS = frozenset({
+    _WORKSPACE_THREAD_KEY, _WORKSPACE_TURN_KEY, _WORKSPACE_DISCUSSION_KEY,
+    _WORKSPACE_PROJECT_ID_KEY, _WORKSPACE_PROJECT_TASK_KEY, _WORKSPACE_PROJECT_EVENT_KEY,
+})
+
+
+def _workspace_thread_for(agent_name: str, email: str) -> Optional[str]:
+    """The chat an addressed ask with no platform-known turn attaches to — the
+    pair's Main — or None (ent#429). The file path's view of
+    `_workspace_attachment`: a file carries only what the agent wrote, so it has
+    no raising turn to offer."""
+    return _workspace_attachment(agent_name, email)[0]
+
+
+def _workspace_attachment(agent_name: str, email: str,
+                          execution_id: Optional[str] = None) -> Tuple[Optional[str], bool]:
+    """`(chat, raised_in_turn)` for an addressed ask (ent#429, ent#734): the
+    chat it attaches to, or None; and whether that chat is the one the raising
+    turn serves, which is what `_WORKSPACE_TURN_KEY` records.
+
+    ent#734: `execution_id` is the RAISING execution as the PLATFORM knows it
+    (the native path's `X-Trinity-Execution-Id`, #2392, validated as this
+    agent's own) — never an agent-written `context.execution_id`, which a model
+    could fill with any turn it has seen. When it is a RUNNING Workspace chat
+    turn of this same (agent, addressee), the ask attaches to
+    that chat; anything else — a schedule, loop or gate run, a finished, unknown
+    or foreign execution, another person's chat, a failed
+    lookup — gets the pair's Main, exactly as before. The header is set by the
+    platform but not unforgeable by the agent's own process, so the bound is
+    "one of this agent's live turns for this addressee", never another person's
+    conversation (`client_portal.service.chat_for_execution`).
+
+    Resolved at RAISE time, never at render time: an ask raised by a scheduled
+    run has no conversation of its own, and "we will work out where it belongs
+    when someone looks at it" is not an attachment — it is a guess repeated
+    per view, with nothing durable to audit.
+
+    Fail-SOFT, and deliberately the opposite direction to `_validated_addressee`
+    beside it. That one fails CLOSED because an addressee it cannot verify is an
+    authorization decision it must not make. This one only decides where a link
+    POINTS: a thread we could not resolve costs the reader one extra click, and
+    refusing the whole ask over it would lose the question entirely. Never
+    raises — the #1632 clamp contract.
+    """
+    if execution_id:
+        try:
+            from client_portal.service import chat_for_execution
+
+            chat = chat_for_execution(agent_name, email, execution_id)
+            if chat:
+                return chat, True
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "[OperatorQueue] could not resolve the chat of the turn that raised "
+                "an ask from %s; attaching it to Main (ent#734)",
+                agent_name,
+                exc_info=True,
+            )
+    try:
+        from client_portal.service import ensure_thread_for_ask
+
+        return ensure_thread_for_ask(agent_name, email) or None, False
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "[OperatorQueue] could not attach a workspace chat for an ask from %s; "
+            "it will render without a thread link (ent#429)",
+            agent_name,
+            exc_info=True,
+        )
+        return None, False
+
+
+def _json_bytes(value) -> Optional[int]:
+    """The UTF-8 size of `value` serialized as JSON, or None when it does not
+    serialize. The ONE measure every operator-queue size cap reads, so the file
+    path's clamp and the native path's refusal (trinity-enterprise#611) cannot
+    disagree about how big a field is."""
+    try:
+        return len(json.dumps(value).encode("utf-8"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _clamp_ingested_item(req: dict, agent_name: str = "") -> dict:
+    """#1632: total field-hygiene clamp for an agent-authored queue item.
+
+    Called INSIDE the create try/except so any failure is quarantined by #1525
+    rather than hot-looping — but it is written to NEVER raise (every branch is
+    isinstance-guarded, json.dumps is wrapped). Returns a NEW dict; never mutates
+    the caller's request.
+
+    NOT PURE, and the name undersells it. Two of the steps below reach the
+    database, and one of them WRITES:
+
+    * `addressed_to_email` (ent#364) is resolved against the agent's roster —
+      an authorization decision, and the reason it is not simply copied through.
+    * `context.workspace_session_id` (ent#429) is stripped and then re-written
+      with a thread this call may CREATE (`_workspace_thread_for`).
+
+    So this is not safe to call speculatively "just to see what a clamped item
+    would look like": today's one production caller creates the row immediately
+    after, and a second caller that did not would leave an empty client thread
+    behind. Both reads/writes are fail-soft and neither can raise, so the #1525
+    contract above still holds.
+
+    - title / question: truncate-with-marker.
+    - type: truncate-with-marker (#3385).
+    - context: non-dict → {} (fixes the create_item .get crash class); serialized
+      > cap OR non-serializable → a marker object that preserves only a *valid*
+      (≤EXECUTION_ID_MAX, id-shaped) execution_id.
+    - options: serialized > cap OR non-serializable → a small marker list.
+    - created_at: normalized to ingest time (defeats future-date sort-pinning);
+      expires_at is left untouched (honored).
+    - priority: validate-only (unknown → medium; a legit `critical` is untouched —
+      the depth cap already bounds critical *volume*).
+    - addressed_to_email: resolved, never trusted (ent#364) — see above.
+    - context.workspace_session_id: agent value stripped, platform value written
+      for an addressed ask (ent#429) — see above.
+    """
+    out = dict(req)
+
+    title = _scalar_text(out.get("title"))
+    if isinstance(title, str):
+        out["title"] = _truncate_with_marker(title, OPERATOR_QUEUE_TITLE_MAX)
+
+    question = _scalar_text(out.get("question"))
+    if isinstance(question, str):
+        out["question"] = _truncate_with_marker(question, OPERATOR_QUEUE_QUESTION_MAX)
+
+    if "type" in out:
+        out["type"] = _bounded_type(out["type"])
+
+    # ent#364: the addressee is an authorization decision, so it is resolved here
+    # rather than trusted. Absent/invalid/off-roster → None, i.e. an operator ask.
+    #
+    # Resolved BEFORE the context block below, not after, because ent#429 writes
+    # the addressee's thread id INTO context — doing it afterwards would add
+    # bytes the size cap had already signed off on.
+    out["addressed_to_email"] = _validated_addressee(agent_name, out.get("addressed_to_email"))
+    if out.get("type") == "credential" and out["addressed_to_email"]:
+        # trinity-enterprise#1066: this channel never reaches `_validated_ask`,
+        # which holds the kind to primary on the platform door. A secret field
+        # opens for the agent's primary person only; anyone else → unaddressed.
+        out["addressed_to_email"] = _primary_addressee(agent_name, out["addressed_to_email"])
+
+    context = out.get("context")
+    if not isinstance(context, dict):
+        # Non-dict context (str/list/None) → {} — also fixes the pre-existing
+        # create_item execution_id `.get` crash. An ask with no context at all is
+        # the COMMON case for a scheduled run, and it is exactly the one that must
+        # still get a thread (ent#429), so the attach happens on this branch too.
+        out["context"] = {}
+        if out["addressed_to_email"]:
+            thread_id = _workspace_thread_for(agent_name, out["addressed_to_email"])
+            if thread_id:
+                out["context"][_WORKSPACE_THREAD_KEY] = thread_id
+    else:
+        # ent#429: `workspace_session_id` is PLATFORM-written and this is the one
+        # place that writes it. Stripped UNCONDITIONALLY first — an agent that
+        # could author it would be choosing which conversation its ask claims to
+        # belong to, and `_project` hands that straight to the client as
+        # `chat_id`. The projection's docstring already promised "platform-written
+        # context only"; nothing enforced it until now.
+        #
+        # Rebuilt rather than popped: `out = dict(req)` is a SHALLOW copy, so the
+        # context dict is still the caller's, and this function's contract is that
+        # it never mutates the request it was handed.
+        context = {k: v for k, v in context.items() if k not in _PLATFORM_CONTEXT_KEYS}
+        out["context"] = context
+        if out["addressed_to_email"]:
+            thread_id = _workspace_thread_for(agent_name, out["addressed_to_email"])
+            if thread_id:
+                context[_WORKSPACE_THREAD_KEY] = thread_id
+        ctx_bytes = _json_bytes(context)  # None = non-serializable
+        if ctx_bytes is None or ctx_bytes > OPERATOR_QUEUE_CONTEXT_MAX_BYTES:
+            marker = {
+                "_truncated": True,
+                "_original_bytes": ctx_bytes,
+                "execution_id": _valid_execution_id(context.get("execution_id")),
+            }
+            # The thread id survives truncation. It is platform-written and ~32
+            # bytes, and dropping it would make an oversize agent context the one
+            # way to produce a homeless ask (ent#429).
+            if context.get(_WORKSPACE_THREAD_KEY):
+                marker[_WORKSPACE_THREAD_KEY] = context[_WORKSPACE_THREAD_KEY]
+            out["context"] = marker
+
+    options = out.get("options")
+    if options is not None:
+        opt_bytes = _json_bytes(options)  # None = non-serializable
+        if opt_bytes is None or opt_bytes > OPERATOR_QUEUE_OPTIONS_MAX_BYTES:
+            out["options"] = [_OPTIONS_DROPPED_MARKER]
+
+    # #3313: isinstance first — a list/object priority is unhashable, and the
+    # set membership test raised out of this never-raises clamp.
+    if not isinstance(out.get("priority"), str) or out["priority"] not in _VALID_PRIORITIES:
+        out["priority"] = "medium"
+
+    # Ignore the agent-supplied created_at (a future date pins the item atop the
+    # `created_at DESC` sort, C4). expires_at is honored as authored.
+    out["created_at"] = utc_now_iso()
+
+    return out
+
+
+# =========================================================================
+# #2915: sync honesty — the vocabulary the loop writes, the fingerprint it
+# compares, and the aging predicate every reader shares.
+#
+# The file contract is unchanged (ingestion is create-only; an agent's rewrite
+# is NEVER applied in place — an approval is frozen to the exact action the
+# human read). What this adds is that every way the two sides can disagree is
+# detected, recorded on the row, and audited, instead of presenting as fine.
+# =========================================================================
+
+SYNC_CONFIRMED = "confirmed"          # entry present, same content, same status
+SYNC_CHANGED = "changed"              # entry present, content rewritten (detail = fields)
+SYNC_CLOSED_BY_FILER = "closed_by_filer"  # entry carries a status the agent set
+SYNC_MISSING = "missing"              # entry gone (entry_missing / file_missing)
+SYNC_STALE_ID = "stale_id"            # a pending entry re-uses a terminal row's id
+SYNC_UNCONFIRMED = "unconfirmed"      # the poller could not reconcile (detail = why)
+SYNC_STATES = frozenset({
+    SYNC_CONFIRMED, SYNC_CHANGED, SYNC_CLOSED_BY_FILER, SYNC_MISSING,
+    SYNC_STALE_ID, SYNC_UNCONFIRMED,
+})
+# States that audit as `diverged` when entered, `reconciled` when left for confirmed.
+DIVERGED_STATES = frozenset({SYNC_CHANGED, SYNC_CLOSED_BY_FILER, SYNC_MISSING, SYNC_STALE_ID})
+# States on which a response is refused (409 item_diverged) without an explicit
+# acknowledgement: the card the human read is not what the agent now holds.
+REFUSE_RESPONSE_STATES = frozenset({SYNC_CHANGED, SYNC_CLOSED_BY_FILER})
+
+DELIVERY_DELIVERED = "delivered"
+DELIVERY_UNDELIVERED = "undelivered"
+DELIVERY_NOT_APPLICABLE = "not_applicable"
+DELIVERY_STATES = frozenset({DELIVERY_DELIVERED, DELIVERY_UNDELIVERED, DELIVERY_NOT_APPLICABLE})
+
+# #3024: the terminal statuses the write-back itself writes into the agent's file
+# (#1017). `db.get_terminal_items_for_agent` hands the write-back exactly the rows
+# `awaits_terminal_flip` is True for — one rule in two spellings, pinned together
+# by a real-DB test (test_2915_operator_queue_sync_honesty.py).
+_FLIPPED_BY_WRITE_BACK = frozenset({"cancelled", "expired"})
+
+
+def awaits_terminal_flip(row) -> bool:
+    """Will this cycle's write-back write the row's ending into the agent's entry?
+
+    A cancelled / expired row whose flip has not landed: never attempted, or
+    retried after `undelivered` — except `entry_missing`, whose entry the agent
+    had already dropped. Until the flip lands, a still-`pending` entry with the
+    row's id is the ORIGINAL entry awaiting it, not a re-used id (#3024).
+    """
+    return (
+        row.get("status") in _FLIPPED_BY_WRITE_BACK
+        and row.get("delivery_state") in (None, DELIVERY_UNDELIVERED)
+        and (row.get("delivery_detail") or "") != "entry_missing"
+    )
+
+# `sync_detail` / `delivery_detail` are durable, operator-visible, audited
+# columns — a CLOSED vocabulary. Field names, folded status tokens and failure
+# kinds only; never `str(e)`, never `response.text` (agent-controlled), never
+# agent-authored text.
+_DETAIL_RE = re.compile(r"^[a-z0-9_,]{1,96}$")
+_AGENT_STATUS_RE = re.compile(r"^[a-z_]{1,32}$")
+READ_FAILURE_THRESHOLD = 3            # consecutive failed cycles before `unconfirmed` (sync_health precedent)
+LAST_CONFIRMED_REFRESH_SECONDS = 60   # `last_confirmed_at` cadence — one batched UPDATE per agent per minute
+OPERATOR_QUEUE_AGING_HOURS_KEY = "operator_queue_aging_hours"
+OPERATOR_QUEUE_AGING_HOURS_DEFAULT = 24
+_PLATFORM_BLOCK_KEY = "platform"      # the receipt lives under `platform` in the agent's entry
+_AGING_SINCE_KEY = "aging_since"
+_CONTENT_FIELDS = ("title", "question", "options", "expires_at", "type", "priority", "context", "addressee")
+_CONTEXT_TRUNCATED_SENTINEL = "<truncated>"
+
+
+def _detail(token) -> str:
+    """Fold any candidate into the closed detail vocabulary; unknown ⇒ `other`."""
+    s = str(token or "").strip().lower()
+    return s if _DETAIL_RE.match(s) else "other"
+
+
+def _fold_agent_status(raw) -> str:
+    """An agent-written status becomes a short lowercase token or `other`."""
+    s = str(raw or "").strip().lower()
+    return s if _AGENT_STATUS_RE.match(s) else "other"
+
+
+def _read_failure_detail(result: dict) -> str:
+    """Why a read failed, as a token — a status code or a class, never text."""
+    code = result.get("status_code") if isinstance(result, dict) else None
+    if isinstance(code, int):
+        return f"http_{code}"
+    err = str(result.get("error") or "") if isinstance(result, dict) else ""
+    return "timeout" if "timeout" in err.lower() else "unreachable"
+
+
+def _normalise_expires(value) -> str:
+    if not value:
+        return ""
+    try:
+        return to_utc_iso(parse_iso_timestamp(str(value)))
+    except Exception:  # noqa: BLE001 — an unparseable deadline compares as its text
+        return str(value)
+
+
+def _canonical_options(options) -> str:
+    # #3314: mirrors `db/operator_queue.py` storing `json.dumps(options) if
+    # item.get("options") else None` — a falsy value ([], "", {}, 0, False) is
+    # stored NULL, so it must canonicalise like None or the untouched entry
+    # reads as a rewrite.
+    if not options:
+        return ""
+    try:
+        return json.dumps(options, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    except (TypeError, ValueError):
+        return json.dumps([_OPTIONS_DROPPED_MARKER])
+
+
+def _entry_content(req: dict) -> dict:
+    """The comparable content of an agent's file entry — the PURE half of
+    `_clamp_ingested_item` (caps, markers) plus `create_item`'s defaults, so it
+    matches what the row stored at ingest byte for byte. `_clamp_ingested_item`
+    itself is deliberately not called: it reads the roster and may create a
+    workspace thread, and must never run speculatively."""
+    title = _scalar_text(req.get("title"))
+    title = _truncate_with_marker(title, OPERATOR_QUEUE_TITLE_MAX) if isinstance(title, str) else None
+    question = _scalar_text(req.get("question"))
+    question = _truncate_with_marker(question, OPERATOR_QUEUE_QUESTION_MAX) if isinstance(question, str) else None
+    options = req.get("options")
+    if options is not None:
+        try:
+            if len(json.dumps(options).encode("utf-8")) > OPERATOR_QUEUE_OPTIONS_MAX_BYTES:
+                options = [_OPTIONS_DROPPED_MARKER]
+        except (TypeError, ValueError):
+            options = [_OPTIONS_DROPPED_MARKER]
+    return {
+        "title": title or "Agent request",
+        "question": question or title or "(no details provided)",
+        "options": _canonical_options(options),
+        "expires_at": _normalise_expires(req.get("expires_at")),
+        "type": _comparable_type(req.get("type")),
+        "priority": _comparable_priority(req.get("priority")),
+        "context": _comparable_context(req.get("context")),
+        "addressee": _comparable_addressee(req.get("addressed_to_email")),
+    }
+
+
+def _row_content(row: dict) -> dict:
+    return {
+        "title": row.get("title") or "Agent request",
+        "question": row.get("question") or row.get("title") or "(no details provided)",
+        "options": _canonical_options(row.get("options")),
+        "expires_at": _normalise_expires(row.get("expires_at")),
+        "type": _comparable_type(row.get("type")),
+        "priority": _comparable_priority(row.get("priority")),
+        "context": _comparable_context(row.get("context")),
+        "addressee": _comparable_addressee(row.get("addressed_to_email")),
+    }
+
+
+def _comparable_type(value) -> str:
+    # #3385: bound BEFORE the empty-value default, so a row holding the clamped
+    # value and an entry still holding the raw one compare equal.
+    value = _bounded_type(value)
+    return "question" if value in (None, "") else str(value)
+
+
+def _comparable_priority(value) -> str:
+    # #3313: isinstance first, as in the clamp — an unhashable value raised here.
+    return value if isinstance(value, str) and value in _VALID_PRIORITIES else "medium"
+
+
+def _comparable_addressee(value) -> Optional[str]:
+    return (str(value).strip().lower() or None) if isinstance(value, str) else None
+
+
+def _comparable_context(ctx) -> str:
+    """The clamp's PURE half for `context` (#2989 review): non-dict → {}, the
+    platform's workspace keys (`_PLATFORM_CONTEXT_KEYS` — the thread, ent#429,
+    and the raised-in-turn flag, ent#734) stripped (never agent content), and an oversize / unserialisable value → one sentinel — which
+    is also what a row holds after ingest (`_truncated`). Compared as canonical
+    JSON. Sized the way the clamp sizes it, so the cap is crossed on both sides
+    at (very nearly) the same input."""
+    if not isinstance(ctx, dict):
+        return "{}"
+    if ctx.get("_truncated") is True:
+        return _CONTEXT_TRUNCATED_SENTINEL
+    body = {k: v for k, v in ctx.items() if k not in _PLATFORM_CONTEXT_KEYS}
+    try:
+        if len(json.dumps(body).encode("utf-8")) > OPERATOR_QUEUE_CONTEXT_MAX_BYTES:
+            return _CONTEXT_TRUNCATED_SENTINEL
+        return json.dumps(body, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return _CONTEXT_TRUNCATED_SENTINEL
+
+
+def changed_fields(row: dict, req: dict) -> list:
+    """Which content fields the agent rewrote since ingest. `addressee` counts
+    only when the row resolved one: the ingest value is an authorization
+    decision against the roster (ent#364), so an addressee the roster refused
+    is not a rewrite — a re-address is ent#619's supersede vocabulary."""
+    a, b = _row_content(row), _entry_content(req)
+    out = []
+    for f in _CONTENT_FIELDS:
+        if f == "addressee" and not a["addressee"]:
+            continue
+        if a[f] != b[f]:
+            out.append(f)
+    return out
+
+
+def _well_formed_queue(data) -> bool:
+    """An object whose `requests` (if present) is a list. Anything else is the
+    WRONG SHAPE and is read as `unconfirmed`, never as an empty queue (#2989
+    review: `{"requests": {...}}` used to mark every row `missing` and then
+    overwrite the agent's file; a top-level array raised inside `gather`)."""
+    return isinstance(data, dict) and isinstance(data.get("requests", []), list)
+
+
+# #3130: why a queue file's new entries were held — the file-level
+# `platform.ingestion.reason`, a closed vocabulary (never agent text). The
+# strongest reason in a cycle wins: a full queue needs the agent to wait for an
+# ask to end, a rate hold clears by itself, a malformed id needs a fix.
+HOLD_QUEUE_FULL = "queue_full"
+HOLD_RATE_LIMITED = "rate_limited"
+HOLD_INVALID_ID = "invalid_id"
+# #3243: an entry over the authoring caps (options / an agent's title). Ranked
+# lowest — the offending ids ride in their own list on the marker, so a
+# self-clearing `queue_full`/`rate_limited` reason can never hide them.
+HOLD_INVALID_OPTIONS = "invalid_options"
+HOLD_INVALID_TITLE = "invalid_title"
+_HOLD_RANK = {HOLD_INVALID_OPTIONS: 0, HOLD_INVALID_TITLE: 0,
+              HOLD_INVALID_ID: 1, HOLD_RATE_LIMITED: 2, HOLD_QUEUE_FULL: 3}
+# How many offending ids the marker names per list (ids already `_ID_RE`-valid).
+_MARKER_MAX_IDS = 10
+_INGESTION_KEY = "ingestion"
+# "Leave the marker as it is" — distinct from None, which means "remove it".
+_MARKER_UNCHANGED = object()
+
+
+def _stronger_hold(current: Optional[str], new: str) -> str:
+    return new if current is None or _HOLD_RANK[new] > _HOLD_RANK[current] else current
+
+
+def _ingestion_marker(reason: Optional[str], invalid_options: Sequence[str] = (),
+                      invalid_title: Sequence[str] = ()) -> Optional[dict]:
+    """The marker a held file should carry, or None when nothing is held. `since`
+    is stamped when it is written (`_apply_ingestion_marker`). #3243: the ids of
+    entries held over the authoring caps, with the limits in force, ride beside
+    `reason` — only the agent can fix them, so they are named whatever reason
+    wins."""
+    if reason is None:
+        return None
+    marker = {"reason": reason, "max_pending": OPERATOR_QUEUE_MAX_PENDING_PER_AGENT}
+    if invalid_options:
+        marker[HOLD_INVALID_OPTIONS] = list(invalid_options)[:_MARKER_MAX_IDS]
+        marker["max_options"] = OPERATOR_QUEUE_MAX_OPTIONS
+        marker["max_option_chars"] = OPERATOR_QUEUE_OPTION_MAX_CHARS
+    if invalid_title:
+        marker[HOLD_INVALID_TITLE] = list(invalid_title)[:_MARKER_MAX_IDS]
+        marker["max_title_chars"] = OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS
+    return marker
+
+
+def _current_marker(queue_data) -> Optional[dict]:
+    block = queue_data.get(_PLATFORM_BLOCK_KEY) if isinstance(queue_data, dict) else None
+    marker = block.get(_INGESTION_KEY) if isinstance(block, dict) else None
+    return marker if isinstance(marker, dict) else None
+
+
+def _marker_differs(queue_data, wanted: Optional[dict]) -> bool:
+    """Whether the file's marker is not the one wanted. Compared on the fields
+    the platform decides (`reason`, `max_pending`), never on `since`: a hold
+    that continues keeps its start time and is not rewritten. A marker the agent
+    wrote itself is read as data only — a different value is overwritten."""
+    current = _current_marker(queue_data)
+    if wanted is None:
+        return current is not None
+    # #3243: the key set too — a fixed entry drops its id list while the
+    # reason (say `queue_full`) continues, and the stale list must go.
+    return (current is None or set(current) - {"since"} != set(wanted)
+            or any(current.get(k) != v for k, v in wanted.items()))
+
+
+def _apply_ingestion_marker(queue_data: dict, wanted: Optional[dict], now: str) -> bool:
+    """Set or remove `platform.ingestion` on the freshly re-read file. True when
+    the file changed."""
+    if not _marker_differs(queue_data, wanted):
+        return False
+    block = queue_data.get(_PLATFORM_BLOCK_KEY)
+    if wanted is None:
+        if isinstance(block, dict):
+            block.pop(_INGESTION_KEY, None)
+            if not block:
+                queue_data.pop(_PLATFORM_BLOCK_KEY, None)
+        return True
+    if not isinstance(block, dict):
+        block = {}
+        queue_data[_PLATFORM_BLOCK_KEY] = block
+    current = _current_marker(queue_data)
+    since = current.get("since") if current and current.get("reason") == wanted["reason"] else None
+    block[_INGESTION_KEY] = {**wanted, "since": since if isinstance(since, str) else now}
+    return True
+
+
+def _deliver_into(req: dict, resp: dict) -> None:
+    # #715: never who answered — the agent's file carries the answer, not a
+    # person's email.
+    req["status"] = "responded"
+    req["response"] = resp["response"]
+    req["response_text"] = resp.get("response_text")
+    req["responded_at"] = resp.get("responded_at")
+
+
+def _is_our_answer(req: dict, resp: dict) -> bool:
+    """Did a previous write-back land THIS answer in the entry? Matched on the
+    answer's own timestamp, so an entry the agent closed itself (`acknowledged`
+    with no `responded_at`) is never mistaken for a delivered one."""
+    return (
+        req.get("status") in ("responded", "acknowledged")
+        and bool(resp.get("responded_at"))
+        and req.get("responded_at") == resp.get("responded_at")
+    )
+
+
+def aging_hours() -> int:
+    """The operator's bound, `0` = disabled; unreadable ⇒ the default + WARN."""
+    try:
+        raw = deps.db.get_setting_value(
+            OPERATOR_QUEUE_AGING_HOURS_KEY, str(OPERATOR_QUEUE_AGING_HOURS_DEFAULT)
+        )
+        return max(0, int(str(raw).strip()))
+    except Exception as e:  # noqa: BLE001 — a bad setting must not break a list
+        logger.warning("[OperatorQueue] aging bound unreadable (%s); using %d h",
+                       e, OPERATOR_QUEUE_AGING_HOURS_DEFAULT)
+        return OPERATOR_QUEUE_AGING_HOURS_DEFAULT
+
+
+def _aged_at(item: dict, hours: int) -> Optional[datetime]:
+    if hours <= 0 or item.get("status") != "pending":
+        return None
+    created = item.get("created_at")
+    if not created:
+        return None
+    try:
+        return parse_iso_timestamp(str(created)) + timedelta(hours=hours)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def is_aged(item: dict, hours: Optional[int] = None, now: Optional[datetime] = None) -> bool:
+    """Has this pending item waited past the operator's bound? ONE predicate for
+    the list API, the portal projection and the receipt the poller writes."""
+    hours = aging_hours() if hours is None else hours
+    at = _aged_at(item, hours)
+    if at is None:
+        return False
+    return at <= (now or datetime.now(timezone.utc))
+
+
+def annotate_aging(items: list, hours: Optional[int] = None) -> list:
+    """Adds `aging` / `aged_since` to every item in place; the frontend renders,
+    it never recomputes."""
+    hours = aging_hours() if hours is None else hours
+    now = datetime.now(timezone.utc)
+    for item in items:
+        at = _aged_at(item, hours)
+        aged = at is not None and at <= now
+        item["aging"] = aged
+        item["aged_since"] = to_utc_iso(at) if aged else None
+    return items
+
+
+def set_websocket_manager(manager):
+    """Set the WebSocket manager for broadcasting events."""
+    global _websocket_manager
+    _websocket_manager = manager
+
+
+# #1677: (agent_name, item_type) → monotonic ts of the last budget episode
+# alert. MODULE-level (the budget seam runs on any worker from terminal paths —
+# there is no leader lock there) and named DISTINCTLY from the instance-level
+# `OperatorQueueSyncService._flood_alert_cooldown`: a file-seam flood alert
+# must not suppress a budget episode for the same agent (different episodes,
+# different meanings), and the #1632 tests pin the flood cooldown's
+# instance-scoped semantics on fresh service objects. Growth is bounded by
+# fleet size × len(_BUDGETED_ALERT_TYPES).
+_alert_budget_cooldown: dict = {}
+
+
+def reset_alert_budget_state() -> None:
+    """Test hook: clear the module-level #1677 budget-episode cooldown map."""
+    _alert_budget_cooldown.clear()
+
+
+# `create_bounded_alert_outcome` results. Only `ALERT_CREATED` means a row was
+# written; the rest separate a deliberate REFUSAL (unregistered type, budget
+# full) from a FAILURE (count read or create raised) for a caller that must
+# treat them differently (#3130 review I1: the flood emitter retries a failure
+# but not a refusal).
+ALERT_CREATED = "created"
+ALERT_REFUSED_UNREGISTERED = "refused_unregistered"
+ALERT_REFUSED_AT_BUDGET = "refused_at_budget"
+ALERT_FAILED_COUNT = "failed_count"
+ALERT_FAILED_CREATE = "failed_create"
+
+
+async def create_bounded_alert(agent_name: str, item: dict) -> bool:
+    """#1677: the bool view of `create_bounded_alert_outcome` (see there)."""
+    return await create_bounded_alert_outcome(agent_name, item) == ALERT_CREATED
+
+
+async def create_bounded_alert_outcome(agent_name: str, item: dict) -> str:
+    """#1677: the create seam for agent-INFLUENCEABLE platform alert emitters,
+    since #3254 a thin delegate of ``platform_alerts.observe``.
+
+    Every in-repo budgeted emitter now reports through ``observe`` itself, which
+    composes the same per-(agent, registered-type) pending budget inside its
+    locked create (``OPERATOR_ALERT_MAX_PENDING_PER_TYPE``) and spawns the budget
+    episode on a refusal. This helper keeps its signature and its outcome
+    contract for any caller still on it; the #3246 ratchet counts each such
+    caller as off the seam, which steers new code to ``observe``.
+
+    The budget type is derived from ``item["type"]`` (never a separate
+    parameter: two sources of one fact silently void the bound) and MUST be a
+    static literal registered in ``_BUDGETED_ALERT_TYPES``. That type names its
+    platform-alert kind (the kind whose ``budgeted_type`` it is), and the key is
+    read back from ``item["id"]`` + ``item["context"]`` by
+    ``platform_alerts.derive_legacy_subject``, which must resolve to that same
+    kind. The two kinds whose ids carry no derivable subject (the gitignore
+    sweep's alert and the Workspace problem report) are keyed by the request id
+    minus the kind's prefix: for the problem report that is the per-person /
+    target / day digest its own emitter keys by; for gitignore it is the old
+    per-call id, so a call still files one row.
+
+    Outcomes (never raises; every refused or failed arm logs ``[#1677 budget]``):
+      * type not registered          → ``ALERT_REFUSED_UNREGISTERED`` (fail-closed,
+        nothing written: register the type, a one-line reviewed act);
+      * the id does not read back as the type's kind, or carries no key
+                                     → ``ALERT_FAILED_CREATE`` (fail-closed);
+      * else ``observe``'s outcome: ``ALERT_CREATED``; ``"updated"`` (the
+        subject's pending row was rewritten in place); ``"snoozed"`` (a person
+        ended the subject inside the snooze window, nothing written);
+        ``ALERT_REFUSED_AT_BUDGET`` (the budget was full; the episode alert is
+        spawned by ``observe``); ``ALERT_FAILED_CREATE`` for its ``"failed"``.
+
+    ``ALERT_FAILED_COUNT`` stays importable and is no longer returned: the
+    per-type count now runs inside the seam's locked create, where a failed
+    count and a failed create are one exception path. ``create_bounded_alert``
+    is the bool view and is true for ``ALERT_CREATED`` only, so a paired side
+    effect (a notification) never fires twice for one pending row.
+    """
+    from services import platform_alerts
+
+    item_type = item.get("type") if isinstance(item, dict) else None
+    if item_type not in _BUDGETED_ALERT_TYPES:
+        logger.error(
+            "[#1677 budget] refusing operator alert for '%s': type %r is not a "
+            "registered budgeted type (%s) — add it to _BUDGETED_ALERT_TYPES "
+            "before routing an emitter through create_bounded_alert "
+            "(fail-closed; no item created)",
+            agent_name, item_type, sorted(_BUDGETED_ALERT_TYPES),
+        )
+        return ALERT_REFUSED_UNREGISTERED
+
+    kind = next(
+        (k for k in platform_alerts.KINDS.values() if k.budgeted_type == item_type), None
+    )
+    match = platform_alerts.derive_legacy_subject(item.get("id"), item.get("context"))
+    key = None
+    if kind is not None and match is not None and match.kind == kind.name:
+        if match.subject is not None:
+            key = match.subject[len(kind.name) + 1:]
+        elif kind.name in ("gitignore_untracked", "workspace_problem_report"):
+            key = item["id"][len(kind.prefix):] or None
+    if key is None:
+        logger.error(
+            "[#1677 budget] refusing operator alert for '%s': id %r does not read "
+            "back as a keyed %r alert, the kind its type %r registers "
+            "(fail-closed; no item created)",
+            agent_name, item.get("id"), kind.name if kind else None, item_type,
+        )
+        return ALERT_FAILED_CREATE
+
+    outcome = platform_alerts.observe(
+        agent_name, kind.name, key,
+        title=item.get("title") or "",
+        question=item.get("question") or "",
+        priority=item.get("priority") or "high",
+        context=item.get("context"),
+    )
+    if outcome == platform_alerts.OBSERVED_FAILED:
+        logger.error(
+            "[#1677 budget] operator alert create failed for %s/%s — suppressed "
+            "(fail-closed; the seam logged the cause)",
+            agent_name, item_type,
+        )
+        return ALERT_FAILED_CREATE
+    if outcome == ALERT_REFUSED_AT_BUDGET:
+        logger.warning(
+            "[#1677 budget] alert budget full for %s/%s (cap=%d) — refused; the "
+            "budget episode alert reports it",
+            agent_name, item_type, OPERATOR_ALERT_MAX_PENDING_PER_TYPE,
+        )
+    return outcome
+
+
+async def _maybe_emit_alert_budget_episode(
+    agent_name: str, item_type: str, last_triggered_by=None
+) -> None:
+    """#1677: ONE budget-hit episode reading per cooldown window.
+
+    Reported through ``platform_alerts.observe`` as kind ``alert_budget`` keyed by
+    the budgeted type (#3254): one pending row per (agent, type), subject
+    ``alert_budget:<type>``, which a later refusal outside the window rewrites
+    in place rather than filing again. No emitter observes the budget freeing
+    up (it is measured only inside the seam's own create), so a row nobody
+    re-reads ends with its 14-day lifetime (``NO_CLEAR_SITE`` in the #3246
+    registry test). Two workers' readings land on the one subject row, which is
+    what the old time-bucketed id approximated.
+
+    The episode is the set of pending rows that fill the budget: each reading
+    carries a digest of their ids (``filled_by``, a material key of the kind).
+    After a person ends the episode alert, a reading of the same full budget is
+    snoozed for the snooze window; once a slot frees and a new row fills it,
+    the condition cleared and came back, the digest differs and the reading
+    files. A failed read of the set logs an ERROR and leaves ``filled_by``
+    None, which no digest equals, so the reading files.
+
+    The cooldown is module-level (see ``_alert_budget_cooldown``) and stamped
+    BEFORE the reading, so a persistently failing write backs off for the
+    window instead of retrying on every refusal (#1632 shape). The kind is
+    unbudgeted, so the episode can never recurse into the budget. ``observe``
+    never raises and sends the thin ``operator_queue_sync`` trigger (#918) when
+    a rendered field changed.
+    """
+    from services import platform_alerts
+
+    now = time.monotonic()
+    key = (agent_name, item_type)
+    # `None` = never alerted (the #1632 sentinel shape — a 0.0 default would
+    # suppress the first-ever alert while monotonic < cooldown after boot).
+    last = _alert_budget_cooldown.get(key)
+    if last is not None and now - last < OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS:
+        return  # already alerted this episode
+    _alert_budget_cooldown[key] = now
+
+    title = f"Agent '{agent_name}' exceeded its '{item_type}' alert budget"
+    # No `held` count (untruthful at a first-trip emit — true volume lives in
+    # the FAILED executions list) and no agent-controlled text (no command
+    # echo — G-04: this is durable operator-visible state).
+    question = (
+        f"Agent '{agent_name}' produced more '{item_type}' alerts than the "
+        f"per-agent budget allows ({OPERATOR_ALERT_MAX_PENDING_PER_TYPE} "
+        f"pending); further occurrences are suppressed until the pending items "
+        f"are resolved. Suppressed occurrences still record as FAILED "
+        f"executions in the executions list. This can indicate a runaway or "
+        f"compromised agent — review its recent activity before acting on its "
+        f"requests."
+    )
+    try:
+        filling = deps.db.list_operator_queue_items(
+            agent_name=agent_name, status="pending", type=item_type, limit=1000)
+        filled_by = hashlib.sha256(
+            "\n".join(sorted(str(r["id"]) for r in filling)).encode("utf-8")
+        ).hexdigest()[:16]
+    except Exception:  # noqa: BLE001 — the alarm still files, as a new episode
+        logger.error("[#1677 budget] could not read the rows filling %s/%s's budget",
+                     agent_name, item_type, exc_info=True)
+        filled_by = None
+    context = {
+        "reason": "platform_alert_budget",
+        "alert_type": item_type,
+        "cap": OPERATOR_ALERT_MAX_PENDING_PER_TYPE,
+        "filled_by": filled_by,
+    }
+    # Triage aid for the cross-agent budget-fill scenario (a permitted peer
+    # spraying at the victim): the platform trigger enum only, shape-guarded.
+    if isinstance(last_triggered_by, str) and _TRIGGERED_BY_RE.fullmatch(
+        last_triggered_by
+    ):
+        context["last_triggered_by"] = last_triggered_by
+
+    outcome = platform_alerts.observe(
+        agent_name, "alert_budget", item_type,
+        title=title, question=question, priority="high", context=context,
+    )
+    if outcome == platform_alerts.OBSERVED_FAILED:
+        logger.error(
+            "[#1677 budget] failed to emit budget episode alert for %s/%s "
+            "(the seam logged the cause)",
+            agent_name, item_type,
+        )
+        return
+    logger.warning(
+        "[#1677 budget] alert budget hit for %s/%s (cap=%d) — episode alert %s",
+        agent_name, item_type, OPERATOR_ALERT_MAX_PENDING_PER_TYPE, outcome,
+    )
+
+
+# #3785: the package's own submodules, imported after the names they read
+# from `__init__` (test_3785's G6 and G13).
+from . import listing  # noqa: E402,F401 — loads the submodule here, in G6 order
+
+# #3785: the poller core (instance state, start/stop, the leader lease, the
+# loop and the cycle) lives in `poller.PollerCoreMixin`. Imported after every
+# O1 definition: its `__init__` default reads `_oq.DEFAULT_POLL_INTERVAL` at
+# import time.
+from . import poller  # noqa: E402
+
+
+class OperatorQueueSyncService(poller.PollerCoreMixin):
+    """Background service that syncs operator queue files with the database."""
+
+    async def _apply_sync_state(self, agent_name: str, row: dict, state: str,
+                                detail: Optional[str], now: str) -> bool:
+        """Record what the poller established about one row; True iff it changed.
+
+        The row is the edge: `set_sync_state`'s WHERE excludes rows already
+        carrying the value and its rowcount is the transition, so two
+        overlapping leaders cannot double-record. Audit ONLY the accountability
+        transitions — entering a diverged state, or leaving one for confirmed.
+        The `confirmed ↔ unconfirmed` flap is never audited: a fleet restart
+        must write zero audit rows.
+        """
+        if state not in SYNC_STATES:
+            logger.error(f"Refusing unknown sync_state {state!r} for {row.get('id')} (programming error)")
+            return False
+        detail = _detail(detail) if detail else None
+        prior = row.get("sync_state")
+        if prior == state and (row.get("sync_detail") or "") == (detail or ""):
+            return False
+        try:
+            changed = deps.db.set_operator_queue_sync_state(row["id"], state, detail, now)
+        except Exception as e:
+            logger.error(f"Failed to record sync state for {row.get('id')}: {e}")
+            return False
+        if not changed:
+            return False
+        row["sync_state"] = state
+        row["sync_detail"] = detail
+        self._changed_this_cycle = True
+        if state in DIVERGED_STATES:
+            await deps._audit_sync("diverged", agent_name, row["id"],
+                                   {"from": prior, "to": state, "detail": detail})
+        elif state == SYNC_CONFIRMED and prior in DIVERGED_STATES:
+            await deps._audit_sync("reconciled", agent_name, row["id"], {"from": prior})
+        return True
+
+    async def _apply_delivery_state(self, agent_name: str, row: dict, state: str,
+                                    detail: Optional[str], now: str) -> bool:
+        """Record whether the answer / terminal flip reached the agent's file."""
+        if state not in DELIVERY_STATES:
+            logger.error(f"Refusing unknown delivery_state {state!r} for {row.get('id')} (programming error)")
+            return False
+        detail = _detail(detail) if detail else None
+        if row.get("delivery_state") == state and (row.get("delivery_detail") or "") == (detail or ""):
+            return False
+        try:
+            changed = deps.db.set_operator_queue_delivery_state(row["id"], state, detail, now)
+        except Exception as e:
+            logger.error(f"Failed to record delivery state for {row.get('id')}: {e}")
+            return False
+        if not changed:
+            return False
+        row["delivery_state"] = state
+        row["delivery_detail"] = detail
+        self._changed_this_cycle = True
+        if state == DELIVERY_DELIVERED:
+            await deps._audit_sync("written_back", agent_name, row["id"], {"status": row.get("status")})
+        elif state == DELIVERY_UNDELIVERED:
+            await deps._audit_sync("undeliverable", agent_name, row["id"],
+                                   {"status": row.get("status"), "detail": detail})
+        return True
+
+    def _notice_file_channel(self, agent_name: str) -> None:
+        """trinity-enterprise#611: name the file channel's deprecation once per
+        agent per process, on the first ask the poller actually ingests."""
+        if agent_name in self._file_channel_noticed:
+            return
+        if len(self._file_channel_noticed) >= _MAX_QUARANTINE_ENTRIES:
+            self._file_channel_noticed.clear()  # safety valve
+        self._file_channel_noticed.add(agent_name)
+        logger.warning(
+            f"Agent '{agent_name}' raised an ask through {QUEUE_FILE_PATH}. The file "
+            f"channel is deprecated: raise asks with the ask_operator MCP tool. The "
+            f"file stays supported for two releases (trinity-enterprise#611)."
+        )
+
+    async def _sync_agent(self, agent_name: str):
+        """Sync a single agent's operator queue file."""
+        client = deps.AgentClient(agent_name)
+        now = utc_now_iso()
+
+        # 1. Read the queue file from the agent
+        try:
+            result = await client.read_file(QUEUE_FILE_PATH, timeout=5.0)
+        except Exception as e:
+            result = {"success": False, "error": type(e).__name__}
+
+        if not result.get("success"):
+            # #2915: "could not read" is a fact, not silence — but with
+            # hysteresis. The 5 s read times out intermittently on a busy
+            # container, so a row is called `unconfirmed` only after
+            # READ_FAILURE_THRESHOLD consecutive failed cycles, and returns to
+            # `confirmed` on the first good read. No ingest and no write-back
+            # this cycle either way.
+            failures = self._read_failures.get(agent_name, 0) + 1
+            self._read_failures[agent_name] = failures
+            if failures >= READ_FAILURE_THRESHOLD:
+                try:
+                    if deps.db.mark_operator_queue_unconfirmed(
+                        _read_failure_detail(result), now, agent_name=agent_name,
+                        exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
+                    ):
+                        self._changed_this_cycle = True
+                except Exception as e:
+                    logger.error(f"Failed to mark {agent_name} rows unconfirmed: {e}")
+            return
+        self._read_failures.pop(agent_name, None)
+
+        file_exists = result.get("success") and not result.get("not_found")
+        content = result.get("content") if file_exists else None
+        if file_exists and not content:
+            file_exists = False
+
+        # #1632: skip a pathologically large queue file wholesale (C1 per-cycle
+        # DoS guard) — don't even parse it. One flood alert, then skip this agent
+        # this cycle; response write-back resumes once the file is sane again.
+        if file_exists and len(content) > OPERATOR_QUEUE_MAX_FILE_BYTES:
+            logger.warning(
+                f"operator-queue.json for {agent_name} is {len(content)} bytes "
+                f"(> {OPERATOR_QUEUE_MAX_FILE_BYTES}); skipping ingestion this cycle"
+            )
+            await self._maybe_emit_flood_alert(agent_name, reason="oversize_file")
+            try:
+                if deps.db.mark_operator_queue_unconfirmed(
+                    "oversize_file", now, agent_name=agent_name,
+                    exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
+                ):
+                    self._changed_this_cycle = True
+            except Exception as e:
+                logger.error(f"Failed to mark {agent_name} rows unconfirmed: {e}")
+            return
+
+        if file_exists:
+            # #3130: a sane-size read ends an oversize episode.
+            self._end_flood_episode(agent_name, "oversize_file")
+            try:
+                queue_data = json.loads(content)
+            except json.JSONDecodeError:
+                # #2915: an unparseable file is `unconfirmed`, never "empty", and
+                # NOTHING is written back this cycle — the previous path treated
+                # it as an empty request list and then overwrote the agent's
+                # file with the reconstructed responses alone.
+                logger.warning(f"Invalid JSON in operator-queue.json for {agent_name}")
+                try:
+                    if deps.db.mark_operator_queue_unconfirmed(
+                        "invalid_json", now, agent_name=agent_name,
+                        exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
+                    ):
+                        self._changed_this_cycle = True
+                except Exception as e:
+                    logger.error(f"Failed to mark {agent_name} rows unconfirmed: {e}")
+                return
+            if not _well_formed_queue(queue_data):
+                logger.warning(
+                    f"operator-queue.json for {agent_name} is not the expected shape "
+                    f"(an object with a `requests` list); not reconciling, not writing"
+                )
+                try:
+                    if deps.db.mark_operator_queue_unconfirmed(
+                        "wrong_shape", now, agent_name=agent_name,
+                        exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
+                    ):
+                        self._changed_this_cycle = True
+                except Exception as e:
+                    logger.error(f"Failed to mark {agent_name} rows unconfirmed: {e}")
+                return
+        else:
+            queue_data = {"$schema": "operator-queue-v1", "requests": []}
+
+        requests = queue_data.get("requests") or []
+        content_sha = (
+            hashlib.sha256(content.encode("utf-8")).hexdigest() if file_exists else None
+        )
+
+        # #2915: everything the platform holds for this agent, in two reads —
+        # full rows for the open (pending/responded) items the file is expected
+        # to carry, and id/status for every terminal row, so a pending entry that
+        # re-uses a terminal row's id is recognised as `stale_id` instead of
+        # being re-admitted (the on-conflict create returns the surviving uuid
+        # silently: a phantom admit against the depth cap and a "new" broadcast
+        # every cycle). Replaces the per-entry `exists()` probe.
+        try:
+            index = deps.db.get_operator_queue_sync_index_for_agent(agent_name)
+        except Exception as e:
+            logger.error(f"Failed to read the sync index for {agent_name}: {e}")
+            return
+        open_rows = list(index["open"] or [])
+        terminal_index = index["terminal"] or {}
+        native_rids = set(index["foreign"] or ())
+        open_by_rid = {r["request_id"]: r for r in open_rows if r.get("request_id")}
+        seen_rids: set = set()
+        hours = aging_hours()
+        receipt_rids: set = set()
+
+        # 2. Process each request. Two independent bounds guard this agent-authored
+        #    seam (#1632): a DB-measured pending-DEPTH cap (primary, Redis-independent)
+        #    and a per-agent + fleet RATE cap (burst smoothing, fail-open), plus
+        #    per-field hygiene inside the create try/except.
+        new_items = []
+        acknowledged_items = []
+
+        # DEPTH cap baseline — one DB count per cycle; `admitted` tracks this
+        # cycle's creates so the cap holds without re-counting per item.
+        # #3130: the agent's OWN rows only — a platform row about the agent (its
+        # flood alarm above all) never spends the agent's budget.
+        pending_count = deps.db.count_operator_queue_pending_for_agent(
+            agent_name, exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
+        )
+        admitted = 0
+        held = 0
+        # #3130: why entries were held this cycle — reported to the agent in its
+        # file (`platform.ingestion`). The most actionable reason wins.
+        hold_reason = None
+        # #3243: entries held over the authoring caps. NOT counted in `held`:
+        # the flood alert reads "runaway or compromised agent", and a too-long
+        # label is an authoring slip that holds until the agent edits it.
+        cap_held: dict[str, list] = {HOLD_INVALID_OPTIONS: [], HOLD_INVALID_TITLE: []}
+
+        for req in requests[:OPERATOR_QUEUE_MAX_SCAN_PER_CYCLE]:
+            if not isinstance(req, dict):
+                continue
+            req_id = req.get("id")
+            if not req_id:
+                continue
+            if not isinstance(req_id, str):
+                # #3313: only a string id can name a row. A list or object id
+                # reached the unguarded `in open_by_rid` below and raised out of
+                # the whole sync, so none of this agent's answers were written
+                # back. A pending one is held as `invalid_id`, as the create-side
+                # shape check would hold it; any other status names nothing.
+                if req.get("status", "pending") == "pending":
+                    logger.warning(
+                        f"Rejecting malformed operator-queue id from {agent_name}: {req_id!r}"
+                    )
+                    held += 1
+                    hold_reason = _stronger_hold(hold_reason, HOLD_INVALID_ID)
+                continue
+
+            # #1631: reject an agent-authored id that impersonates a platform id
+            # prefix (hijack/suppress guard). Log once per (agent, id) so it
+            # can't hot-loop the ~5s sync at WARNING. Normalize before the check
+            # (case/whitespace-fold) so a lookalike like ` Poison-x` can't slip a
+            # platform-styled alert past the filter — the platform mints these
+            # prefixes lowercase and unpadded, so a normalized id that matches can
+            # only be an impersonation attempt.
+            if isinstance(req_id, str) and req_id.strip().lower().startswith(
+                _RESERVED_ID_PREFIXES
+            ):
+                key = (agent_name, req_id)
+                # #2372: only a PENDING entry can pre-create (and so suppress)
+                # a platform row. A non-pending one is what the pre-ent#499
+                # write-back left in the file — the platform's own entry, not
+                # the agent's — and nothing removes it, so the row may already
+                # be pruned. Skipped quietly; the WARNING stays for the
+                # impersonation case.
+                if req.get("status", "pending") != "pending":
+                    continue
+                if key not in self._rejected_reserved:
+                    if len(self._rejected_reserved) >= _MAX_QUARANTINE_ENTRIES:
+                        self._rejected_reserved.clear()  # safety valve
+                    self._rejected_reserved.add(key)
+                    logger.warning(
+                        f"Rejecting operator-queue request '{req_id}' from "
+                        f"'{agent_name}': ids with a reserved platform prefix are "
+                        f"minted only by the platform (#1631)"
+                    )
+                continue
+
+            # trinity-enterprise#611: an id this agent raised over the platform.
+            # The native ask lives outside the file contract, so the entry is
+            # skipped before any branch reads it: the acknowledged branch matches
+            # rows by request_id alone, and the create branch would read the id
+            # as brand new every cycle (the phantom admit).
+            if isinstance(req_id, str) and req_id in native_rids:
+                key = (agent_name, req_id)
+                if key not in self._skipped_native:
+                    if len(self._skipped_native) >= _MAX_QUARANTINE_ENTRIES:
+                        self._skipped_native.clear()  # safety valve
+                    self._skipped_native.add(key)
+                    logger.warning(
+                        f"Ignoring operator-queue file entry '{req_id}' from "
+                        f"'{agent_name}': the agent raised that id with ask_operator, "
+                        f"and a native ask is never read from or written back to the "
+                        f"file (trinity-enterprise#611)"
+                    )
+                continue
+
+            fail_key = (agent_name, req_id)
+            req_status = req.get("status", "pending")
+            if isinstance(req_id, str):
+                if req_id in seen_rids:
+                    # #2989 review: a duplicated id is reconciled ONCE, on its first
+                    # entry. Two copies with different content used to flip the row
+                    # confirmed ↔ changed every cycle: two audit rows, two writes and
+                    # a broadcast per 5 s.
+                    continue
+                seen_rids.add(req_id)
+
+            if req_status == "acknowledged":
+                # Agent acknowledged our response. #1631: broadcast the row's
+                # platform uuid (returned here), not the agent's `req_id` — the
+                # frontend store keys items by uuid `id`, so an ack keyed on
+                # request_id would never match a live item.
+                ack_uuid = deps.db.mark_operator_queue_acknowledged(agent_name, req_id)
+                if ack_uuid:
+                    acknowledged_items.append(ack_uuid)
+                    open_by_rid.pop(req_id, None)  # it just went terminal
+                elif req_id in open_by_rid:
+                    row = open_by_rid[req_id]
+                    if row.get("status") == "responded" and _is_our_answer(req, row):
+                        # Our answer landed and the agent acknowledged it, but the
+                        # flip waits for the delivery record (`mark_acknowledged`
+                        # requires `delivered`, #2989 review) — confirmed, not closed.
+                        await self._apply_sync_state(agent_name, row, SYNC_CONFIRMED, None, now)
+                    else:
+                        # #2915: acknowledged on a row that was never responded — the
+                        # agent closed its own ask. The platform used to drop this
+                        # (the UPDATE matches only `responded` rows) and keep showing
+                        # the human a pending card for an item the agent had closed.
+                        await self._apply_sync_state(
+                            agent_name, row, SYNC_CLOSED_BY_FILER, "acknowledged", now
+                        )
+                continue
+
+            if req_id in open_by_rid:
+                # #2915: the platform already holds this item — reconcile the
+                # entry against the row instead of skipping it. The row is the
+                # frozen ingest snapshot; nothing here rewrites it.
+                row = open_by_rid[req_id]
+                if req_status == "pending":
+                    fields = changed_fields(row, req)
+                    if fields:
+                        await self._apply_sync_state(agent_name, row, SYNC_CHANGED, ",".join(fields), now)
+                    else:
+                        await self._apply_sync_state(agent_name, row, SYNC_CONFIRMED, None, now)
+                        if (
+                            row.get("status") == "pending"
+                            and is_aged(row, hours)
+                            and not (isinstance(req.get(_PLATFORM_BLOCK_KEY), dict)
+                                     and req[_PLATFORM_BLOCK_KEY].get(_AGING_SINCE_KEY))
+                        ):
+                            receipt_rids.add(req_id)
+                elif req_status == "responded":
+                    # Our own write-back landed; the agent has not acknowledged yet.
+                    await self._apply_sync_state(agent_name, row, SYNC_CONFIRMED, None, now)
+                else:
+                    await self._apply_sync_state(
+                        agent_name, row, SYNC_CLOSED_BY_FILER, _fold_agent_status(req_status), now
+                    )
+                continue
+
+            if isinstance(req_id, str) and req_id in terminal_index:
+                term = terminal_index[req_id]
+                if req_status == "pending":
+                    # #3024: this runs BEFORE the write-back (step 4), so right
+                    # after the platform ends a row the file still holds the
+                    # ORIGINAL pending entry — the one step 4 is about to flip.
+                    # That is not a re-use; only an entry the write-back will not
+                    # flip is.
+                    if not awaits_terminal_flip(term):
+                        await self._apply_sync_state(
+                            agent_name,
+                            {"id": term["id"], "sync_state": term.get("sync_state"), "sync_detail": None},
+                            SYNC_STALE_ID, _fold_agent_status(term.get("status")), now,
+                        )
+                elif term.get("sync_state") == SYNC_STALE_ID and req_status == term.get("status"):
+                    # #3024: the entry reads the row's own ending — file and row
+                    # agree. Heals the rows flagged before this fix; a genuine
+                    # re-use cannot get here, because the write-back never flips an
+                    # entry once the row has left its set.
+                    await self._apply_sync_state(
+                        agent_name,
+                        {"id": term["id"], "sync_state": SYNC_STALE_ID, "sync_detail": None},
+                        SYNC_CONFIRMED, None, now,
+                    )
+                continue
+
+            if req_status != "pending":
+                continue
+
+            # #1525: quarantine a request whose create keeps failing so a single
+            # malformed/unpersistable entry can't hot-loop the ~5s sync (the row
+            # never persists → exists() stays False → retry forever). #1631: keyed
+            # by the (agent, id) tuple so agent A's failing id can't quarantine
+            # agent B's distinct, healthy request.
+            if self._create_failures.get(fail_key, 0) >= MAX_CREATE_ATTEMPTS:
+                continue
+
+            # NB: an agent-authored id impersonating a platform-reserved prefix is
+            # already rejected above (normalized, logged once per (agent, id)), so
+            # no second reserved-prefix check is needed here.
+
+            # #1632 C4: a create PK can't be safely rewritten, so a malformed /
+            # oversize id is rejected (held → may trigger the summary alert).
+            if (
+                not isinstance(req_id, str)
+                or len(req_id) > OPERATOR_QUEUE_ID_MAX
+                or not _ID_RE.match(req_id)
+            ):
+                logger.warning(
+                    f"Rejecting malformed operator-queue id from {agent_name}: {req_id!r}"
+                )
+                held += 1
+                hold_reason = _stronger_hold(hold_reason, HOLD_INVALID_ID)
+                continue
+
+            # #3243: the authoring caps, the same predicate as the native raise.
+            # A NEW entry only (an ingested row was matched above, so an ask
+            # already in the queue is never re-judged), and before the depth and
+            # rate caps so a held entry spends no token.
+            cap_hold = None
+            if options_cap_violation(req.get("options"),
+                                     max_options=OPERATOR_QUEUE_MAX_OPTIONS,
+                                     max_chars=OPERATOR_QUEUE_OPTION_MAX_CHARS):
+                cap_hold = HOLD_INVALID_OPTIONS
+            elif title_cap_violation(req.get("title"),
+                                     max_chars=OPERATOR_QUEUE_ASK_TITLE_MAX_CHARS):
+                cap_hold = HOLD_INVALID_TITLE
+            if cap_hold:
+                cap_held[cap_hold].append(req_id)
+                hold_reason = _stronger_hold(hold_reason, cap_hold)
+                key = (agent_name, req_id)
+                if key not in self._cap_held_logged:
+                    if len(self._cap_held_logged) >= _MAX_QUARANTINE_ENTRIES:
+                        self._cap_held_logged.clear()  # safety valve
+                    self._cap_held_logged.add(key)
+                    logger.warning(
+                        f"Holding operator-queue request '{req_id}' from '{agent_name}': "
+                        f"{cap_hold} (#3243)")
+                continue
+
+            # #1632 C3: DEPTH cap (hard, primary). At the cap STOP ingesting —
+            # `admitted` only grows, so every later item is over too → break.
+            if pending_count + admitted >= OPERATOR_QUEUE_MAX_PENDING_PER_AGENT:
+                held += 1
+                hold_reason = _stronger_hold(hold_reason, HOLD_QUEUE_FULL)
+                break
+
+            # #1632: RATE cap (per-agent + fleet, fail-open). Charged only at the
+            # real create point. Denied → hold + stop scanning (the window is
+            # monotonic within a cycle, so a re-check would also deny). NB: on a
+            # per-agent-allow / fleet-deny, this cycle's ≤1 per-agent token is
+            # "spent" without a create — a fail-safe (slightly stricter) drift
+            # bounded to one item because we break.
+            if not rate_limiter.check(
+                f"operator_queue_create:{agent_name}",
+                OPERATOR_QUEUE_CREATE_RATE_LIMIT,
+                OPERATOR_QUEUE_CREATE_RATE_WINDOW,
+            ).allowed or not rate_limiter.check(
+                "operator_queue_create:_fleet",
+                OPERATOR_QUEUE_FLEET_CREATE_RATE_LIMIT,
+                OPERATOR_QUEUE_CREATE_RATE_WINDOW,
+            ).allowed:
+                held += 1
+                hold_reason = _stronger_hold(hold_reason, HOLD_RATE_LIMITED)
+                break
+
+            # New item — clamp then create. The clamp runs INSIDE the try so any
+            # clamp/create failure is quarantined by #1525 rather than hot-looping.
+            try:
+                clamped = _clamp_ingested_item(req, agent_name)
+                # trinity-enterprise#611: provenance from what the POLLER knows,
+                # keyword-only — never from the entry, which could claim any
+                # channel it likes.
+                new_id, inserted = deps.db.create_operator_queue_item_with_outcome(
+                    agent_name, clamped, channel="file", raised_by="agent",
+                )
+                self._create_failures.pop(fail_key, None)  # recovered — clear count
+                if not inserted:
+                    # The row already exists: an ask raised with the same id
+                    # over the platform between this cycle's index read and
+                    # now. Nothing was admitted, so nothing spends a depth-cap
+                    # slot, announces itself or opens an audit story.
+                    continue
+                admitted += 1
+                new_items.append(clamped)
+                self._notice_file_channel(agent_name)
+            except Exception as e:
+                attempts = self._create_failures.get(fail_key, 0) + 1
+                if len(self._create_failures) >= _MAX_QUARANTINE_ENTRIES:
+                    self._create_failures.clear()  # safety valve — never unbounded
+                self._create_failures[fail_key] = attempts
+                if attempts >= MAX_CREATE_ATTEMPTS:
+                    logger.error(
+                        f"Quarantining operator-queue request {req_id} for "
+                        f"'{agent_name}' after {attempts} failed create attempts "
+                        f"(last error: {e}); it won't be retried until it changes "
+                        f"or the service restarts"
+                    )
+                else:
+                    logger.error(
+                        f"Failed to create queue item {req_id} for '{agent_name}' "
+                        f"(attempt {attempts}/{MAX_CREATE_ATTEMPTS}): {e}"
+                    )
+                continue
+
+            # #2915: a freshly ingested row is confirmed by construction (the
+            # entry was just read) — and `ingested` is the first accountability
+            # row of its audit story.
+            await self._apply_sync_state(
+                agent_name, {"id": new_id, "sync_state": None, "sync_detail": None},
+                SYNC_CONFIRMED, None, now,
+            )
+            # `type` is agent-authored free text — the clamp bounds its length
+            # (#3385) but not its content; the
+            # audit row is durable operator-visible state (G-04), so it carries
+            # the folded token or `other` — never the string itself. `req_id`
+            # passed the `_ID_RE` shape check above.
+            await deps._audit_sync("ingested", agent_name, new_id,
+                                   {"request_id": req_id, "type": _fold_agent_status(clamped.get("type"))})
+
+        # #2915: open rows the file no longer carries. The entry was pruned or the
+        # file is gone — the platform used to keep showing a live card for it.
+        for rid, row in open_by_rid.items():
+            if rid in seen_rids:
+                continue
+            # A platform alarm (ent#499) was never in this file — there is no entry
+            # to miss (#2989 review: every alarm went `missing` on the first cycle
+            # after upgrade). A `responded` row the file lost is the write-back's
+            # business: it re-appends the entry this same cycle, so marking it
+            # `missing` first only minted a `diverged` + `reconciled` pair.
+            if is_platform_minted(row) or row.get("status") == "responded":
+                continue
+            await self._apply_sync_state(
+                agent_name, row, SYNC_MISSING,
+                "entry_missing" if file_exists else "file_missing", now,
+            )
+
+        # #2915: "last confirmed at HH:MM" without a write per row per cycle —
+        # one batched UPDATE per agent, for confirmed rows older than a minute.
+        try:
+            deps.db.refresh_operator_queue_last_confirmed(
+                agent_name, now, iso_cutoff(minutes=LAST_CONFIRMED_REFRESH_SECONDS // 60)
+            )
+        except Exception as e:
+            logger.error(f"Failed to refresh last_confirmed_at for {agent_name}: {e}")
+
+        # #1632: one aggregated summary alert per episode when items were held
+        # (depth cap, rate cap, or malformed ids) — never one per skipped item.
+        if held > 0:
+            await self._maybe_emit_flood_alert(agent_name, held=held)
+        else:
+            # #3130: nothing held — the episode is over; the next one alerts.
+            self._end_flood_episode(agent_name, "ingestion_cap")
+
+        # 3. Broadcast new items via WebSocket
+        if new_items and _websocket_manager:
+            for item in new_items:
+                try:
+                    await _websocket_manager.broadcast(json.dumps({
+                        "type": "operator_queue_new",
+                        "data": {
+                            "id": item.get("id", ""),
+                            "agent_name": agent_name,
+                            "type": item.get("type", "question"),
+                            "priority": item.get("priority", "medium"),
+                            "title": item.get("title", ""),
+                            "created_at": item.get("created_at", ""),
+                        }
+                    }))
+                except Exception as e:
+                    logger.error(f"Failed to broadcast queue event: {e}")
+
+        if acknowledged_items and _websocket_manager:
+            for ack_id in acknowledged_items:
+                try:
+                    await _websocket_manager.broadcast(json.dumps({
+                        "type": "operator_queue_acknowledged",
+                        "data": {
+                            "id": ack_id,
+                            "agent_name": agent_name,
+                        }
+                    }))
+                except Exception:
+                    pass
+
+        # 4. Write responses back to the agent's file. Cancelled/expired
+        # items are propagated too (#1017) so the agent stops waiting on
+        # them — as in-place status flips on entries still in the file; an
+        # entry that is gone is recorded `undelivered:entry_missing` (#2915),
+        # never silently skipped. The aging receipt rides the same write.
+        responded_items = deps.db.get_operator_queue_responded_for_agent(agent_name)
+        terminal_items = deps.db.get_operator_queue_terminal_for_agent(agent_name)
+        # #3130: tell a held file so — but only when the marker it carries is not
+        # already the one wanted, and never again against a file a write was
+        # already refused on.
+        ingestion = _ingestion_marker(hold_reason, cap_held[HOLD_INVALID_OPTIONS],
+                                      cap_held[HOLD_INVALID_TITLE])
+        marker_due = (
+            file_exists
+            and _marker_differs(queue_data, ingestion)
+            and self._ingestion_write_refused.get(agent_name) != content_sha
+        )
+        if responded_items or terminal_items or receipt_rids or marker_due:
+            wrote = await self._write_responses_to_agent(
+                agent_name, client, queue_data, responded_items,
+                terminal_items, file_exists,
+                content_sha=content_sha, receipt_request_ids=receipt_rids,
+                ingestion=ingestion if marker_due else _MARKER_UNCHANGED,
+            )
+            if marker_due and wrote is False:
+                self._ingestion_write_refused[agent_name] = content_sha
+            elif wrote:
+                self._ingestion_write_refused.pop(agent_name, None)
+
+    async def _write_responses_to_agent(
+        self,
+        agent_name: str,
+        client: deps.AgentClient,
+        queue_data: dict,
+        responded_items: list,
+        terminal_items: Optional[list] = None,
+        file_exists: bool = True,
+        *,
+        content_sha: Optional[str] = None,
+        receipt_request_ids=None,
+        ingestion=_MARKER_UNCHANGED,
+    ) -> Optional[bool]:
+        """Write operator responses back to the agent's queue file.
+
+        #2915 — the write is honest and narrow. Before writing, the file is
+        READ AGAIN and merged by id, and the write carries `if_match` (the sha of
+        what was read) so the agent server refuses (412) rather than clobbers an
+        entry the agent appended in between — the window is narrowed to one
+        round trip, and a refused write is recorded and retried, not lost. A
+        response is delivered ONLY into an entry that is still `pending` and
+        whose content still matches the row (an answer to a rewritten question
+        is `undelivered:entry_changed`). Every outcome lands on the row as a
+        delivery state; nothing is dropped silently.
+
+        #3130: ``ingestion`` is the file-level `platform.ingestion` marker to
+        leave in the file (a dict), to remove (``None``), or
+        ``_MARKER_UNCHANGED``. Returns True when a write landed, False when one
+        was attempted and refused or failed, None when nothing was written.
+        """
+        now = utc_now_iso()
+        terminal_items = terminal_items or []
+        receipt_request_ids = set(receipt_request_ids or ())
+        marker_wanted = ingestion is not _MARKER_UNCHANGED
+        if (not responded_items and not terminal_items and not receipt_request_ids
+                and not marker_wanted):
+            return None
+
+        # Re-read immediately before writing (the cycle-start read may be a whole
+        # cycle old). A transient failure here means "try next cycle" — the
+        # agent WAS readable seconds ago, so nothing is recorded for it.
+        if file_exists:
+            try:
+                fresh = await client.read_file(QUEUE_FILE_PATH, timeout=5.0)
+            except Exception as e:
+                logger.warning(f"Re-read before write-back failed for {agent_name}: {type(e).__name__}")
+                return
+            if not fresh.get("success"):
+                return
+            if fresh.get("not_found") or not fresh.get("content"):
+                # The cycle-start read HAD a file and this re-read does not: an
+                # agent mid-rewrite, not a lost file. Write nothing, record
+                # nothing — the next cycle decides. (A file missing at BOTH reads
+                # is the container-restart case and is reconstructed below.)
+                logger.info(f"operator-queue.json for {agent_name} vanished between the two reads; not writing")
+                return
+            try:
+                queue_data = json.loads(fresh["content"])
+            except json.JSONDecodeError:
+                logger.warning(f"Re-read of operator-queue.json for {agent_name} is not JSON; not writing")
+                return
+            if not _well_formed_queue(queue_data):
+                logger.warning(f"Re-read of operator-queue.json for {agent_name} is not the expected shape; not writing")
+                return
+            content_sha = hashlib.sha256(fresh["content"].encode("utf-8")).hexdigest()
+
+        requests = queue_data.get("requests") or []
+        updated = False
+        terminal_flips = 0
+
+        # #1631: the DB `id` is now a platform uuid; the agent's file entries are
+        # keyed by the string the agent authored, which is persisted as the row's
+        # `request_id`. So every match against a file entry (`req.get("id")`)
+        # MUST key on `request_id`, not the DB `id` — otherwise write-back
+        # silently stops matching and the agent never sees its answer.
+        # #2915: a platform-minted row (ent#499) has no loop to close — it is
+        # `not_applicable` and takes NO part in delivery. Files written before
+        # ent#499 still carry those alarms as `responded` entries; matching them
+        # here flip-flopped the row between delivered and not_applicable every
+        # cycle, minting an audit row each time (seen live on the first run).
+        response_map = {
+            item["request_id"]: item for item in responded_items
+            if not is_platform_minted(item)
+        }
+        # Cancelled/expired items (#1017): flip still-'pending' file entries
+        # to their terminal status so the agent stops waiting (and so a
+        # stale 'pending' file entry can't resurrect a purged row). Never
+        # appended if missing from the file.
+        terminal_map = {
+            item["request_id"]: item for item in (terminal_items or [])
+            if not is_platform_minted(item)
+        }
+        delivered: dict = {}      # row id -> row, IN this write (or already there)
+        undelivered: dict = {}    # row id -> (row, detail), decided before the write
+
+        # Update items already in the agent's requests array
+        seen_ids = set()
+        for req in requests:
+            if not isinstance(req, dict):
+                continue
+            req_id = req.get("id")
+            if not isinstance(req_id, str):
+                # #3313: every map here is keyed on a row's string request_id,
+                # so a non-string id names no row — and a list/object one made
+                # the lookup below raise, aborting the whole write-back.
+                continue
+            if req_id in response_map:
+                resp = response_map[req_id]
+                # #2989 review: "send again to answer anyway" must reach the file.
+                # The operator saw the divergence and acknowledged it at respond
+                # time (`divergence_acknowledged_at`), so the answer is written
+                # into the entry as it is now — rewritten or closed by the agent.
+                forced = bool(resp.get("divergence_acknowledged_at"))
+                if req.get("status") == "pending":
+                    if changed_fields(resp, req) and not forced:
+                        # The agent rewrote the question after the human answered
+                        # it. Never hand an answer to a different question.
+                        undelivered[resp["id"]] = (resp, "entry_changed")
+                    else:
+                        _deliver_into(req, resp)
+                        updated = True
+                        delivered[resp["id"]] = resp
+                elif _is_our_answer(req, resp):
+                    delivered[resp["id"]] = resp  # a previous write landed
+                elif forced:
+                    # The agent closed the entry on its side; the acknowledged
+                    # answer is WRITTEN into it (status → responded) so the agent
+                    # finds it. Recording `delivered` without a write let the next
+                    # cycle read the agent's own `acknowledged` as an ack of an
+                    # answer it never saw.
+                    _deliver_into(req, resp)
+                    updated = True
+                    delivered[resp["id"]] = resp
+                else:
+                    undelivered[resp["id"]] = (resp, "closed_by_filer")
+            elif req_id in terminal_map:
+                term = terminal_map[req_id]
+                if req.get("status") == "pending":
+                    req["status"] = term["status"]
+                    updated = True
+                    terminal_flips += 1
+                delivered[term["id"]] = term
+            if req_id in receipt_request_ids and req.get("status") == "pending":
+                block = req.get(_PLATFORM_BLOCK_KEY)
+                if not isinstance(block, dict):
+                    block = {}
+                    req[_PLATFORM_BLOCK_KEY] = block
+                if not block.get(_AGING_SINCE_KEY):
+                    block[_AGING_SINCE_KEY] = now
+                    updated = True
+            if req_id:
+                seen_ids.add(req_id)
+
+        # Reconstruct items missing from the file (e.g. after container restart).
+        # #1631: write the agent's own `request_id` back as the file entry's
+        # `id` (never the DB uuid) so the agent recognises the item and the next
+        # sync cycle's index — keyed on request_id — matches instead of
+        # creating a duplicate.
+        for resp in responded_items:
+            # ent#499: a platform alarm was never in this agent's file and must
+            # not be written into it — see `is_platform_minted`.
+            if is_platform_minted(resp):
+                continue
+            if resp["request_id"] not in seen_ids:
+                requests.append({
+                    "id": resp["request_id"],
+                    "type": resp.get("type", "question"),
+                    "status": "responded",
+                    "priority": resp.get("priority", "medium"),
+                    "title": resp.get("title", ""),
+                    "question": resp.get("question", ""),
+                    "options": resp.get("options"),
+                    "context": resp.get("context"),
+                    "created_at": resp.get("created_at", ""),
+                    "response": resp["response"],
+                    "response_text": resp.get("response_text"),
+                    "responded_at": resp.get("responded_at"),  # #715: never who
+                })
+                updated = True
+                delivered[resp["id"]] = resp
+
+        # #2915: a platform alarm has no loop to close — `not_applicable`, once,
+        # whether it is still `responded` or already terminal.
+        for row in list(responded_items) + list(terminal_items or []):
+            if is_platform_minted(row):
+                await self._apply_delivery_state(
+                    agent_name, row, DELIVERY_NOT_APPLICABLE, "platform_minted", now
+                )
+        # #2915: a terminal flip whose entry is gone is recorded, not dropped.
+        for term in terminal_map.values():
+            if term["request_id"] not in seen_ids:
+                undelivered[term["id"]] = (term, "entry_missing" if file_exists else "file_missing")
+        for row, detail in undelivered.values():
+            await self._apply_delivery_state(agent_name, row, DELIVERY_UNDELIVERED, detail, now)
+
+        # #3130: the file-level hold marker rides the same guarded write.
+        if marker_wanted and _apply_ingestion_marker(queue_data, ingestion, now):
+            updated = True
+
+        if not updated:
+            for row in delivered.values():
+                await self._apply_delivery_state(agent_name, row, DELIVERY_DELIVERED, None, now)
+            return None
+
+        queue_data["requests"] = requests
+
+        # Write the updated file back to the agent
+        try:
+            new_content = json.dumps(queue_data, indent=2)
+            result = await client.write_file(
+                QUEUE_FILE_PATH,
+                new_content,
+                timeout=10.0,
+                platform=True,  # Allow writes to .trinity directory
+                if_match=content_sha,
+            )
+        except Exception as e:
+            result = {"success": False, "error": type(e).__name__}
+
+        if result.get("success"):
+            logger.info(
+                f"Wrote {len(response_map)} responses and {terminal_flips} "
+                f"terminal-status flips back to {agent_name}"
+            )
+            for row in delivered.values():
+                await self._apply_delivery_state(agent_name, row, DELIVERY_DELIVERED, None, now)
+            return True
+        else:
+            code = result.get("status_code")
+            if code == 412:
+                detail = "conflict"      # the agent wrote in between — retried next cycle
+            elif isinstance(code, int):
+                detail = f"http_{code}"
+            else:
+                detail = _read_failure_detail(result)
+            logger.warning(
+                f"Failed to write responses to {agent_name}: {detail}"
+            )
+            for row in delivered.values():
+                await self._apply_delivery_state(agent_name, row, DELIVERY_UNDELIVERED, detail, now)
+            return False
+
+    async def _maybe_emit_flood_alert(
+        self, agent_name: str, held: int = 0, reason: str = "ingestion_cap"
+    ):
+        """#1632 / #3130: ONE flood alert per over-cap EPISODE.
+
+        Fired when this agent's ingestion was depth-held / rate-skipped, or its
+        queue file was oversized.
+
+        Edge-triggered (#3130): an episode alerts once, however many cycles or
+        cooldown windows it lasts, and the next alert needs the condition to
+        have cleared first (`_sync_agent` ends the episode through
+        `_end_flood_episode`, which ends its alert too). That holds after a
+        person acknowledges the alert too: each reading carries the episode's
+        start (`episode_started_at`, a material key of the kind), so the
+        snooze silences re-reads of the acknowledged episode for the snooze
+        window and a NEW episode files at once. A leader failover or restart
+        loses the in-memory episode, so a persisting flood counts as a new
+        episode there and may file once more. The marker is worker-local too:
+        with Redis down the leader lease fails open
+        (`_try_acquire_leadership`), each worker stamps its own
+        `episode_started_at`, and another worker's re-read can file past a
+        person's ending, at most one extra row per extra worker per re-read
+        window. It used to be one
+        alert per cooldown window for as long as the condition held — and since
+        the alert counted toward the very depth it reported, the condition never
+        cleared: 241 alerts in one day on one agent. The cooldown stays as the
+        minimum spacing between episodes, so a cap that flaps cannot re-alert
+        every cycle.
+
+        Reported through `platform_alerts.observe` (#3254) as kind
+        `queue_flood`, keyed by the reason: one pending row per (agent, reason),
+        rewritten in place. Budgeted (#1677, #3130): the kind's budgeted type is
+        `queue_flood`, so `observe` applies the per-(agent, type) budget — an
+        agent's own filing volume drives this emitter, which is the test that
+        classification applies. The budget is the backstop for what the
+        in-memory episode state cannot see (a leader failover re-reads once,
+        onto the same row). Excluded from the agent's own depth read by its
+        reserved prefix. Softened wording to avoid cry-wolf (C9).
+
+        Re-read while it lasts (#3254 R9): an episode that persists is observed
+        again at most every `OPERATOR_QUEUE_FLOOD_REREAD_SECONDS` (6 hours), so
+        the kind's 14-day lifetime ends only a row nobody re-read (a lost
+        clear), never one whose condition still holds. The refresh time and the
+        episode start per (agent, reason) live in dicts this method creates on
+        the instance for itself (`_flood_refreshed_at`,
+        `_flood_episode_started_at`).
+
+        The episode and its refresh time are stamped BEFORE every reading; the
+        per-agent cooldown only before an episode's first reading, since it
+        spaces episodes and a re-read is not one. Outcomes:
+          * created / updated / snoozed → the episode is consumed (one alert per
+            episode; a snoozed reading is a person's ending of this episode,
+            which stands for the snooze window);
+          * failed on the episode's first reading → the episode is RELEASED so
+            the alarm is retried, and the cooldown stamp spaces those retries to
+            at most one per window (review I1: holding the episode on a failure
+            silenced the alarm until the condition cleared — for a runaway agent,
+            never);
+          * failed on a re-read → the episode is KEPT: an earlier reading filed
+            its alert, and only a live episode lets `_end_flood_episode` end it
+            when the condition clears (AC 2). The re-read is retried after the
+            cooldown, not after the full 6 hours;
+          * refused at budget → the episode is consumed. The agent already has
+            a full budget of pending flood alerts and the budget emits its own
+            `alert-budget-` episode alert, so re-knocking every window would
+            add nothing but budget-episode churn. An unregistered kind is the
+            same (a code defect retrying cannot fix).
+        Never raises (`observe` never does): an alert must not kill the sync.
+        """
+        from services import platform_alerts
+
+        key = (agent_name, reason)
+        now = time.monotonic()
+        refreshed = vars(self).setdefault("_flood_refreshed_at", {})
+        started = vars(self).setdefault("_flood_episode_started_at", {})
+        rereading = key in self._flood_episodes
+        if rereading:
+            # R9: the re-read of a persisting episode.
+            last_read = refreshed.get(key)
+            if last_read is not None and now - last_read < OPERATOR_QUEUE_FLOOD_REREAD_SECONDS:
+                return  # this episode already alerted and was read recently
+        else:
+            # `None` = never alerted for this agent. A `0.0` default would be
+            # wrong: `time.monotonic()` is seconds from an arbitrary reference
+            # and can be < COOLDOWN on a freshly-booted process, so
+            # `now - 0.0 < COOLDOWN` would suppress the FIRST-ever alert for
+            # the first COOLDOWN seconds of uptime.
+            last = self._flood_alert_cooldown.get(agent_name)
+            if last is not None and now - last < OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS:
+                return  # too soon after the last episode — the next cycle retries
+            self._flood_episodes.add(key)
+            started[key] = utc_now_iso()
+            # Stamped before the first reading, so a failed one — released
+            # below — is retried no sooner than the cooldown (I1).
+            self._flood_alert_cooldown[agent_name] = now
+        refreshed[key] = now
+
+        if reason == "oversize_file":
+            title = f"Agent '{agent_name}' produced an oversized operator-queue file"
+            question = (
+                f"Agent '{agent_name}' wrote an operator-queue.json larger than the "
+                f"allowed size; its requests are not being ingested. This can "
+                f"indicate a runaway or compromised agent — review its recent "
+                f"activity before acting on its requests."
+            )
+        else:
+            title = f"Agent '{agent_name}' exceeded its operator-queue ingestion limit"
+            question = (
+                f"Agent '{agent_name}' produced more operator-queue requests than the "
+                f"per-agent ingestion limit allows; {held} request(s) were held and "
+                f"are not shown. Held requests stay in the agent's file and are read "
+                f"again once it is under the limit; the agent is told they are held. "
+                f"This can indicate a runaway or compromised agent — review its "
+                f"recent activity before acting on its requests."
+            )
+
+        outcome = platform_alerts.observe(
+            agent_name, "queue_flood", reason,
+            title=title, question=question, priority="high",
+            context={"held": held, "reason": reason, "episode_started_at": started.get(key)},
+        )
+        if outcome == platform_alerts.OBSERVED_FAILED:
+            if rereading:
+                # keep the episode so its end still clears the alert; retry the
+                # re-read once the cooldown has passed
+                refreshed[key] = (now - OPERATOR_QUEUE_FLOOD_REREAD_SECONDS
+                                  + OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS)
+            else:
+                self._flood_episodes.discard(key)  # retry next window (I1)
+                refreshed.pop(key, None)
+            return
+        if outcome in (platform_alerts.OBSERVED_CREATED, platform_alerts.OBSERVED_UPDATED):
+            logger.warning(
+                f"Operator-queue flood alert {outcome} for {agent_name} "
+                f"(reason={reason}, held={held})"
+            )
+
+    def _end_flood_episode(self, agent_name: str, reason: str) -> None:
+        """#3130 / #3254: the over-cap condition behind `reason` cleared.
+
+        Called from `_sync_agent` where it knows (a sane-size read ends an
+        oversize episode; a cycle that held nothing ends an ingestion-cap one).
+        Ends the episode, so the next over-cap reading alerts again, and, only
+        when one was running, ends its alert as the platform
+        (`platform_alerts.clear`, a compare-and-set on pending: a person's
+        ending is never overwritten). Every cycle without an episode costs no
+        read. Never raises (`clear` never does).
+        """
+        key = (agent_name, reason)
+        if key not in self._flood_episodes:
+            return
+        self._flood_episodes.discard(key)
+        from services import platform_alerts
+        platform_alerts.clear(agent_name, "queue_flood", reason)
+
+
+# Global service instance
+operator_queue_service = OperatorQueueSyncService()
+
+
+# ---------------------------------------------------------------------------
+# Re-exports (#3785, O3): only names read from outside the package, by
+# production code or by a test that calls or compares one (never patches it).
+# Inside the package every reader names the owning module.
+# ---------------------------------------------------------------------------
+
+# listing: the router's engine and refusal; the cursor codec tests drive.
+from .listing import (  # noqa: E402,F401
+    CURSOR_MAX_BYTES,
+    QueueListError,
+    decode_cursor,
+    encode_cursor,
+    list_for_principal,
+    narrow_to_agent_key,
+)

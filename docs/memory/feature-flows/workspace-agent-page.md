@@ -9,7 +9,7 @@
 >
 > | This page had | It is now |
 > |---|---|
-> | stats strip, Activity chart | `PortalAgentBand.vue`, always visible above the thread |
+> | stats strip, Activity chart | `PortalAgentBand.vue`, always visible above the thread (the chart is `ActivityWave.vue` since trinity-enterprise#968) |
 > | Your chats, What it can do, Reports | `PortalAgentDetails.vue`, in the rail's place |
 > | Canvas, Files | rail tabs since ent#475 |
 > | Recent work, Activity | the rail's Work tab since ent#525 |
@@ -503,6 +503,34 @@ failure that reads as "this agent did nothing this week".
 Empty and unavailable are different sentences ("No activity in this window" vs
 "Stats are unavailable right now"), and the window selector is hidden on the tabs
 it does not drive.
+
+#### … and then the band's chart became a signature (trinity-enterprise#968)
+
+Operator feedback on 2026-10-22: the stacked bars in the band were "ugly and
+technical looking"; the ask was an Apple-style, flowing surface that reads as the
+agent's signature rather than a data chart, and looks good whatever the week
+holds. Four options went to a design canvas; the waveform won, with two
+refinements made in review (per-source colour inside each beat — a per-day blended
+colour collapsed to one hue on a typical week — and softened seams).
+
+`PortalAgentBand.vue` now renders `components/portal/ActivityWave.vue`: four
+rounded beats per day mirrored on the centre line, the envelope a monotone curve
+through the daily totals (so a single busy day is a hump, never a dip), each beat
+a clipped pill of that day's sources stacked bottom-up in the bar chart's order
+with a vertical blur melting the seams. A quiet week stays low (scale floor of ten
+runs); an empty week is the wave's own resting face at reduced opacity — the "No
+activity in this window" sentence is gone from the band, while "Stats are
+unavailable right now" stays, because empty and unavailable remain different
+claims. The payload, the `labels` contract and the per-day tooltip are unchanged
+(the tooltip's placement rule moved to `utils/chartTooltip.js`, shared with
+`StackedBarChart`, which the operator Overview keeps). The chart owns its loading
+motion — breathing beats under a glint, then a left-to-right grow-in — as the one
+named exception to design-system §6, under the scanline's phase rules; a failed
+first load takes the "unavailable" sentence arm rather than the wave, which would
+otherwise draw the fallback empty timeline as "no runs". The day count comes from the payload: a `7d` window is
+**eight** points (start date through today inclusive). The 39px column budget from
+ent#547 is untouched. Guards: `tests/unit/activityWave.spec.js`,
+`activityWave.mount.spec.js`, `portalAgentBandWave.mount.spec.js`.
 
 ### "Start a chat" did nothing — the third time this shape broke
 

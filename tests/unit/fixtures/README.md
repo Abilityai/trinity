@@ -50,7 +50,9 @@ it is precisely the partial-recovery risk the `#1870` recovery notice
 
 The frozen baseline of the #2996 route census (`tests/unit/_route_census.py`):
 every OSS HTTP route that, at freeze, was neither gated by a recognised principal
-rule nor listed with a reason in `AGENT_CALLABLE` / `OWN_AUTH` / `DELEGATED`.
+rule nor listed with a reason in `AGENT_CALLABLE` / `OWN_AUTH` / `DELEGATED`
+(`AGENT_CALLABLE` was split into `AGENT_CALLABLE_SELF` / `AGENT_CALLABLE_ANY` by
+trinity-enterprise#840).
 Keys are `<definition relpath under src/backend>::<qualname>`; values are the
 registered `"METHOD /full/path"`, checked against the live app by
 `test_2996_route_census_runtime.py`.

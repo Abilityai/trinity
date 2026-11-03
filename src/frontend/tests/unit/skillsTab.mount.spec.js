@@ -324,6 +324,105 @@ describe('filter', () => {
   })
 })
 
+describe('one bounded box (trinity#3448)', () => {
+  const region = (w) => tid(w, 'skills-region')
+
+  it('Own and Shared scroll in one named region; the header with the filter stays outside it', async () => {
+    const { w } = await mountTab()
+    expect(region(w).attributes('role')).toBe('region')
+    expect(region(w).attributes('aria-label')).toBe('Skills')
+    expect(w.findAll('[role="region"]')).toHaveLength(1)           // never one box per section
+    expect(region(w).find('[data-testid="skills-own"]').exists()).toBe(true)
+    expect(region(w).find('[data-testid="skills-shared"]').exists()).toBe(true)
+    expect(region(w).find('[data-testid="skills-filter"]').exists()).toBe(false)
+    expect(region(w).find('[data-testid="skills-tab-total"]').exists()).toBe(false)
+  })
+
+  it('it fills the window: the tab is a link in the 0px-basis chain, never flex-1', async () => {
+    const { w } = await mountTab()
+    expect(tid(w, 'skills-tab').classes()).toEqual(expect.arrayContaining(['flex', 'flex-col', 'grow', 'basis-0']))
+    expect(tid(w, 'skills-tab').classes()).not.toContain('flex-1')
+    expect(region(w).classes()).toEqual(expect.arrayContaining(['grow', 'basis-0']))
+    expect(region(w).classes()).not.toContain('flex-1')
+  })
+
+  it("Shared's heading docks to the box from 640 px up, with the verbs and the outcome line", async () => {
+    const { w } = await mountTab()
+    const head = tid(w, 'skills-shared-head')
+    expect(head.classes()).toEqual(expect.arrayContaining(['sticky', 'top-0', 'sm:bottom-0']))
+    expect(head.classes()).not.toContain('bottom-0')               // a dock would take a third of a phone's box
+    expect(head.find('[data-testid="skills-assign-open"]').exists()).toBe(true)
+    expect(head.find('[data-testid="skills-sync"]').exists()).toBe(true)
+    expect(head.find('[data-testid="skills-sync-meta"]').exists()).toBe(true)
+  })
+
+  it('that heading can reach both edges: no boxed parent between it and the region', async () => {
+    const { w } = await mountTab()
+    const section = tid(w, 'skills-shared')
+    expect(section.classes()).toContain('contents')
+    expect(tid(w, 'skills-shared-head').element.parentElement).toBe(section.element)
+    expect(section.element.parentElement).toBe(region(w).element)
+  })
+
+  it('the box has no vertical padding: a dock stops at its padding edge, and cards would show under it', async () => {
+    const { w } = await mountTab()
+    expect(region(w).classes().filter((c) => /^(sm:|md:|lg:)?(p|py|pb|pt)-/.test(c))).toEqual([])
+  })
+
+  it('a card tabbed to is never left under a sticky heading', async () => {
+    const { w } = await mountTab()
+    expect(region(w).classes()).toEqual(expect.arrayContaining(['scroll-pt-14', 'sm:scroll-pb-20']))
+  })
+
+  it('a new query starts at the first card', async () => {
+    const { w } = await mountTab()
+    region(w).element.scrollTop = 300
+    await tid(w, 'skills-filter').setValue('daily')
+    await flush()
+    expect(region(w).element.scrollTop).toBe(0)
+  })
+
+  it('an agent switch starts at the first card', async () => {
+    const { w } = await mountTab()
+    region(w).element.scrollTop = 300
+    respond({ playbooks: { data: LIVE } })
+    await w.setProps({ agentName: 'other' })
+    await flush()
+    expect(region(w).element.scrollTop).toBe(0)
+  })
+})
+
+describe('the stated total (ent#660: the count stays in view)', () => {
+  const total = (w) => tid(w, 'skills-tab-total').text()
+
+  it('counts both sections in the header', async () => {
+    const { w } = await mountTab()
+    expect(total(w)).toBe('2 own · 1 shared')
+  })
+
+  it('adds what is shown while the filter is on', async () => {
+    const { w } = await mountTab()
+    await tid(w, 'skills-filter').setValue('daily')
+    await flush()
+    expect(total(w)).toBe('2 own · 1 shared · 1 shown')
+  })
+
+  it('never states a zero it does not know: a stopped agent with no kept list has no own part', async () => {
+    respond({ playbooks: { response: { status: 503, data: { detail: 'Agent is not running.' } } } })
+    const { w } = await mountTab({ agentStatus: 'exited' })
+    expect(total(w)).toBe('1 shared')
+  })
+
+  it('says nothing until its reads answer, and keeps its line reserved', async () => {
+    let answer
+    respond({ rows: new Promise((r) => { answer = r }), playbooks: new Promise(() => {}) })
+    const { w } = await mountTab()
+    expect(total(w)).toBe('')
+    expect(tid(w, 'skills-tab-total').classes()).toContain('h-5')
+    answer({ data: [] })
+  })
+})
+
 describe('sets on the Shared head', () => {
   it('a failed sets read is named on the head with a retry — never a silently missing line', async () => {
     respond({ sets: { response: { status: 500, data: { detail: 'boom' } } } })
