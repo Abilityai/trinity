@@ -685,6 +685,10 @@ def _direct_start_env(monkeypatch, *, live=False, direct=False):
     monkeypatch.setattr(core_db, "get_voice_name", lambda name: None)
     monkeypatch.setattr(wv, "voice_call_active", lambda sid: live)
     monkeypatch.setattr(dvs, "call_active", lambda sid: direct)
+    # A Live start reads its own capability first; without this the `live` case
+    # passed only on a host with a realtime provider key in its env.
+    live_on = wv.realtime_voice_capability(True).model_copy(update={"available": True, "reason": None})
+    monkeypatch.setattr(wv, "realtime_voice_capability", lambda _p: live_on)
 
 
 def _direct_start(**over):
