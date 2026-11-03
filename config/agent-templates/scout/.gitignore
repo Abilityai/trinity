@@ -34,6 +34,7 @@ __pycache__/
 .claude/plugins/
 .claude/remote-settings.json
 .claude/policy-limits.json
+.claude/policy-limits.json.stamp.json
 .claude/backups/
 .claude/.last-cleanup
 *.log

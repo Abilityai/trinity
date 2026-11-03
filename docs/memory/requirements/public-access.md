@@ -1175,6 +1175,24 @@ own reply. Live stays the default and is unchanged.
 - **FR-5 — Barge-in**: talking over the agent pauses playback; if it was real speech the
   running turn is cancelled through the terminate primitive and the new words run next.
   Echo of the agent's own voice resumes playback.
+- **FR-5a — Stopping the agent (trinity-enterprise#1087)**: the person can stop the agent
+  mid-reply without hanging up, by voice or by hand, and the call returns to listening.
+  - A whole short stop phrase ("stop", "wait", "hold on", "never mind", …) said while
+    there is something to stop silences the agent, cancels its turn, and is never sent
+    as a turn. With nothing to stop the same words go to the agent. While an approval
+    waits, "stop" and "cancel" answer it **no**.
+  - Over playback, the speech bar follows the agent's own output level (linear RMS), so a
+    normal voice is heard over a quiet passage and the agent's echo is not taken for speech.
+  - The call strip carries a Stop control, always present, disabled with "Nothing to
+    stop" when idle. The composer's Stop on a Direct call silences the voice too.
+  - Escape silences the agent while its voice is playing and never cancels a turn;
+    with nothing playing it ends the call (a running turn keeps going, as on hang-up).
+  - A stop reaches the run being spoken, including an approved run that is not the
+    composer's own turn. Words queued behind it, a transcript already in flight and audio
+    already on the wire are dropped. An approval prompt cut off by a stop is answered on
+    its card, never by a later spoken yes.
+  - The strip says "Stopped." or, when the reply had finished and only its audio was cut,
+    "Stopped. The full reply is in the chat."
 - **FR-6 — Approvals are Trinity's asks**: an ask raised in the turn appears as the
   normal chat card and is read aloud. A whole short yes or no answers it through the
   person's own answer route, so the Inbox is the record. Anything else runs as the next

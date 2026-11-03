@@ -1472,6 +1472,12 @@
   "standing_work": true,
   "tier": "resource"
  },
+ "seat_decisions.py::get_seat_autonomy": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/seat-autonomy",
+  "reason": "trinity-enterprise#641: a seat-scoped read of the companion's ask-class states and blockers, email-free, the same gates as its sibling decision routes (assert_own_agent, then assert_agent_access); an agent key reads only its own agent",
+  "tier": "accessor"
+ },
  "seat_decisions.py::list_seat_decisions": {
   "method": "GET",
   "path": "/api/agents/{agent_name}/decisions",
