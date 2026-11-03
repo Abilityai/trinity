@@ -4770,6 +4770,16 @@
       ]
     },
     {
+      "file": "unit/test_ent1087_direct_call_interrupt.py",
+      "feature": "ent#1087",
+      "added": "2026-11-03",
+      "categories": [
+        "backend",
+        "workspace",
+        "voice"
+      ]
+    },
+    {
       "file": "unit/test_ent1046_direct_voice_db.py",
       "feature": "ent#1046",
       "added": "2026-11-02",

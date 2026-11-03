@@ -47,7 +47,23 @@ browser send() ─▶ POST …/chat/stream {voice_call_id: vd_…} ◀──┘ 
    the chat." Spoken text is scrubbed of staged secrets.
 6. **Barge-in.** Speech over playback pauses it; a real utterance sends `interrupt` (drop the
    queue, `audio_flush`) and the browser stops the running turn through the existing cancel
-   route with `restore:false`.
+   route with `restore:false`. Over playback the endpointer's bar is
+   `max(idle, PLAY_MIN, ECHO_K × playbackLevel)`, where `playbackLevel` is the player's
+   `getLevel()` (linear RMS of the output, peak-held 200 ms, 0 while paused); onset needs
+   `startMsPlayback` (250 ms), and an utterance that got that far is sent however short.
+6a. **Stopping (trinity-enterprise#1087).** `useDirectVoiceSession.interrupt({cancelTurn})` is
+   the one stop: `player.stop()`, `interrupt` (then `audio` frames are dropped until
+   `audio_flush`), `stopSeq = seq` (later transcripts at or below it are dropped), held text
+   cleared, the ask window disarmed, `onBargeIn({executionId})` for the run being spoken when
+   `cancelTurn`, `onStop` (the conversation clears `spokenQueue`), a "Stopped." notice. Callers:
+   a whole-utterance stop phrase (`isStopUtterance`, checked after an approval answer and before
+   echo unless it is the agent's own sentence word for word), the strip's Stop button, the
+   composer's Stop (`cancelTurn` silences first, `{cancelTurn:false}`), and Escape
+   (`turnCancel.directEscapeAction`: `silence` while the voice plays, else `end`; overlays own
+   it first). `PortalConversation.stopCallTurn` cancels the composer's turn, or the bridge's
+   `executionId` (an approved run) through the same `cancelPortalTurn`. Server side,
+   `_speak_sentence` re-checks the generation before every `audio` send, so an interrupt that
+   lands while the `spoken` send is in flight lets no chunk out after its flush.
 7. **Approvals.** A new pending ask in the thread → `speak_ask` (read aloud: title and the
    person's own request). A whole-utterance yes/no (`classifyAnswer`) that starts ≥300 ms after
    the prompt's playback ended is posted by the browser via `store.answerAsk` — the person's
@@ -85,4 +101,7 @@ route, prompt, settings), `test_ent1046_direct_voice_db.py` (cursor on a real DB
 `test_ent1046_speech_providers.py` (providers over a mock transport);
 `src/frontend/tests/unit/portalDirectCall.spec.js` (rules, endpointer, fold, protocol, the two call
 buttons, the call bars, settings card), `portalDirectCall.mount.spec.js` (the real conversation with the socket, mic and
-speaker faked).
+speaker faked);
+`tests/unit/test_ent1087_direct_call_interrupt.py` (no audio after a flush) and
+`src/frontend/tests/unit/directCallInterrupt.spec.js` (stop words, Escape, endpointer over
+playback, player level, stop protocol), plus the stopping block in the mount spec.
