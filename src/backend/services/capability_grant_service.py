@@ -22,7 +22,7 @@ import logging
 from typing import Any, Callable, List, Optional
 
 from database import db
-from db.capability_grants import CAPABILITIES, CAPABILITY_INSTRUCTIONS_MANAGE, CAPABILITY_SKILLS_MANAGE
+from db.capability_grants import CAPABILITIES, CAPABILITY_INSTRUCTIONS_MANAGE
 
 logger = logging.getLogger(__name__)
 
@@ -46,18 +46,6 @@ class CapabilityGrantRefused(Exception):
 
     def as_detail(self) -> dict:
         return {"code": self.code, "message": self.message}
-
-
-def grant_audit_action(capability: str, granted: bool) -> str:
-    """The AUTHORIZATION verb for one grant change, whichever door made it.
-
-    `skills.manage` keeps the skill-manager route's verb (#3236 review), so an
-    audit query for it finds both doors; every other capability is
-    `capability_grant` / `capability_revoke`.
-    """
-    if capability == CAPABILITY_SKILLS_MANAGE:
-        return "skill_manager_grant" if granted else "skill_manager_revoke"
-    return "capability_grant" if granted else "capability_revoke"
 
 
 async def audit_grant_change(
@@ -86,7 +74,7 @@ async def audit_grant_change(
     try:
         await log(
             event_type=AuditEventType.AUTHORIZATION,
-            event_action=grant_audit_action(capability, granted),
+            event_action="capability_grant" if granted else "capability_revoke",
             source=source,
             actor_user=actor_user,
             actor_ip=getattr(client, "host", None) if client else None,

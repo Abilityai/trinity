@@ -26,6 +26,7 @@ from dependencies import (
     assert_interactive_admin,
     get_authorized_agent_by_name,
     get_skill_managed_agent_by_name,
+    record_capability_use,
     can_manage_agent_skills,
     acting_agent_name,
 )
@@ -643,6 +644,7 @@ async def unassign_skill(
 
 @router.get("/agents/{agent_name}/skill-sets", response_model=List[AgentSkillSetStatus])
 async def get_agent_skill_sets(
+    request: Request,
     agent_name: str = Depends(get_authorized_agent_by_name),
     current_user: User = Depends(get_current_user),
     probe: bool = False,
@@ -661,6 +663,8 @@ async def get_agent_skill_sets(
     the set writes); any other reader gets the unprobed answer, never a 403."""
     from services import skill_set_service
     probe = probe and can_manage_agent_skills(current_user, agent_name)
+    if probe:  # the probe runs in the target, on the grant alone (ent#871)
+        await record_capability_use(request, current_user, CAPABILITY_SKILLS_MANAGE, target=agent_name)
     return await skill_set_service.agent_set_status(agent_name, probe=probe)
 
 
@@ -805,8 +809,6 @@ async def set_skill_manager(
     except CapabilityGrantRefused as e:
         raise HTTPException(status_code=e.status_code, detail=e.as_detail())
     if result["changed"]:
-        # `skill_manager_grant` / `skill_manager_revoke`, from the shared verb
-        # table every grant door uses.
         await capability_grant_service.audit_grant_change(
             agent_name, CAPABILITY_SKILLS_MANAGE, body.granted, admin_user, request=request,
             log=platform_audit_service.log)
