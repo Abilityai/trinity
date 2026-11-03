@@ -161,6 +161,12 @@ def world(db_backend, monkeypatch, tmp_path):
     monkeypatch.setattr(skill_assignment_service, "sync_gates", gates)
 
     W.install_executor_seams(w, monkeypatch)
+    # Left real, a deploy reaches `start_agent_internal` and the host's Docker,
+    # and creates a real `agent-acme-lead` on any machine that runs this file.
+    async def no_start(_names):
+        return {}
+
+    monkeypatch.setattr(system_service, "start_all_agents", no_start)
     start = w.docker.start
 
     async def recorded_start(name):

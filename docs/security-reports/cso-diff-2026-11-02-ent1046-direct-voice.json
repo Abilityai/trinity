@@ -1,0 +1,44 @@
+{
+  "version": "1.2.3",
+  "date": "2026-11-02",
+  "mode": "daily",
+  "scope": "diff",
+  "issue": "abilityai/trinity-enterprise#1046",
+  "phases_run": [
+    0,
+    1,
+    2,
+    6,
+    7,
+    9,
+    12,
+    13,
+    14
+  ],
+  "stack_cve_quicklist": [],
+  "findings": [],
+  "hypotheses": [],
+  "coverage_gaps": [
+    "no docker pass (diff run)",
+    "no dependency scanner (no dependency change)",
+    "no live end-to-end call yet"
+  ],
+  "supply_chain_summary": {
+    "scanner": "none",
+    "reason": "no dependency change in diff"
+  },
+  "fixed_below_gate": [
+    {
+      "category": "llm-unbounded-consumption",
+      "title": "utterance limit was per socket, now per person",
+      "file": "src/backend/services/direct_voice_service.py"
+    }
+  ],
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "counts_as_full_run": false
+}

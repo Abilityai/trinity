@@ -75,7 +75,7 @@ from services.agent_service import (
     # Autonomy (global view)
     get_all_autonomy_status_logic,
 )
-from utils.helpers import utc_now_iso
+from utils.helpers import sanitize_agent_name, utc_now_iso
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -552,8 +552,10 @@ async def _require_create_capability(request: Request, current_user, config) -> 
     if getattr(config, "ephemeral", None):
         return
     from dependencies import enforce_agent_capability
+    # The slug `create_agent_internal` will use, not the raw body: the audit row
+    # names an agent that can exist, and a raw name can carry what a row must not.
     await enforce_agent_capability(request, current_user, "agents.manage",
-                                   target=getattr(config, "name", None))
+                                   target=sanitize_agent_name(getattr(config, "name", None) or "") or None)
 
 
 @router.post("")
@@ -869,6 +871,7 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
         target_type="agent",
         target_id=agent_name,
         endpoint=request.scope["path"],
+        request_id=getattr(request.state, "request_id", None),
     )
 
     if manager:

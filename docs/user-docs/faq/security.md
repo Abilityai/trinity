@@ -44,7 +44,7 @@ Yes — that is what it exists for. It is an AES-256-GCM encrypted archive of th
 
 ## What is recorded in the audit log?
 
-Administrative and security-relevant actions across the platform: agent lifecycle (create, start, stop, delete, rename, recover), logins and logouts, permission grants and denials, settings changes, credential inject/export/import, git operations, and every MCP tool call. Each entry records who acted (user, agent, MCP client, or system), what was affected, when, and where the request originated. When the call was authenticated with an MCP API key, the entry also names the key — its id, name, and scope — beside the accountable owner, so "what did that leaked key touch?" is answered by filtering the list on the key id; a browser session records no key fields. Admins can search, filter, and export it from the dashboard. See [Audit Trail](../operations/audit-trail.md).
+Administrative and security-relevant actions across the platform: agent lifecycle (create, start, stop, delete, rename, recover), logins and logouts, permission grants, uses and denials, settings changes, credential inject/export/import, git operations, and every MCP tool call. Each entry records who acted (user, agent, MCP client, or system), what was affected, when, and where the request originated. When the call was authenticated with an MCP API key, the entry also names the key — its id, name, and scope — beside the accountable owner, so "what did that leaked key touch?" is answered by filtering the list on the key id; a browser session records no key fields. Admins can search, filter, and export it from the dashboard. See [Audit Trail](../operations/audit-trail.md).
 
 ## Does a refused MCP tool call show up in the audit log?
 
