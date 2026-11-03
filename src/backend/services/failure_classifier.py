@@ -5,6 +5,8 @@ copy is a byte-identical vendored mirror — edit the backend copy and regenerat
 byte-identity is enforced by tests/unit/test_904_sigkill_no_false_auth.py::TestBackendSchedulerParity.
 """
 
+import re
+
 # Substrings that indicate an auth-class subscription failure.
 AUTH_INDICATORS = [
     "credit balance",
@@ -117,13 +119,36 @@ PROMPT_LENGTH_MARKERS = [
     "prompt is too long",
 ]
 
+# #4123: the agent's own auth answer (headless_executor.py, #285). It quotes the
+# stderr line that tripped it, so when that one line also said "prompt is too
+# long" the sentence stopped a genuine auth walk. Anchored at the start, after an
+# optional `[code] ` tag (a pull row stores `[auth] <text>`). Pinned against the
+# producer by tests/unit/test_4123_auth_prefix_wins.py.
+AGENT_AUTH_FAILURE_PREFIXES = [
+    "authentication failure:",
+]
+
+
+_CODE_TAG = re.compile(r"\[[a-z_]+\]\s*")
+
+
+def _is_agent_auth_answer(error_lower: str) -> bool:
+    text = error_lower.lstrip()
+    tag = _CODE_TAG.match(text)
+    if tag:
+        text = text[tag.end():]
+    return any(text.startswith(prefix) for prefix in AGENT_AUTH_FAILURE_PREFIXES)
+
 
 def is_prompt_too_long(error_message: str) -> bool:
     """Return True if `error_message` is the API rejecting the prompt's length
-    — no credential can fix it, so SUB-003 must not switch on it (#3849)."""
+    — no credential can fix it, so SUB-003 must not switch on it (#3849). The
+    agent's own auth answer wins over the sentence (#4123)."""
     if not error_message:
         return False
     error_lower = error_message.lower()
+    if _is_agent_auth_answer(error_lower):
+        return False
     return any(marker in error_lower for marker in PROMPT_LENGTH_MARKERS)
 
 
