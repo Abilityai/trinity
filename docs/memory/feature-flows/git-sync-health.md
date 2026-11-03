@@ -513,6 +513,11 @@ SessionStart hook, and the 2026-09-24 audit found agents up to 31 commits behind
     during the integrate window (up to 60 s for a merge, 120 s for a rebase)
     can see HEAD move.
   - Refused while the index holds unmerged paths.
+  - A detached HEAD is recorded `skipped` (`detached HEAD (pinned to a tag or
+    commit): nothing to pull onto`), never `failed`: a clone of `@<tag>` runs
+    pinned to that release by design, and pull sync is on for every `github:`
+    agent (trinity#4165). A detached HEAD left by a rebase stopped part-way is
+    still `failed`.
   - Counts are strict (`_ahead_behind_vs`): a branch that can't be counted
     against origin fails the pull (`could not count commits on …`) instead of
     reading as up to date.

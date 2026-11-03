@@ -155,8 +155,11 @@ class TestLoginGateBehavior:
             assert reply is not None
             assert "Verified" in reply
             assert "pending approval" in reply.lower()
+            # trinity-enterprise#737: the request names who asked, from this message.
             mock_db.upsert_access_request.assert_called_once_with(
-                "my-agent", "stranger@example.com", "telegram"
+                "my-agent", "stranger@example.com", "telegram",
+                identity={"requester_channel_id": "tg_user_42", "requester_handle": "alice",
+                          "requester_chat_id": "tg_chat_42"},
             )
 
     @pytest.mark.smoke

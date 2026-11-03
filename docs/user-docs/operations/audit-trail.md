@@ -19,7 +19,7 @@ Append-only log of administrative actions across the platform. Records who did w
 |------------|---------|
 | `agent_lifecycle` | create, start, stop, delete, rename, recover |
 | `authentication` | login_success, login_failure, logout |
-| `authorization` | permission_granted, permission_denied |
+| `authorization` | permission_granted, permission_denied, capability_used, capability_refused, capability_grant, capability_revoke |
 | `configuration` | settings_changed, quota_updated |
 | `credentials` | injected, exported, imported |
 | `mcp_operation` | tool_call — every MCP tool call, captured via a transparent wrapper, including calls the tool refused |

@@ -152,11 +152,6 @@ def test_every_free_text_field_the_prompt_renders_is_scanned_or_named_platform_c
         "role_id": "an assignment id",
         "served_role_id": "a seat id from the assignment provider, sanitized like role_id (ent#814)",
         "served_person_email": "never rendered: it only picks the seat served_role_id names (ent#814)",
-        # trinity-enterprise#1059: composed by a registered admission policy
-        # from the platform's own numbers (used, budget, percent) and the ask-id
-        # prefix it reserves — never from requester text, which the policy
-        # never reads.
-        "usage_notice": "an admission policy's line over platform numbers (ent#1059)",
     }
     strings = {f.name for f in dataclasses.fields(ExecutionContext)
                if typing.get_type_hints(ExecutionContext)[f.name] == typing.Optional[str]}

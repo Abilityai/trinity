@@ -20,7 +20,7 @@
  */
 
 import { ref, computed } from 'vue'
-import axios from 'axios'
+import api from '@/api'
 import { useAuthStore } from '../stores/auth'
 import { startMicCapture, createAudioPlayer } from '../utils/audio'
 import {
@@ -226,10 +226,9 @@ export function useVoiceSession(agentName) {
 
     if (restStopOnEnd && voiceSessionId.value) {
       try {
-        await axios.post(
+        await api.post(
           `/api/agents/${agentName}/voice/stop`,
-          { voice_session_id: voiceSessionId.value },
-          { headers: authStore.authHeader }
+          { voice_session_id: voiceSessionId.value }
         )
       } catch (e) {
         console.warn('Voice stop API error (transcript may already be saved):', e)

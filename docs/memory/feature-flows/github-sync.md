@@ -487,7 +487,7 @@ the clone will succeed), and immune to the anonymous REST 60/hr cap that makes
 
 | Probe outcome | Meaning | Create result |
 |---------------|---------|---------------|
-| `ok` | Remote answered; public and reachable | Proceed; the source branch is then verified anonymously via `check_remote_branch_exists` — missing branch → 400 "Branch '…' not found in public repository '…'" |
+| `ok` | Remote answered; public and reachable | Proceed; the source ref (a branch or a tag, trinity#4165) is then verified anonymously via `check_remote_branch_exists` — missing → 400 "Branch or tag '…' not found in public repository '…'" |
 | `unavailable` | Remote answered with auth-challenge / not-found (anonymous GitHub deliberately cannot distinguish private from nonexistent) | 400 combined message: "was not found or is private. If it is private, add your GitHub token…" |
 | `transient` | GitHub itself unreachable (timeout / DNS / no git binary) | **502 — FAIL-CLOSED.** The clone would fail too, and with monitoring default-off (#1121) a fail-open would produce a silently empty agent |
 

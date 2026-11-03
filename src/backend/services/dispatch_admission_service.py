@@ -30,7 +30,8 @@ from typing import Optional
 
 from models import User, ChatMessageRequest, ExecutionSource
 from database import db
-from services import admission_policy, idempotency_service, skill_gate_service
+from services import turn_tier_service  # ent#926: a dispatched turn is no higher than its parent
+from services import idempotency_service, skill_gate_service
 from services.capacity_manager import (
     AcquireResult,
     CapacityFull,
@@ -313,11 +314,7 @@ async def admit_chat_request(
     Raises ``InterAgentDepthExceeded`` (#2806) FIRST — before the claim, the
     breaker read and the acquire — so a refused hop leaves nothing behind.
 
-    trinity-enterprise#1059: then the admission policies
-    (``services/admission_policy``) — ``AdmissionRefused`` propagates with
-    nothing claimed or acquired; the router maps it to a named 429.
-
-    trinity-enterprise#751: before them, the skill gate, at the same point and for the
+    trinity-enterprise#751: then the skill gate, at the same point and for the
     same reason — ``SkillApprovalRequired`` / ``SkillGateRefused`` propagate to
     the app handler (202 pending / named refusal) with nothing claimed, acquired
     or written. The same Idempotency-Key replays the same approval. A
@@ -347,20 +344,14 @@ async def admit_chat_request(
         dispatch=skill_gate_service.frozen_dispatch(
             triggered_by=gate_trigger,
             model=request.model,
-            source_user_id=current_user.id,
-            source_user_email=current_user.email or current_user.username,
+            source_user_id=turn_tier_service.turn_origin_user_id(db, current_user),
+            source_user_email=turn_tier_service.turn_origin_email(db, current_user, current_user.email or current_user.username),
             source_agent_name=x_source_agent,
             source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
             source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
             chain_depth=chain_depth,
         ),
     )
-
-    # trinity-enterprise#1059: a registered admission policy (an agent's share
-    # of its subscription) — after the skill gate, before the claim, for the
-    # same reason: a refused request leaves nothing behind, and the same key
-    # goes through once the policy admits again. Raises AdmissionRefused.
-    await admission_policy.enforce(name, triggered_by=gate_trigger, source="chat")
 
     # RELIABILITY-006 (#525): idempotency gate. Short-circuit duplicate
     # requests before consuming a capacity slot. The header is optional — when

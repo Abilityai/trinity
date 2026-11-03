@@ -724,3 +724,102 @@ describe("trinity-enterprise#1007 ask_operator to a canon role", () => {
     ]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// trinity-enterprise#1066 — ask_for_credential: an agent asks the person of the
+// conversation for a secret BY NAME. The ask is a `credential` ask addressed to
+// primary; the value is typed into the masked field in the person's Workspace
+// and never travels through this tool, its arguments or its receipt.
+// ---------------------------------------------------------------------------
+
+describe("trinity-enterprise#1066 ask_for_credential", () => {
+  const makeTool = (fake: Partial<TrinityClient>) =>
+    (createOperatorQueueTools(fake as unknown as TrinityClient, false) as any).askForCredential;
+
+  it("raises a credential ask by name, as the calling agent, addressed to the person", async () => {
+    const { fake, calls } = raisingClient({ status: "created", request_id: "x" });
+    const out = JSON.parse(await makeTool(fake).execute(
+      { name: "OP_SERVICE_ACCOUNT_TOKEN", why: "To open your vault.", request_id: "cred-1" },
+      agentCtx("self"),
+    ));
+    assert.equal(out.status, "created");
+    assert.deepEqual(calls, [["self", {
+      request_id: "cred-1",
+      type: "credential",
+      title: "Needs OP_SERVICE_ACCOUNT_TOKEN",
+      question: "To open your vault.",
+      context: { credential_name: "OP_SERVICE_ACCOUNT_TOKEN" },
+      to: "primary",
+    }]]);
+  });
+
+  it("without a request_id, a retry in the same turn is the same ask; another turn is a new one", async () => {
+    const { fake, calls } = raisingClient();
+    const tool = makeTool(fake);
+    const inTurn = (id: string) => ({ session: { scope: "agent", agentName: "self", executionId: id } as any });
+    await tool.execute({ name: "API_KEY", why: "w" }, inTurn("exec-1"));
+    await tool.execute({ name: "API_KEY", why: "w" }, inTurn("exec-1"));
+    await tool.execute({ name: "API_KEY", why: "w" }, inTurn("exec-2"));
+    const ids = calls.map((c) => c[1].request_id);
+    assert.equal(ids[0], ids[1]);
+    assert.notEqual(ids[0], ids[2]);
+    for (const id of ids) assert.match(id, /^[A-Za-z0-9._:-]{1,256}$/);
+  });
+
+  it("forwards the turn id so the ask reaches the person of the conversation", async () => {
+    const turns: unknown[] = [];
+    const fake = {
+      raiseAsk: async (_a: string, _b: OperatorAskCreate, turn?: string) => { turns.push(turn); return {}; },
+    } as Partial<TrinityClient>;
+    await makeTool(fake).execute(
+      { name: "API_KEY", why: "w" },
+      { session: { scope: "agent", agentName: "self", executionId: "exec-9" } as any },
+    );
+    assert.deepEqual(turns, ["exec-9"]);
+  });
+
+  it("declares name, why, request_id and expires_at only — no value, no agent, no options", () => {
+    const keys = Object.keys(makeTool(raisingClient().fake).parameters.shape).sort();
+    assert.deepEqual(keys, ["expires_at", "name", "request_id", "why"]);
+  });
+
+  it("stray arguments never travel — a value smuggled in is dropped", async () => {
+    const { fake, calls } = raisingClient();
+    await makeTool(fake).execute(
+      { name: "API_KEY", why: "w", request_id: "r", value: "sk-secret", agent_name: "sibling", options: ["a"] } as any,
+      agentCtx("self"),
+    );
+    const sent = JSON.stringify(calls);
+    assert.doesNotMatch(sent, /sk-secret|sibling|options/);
+  });
+
+  it("a non-agent key is refused before any backend call", async () => {
+    const { fake, calls } = raisingClient();
+    const out = JSON.parse(await makeTool(fake).execute({ name: "API_KEY", why: "w" }, { session: { scope: "user" } as any }));
+    assert.equal(out.success, false);
+    assert.deepEqual(calls, []);
+  });
+
+  for (const detail of [
+    { code: "no_person", message: "A credential ask must reach exactly one person." },
+    { code: "invalid_credential_name", message: "bad name", reason: "reserved" },
+  ]) {
+    it(`a ${detail.code} refusal comes back named, not as a throw`, async () => {
+      const fake = { raiseAsk: async () => { throw new ApiError(422, JSON.stringify({ detail })); } } as Partial<TrinityClient>;
+      const out = JSON.parse(await makeTool(fake).execute({ name: "API_KEY", why: "w" }, agentCtx("self")));
+      assert.deepEqual(out, { success: false, status: 422, ...detail });
+    });
+  }
+
+  it("the description says: only in a conversation with the person, never in a plain message, by name only", () => {
+    const d: string = makeTool(raisingClient().fake).description;
+    assert.ok(d.length <= 2048, `ask_for_credential description is ${d.length} characters`);
+    assert.match(d, /only in a conversation with the person/i);
+    assert.match(d, /masked/i);
+    assert.match(d, /never ask for (a|the) (secret|value) in a (plain )?message/i);
+    assert.match(d, /never repeat/i);
+    assert.match(d, /no_person/);
+    assert.match(d, /get_my_ask/);
+    assert.doesNotMatch(d, /mcp__trinity__/);
+  });
+});

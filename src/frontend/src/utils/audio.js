@@ -19,7 +19,7 @@ export const MIC_WORKLET_URL = '/mic-capture.worklet.js'
  * Start capturing audio from the microphone.
  * Tries AudioWorklet first, falls back to ScriptProcessor.
  *
- * @param {Function} onData - Called with base64-encoded PCM chunks
+ * @param {Function} onData - Called with base64-encoded PCM chunks and the raw samples
  * @returns {{ stop: Function }} Control object
  */
 export async function startMicCapture(onData) {
@@ -45,7 +45,7 @@ export async function startMicCapture(onData) {
     const workletNode = new AudioWorkletNode(audioContext, 'trinity-mic-capture')
     workletNode.port.onmessage = (e) => {
       const base64 = arrayBufferToBase64(float32ToPcm16(e.data).buffer)
-      onData(base64)
+      onData(base64, e.data)
     }
     source.connect(workletNode)
     processorNode = workletNode
@@ -60,7 +60,8 @@ export async function startMicCapture(onData) {
     processor.onaudioprocess = (event) => {
       const float32 = event.inputBuffer.getChannelData(0)
       const base64 = arrayBufferToBase64(float32ToPcm16(float32).buffer)
-      onData(base64)
+      // A copy: the browser reuses this buffer on the next callback.
+      onData(base64, float32.slice())
     }
     source.connect(processor)
     processor.connect(audioContext.destination)
@@ -77,16 +78,24 @@ export async function startMicCapture(onData) {
   }
 }
 
+const LEVEL_HOLD_MS = 200
+
 /**
  * Create an audio player for PCM 24kHz mono output with amplitude monitoring.
  *
- * @returns {{ play: Function, getAmplitude: Function, stop: Function }}
+ * @param {object} [opts]
+ * @param {() => number} [opts.now] clock for the level's peak hold (ms)
+ * @returns {{ play: Function, getAmplitude: Function, getLevel: Function, stop: Function }}
  */
-export function createAudioPlayer() {
+export function createAudioPlayer({ now = () => Date.now() } = {}) {
   let audioContext = null
+  let levelData = null
+  let peak = 0
+  let peakAt = 0
   let nextStartTime = 0
   let analyser = null
   let analyserData = null
+  let held = false
 
   function ensureContext() {
     if (!audioContext || audioContext.state === 'closed') {
@@ -98,7 +107,7 @@ export function createAudioPlayer() {
       analyserData = new Uint8Array(analyser.frequencyBinCount)
       analyser.connect(audioContext.destination)
     }
-    if (audioContext.state === 'suspended') {
+    if (audioContext.state === 'suspended' && !held) {
       audioContext.resume()
     }
     return audioContext
@@ -127,10 +136,45 @@ export function createAudioPlayer() {
       nextStartTime += buffer.duration
     },
 
+    /** Whether queued audio has not finished. A paused player still counts. */
+    isPlaying() {
+      return !!audioContext && nextStartTime > audioContext.currentTime
+    },
+
+    /** Hold playback without losing what is queued. */
+    pause() {
+      held = true
+      if (audioContext && audioContext.state === 'running') audioContext.suspend().catch(() => {})
+    },
+
+    resume() {
+      held = false
+      if (audioContext && audioContext.state === 'suspended') audioContext.resume().catch(() => {})
+    },
+
     /**
      * Get current output amplitude as 0–1 float.
      * Returns 0 if no audio is playing.
      */
+    /**
+     * Linear RMS of what is playing right now (trinity-enterprise#1087), the unit the
+     * mic's own level is in, so the endpointer can compare the two. `getAmplitude` is
+     * the orb's: dB-scaled frequency bytes, a different unit. Zero while paused, because
+     * a suspended context's analyser holds its last frame and nothing is coming out.
+     * The peak is held briefly so the gap between two words does not drop the bar.
+     */
+    getLevel() {
+      if (!analyser || held) { peak = 0; return 0 }
+      if (!levelData || levelData.length !== analyser.fftSize) levelData = new Float32Array(analyser.fftSize || 256)
+      analyser.getFloatTimeDomainData(levelData)
+      let sum = 0
+      for (let i = 0; i < levelData.length; i++) sum += levelData[i] * levelData[i]
+      const rms = levelData.length ? Math.sqrt(sum / levelData.length) : 0
+      const t = now()
+      if (rms >= peak || t - peakAt > LEVEL_HOLD_MS) { peak = rms; peakAt = t }
+      return peak
+    },
+
     getAmplitude() {
       if (!analyser || !analyserData) return 0
       analyser.getByteFrequencyData(analyserData)
@@ -140,6 +184,7 @@ export function createAudioPlayer() {
     },
 
     stop() {
+      held = false
       if (audioContext) {
         audioContext.close().catch(() => {})
         audioContext = null

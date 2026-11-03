@@ -118,7 +118,7 @@ describe('#2598 — a voice call owns Escape, but not against an overlay that al
     expect(workspaceCode).toMatch(
       /import \{[^}]*shouldEndCallOnEscape[^}]*\} from ['"][^'"]*utils\/turnCancel['"]/
     )
-    expect(workspaceCode).toContain('shouldEndCallOnEscape(event, { callActive: voiceCallActive.value })')
+    expect(workspaceCode).toContain('shouldEndCallOnEscape(event, { callActive: anyCallActive.value })')
     // and that the old hand-rolled condition is gone, not merely shadowed
     expect(workspaceCode).not.toMatch(/voiceCallActive\.value && event\.key === 'Escape'/)
   })

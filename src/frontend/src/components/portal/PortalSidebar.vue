@@ -42,11 +42,25 @@
       <button
         :disabled="!roster.length"
         :title="roster.length ? 'Start a new conversation' : 'No agents available yet'"
-        class="w-full flex items-center gap-2 rounded-xl border border-gray-300 dark:border-gray-700 px-3 py-2 text-sm font-medium hover:bg-white dark:hover:bg-gray-900 transition disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent dark:disabled:hover:bg-transparent"
+        :class="NEW_CONVERSATION_CLASS"
         @click="$emit('new-chat')"
       >
         <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" /></svg>
         New chat
+      </button>
+      <!-- trinity-enterprise#701: a room is many participants, so it gets its
+           own door and its own word ("chat" is one-to-one). Shown only where
+           rooms exist — the roster's capability bit, never a feature flag. -->
+      <button
+        v-if="roomsAvailable"
+        :disabled="!roster.length"
+        :title="roster.length ? 'Start a room with several agents, or with colleagues' : 'No agents available yet'"
+        :class="['mt-1.5', NEW_CONVERSATION_CLASS]"
+        data-testid="sidebar-new-room"
+        @click="$emit('new-room')"
+      >
+        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.36-1.86M17 20H7m10 0v-2c0-.66-.13-1.28-.36-1.86M7 20H2v-2a3 3 0 015.36-1.86M7 20v-2c0-.66.13-1.28.36-1.86m0 0a5 5 0 019.28 0M15 7a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+        New room
       </button>
 
       <!-- Search -->
@@ -505,6 +519,8 @@ const props = defineProps({
   workspaceOnly: { type: Boolean, default: false },
   // ent#661 — the roster's capability, and whether a Projects page is on screen.
   projectsAvailable: { type: Boolean, default: false },
+  // trinity-enterprise#701: rooms exist on this install (the roster's bit).
+  roomsAvailable: { type: Boolean, default: false },
   projectsActive: { type: Boolean, default: false },
   // #2159: distinguishes "still loading" from "loaded, and you have none".
   loadingRoster: { type: Boolean, default: false },
@@ -523,8 +539,11 @@ const props = defineProps({
   // list update and the request; a row only edits.
   rename: { type: Function, default: null },
 })
+// New chat and New room share one recipe (trinity-enterprise#701).
+const NEW_CONVERSATION_CLASS = 'w-full flex items-center gap-2 rounded-xl border border-gray-300 dark:border-gray-700 px-3 py-2 text-sm font-medium hover:bg-white dark:hover:bg-gray-900 transition disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent dark:disabled:hover:bg-transparent'
+
 const emit = defineEmits([
-  'new-chat', 'new-chat-with-agent', 'open-agent', 'open-thread', 'toggle-star', 'open-inbox',
+  'new-chat', 'new-room', 'new-chat-with-agent', 'open-agent', 'open-thread', 'toggle-star', 'open-inbox',
   'update:search', 'sign-out', 'open-projects', 'open-keys', 'retry-threads',
 ])
 
