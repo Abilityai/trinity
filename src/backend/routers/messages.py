@@ -17,6 +17,7 @@ from models import (
 
 from database import db
 from dependencies import get_current_user, AuthorizedAgentByName, assert_agent_owner, require_person
+from services.tool_access_guard import assert_tool_allowed
 from db_models import User
 from services import role_addressing
 from services.idempotency_service import EffectInProgressError, EffectUnguardedError
@@ -55,6 +56,8 @@ async def send_proactive_message(
     Rate limited to 10 messages per recipient per hour.
     """
 
+    # trinity-enterprise#341: refused when this agent's tool access removes send_message.
+    assert_tool_allowed(current_user, "send_message", as_agent=agent_name)
     recipient = _recipient(agent_name, request, current_user)
     try:
         result = await proactive_message_service.send_message(

@@ -386,7 +386,7 @@
               </div>
               <div class="w-[7.5rem] flex-shrink-0 flex justify-end" :class="{ 'invisible': agent.is_system || agent.is_shared }">
                 <ReadOnlyToggle
-                  :model-value="!!agent.read_only_enabled"
+                  :model-value="isStrict(agent)"
                   :loading="readOnlyLoading === agent.name"
                   size="sm"
                   @toggle="handleReadOnlyToggle(agent)"
@@ -632,7 +632,7 @@
               </div>
               <div class="flex-shrink-0" :class="{ 'invisible': agent.is_system || agent.is_shared }">
                 <ReadOnlyToggle
-                  :model-value="!!agent.read_only_enabled"
+                  :model-value="isStrict(agent)"
                   :loading="readOnlyLoading === agent.name"
                   size="sm"
                   @toggle="handleReadOnlyToggle(agent)"
@@ -869,10 +869,11 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
-import { readStoredToken } from '../utils/platformSession'
 import { formatCostCompact } from '../composables/useFormatters'
 import { useNotification } from '../composables/useNotification'
 import { useAgentsStore } from '../stores/agents'
+import { useAgentRestartStore } from '../stores/agentRestart'
+import { isStrict, toggleMessage } from '../utils/toolAccess'
 import { useNetworkStore } from '../stores/network'
 import { agentDisplayName, agentNameParts, agentNameTooltip } from '../utils/agentName'
 import { showsRuntimeBadgeInList } from '../utils/agentRuntime'
@@ -917,6 +918,7 @@ const emit = defineEmits(['tags-changed', 'clear-chassis-filters'])
 // would reset on every v-if teardown) and `syncHealth`/`fetchSyncHealth`
 // (#389). Do not widen this surface.
 const agentsStore = useAgentsStore()
+const restartStore = useAgentRestartStore()
 const networkStore = useNetworkStore()
 
 // ent#527 rider: the row's stamp plus whether it holds a brief (both ride the
@@ -1192,36 +1194,25 @@ const handleAutonomyToggle = async (agent) => {
   }
 }
 
-// Read-only state rides the fleet payload (agent.read_only_enabled) — the old
-// per-agent GET (which 404'd on stopped containers and was coerced to false)
-// is gone. The PUT toggle updates the row object in place on success, the
-// same in-place mutation pattern the networkStore toggles use.
+// Read-only state rides the fleet payload (`agent.tool_access_profile`) — the
+// old per-agent GET (which 404'd on stopped containers and was coerced to
+// false) is gone. trinity-enterprise#341: the toggle is the shortcut to the
+// Strict read-only tool-access profile (ON for Strict only; OFF returns to the
+// profile the agent had before), sent through the store (Invariant #7). The
+// row object is updated in place on success, the same in-place mutation
+// pattern the networkStore toggles use.
 async function handleReadOnlyToggle(agent) {
   if (readOnlyLoading.value === agent.name) return
   readOnlyLoading.value = agent.name
 
-  const newState = !agent.read_only_enabled
-
   try {
-    const token = readStoredToken()
-    const response = await axios.put(`/api/agents/${agent.name}/read-only`, {
-      enabled: newState
-    }, {
-      headers: { Authorization: `Bearer ${token}` }
-    })
-
-    if (response.data) {
-      agent.read_only_enabled = newState
-      showNotification(
-        newState
-          ? `Read-only mode enabled for ${agentDisplayName(agent)}`
-          : `Read-only mode disabled for ${agentDisplayName(agent)}`,
-        'success'
-      )
-    }
+    const result = await agentsStore.setReadOnly(agent.name, !isStrict(agent))
+    agent.tool_access_profile = result.profile
+    agent.read_only_enabled = result.read_only_layer
+    if (result.restart_required) restartStore.report(agent.name, 'tool-access', 'Tool access', true)
+    showNotification(toggleMessage(result, agentDisplayName(agent)), 'success')
   } catch (error) {
-    console.error('Failed to toggle read-only mode:', error)
-    showNotification('Failed to toggle read-only mode', 'error')
+    showNotification(error.response?.data?.detail || 'Failed to toggle read-only mode', 'error')
   } finally {
     readOnlyLoading.value = null
   }

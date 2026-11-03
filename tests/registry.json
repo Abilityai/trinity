@@ -7974,6 +7974,44 @@
         "unit"
       ],
       "description": "trinity-enterprise#1054 A2: EmailService.send_html renders on the one HTML shell with a plain-text twin, escapes every string, omits blank paragraphs and an absent call to action; the verification mail is byte-identical to its pre-refactor output (literal snapshot). No Docker."
+    },
+    {
+      "file": "unit/test_ent341_tool_access_profiles.py",
+      "feature": "trinity-enterprise#341",
+      "added": "2026-11-03",
+      "categories": [
+        "backend",
+        "security",
+        "guardrails",
+        "unit"
+      ],
+      "description": "trinity-enterprise#341: the pure tool-access policy (services/tool_access_profiles.py) \u2014 the approved bundle table, legacy derivation (read-only with no list reads Strict 'not applied', a list reads Custom, else Full), the applied check, plan_selection / plan_shortcut round trips, the guardrails-PUT merge that never forges or wipes a stored profile, denies_tool on the enforced list only, per-runtime coverage copy, and the send-tool names pinned against the MCP server registry and the 'trinity' server key. No Docker."
+    },
+    {
+      "file": "unit/test_ent341_tool_access_routes.py",
+      "feature": "trinity-enterprise#341",
+      "added": "2026-11-03",
+      "categories": [
+        "backend",
+        "security",
+        "guardrails",
+        "api",
+        "unit"
+      ],
+      "description": "trinity-enterprise#341: GET/PUT /tool-access, the PUT /read-only Strict shortcut and PUT /guardrails through the real router over the real schema \u2014 one compare-and-set (a lost race is a 409, mutation-proved), live read-only apply and an honest restart_required, pattern preservation, the gates (owner or agents.manage holder, never the agent on itself, never the system agent), the audit row, the drift check ignoring the bookkeeping key, and tool_access_profile resolved identically on the detail and fleet payloads. Container and live apply stubbed; no Docker."
+    },
+    {
+      "file": "unit/test_ent341_send_block.py",
+      "feature": "trinity-enterprise#341",
+      "added": "2026-11-03",
+      "categories": [
+        "backend",
+        "security",
+        "guardrails",
+        "api",
+        "unit"
+      ],
+      "description": "trinity-enterprise#341: the send block refused by Trinity \u2014 assert_tool_allowed (agent keys only, enforced list only, named 403) and every one of the nine routes behind the send tools and report refusing a denied agent through its real router, plus an AST pin that each call names the right tool and is the handler's first action after its own-agent / owner gate. No Docker."
     }
   ]
 }

@@ -1,5 +1,5 @@
-# mcp: permissions.ts (get_agent_capability_grants → GET /capability-grants, read-only, ent#991); everything else — the owner configuration surface (autonomy / timeout / resources / capabilities) and the capability-grant PUT — is a grant, not a use; deliberately unexposed (Invariant #8)
-"""Per-agent configuration endpoints: api-key, autonomy, read-only, resources, capabilities, capacity, timeout."""
+# mcp: permissions.ts (get_agent_capability_grants → GET /capability-grants, read-only, ent#991); everything else — the owner configuration surface (autonomy / timeout / resources / capabilities / tool access — trinity-enterprise#341: no tool reads or writes a profile, agent self-selection is a later grant) and the capability-grant PUT — is a grant, not a use; deliberately unexposed (Invariant #8)
+"""Per-agent configuration endpoints: api-key, autonomy, read-only, tool access, resources, capabilities, capacity, timeout."""
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -137,20 +137,53 @@ async def get_agent_read_only_status(
 async def set_agent_read_only_status(
     agent_name: str,
     body: dict,
+    request: Request,
     current_user: User = Depends(require_person_or_capability("agents.manage", self_person_only=True))
 ):
     """
-    Set the read-only mode status for an agent.
+    The header and list Read-only toggle: a shortcut to the Strict read-only
+    tool-access profile (trinity-enterprise#341).
 
     Body:
-    - enabled: True to enable read-only mode, False to disable
+    - enabled: True selects Strict read-only; False returns to the profile it
+      came from (409 when read-only belongs to another profile)
     - config: Optional dict with 'blocked_patterns' and 'allowed_patterns' lists
 
-    When enabled, the agent cannot modify files matching blocked patterns.
-    Files matching allowed patterns can still be written (e.g., content/, output/).
+    When the read-only layer is on, the agent cannot modify files matching
+    blocked patterns. Files matching allowed patterns can still be written
+    (e.g., content/, output/).
     """
     from services.agent_service.read_only import set_read_only_status_logic
-    return await set_read_only_status_logic(agent_name, body, current_user)
+    return await set_read_only_status_logic(agent_name, body, current_user, request)
+
+
+# ============================================================================
+# Tool access (GUARD-008, trinity-enterprise#341)
+# ============================================================================
+
+@router.get("/{agent_name}/tool-access")
+async def get_agent_tool_access(agent_name: OwnedAgentByName):
+    """The agent's tool-access profile, the five cards with their per-runtime
+    coverage, and whether a restart is waiting. Owner tier: it shows Custom's
+    remembered list."""
+    from services.agent_service.tool_access import get_tool_access_logic
+    return await get_tool_access_logic(agent_name)
+
+
+@router.put("/{agent_name}/tool-access")
+async def set_agent_tool_access(
+    agent_name: str,
+    body: dict,
+    request: Request,
+    current_user: User = Depends(require_person_or_capability("agents.manage", self_person_only=True)),
+):
+    """Select a tool-access profile. Body: `{profile, custom?: {read_only,
+    disallowed_tools}}`. Owner-only (or another agent holding `agents.manage`,
+    never the agent on itself); the system agent is refused. The read-only
+    layer applies now, the tool list on restart (`restart_required`)."""
+    assert_agent_owner(current_user, agent_name, detail="Only agent owners can change tool access")
+    from services.agent_service.tool_access import set_tool_access_logic
+    return await set_tool_access_logic(agent_name, body, current_user, request)
 
 
 # ============================================================================
@@ -710,6 +743,8 @@ _GUARDRAILS_NUMBER_BOUNDS = {
     "execution_timeout_sec": (60, 7200),
 }
 _GUARDRAILS_LIST_FIELDS = ("extra_bash_deny", "extra_path_deny", "disallowed_tools")
+# Same contract as the tool-access Custom editor (tool_access_profiles.MAX_*,
+# trinity-enterprise#341; a parity test holds them equal).
 _GUARDRAILS_MAX_LIST = 50
 _GUARDRAILS_MAX_STRING = 256
 
@@ -774,9 +809,12 @@ async def get_agent_guardrails(
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
 
+    # trinity-enterprise#341: the profile id only — Custom's remembered list is
+    # owner-tier (GET /tool-access); this read is access-tier.
+    from services.tool_access_profiles import public_guardrails_view
     return {
         "agent_name": agent_name,
-        "guardrails": db.get_guardrails_config(agent_name),
+        "guardrails": public_guardrails_view(db.get_guardrails_config(agent_name)),
     }
 
 
@@ -796,14 +834,15 @@ async def set_agent_guardrails(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     cleaned = _validate_guardrails_payload(body)
-    success = db.set_guardrails_config(agent_name, cleaned or None)
-    if not success:
-        raise HTTPException(status_code=500, detail="Failed to update guardrails")
+    # trinity-enterprise#341: the stored tool-access profile is kept (never
+    # taken from the body), and once one is stored the tool list belongs to it.
+    from services.agent_service.tool_access import apply_guardrails_put
+    stored = apply_guardrails_put(agent_name, cleaned)
 
     return {
         "message": "Guardrails updated (restart agent to apply)",
         "agent_name": agent_name,
-        "guardrails": cleaned,
+        "guardrails": stored,
     }
 
 

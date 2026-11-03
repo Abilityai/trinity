@@ -8,11 +8,22 @@ Read-only mode prevents agents from modifying source code, instructions, or conf
 
 As an agent owner, I want to enable read-only mode so that the agent cannot modify critical files (code, configs, CLAUDE.md) while still allowing it to write reports and output files.
 
+## Read-only mode is a tool-access profile (trinity-enterprise#341)
+
+Read-only mode is now the **Strict read-only** tool-access profile ([agent-guardrails.md → Tool-access profiles](agent-guardrails.md#tool-access-profiles-guard-008-trinity-enterprise341)). The read-only *layer* described below (root config file → `read-only-guard.py` hook, Codex `--sandbox read-only`) is unchanged and is also on under **Read-only + report** and a Custom choice. What changed:
+
+- The header and Dashboard-list toggle is the **shortcut to Strict read-only**: it shows ON for Strict only (`tool_access_profile === 'strict_read_only'`); ON selects Strict and remembers the profile it came from, OFF returns there (Full access if none). Both go through `stores/agents.js::setReadOnly` (the old raw `fetch` / direct axios calls are gone).
+- `PUT /read-only` writes through the tool-access commit (one compare-and-set with the guardrails blob). `enabled: true` from a list that removes tools Strict allows (Custom, or an older agent's API-set list) is a **409** naming them — the toggle never loosens silently. `enabled: false` on another profile whose read-only layer is on is a **409** naming it; already off is a 200 that changes nothing. Patterns in `config` are stored; turning the layer off keeps them.
+- `GET /read-only` adds `profile`, `applied` and `read_only_layer`; `enabled` is the toggle's state (Strict only).
+- The Settings › General read-only row is gone; the control is Settings › Guardrails › Tool access.
+- An agent that was read-only before the upgrade reads **Strict read-only · send block not applied** until its owner applies it — nothing changes on upgrade.
+
 ## Entry Points
 
-- **UI (Agent Detail)**: `src/frontend/src/components/AgentHeader.vue:128-136` - ReadOnlyToggle component
-- **UI (Dashboard List)**: `src/frontend/src/components/AgentListPanel.vue` - ReadOnlyToggle in the row controls (ent#260 — replaces the retired Agents page; rows read `agent.read_only_enabled` off the fleet payload, the per-agent GET N+1 is gone)
-- **API**: `GET/PUT /api/agents/{name}/read-only` — the `PUT` is person-only (`Depends(require_person)`, #2996: agent- and system-scoped keys get 403 `person_required`)
+- **UI (Agent Detail)**: `src/frontend/src/components/AgentHeader.vue` - ReadOnlyToggle (the Strict read-only shortcut, trinity-enterprise#341)
+- **UI (Dashboard List)**: `src/frontend/src/components/AgentListPanel.vue` - ReadOnlyToggle in the row controls (ent#260 — replaces the retired Agents page; rows read `agent.tool_access_profile` off the fleet payload, the per-agent GET N+1 is gone)
+- **UI (Settings)**: Settings › Guardrails › **Tool access** (`agent-settings/ToolAccessSection.vue`) — the full profile selector
+- **API**: `GET/PUT /api/agents/{name}/read-only` — the `PUT` takes a person, or another agent holding `agents.manage` (never the agent on itself; `require_person_or_capability("agents.manage", self_person_only=True)`)
 
 ---
 
