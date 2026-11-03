@@ -25,6 +25,17 @@
       "description": "The room's people panel, mounted: present people first with the reader marked and who left kept; seat controls only where the room says can_seat_people, otherwise the @mention next step for a platform person and nothing for an outside client; the search asks the store, an unseatable colleague is disabled with the reason, Add seats with the history choice, a refused seat is shown in place; Remove only after a confirmation restating the consequence (cancel writes nothing); Show earlier messages only for a collaborator without them, never for oneself or who left; Leave calls the store and tells the shell, the last-moderator refusal is shown in place; and the agent picker's room mode is a room even with one agent, in room words, while New chat says chat for one agent and room once several are picked."
     },
     {
+      "file": "unit/test_ent871_capability_used_audit.py",
+      "feature": "trinity-enterprise#871",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "unit",
+        "auth"
+      ],
+      "description": "An agent key a grant admits writes one capability_used row: every fence shape, the file routes, agent create and an honoured skill-set probe through the real routers with real keys, read back from the real audit_log; a direct enforce_agent_capability call for projects.manage; manifest deploy over the recorded audit sink. A refused call writes only capability_refused (a holder outside its owner's agents included, same 404), an edge gives a holder no way past the owner bound on the file routes, and no grant reaches the system agent; people, the system key and the exemptions write none; one request is one row per capability and target. skills.manage grants log capability_grant / capability_revoke through both routes."
+    },
+    {
       "file": "unit/test_ent1066_secret_paste_guard.py",
       "feature": "trinity-enterprise#1066",
       "added": "2026-11-02",
