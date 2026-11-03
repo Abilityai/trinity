@@ -144,6 +144,8 @@ def _as_str_list(value: Any) -> List[str]:
 # The successor is the AUTHOR's text, surfaced verbatim in the UI — so it is
 # bounded here, once, rather than at each of the places that render it.
 SUPERSEDED_BY_MAX_CHARS = 200
+# trinity-enterprise#660: the author's category, shown as a filter option.
+CATEGORY_MAX_CHARS = 64
 
 
 def _first_present(sources: List[Dict[str, Any]], keys: Tuple[str, ...]) -> Any:
@@ -183,7 +185,8 @@ def extract_contract(frontmatter: Optional[Dict[str, Any]]) -> Tuple[Dict[str, A
     Returns ``(contract, warnings)`` where contract is::
 
         {description, automation, user_invocable, allowed_tools,
-         requires: {packages, binaries, env}, deprecated, superseded_by, approval}
+         requires: {packages, binaries, env}, deprecated, superseded_by, approval,
+         category}
 
     ``deprecated`` / ``superseded-by`` (trinity-enterprise#672) are the two
     lifecycle keys a library uses to retire a skill. ``superseded_by`` is the
@@ -263,6 +266,12 @@ def extract_contract(frontmatter: Optional[Dict[str, Any]]) -> Tuple[Dict[str, A
     elif approval_raw is not None:
         warnings.append("frontmatter_invalid:approval")
 
+    # trinity-enterprise#660: it only narrows a list, so garbage reads as no
+    # category and is not named: `frontmatter_invalid:*` would ride every
+    # injection of this skill on every agent, for a value nothing else reads.
+    category_raw = _first_present(sources, ("category",))
+    category = _one_line(category_raw, CATEGORY_MAX_CHARS) if isinstance(category_raw, str) else None
+
     contract = {
         "description": description,
         "automation": automation,
@@ -272,6 +281,7 @@ def extract_contract(frontmatter: Optional[Dict[str, Any]]) -> Tuple[Dict[str, A
         "deprecated": deprecated,
         "superseded_by": superseded_by,
         "approval": approval,
+        "category": category,
     }
     return contract, warnings
 

@@ -832,10 +832,24 @@ class TestTheCallsOwnTurnPassesTheLiveCallGuard:
         stream_src = inspect.getsource(portal.portal_chat_stream) if hasattr(portal, "portal_chat_stream") else ""
         assert "voice_call_id=voice_call_id" not in stream_src.split("_refuse_turn_during_voice_call(", 1)[-1][:60]
 
-    def test_the_only_writer_of_the_call_id_is_the_voice_dispatcher(self):
-        # The bypass is safe because nothing a request can carry sets the id.
+    def test_a_request_carried_call_id_never_bypasses_the_live_guard(self, monkeypatch):
+        # The bypass is safe because only the voice dispatcher writes a bypassing id.
+        # trinity-enterprise#1046 lets a request carry a Direct call's `vd_` id (the route
+        # checks it is the caller's own), so that prefix must never pass a Live call.
+        from client_portal import service as portal, voice as pv
+        monkeypatch.setattr(pv, "voice_call_active", lambda sid: True)
+        with pytest.raises(portal.ClientPortalError) as ei:
+            portal._refuse_turn_during_voice_call("thread-1", voice_call_id="vd_mine")
+        assert ei.value.category == "voice_call_active"
+
+    def test_the_router_forwards_only_a_direct_call_id_it_has_checked(self):
+        # A request id reaching the turn is either refused by the route (404) or a `vd_` id
+        # the guard above still refuses during a Live call.
         from client_portal import router
-        assert "voice_call_id" not in inspect.getsource(router)
+        src = inspect.getsource(router)
+        rest = src.replace("voice_call_id=body.voice_call_id", "").replace("body.voice_call_id", "")
+        assert "voice_call_id" not in rest   # no other source of a call id in the router
+        assert src.index("turn_may_join_call(") < src.index("voice_call_id=body.voice_call_id")
 
 
 # ---------------------------------------------------------------------------

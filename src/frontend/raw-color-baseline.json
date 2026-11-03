@@ -926,7 +926,7 @@
     },
     "src/frontend/src/views/AgentDetail.vue": {
       "raw_nongray": 0,
-      "raw_gray": 20,
+      "raw_gray": 18,
       "hardcoded_colors": 1
     },
     "src/frontend/src/views/Dashboard.vue": {
@@ -970,8 +970,8 @@
       "hardcoded_colors": 0
     },
     "src/frontend/src/views/Settings.vue": {
-      "raw_nongray": 59,
-      "raw_gray": 683,
+      "raw_nongray": 57,
+      "raw_gray": 667,
       "hardcoded_colors": 0
     },
     "src/frontend/src/views/SetupPassword.vue": {
@@ -996,8 +996,8 @@
     }
   },
   "totals": {
-    "raw_nongray": 815,
-    "raw_gray": 8752,
+    "raw_nongray": 813,
+    "raw_gray": 8736,
     "hardcoded_colors": 447,
     "semantic_tokens": 4030,
     "files_with_violations": 198

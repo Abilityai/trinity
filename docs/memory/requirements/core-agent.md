@@ -100,6 +100,11 @@
 - **Description**: Delete agents and cleanup resources
 - **Key Features**: Container cleanup, network cleanup, cascade delete sharing records
 
+#### 1.4.1 Immediate purge primitive (abilityai/trinity-enterprise#1055)
+- **Status**: ✅ Implemented (primitive; no route of its own)
+- **Description**: A delete is a soft delete (#834) whose rows, volumes and key are kept for the retention window. Where an agent must not outlive the decision to remove it — an invited member is removed, or a half-created agent is rolled back — `services/agent_service/purge.py::purge_agent_now(agent_name, *, actor)` hard-purges it at once: container, queued and in-flight work, per-agent Redis state, every row the #816 cascade covers (sharing, permissions in both directions, the agent's MCP key), and the data volumes under both identities of a renamed agent (#1664), never a base another agent still claims.
+- **Acceptance**: the `agent_lifecycle:purge` audit row is written while the agent still exists and survives the purge; if it cannot be written nothing is destroyed (503). A person caller must pass `assert_admin` (an agent key carrying an admin owner's role is refused); `actor=None` is the platform acting on its own behalf. System agents (403) and ephemeral agents (409, they have their own discard) are refused. A Docker fault never stops the row purge; a residual volume is reclaimed by the orphan sweep (#1581). An agent with no row is a no-op. Edition-agnostic enforcement primitive: an entitled module or a later admin surface calls it. Test: `tests/unit/test_ent1055_purge_agent_now.py`.
+
 ### 1.5 Agent Logs Viewing
 - **Status**: ✅ Implemented
 - **Description**: View container logs for debugging
@@ -176,6 +181,7 @@
 ### 4.2 GitHub Templates
 - **Status**: ✅ Implemented
 - **Description**: Clone via `github:Org/repo` format with PAT authentication
+- **Ref pinning (trinity#4165)**: `github:owner/repo@ref` takes the ref whole — a branch or a tag, dots included (`v1.2.0`, `releases/v1.2.0`) — and pins the clone to it. The ref is interpolated into startup.sh's eval-built clone command, so the charset stays a shell-safety barrier (`[A-Za-z0-9_./-]`) and the git ref-format shapes a dotted ref cannot take (`..`, a component starting with `.`, a trailing `.` or `.lock`) are refused, as is a leading `-` (a value at every live site today, an option to `git checkout` one shell edit away). An unusable ref is a named 400, never a silent fall-back to `main`. The three ref-existence checks the create runs before the clone accept a branch or a tag alike — the anonymous `ls-remote` (`refs/heads/<ref>` and `refs/tags/<ref>`, never `--heads`), the REST branch check (a 404 there is answered by the tag ref before the ref is called missing), and the tokened `ls-remote` re-check after a REST 403 — with the ref always a value after the URL, never an option; a branch wins over a same-named tag, as in `git clone -b`, and an annotated tag resolves to its peeled commit. A ref that is neither is 400 "Branch or tag '…' not found". A tag never pulls; re-pinning is a recreate. Tests: `tests/unit/test_4165_github_ref_tag.py` (parser), `tests/unit/test_4165_ref_existence_checks.py` (the three checks, driven through `_validate_github_access`).
 
 ### 4.2.1 Admin-Configurable GitHub Templates (TMPL-001)
 - **Status**: ✅ Implemented
@@ -4148,6 +4154,105 @@ to localStorage in the clear.
 - **Not in scope**: the editable "What would be sent" (09-20 ruling); #609; the `people_for`
   provider; `may_end` (rides #164); run pills with step labels (need a message→execution link).
 - **Flow**: `docs/memory/feature-flows/workspace-inbox.md`
+### 5.44 Workspace — the autonomy dial: what a companion may do unprompted (trinity-enterprise#641)
+- **Status**: ✅ Implemented (2026-09-23). OSS-core (Workspace).
+- **Requirement ID**: WORKSPACE_AUTONOMY_DIAL
+- **GitHub Issue**: abilityai/trinity-enterprise#641 (canon `tandem-06-operations.md` §2.3, ruling P12; consumes §5.37's evidence)
+- **Description**: Autonomy was one boolean per agent — scheduled runs on or off.
+  The dial adds the two scopes the operating model actually needs. **Above**: one
+  instance LEVEL (`L0` Continuity · `L1` Companion · `L2` Delegated classes ·
+  `L3` Load-bearing judgment), the ceiling on the whole fleet. **Below**: a state
+  per (seat, `ask_class`) — `on_request` or `graduated` — earned from the seat's own
+  decision record. Nothing between them is new: a graduated class means the
+  companion acts and reports; everything else it asks first.
+- **Promotion is earned, and there is no promote control.** A class graduates when
+  §5.37's evidence says `stable` for it — **≥3 non-expired records, ONE normalized
+  criterion, no reversal in the window** — AND the seat has no negative rating in the
+  last 30 days AND the guard metric for the class is not `capped`. A person can only
+  move it DOWN (`hold`, any reader for their own seat) or let it back up
+  (`release`, the agent OWNER only — holding is a refusal, releasing is a grant).
+- **Evidence is counted per CONVERSATION, not per record.** The companion writes
+  its own records (MCP `record_decision` stores the seat as `decided_by_person` and
+  its execution as `source_execution_id`), so three `record()` calls inside one
+  execution must not graduate a class it just invented. The qualifying records must
+  come from **at least `STABLE_MIN_COUNT` (3) distinct sources**: each distinct
+  non-null `source_execution_id` is one source, and every person-written record (the
+  Workspace path, `source_execution_id IS NULL`) is its own source. The count is
+  carried as `evidence.sources`; short of it the class is blocked
+  `too_few_conversations` ("the decisions for this kind of ask come from fewer than
+  three separate conversations"). Every other conjunct is unchanged.
+- **Agent-written evidence is held to the running turn and to days (#2984 review,
+  option b).** `POST /api/agents/{name}/decisions` from an **agent** key records only
+  for the turn it is running: the body's `execution_id` must equal the
+  platform-stamped `X-Trinity-Execution-Id` (#2392, which MCP `record_decision`
+  forwards and the model cannot set; `manual` or absent is refused) — else 422
+  `not_this_turn` — and that execution must be `running`, else 422
+  `turn_not_running`. A person's own record keeps its path. And when **every** record
+  in a class's window is agent-written (no person-written record), the evidence must
+  span **`STABLE_MIN_DAYS` (3) distinct days** of `created_at`, else the class is
+  blocked `agent_only_evidence_too_recent`, so one burst of turns (or self-tasks)
+  cannot graduate a class nobody asked about. **Residual, accepted:** a seat's daily
+  scheduled run is a running turn, so agent-only evidence can still graduate over
+  three days with no person in the loop — slower, not closed; option (a), counting
+  only person-written or person-confirmed records, is what would close it.
+- **Reversals are counted over the WINDOW, not over all history** — `effective_status`
+  returns `reversed` unconditionally, so a reversed record never expires; counted
+  over history, one reversal ever would block a class forever and `on_request` would
+  be the only reachable steady state. A reversed record leaves the window at its own
+  `review_by`, like any other.
+- **The verdict is stored earned-state × three read-time conjuncts** — the instance
+  level (`≥L2` for anything unprompted), the agent's `autonomy_enabled`, and
+  `now <= evidence_expires_at` (the EARLIEST `review_by` of the window). Written
+  instead of read, each fails silently: records lapse at UTC midnight with no event to
+  hook, so a materialised verdict outlives its evidence; and re-evaluating the fleet
+  inside a level change is an unbounded fan-out. As conjuncts a level drop needs zero
+  writes and restores exactly what each class had earned when it goes back up. Reads
+  persist NOTHING; writes happen only on a real event (a decision recorded or acted
+  on, a rating by the seat, a hold/release) and are CAS'd on an evidence hash, so an
+  unchanged verdict writes no row and emits no event.
+- **Every block is NAMED, never a bare boolean**: `level_below_l2` ·
+  `agent_autonomy_off` · `evidence_expired` · `too_few_records` ·
+  `too_few_conversations` · `criterion_not_stable` · `reversal_in_window` · `negative_rating_in_window` ·
+  `guard_metric_capped` · `held_by_operator`, each with the sentence the panel and the
+  companion both show.
+- **The rating query's three shapes are each a defect first**: it matches
+  `operator:<email>` as well as `workspace:<email>` (on a single-operator install the
+  seat person IS the platform principal, so their thumbs-down lands under the other
+  prefix and the class could never demote); it reads `COALESCE(updated_at, created_at)`
+  (flipping a rating up→down touches only `updated_at`, and that flip is exactly a
+  demotion); and the window is a FIXED 30 days, not "since the oldest surviving
+  record" — otherwise a blocking rating falls out as records expire, which is
+  promotion by the clock and R25 forbids it.
+- **The level has a control, not just an endpoint**: `AutonomyDialPanel.vue` on
+  Settings → Retention, beside the two panels that already bound what an
+  engagement does on its own. It renders one option per level with the single
+  fact that changes behaviour said on the row (`unprompted possible` /
+  `always asks first`), and it states the two things an admin otherwise fears:
+  raising the level promotes nothing, lowering it destroys nothing. Shown in
+  every edition — the level is in force whether or not anyone has set it.
+- **The level is a grant, not a preference**: `GET/PUT /api/settings/autonomy-dial`,
+  `require_admin` **and** interactive-principal only (an agent's own MCP key can read
+  the dial but can never raise it — the ent#297 line), validated against the four
+  levels, audited as `autonomy_dial_change`, and blocked on the generic
+  `PUT /api/settings/{key}` catch-all so the one door that addresses any key cannot
+  set it.
+- **The companion is told, in the same words**: `autonomy_dial_service.prompt_lines`
+  rides the seat's shared memory block, so the model reads which classes it may act on
+  unprompted and, for every other class, the named reason it must ask first.
+- **Three surfaces, one seat rule**: MCP `get_autonomy` (seat from `execution_id`,
+  never a parameter; no email in the answer) → `GET /api/agents/{name}/seat-autonomy`
+  (`/autonomy` is the agent-level toggle, registered first — a second route on it
+  is silently never reached);
+  the person reads and holds/releases in Agent details (`PortalAgentAutonomy.vue`,
+  `GET /api/enterprise/client-portal/agents/{name}/autonomy`, `…/autonomy/actions`,
+  `…/autonomy/guard`); admins set the level in Settings.
+- **Storage**: `seat_ask_class_state` (both tracks; Alembic `0108` ← `0107`; cleanup
+  CASCADE) holds ONLY the earned half + the hold + the guard metric. The level is one
+  validated `system_settings` key (`autonomy_dial_level:instance`), not a table.
+- **Not in scope**: per-agent or per-seat levels (the instance level is the ceiling in
+  v1); auto-feeding `guard_metric` from the §49 metric registry (set explicitly by the
+  owner for now — DEBT_INBOX 2026-09-23).
+- **Flow**: `docs/memory/feature-flows/workspace-autonomy-dial.md`
 
 ### 5.41 Workspace — close a chat from its tab, the tab's unread count, and a star that sticks (trinity-enterprise#841, abilityai/trinity#3356)
 - **Status**: ✅ Implemented (2026-10-08)
@@ -4294,3 +4399,41 @@ to localStorage in the clear.
   (pure); `portalChatCycle.mount.spec.js`, `portalAgentLandingStage.mount.spec.js`,
   `portalAgentLandingRemount.mount.spec.js` (mounted). Flow:
   `feature-flows/workspace-chat-tabs-and-titles.md` § *The strip holds still*.
+### 5.44 People in a room — a read floor, leaving, and who is speaking (trinity-enterprise#701)
+- **Status**: ✅ Implemented (2026-10-26)
+- **Requirement ID**: WORKSPACE_ROOM_PEOPLE
+- **GitHub Issue**: abilityai/trinity-enterprise#701
+- **Description**: The edition-agnostic half of a room holding more than one
+  person. A room ("room" means many participants; a "chat" is one person and one
+  agent — the Workspace uses the two words by that rule) can hold several people,
+  each a `user` or `workspace_user` participant row.
+- **FR-1 — A person reads from their join point.** `enterprise_room_participants.visible_from_seq`
+  is the first message seq that person may read (0 = everything: the creator, every row
+  that predates this). `GET /api/rooms/{id}` leaves earlier messages out for that
+  person and reports `history_from_seq`. Moving the floor to 0 is a recorded backscroll
+  grant. Dual-track: SQLite migration `room_participant_visible_from` + Alembic
+  `0114_room_participant_visible_from`.
+- **FR-2 — Leaving ends access.** `POST /api/rooms/{id}/leave` (people only — an agent is
+  removed by the moderator, never by itself). A person who left, or was removed, gets the
+  room's uniform 404 and the room drops out of their list; the row keeps `left_at`, so the
+  roster shows who left and their messages stay attributed. A person can be seated again
+  (`db.seat_person` is an upsert that clears `left_at`; agents keep their own rule). A
+  moderator cannot leave while other people are seated without another moderator — they
+  remove them or close the room first.
+- **FR-3 — The room payload names the reader and the people.** `you` (`kind`, `identity`)
+  so the Workspace tells the caller's messages from another person's, `people` (present
+  first, then who left, with role and whether they see the earlier messages), and
+  `can_seat_people` — a capability for the UI, offered only to a platform moderator of an
+  open room when the install provides seating through the entitlement seam; never the
+  authorization.
+- **FR-4 — The agent is told who is present.** With two or more people present, the turn
+  prompt names each and what they may decide (a collaborator reads and talks but cannot
+  approve, spend or reassign; approvals and spending go to the agent's primary). Every
+  transcript line already names its sender.
+- **FR-5 — Mentioning a seated person reaches them.** An `@username` of a person seated in
+  the room becomes a tag (one Unread item in their Inbox), never a wake; a mention that
+  cannot be delivered stays plain text rather than failing the message.
+- **FR-6 — A colleague keeps the room internal.** A seated platform person is kind `user`,
+  which `room_is_user_facing` counts as internal (#363).
+- **FR-7 — "New room" is its own door.** Beside New chat; it opens the agent picker in room
+  words and always creates a room, even with one agent.

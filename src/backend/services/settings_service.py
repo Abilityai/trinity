@@ -524,6 +524,22 @@ class SettingsService:
         at the consumers, not here."""
         return self._resolve_bool_flag("brain_orb_voice_enabled", "BRAIN_ORB_VOICE_ENABLED")
 
+    def is_direct_voice_enabled(self) -> bool:
+        """Workspace Direct calls (trinity-enterprise#1046). On by default, unlike the
+        opt-in flags `_resolve_bool_flag` was written for, so an env "false" has to be
+        honoured here: that helper reads env values only as an opt-in."""
+        env_off = os.getenv("DIRECT_VOICE_ENABLED", "").strip().lower() in ("false", "0", "no")
+        return self._resolve_bool_flag("direct_voice_enabled", "DIRECT_VOICE_ENABLED", default=not env_off)
+
+    def get_direct_voice_provider(self) -> str:
+        """`auto` | `gemini` | `elevenlabs`. An unrecognised stored value reads as
+        `auto` rather than breaking every call."""
+        try:
+            stored = (self.get_setting("direct_voice_provider") or "").strip().lower()
+        except Exception:  # noqa: BLE001 - a settings read must not break the roster
+            stored = ""
+        return stored if stored in ("auto", "gemini", "elevenlabs") else "auto"
+
     def is_brain_orb_write_enabled(self) -> bool:
         """Brain Orb KB-write kill-switch (trinity-enterprise#61). Distinct from
         the base flag so the write/exec surface can be downed without downing

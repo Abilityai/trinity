@@ -765,8 +765,10 @@ def _build_schedule_create(schedule_data: dict) -> ScheduleCreate:
     The single mapping shared by the preview resolver and the writer, so the
     manifest key names (`cron` -> `cron_expression`) and the three `.get()`
     defaults cannot diverge between what a preview shows and what deploy writes.
-    Fields the manifest never populates (timeout_seconds, model, allowed_tools,
-    retries) keep their model defaults.
+    Fields the manifest never populates (timeout_seconds, allowed_tools,
+    retries) keep their model defaults. `model` (MODEL-001) is carried: #4151
+    found it silently dropped, so a scheduled run used the agent default while
+    the dry run and the result reported a clean create.
     """
     return ScheduleCreate(
         name=schedule_data["name"],
@@ -774,7 +776,8 @@ def _build_schedule_create(schedule_data: dict) -> ScheduleCreate:
         message=schedule_data["message"],
         enabled=schedule_data.get("enabled", True),
         timezone=schedule_data.get("timezone", "UTC"),
-        description=schedule_data.get("description")
+        description=schedule_data.get("description"),
+        model=schedule_data.get("model"),
     )
 
 
@@ -1581,7 +1584,10 @@ def export_manifest(system_name: str, agents: List[Dict], *,
                         "cron": s.cron_expression,
                         "message": s.message,
                         "enabled": bool(s.enabled),
-                        "timezone": s.timezone
+                        "timezone": s.timezone,
+                        # #4151: only when set, so an agent-default row
+                        # exports (and round-trips) exactly as before.
+                        **({"model": s.model} if getattr(s, "model", None) else {}),
                     }
                     for s in sorted(schedules, key=lambda s: s.name)
                 ]
@@ -2551,6 +2557,16 @@ async def deploy_manifest(
             logger.exception(f"Tag configuration failed for system '{manifest.name}'")
             all_warnings.append(f"Failed to configure tags: {reason}")
 
+        # The two phases below judge skills.manage themselves, with no fence to
+        # record it: one `capability_used` per member the grant decides for
+        # (trinity-enterprise#871). A caller without it writes none and is told.
+        from db.capability_grants import CAPABILITY_SKILLS_MANAGE
+        from dependencies import record_capability_use
+        for short, cfg in manifest.agents.items():
+            if short in created_map and (cfg.gates or cfg.skills or cfg.skill_sets):
+                await record_capability_use(request, current_user, CAPABILITY_SKILLS_MANAGE,
+                                            target=created_map[short])
+
         # 10a. The approval map (trinity-enterprise#1030 CP3), BEFORE the
         # skills: a gate is in place before the skill it governs is delivered
         # (ent#753). Written only by a caller holding skills.manage (T8);
@@ -3288,13 +3304,15 @@ class ScheduleAction:
 # maps to, and whether the key is always compared. `timezone` and
 # `description` only when the entry declares them: comparing the defaults
 # `_build_schedule_create` fills in would reset a row's `Europe/Berlin` to UTC
-# and wipe a template's `purpose:` description. `enabled` is
+# and wipe a template's `purpose:` description. `model` likewise (#4151): an
+# entry that names no model leaves a row's override alone. `enabled` is
 # never compared for a write.
 _SCHEDULE_DECLARED_FIELDS = (
     ("cron", "cron_expression", True),
     ("message", "message", True),
     ("timezone", "timezone", False),
     ("description", "description", False),
+    ("model", "model", False),
 )
 
 
@@ -3418,6 +3436,7 @@ APPLY_FIELD_CLASSIFICATION: Dict[str, Tuple[str, str]] = {
     "schedule.enabled": ("create-only", "never written on a matched row; enabled_differs"),
     "schedule.timezone": ("reconciled", "only when declared"),
     "schedule.description": ("reconciled", "only when declared"),
+    "schedule.model": ("reconciled", "only when declared"),
 }
 
 # The order the executor writes in, by kind (phase-major, as create mode does),
@@ -3618,13 +3637,13 @@ def _schedule_view(entry_or_row) -> Dict:
     """The schedule fields a report shows. Never webhook tokens or secrets."""
     if isinstance(entry_or_row, dict):
         return {k: entry_or_row.get(k) for k in
-                ("name", "cron", "message", "enabled", "timezone", "description")
+                ("name", "cron", "message", "enabled", "timezone", "description", "model")
                 if k in entry_or_row}
     row = entry_or_row
     return {
         "name": row.name, "cron": row.cron_expression, "message": row.message,
         "enabled": bool(row.enabled), "timezone": row.timezone,
-        "description": row.description,
+        "description": row.description, "model": getattr(row, "model", None),
     }
 
 

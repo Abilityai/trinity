@@ -42,7 +42,6 @@ from services.upload_service import (
     process_file_uploads,
 )
 from db.write_params import TaskExecutionFields
-from services.chat_signals import admission_refusal_of
 from services.skill_gate_errors import SkillGateError
 # The chat-turn rate constants moved here with the accounting that reads them
 # (per-IP and per-token message caps; the connection-level public-link rate
@@ -51,6 +50,51 @@ MAX_CHAT_MESSAGES_PER_IP = 30  # per minute
 MAX_CHAT_MESSAGES_PER_TOKEN = 60  # per minute, per public link token
 
 logger = logging.getLogger(__name__)
+
+
+# ent#926: what a visitor is told when the agent's runtime refused their turn
+# (Gemini CLI / Codex, visitor switch off). A refusal, not a fault: no "try
+# again", and no internal setting named to an anonymous visitor.
+PUBLIC_TURN_REFUSED_MESSAGE = (
+    "This agent isn't taking conversations from public links right now. "
+    "Please contact its owner."
+)
+# The agent server's refusal sentences (agent_server/services/turn_scope.py
+# REFUSED / REFUSED_VISITOR). A push terminal stores only this text, so the
+# async status read recognises it; a parity test pins both.
+_TURN_REFUSED_MARKERS = ("cannot limit what such a turn may do", "has not allowed those to run on")
+
+
+def is_turn_refused(error_code, error_text) -> bool:
+    """Did the agent refuse this turn for who it is for (ent#926)?"""
+    if getattr(error_code, "value", error_code) == "turn_refused":
+        return True
+    text = error_text or ""
+    if text.startswith("[turn_refused]"):
+        return True
+    return any(m in text for m in _TURN_REFUSED_MARKERS)
+
+
+def raise_for_failed_public_result(agent_name: str, result) -> None:
+    """Map a failed or cancelled public turn to the visitor's answer. Raises."""
+    error = result.error or ""
+    if is_turn_refused(getattr(result, "error_code", None), error):
+        raise PublicChatError(status_code=403, detail=PUBLIC_TURN_REFUSED_MESSAGE)
+    if "at capacity" in error:
+        raise PublicChatError(
+            status_code=429,
+            detail="Agent is busy. Please try again later."
+        )
+    if "timed out" in error:
+        raise PublicChatError(
+            status_code=504,
+            detail="Request timed out. Please try again with a simpler question."
+        )
+    logger.error(f"Public chat task failed for {agent_name}: {error}")
+    raise PublicChatError(
+        status_code=502,
+        detail="Failed to process your request. Please try again."
+    )
 
 
 class PublicChatError(Exception):
@@ -144,16 +188,6 @@ async def _execute_public_chat_background(
                                                 content=e.message if hasattr(e, "message") else str(e),
                                                 sender_email=verified_email)
             _mark_gate_hold((user_message_id, getattr(notice, "id", None)), e)
-            return
-
-        refusal = admission_refusal_of(result, agent_name)
-        if refusal is not None:
-            # trinity-enterprise#1059 (review C2): nothing ran — the visitor
-            # polls this thread, so the policy's sentence is stored as the
-            # reply (the gate's shape), never an empty assistant turn.
-            logger.info(f"[PublicChatAsync] refused by an admission policy for {agent_name}: {refusal.code}")
-            db.add_public_chat_message(session_id=chat_session_id, role="assistant",
-                                       content=refusal.message, sender_email=verified_email)
             return
 
         if result.status == "success" and result.response:
@@ -434,38 +468,11 @@ async def run_public_chat(link: dict, chat_request, client_ip: str):
     else:
         gate_stop = None
 
-    refusal = admission_refusal_of(result, agent_name)
-    if refusal is not None:
-        # trinity-enterprise#1059 (review C2): an admission policy stopped the
-        # turn before it ran — the seam's 429 with the policy's own sentence
-        # and code, never a success-shaped empty reply stored in the thread.
-        from services.chat_execution_service import _error_code_headers
-        retry_after = refusal.retry_after_seconds()
-        extra = {"Retry-After": str(retry_after)} if retry_after is not None else None
-        raise PublicChatError(status_code=429, detail=refusal.message,
-                              headers=_error_code_headers(refusal.code, extra))
-
     if result.status in ("failed", "cancelled"):
         # #679: a CANCELLED turn is non-delivery, not a success-like empty
-        # response. It falls through to the generic 502 below (its error text
+        # response. It falls through to the generic 502 (its error text
         # matches no capacity/timeout branch) — the operator stopped the work.
-        error = result.error or ""
-        if "at capacity" in error:
-            raise PublicChatError(
-                status_code=429,
-                detail="Agent is busy. Please try again later."
-            )
-        elif "timed out" in error:
-            raise PublicChatError(
-                status_code=504,
-                detail="Request timed out. Please try again with a simpler question."
-            )
-        else:
-            logger.error(f"Public chat task failed for {agent_name}: {error}")
-            raise PublicChatError(
-                status_code=502,
-                detail="Failed to process your request. Please try again."
-            )
+        raise_for_failed_public_result(agent_name, result)
 
     assistant_response = result.response
 

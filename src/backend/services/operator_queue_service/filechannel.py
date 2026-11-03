@@ -61,6 +61,21 @@ def _scalar_text(value):
     return value
 
 
+def _primary_addressee(agent_name: str, email: str) -> Optional[str]:
+    """``email`` if it is the ONE person who fills ``agent_name``'s primary
+    role, else None (trinity-enterprise#1066). Fails CLOSED and never raises,
+    like `_validated_addressee`."""
+    try:
+        from services import role_addressing
+
+        single = role_addressing.resolve(agent_name, "primary").single
+    except Exception:  # noqa: BLE001 — unresolvable → unaddressed, per #1632
+        logger.warning("[OperatorQueue] primary of %s unresolvable; credential item "
+                       "left unaddressed (ent#1066)", agent_name, exc_info=True)
+        return None
+    return email if single and single.strip().lower() == email else None
+
+
 def _validated_addressee(agent_name: str, raw) -> Optional[str]:
     """The email an ask is addressed to, or None (ent#364).
 
@@ -160,6 +175,11 @@ def _clamp_ingested_item(req: dict, agent_name: str = "") -> dict:
     # the addressee's thread id INTO context — doing it afterwards would add
     # bytes the size cap had already signed off on.
     out["addressed_to_email"] = _validated_addressee(agent_name, out.get("addressed_to_email"))
+    if out.get("type") == "credential" and out["addressed_to_email"]:
+        # trinity-enterprise#1066: this channel never reaches `_validated_ask`,
+        # which holds the kind to primary on the platform door. A secret field
+        # opens for the agent's primary person only; anyone else → unaddressed.
+        out["addressed_to_email"] = _primary_addressee(agent_name, out["addressed_to_email"])
 
     context = out.get("context")
     if not isinstance(context, dict):
