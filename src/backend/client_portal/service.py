@@ -178,6 +178,11 @@ PORTAL_FAILURE_CATEGORIES = (
     # failure. Not `invalid_model`: the client did not choose this model, so
     # there is no stored preference to clear. Only an operator can fix it.
     "model_unsupported",
+    # trinity-enterprise#926 — the agent's runtime (Gemini CLI, Codex) cannot hold
+    # a turn to what this person may do, so it refused it before starting. The
+    # agent's own sentence names the runtime and what the owner can change. Not
+    # retryable: resending meets the same refusal.
+    "turn_refused",
     # trinity-enterprise#751 — the message invokes a skill that needs a person's
     # approval and could not be put up for one (refused by name; nothing ran).
     # Not retryable: resending meets the same refusal. A request that WAS put up
@@ -3451,6 +3456,13 @@ async def portal_chat(agent_name: str, message: str, email: str,
                 "pick another model.",
                 category="model_unsupported", retryable=False,
             )
+        if code == "TURN_REFUSED":
+            raise ClientPortalError(
+                403,
+                result.error or "This agent can't take this conversation on its current runtime. "
+                "Its owner can change that.",
+                category="turn_refused", retryable=False,
+            )
         if code in ("AUTH", "BILLING"):
             # #2638: "re-sending re-fails" is only true while nothing changed
             # underneath. SUB-003 may have MOVED the agent onto a different
@@ -6212,6 +6224,19 @@ def submit_rating(agent_name: str, email: str, *, target_kind: str, target_id: s
     except Exception as e:  # noqa: BLE001
         logger.warning("portal: rating write failed for %s/%s: %s", agent_name, target_kind, e)
         raise ClientPortalError(503, "Could not record that rating — try again.")
+
+    # ent#641: a thumbs-down by the seat is one of the two events that can
+    # DEMOTE an ask class, and the only one that does not pass through the
+    # decision record. Re-evaluate here rather than on the panel read — a read
+    # that writes makes an owner opening the page a writer for every seat.
+    # Fail-open: the reader re-ANDs the live conjuncts anyway, so a missed
+    # re-evaluation can only leave a verdict stale, never wider than earned.
+    try:
+        from services import autonomy_dial_service
+
+        autonomy_dial_service.evaluate_seat(platform_db, agent_name, email, persist=True)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("portal: autonomy re-evaluation after a rating failed for %s: %s", agent_name, e)
 
     return {
         "target_kind": target_kind,
