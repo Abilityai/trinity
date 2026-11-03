@@ -98,8 +98,10 @@ def tg(agent_name, chat, *, email=ANN, finished=None):
 
 
 def record(client, agent, execution_id, key=None):
+    # The platform stamps the turn's id on the call (#2392); #2984 requires it to match.
     return client.post(f"/api/agents/{agent.name}/decisions", json={**RECORD, "execution_id": execution_id},
-                       headers={"Authorization": f"Bearer {key or agent.key}"})
+                       headers={"Authorization": f"Bearer {key or agent.key}",
+                                "X-Trinity-Execution-Id": execution_id})
 
 
 def read(client, agent, execution_id, key=None):

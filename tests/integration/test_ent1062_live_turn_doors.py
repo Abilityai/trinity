@@ -125,7 +125,8 @@ class Door:
 
     def record(self, execution_id: str, *, token: str | None = None):
         return self.client.post(f"/api/agents/{self.name}/decisions", json={**RECORD, "execution_id": execution_id},
-                                auth=False, headers={"Authorization": f"Bearer {token or self.key}"})
+                                auth=False, headers={"Authorization": f"Bearer {token or self.key}",
+                                                     "X-Trinity-Execution-Id": execution_id})
 
     def read(self, execution_id: str):
         return self.client.get(f"/api/agents/{self.name}/decisions", params={"execution_id": execution_id},

@@ -382,7 +382,7 @@ class TestAgentRouter:
     def test_a_seat_run_records_for_its_seat_with_the_providers_role_and_no_email_back(self, wired):
         r, store, recorded = wired
         store["execution"] = _execution()
-        out = asyncio.run(r.record_seat_decision(AGENT, self._body(), current_user=_AGENT_KEY))
+        out = asyncio.run(r.record_seat_decision(AGENT, self._body(), current_user=_AGENT_KEY, x_trinity_execution_id="e1"))
         assert recorded[0]["seat_email"] == SEAT and recorded[0]["decided_by_person"] == SEAT
         assert recorded[0]["payload"]["decided_by_role"] == "sales-lead"
         assert recorded[0]["source_execution_id"] == "e1"
@@ -393,22 +393,22 @@ class TestAgentRouter:
         r, store, recorded = wired
         store["execution"] = _execution(triggered_by="public", schedule_id=None, source_channel_client=None,
                                         source_user_email="Client@Example.com")
-        asyncio.run(r.record_seat_decision(AGENT, self._body(), current_user=_AGENT_KEY))
+        asyncio.run(r.record_seat_decision(AGENT, self._body(), current_user=_AGENT_KEY, x_trinity_execution_id="e1"))
         assert recorded[-1]["seat_email"] == "client@example.com"
         store["execution"] = _execution(triggered_by="mcp", schedule_id=None, source_channel_client=None)
         with pytest.raises(HTTPException) as e:
-            asyncio.run(r.record_seat_decision(AGENT, self._body(), current_user=_AGENT_KEY))
+            asyncio.run(r.record_seat_decision(AGENT, self._body(), current_user=_AGENT_KEY, x_trinity_execution_id="e1"))
         assert e.value.status_code == 422 and e.value.detail["code"] == "no_seat"
 
     def test_a_foreign_execution_is_403_and_a_missing_one_404(self, wired):
         r, store, _ = wired
         store["execution"] = _execution(agent_name="someone-else")
         with pytest.raises(HTTPException) as e:
-            asyncio.run(r.record_seat_decision(AGENT, self._body(), current_user=_AGENT_KEY))
+            asyncio.run(r.record_seat_decision(AGENT, self._body(), current_user=_AGENT_KEY, x_trinity_execution_id="e1"))
         assert e.value.status_code == 403
         store["execution"] = None
         with pytest.raises(HTTPException) as e:
-            asyncio.run(r.record_seat_decision(AGENT, self._body(), current_user=_AGENT_KEY))
+            asyncio.run(r.record_seat_decision(AGENT, self._body(), current_user=_AGENT_KEY, x_trinity_execution_id="e1"))
         assert e.value.status_code == 404
 
     def test_a_refusal_is_the_named_receipt_and_the_idempotency_claim_is_released(self, wired, monkeypatch, svc):
@@ -421,7 +421,7 @@ class TestAgentRouter:
             svc.DecisionRefused("decision_prose_only", "prose", receipt={"fields": {"criterion": "one line"}})))
         store["execution"] = _execution()
         with pytest.raises(HTTPException) as e:
-            asyncio.run(r.record_seat_decision(AGENT, self._body(), current_user=_AGENT_KEY, idempotency_key="k"))
+            asyncio.run(r.record_seat_decision(AGENT, self._body(), current_user=_AGENT_KEY, idempotency_key="k", x_trinity_execution_id="e1"))
         assert e.value.status_code == 422 and e.value.detail["code"] == "decision_prose_only"
         assert e.value.detail["receipt"]["fields"] == {"criterion": "one line"}
         assert released
@@ -432,7 +432,7 @@ class TestAgentRouter:
         monkeypatch.setattr(idem, "begin", lambda scope, key: SimpleNamespace(
             enabled=True, replay=True, in_flight=False, snapshot={"success": True, "decision": {"id": "d1"}}))
         store["execution"] = _execution()
-        out = asyncio.run(r.record_seat_decision(AGENT, self._body(), current_user=_AGENT_KEY, idempotency_key="k"))
+        out = asyncio.run(r.record_seat_decision(AGENT, self._body(), current_user=_AGENT_KEY, idempotency_key="k", x_trinity_execution_id="e1"))
         assert out["replayed"] is True and out["decision"]["id"] == "d1" and recorded == []
 
     def test_list_returns_active_only_by_default_email_free_with_stats(self, wired, monkeypatch):
