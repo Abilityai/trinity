@@ -784,7 +784,7 @@ _ALLOW = {
         "maps a role to an agent-creation quota; selects no roster",
     ("services/ask_service.py", "may_end"):
         "an ask's ending is person-only at every route (reject_non_person_principal)",
-    ("services/person_mention_service.py", "_room_access"):
+    ("services/person_mention_service.py", "_room_access_row"):
         "decides about the PERSON row being mentioned (looked up by email), never a principal's fleet",
     ("services/ws_identity_service.py", "resolve_ws_identity"):
         "a /ws ticket subject is a person (the ticket route is require_person)",

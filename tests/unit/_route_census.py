@@ -1259,6 +1259,14 @@ DELEGATED: Dict[str, Tuple[str, str, str]] = {
         "GET /api/rooms/{room_id}/people",
         "shared_sessions.service.room_people -> person_mention_service.tagger_for",
         "tests/unit/test_ent631_person_mention.py::test_an_agent_key_cannot_list_people_to_tag"),
+    # trinity-enterprise#701: a person leaves a room. Same principal as above
+    # (a platform user OR a Workspace client), so no dependency gate fits; the
+    # service refuses any non-person (`not_a_person`, 403) after the uniform
+    # membership 404.
+    "shared_sessions/router.py::leave_room": (
+        "POST /api/rooms/{room_id}/leave",
+        "shared_sessions.service.leave_room -> PEOPLE_KINDS check",
+        "tests/unit/test_ent701_room_people.py::test_an_agent_cannot_leave"),
     # trinity-enterprise#719: three room uses. Agents read and post in a room as
     # themselves (ent#169); `get_room_principal` fits no census gate, and the
     # service keeps each room to its members. Creating a room stays in the
