@@ -1,6 +1,107 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent1024_admin_acts_as_agent.py",
+      "feature": "abilityai/trinity-enterprise#1024",
+      "added": "2026-10-30",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "An admin's user MCP key acts on behalf of an agent through X-Trinity-Act-As-Agent: admit_act_as admits it only for a user-scoped key whose user is an admin and writes one acted_as_agent audit row naming the acting user and the agent; every other principal (non-admin user key, creator, agent, system, connector, portal_delegate, ops, a browser session) is a named 403 act_as_not_permitted and writes nothing; blank/oversize names are 400; a failed audit write never fails the request; no header changes nothing. get_self_acting_agent admits the admitted agent on its own path only and tells an un-admitted admin to pass agent_name; agent keys still act only as themselves; assert_own_agent holds the admitted agent to its path. An on-behalf raise records acted_by: user:<id>; an agent's own ask does not. Mutations (no admin check, ask gate or own-agent gate ignoring act-as, any scope admitted, no acted_by) each turn it red."
+    },
+    {
+      "file": "../src/mcp-server/src/act_as_agent.test.ts",
+      "feature": "abilityai/trinity-enterprise#1024",
+      "added": "2026-10-30",
+      "categories": [
+        "mcp",
+        "security",
+        "unit"
+      ],
+      "description": "resolveActingAgent's scope matrix with agent_name (agent/system act as themselves and may not name another; a user key acts for the named agent or is told to pass agent_name; connector/portal_delegate/ops/anonymous refused naming the key); TrinityClient.asAgent adds X-Trinity-Act-As-Agent on a clone only and a per-call header cannot override it; ask_operator, report, record_metrics, set_canvas and the project tools (create_project, create_project_task) send the header for a user key with agent_name, never put agent_name in a body, refuse a user key without it and a connector key with it, and leave an agent key's call unchanged."
+    },
+    {
+      "file": "unit/test_ent871_capability_used_audit.py",
+      "feature": "trinity-enterprise#871",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "unit",
+        "auth"
+      ],
+      "description": "An agent key a grant admits writes one capability_used row: every fence shape, the file routes, agent create and an honoured skill-set probe through the real routers with real keys, read back from the real audit_log; a direct enforce_agent_capability call for projects.manage; manifest deploy over the recorded audit sink. A refused call writes only capability_refused (a holder outside its owner's agents included, same 404), an edge gives a holder no way past the owner bound on the file routes, and no grant reaches the system agent; people, the system key and the exemptions write none; one request is one row per capability and target. skills.manage grants log capability_grant / capability_revoke through both routes."
+    },
+    {
+      "file": "unit/test_ent1066_secret_paste_guard.py",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "unit",
+        "security"
+      ],
+      "description": "A secret pasted as a plain Workspace chat message is refused by both chat routes (sync and stream) with 422 `secret_in_message` BEFORE admission: no service call, no Idempotency-Key consumed, the SHAPE named and never the text. `utils/credential_sanitizer.secret_shape` over `SECRET_VALUE_PATTERNS` (gaining `ops_` and `dop_v1_` service-token shapes in both the backend and agent-image copies, so logs redact them too), `Bearer`/`Basic` excluded as prose, a sensitive `KEY=value` pair counted only with an 8+ character value and the #3311 harmless-word blanking; the partition of the list into named and excluded pinned complete."
+    },
+    {
+      "file": "unit/test_ent1066_secret_guard_linear.py",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "unit",
+        "security"
+      ],
+      "description": "The paste guard's `KEY=value` walk (`utils/credential_sanitizer.secret_shape`, CodeQL `py/polynomial-redos` on the chat message) is linear by construction: `str.find` per `=`, a bounded walk back to the key start, one fixed-width value match, no unbounded regex. Timing bound and linear scaling at 10k/100k/1M on the `!` shapes CodeQL names and key-walk stress shapes; detection both ways — every sensitive pair refused (quoted, unclosed quote, chained, URL query, a key of 6k characters, a pair or prefixed token at the end of 1M characters) and prose, short values and harmless keys admitted."
+    },
+    {
+      "file": "unit/test_ent1066_credential_sink.py",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "unit",
+        "security"
+      ],
+      "description": "The secret sink behind the Workspace secret field (`client_portal.asks.service.provide_credential` -> `services/credential_sink.set_env_value`): one line of the agent's `.env` set through its own read + inject (round-tripped against the agent image's reader, duplicates collapsed, every other byte kept); staged into the runtime identity scrub FIRST and fail-closed (503 `scrub_unavailable`); a stopped or missing agent a named 409 `agent_not_running`; one writer per agent (`env_busy`); the 256 KiB file cap (`env_too_large`); every refusal names the step and never the value; the value absent from logs, audit, the ask row, the response and the wake; the ask answered `provided` by name; a compare-and-set lost after the write is 409 `already_resolved` with `credential_written: true`; an AST guard that the module never formats, logs, concatenates or raises the value."
+    },
+    {
+      "file": "unit/test_ent1066_credential_route_gates.py",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "unit",
+        "auth",
+        "security"
+      ],
+      "description": "Who may reach `POST /api/enterprise/client-portal/asks/{id}/credential` (the ent#719 shape, through the real router and the real `get_portal_principal`): an agent-scoped key refused 403 before the row is read; a system or ops key 403 `person_required`; a JWT person, a user-scoped key, a Workspace-only `user` and a portal session admitted; a stranger the uniform 404; no credential 401; the typed-answer route refuses the kind 422 `credential_answer_via_field`; a malformed body never echoes the value; the list shows `credential_name` to the addressee."
+    },
+    {
+      "file": "unit/test_ent1066_credential_ask_kind.py",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "unit",
+        "auth",
+        "security"
+      ],
+      "description": "The `credential` ask kind: raised by name with no options and exactly one resolved person (`no_person`), the name validated against the agent runtime's protected/routing sets and the platform-written keys (parity-tested), answered ONLY through the secret field's sink (`via_credential_sink`) — the operator respond box, the Workspace typed answer and a direct `answer()` are refused 422 `credential_answer_via_field`; the projection carries `credential_name` only; the wake names the variable, never a value."
+    },
+    {
+      "file": "unit/test_ent1066_credential_read_containment.py",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "agent",
+        "unit",
+        "security"
+      ],
+      "description": "The agent image's `GET /api/credentials/read` stays inside the agent home (CodeQL path-injection on the ent#1066 `lstat`): a leading `../` into a sibling whose name extends the home's, a `../` existence probe through the `missing` list, deeper `..`, absolute paths, a link (file, dangling, or parent directory) out of the home — each neither read nor reported missing; dotfiles, nested files, an in-home link and an absent in-home file still behave as before. Driven through the real router over a tmp home."
+    },
+    {
       "file": "unit/test_ent981_addressee_reach.py",
       "feature": "trinity-enterprise#981",
       "added": "2026-11-01",
@@ -251,6 +352,19 @@
       "description": "#4051: each unit-test process, every xdist worker included, defaults TRINITY_DB_PATH / TRINITY_RETAINED_RESULTS_DIR / TRINITY_CHAT_SESSION_FILE to its own pid, not the xdist controller's (bites under CI's -n auto)."
     },
     {
+      "file": "unit/test_ent1053_approver_answer_fence.py",
+      "feature": "trinity-enterprise#1053",
+      "added": "2026-11-02",
+      "categories": [
+        "unit",
+        "operator-queue",
+        "asks",
+        "role-addressing",
+        "security"
+      ],
+      "description": "trinity-enterprise#1053: an answer to an ask addressed to: approver is fenced in ask_service.may_end to the raise-time resolved_to snapshot, executed through the real Operations route and the Workspace door. A shared person or admin outside the seat is refused 403 not_addressee naming the approver role, writing nothing; a seated person answers; cancel and bulk cancel are not narrowed; a legacy row with an empty snapshot stays answerable by anyone with access and carries no addressed view."
+    },
+    {
       "file": "unit/test_ent1042_role_answer_fence.py",
       "feature": "trinity-enterprise#1042",
       "added": "2026-11-01",
@@ -261,7 +375,7 @@
         "role-addressing",
         "security"
       ],
-      "description": "trinity-enterprise#1042: an answer to an ask addressed to a canon role (role:<id>) is fenced in ask_service.may_end to the raise-time resolved_to snapshot, so every door inherits it. The real Operations route refuses a shared person outside the seat and an admin without the seat with 403 not_addressee and a remedy naming the role's label, never a person, writing nothing. An admin may still cancel, cancel and bulk-cancel are not narrowed, the approver and primary kinds are unchanged, an empty or unreadable snapshot fails closed, and all three catch sites word the refusal by role."
+      "description": "trinity-enterprise#1042: an answer to an ask addressed to a canon role (role:<id>) is fenced in ask_service.may_end to the raise-time resolved_to snapshot, so every door inherits it. The real Operations route refuses a shared person outside the seat and an admin without the seat with 403 not_addressee and a remedy naming the role's label, never a person, writing nothing. An admin may still cancel, cancel and bulk-cancel are not narrowed, the primary and viewer kinds are unchanged (approver is fenced by ent#1053), an empty or unreadable snapshot fails closed, and all three catch sites word the refusal by role."
     },
     {
       "file": "unit/test_ent1030_export_access.py",
@@ -4612,6 +4726,36 @@
       "description": "ent#537 canvas design kit + starter layouts: the four templates and their slot map are one set across models.py, canvas.ts and canvasLayouts.js and every layout/slot has a grid-area rule in CanvasKit.vue; `slot` survives the REST round trip (CanvasBlock field + validate_blocks) and a malformed slot is a named 400 while an unknown slot is not refused; an unknown template is refused by the Literal and by name in the service; write_canvas stores the template and defaults to None, patch_canvas and the voice panel write carry the stored one, and a voice verb leaves a slotted block untouched; CanvasSummary/empty_canvas carry template; _SUMMARY_COLUMNS appends template LAST and _row_to_summary/_row_to_full read stable positions; the DDL pair exists on both tracks (schema.py, tables.py, migrations.py, Alembic 0054 revising 0053); every class the prompt and the voice HTML rule teach is in KIT_CLASSES and every KIT_CLASSES entry has a rule in the stylesheet; the prompt teaches each layout with its slots, one worked example, the skill and the <style> rule; the MCP tool advertises template + slot; canvas components use only the canvas-mode sanitiser entry points, every markdown/html path forbids <style> via BASE_CONFIG, the hook reads the per-call canvasKit flag from its third argument, and only the SVG path keeps DOMPurify's default tag list."
     },
     {
+      "file": "unit/test_ent1046_speech_providers.py",
+      "feature": "ent#1046",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "workspace",
+        "voice"
+      ]
+    },
+    {
+      "file": "unit/test_ent1046_direct_voice.py",
+      "feature": "ent#1046",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "workspace",
+        "voice"
+      ]
+    },
+    {
+      "file": "unit/test_ent1046_direct_voice_db.py",
+      "feature": "ent#1046",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "workspace",
+        "voice"
+      ]
+    },
+    {
       "file": "unit/test_ent534_workspace_voice.py",
       "feature": "ent#534",
       "added": "2026-09-07",
@@ -7697,6 +7841,17 @@
       "description": "trinity-enterprise#1043: a gate write that fails on a skill the member already holds (a service refusal after the plan validated, a database fault, a lost lease), through the real apply route on the real database facade: the skill is still assigned and the admission read shows no gate, and the result says so — the failed[] reason carries the consequence, the member reports skill_runs_ungated (no gate in force) or previous_gate_stands (the stored gate still applies), one top-level warning line per ungated skill, applied false, summary.gates.write 0; a skill held only through a set; the #4125 hold-back of a new assignment in the same run untouched; a landed gate reports nothing new; the dry run predicts no failure."
     },
     {
+      "file": "unit/test_ent1068_unassign_on_failed_gate.py",
+      "feature": "trinity-enterprise#1068",
+      "added": "2026-11-02",
+      "categories": [
+        "unit",
+        "systems",
+        "security"
+      ],
+      "description": "trinity-enterprise#1068: a held skill whose declared gate cannot be written (a service refusal after validation, a database fault) is unassigned and its package removed when apply_unassign_on_failed_gate is on (the default), through the real apply route on the real database facade, and the result names it (failed[] reason, skill_unassigned_gate_failed write change, one warning line, summary.skills.write); the switch off keeps the ent#1043 report; a lost lease refuses the unassign; a deferred removal keeps the ungated line; a gate row stored despite the raise unassigns nothing; previous_gate_stands and a set-held skill (skill_held_via_set) stay report-only; several failing gates each unassign their own skill; the dry run's note follows the switch; the unassign route delegates to the same writer and keeps its 409."
+    },
+    {
       "file": "unit/test_4058_loop_stale_run_rows.py",
       "feature": "#4058",
       "added": "2026-10-29",
@@ -7720,26 +7875,127 @@
       "description": "#3785: services/operator_queue_service is a package and the split changes no behaviour. Every property is derived from the tree, so the extraction slices never edit this guard: every module under 800 lines (the pre-split __init__ exempt, with a staleness check); every name src/backend and tests/ read through the package still resolves (a scoped alias scan, pinned not to go blind); no from-import between package modules; the collaborators (db, _queue_db, principal_reach, get_breaker_redis, ask_service, AgentClient, _audit_sync) bound once, in deps: no other package module imports a collaborator's source (derived from deps' own imports) in any scope under any alias, holds a collaborator object at module level, or binds a collaborator name, and the package has none of them, so a stale patch on the package raises; one top-level binding per name and no import-time copy of a package binding; every import-time read defined above the submodule's import, and the _MARKER_UNCHANGED default the owner's object; a monkeypatch of a re-exported name lands where its readers read (both-sided names refused, an unresolvable patch fails closed), and no test reaches a package function's __globals__ (provenance tracked per scope: an attribute chain, a from-import or a simple assignment; parameters shadow); one logger identity; owner-exact qualified reads and no name unresolved in its own scope; no submodule named like a package attribute; one rate_limiter binding; no method defined on two classes of the composed service; deps imported first and holding no package reference; every external import before the first submodule import, and a failed first import, injected at that last external statement and proven to fire there, leaves no stale submodule. The other shape, a fresh install: each consumer imported first in its own interpreter on an empty database raises a bounded alert (created; only main binds a WebSocket manager, and then exactly one thin operator_queue_sync trigger is sent). No Docker, no network."
     },
     {
-      "file": "unit/test_ent1024_admin_acts_as_agent.py",
-      "feature": "abilityai/trinity-enterprise#1024",
-      "added": "2026-10-30",
+      "file": "../src/frontend/tests/unit/portalCredentialField.mount.spec.js",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
       "categories": [
-        "backend",
-        "security",
-        "unit"
+        "frontend",
+        "unit",
+        "security"
       ],
-      "description": "An admin's user MCP key acts on behalf of an agent through X-Trinity-Act-As-Agent: admit_act_as admits it only for a user-scoped key whose user is an admin and writes one acted_as_agent audit row naming the acting user and the agent; every other principal (non-admin user key, creator, agent, system, connector, portal_delegate, ops, a browser session) is a named 403 act_as_not_permitted and writes nothing; blank/oversize names are 400; a failed audit write never fails the request; no header changes nothing. get_self_acting_agent admits the admitted agent on its own path only and tells an un-admitted admin to pass agent_name; agent keys still act only as themselves; assert_own_agent holds the admitted agent to its path. An on-behalf raise records acted_by: user:<id>; an agent's own ask does not. Mutations (no admin check, ask gate or own-agent gate ignoring act-as, any scope admitted, no acted_by) each turn it red."
+      "description": "PortalAsks mounted with a credential ask: masked secret field (show/hide), one POST to /asks/{id}/credential with the value in the body only, field empty on submit, nothing in storage/logs/URL, every refusal in words, no typed-answer box or Discuss."
     },
     {
-      "file": "../src/mcp-server/src/act_as_agent.test.ts",
-      "feature": "abilityai/trinity-enterprise#1024",
-      "added": "2026-10-30",
+      "file": "../src/frontend/tests/unit/credentialAskSurfaces.mount.spec.js",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
       "categories": [
-        "mcp",
-        "security",
+        "frontend",
+        "unit",
+        "security"
+      ],
+      "description": "queueResponseKind names the credential kind; history row reads 'NAME provided'; QueueCard and QueueItemDetail mounted show no respond box, only where the ask is answered."
+    },
+    {
+      "file": "../src/frontend/tests/unit/portalSecretInMessage.mount.spec.js",
+      "feature": "trinity-enterprise#1066",
+      "added": "2026-11-02",
+      "categories": [
+        "frontend",
+        "unit",
+        "security"
+      ],
+      "description": "PortalConversation mounted: a 422 secret_in_message (streaming and sync fallback) drops the bubble, offers no Retry, never restores the text to the composer or a draft, and shows the server's pointer."
+    },
+    {
+      "file": "unit/test_4165_github_ref_tag.py",
+      "feature": "trinity#4165",
+      "added": "2026-11-02",
+      "categories": [
+        "unit",
+        "backend",
+        "agents"
+      ],
+      "description": "trinity#4165: github:owner/repo@ref takes a dotted tag whole (v1.2.0, releases/v1.2.0) and pins the clone; branch names parse unchanged; '..', a leading-dot component, a trailing '.' or '.lock', a leading '-', whitespace and shell metacharacters are a named 400 instead of a silent fall-back to main."
+    },
+    {
+      "file": "unit/test_4165_ref_existence_checks.py",
+      "feature": "trinity#4165",
+      "added": "2026-11-02",
+      "categories": [
+        "unit",
+        "backend",
+        "agents"
+      ],
+      "description": "trinity#4165: a tag accepted by the parser survives the three ref-existence checks — provisioning.check_remote_branch_exists, ref_probes (anonymous and tokened), and the REST branch check with its tag fallback — driven through _validate_github_access on all three paths against a fake ls-remote that filters like git; the ref is always a value after the URL; a branch wins over a same-named tag; an annotated tag peels to its commit."
+    },
+    {
+      "file": "unit/test_4165_pull_cycle_pinned_tag.py",
+      "feature": "trinity#4165",
+      "added": "2026-11-02",
+      "categories": [
+        "unit",
+        "agent-server",
+        "git"
+      ],
+      "description": "trinity#4165: an agent cloned -b <tag> (detached HEAD) runs the real pull cycle as a named skip every cycle, never a failure streak, and stays on the tag while origin moves on; a detached HEAD from a rebase stopped part-way is still a failure."
+    },
+    {
+      "file": "unit/test_4165_ref_probes_real_git.py",
+      "feature": "trinity#4165",
+      "added": "2026-11-02",
+      "categories": [
+        "unit",
+        "backend",
+        "agents"
+      ],
+      "description": "trinity#4165: ref_probes against a REAL bare git remote over file:// (no fake ls-remote) holding a lightweight tag, an annotated tag and a branch sharing a name with an annotated tag: an annotated tag resolves to its commit, never the tag object (the probe asks for refs/tags/<r>^{} by name); a branch wins over the same-named tag; anonymous and tokened probes agree."
+    },
+    {
+      "file": "unit/test_ent1055_purge_agent_now.py",
+      "feature": "trinity-enterprise#1055",
+      "added": "2026-11-02",
+      "categories": [
+        "unit",
+        "backend",
+        "agents"
+      ],
+      "description": "trinity-enterprise#1055: purge_agent_now hard-purges an agent at once on the real schema — audit row written while the agent exists and kept; ownership, sharing, permissions (both directions) and MCP key rows gone; container, Redis state and volumes (both identities of a renamed agent, never a base another agent claims) removed; a Docker fault still purges rows; no audit row → 503 and nothing destroyed; non-admin and agent-key callers, system and ephemeral agents refused; no row → no-op."
+    },
+    {
+      "file": "unit/test_4123_auth_prefix_wins.py",
+      "feature": "#4123",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "agent",
+        "subscriptions",
         "unit"
       ],
-      "description": "resolveActingAgent's scope matrix with agent_name (agent/system act as themselves and may not name another; a user key acts for the named agent or is told to pass agent_name; connector/portal_delegate/ops/anonymous refused naming the key); TrinityClient.asAgent adds X-Trinity-Act-As-Agent on a clone only and a per-call header cannot override it; ask_operator, report, record_metrics, set_canvas and the project tools (create_project, create_project_task) send the header for a user key with agent_name, never put agent_name in a body, refuse a user key without it and a connector key with it, and leave an agent key's call unchanged."
+      "description": "#4123: a genuine auth failure whose detail also carries the 'prompt is too long' sentence is still auth. The agent's own 'Authentication failure:' prefix outranks the prompt-length marker in is_prompt_too_long, in both failure_classifier copies. Two details: the real _finalize_headless_result 503 for one stderr line holding both an auth pattern and the sentence (driven through the stderr auth-abort branch, as read_stderr does), and the issue's probe string. classify_switch_failure returns auth for both body shapes; execute_task walks and codes AUTH; /chat switches and codes auth; the pull refusal walk, terminal switch and recode keep auth; the #1083 callback keeps auth. A bare prompt-length rejection is still not auth (#3849 unchanged), and the prefix list is pinned to the agent's source."
+    },
+    {
+      "file": "unit/test_ent1054_terms_gate.py",
+      "feature": "trinity-enterprise#1054",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "auth",
+        "workspace",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1054: the terms-acceptance gate seam (services/terms_gate.py) consulted once in resolve_platform_user_unfloored. Real routed requests through the real resolver: a Workspace-only person is refused 403 terms_required on a @workspace_route route, the portal door, the rooms door and their own user-scoped key while a provider says so; operator+ never consulted; a raising or empty provider fails closed for a user; @terms_route exempts a route (logout and /api/users/me pinned); an agent key is untouched; the suspension check stays first. No Docker."
+    },
+    {
+      "file": "unit/test_ent1054_email_html_shell.py",
+      "feature": "trinity-enterprise#1054",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "email",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1054 A2: EmailService.send_html renders on the one HTML shell with a plain-text twin, escapes every string, omits blank paragraphs and an absent call to action; the verification mail is byte-identical to its pre-refactor output (literal snapshot). No Docker."
     }
   ]
 }

@@ -429,6 +429,7 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   get_my_ask: { kind: "in-tool", how: ACT_AS + " — self-acting: the agent comes from the key (resolveActingAgent); the backend re-checks identity (trinity-enterprise#611)" },
   ask_operator: { kind: "in-tool", how: ACT_AS + " — self-acting: the agent comes from the key (resolveActingAgent), `to` is a role and never an agent; the backend re-checks identity (trinity-enterprise#611)" },
   withdraw_ask: { kind: "in-tool", how: ACT_AS + " — self-acting: the agent comes from the key (resolveActingAgent), request_id names one of its own asks; the backend re-checks identity and ownership (trinity-enterprise#901)" },
+  ask_for_credential: { kind: "none", why: "self-acting: the agent comes from the key (resolveActingAgent), the ask goes to its own primary person; the backend re-checks identity (trinity-enterprise#1066)" },
   // --- git.ts ---
   get_git_status: { kind: "in-tool", how: GIT_GATE },
   git_sync: { kind: "in-tool", how: GIT_GATE },
