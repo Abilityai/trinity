@@ -36,6 +36,7 @@ __pycache__/
 .claude/policy-limits.json
 .claude/backups/
 .claude/.last-cleanup
+/uploads/
 *.log
 *.tmp
 .DS_Store

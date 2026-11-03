@@ -777,7 +777,7 @@ class ChannelMessageRouter:
         MEM-001 memory injection, restricted tool set) and run the task.
 
         Returns the execution result on success, or ``None`` after surfacing the
-        error to the user and cleaning up uploads on failure/exception — the
+        error to the user and retaining uploads on unconfirmed failure — the
         caller treats ``None`` as "abort, do not finalize".
         """
         logger.debug(f"[ROUTER:{channel}] Step 9 - executing via TaskExecutionService")
@@ -906,7 +906,7 @@ class ChannelMessageRouter:
                     ChannelResponse(text=response_text, metadata={"bot_token": bot_token, "agent_name": agent_name}),
                     thread_id=message.thread_id,
                 )
-                await self._cleanup_uploads(container, upload_dir)
+                self._retain_uploads(upload_dir, getattr(result, "execution_id", None))
                 return None
 
             response_text = result.response or ""
@@ -929,6 +929,10 @@ class ChannelMessageRouter:
             await self._cleanup_uploads(container, upload_dir)
             return None
 
+        except asyncio.CancelledError:
+            self._retain_uploads(upload_dir)
+            raise
+
         except Exception as e:
             logger.error(f"[ROUTER:{channel}] Step 9 - execution error: {e}", exc_info=True)
             await self._resolve_indicator(adapter, message, success=False)
@@ -940,7 +944,7 @@ class ChannelMessageRouter:
                 ),
                 thread_id=message.thread_id,
             )
-            await self._cleanup_uploads(container, upload_dir)
+            self._retain_uploads(upload_dir)
             return None
 
     async def _finalize_response(
@@ -1383,8 +1387,17 @@ class ChannelMessageRouter:
         return cleaned_text, files
 
     @staticmethod
+    def _retain_uploads(upload_dir: Optional[str], execution_id: Optional[str] = None) -> None:
+        if upload_dir:
+            logger.warning(
+                "[ROUTER] Retaining upload dispatch %s for execution %s: completion "
+                "is unconfirmed. Remove manually only after confirming the execution has stopped.",
+                upload_dir.rsplit("/", 1)[-1], execution_id or "unknown",
+            )
+
+    @staticmethod
     async def _cleanup_uploads(container, upload_dir: Optional[str]) -> None:
-        """Remove per-session upload directory from agent container."""
+        """Remove only this completed or undispatched upload directory."""
         if not upload_dir:
             return
         try:

@@ -28,40 +28,19 @@ if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
 
-# ---------------------------------------------------------------------------
-# Stub heavyweight backend deps so upload_service can be imported without
-# a running database or Docker daemon.
-# ---------------------------------------------------------------------------
-
-def _install_stubs():
-    """Install sys.modules stubs once per process."""
-    if "services.upload_service" in sys.modules:
-        return  # already loaded (or already stubbed)
-
-    # Stub platform_audit_service
-    _aud = types.ModuleType("services.platform_audit_service")
-
-    class _AuditEventType:
-        EXECUTION = "execution"
-        AUTHENTICATION = "authentication"
-
-    _mock_svc = MagicMock()
-    _mock_svc.log = AsyncMock()
-    _aud.platform_audit_service = _mock_svc
-    _aud.AuditEventType = _AuditEventType
-    sys.modules.setdefault("services.platform_audit_service", _aud)
-
-    # Stub docker_utils
-    _du = types.ModuleType("services.docker_utils")
-    _du.container_put_archive = AsyncMock(return_value=True)
-    _du.container_exec_run = AsyncMock(return_value=(0, b""))
-    sys.modules.setdefault("services.docker_utils", _du)
-
-
-_install_stubs()
-
-# Now import the module under test
 import services.upload_service as _svc  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def isolated_upload_io(monkeypatch):
+    """Patch this test's I/O, never leave fake backend modules in sys.modules.
+
+    Global stubs hid volume_get/image_get from later template compatibility
+    tests when this upload module was collected first.
+    """
+    monkeypatch.setattr(_svc, "container_put_archive", AsyncMock(return_value=True))
+    monkeypatch.setattr(_svc, "container_exec_run", AsyncMock(return_value=(0, b"")))
+    monkeypatch.setattr(_svc.platform_audit_service, "log", AsyncMock())
 
 
 # ---------------------------------------------------------------------------
@@ -214,14 +193,15 @@ class TestProcessFileUploads:
                 [raw], "test-agent", MagicMock(), "session-1", "user@example.com"
             )
         assert not failed and images == []
-        assert directory == "/home/developer/uploads/session-1"
+        assert directory.startswith("/home/developer/uploads/")
+        assert len(Path(directory).name) == 32
         put.assert_awaited_once()
         assert put.await_args.args[1] == directory
         with tarfile.open(fileobj=io.BytesIO(put.await_args.args[2])) as archive:
             assert archive.getnames() == ["report.pdf"]
             assert archive.extractfile("report.pdf").read() == data
         assert "[File uploaded by user@example.com]" in descriptions[0]
-        assert "saved to /home/developer/uploads/session-1/report.pdf" in descriptions[0]
+        assert f"saved to {directory}/report.pdf" in descriptions[0]
         assert audit.await_args.kwargs["details"]["mime_type"] == "application/pdf"
 
     @pytest.mark.asyncio
@@ -332,7 +312,7 @@ class TestProcessFileUploads:
         )
         assert len(imgs) == 1
         assert imgs[0]["media_type"].startswith("image/")
-        assert udir is None  # no container writes for images
+        assert udir.startswith("/home/developer/uploads/")
         assert not failed
 
     @pytest.mark.asyncio
@@ -540,3 +520,66 @@ class TestPdfUploadPolicy:
             compose = yaml.safe_load((root / filename).read_text())
             assert "ALLOW_PDF_UPLOADS=${ALLOW_PDF_UPLOADS:-false}" in compose["services"]["backend"]["environment"]
         assert "ALLOW_PDF_UPLOADS=false" in (root / ".env.example").read_text()
+
+@pytest.mark.asyncio
+async def test_3870_image_original_and_native_vision_share_dispatch_with_attribution(monkeypatch):
+    monkeypatch.setattr(_svc, "_MAGIC_AVAILABLE", False)
+    archives = []
+    async def store(container, directory, data):
+        with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+            member = archive.getmembers()[0]
+            archives.append((directory, member.name, archive.extractfile(member).read()))
+        return True
+    monkeypatch.setattr(_svc, "container_put_archive", store)
+    monkeypatch.setattr(_svc, "container_exec_run", AsyncMock(return_value=(0, b"")))
+    audit = AsyncMock()
+    monkeypatch.setattr(_svc.platform_audit_service, "log", audit)
+    raw = [{"name": "original.png", "mimetype": "image/png", "data": b"original", "id": "1"}]
+    one = await _svc.process_file_uploads(raw, "agent", MagicMock(), "same-session", "anonymous", source="public")
+    two = await _svc.process_file_uploads(raw, "agent", MagicMock(), "same-session", "anonymous", source="public")
+    assert len(archives) == 2
+    assert archives[0][2] == b"original"
+    assert one[1] != two[1], "same-session dispatches must not overwrite each other"
+    assert one[1] in one[0][0]
+    assert one[3] == [{"media_type": "image/png", "data": _b64(b"original")}]
+    assert not one[2]
+    details = audit.call_args.kwargs["details"]
+    assert details["uploader"] == "anonymous"
+    assert details["dest_path"].startswith(two[1])
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["mkdir", "archive"])
+async def test_3870_original_storage_failure_keeps_vision_and_reports_unavailable(monkeypatch, failure):
+    monkeypatch.setattr(_svc, "_MAGIC_AVAILABLE", False)
+    monkeypatch.setattr(_svc, "container_exec_run", AsyncMock(return_value=(1 if failure == "mkdir" else 0, b"")))
+    monkeypatch.setattr(_svc, "container_put_archive", AsyncMock(return_value=False))
+    audit = AsyncMock()
+    monkeypatch.setattr(_svc.platform_audit_service, "log", audit)
+    desc, directory, failed, images = await _svc.process_file_uploads(
+        [{"name":"photo.png", "mimetype":"image/png", "data":b"pixels"}],
+        "agent", MagicMock(), "session", "user@example.com")
+    assert images == [{"media_type":"image/png", "data":_b64(b"pixels")}]
+    assert not failed, "workspace failure must not disable existing native vision"
+    assert "original unavailable" in " ".join(desc).lower()
+    assert "[File uploaded by user@example.com]" in " ".join(desc)
+    assert audit.call_args.kwargs["details"]["original_saved"] is False
+
+def test_3870_existing_workspace_excludes_new_originals_from_actual_git_add(tmp_path):
+    import subprocess
+    root = tmp_path / "developer"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / ".gitignore").write_text("# existing workspace\n")
+    directory = root / "uploads" / "dispatch"
+    result = subprocess.run([sys.executable, "-c", _svc._PREPARE_UPLOAD_SCRIPT, str(root), str(directory)], capture_output=True)
+    assert result.returncode == 0, result.stderr
+    original = directory / "photo.png"
+    original.write_bytes(b"original")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    tracked = subprocess.check_output(["git", "-C", str(root), "ls-files"]).decode()
+    assert "photo.png" not in tracked
+    assert original.read_bytes() == b"original"
+    # Existing user-region negations deliberately retain their normal priority.
+    (root / ".gitignore").write_text("!uploads/\n!uploads/**\n")
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    assert "uploads/dispatch/photo.png" in subprocess.check_output(["git", "-C", str(root), "ls-files"]).decode()

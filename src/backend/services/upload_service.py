@@ -13,6 +13,7 @@ import os
 import re
 import tarfile
 import unicodedata
+import uuid
 from typing import List, Optional, Tuple
 
 from config import ALLOW_PDF_UPLOADS
@@ -51,6 +52,34 @@ UNSUPPORTED_MIMES = {
 }
 
 UPLOAD_BASE = "/home/developer/uploads"
+
+# A current workspace may heartbeat-sync before its next backend Push installs
+# the canonical gitignore defaults. Protect new originals BEFORE writing them.
+# info/exclude is local, handles linked worktrees via git's own path resolution,
+# and remains lower priority than deliberate user .gitignore overrides.
+_PREPARE_UPLOAD_SCRIPT = """
+import pathlib, subprocess, sys
+home, directory = map(pathlib.Path, sys.argv[1:])
+repo = subprocess.run(["git", "-C", str(home), "rev-parse", "--show-toplevel"],
+                      capture_output=True, text=True)
+if repo.returncode == 0:
+    root = pathlib.Path(repo.stdout.strip())
+    relative = directory.parent.relative_to(root)
+    exclude = subprocess.run(["git", "-C", str(home), "rev-parse", "--git-path", "info/exclude"],
+                             capture_output=True, text=True, check=True).stdout.strip()
+    target = pathlib.Path(exclude)
+    if not target.is_absolute():
+        target = home / target
+    rule = "/" + relative.as_posix() + "/"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("a+") as stream:
+        stream.seek(0)
+        if rule not in stream.read().splitlines():
+            stream.write("\\n" + rule + "\\n")
+elif (home / ".git").exists():
+    raise RuntimeError("could not inspect existing workspace Git metadata")
+directory.mkdir(parents=True, exist_ok=False)
+"""
 
 # Filename sanitization constants (same rules as the original message_router)
 _FILENAME_MAX_LENGTH = 200
@@ -144,12 +173,11 @@ async def process_file_uploads(
 
     Returns (descriptions, upload_dir, all_writes_failed, image_data):
       - descriptions: list of context strings injected into the prompt
-      - upload_dir: container path to clean up after execution, or None
-      - all_writes_failed: True iff at least one write was attempted but all failed
+      - upload_dir: this dispatch's container directory, or None; callers own retention
+      - all_writes_failed: True iff delivery was attempted but neither files nor vision succeeded
       - image_data: list of {"media_type": str, "data": base64_str} for vision blocks
     """
-    safe_session_id = re.sub(r"[^a-zA-Z0-9_-]", "_", session_id)
-    upload_dir = f"{UPLOAD_BASE}/{safe_session_id}"
+    upload_dir = f"{UPLOAD_BASE}/{uuid.uuid4().hex}"
     descriptions: List[str] = []
     image_data: List[dict] = []
     dir_created = False
@@ -272,102 +300,70 @@ async def process_file_uploads(
                 )
                 continue
 
-            write_attempted += 1
             total_image_bytes += actual_size
-            b64 = base64.b64encode(data).decode()
-            image_data.append({"media_type": actual_mime, "data": b64})
-            descriptions.append(
-                f"[File uploaded by {uploader}]: {safe_name} ({size_str}) — image provided for visual analysis"
-            )
-            write_succeeded += 1
-            logger.info(f"[UPLOAD] Queued {safe_name} ({size_str}) as vision block for {agent_name}")
+            image_data.append({"media_type": actual_mime, "data": base64.b64encode(data).decode()})
 
-            await platform_audit_service.log(
-                event_type=AuditEventType.EXECUTION,
-                event_action="file_upload",
-                source=source,
-                target_type="agent",
-                target_id=agent_name,
-                details={
-                    "filename": safe_name,
-                    "size_bytes": actual_size,
-                    "mime_type": actual_mime,
-                    "storage": "stream_json_vision",
-                    "sender_id": sender_id,
-                    "channel_id": channel_id,
-                    "uploader": uploader,
-                },
-            )
-
-        else:
-            # Non-image: write to per-session upload directory in the container
+        # Originals use the same limits, dispatch directory and retention as
+        # existing non-image uploads. Native vision is independent of disk I/O.
+        write_attempted += 1
+        original_saved = False
+        failure_reason = "could not save to agent workspace"
+        try:
             if not dir_created:
-                write_attempted += 1
-                try:
-                    await container_exec_run(
-                        container, f"mkdir -p {upload_dir}", user="developer"
-                    )
-                    dir_created = True
-                except Exception as e:
-                    logger.error(
-                        f"[UPLOAD] Failed to create {upload_dir} in {agent_name}: {e}"
-                    )
-                    descriptions.append(
-                        f"[File upload failed]: {safe_name} — could not create workspace upload directory"
-                    )
-                    continue
-            else:
-                write_attempted += 1
-
-            try:
-                tar_buf = io.BytesIO()
-                with tarfile.open(fileobj=tar_buf, mode="w") as tar:
-                    info = tarfile.TarInfo(name=safe_name)
-                    info.size = actual_size
-                    info.uid = 1000  # developer user
-                    info.gid = 1000
-                    info.mode = 0o644
-                    tar.addfile(info, io.BytesIO(data))
-                tar_buf.seek(0)
-
-                success = await container_put_archive(container, upload_dir, tar_buf.read())
-                if not success:
-                    logger.error(f"[UPLOAD] Failed to copy {safe_name} into {agent_name}")
-                    descriptions.append(
-                        f"[File upload failed]: {safe_name} — could not save to agent workspace"
-                    )
-                    continue
-
-                dest_path = f"{upload_dir}/{safe_name}"
-                descriptions.append(
-                    f"[File uploaded by {uploader}]: {safe_name} ({size_str}) saved to {dest_path}"
+                exit_code, _ = await container_exec_run(
+                    container, ["python3", "-c", _PREPARE_UPLOAD_SCRIPT,
+                                "/home/developer", upload_dir], user="developer"
                 )
-                write_succeeded += 1
-                logger.info(f"[UPLOAD] Copied {safe_name} ({size_str}) to {agent_name}:{dest_path}")
+                if exit_code != 0:
+                    raise OSError("could not create workspace upload directory")
+                dir_created = True
+            tar_buf = io.BytesIO()
+            with tarfile.open(fileobj=tar_buf, mode="w") as tar:
+                info = tarfile.TarInfo(name=safe_name)
+                info.size = actual_size
+                info.uid = 1000
+                info.gid = 1000
+                info.mode = 0o644
+                tar.addfile(info, io.BytesIO(data))
+            original_saved = bool(await container_put_archive(container, upload_dir, tar_buf.getvalue()))
+        except Exception as e:
+            logger.warning("[UPLOAD] Original write failed for %s in %s: %s", agent_name, upload_dir, e)
+            failure_reason = "workspace write error"
 
-                await platform_audit_service.log(
-                    event_type=AuditEventType.EXECUTION,
-                    event_action="file_upload",
-                    source=source,
-                    target_type="agent",
-                    target_id=agent_name,
-                    details={
-                        "filename": safe_name,
-                        "size_bytes": actual_size,
-                        "mime_type": actual_mime,
-                        "storage": "container_file",
-                        "dest_path": dest_path,
-                        "sender_id": sender_id,
-                        "channel_id": channel_id,
-                        "uploader": uploader,
-                    },
-                )
-
-            except Exception as e:
-                logger.error(f"[UPLOAD] Error copying {safe_name} to {agent_name}: {e}")
-                descriptions.append(
-                    f"[File upload failed]: {safe_name} — workspace write error"
-                )
+        dest_path = f"{upload_dir}/{safe_name}" if original_saved else None
+        if original_saved:
+            description = f"[File uploaded by {uploader}]: {safe_name} ({size_str}) saved to {dest_path}"
+        else:
+            description = f"[File upload failed]: {safe_name} — {failure_reason}"
+        if is_image:
+            if not original_saved:
+                description = f"[File uploaded by {uploader}]: {safe_name} ({size_str})"
+            description += " — image provided for visual analysis"
+            if not original_saved:
+                description += "; original unavailable in agent workspace"
+        descriptions.append(description)
+        # Existing callers reject only when NO usable delivery succeeded.
+        # A failed original must not discard Claude/Gemini/Codex native vision.
+        if original_saved or is_image:
+            write_succeeded += 1
+        await platform_audit_service.log(
+            event_type=AuditEventType.EXECUTION,
+            event_action="file_upload",
+            source=source,
+            target_type="agent",
+            target_id=agent_name,
+            details={
+                "filename": safe_name,
+                "size_bytes": actual_size,
+                "mime_type": actual_mime,
+                "storage": "stream_json_vision" if is_image else "container_file",
+                "original_saved": original_saved,
+                "dest_path": dest_path,
+                "sender_id": sender_id,
+                "channel_id": channel_id,
+                "uploader": uploader,
+            },
+        )
 
     if len(raw_files) > max_files:
         descriptions.append(

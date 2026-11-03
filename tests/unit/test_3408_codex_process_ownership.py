@@ -205,12 +205,19 @@ class _Harness:
         if not self.queued:
             await _real_wait_for(self.reader_started.wait(), timeout=5)
 
-    def start(self):
+    def start(self, with_image=False):
         rt = CodexRuntime()
+        from contextlib import ExitStack
+        self.image_scope = ExitStack()
+        self.image_paths = self.image_scope.enter_context(codex_runtime._image_files(
+            [{"media_type": "image/png", "data": "YQ=="}] if with_image else None
+        ))
         return asyncio.create_task(rt._execute_codex(
             prompt="hello", model=None, system_prompt=None, resume_thread_id=None,
             timeout_seconds=TIMEOUT_SECONDS, allowed_tools=None,
             execution_id=EXECUTION_ID, concurrent_reader=self.pool_kind == "task",
+            image_paths=self.image_paths,
+            image_scope=self.image_scope if self.image_paths else None,
         ))
 
     def finish_turn(self):
@@ -326,8 +333,9 @@ _ABANDONMENTS = [
     _ABANDONMENTS,
     ids=[f"{k}{'_queued_reader' if q else ''}-{e}" for k, q, e in _ABANDONMENTS],
 )
+@pytest.mark.parametrize("with_image", [False, True])
 async def test_abandoned_codex_waiter_releases_after_child_exits(
-    pool_kind, queued, waiter_end, registry, refused_signals, monkeypatch, tmp_path,
+    pool_kind, queued, waiter_end, registry, refused_signals, monkeypatch, tmp_path, with_image,
 ):
     harness = _Harness(monkeypatch, tmp_path, pool_kind=pool_kind, queued=queued)
     harness.registry = registry
@@ -335,9 +343,12 @@ async def test_abandoned_codex_waiter_releases_after_child_exits(
         _hold_outer_timeout_until_abandonable(monkeypatch, harness)
     task = None
     try:
-        task = harness.start()
+        task = harness.start(with_image=with_image)
         await _abandon(harness, task, waiter_end)
         _assert_retained(harness)
+        if with_image:
+            from pathlib import Path
+            assert Path(harness.image_paths[0]).read_bytes() == b"a"
         subscriber = registry.subscribe_logs(EXECUTION_ID)
         assert subscriber is not None
         harness.unblock_pool.set()
@@ -346,6 +357,8 @@ async def test_abandoned_codex_waiter_releases_after_child_exits(
         assert harness.marker.exists(), "control: the child wrote its -o file at turn end"
         assert {"type": "thread.started", "thread_id": "t-3408"} in entries
         await _assert_released(harness, entries)
+        if with_image:
+            assert not Path(harness.image_paths[0]).exists()
     finally:
         if task is not None and not task.done():
             task.cancel()

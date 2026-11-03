@@ -223,6 +223,8 @@ _GITIGNORE_PATTERNS: Tuple[str, ...] = (
     ".claude/policy-limits.json",
     ".claude/backups/",
     ".claude/.last-cleanup",
+    # Uploaded originals are workspace data, not source; user overrides remain deliberate.
+    "/uploads/",
     # Temporary files
     "*.log",
     "*.tmp",

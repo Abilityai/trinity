@@ -139,7 +139,7 @@ def children(monkeypatch):
                     pipe.close()
 
 
-def _prepare(site, monkeypatch, tmp_path):
+def _prepare(site, monkeypatch, tmp_path, *, image_scope=None, image_paths=None):
     """Wire one real handoff site; return `prompt -> coroutine`."""
     if site == "claude_chat":
         monkeypatch.setattr(chat, "_load_guardrails", lambda: {"execution_timeout_sec": 60})
@@ -163,6 +163,7 @@ def _prepare(site, monkeypatch, tmp_path):
         return lambda prompt: runtime._execute_codex(
             prompt=prompt, model=None, system_prompt=None, resume_thread_id=None,
             timeout_seconds=60, allowed_tools=None, execution_id=EID,
+            image_scope=image_scope, image_paths=image_paths,
         )
     runtime = gemini_runtime.GeminiRuntime()
     monkeypatch.setattr(runtime, "is_available", lambda: True)
@@ -519,3 +520,47 @@ async def test_a_headless_drain_that_cannot_start_does_not_replace_the_handoff_e
     assert child.poll() is not None, "the kill ran before the drain"
     _assert_released(registry, child)
     assert signals["refused"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["stdin_kill", "stdin_executor", "reader_executor"])
+async def test_3870_failed_handoff_retains_images_until_watchdog_observes_exit(
+    failure, registry, signals, pools, children, monkeypatch, tmp_path,
+):
+    """No reader can reap these children; normal registry polling owns cleanup."""
+    from contextlib import ExitStack
+    from pathlib import Path
+    spawned, _ = children
+    scope = ExitStack()
+    paths = scope.enter_context(codex_runtime._image_files([
+        {"media_type": "image/png", "data": "YQ=="},
+    ]))
+    original = Path(paths[0])
+    def kill_refused(*args, **kwargs):
+        raise OSError("synthetic kill refusal")
+    monkeypatch.setattr(codex_runtime, "_terminate_process_group", kill_refused)
+    loop = asyncio.get_running_loop()
+    real_executor = loop.run_in_executor
+    def refused(executor, fn, *args):
+        if (failure == "stdin_executor" and fn.__name__ == "_abort_handoff") or (
+            failure == "reader_executor" and fn.__name__ == "read_owned_subprocess_output"
+        ):
+            raise RuntimeError("synthetic executor refusal")
+        return real_executor(executor, fn, *args)
+    monkeypatch.setattr(loop, "run_in_executor", refused)
+    call = _prepare("codex", monkeypatch, tmp_path, image_scope=scope, image_paths=paths)
+    try:
+        with pytest.raises((UnicodeEncodeError, OSError, RuntimeError, HTTPException)):
+            await asyncio.wait_for(call("ok" if failure == "reader_executor" else UNENCODABLE_PROMPT), 5)
+        scope.close()  # the failed caller unwinds its own context
+        assert original.read_bytes() == b"a"
+        [child] = spawned
+        assert child.poll() is None
+        registry.list_running()
+        assert original.exists()
+        child.kill()
+        child.wait(timeout=5)
+        registry.list_running()  # actual watchdog observation path
+        assert not original.parent.exists()
+    finally:
+        scope.close()

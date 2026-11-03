@@ -246,6 +246,7 @@ __pycache__/
 # Keep: .claude/commands/, .claude/skills/, .claude/agents/
 
 # Temporary files
+/uploads/
 *.log
 *.tmp
 .DS_Store

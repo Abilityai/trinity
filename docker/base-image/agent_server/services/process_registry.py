@@ -85,6 +85,10 @@ class ProcessRegistry:
 
     def __init__(self):
         self._processes: Dict[str, dict] = {}
+        # Resources belong to a concrete child, not an execution ID (a retry
+        # can reuse the ID). Keep ownership even if another registration or a
+        # terminate path removes the ID entry before resource observation.
+        self._exit_resources = {}
         self._lock = Lock()
         # Log streaming: execution_id -> list of subscriber queues
         self._log_subscribers: Dict[str, List[asyncio.Queue]] = {}
@@ -184,7 +188,8 @@ class ProcessRegistry:
                 )
             return list(self._pending.keys())
 
-    def register(self, execution_id: str, process: subprocess.Popen, metadata: dict = None):
+    def register(self, execution_id: str, process: subprocess.Popen, metadata: dict = None,
+                 *, on_exit=None):
         """
         Register a running process.
 
@@ -200,6 +205,8 @@ class ProcessRegistry:
             execution_id: Unique identifier for this execution
             process: The subprocess.Popen handle
             metadata: Optional metadata (type, message preview, etc.)
+            on_exit: Optional resource cleanup, run once outside the lock only
+                after child exit is observed. Never run on a refused live release.
         """
         kill_requested = False
         with self._lock:
@@ -209,6 +216,8 @@ class ProcessRegistry:
                 "started_at": datetime.utcnow(),
                 "metadata": metadata or {}
             }
+            if on_exit is not None:
+                self._exit_resources[process] = (execution_id, on_exit)
             # Initialize log streaming structures
             self._log_subscribers[execution_id] = []
             self._log_buffers[execution_id] = []
@@ -260,6 +269,7 @@ class ProcessRegistry:
         runtime whose waiter can be abandoned therefore hands a second call
         here to its reader worker, made once the exit is observed.
         """
+        self._cleanup_exited_resources()
         with self._lock:
             entry = self._processes.get(execution_id)
             if entry is not None and entry["process"].poll() is None:
@@ -294,6 +304,24 @@ class ProcessRegistry:
             # `success` to the schedule_executions row.
             self._recently_completed[execution_id] = time.time()
 
+    @staticmethod
+    def _run_exit_cleanup(execution_id, cleanup):
+        if cleanup is not None:
+            try:
+                cleanup()
+            except Exception:
+                logger.exception("[ProcessRegistry] Resource cleanup failed for %s", execution_id)
+
+    def _cleanup_exited_resources(self):
+        # The running-executions endpoint is polled by the backend watchdog.
+        # It also observes exits when a failed reader handoff left no worker
+        # to call unregister. Preserve the registry entry/stream semantics.
+        with self._lock:
+            finished = [process for process in self._exit_resources if process.poll() is not None]
+            cleanups = [self._exit_resources.pop(process) for process in finished]
+        for execution_id, cleanup in cleanups:
+            self._run_exit_cleanup(execution_id, cleanup)
+
     def terminate(self, execution_id: str, graceful_timeout: int = 5) -> dict:
         """
         Terminate a running process.
@@ -313,6 +341,7 @@ class ProcessRegistry:
             - {"success": False, "reason": "termination_unconfirmed"} if exit was not observed
             - {"success": False, "reason": "error", "error": str}
         """
+        self._cleanup_exited_resources()
         with self._lock:
             entry = self._processes.get(execution_id)
             if not entry:
@@ -415,6 +444,7 @@ class ProcessRegistry:
                 if execution_id in self._processes:
                     del self._processes[execution_id]
 
+            self._cleanup_exited_resources()
             return {"success": True, "returncode": returncode}
 
         except Exception as e:
@@ -452,6 +482,7 @@ class ProcessRegistry:
         ``execution_id`` / ``started_at`` / ``metadata`` are
         unaffected.
         """
+        self._cleanup_exited_resources()
         with self._lock:
             result = []
             for exec_id, entry in self._processes.items():
@@ -635,7 +666,8 @@ class ProcessRegistry:
                 del self._processes[exec_id]
             if finished:
                 logger.info(f"[ProcessRegistry] Cleaned up {len(finished)} finished processes")
-            return len(finished)
+        self._cleanup_exited_resources()
+        return len(finished)
 
     # ========================================================================
     # Log Streaming Methods
