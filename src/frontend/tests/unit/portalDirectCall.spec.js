@@ -2,19 +2,19 @@
 /**
  * trinity-enterprise#1046: Workspace Direct calls in the browser.
  * The rules, the endpointer, the fold, the composable's protocol, the two call buttons,
- * and the mounted orb.
+ * and the mounted call bars.
  */
 import { describe, expect, it, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import {
-  answersAsk, callButtons, cardOutcome, classifyAnswer, directOrbState, directStatusLine, isDirectCallId,
+  answersAsk, callButtons, cardOutcome, classifyAnswer, directBarsState, directStatusLine, isDirectCallId,
   isEcho, looksUnfinished, optionForAnswer,
 } from '../../src/components/portal/portalDirectCall'
 import { groupVoiceBlocks, voiceTaskCaption } from '../../src/components/portal/portalVoiceMode'
 import { createEndpointer, samplesToPcm16Base64, VAD } from '../../src/utils/voiceEndpointing'
 import { useDirectVoiceSession } from '../../src/composables/useDirectVoiceSession'
-import VoiceOrb from '../../src/components/chat/VoiceOrb.vue'
+import CallBars from '../../src/components/portal/CallBars.vue'
 import DirectVoiceSettings from '../../src/components/settings/DirectVoiceSettings.vue'
 import { useSettingsStore } from '../../src/stores/settings'
 
@@ -217,72 +217,94 @@ describe('the call protocol', () => {
   })
 })
 
-describe('the small orb', () => {
-  it('maps every Direct status onto the Live orb\'s vocabulary', () => {
-    expect(directOrbState('listening')).toBe('listening')
-    expect(directOrbState('speaking')).toBe('speaking')
-    expect(['transcribing', 'thinking', 'awaiting_approval'].map(directOrbState)).toEqual(['tool_calling', 'tool_calling', 'tool_calling'])
-    expect(directOrbState('connecting')).toBe('connecting')
-    expect(directOrbState('ended')).toBe('idle')
+describe('the call bars', () => {
+  it('maps every Direct status onto a bars state', () => {
+    expect(directBarsState('listening')).toBe('listening')
+    expect(directBarsState('speaking')).toBe('speaking')
+    expect(['transcribing', 'thinking', 'awaiting_approval'].map(directBarsState)).toEqual(['working', 'working', 'working'])
+    expect(directBarsState('connecting')).toBe('connecting')
+    expect(directBarsState('ended')).toBe('idle')
   })
 
-  // jsdom has no 2d context: a recording one stands in, so the test sees what the orb
-  // asked the canvas to do.
-  function fakeContext() {
-    const calls = []
-    return new Proxy({ calls }, {
-      get(t, k) {
-        if (k === 'calls') return calls
-        if (k === 'createRadialGradient') return () => ({ addColorStop() {} })
-        return (...args) => { calls.push([k, args]) }
-      },
-      set() { return true },
-    })
-  }
-  function mountOrb(props = {}) {
-    const ctx = fakeContext()
-    const getContext = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockImplementation(() => ctx)
+  function mountBars(props = {}) {
     const frames = []
     const raf = vi.fn((cb) => { frames.push(cb); return frames.length })
     const caf = vi.fn()
     vi.stubGlobal('requestAnimationFrame', raf)
     vi.stubGlobal('cancelAnimationFrame', caf)
-    const w = mount(VoiceOrb, { props: { state: 'listening', size: 48, ...props }, attachTo: document.body })
-    return { w, ctx, raf, caf, frames, getContext }
+    const w = mount(CallBars, { props: { state: 'listening', size: 48, ...props }, attachTo: document.body })
+    // Runs the queued frames n times, as the browser would.
+    const tick = (n = 1) => { for (let i = 0; i < n; i++) frames.shift()?.(performance.now() + i * 16) }
+    return { w, raf, caf, tick }
   }
+  const heights = (w) => w.findAll('[data-testid="call-bar"]').map((b) => parseFloat(b.element.style.height))
+  const done = (w) => { w.unmount(); vi.unstubAllGlobals(); vi.restoreAllMocks() }
 
-  it('draws the field into a disc the size it was given, and runs on the animation frame', () => {
-    const { w, ctx, raf, frames } = mountOrb()
-    const canvas = w.get('[data-testid="voice-orb"]').element
-    expect(canvas.style.width).toBe('48px')
-    expect(canvas.getAttribute('aria-hidden')).toBe('true')
-    const names = (c) => c.calls.map(([k]) => k)
-    expect(names(ctx)).toContain('clip')
-    expect(names(ctx)).toContain('drawImage')
-    expect(raf).toHaveBeenCalledTimes(1)
-    frames[0]()
-    expect(raf).toHaveBeenCalledTimes(2)
-    w.unmount()
-    vi.unstubAllGlobals()
-    vi.restoreAllMocks()
+  it('is four bars in a disc the size it was given, hidden from assistive tech', () => {
+    const { w } = mountBars()
+    const root = w.get('[data-testid="call-bars"]')
+    expect(root.element.style.width).toBe('48px')
+    expect(root.attributes('aria-hidden')).toBe('true')
+    expect(w.findAll('[data-testid="call-bar"]')).toHaveLength(4)
+    done(w)
   })
 
-  it('stops drawing when it leaves the page', () => {
-    const { w, caf } = mountOrb()
+  it('the bars rise with the sound while listening, and sit flat in silence', async () => {
+    const { w, tick } = mountBars({ amplitude: 0 })
+    tick(30)
+    const quiet = Math.max(...heights(w))
+    await w.setProps({ amplitude: 0.8 })
+    tick(30)
+    expect(Math.max(...heights(w))).toBeGreaterThan(quiet * 2)
+    done(w)
+  })
+
+  it('muted is flat dots whatever the sound', () => {
+    const { w, tick } = mountBars({ amplitude: 1, muted: true })
+    tick(30)
+    expect(heights(w).every((h) => h <= 4.5)).toBe(true)
+    expect(w.get('[data-testid="call-bars"]').attributes('data-state')).toBe('muted')
+    done(w)
+  })
+
+  it('while working the bars move with no sound at all', () => {
+    const { w, tick } = mountBars({ state: 'working', amplitude: 0 })
+    tick(10)
+    const a = heights(w)
+    tick(15)
+    expect(heights(w)).not.toEqual(a)
+    expect(Math.max(...heights(w))).toBeGreaterThan(4.5)
+    done(w)
+  })
+
+  it('each state is tinted with its own token', async () => {
+    const { w } = mountBars()
+    const cls = () => w.get('[data-testid="call-bars"]').classes().join(' ') + ' ' + w.get('[data-testid="call-bar"]').classes().join(' ')
+    expect(cls()).toContain('status-success')
+    await w.setProps({ state: 'working' })
+    expect(cls()).toContain('state-autonomous')
+    await w.setProps({ state: 'speaking' })
+    expect(cls()).toContain('status-info')
+    await w.setProps({ muted: true })
+    expect(cls()).not.toMatch(/status-|state-/)
+    done(w)
+  })
+
+  it('stops animating when it leaves the page', () => {
+    const { w, caf } = mountBars()
     w.unmount()
     expect(caf).toHaveBeenCalledTimes(1)
     vi.unstubAllGlobals()
-    vi.restoreAllMocks()
   })
 
-  it('draws one still frame under reduced motion', () => {
+  it('under reduced motion it holds one still frame per state and never animates', async () => {
     vi.stubGlobal('matchMedia', () => ({ matches: true }))
-    const { w, ctx, raf } = mountOrb()
-    expect(ctx.calls.some(([k]) => k === 'drawImage')).toBe(true)
+    const { w, raf } = mountBars({ state: 'speaking', amplitude: 0.9 })
+    expect(Math.max(...heights(w))).toBeGreaterThan(4.5)
+    await w.setProps({ muted: true })
+    expect(heights(w).every((h) => h <= 4.5)).toBe(true)
     expect(raf).not.toHaveBeenCalled()
-    w.unmount()
-    vi.unstubAllGlobals()
-    vi.restoreAllMocks()
+    done(w)
   })
 })
 

@@ -55,8 +55,6 @@ class FakeSocket {
 }
 vi.stubGlobal('WebSocket', FakeSocket)
 vi.stubGlobal('MediaRecorder', class {})
-// jsdom has no 2d context; the strip's orb draws nothing here and says nothing about it.
-HTMLCanvasElement.prototype.getContext = () => null
 Object.defineProperty(globalThis.navigator, 'mediaDevices', { value: { getUserMedia: vi.fn() }, configurable: true })
 
 const { default: PortalConversation } = await import('@/components/portal/PortalConversation.vue')
@@ -122,7 +120,7 @@ describe('a Direct call in the conversation', () => {
     await startCall()
     expect(store.startWorkspaceVoice).toHaveBeenCalledWith('scout', SID, null, 'direct')
     expect(wrapper.find('[data-testid="direct-call-stage"]').exists()).toBe(true)
-    expect(wrapper.find('[data-testid="voice-orb"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="call-bars"]').exists()).toBe(true)
     expect(composer().attributes('disabled')).toBeUndefined()
     expect(wrapper.get('[data-testid="portal-agent-picker"]').attributes('disabled')).toBeDefined()
   })

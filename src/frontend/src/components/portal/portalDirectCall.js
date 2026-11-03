@@ -89,17 +89,17 @@ export function callButtons({ isPlatform = false, realtimeVoice = null, directVo
   }
 }
 
-// What the orb shows for each Direct status, in the Live orb's vocabulary
-// (`voiceOrbField.STATE_HUE`): green while it listens, amber while anything is being
-// worked on — a transcript, the agent's turn, an open question — and blue while it
-// speaks. Muted is the orb dimmed, which the orb does itself.
-export function directOrbState(status) {
+// What the strip's bars show for each Direct status (`CallBars.vue`): green while it
+// listens, amber while anything is being worked on — a transcript, the agent's turn, an
+// open question — and blue while it speaks. Muted is flat gray dots, which the bars do
+// themselves.
+export function directBarsState(status) {
   switch (status) {
     case 'listening': return 'listening'
     case 'speaking': return 'speaking'
     case 'transcribing':
     case 'thinking':
-    case 'awaiting_approval': return 'tool_calling'
+    case 'awaiting_approval': return 'working'
     case 'connecting': return 'connecting'
     default: return 'idle'
   }

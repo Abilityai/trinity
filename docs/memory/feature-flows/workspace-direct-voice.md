@@ -83,5 +83,5 @@ Out: `status`, `transcript_live`, `not_heard`, `speak_state`, `activity`, `spoke
 route, prompt, settings), `test_ent1046_direct_voice_db.py` (cursor on a real DB),
 `test_ent1046_speech_providers.py` (providers over a mock transport);
 `src/frontend/tests/unit/portalDirectCall.spec.js` (rules, endpointer, fold, protocol, the two call
-buttons, the orb, settings card), `portalDirectCall.mount.spec.js` (the real conversation with the socket, mic and
+buttons, the call bars, settings card), `portalDirectCall.mount.spec.js` (the real conversation with the socket, mic and
 speaker faked).
