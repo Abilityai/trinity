@@ -71,11 +71,14 @@ describe('the HTTP clients report the terms refusal', () => {
     expect(handler).not.toHaveBeenCalled()
   })
 
-  it('reports a burst of refusals once', () => {
-    const handler = vi.fn()
+  it('reports a burst of refusals once', async () => {
+    // The handler navigated (vue-router resolves a completed push with nothing).
+    const handler = vi.fn(() => Promise.resolve())
     setTermsRefusalHandler(handler)
     notifyTermsRefusal(errorOf(TERMS), clock)
     notifyTermsRefusal(errorOf(TERMS), clock + 100)
+    await Promise.resolve()
+    await Promise.resolve()
     notifyTermsRefusal(errorOf(TERMS), clock + 200)
     expect(handler).toHaveBeenCalledTimes(1)
   })
