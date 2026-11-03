@@ -7910,6 +7910,29 @@
         "unit"
       ],
       "description": "#4123: a genuine auth failure whose detail also carries the 'prompt is too long' sentence is still auth. The agent's own 'Authentication failure:' prefix outranks the prompt-length marker in is_prompt_too_long, in both failure_classifier copies. Two details: the real _finalize_headless_result 503 for one stderr line holding both an auth pattern and the sentence (driven through the stderr auth-abort branch, as read_stderr does), and the issue's probe string. classify_switch_failure returns auth for both body shapes; execute_task walks and codes AUTH; /chat switches and codes auth; the pull refusal walk, terminal switch and recode keep auth; the #1083 callback keeps auth. A bare prompt-length rejection is still not auth (#3849 unchanged), and the prefix list is pinned to the agent's source."
+    },
+    {
+      "file": "unit/test_ent1054_terms_gate.py",
+      "feature": "trinity-enterprise#1054",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "auth",
+        "workspace",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1054: the terms-acceptance gate seam (services/terms_gate.py) consulted once in resolve_platform_user_unfloored. Real routed requests through the real resolver: a Workspace-only person is refused 403 terms_required on a @workspace_route route, the portal door, the rooms door and their own user-scoped key while a provider says so; operator+ never consulted; a raising or empty provider fails closed for a user; @terms_route exempts a route (logout and /api/users/me pinned); an agent key is untouched; the suspension check stays first. No Docker."
+    },
+    {
+      "file": "unit/test_ent1054_email_html_shell.py",
+      "feature": "trinity-enterprise#1054",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "email",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1054 A2: EmailService.send_html renders on the one HTML shell with a plain-text twin, escapes every string, omits blank paragraphs and an absent call to action; the verification mail is byte-identical to its pre-refactor output (literal snapshot). No Docker."
     }
   ]
 }
