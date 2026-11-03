@@ -134,7 +134,7 @@ def _calls(db):
 
 def _budget_db(monkeypatch, pending=0, count_side_effect=None, create_side_effect=None):
     db = MagicMock()
-    monkeypatch.setattr(oqs, "db", db)
+    monkeypatch.setattr(oqs.deps, "db", db)
     monkeypatch.setattr(oqs, "_websocket_manager", None)
     return _seam(monkeypatch, db, pending, count_side_effect, create_side_effect)
 
@@ -407,7 +407,7 @@ def _wire_skill_alert(monkeypatch, pending=0, existing=None):
     db = MagicMock()
     db.list_operator_queue_items.return_value = list(existing or [])
     monkeypatch.setattr(tes, "db", db)
-    monkeypatch.setattr(oqs, "db", db)
+    monkeypatch.setattr(oqs.deps, "db", db)
     monkeypatch.setattr(oqs, "_websocket_manager", None)
     return _seam(monkeypatch, db, pending)
 

@@ -20,7 +20,7 @@ Yes. Set `deliver_to_workspace_email` on the schedule over the API or with `crea
 
 ## Can a scheduled brief remember things about the person it's for?
 
-Yes. A run of a schedule that names a person with `deliver_to_workspace_email` runs as that person's seat: the agent receives their per-person memory before it starts and can write it back with `write_user_memory`, so the next brief builds on the last. Cron, **Run now** and webhook fires all serve the named person. The tool replaces the whole notes blob, so the agent must write the complete updated notes. The person sees every write in their Workspace and can undo the latest one. See [Scheduling](../automation/scheduling.md#the-run-remembers-the-person).
+Yes. A run of a schedule that names a person with `deliver_to_workspace_email` runs as that person's seat: the agent receives their per-person memory before it starts and can write it back with `write_user_memory`, so the next brief builds on the last. Cron, **Run now** and webhook fires all serve the named person. The tool replaces the whole notes blob, so the agent must write the complete updated notes. The write is refused while another turn for someone else is running on the same agent, so give each brief its own time. The person sees every write in their Workspace and can undo the latest one. See [Scheduling](../automation/scheduling.md#the-run-remembers-the-person).
 
 ## Why was my companion agent's scheduled brief skipped with "Held"?
 

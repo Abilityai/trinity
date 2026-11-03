@@ -299,3 +299,49 @@ AES-256-GCM envelopes. What changed is how git *reads* one.
 **Full requirement**: `docs/memory/requirements/github.md` §11.16.
 **Security surface**: `docs/memory/requirements/security.md` §20.9b.
 
+### 3.10 A Credential Handed in the Chat (trinity-enterprise#1066)
+
+- **Status**: ✅ Implemented (OSS core).
+- **Need**: a person who works with an agent only in the Workspace (the ent#837
+  `user` rung) has no Credentials tab and cannot reach
+  `POST /api/agents/{name}/credentials/inject`. When the agent needs a key, the
+  only channel left was the chat — and a value typed there is persisted in the
+  thread, the execution log and the agent's next prompt.
+- **Behaviour**:
+  - The agent asks **by name** with the MCP tool `ask_for_credential(name, why)`:
+    a `credential` ask (`context.credential_name`), addressed to the person of
+    the conversation. No options; the name is a variable name of at most 64
+    characters and never one the platform or the agent runtime writes itself
+    (`services/credential_ask_policy.py`, mirrored from the agent image and held
+    in parity by test). With no single person to ask it is refused (422
+    `no_person`).
+  - The person sees a **masked secret field** in the thread (and wherever the
+    ask card renders: Inbox, rail, agent page) and types the value there. It is
+    posted once to `POST /api/enterprise/client-portal/asks/{id}/credential`
+    (a person only), and the field is emptied before the request goes out.
+  - The value is written to **one line of the agent's `.env`** through the
+    agent's own read/inject endpoints (`services/credential_sink.py`), so the
+    agent's next turn sees it without a restart (#1999). It is staged in the
+    runtime identity scrub first (ent#279) — no delivery without the scrub armed.
+  - The ask ends answered with the response `provided`; the agent's wake says the
+    name is set and to read it from the environment. The thread shows
+    "NAME provided". The value never reaches the ask row, its answer, the wake,
+    the audit row (`credentials` / `chat_provide`: name and ask id only), a log
+    line or a refusal message.
+  - A credential ask is answered **only** through the field: an operator's
+    respond box, a Workspace typed answer and a direct `answer(...)` are refused
+    (422 `credential_answer_via_field`), and the Operating Room shows no respond
+    box for the kind. Dismiss works as for any ask.
+  - Refusals are named: `agent_not_running` (409), `env_busy` (409),
+    `scrub_unavailable` / `agent_unreachable` (503), `invalid_value`,
+    `env_too_large`, `invalid_credential_name` (422), `already_resolved`
+    (`credential_written: true` when the value landed but the ask ended first —
+    nothing is un-written).
+- **Not in scope**: a vault target for the value (the sink is one function, so
+  a second target can be added without touching the ask kind or the field); the
+  paste guard on channel adapters (Slack, Telegram, voice). The live stream of a
+  turn is not scrubbed (the ent#279 limit), so a model that echoes the value
+  shows it once on screen, never in history.
+- **Security surface**: `docs/memory/requirements/security.md` §20.11.
+- **Flow**: [credential-in-chat.md](../feature-flows/credential-in-chat.md).
+

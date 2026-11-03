@@ -72,7 +72,7 @@ _ALLOWED_CALLERS = {
         "NOT platform-only — bounded instead by the #1632 depth cap, enforced ATOMICALLY "
         "per agent inside create_native_item, and by the SAME per-agent + fleet rate "
         "buckets as the file seam; every field validated at the call",
-    ("services/operator_queue_service.py", "OperatorQueueSyncService._sync_agent"):
+    ("services/operator_queue_service/__init__.py", "OperatorQueueSyncService._sync_agent"):
         "the #1632-capped agent-file ingestion seam itself (depth+rate+clamp)",
 }
 

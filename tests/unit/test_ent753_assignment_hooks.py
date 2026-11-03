@@ -71,7 +71,6 @@ EXEMPT_DIRS = ("db/", "enterprise/", "tests/", "migrations/")
 EXPECTED_SITES = frozenset({
     "routers/skills.py::update_agent_skills",
     "routers/skills.py::inject_skills",
-    "routers/skills.py::unassign_skill",
     "routers/skills.py::assign_skill_set",
     "routers/skills.py::unassign_skill_set",
     "services/agent_service/lifecycle.py::inject_assigned_skills",
@@ -79,6 +78,9 @@ EXPECTED_SITES = frozenset({
     # ent#1030: the single-skill assign route delegates its write here.
     "services/skill_assignment_service.py::assign_and_deliver",
     "services/skill_assignment_service.py::assign_set_and_deliver",
+    # trinity-enterprise#1068: the unassign route delegates its write here, and
+    # a system apply reaches it when a held skill's declared gate fails.
+    "services/skill_assignment_service.py::unassign_and_remove",
 })
 
 

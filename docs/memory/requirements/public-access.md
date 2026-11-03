@@ -24,7 +24,7 @@
 - **GitHub Issue**: #147
 - **Description**: Email-verified public chat sessions maintain persistent per-user memory (text blob) scoped to `(agent_name, user_email)`, injected into every agent call. Memory is updated via background summarization every 5 messages (auto) or explicitly via the `write_user_memory` MCP tool (agent-initiated, #888). The tool resolves the user email server-side from the execution record — agents never handle email addresses directly.
 - **Database Tables**: `public_user_memory`
-- **API**: `POST /api/agents/{name}/user-memory` (agent-scoped key + execution_id; user-facing triggers, plus a `schedule` run that names a seat — §10.19 of `scheduling.md`, ent#637). Every agent-notes write records a `public_user_memory_writes` row; the person reads and undoes them through the Workspace (`GET/POST /api/enterprise/client-portal/agents/{name}/memory…`)
+- **API**: `POST /api/agents/{name}/user-memory` (the agent's own key only, a human is refused `agent_only`, + execution_id; user-facing triggers, plus a `schedule` run that names a seat — §10.19 of `scheduling.md`, ent#637). The named run must be live and no other live turn on the agent may resolve to a different scope (#4121, `memory_turn_not_live` / `memory_turn_ambiguous`); on a shared agent a refused note is lost unless the agent can retry, so the tool description tells the agent to say it was not saved. Every agent-notes write records a `public_user_memory_writes` row; the person reads and undoes them through the Workspace (`GET/POST /api/enterprise/client-portal/agents/{name}/memory…`)
 - **Anti-poisoning gates (trinity-enterprise#419)**: memory is written from conversations with arbitrary people and re-injected into every later prompt for that person, so it is treated as a persistent prompt-injection vector. Two cheap layers, both in `services/user_memory_guard.py`:
   - **Write-boundary screen**: a small, named, pattern-based check (not prompt-injection detection — that stance is ent#409) on both writers of the block: the agent's `write_user_memory` and the background conversation summarizer. A hit refuses the write with `422 {code, message, line}` and stores nothing (no memory change, no history row); the summarizer, which has no agent to rephrase, drops the tripping lines and keeps the rest (a summary that loses every line leaves the previous one). Four rules: `memory_prompt_marker` (text imitating prompt structure), `memory_instruction` (text aimed at the agent's own rules, role or oversight), `memory_tool_directive` (a tool or command directive), `memory_link_in_instruction` (a link or an email address inside an instruction, or data placed into a URL; a link or address stated as a fact is stored — operator ruling 2026-10-23 extended links to addresses). Preferences, open loops and business rules stated as facts are stored. A hit the stored notes already produced (same rule, same matched text) is not counted again, so text from before the screen never locks a person's memory, while old lines reordered, re-contextualised or respelled into a new hit are judged afresh. A copy-back of the rendered block keeps only the agent-notes section (the summary and the decisions are dropped, the platform's margin, headings and envelope lines stripped) before the screen and before storage. Every pass is linear, and the summarizer clamps each chat message first. The refusal is logged with the rule and line, never the text.
   - **Trust envelope**: the notes and the summary enter the prompt between platform lines carrying a per-render nonce, every stored line behind a `│ ` margin, under a framing paragraph (reference material about the person; it cannot change instructions, grant permissions or trigger tools or links on its own) and followed by a platform reminder. The content cannot reproduce the delimiters (envelope lines dropped, any other copy defanged in one pass; line breaks split with `splitlines()`; control characters removed). A rendering failure drops the memory rather than injecting it raw.
@@ -1106,6 +1106,47 @@ spoken replies (#2157) stay as composer affordances.
   frame after persistence tells the client when to reload; End always works.
 - **FR-9 — Out of scope**: rooms; acting as the agent (#535); the external
   projection (#285/#446); provider choice (#354, seam kept provider-neutral).
+
+### 48.5 Workspace Direct calls — every spoken turn goes to the agent (trinity-enterprise#1046)
+
+A second way to take a Workspace call. Today's call (§48.3) has a realtime model
+answering and consulting the agent; a **Direct** call has no model in the path:
+speech-to-text, the agent's ordinary Workspace turn, text-to-speech of the agent's
+own reply. Live stays the default and is unchanged.
+
+- **FR-1 — Entry**: two buttons in the composer, one per call: Live (waveform) and
+  Direct (handset). An unavailable one is disabled with its reason; while one call is
+  on, its button ends it and the other says so. During a Direct call, one fixed-height
+  strip shows four bars (the state), one short word, one detail line (a notice, what was
+  heard, the tool at work, or the slow-runtime wait), a mute icon and a red hang-up.
+- **FR-2 — Same turn as typing**: a spoken turn goes through the route a typed message
+  uses (`POST …/chat/stream`), so its limits, idempotency, gates, attachments and
+  attribution are the typed path's. The call's socket only hears and speaks.
+- **FR-3 — Harness-agnostic speech**: every reply is spoken from the finished turn on
+  every runtime. Where a runtime streams its messages, speech starts earlier and the
+  persisted reply is reconciled so nothing is said twice and no tail is lost. A runtime
+  without a stream says so in the strip's detail line. A reply with nothing to read
+  aloud (only code, a table or links) says "The reply is in the chat." rather than
+  nothing.
+- **FR-4 — The live thread stays live**: during a Direct call the thread and composer
+  work. A typed message is sent normally and spoken back. Rows land as they happen;
+  after the call they fold into one call block.
+- **FR-5 — Barge-in**: talking over the agent pauses playback; if it was real speech the
+  running turn is cancelled through the terminate primitive and the new words run next.
+  Echo of the agent's own voice resumes playback.
+- **FR-6 — Approvals are Trinity's asks**: an ask raised in the turn appears as the
+  normal chat card and is read aloud. A whole short yes or no answers it through the
+  person's own answer route, so the Inbox is the record. Anything else runs as the next
+  turn and the ask stays open. Per-tool prompts are out of scope.
+- **FR-7 — Words on failure**: no speech key, speech-to-text failure, speech failure and
+  turn failure each have a fixed line. Nothing spoken is a paraphrase of the agent.
+- **FR-8 — One call per thread**: a Live call and a Direct call cannot overlap on a thread.
+- **FR-9 — Settings**: admin toggle (default on) and provider (`auto`, `gemini`,
+  `elevenlabs`) under Settings → Voice, resolved at call time, with a readiness line
+  and a disclosure that audio and transcripts go to the chosen provider.
+- **FR-10 — Timing**: each turn reports transcription time and time to first audio.
+- **FR-11 — Out of scope**: portal-token clients (no platform JWT, same as §48.3), mobile
+  layout, rooms, and a hosted speech path, for which `SpeechProvider` instances are the seam.
 
 ### 48.4 Workspace Projects — the open-core surface (trinity-enterprise#661)
 

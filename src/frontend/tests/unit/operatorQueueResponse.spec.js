@@ -158,8 +158,10 @@ describe('queueTypeLabel — desktop QueueCard labels, shared', () => {
     expect(queueTypeLabel('question')).toBe('Question')
     expect(queueTypeLabel('alert')).toBe('Heads up')
     // #3130: plus the budgeted flood alarm, labelled as the alert it was.
+    // trinity-enterprise#1066: and the credential ask, answered in the Workspace.
     expect(QUEUE_TYPE_LABELS).toEqual({
       approval: 'Needs approval', question: 'Question', alert: 'Heads up', queue_flood: 'Heads up',
+      credential: 'Needs a credential',
     })
   })
   it('falls back to the raw type string, and to "" when there is none — never a blank from a wrong field name', () => {

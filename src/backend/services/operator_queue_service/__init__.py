@@ -14,30 +14,39 @@ Polling cycle:
   6. Handle expired entries
 """
 
-import asyncio
-import base64
+# #3785: this external block stays whole, first, even where `__init__` itself
+# no longer reads a name. A submodule may import at module level only what is
+# already imported here (test_3785's G13), so an ImportError fires before any
+# `_oq`-holding submodule has loaded; and several names here are read through
+# the package from outside (`oqs.time`, `oqs.to_utc_iso`, `oqs.rate_limiter`).
+# A name `__init__` stops reading keeps its line with a per-line F401 waiver
+# (`noqa: F401`) that says which of the two keeps it, so F401 still checks
+# every other import here.
+import asyncio  # noqa: F401 — kept for G13 (poller imports it)
+import base64  # noqa: F401 — kept for G13 (listing imports it)
 import hashlib
 import json
 import logging
 import os
 import re
 import time
-import uuid
+import uuid  # noqa: F401 — kept for G13 (listing and poller import it)
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Sequence, Tuple
 
-from database import db
-from db import operator_queue as _queue_db
-from dependencies import principal_reach
-from redis_breaker_util import get_breaker_redis
-from services import ask_service, rate_limiter
+from services import rate_limiter
 from services.operator_queue_choices import (
     OPTIONS_DROPPED_MARKER,
     options_cap_violation,
     title_cap_violation,
 )
-from services.agent_client import AgentClient
 from utils.helpers import iso_cutoff, parse_iso_timestamp, to_utc_iso, utc_now_iso
+
+# #3785 (O2): the collaborators (`db`, `AgentClient`, …) are bound once, in
+# `deps`, and read as `deps.X`, never bound here — a stale
+# `monkeypatch.setattr(oqs, "db", …)` raises; patch `oqs.deps.X`. Imported
+# after every external import, so a failed first import leaves nothing stale.
+from . import deps
 
 logger = logging.getLogger(__name__)
 
@@ -447,346 +456,6 @@ def is_addressed_to(item: dict, email: Optional[str]) -> bool:
     return viewer in {str(p).strip().lower() for p in resolved}
 
 
-# ============================================================================
-# trinity-enterprise#815 — a broad listing is complete before the limit
-# ============================================================================
-
-class QueueListError(Exception):
-    """A refusal `list_for_principal` names; the router maps it to HTTP."""
-
-    def __init__(self, status_code: int, message: str):
-        super().__init__(message)
-        self.status_code = status_code
-        self.message = message
-
-
-# `agent_names` (trinity-enterprise#815): the MCP passes its own permit set,
-# one query parameter per name. Bounded so a request line stays well inside
-# every HTTP server's limit; the MCP refuses a larger set before sending.
-AGENT_NAMES_MAX = 500
-
-
-def narrow_to_agent_key(current_user, accessible):
-    """The agents an AGENT-scoped key's queue read covers: its reach
-    (`dependencies.principal_reach`: itself, its edges, the agents it spawned,
-    trinity-enterprise#872) intersected with its owner's accessible set (or the
-    bare set when the owner is an admin, `accessible is None`). Every other principal — a person's JWT
-    or user key, a system key, the event loopback — gets `accessible` back
-    unchanged (trinity-enterprise#815).
-
-    Narrowing for COMPLETENESS, not an authorization point: an agent key
-    resolves to its owner, so its broad read used to rank the owner's whole
-    fleet, cut it at `limit`, and leave the MCP to drop the rows the agent may
-    not see — its own rows could sit below the cut. The MCP's `checkAgentAccess`
-    stays the gate; enforcement on the raw routes is ent#629.
-
-    Keyed on `mcp_scope` / `agent_name` directly, never `acting_agent_name()`,
-    which maps a system key to `trinity-system` and would narrow the system
-    agent. Pure DB (`agent_permissions`, the ent#727 precedent): no Docker read,
-    so a Docker fault cannot shrink the set; a failed read keeps only itself.
-    """
-    if getattr(current_user, "mcp_scope", None) != "agent":
-        return accessible
-    allowed = principal_reach(current_user)
-    if allowed is None:
-        raise QueueListError(403, "agent key carries no agent identity")
-    return allowed if accessible is None else allowed & set(accessible)
-
-
-def _effective_agents(narrowed, agent_names):
-    """`agent_names` only ever narrows: intersected with what the caller may
-    see, or taken as given when the caller sees every agent."""
-    if agent_names is None:
-        return narrowed
-    if len(agent_names) > AGENT_NAMES_MAX:
-        raise QueueListError(422, f"agent_names: at most {AGENT_NAMES_MAX} names")
-    if any(not name or not name.strip() for name in agent_names):
-        raise QueueListError(422, "agent_names: a blank name is not allowed")
-    wanted = set(agent_names)
-    return wanted if narrowed is None else narrowed & wanted
-
-
-# --- the keyset (cursor) walk ------------------------------------------------
-#
-# A walk starts with `cursor=start` and continues with each `next_cursor`.
-# Within one walk no id is returned twice, and every row that matches both when
-# the walk starts and when the walk reaches it is returned exactly once, under
-# concurrent inserts, endings and platform-alert priority changes. The bound:
-# an ending must commit within `db.operator_queue.WALK_WATERMARK_MARGIN_S` of
-# the timestamp it stamped (a breach is logged at error there).
-#
-# The token is `base64url(JSON {"v":1,"w":W,"k":[sec,prk,st,id],"f":fp,"s":walk})`.
-# It is NOT signed and carries no authority: every page re-applies the caller's
-# visibility, so a forged token can only choose a position over rows the caller
-# may already see. `s` names the walk's priority snapshot in Redis (TTL 1 h).
-
-WALK_SNAPSHOT_TTL_S = 3600
-_WALK_KEY = "opqueue:walk:{}"
-_WALK_SENTINEL = "_"
-CURSOR_MAX_BYTES = 4096
-CURSOR_KEY_TEXT_MAX = 1024
-_WALK_ID_RE = re.compile(r"^[0-9a-f]{32}$")
-_ISO_Z_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z$")
-_B64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
-_FILTER_KEYS = ("status", "type", "priority", "agent_name", "since")
-
-
-def filter_fingerprint(filters: dict) -> str:
-    """The caller-chosen filters a cursor belongs to. `agent_names`, `limit` and
-    the principal's narrowed set are deliberately NOT in it: the MCP re-reads its
-    permits every page, and a permission change must not break a walk — it
-    changes which agents' rows match, never the order of the others."""
-    canon = json.dumps({k: filters.get(k) for k in _FILTER_KEYS},
-                       sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canon.encode("utf-8")).hexdigest()[:16]
-
-
-def _key_text_ok(value) -> bool:
-    return (isinstance(value, str) and len(value) <= CURSOR_KEY_TEXT_MAX
-            and not any(ord(c) < 0x20 or 0xD800 <= ord(c) <= 0xDFFF for c in value))
-
-
-def encode_cursor(watermark: str, key, fingerprint: str, walk_id: str) -> Optional[str]:
-    """The `next_cursor` for a page whose last row has `key`, or None when that
-    key cannot be carried (a legacy agent-authored id or `created_at` longer
-    than the decoder allows, holding a control character, or whose escaped
-    JSON would exceed `CURSOR_MAX_BYTES`) — the caller then says so instead of
-    truncating a key or quietly ending the walk.
-
-    The byte check is on the encoded JSON, not only per-field characters:
-    `json.dumps` escapes a non-ASCII character to six bytes and `"` / a backslash to
-    two, so a 700-character legacy id could pass the per-field check and still
-    produce a token `decode_cursor` refuses (ent#815 fix 2). Within the cap the
-    token is also within the decoder's base64 length bound."""
-    sec, prk, st, item_id = key
-    if not (_key_text_ok(st) and _key_text_ok(item_id)):
-        return None
-    raw = json.dumps({"v": 1, "w": watermark, "k": [sec, prk, st, item_id],
-                      "f": fingerprint, "s": walk_id}, separators=(",", ":"))
-    if len(raw.encode("utf-8")) > CURSOR_MAX_BYTES:
-        return None
-    return base64.urlsafe_b64encode(raw.encode("utf-8")).rstrip(b"=").decode("ascii")
-
-
-def _bad_cursor(why: str) -> QueueListError:
-    return QueueListError(422, f"cursor: {why}; pass cursor=start to begin a walk, "
-                               "then the next_cursor of each page")
-
-
-def decode_cursor(token: str) -> dict:
-    """Strict: every malformed token is a 422 naming `cursor`, never a silent
-    restart (which would re-return rows the caller already has)."""
-    if not _B64URL_RE.match(token) or len(token) > (CURSOR_MAX_BYTES * 4 + 2) // 3 + 4:
-        raise _bad_cursor("not a token this server issued")
-    try:
-        raw = base64.urlsafe_b64decode(token + "=" * (-len(token) % 4))
-    except (ValueError, TypeError):
-        raise _bad_cursor("not a token this server issued")
-    if len(raw) > CURSOR_MAX_BYTES:
-        raise _bad_cursor(f"longer than {CURSOR_MAX_BYTES} bytes")
-    try:
-        tok = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        raise _bad_cursor("not a token this server issued")
-    if not isinstance(tok, dict) or set(tok) != {"v", "w", "k", "f", "s"}:
-        raise _bad_cursor("not a token this server issued")
-    if tok["v"] != 1:
-        raise _bad_cursor("an unsupported version")
-    w = tok["w"]
-    if not isinstance(w, str) or not _ISO_Z_RE.match(w):
-        raise _bad_cursor("a malformed watermark")
-    try:
-        parse_iso_timestamp(w)
-    except ValueError:
-        raise _bad_cursor("a malformed watermark")
-    k = tok["k"]
-    if not (isinstance(k, list) and len(k) == 4):
-        raise _bad_cursor("a malformed position")
-    sec, prk, st, item_id = k
-    if type(sec) is not int or sec not in (0, 1) or type(prk) is not int or not 0 <= prk <= 4:
-        raise _bad_cursor("a malformed position")
-    if not (_key_text_ok(st) and _key_text_ok(item_id)):
-        raise _bad_cursor("a malformed position")
-    if not isinstance(tok["f"], str) or not isinstance(tok["s"], str) \
-            or not _WALK_ID_RE.match(tok["s"]):
-        raise _bad_cursor("not a token this server issued")
-    return {"w": w, "after": (sec, prk, st, item_id), "f": tok["f"], "walk": tok["s"]}
-
-
-def _walk_redis():
-    r = get_breaker_redis()
-    if r is None:
-        raise QueueListError(
-            503, "cursor walks need Redis, which is unreachable; retry, or page with offset")
-    return r
-
-
-def _start_walk_snapshot(snapshot: dict) -> str:
-    """Record the walk's platform-alert priorities under a new walk id (option B,
-    ent#815). The sentinel keeps an empty snapshot distinguishable from an
-    expired one."""
-    walk_id = uuid.uuid4().hex
-    key = _WALK_KEY.format(walk_id)
-    try:
-        r = _walk_redis()
-        pipe = r.pipeline()
-        pipe.hset(key, mapping={_WALK_SENTINEL: "1", **{k: str(v) for k, v in snapshot.items()}})
-        pipe.expire(key, WALK_SNAPSHOT_TTL_S)
-        pipe.execute()
-    except QueueListError:
-        raise
-    except Exception as e:  # a Redis fault mid-call: same answer as unreachable
-        raise QueueListError(503, f"cursor walks need Redis, which failed ({type(e).__name__}); "
-                                  "retry, or page with offset")
-    return walk_id
-
-
-def _load_walk_snapshot(walk_id: str) -> dict:
-    try:
-        stored = _walk_redis().hgetall(_WALK_KEY.format(walk_id))
-    except QueueListError:
-        raise
-    except Exception as e:
-        raise QueueListError(503, f"cursor walks need Redis, which failed ({type(e).__name__}); "
-                                  "retry, or page with offset")
-    if not stored or _WALK_SENTINEL not in stored:
-        raise QueueListError(410, "this walk has expired; restart with cursor=start")
-    return {k: int(v) for k, v in stored.items() if k != _WALK_SENTINEL}
-
-
-_UNCARRIABLE_KEY_WARNING = (
-    "a row's sort key is too long to page past (id {prefix}…); "
-    "use offset paging for this filter"
-)
-
-
-_BELT_DROP_WARNING = (
-    "{n} item(s) on this page were withheld after the read (a stored request_id "
-    "the database filter could not match); total not verified"
-)
-
-
-def list_for_principal(
-    current_user,
-    *,
-    accessible,
-    exclude_about_a_person: bool,
-    project,
-    filters: dict,
-    limit: int,
-    offset: int = 0,
-    agent_names=None,
-    cursor: Optional[str] = None,
-    owned_agents=None,
-    addressee_email=None,
-) -> dict:
-    """One page of `GET /api/operator-queue` for this caller, with the fields
-    that make it honest (trinity-enterprise#815).
-
-    `owned_agents` (trinity-enterprise#866): the agents this caller OWNS, or None
-    when the owner-only rule does not apply (an admin). With a set, an
-    owner-only row (`OWNER_ONLY_ID_PREFIXES`) is listed only for those agents —
-    a SQL condition like every other visibility filter, so `total` stays exact.
-
-    `addressee_email` (trinity-enterprise#980): this caller's email, or None
-    when the addressee-only rule does not apply (an admin). With a value, an
-    addressee-only row (`ADDRESSEE_ONLY_ID_PREFIXES`) is listed only when it is
-    addressed to them — the same kind of SQL condition.
-
-    Every visibility filter is a SQL condition on the one WHERE builder, so the
-    page, `total` and the flags are computed over the same rows:
-    - `has_more` is read off the page itself (`limit + 1` rows asked for), never
-      a separate count, so a row landing between the two cannot make it lie;
-    - `next_offset` is `offset + limit` while `has_more`, else None;
-    - `total` is a `COUNT` over the same filters — a snapshot.
-
-    The agent set is `narrow_to_agent_key` (an agent key: `{self} ∪ permitted`)
-    further narrowed by `agent_names`; it applies to the page, `total` and the
-    flags alike.
-
-    With `cursor` the page is a step of a keyset walk (see `encode_cursor`):
-    `next_cursor` continues it and `next_offset` is None. Without it the route
-    is in offset mode, ordered exactly as before, and `next_cursor` is None.
-
-    `project` is the router's per-principal projection (`_for_principal`). It
-    stays a BELT: on SQLite and a UTF-8, non-Turkic PostgreSQL the SQL
-    exclusion equals `is_about_a_person` exactly, so it should never fire;
-    under a Turkic collation a legacy upper-case row can reach it. If it drops
-    a row the SQL page returned, `total` becomes None and `warnings` says so. The paging fields are
-    unaffected — they describe the SQL page.
-    """
-    agents = _effective_agents(narrow_to_agent_key(current_user, accessible), agent_names)
-    exclude = ABOUT_A_PERSON_ID_PREFIXES if exclude_about_a_person else None
-    where = dict(filters, accessible_agent_names=agents,
-                 exclude_request_id_prefixes=exclude)
-    if owned_agents is not None:
-        where.update(owner_only_request_id_prefixes=OWNER_ONLY_ID_PREFIXES,
-                     owner_agent_names=set(owned_agents))
-    if addressee_email is not None:
-        where.update(addressee_only_request_id_prefixes=ADDRESSEE_ONLY_ID_PREFIXES,
-                     addressee_email=addressee_email)
-    warnings = []
-    next_cursor = None
-    if cursor is None:
-        rows = db.list_operator_queue_items(**where, limit=limit + 1, offset=offset)
-        has_more = len(rows) > limit
-        page = rows[:limit]
-        next_offset = offset + limit if has_more else None
-    else:
-        if offset:
-            raise QueueListError(
-                422, "cursor and offset cannot be combined: page a walk with cursor alone")
-        fingerprint = filter_fingerprint(filters)
-        if cursor == "start":
-            watermark = iso_cutoff(seconds=_queue_db.WALK_WATERMARK_MARGIN_S)
-            snapshot = db.operator_queue_walk_alert_priorities(watermark=watermark, **where)
-            walk_id = _start_walk_snapshot(snapshot)
-            after = None
-        else:
-            token = decode_cursor(cursor)
-            if token["f"] != fingerprint:
-                raise QueueListError(422, "cursor does not match these filters; "
-                                          "restart with cursor=start")
-            watermark, after, walk_id = token["w"], token["after"], token["walk"]
-            snapshot = _load_walk_snapshot(walk_id)
-        keyed = db.list_operator_queue_items_walk(
-            watermark=watermark, snapshot=snapshot, after=after, limit=limit + 1, **where)
-        has_more = len(keyed) > limit
-        keyed = keyed[:limit]
-        page = [item for item, _ in keyed]
-        next_offset = None
-        if has_more:
-            last_key = keyed[-1][1]
-            next_cursor = encode_cursor(watermark, last_key, fingerprint, walk_id)
-            if next_cursor is None:
-                warnings.append(_UNCARRIABLE_KEY_WARNING.format(prefix=str(last_key[3])[:32]))
-    total = db.count_operator_queue_items(**where)
-    flags = db.count_operator_queue_flags(accessible_agent_names=agents)
-
-    items = project(page)
-    dropped = len(page) - len(items)
-    if dropped:
-        total = None
-        warnings.append(_BELT_DROP_WARNING.format(n=dropped))
-        logger.warning(
-            "[operator-queue] list: the projection withheld %d row(s) the SQL "
-            "exclusion kept (ent#815); total reported as null", dropped,
-        )
-    body = {
-        "items": items,
-        "count": len(items),
-        "total": total,
-        "has_more": has_more,
-        "next_offset": next_offset,
-        "next_cursor": next_cursor,
-        "undelivered_count": flags["undelivered"],
-        "closed_by_filer_count": flags["closed_by_filer"],
-    }
-    if warnings:
-        body["warnings"] = warnings
-    return body
-
-
 def _truncate_with_marker(text: str, max_len: int) -> str:
     """Truncate so the RESULT (content + marker) is ≤ max_len chars."""
     if len(text) <= max_len:
@@ -815,6 +484,21 @@ def _scalar_text(value):
     if isinstance(value, (bool, int, float)) and value:
         return str(value)
     return value
+
+
+def _primary_addressee(agent_name: str, email: str) -> Optional[str]:
+    """``email`` if it is the ONE person who fills ``agent_name``'s primary
+    role, else None (trinity-enterprise#1066). Fails CLOSED and never raises,
+    like `_validated_addressee`."""
+    try:
+        from services import role_addressing
+
+        single = role_addressing.resolve(agent_name, "primary").single
+    except Exception:  # noqa: BLE001 — unresolvable → unaddressed, per #1632
+        logger.warning("[OperatorQueue] primary of %s unresolvable; credential item "
+                       "left unaddressed (ent#1066)", agent_name, exc_info=True)
+        return None
+    return email if single and single.strip().lower() == email else None
 
 
 def _validated_addressee(agent_name: str, raw) -> Optional[str]:
@@ -1021,6 +705,11 @@ def _clamp_ingested_item(req: dict, agent_name: str = "") -> dict:
     # the addressee's thread id INTO context — doing it afterwards would add
     # bytes the size cap had already signed off on.
     out["addressed_to_email"] = _validated_addressee(agent_name, out.get("addressed_to_email"))
+    if out.get("type") == "credential" and out["addressed_to_email"]:
+        # trinity-enterprise#1066: this channel never reaches `_validated_ask`,
+        # which holds the kind to primary on the platform door. A secret field
+        # opens for the agent's primary person only; anyone else → unaddressed.
+        out["addressed_to_email"] = _primary_addressee(agent_name, out["addressed_to_email"])
 
     context = out.get("context")
     if not isinstance(context, dict):
@@ -1403,7 +1092,7 @@ def _is_our_answer(req: dict, resp: dict) -> bool:
 def aging_hours() -> int:
     """The operator's bound, `0` = disabled; unreadable ⇒ the default + WARN."""
     try:
-        raw = db.get_setting_value(
+        raw = deps.db.get_setting_value(
             OPERATOR_QUEUE_AGING_HOURS_KEY, str(OPERATOR_QUEUE_AGING_HOURS_DEFAULT)
         )
         return max(0, int(str(raw).strip()))
@@ -1446,23 +1135,6 @@ def annotate_aging(items: list, hours: Optional[int] = None) -> list:
         item["aging"] = aged
         item["aged_since"] = to_utc_iso(at) if aged else None
     return items
-
-
-async def _audit_sync(action: str, agent_name: str, item_id: str, details: dict) -> None:
-    """Accountability transitions only (ingested · diverged · reconciled ·
-    written_back · undeliverable) — ids and enums, never agent text; best-effort."""
-    try:
-        from services.platform_audit_service import platform_audit_service, AuditEventType
-        await platform_audit_service.log(
-            event_type=AuditEventType.OPERATOR_QUEUE,
-            event_action=action,
-            source="system",
-            target_type="operator_queue",
-            target_id=str(item_id),
-            details={"agent_name": agent_name, **details},
-        )
-    except Exception as e:  # noqa: BLE001 — audit never breaks the sync
-        logger.debug("[OperatorQueue] audit %s for %s skipped: %s", action, item_id, e)
 
 
 def set_websocket_manager(manager):
@@ -1653,7 +1325,7 @@ async def _maybe_emit_alert_budget_episode(
         f"requests."
     )
     try:
-        filling = db.list_operator_queue_items(
+        filling = deps.db.list_operator_queue_items(
             agent_name=agent_name, status="pending", type=item_type, limit=1000)
         filled_by = hashlib.sha256(
             "\n".join(sorted(str(r["id"]) for r in filling)).encode("utf-8")
@@ -1692,264 +1364,19 @@ async def _maybe_emit_alert_budget_episode(
     )
 
 
-class OperatorQueueSyncService:
+# #3785: the package's own submodules, imported after the names they read
+# from `__init__` (test_3785's G6 and G13).
+from . import listing  # noqa: E402,F401 — loads the submodule here, in G6 order
+
+# #3785: the poller core (instance state, start/stop, the leader lease, the
+# loop and the cycle) lives in `poller.PollerCoreMixin`. Imported after every
+# O1 definition: its `__init__` default reads `_oq.DEFAULT_POLL_INTERVAL` at
+# import time.
+from . import poller  # noqa: E402
+
+
+class OperatorQueueSyncService(poller.PollerCoreMixin):
     """Background service that syncs operator queue files with the database."""
-
-    def __init__(self, poll_interval: int = DEFAULT_POLL_INTERVAL):
-        self.poll_interval = poll_interval
-        self._task: Optional[asyncio.Task] = None
-        self._running = False
-        # #1525: (agent_name, req_id) → consecutive create-failure count. Bounds
-        # the retry loop for a request whose DB create keeps raising (malformed
-        # input, a DB error, …) so it can't hot-loop forever. Entry is dropped on
-        # success. #1631: keyed by the (agent, id) TUPLE — two agents can now
-        # share a req_id, so a bare-id key would let agent A's failing id
-        # quarantine agent B's distinct, healthy request.
-        self._create_failures: dict[tuple[str, str], int] = {}
-        # #1631: (agent, req_id) already warned about for a reserved-prefix
-        # hijack attempt — logged once, not every ~5s cycle. Bounded like the
-        # quarantine map so a crafted stream of unique reserved ids can't grow it
-        # without bound.
-        self._rejected_reserved: set[tuple[str, str]] = set()
-        # trinity-enterprise#611: (agent, req_id) already logged for a file entry
-        # that re-uses the id of an ask the agent raised over the platform, and
-        # the agents already told the file channel is deprecated. Logged once
-        # per process each, bounded like the sets above.
-        self._skipped_native: set[tuple[str, str]] = set()
-        # #3243: (agent, req_id) already logged for an entry held over the
-        # authoring caps — once per process, bounded like the sets above.
-        self._cap_held_logged: set[tuple[str, str]] = set()
-        self._file_channel_noticed: set[str] = set()
-        # #1632: unique per worker process so the cross-worker leader lock only
-        # ever refreshes/releases ITS OWN lease (mirror monitoring #1464).
-        self._worker_id = f"{os.getpid()}:{uuid.uuid4().hex[:8]}"
-        self._is_leader = False  # last observed leadership, for transition logs
-        # #1632: agent_name → monotonic ts of the last flood alert — now the
-        # minimum spacing between episodes, so a flapping cap cannot re-alert
-        # every cycle.
-        self._flood_alert_cooldown: dict[str, float] = {}
-        # #3130: (agent_name, reason) pairs whose over-cap episode has already
-        # been alerted. An episode ends when a cycle reads the file and holds
-        # nothing (`ingestion_cap`) or reads a sane-size file (`oversize_file`);
-        # only then can the next one alert. In-memory like the cooldown: a
-        # leader failover may re-alert once, and the #1677 budget bounds that.
-        self._flood_episodes: set = set()
-        # #3130: agent_name → the queue-file sha a `platform.ingestion` write was
-        # refused against. Retried only once the file has changed, so a 412
-        # from an agent still rewriting its file is not a write every 5 s.
-        self._ingestion_write_refused: dict[str, str] = {}
-        # #2915: consecutive failed reads per agent — hysteresis before a row is
-        # called `unconfirmed` (a busy container times out intermittently).
-        self._read_failures: dict[str, int] = {}
-        # #2915: did any row's sync/delivery state change this cycle? ONE thin WS
-        # trigger per cycle, never per agent or per item.
-        self._changed_this_cycle = False
-
-    def start(self):
-        """Start the background polling loop."""
-        if self._running:
-            return
-        self._running = True
-        self._task = asyncio.create_task(self._poll_loop())
-        logger.info(f"Operator queue sync service started (interval={self.poll_interval}s)")
-
-    def stop(self):
-        """Stop the background polling loop."""
-        self._running = False
-        if self._task:
-            self._task.cancel()
-            self._task = None
-        # #1632: hand leadership off immediately on graceful shutdown instead of
-        # leaving a sibling worker idle until the TTL expires. Never raises.
-        self._release_leadership()
-        logger.info("Operator queue sync service stopped")
-
-    def _leader_ttl(self) -> int:
-        """Lease TTL. Refreshed once at the TOP of each `_poll_cycle`, so it must
-        comfortably outlast ONE worst-case cycle plus the inter-cycle sleep — or
-        the lease expires mid-cycle, a sibling grabs it, and leadership flaps
-        (both workers run an overlapping cycle → the flood alert double-emits,
-        since its id carries `utc_now_iso()` and so isn't deduped by
-        `on_conflict`). A `_sync_agent` can take a fast read + `write_file`
-        (10s timeout, `_write_responses_to_agent`), and the loop then sleeps
-        `poll_interval`, so the bare `poll_interval * 3` (15s at the 5s default)
-        has ~zero headroom over a single slow-writing agent. Floor at 30s so one
-        slow write can't drop leadership. (Monitoring #1464 mirrors this pattern
-        but at a 30s interval, where `* 3` already dwarfs its cycle.)"""
-        return max(self.poll_interval * 3, 30)
-
-    def _try_acquire_leadership(self) -> bool:
-        """#1632 — cross-worker leader election for the sync loop (mirror
-        monitoring #1464). Returns True iff this worker holds the lease for this
-        cycle. Fail-open: if Redis is unreachable, act as leader (single-worker
-        dev keeps syncing; in a Redis-down prod the DB depth cap still bounds a
-        double feed, and duplicate creates are idempotent via on_conflict)."""
-        r = get_breaker_redis()
-        if r is None:
-            return True  # fail-open: no Redis → behave as the sole worker
-        ttl = self._leader_ttl()
-        try:
-            if r.set(_LEADER_KEY, self._worker_id, nx=True, ex=ttl):
-                return True
-            # Already held — refresh the TTL only if the lease is OURS.
-            if r.get(_LEADER_KEY) == self._worker_id:
-                r.expire(_LEADER_KEY, ttl)
-                return True
-            return False
-        except Exception as e:
-            logger.warning("operator-queue leader lock check failed-open (%s)", e)
-            return True
-
-    def _release_leadership(self) -> None:
-        """Delete the lease iff we hold it (best-effort, never raises)."""
-        try:
-            r = get_breaker_redis()
-            if r is not None and r.get(_LEADER_KEY) == self._worker_id:
-                r.delete(_LEADER_KEY)
-        except Exception:
-            pass
-
-    async def _poll_loop(self):
-        """Main polling loop."""
-        while self._running:
-            try:
-                await self._poll_cycle()
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                logger.error(f"Operator queue sync error: {e}")
-
-            try:
-                await asyncio.sleep(self.poll_interval)
-            except asyncio.CancelledError:
-                break
-
-    async def _poll_cycle(self):
-        """Single poll cycle: sync all running agents."""
-        # #1632: only the lease-holding worker syncs (mirror monitoring #1464),
-        # so `--workers 2` doesn't double-charge the rate limiter, double-scan
-        # agent files, or double-broadcast the flood alert.
-        leader = self._try_acquire_leadership()
-        if leader and not self._is_leader:
-            logger.info("Operator queue sync acquired leadership (worker %s)", self._worker_id)
-        elif not leader and self._is_leader:
-            logger.info("Operator queue sync yielded leadership (worker %s)", self._worker_id)
-        self._is_leader = leader
-        if not leader:
-            return
-
-        from services.docker_service import agent_container_states
-
-        # Reset BEFORE expiry (trinity-enterprise#611): an expiry is a change, and
-        # the reset used to sit below it, so an expired ask reached the UI only on
-        # its 15 s poll.
-        self._changed_this_cycle = False
-
-        # Expire items past their deadline — BEFORE the running-agents gate
-        # (#2915): the early return below used to sit above this, so an
-        # all-stopped fleet never expired anything. Through the ask sink
-        # (trinity-enterprise#611): the ledger (`disposed_by = 'timeout'`), one
-        # audit row per ask, and the wake for each filer; the sink sends no
-        # trigger of its own — this cycle's ONE trigger announces it.
-        try:
-            expired = ask_service.expire().rows
-            if expired:
-                self._changed_this_cycle = True
-                logger.info(f"Expired {len(expired)} operator queue items")
-        except Exception as e:
-            logger.error(f"Operator queue expiry failed: {e}")
-
-        # trinity-enterprise#751: gated-skill approvals whose ending no observer
-        # consumed, and approved runs lost between claim and start. Compare-and-
-        # sets throughout, so every worker may run it; a miss waits a cycle and
-        # never dispatches anything wrongly.
-        try:
-            from services import skill_gate_service
-            await skill_gate_service.sweep()
-        except Exception as e:
-            logger.error(f"Skill gate sweep failed: {e}")
-
-        # #2915: TRI-state, deliberately (#2196 class). `list_all_agents_fast`
-        # collapses "Docker unreadable" into "no agents"; keyed on that, one
-        # daemon blip would flip every open row fleet-wide to
-        # `unconfirmed:agent_not_running` and back. `None` here means "could
-        # not look" — nothing is swept and nothing is synced this cycle.
-        try:
-            states = agent_container_states()
-        except Exception as e:
-            logger.debug(f"Could not read agent container states: {e}")
-            states = None
-        if states is None:
-            # Nothing is swept or synced — but an expiry that already happened
-            # is still announced.
-            if self._changed_this_cycle:
-                await self._broadcast_sync()
-            return
-
-        running_agents = sorted(name for name, state in states.items() if state == "running")
-        now = utc_now_iso()
-
-        # Sweep: every open row of an agent that is NOT running is
-        # `unconfirmed:agent_not_running`. Edge-triggered — at steady state the
-        # WHERE matches nothing. An empty running list sweeps every open row
-        # (an explicit branch in the accessor; never `notin_([])`).
-        try:
-            swept = db.mark_operator_queue_unconfirmed(
-                "agent_not_running", now, exclude_agents=running_agents,
-                exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
-            )
-            if swept:
-                self._changed_this_cycle = True
-        except Exception as e:
-            logger.error(f"Operator queue not-running sweep failed: {e}")
-
-        # #2989 review (AC3): an answer or terminal flip waiting on an agent that
-        # is NOT running cannot reach its file — the row says so,
-        # `undelivered:agent_not_running`, not merely `unconfirmed`. Edge-triggered
-        # and audited once per transition; the write-back flips it to `delivered`
-        # when the agent is back. Platform alarms (`not_applicable`) are skipped.
-        try:
-            stalled = db.mark_operator_queue_undelivered_for_stopped_agents(
-                now, running_agents=running_agents,
-                exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
-            )
-        except Exception as e:
-            logger.error(f"Operator queue not-running delivery sweep failed: {e}")
-            stalled = []
-        for row in stalled:
-            self._changed_this_cycle = True
-            await _audit_sync("undeliverable", row.get("agent_name") or "", row["id"],
-                              {"status": row.get("status"), "detail": "agent_not_running"})
-
-        if running_agents:
-            # Sync each agent concurrently (with a reasonable limit)
-            tasks = [self._sync_agent(name) for name in running_agents]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            # #3313: `return_exceptions=True` keeps one agent's failure from
-            # cancelling the others, but it also dropped the error unlogged.
-            for name, result in zip(running_agents, results):
-                if isinstance(result, Exception):
-                    logger.error(
-                        f"Operator queue sync failed for '{name}': "
-                        f"{type(result).__name__}: {result}"
-                    )
-
-        if self._changed_this_cycle:
-            await self._broadcast_sync()
-
-    async def _broadcast_sync(self):
-        """ONE thin trigger per cycle (#918: identifiers only — here none; the
-        store refetches the access-controlled list). Never per agent or per
-        item: a fleet restart would otherwise fire hundreds of refetches."""
-        if not _websocket_manager:
-            return
-        try:
-            await _websocket_manager.broadcast(json.dumps({
-                "type": "operator_queue_sync",
-                "data": {},
-            }))
-        except Exception as e:
-            logger.error(f"Failed to broadcast operator-queue sync: {e}")
 
     async def _apply_sync_state(self, agent_name: str, row: dict, state: str,
                                 detail: Optional[str], now: str) -> bool:
@@ -1970,7 +1397,7 @@ class OperatorQueueSyncService:
         if prior == state and (row.get("sync_detail") or "") == (detail or ""):
             return False
         try:
-            changed = db.set_operator_queue_sync_state(row["id"], state, detail, now)
+            changed = deps.db.set_operator_queue_sync_state(row["id"], state, detail, now)
         except Exception as e:
             logger.error(f"Failed to record sync state for {row.get('id')}: {e}")
             return False
@@ -1980,10 +1407,10 @@ class OperatorQueueSyncService:
         row["sync_detail"] = detail
         self._changed_this_cycle = True
         if state in DIVERGED_STATES:
-            await _audit_sync("diverged", agent_name, row["id"],
-                              {"from": prior, "to": state, "detail": detail})
+            await deps._audit_sync("diverged", agent_name, row["id"],
+                                   {"from": prior, "to": state, "detail": detail})
         elif state == SYNC_CONFIRMED and prior in DIVERGED_STATES:
-            await _audit_sync("reconciled", agent_name, row["id"], {"from": prior})
+            await deps._audit_sync("reconciled", agent_name, row["id"], {"from": prior})
         return True
 
     async def _apply_delivery_state(self, agent_name: str, row: dict, state: str,
@@ -1996,7 +1423,7 @@ class OperatorQueueSyncService:
         if row.get("delivery_state") == state and (row.get("delivery_detail") or "") == (detail or ""):
             return False
         try:
-            changed = db.set_operator_queue_delivery_state(row["id"], state, detail, now)
+            changed = deps.db.set_operator_queue_delivery_state(row["id"], state, detail, now)
         except Exception as e:
             logger.error(f"Failed to record delivery state for {row.get('id')}: {e}")
             return False
@@ -2006,10 +1433,10 @@ class OperatorQueueSyncService:
         row["delivery_detail"] = detail
         self._changed_this_cycle = True
         if state == DELIVERY_DELIVERED:
-            await _audit_sync("written_back", agent_name, row["id"], {"status": row.get("status")})
+            await deps._audit_sync("written_back", agent_name, row["id"], {"status": row.get("status")})
         elif state == DELIVERY_UNDELIVERED:
-            await _audit_sync("undeliverable", agent_name, row["id"],
-                              {"status": row.get("status"), "detail": detail})
+            await deps._audit_sync("undeliverable", agent_name, row["id"],
+                                   {"status": row.get("status"), "detail": detail})
         return True
 
     def _notice_file_channel(self, agent_name: str) -> None:
@@ -2028,7 +1455,7 @@ class OperatorQueueSyncService:
 
     async def _sync_agent(self, agent_name: str):
         """Sync a single agent's operator queue file."""
-        client = AgentClient(agent_name)
+        client = deps.AgentClient(agent_name)
         now = utc_now_iso()
 
         # 1. Read the queue file from the agent
@@ -2048,7 +1475,7 @@ class OperatorQueueSyncService:
             self._read_failures[agent_name] = failures
             if failures >= READ_FAILURE_THRESHOLD:
                 try:
-                    if db.mark_operator_queue_unconfirmed(
+                    if deps.db.mark_operator_queue_unconfirmed(
                         _read_failure_detail(result), now, agent_name=agent_name,
                         exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
                     ):
@@ -2073,7 +1500,7 @@ class OperatorQueueSyncService:
             )
             await self._maybe_emit_flood_alert(agent_name, reason="oversize_file")
             try:
-                if db.mark_operator_queue_unconfirmed(
+                if deps.db.mark_operator_queue_unconfirmed(
                     "oversize_file", now, agent_name=agent_name,
                     exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
                 ):
@@ -2094,7 +1521,7 @@ class OperatorQueueSyncService:
                 # file with the reconstructed responses alone.
                 logger.warning(f"Invalid JSON in operator-queue.json for {agent_name}")
                 try:
-                    if db.mark_operator_queue_unconfirmed(
+                    if deps.db.mark_operator_queue_unconfirmed(
                         "invalid_json", now, agent_name=agent_name,
                         exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
                     ):
@@ -2108,7 +1535,7 @@ class OperatorQueueSyncService:
                     f"(an object with a `requests` list); not reconciling, not writing"
                 )
                 try:
-                    if db.mark_operator_queue_unconfirmed(
+                    if deps.db.mark_operator_queue_unconfirmed(
                         "wrong_shape", now, agent_name=agent_name,
                         exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
                     ):
@@ -2132,7 +1559,7 @@ class OperatorQueueSyncService:
         # silently: a phantom admit against the depth cap and a "new" broadcast
         # every cycle). Replaces the per-entry `exists()` probe.
         try:
-            index = db.get_operator_queue_sync_index_for_agent(agent_name)
+            index = deps.db.get_operator_queue_sync_index_for_agent(agent_name)
         except Exception as e:
             logger.error(f"Failed to read the sync index for {agent_name}: {e}")
             return
@@ -2155,7 +1582,7 @@ class OperatorQueueSyncService:
         # cycle's creates so the cap holds without re-counting per item.
         # #3130: the agent's OWN rows only — a platform row about the agent (its
         # flood alarm above all) never spends the agent's budget.
-        pending_count = db.count_operator_queue_pending_for_agent(
+        pending_count = deps.db.count_operator_queue_pending_for_agent(
             agent_name, exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
         )
         admitted = 0
@@ -2253,7 +1680,7 @@ class OperatorQueueSyncService:
                 # platform uuid (returned here), not the agent's `req_id` — the
                 # frontend store keys items by uuid `id`, so an ack keyed on
                 # request_id would never match a live item.
-                ack_uuid = db.mark_operator_queue_acknowledged(agent_name, req_id)
+                ack_uuid = deps.db.mark_operator_queue_acknowledged(agent_name, req_id)
                 if ack_uuid:
                     acknowledged_items.append(ack_uuid)
                     open_by_rid.pop(req_id, None)  # it just went terminal
@@ -2414,7 +1841,7 @@ class OperatorQueueSyncService:
                 # trinity-enterprise#611: provenance from what the POLLER knows,
                 # keyword-only — never from the entry, which could claim any
                 # channel it likes.
-                new_id, inserted = db.create_operator_queue_item_with_outcome(
+                new_id, inserted = deps.db.create_operator_queue_item_with_outcome(
                     agent_name, clamped, channel="file", raised_by="agent",
                 )
                 self._create_failures.pop(fail_key, None)  # recovered — clear count
@@ -2458,8 +1885,8 @@ class OperatorQueueSyncService:
             # audit row is durable operator-visible state (G-04), so it carries
             # the folded token or `other` — never the string itself. `req_id`
             # passed the `_ID_RE` shape check above.
-            await _audit_sync("ingested", agent_name, new_id,
-                              {"request_id": req_id, "type": _fold_agent_status(clamped.get("type"))})
+            await deps._audit_sync("ingested", agent_name, new_id,
+                                   {"request_id": req_id, "type": _fold_agent_status(clamped.get("type"))})
 
         # #2915: open rows the file no longer carries. The entry was pruned or the
         # file is gone — the platform used to keep showing a live card for it.
@@ -2481,7 +1908,7 @@ class OperatorQueueSyncService:
         # #2915: "last confirmed at HH:MM" without a write per row per cycle —
         # one batched UPDATE per agent, for confirmed rows older than a minute.
         try:
-            db.refresh_operator_queue_last_confirmed(
+            deps.db.refresh_operator_queue_last_confirmed(
                 agent_name, now, iso_cutoff(minutes=LAST_CONFIRMED_REFRESH_SECONDS // 60)
             )
         except Exception as e:
@@ -2531,8 +1958,8 @@ class OperatorQueueSyncService:
         # them — as in-place status flips on entries still in the file; an
         # entry that is gone is recorded `undelivered:entry_missing` (#2915),
         # never silently skipped. The aging receipt rides the same write.
-        responded_items = db.get_operator_queue_responded_for_agent(agent_name)
-        terminal_items = db.get_operator_queue_terminal_for_agent(agent_name)
+        responded_items = deps.db.get_operator_queue_responded_for_agent(agent_name)
+        terminal_items = deps.db.get_operator_queue_terminal_for_agent(agent_name)
         # #3130: tell a held file so — but only when the marker it carries is not
         # already the one wanted, and never again against a file a write was
         # already refused on.
@@ -2558,7 +1985,7 @@ class OperatorQueueSyncService:
     async def _write_responses_to_agent(
         self,
         agent_name: str,
-        client: AgentClient,
+        client: deps.AgentClient,
         queue_data: dict,
         responded_items: list,
         terminal_items: Optional[list] = None,
@@ -2955,3 +2382,20 @@ class OperatorQueueSyncService:
 
 # Global service instance
 operator_queue_service = OperatorQueueSyncService()
+
+
+# ---------------------------------------------------------------------------
+# Re-exports (#3785, O3): only names read from outside the package, by
+# production code or by a test that calls or compares one (never patches it).
+# Inside the package every reader names the owning module.
+# ---------------------------------------------------------------------------
+
+# listing: the router's engine and refusal; the cursor codec tests drive.
+from .listing import (  # noqa: E402,F401
+    CURSOR_MAX_BYTES,
+    QueueListError,
+    decode_cursor,
+    encode_cursor,
+    list_for_principal,
+    narrow_to_agent_key,
+)

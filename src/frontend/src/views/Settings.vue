@@ -642,6 +642,9 @@
                   </p>
                 </div>
 
+                <!-- Workspace Direct calls (trinity-enterprise#1046) -->
+                <DirectVoiceSettings v-if="isAdmin" />
+
                 <!-- ElevenLabs / Voice platform settings (trinity-enterprise#117) -->
                 <div v-if="isAdmin" class="mt-6 pt-6 border-t border-gray-200 dark:border-gray-700">
                   <h3 class="text-sm font-medium text-gray-900 dark:text-white">Voice (ElevenLabs)</h3>
@@ -1603,32 +1606,10 @@ Example:
                 <span class="inline-flex items-center px-2 py-0.5 rounded-full bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200">{{ WORKSPACE_ONLY_ROLE_LABEL }}</span>
               </div>
 
-              <!-- #995 — enterprise: invite users (gated by user_management) -->
+              <!-- #995 / trinity-enterprise#1054 — enterprise: invite a person, and the
+                   invitations with who accepted which terms version (gated by user_management) -->
               <div v-if="umEntitled" class="mb-4">
-                <button
-                  v-if="!showInvite"
-                  @click="showInvite = true"
-                  class="px-3 py-2 text-sm font-medium rounded-lg bg-action-primary-600 hover:bg-action-primary-700 text-white"
-                >
-                  + Invite user
-                  <span class="ml-1 px-1.5 py-0.5 text-[9px] font-bold rounded bg-purple-200/70 text-purple-800 align-middle">PRO</span>
-                </button>
-                <form v-else @submit.prevent="createInvite" class="flex flex-wrap items-center gap-2 p-3 rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-700/40">
-                  <input v-model="inviteEmail" type="email" required placeholder="email@company.com" :disabled="umBusy"
-                    class="flex-1 min-w-[200px] px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100" />
-                  <select v-model="inviteRole" :disabled="umBusy"
-                    class="px-3 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100">
-                    <option value="user">{{ WORKSPACE_ONLY_ROLE_LABEL }}</option>
-                    <option value="operator">operator</option>
-                    <option value="creator">creator</option>
-                    <option value="admin">admin</option>
-                  </select>
-                  <button type="submit" :disabled="umBusy || !inviteEmail"
-                    class="px-3 py-2 text-sm font-medium rounded-lg bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-50">Send invite</button>
-                  <button type="button" @click="showInvite = false; inviteEmail = ''" :disabled="umBusy"
-                    class="px-3 py-2 text-sm rounded-lg text-gray-600 dark:text-gray-300 hover:underline">Cancel</button>
-                  <span v-if="inviteMsg" class="text-xs" :class="inviteErr ? 'text-status-danger-600 dark:text-status-danger-400' : 'text-status-success-700 dark:text-status-success-400'">{{ inviteMsg }}</span>
-                </form>
+                <InvitesPanel :users="usersList" />
               </div>
 
               <!-- trinity-enterprise#837 — how many accounts the operator floor keeps in
@@ -2002,6 +1983,9 @@ Example:
               <!-- #2915: the operator-queue aging bound — its own component so
                    this view's raw-colour count cannot move (the registry-panel precedent). -->
               <OperatorQueueAgingSetting />
+              <!-- trinity-enterprise#1068: a system apply's failed gate on a held
+                   skill unassigns it; its own component, same reason. -->
+              <ApplyUnassignOnFailedGateSetting />
             </div>
           </div>
 
@@ -2337,6 +2321,7 @@ import {
   retentionSaveBody,
 } from '../utils/retentionFields'
 import OperatorQueueAgingSetting from '../components/settings/OperatorQueueAgingSetting.vue'
+import ApplyUnassignOnFailedGateSetting from '../components/settings/ApplyUnassignOnFailedGateSetting.vue'
 import { describeSttCapability, describeSttLastFailure } from '../utils/sttCapability'
 import { useEnterpriseStore } from '../stores/enterprise'
 import NavBar from '../components/NavBar.vue'
@@ -2361,6 +2346,7 @@ import OperatorIntakePanel from '../components/settings/OperatorIntakePanel.vue'
 import PortalSessionPolicyPanel from '../components/settings/PortalSessionPolicyPanel.vue'
 import RoomBudgetDefaultsPanel from '../components/settings/RoomBudgetDefaultsPanel.vue'
 import BackupStatusPanel from '../components/settings/BackupStatusPanel.vue'
+import InvitesPanel from '../components/settings/InvitesPanel.vue'
 import { SETTINGS_NUMBER_INPUT_CLASS, SETTINGS_TEXT_INPUT_CLASS } from '../components/settings/fieldStyles'
 // #2691: one home for what the Public URL buys, what must be true first, and
 // what saving it re-points — shared with the first-run step so the explanation
@@ -2379,6 +2365,7 @@ import ConfirmDialog from '../components/ConfirmDialog.vue'
 import BaseBadge from '../components/base/BaseBadge.vue'
 import BaseButton from '../components/base/BaseButton.vue'
 import BaseSelect from '../components/base/BaseSelect.vue'
+import DirectVoiceSettings from '../components/settings/DirectVoiceSettings.vue'
 import { WORKSPACE_ONLY_ROLE_LABEL, existingAccountNotice } from '../utils/workspaceOnly'
 import { HELP_CLASS } from '../components/base/fieldClasses'
 import InlineError from '../components/InlineError.vue'
@@ -2647,14 +2634,9 @@ function closeActivity() {
   activityData.value = null
 }
 
-// #995 — enterprise user lifecycle: deactivate / reactivate / invite.
+// #995 — enterprise user lifecycle: deactivate / reactivate (invitations: InvitesPanel, ent#1054).
 const UM_BASE = '/api/enterprise/user-management'
 const umBusy = ref(false)
-const showInvite = ref(false)
-const inviteEmail = ref('')
-const inviteRole = ref('user')
-const inviteMsg = ref('')
-const inviteErr = ref(false)
 
 async function suspendUser(u) {
   if (umBusy.value) return
@@ -2678,24 +2660,6 @@ async function reactivateUser(u) {
     await loadUsers()
   } catch (e) {
     alert(e.response?.data?.detail || e.message)
-  } finally {
-    umBusy.value = false
-  }
-}
-
-async function createInvite() {
-  if (umBusy.value || !inviteEmail.value) return
-  umBusy.value = true
-  inviteMsg.value = ''
-  inviteErr.value = false
-  try {
-    await axios.post(`${UM_BASE}/invites`, { email: inviteEmail.value, role: inviteRole.value }, { headers: authStore.authHeader })
-    inviteMsg.value = `Invited ${inviteEmail.value} (${inviteRole.value}) — they can now sign in by email.`
-    inviteEmail.value = ''
-    inviteRole.value = 'user'
-  } catch (e) {
-    inviteErr.value = true
-    inviteMsg.value = e.response?.data?.detail || e.message
   } finally {
     umBusy.value = false
   }

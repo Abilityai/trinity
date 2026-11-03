@@ -581,10 +581,10 @@ def _sync(monkeypatch, responded, *entries):
     client = MagicMock()
     client.read_file = AsyncMock(return_value={"success": True, "content": content})
     client.write_file = AsyncMock(return_value={"success": True})
-    monkeypatch.setattr(oqs, "db", db)
-    monkeypatch.setattr(oqs, "AgentClient", lambda name: client)
+    monkeypatch.setattr(oqs.deps, "db", db)
+    monkeypatch.setattr(oqs.deps, "AgentClient", lambda name: client)
     monkeypatch.setattr(oqs.rate_limiter, "check", lambda *a, **k: RateLimitResult(True, 10, 0, 60))
-    monkeypatch.setattr(oqs, "_audit_sync", AsyncMock())
+    monkeypatch.setattr(oqs.deps, "_audit_sync", AsyncMock())
     asyncio.run(oqs.OperatorQueueSyncService()._sync_agent("a"))
     return db, client
 
@@ -888,7 +888,7 @@ _NON_ROW_ACCESSORS = frozenset({
 _READ_CLASSES = frozenset({"door", "filtered", "person", "addressee", "agent", "ruled", "internal"})
 _PORTAL_ASKS = "client_portal/asks/service.py"
 _ASKS = "services/ask_service.py"
-_OQS = "services/operator_queue_service.py"
+_OQS = "services/operator_queue_service/__init__.py"
 _TAGS = "services/person_mention_service.py"
 _ALERTS = "services/platform_alerts.py"
 _PROMPT = "services/platform_prompt_service.py"
@@ -944,7 +944,7 @@ _ROW_READERS = {
     (_ASKS, "withdraw"): (
         "agent", "the receipt of the agent's own ask; a row it did not raise, or one about a "
                  "person, is the uniform 404 (§2 drives it)"),
-    (_OQS, "OperatorQueueSyncService._poll_cycle"): (
+    ("services/operator_queue_service/poller.py", "PollerCoreMixin._poll_cycle"): (
         "internal", "marks answers owed to stopped agents, reserved prefixes excluded; audits ids"),
     (_OQS, "OperatorQueueSyncService._sync_agent"): (
         "agent", "the file write-back: `is_platform_minted` keeps every reserved-prefix row, so "
@@ -952,7 +952,7 @@ _ROW_READERS = {
     (_OQS, "_maybe_emit_alert_budget_episode"): (
         "internal", "the ids of the rows filling an agent's alert budget, digested into the "
                     "episode marker (#3254); no row leaves"),
-    (_OQS, "list_for_principal"): (
+    ("services/operator_queue_service/listing.py", "list_for_principal"): (
         "filtered", "the broad list's engine: a machine's about-a-person exclusion runs in SQL "
                     "before the limit (§2 drives its door)"),
     (_TAGS, "_mine"): ("addressee", "one tag, only for the person it tags"),

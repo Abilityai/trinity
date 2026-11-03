@@ -23,7 +23,7 @@ The platform instructions also tell every agent, on every runtime, **not to run 
 - **Work inside the turn**: on Claude Code, its `Agent` subagent tool (also named `Task`) when the agent has it; on any runtime, its own tools directly.
 - **Delegated, batch or second-model work** (for example a judge step on another model): `chat_with_agent` with `parallel=true`, which can target the agent itself and take a `model` (`async=true` for long work), or `fan_out`, which also takes `model`.
 
-This rule is advisory: nothing blocks the command, and agents that never shell out see no change. You don't need to add it to your Trinity prompt. If an agent of yours relies on a skill that runs `claude -p` (or another CLI) for a sub-step, rewrite that step to use one of the paths above.
+On most agents this rule is advisory: nothing blocks the command. On a Claude Code agent with gated skills, the [Bash guardrail](agent-guardrails.md#1-bash-command-blocking) also refuses it. You don't need to add it to your Trinity prompt. If an agent of yours relies on a skill that runs `claude -p` (or another CLI) for a sub-step, rewrite that step to use one of the paths above.
 
 > **Note:** Deploying a [system manifest](../collaboration/system-manifest.md#things-the-preview-will-make-you-confirm) with a top-level `prompt:` key **replaces** the Trinity prompt for every agent on the instance. If you have adopted the prompt below, check a manifest's preview before you deploy it.
 

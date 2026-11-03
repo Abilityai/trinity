@@ -479,15 +479,12 @@ def _may_reach_for_path(current_user, agent_name, path, *, include_ancestors=Fal
     the target without a permission edge. Every file class the path touches
     needs its capability, and the target must be one the key's owner OWNS — the
     bound the route-level capability fences apply (`owner_owns_agent`). The
-    capability gate below still decides the write and audits a refusal."""
+    capability gate below still decides the write, audits a refusal and, for
+    reach an edge gave (an edge means may call, never may manage), applies the
+    owner bound."""
     if agent_may_reach(current_user, agent_name):
         return True
-    from db.capability_grants import CAPABILITY_INSTRUCTIONS_MANAGE, CAPABILITY_SKILLS_MANAGE
-    needed = []
-    if _touches_skills_dir(path, include_ancestors=include_ancestors):
-        needed.append(CAPABILITY_SKILLS_MANAGE)
-    if _touches_instructions(path, include_ancestors=include_ancestors):
-        needed.append(CAPABILITY_INSTRUCTIONS_MANAGE)
+    needed = _capabilities_for_path(path, include_ancestors=include_ancestors)
     if not needed:
         return False
     from dependencies import capability_refusal, owner_owns_agent
@@ -508,18 +505,26 @@ def _touches_instructions(path: str, *, include_ancestors: bool = False) -> bool
     return _policy.INSTRUCTIONS in _policy.classes(path, include_ancestors=include_ancestors)
 
 
-async def _require_skill_capability(path, current_user, request, agent_name, *, include_ancestors=False):
-    from dependencies import enforce_agent_capability
+def _capabilities_for_path(path, *, include_ancestors=False) -> list:
+    """The capabilities a platform write to `path` takes, one per file class."""
+    from db.capability_grants import CAPABILITY_INSTRUCTIONS_MANAGE, CAPABILITY_SKILLS_MANAGE
+    needed = []
     if _touches_skills_dir(path, include_ancestors=include_ancestors):
-        from db.capability_grants import CAPABILITY_SKILLS_MANAGE
-        await enforce_agent_capability(
-            request, current_user, CAPABILITY_SKILLS_MANAGE, target=agent_name
-        )
+        needed.append(CAPABILITY_SKILLS_MANAGE)
     if _touches_instructions(path, include_ancestors=include_ancestors):
-        from db.capability_grants import CAPABILITY_INSTRUCTIONS_MANAGE
-        await enforce_agent_capability(
-            request, current_user, CAPABILITY_INSTRUCTIONS_MANAGE, target=agent_name
-        )
+        needed.append(CAPABILITY_INSTRUCTIONS_MANAGE)
+    return needed
+
+
+async def _require_skill_capability(path, current_user, request, agent_name, *, include_ancestors=False):
+    from dependencies import capability_refusal, enforce_agent_capability
+    needed = _capabilities_for_path(path, include_ancestors=include_ancestors)
+    # A capability the key lacks goes first, so a refused call never records a
+    # use of the other one (trinity-enterprise#871).
+    needed.sort(key=lambda cap: capability_refusal(current_user, cap) is None)
+    for capability in needed:
+        await enforce_agent_capability(request, current_user, capability, target=agent_name,
+                                       owner_bound=True)
 
 
 # trinity-enterprise#820: a hard link to a credential file (made by the agent
