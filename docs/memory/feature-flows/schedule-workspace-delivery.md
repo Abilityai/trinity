@@ -95,6 +95,18 @@ chat as an ordinary turn from the agent. Create-only would be a formality — cr
 without the field, PUT it a second later. Fail-closed on an unreadable ownership
 read, and clearing the target is never privileged.
 
+**An agent's own key addresses only its owner (trinity-enterprise#1063).** The
+agent key resolves to its owner, so the rule above would let an agent address
+anyone the owner could — and a schedule addressed to a person makes its runs that
+person's seat runs. `_refuse_agent_third_party` refuses an agent principal
+(`403 agent_cannot_address_another_person`) a third-party target on create and
+update, and every per-schedule action (update, delete, enable, disable, trigger,
+webhook mint) on a schedule already addressed to someone else — so the agent can
+neither create, retarget, rewrite nor fire a turn in a colleague's seat. Who the
+agent speaks to unprompted is the owner's grant (Invariant #8 grant vs use); the
+owner's own session keeps every control, and a schedule for the owner or with no
+target stays fully agent-manageable.
+
 ## Refusals are visible (AC 5)
 
 | reason | when |
@@ -230,6 +242,11 @@ rule; the address normaliser driven over **both** models so the update path cann
 than the create path; the stamp's add-only guard; every refusal reason; the ordering that
 puts the refusal ahead of both dispatch branches; the bounded wait; and that the scheduler
 resolves no session.
+
+`tests/unit/test_ent1063_agent_schedule_recipient.py` — with a real agent key: a
+third-party target refused on create and update; the owner's colleague schedule refused
+to the agent on update, trigger, enable, disable, delete and webhook mint; the owner keeps
+every control; the agent's own-owner schedules stay manageable.
 
 `tests/journeys/test_j11_brief_delivery_journey.py` — the J11 skeleton (`strict=True`
 xfail).

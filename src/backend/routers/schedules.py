@@ -28,6 +28,7 @@ from models import (
 )
 from dependencies import (
     agent_may_reach,
+    agent_principal_name,
     capability_fence,
     person_or_capability_admits,
     require_person_or_capability,
@@ -191,6 +192,35 @@ async def list_agent_schedules(name: AuthorizedAgent, current_user: User = Depen
     return [_schedule_response(s, name, current_user) for s in schedules]
 
 
+_AGENT_THIRD_PARTY = {
+    "error": ("An agent can deliver a schedule only to its owner's Workspace. Pointing a schedule at "
+              "someone else, or changing or running one that is, is the owner's decision: ask them to "
+              "set it up in the agent's Schedules."),
+    "code": "agent_cannot_address_another_person",
+}
+
+
+def _refuse_agent_third_party(current_user, email) -> None:
+    """trinity-enterprise#1063: an agent's own key never addresses, edits or fires
+    a schedule delivered to someone other than its owner.
+
+    A schedule addressed to a person makes its runs that person's seat runs
+    (`schedule_seat_memory`): they serve that person, write their notes and
+    read as that person's turns. `_enforce_delivery_target_authority` lets the
+    agent's OWNER address anyone, and an agent key resolves to its owner, so
+    without this an agent could mint a live turn in a colleague's seat — create
+    or retarget a schedule to them, rewrite one the owner made for them, or fire
+    it on demand. That is a grant, not a use (Invariant #8): the owner decides
+    who the agent speaks to unprompted. Addressing the owner stays open (the
+    key's email IS the owner's), and the system key is the platform's own.
+    """
+    if not agent_principal_name(current_user):
+        return
+    target = (email or "").strip().lower()
+    if target and target != (getattr(current_user, "email", "") or "").strip().lower():
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_AGENT_THIRD_PARTY)
+
+
 def _enforce_delivery_target_authority(current_user, name: str, email) -> None:
     """Who may point a schedule at somebody else's Workspace (ent#498 review).
 
@@ -291,6 +321,7 @@ async def create_schedule(
     if schedule_data.timeout_seconds is not None:
         _enforce_timeout_below_agent_cap(name, schedule_data.timeout_seconds)
 
+    _refuse_agent_third_party(current_user, schedule_data.deliver_to_workspace_email)
     _enforce_delivery_target_authority(
         current_user, name, schedule_data.deliver_to_workspace_email)
 
@@ -417,6 +448,7 @@ async def update_schedule(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Schedule not found"
         )
+    _refuse_agent_third_party(current_user, getattr(schedule, "deliver_to_workspace_email", None))
 
     # #1472: validate cron + timezone with the scheduler's parser (see
     # create_schedule). Cron-field validity is timezone-independent, so a cron
@@ -476,6 +508,7 @@ async def update_schedule(
     # nulling PUT (stop delivering) is always allowed.
     update_dict = updates.model_dump(exclude_unset=True)
     if update_dict.get("deliver_to_workspace_email"):
+        _refuse_agent_third_party(current_user, update_dict["deliver_to_workspace_email"])
         _enforce_delivery_target_authority(
             current_user, name, update_dict["deliver_to_workspace_email"])
 
@@ -505,6 +538,7 @@ async def delete_schedule(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Schedule not found"
         )
+    _refuse_agent_third_party(current_user, getattr(schedule, "deliver_to_workspace_email", None))
 
     # Dedicated scheduler syncs from database automatically
     # It will detect the deletion on next sync cycle
@@ -525,7 +559,8 @@ async def enable_schedule(
     # OwnedAgentByName reads `agent_name`, so FastAPI could never satisfy it
     # and rejected every request with 422 before the handler ran (#2094).
     name: OwnedAgent,
-    schedule_id: str
+    schedule_id: str,
+    current_user: User = Depends(get_current_user),
 ):
     """Enable a schedule."""
     schedule = db.get_schedule(schedule_id)
@@ -534,6 +569,7 @@ async def enable_schedule(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Schedule not found"
         )
+    _refuse_agent_third_party(current_user, getattr(schedule, "deliver_to_workspace_email", None))
 
     # Update database - dedicated scheduler syncs automatically
     db.set_schedule_enabled(schedule_id, True)
@@ -548,7 +584,8 @@ async def disable_schedule(
     # OwnedAgentByName reads `agent_name`, so FastAPI could never satisfy it
     # and rejected every request with 422 before the handler ran (#2094).
     name: OwnedAgent,
-    schedule_id: str
+    schedule_id: str,
+    current_user: User = Depends(get_current_user),
 ):
     """Disable a schedule."""
     schedule = db.get_schedule(schedule_id)
@@ -557,6 +594,7 @@ async def disable_schedule(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Schedule not found"
         )
+    _refuse_agent_third_party(current_user, getattr(schedule, "deliver_to_workspace_email", None))
 
     # Update database - dedicated scheduler syncs automatically
     db.set_schedule_enabled(schedule_id, False)
@@ -590,6 +628,7 @@ async def trigger_schedule(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Schedule not found"
         )
+    _refuse_agent_third_party(current_user, getattr(schedule, "deliver_to_workspace_email", None))
 
     # #1970: the authenticated caller is in scope HERE and nowhere downstream —
     # the scheduler hop carried only the schedule id, so every manually
@@ -762,6 +801,7 @@ async def generate_webhook(
     schedule = db.get_schedule(schedule_id)
     if not schedule or schedule.agent_name != name:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
+    _refuse_agent_third_party(current_user, getattr(schedule, "deliver_to_workspace_email", None))
 
     _assert_can_manage_webhook(schedule, name, current_user)
 

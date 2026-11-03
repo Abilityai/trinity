@@ -229,7 +229,11 @@ export function createScheduleTools(
             "conversation with the agent (their pinned Main chat), as well as recording " +
             "the run. Must be someone the agent is already shared with or owned by — " +
             "an address that cannot reach the agent makes the run FAIL rather than " +
-            "silently deliver nowhere. Omit for today's behaviour (no delivery)."
+            "silently deliver nowhere. Omit for today's behaviour (no delivery). " +
+            "With the agent's own key, only the owner's address is accepted: pointing a " +
+            "schedule at anyone else is refused `agent_cannot_address_another_person` " +
+            "(the owner sets that up in the agent's Schedules), and so is changing, " +
+            "triggering or deleting a schedule that already delivers to someone else."
           ),
       }),
       execute: async (
@@ -421,7 +425,9 @@ export function createScheduleTools(
           .optional()
           .describe(
             "Deliver this schedule's output into that person's Workspace conversation " +
-            "with the agent. Pass null to stop delivering. If omitted, keeps current value."
+            "with the agent. Pass null to stop delivering. If omitted, keeps current value. " +
+            "With the agent's own key only the owner's address is accepted, and a schedule " +
+            "that delivers to someone else cannot be changed (`agent_cannot_address_another_person`)."
           ),
       }),
       execute: async (
