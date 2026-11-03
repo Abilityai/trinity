@@ -1125,9 +1125,9 @@ own reply. Live stays the default and is unchanged.
 - **FR-3 — Harness-agnostic speech**: every reply is spoken from the finished turn on
   every runtime. Where a runtime streams its messages, speech starts earlier and the
   persisted reply is reconciled so nothing is said twice and no tail is lost. A runtime
-  without a stream says so in the strip's detail line. A reply with nothing to read
-  aloud (only code, a table or links) says "The reply is in the chat." rather than
-  nothing.
+  without a stream says so in the strip's detail line. A reply that is only a code
+  block is read from inside it; one with nothing to read aloud at all (a table, links)
+  says "The reply is in the chat." rather than nothing.
 - **FR-4 — The live thread stays live**: during a Direct call the thread and composer
   work. A typed message is sent normally and spoken back. Rows land as they happen;
   after the call they fold into one call block.
