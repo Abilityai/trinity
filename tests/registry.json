@@ -11,6 +11,17 @@
       "description": "#4151: a manifest schedule's `model` is never silently dropped. The shared `_build_schedule_create` mapping carries it; apply creates the row with it and the dry run and the result name it in `schedule_create`; a different declared model (or one on a row with none) is a `schedule_update` naming `model` current -> desired, written on the real run; an entry that declares no model leaves the row's model alone; the same model is in sync; export writes `model` only when set and export -> dry-run apply writes nothing."
     },
     {
+      "file": "unit/test_4055_platform_alert_followup_logged.py",
+      "feature": "#4055",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "operator-queue",
+        "reliability"
+      ],
+      "description": "#4055: a follow-up the platform-alert seam spawns (alert-budget episode, operator_queue_sync broadcast) that raises is logged once at ERROR with kind and agent; a successful one logs nothing."
+    },
+    {
       "file": "unit/test_ent737_request_identity.py",
       "feature": "trinity-enterprise#737",
       "added": "2026-11-03",
