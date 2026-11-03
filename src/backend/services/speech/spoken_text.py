@@ -1,8 +1,7 @@
 """What part of an agent's reply is read aloud. The one home of this rule.
 
-The written reply is always whole. This only decides what the speaker says: no code
-beside prose (a reply that is nothing but a code block is read from inside it), no
-`<screen>` blocks, no markdown punctuation or bare URLs, and a bounded length with a
+The written reply is always whole. This only decides what the speaker says: no code,
+no `<screen>` blocks, no markdown punctuation or bare URLs, and a bounded length with a
 fixed closing line. It removes text and never rewrites the agent's sentences.
 """
 from __future__ import annotations
@@ -18,8 +17,6 @@ SPOKEN_CHAR_LIMIT = 1200
 _SCREEN = re.compile(r"<screen>.*?</screen>", re.I | re.S)
 _OPEN_SCREEN = re.compile(r"<screen>.*\Z", re.I | re.S)
 _FENCE = re.compile(r"```.*?(```|\Z)", re.S)
-# A fence's body without its markers and language tag.
-_FENCE_BODY = re.compile(r"```[^\n]*\n?(.*?)(```|\Z)", re.S)
 _LINK = re.compile(r"\[([^\]]+)\]\([^)]+\)")
 _URL = re.compile(r"https?://\S+")
 _INLINE_CODE = re.compile(r"`([^`]*)`")
@@ -31,13 +28,11 @@ _NORMAL = re.compile(r"[^\w]+", re.U)
 
 
 def speakable(text: str) -> str:
-    """The reply with everything that should not be read aloud removed. Code beside
-    prose is dropped; when code blocks are all there is, their text is the answer."""
+    """The reply with everything that should not be read aloud removed."""
     t = text or ""
     t = _SCREEN.sub(" ", t)
     t = _OPEN_SCREEN.sub(" ", t)
-    without_code = _FENCE.sub(" ", t)
-    t = without_code if _NORMAL.sub("", without_code) else _FENCE_BODY.sub(r"\1", t)
+    t = _FENCE.sub(" ", t)
     t = _TABLE_LINE.sub(" ", t)
     t = _LINK.sub(r"\1", t)
     t = _URL.sub(" ", t)

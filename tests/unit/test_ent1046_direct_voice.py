@@ -228,26 +228,12 @@ def test_a_failed_turn_gets_the_fixed_line_and_nothing_invented(patched):
     assert provider.said == [dvs.LINE_TURN_FAILED]
 
 
-def test_a_reply_that_is_only_a_code_block_is_read_from_inside_it(patched):
-    # test-echo answers with nothing but a fenced block. Code beside prose stays unsaid,
-    # but when the block IS the reply, its text is the answer and is read.
+def test_a_reply_with_nothing_to_say_aloud_still_answers(patched):
+    # A reply that is only code (test-echo's fenced echo), a table or links has no
+    # speakable sentence. Silence there reads as a dead call; the fixed line says
+    # where the reply is.
     _, provider = _turn(patched, runtime="claude-code",
                         reply="```\nEcho: Tell me something please.\nWords: 4\n```")
-    assert provider.said == ["Echo: Tell me something please.", "Words: 4"]
-
-
-def test_a_streamed_code_only_reply_is_said_once(patched):
-    entry = {"type": "assistant", "message": {"content": [
-        {"type": "text", "text": "```\nEcho: hi there.\n```"}]}}
-    _, provider = _turn(patched, runtime="claude-code", entries=[entry],
-                        reply="```\nEcho: hi there.\n```")
-    assert provider.said == ["Echo: hi there."]
-
-
-def test_a_reply_with_nothing_to_say_aloud_still_answers(patched):
-    # Only a table: nothing to read. Silence reads as a dead call; the fixed line says
-    # where the reply is.
-    _, provider = _turn(patched, runtime="claude-code", reply="| a | b |\n|---|---|\n| 1 | 2 |")
     assert provider.said == [dvs.LINE_REPLY_IN_CHAT]
 
 

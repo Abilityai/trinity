@@ -42,8 +42,7 @@ browser send() ─▶ POST …/chat/stream {voice_call_id: vd_…} ◀──┘ 
    `normalize_stream_entry` per runtime (subagent text dropped), tool status lines on silence,
    then `_await_turn_end` reads the persisted row and `unspoken_tail` speaks what the stream
    did not. A held turn's notice is not read; a failed turn gets "The agent couldn't answer
-   that."; a reply that is only a code block is read from inside it (code beside prose stays
-   unsaid); a reply with nothing speakable at all (a table, links) gets "The reply is in the
+   that."; a reply with nothing speakable (only code, a table, links) gets "The reply is in the
    chat."; a cancelled one is silent. `SpokenBudget` closes a long reply with "The rest is in
    the chat." Spoken text is scrubbed of staged secrets.
 6. **Barge-in.** Speech over playback pauses it; a real utterance sends `interrupt` (drop the
