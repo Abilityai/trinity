@@ -15,7 +15,7 @@ import api from '../../src/api'
 import { portalHttp } from '../../src/stores/clientPortal'
 import { useAuthStore } from '../../src/stores/auth'
 import {
-  isTermsRefusal, notifyTermsRefusal, reactToTermsRefusal, setTermsRefusalHandler,
+  isTermsRefusal, notifyTermsRefusal, reactToTermsRefusal, setTermsRefusalHandler, termsLocation,
 } from '../../src/utils/termsGate'
 
 function failWith(status, detail) {
@@ -81,6 +81,68 @@ describe('the HTTP clients report the terms refusal', () => {
     await Promise.resolve()
     notifyTermsRefusal(errorOf(TERMS), clock + 200)
     expect(handler).toHaveBeenCalledTimes(1)
+  })
+})
+
+// trinity-enterprise#1082 — the window is earned by a navigation, not spent by
+// a refusal: one the handler ignored (a sign-in page, /terms) or whose push
+// failed must not silence the next refusal on a settled page.
+describe('the burst window starts only when the person was moved', () => {
+  const settle = async () => { for (let i = 0; i < 4; i++) await Promise.resolve() }
+
+  it('a refusal the handler ignored does not start the window', () => {
+    const handler = vi.fn(() => undefined)
+    setTermsRefusalHandler(handler)
+    notifyTermsRefusal(errorOf(TERMS), clock)
+    notifyTermsRefusal(errorOf(TERMS), clock + 100)
+    expect(handler).toHaveBeenCalledTimes(2)
+  })
+
+  it('a navigation that failed does not start the window', async () => {
+    // vue-router resolves (never rejects) an aborted/cancelled push with a NavigationFailure.
+    const handler = vi.fn(() => Promise.resolve({ type: 4 }))
+    setTermsRefusalHandler(handler)
+    notifyTermsRefusal(errorOf(TERMS), clock)
+    await settle()
+    notifyTermsRefusal(errorOf(TERMS), clock + 100)
+    expect(handler).toHaveBeenCalledTimes(2)
+  })
+
+  it('a navigation that rejected does not start the window, and is not unhandled', async () => {
+    const handler = vi.fn(() => Promise.reject(new Error('aborted')))
+    setTermsRefusalHandler(handler)
+    notifyTermsRefusal(errorOf(TERMS), clock)
+    await settle()
+    notifyTermsRefusal(errorOf(TERMS), clock + 100)
+    expect(handler).toHaveBeenCalledTimes(2)
+  })
+
+  it('one navigation in flight absorbs the burst; the window runs from its completion', async () => {
+    let complete
+    const handler = vi.fn(() => new Promise((resolve) => { complete = resolve }))
+    setTermsRefusalHandler(handler)
+    notifyTermsRefusal(errorOf(TERMS), clock)
+    notifyTermsRefusal(errorOf(TERMS), clock + 50)
+    notifyTermsRefusal(errorOf(TERMS), clock + 5_000) // still navigating: absorbed, clock or not
+    expect(handler).toHaveBeenCalledTimes(1)
+    complete(undefined)
+    await settle()
+    notifyTermsRefusal(errorOf(TERMS), clock + 100)
+    expect(handler).toHaveBeenCalledTimes(1)
+    notifyTermsRefusal(errorOf(TERMS), clock + 2_001)
+    expect(handler).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('termsLocation — one builder for the push and the link', () => {
+  it('is exactly what reactToTermsRefusal pushes', () => {
+    for (const [path, code] of [['/workspace?agent=scout', 'terms_required'], ['/workspace', 'invite_expired'], ['/workspace/inbox', 'invite_revoked']]) {
+      const push = vi.fn(() => Promise.resolve())
+      reactToTermsRefusal(errorOf({ code }), { currentPath: () => path, push })
+      expect(push).toHaveBeenCalledWith(termsLocation(path, code))
+    }
+    expect(termsLocation('/workspace', 'terms_required')).toEqual({ path: '/terms', query: { redirect: '/workspace' } })
+    expect(termsLocation('https://evil.example/x', 'invite_revoked')).toEqual({ path: '/terms', query: { reason: 'invite_revoked' } })
   })
 })
 
