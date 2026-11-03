@@ -241,6 +241,7 @@ __pycache__/
 # awsCredentialExport, gcpAuthRefresh, otelHeadersHelper) — on disk either way.
 .claude/remote-settings.json
 .claude/policy-limits.json
+.claude/policy-limits.json.stamp.json
 .claude/backups/
 .claude/.last-cleanup
 # Keep: .claude/commands/, .claude/skills/, .claude/agents/
