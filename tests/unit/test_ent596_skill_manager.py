@@ -205,7 +205,9 @@ def test_a_holder_manages_itself_and_siblings_but_never_beyond_its_owner(grants,
     with pytest.raises(HTTPException) as exc:
         _run_fence(_principal("agent", HOLDER), OUTSIDER)
     assert exc.value.status_code == 404   # the grant widened nothing
-    audit.assert_not_awaited()
+    # ent#871: two uses, then the refusal the owner bound writes.
+    assert [c.kwargs["event_action"] for c in audit.await_args_list] == [
+        "capability_used", "capability_used", "capability_refused"]
 
 
 def test_a_holder_never_reaches_another_users_agent_even_on_an_admin_owned_install(grants, owner_fence, audit):
@@ -564,7 +566,7 @@ def test_the_grant_route_grants_and_audits_only_real_changes(monkeypatch, audit)
                                                  _request(), admin_user=admin))
     assert first.changed is True and again.changed is False
     audit.assert_awaited_once()
-    assert audit.await_args.kwargs["event_action"] == "skill_manager_grant"
+    assert audit.await_args.kwargs["event_action"] == "capability_grant"
 
 
 # ---- 7. attribution over a real SQLite file ------------------------------------

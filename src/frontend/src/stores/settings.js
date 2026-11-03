@@ -89,6 +89,17 @@ export const useSettingsStore = defineStore('settings', {
      * { flags: { enabled|voice_enabled|write_enabled: { value, source } },
      *   gemini_key_configured }. `source` is override|env|default. Admin-only.
      */
+    // trinity-enterprise#1046. Admin-only; applies to the next call.
+    async getDirectVoiceSettings() {
+      const response = await axios.get('/api/settings/direct-voice')
+      return response.data
+    },
+
+    async setDirectVoiceSettings(payload) {
+      const response = await axios.put('/api/settings/direct-voice', payload)
+      return response.data
+    },
+
     async getBrainOrbSettings() {
       const response = await axios.get('/api/settings/brain-orb')
       return response.data

@@ -15,6 +15,10 @@
  *   - withdraw_ask              — an agent ends one of its OWN pending asks
  *                                 with a reason and no successor (ent#901,
  *                                 self-acting)
+ *   - ask_for_credential        — an agent asks the person of the conversation
+ *                                 for a secret BY NAME; the value is typed into
+ *                                 a masked Workspace field, never through MCP
+ *                                 (trinity-enterprise#1066, self-acting)
  *
  * Access control crux: the backend resolves an agent-scoped MCP key to its
  * OWNER and filters by the owner's accessible agents — it does NOT enforce
@@ -138,7 +142,8 @@ const askOperatorParameters = z.object({
   // trinity-enterprise#1007: the four kinds, or a canon role by id. The regex is
   // the backend's ROLE_ID_RE behind a lower-case `role:` prefix (the backend
   // lower-cases the id, so a retry spelt differently still replays). A union
-  // publishes as `anyOf`, which strictJsonSchema leaves alone.
+  // publishes as `anyOf`, which strictJsonSchema leaves alone. trinity-enterprise#1053:
+  // the answer to an `approver` ask is fenced to the seat (`ask_service.may_end`).
   to: z
     .union([
       z.enum(["primary", "approver", "viewer", "operator"]),
@@ -146,7 +151,7 @@ const askOperatorParameters = z.object({
     ])
     .optional()
     .describe(
-      "Who should answer: primary (your owner — it also shows in their Workspace; the default for approval and question) or operator (the platform's operators; the default for alert). approver and viewer are refused with role_unassigned until someone fills them. A role several people fill reaches every one of them: the first answer wins. " +
+      "Who should answer: primary (your owner — it also shows in their Workspace; the default for approval and question) or operator (the platform's operators; the default for alert). approver and viewer are refused with role_unassigned until someone fills them. approver: only a person seated as approver can answer (anyone else is refused with not_addressee). A role several people fill reaches every one of them: the first answer wins. " +
         "Or role:<id> — a canon role on your own roster, reaching every person seated in it who can open you; refused by name with role_unavailable (the assignments module is absent, has no answer for the role or could not answer: address primary or operator), role_unassigned (nobody is seated) or role_cannot_open_agent (nobody seated can open you: ask your owner to share you with them).",
     ),
   expires_at: z
@@ -170,6 +175,33 @@ const askOperatorParameters = z.object({
         "Repeating a pending ask's proposal without naming it here is refused with 409 already_pending, which names that ask's request_id. " +
         "A retry of THIS request_id replays the first receipt and does not replace again. After an expiry use supersedes_expired, not this.",
     ),
+});
+
+/** trinity-enterprise#1066: what an agent sends to ask for a credential by name. */
+const askForCredentialParameters = z.object({
+  name: z
+    .string()
+    .min(1)
+    .max(64)
+    .describe(
+      "The environment variable the credential will be stored under, e.g. OP_SERVICE_ACCOUNT_TOKEN: letters, digits and '_', not starting with a digit, at most 64 characters. Names the platform or the agent runtime writes itself (TRINITY_*, ANTHROPIC_API_KEY and the like) are refused with invalid_credential_name.",
+    ),
+  why: z
+    .string()
+    .min(1)
+    .describe("One or two sentences the person reads beside the field: what the credential is for and where they find it (up to 4000 characters). Never include a value."),
+  request_id: z
+    .string()
+    .min(1)
+    .max(256)
+    .optional()
+    .describe(
+      "Optional id YOU choose (letters, digits, '.', '_', ':' or '-'). Left out, it is derived from the name and the current turn, so a retry in the same turn returns the first receipt (status replayed) and never asks twice. Set a new one to ask again for the same name in the same turn, e.g. after the credential was rotated.",
+    ),
+  expires_at: z
+    .string()
+    .optional()
+    .describe("An ISO-8601 time WITH a timezone, at least 15 minutes out. When it passes unanswered the ask ends denied by timeout."),
 });
 
 /** trinity-enterprise#901: what an agent sends to withdraw one of its own asks. */
@@ -631,6 +663,76 @@ export function createOperatorQueueTools(
         } catch (error) {
           const refusal = askRefusal(error);
           console.error(`[ask_operator] refused: ${String(refusal.code ?? refusal.error)}`);
+          return JSON.stringify(refusal, null, 2);
+        }
+      },
+    },
+
+    // ========================================================================
+    // ask_for_credential (trinity-enterprise#1066)
+    // ========================================================================
+    askForCredential: {
+      name: "ask_for_credential",
+      // Kept under Claude Code's 2,048-character description cap (#3234); the
+      // name rules and the request_id derivation live in the parameters.
+      description:
+        "Ask the person you are talking with for a secret you need — an API key, " +
+        "a token, a password — BY NAME. Use it only in a conversation with the " +
+        "person who holds the credential: the ask reaches the person of the current " +
+        "chat; one raised from a schedule or another agent's call goes to your owner " +
+        "instead, and is refused with no_person when no single person can be named. The person sees a masked field in their Workspace thread " +
+        "and types the value there; it is stored in your environment under the name " +
+        "you gave and never appears in the chat, the ask, its answer or your wake. " +
+        "Never ask for a secret in a plain message, and never tell the person to " +
+        "paste it into the chat: the Workspace refuses a message that looks like a " +
+        "secret. Fire and park: raise it, end your turn. When the person fills the " +
+        "field the ask ends answered with the response provided and the name only: " +
+        "read the value from your environment on your next turn (environment " +
+        "variable NAME, or the .env file in your home) and never repeat, print or " +
+        "log it. Learn how it ended from the wake when the receipt says " +
+        "wakes_on_ending, or any time with get_my_ask and the receipt's request_id. " +
+        "A dismissed ask means the person chose not to give it: do not ask again " +
+        "straight away. If you no longer need it, withdraw_ask. Refusals come back " +
+        "as {success: false, status, code, message}: 422 no_person (no single person " +
+        "to ask — ask from a chat with them), 422 invalid_credential_name (a malformed " +
+        "or reserved name; reason says which), 429 rate_limited or queue_full. Acts " +
+        "as the agent your key belongs to; there is no agent parameter.",
+      parameters: askForCredentialParameters,
+      execute: async (
+        params: { name: string; why: string; request_id?: string; expires_at?: string },
+        context?: { session?: McpAuthContext },
+      ) => {
+        const authContext = context?.session;
+        let agentName: string;
+        try {
+          agentName = resolveActingAgent(authContext, "The ask_for_credential tool");
+        } catch (error) {
+          return JSON.stringify(
+            { success: false, error: error instanceof Error ? error.message : String(error) },
+            null,
+            2,
+          );
+        }
+        // The body is built from the declared fields only: nothing else an
+        // agent passes — least of all a value — reaches the backend.
+        const turn = authContext?.executionId;
+        const derived = `credential-${params.name}${turn ? `-${turn}` : ""}`.replace(/[^A-Za-z0-9._:-]/g, "-").slice(0, 256);
+        const body: OperatorAskCreate = {
+          request_id: params.request_id ?? derived,
+          type: "credential",
+          title: `Needs ${params.name}`,
+          question: params.why,
+          context: { credential_name: params.name },
+          to: "primary",
+          ...(params.expires_at === undefined ? {} : { expires_at: params.expires_at }),
+        };
+        const apiClient = getClient(authContext);
+        try {
+          const receipt = await apiClient.raiseAsk(agentName, body, turn);
+          return JSON.stringify(receipt, null, 2);
+        } catch (error) {
+          const refusal = askRefusal(error);
+          console.error(`[ask_for_credential] refused: ${String(refusal.code ?? refusal.error)}`);
           return JSON.stringify(refusal, null, 2);
         }
       },

@@ -791,7 +791,24 @@ async def resolve_platform_user_unfloored(request: Request, token: str) -> User:
     where a Workspace-only member belongs. Every other caller goes through
     `get_current_user`. `test_837_workspace_only_floor.py` pins the caller set,
     so a new door is a reviewed edit rather than a quiet way around the floor.
+
+    trinity-enterprise#1054 — the terms-acceptance gate (`services/terms_gate.py`)
+    is consulted HERE, once, after the credential is fully resolved: this is the
+    one function every door shares, so a Workspace-only person who has not
+    accepted the current terms is refused on all of them (403 `terms_required`),
+    and a route the person must reach before accepting is marked `@terms_route`.
+    Operator and above are never gated; an agent's credential is untouched.
     """
+    user = await _resolve_platform_credential(request, token)
+    from services import terms_gate  # late: the seam imports this module's marker
+    terms_gate.enforce(request, user)
+    return user
+
+
+async def _resolve_platform_credential(request: Request, token: str) -> User:
+    """The credential resolution itself — every scope fence, the revocation and
+    suspension checks — with no gate on top. Only `resolve_platform_user_unfloored`
+    calls this; the gate it adds is the reason the body is split out."""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -1166,6 +1183,32 @@ def workspace_route(reason: str):
 
     def mark(endpoint):
         setattr(endpoint, WORKSPACE_ROUTE_ATTR, reason)
+        return endpoint
+
+    return mark
+
+
+TERMS_ROUTE_ATTR = "__trinity_terms_route__"
+
+
+def terms_route(reason: str):
+    """Mark a route a person must reach BEFORE accepting the terms (trinity-enterprise#1054).
+
+    The terms gate (`services/terms_gate.py`) skips a marked route. The set is
+    deliberately tiny: signing out, the identity read the SPA lands on, and the
+    acceptance routes themselves. Same shape and same placement rule as
+    `workspace_route` — keep it BELOW the route decorator::
+
+        @router.post("/terms/accept")
+        @workspace_route("the terms screen is a Workspace page")
+        @terms_route("accepting is what ends the refusal")
+        async def accept_terms(current_user: User = Depends(require_interactive)):
+    """
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("terms_route needs a reason")
+
+    def mark(endpoint):
+        setattr(endpoint, TERMS_ROUTE_ATTR, reason)
         return endpoint
 
     return mark
@@ -1883,8 +1926,8 @@ def _admit_capability_reach(current_user, target_agent: str) -> None:
     """Record that a capability fence admitted an agent key to `target_agent`.
 
     Call only after the grant check AND the owner bound
-    (`_refuse_unless_owners_agent`) have passed, so the reach it earns stays
-    inside the agents the key's owner owns."""
+    (`enforce_agent_capability`'s `owner_bound`) have passed, so the reach it
+    earns stays inside the agents the key's owner owns."""
     reach = getattr(current_user, "_capability_reach", None)
     if isinstance(reach, set):
         reach.add(target_agent)
@@ -2597,24 +2640,20 @@ def capability_refusal(current_user, capability: str) -> Optional[tuple]:
     return code, f"A '{scope}' key cannot do this: {message}"
 
 
-async def enforce_agent_capability(
-    request: Request, current_user: User, capability: str, *, target: Optional[str] = None,
+async def _audit_capability(
+    request: Request, current_user: User, action: str, capability: str,
+    target: Optional[str], **details,
 ) -> None:
-    """Refuse with a named 403 — and an audit row — unless the principal may use
-    `capability`. The refused attempt of a prompt-injected agent is exactly the
-    event worth keeping, so a refusal is recorded, not only returned."""
-    refusal = capability_refusal(current_user, capability)
-    if refusal is None:
-        return
-    code, message = refusal
-    try:  # best-effort: an audit failure must never turn a 403 into a 500
+    """One AUTHORIZATION row about a capability. Best-effort: an audit failure
+    never changes what the caller gets."""
+    try:
         from services.platform_audit_service import platform_audit_service, AuditEventType
-        # The refused ACTOR is the agent, not its owner. `platform_audit_service`
-        # ranks `actor_user` above `actor_agent_name`, so passing the principal
-        # would file a prompt-injected agent's attempt as the owner's own act —
-        # the exact "the agent did it" vs "the person did it" line (Tandem R29)
-        # this capability exists to keep. For an agent principal: the agent is
-        # the actor, the owner rides as `actor_email`, and the key is named
+        # The ACTOR is the agent, not its owner. `platform_audit_service` ranks
+        # `actor_user` above `actor_agent_name`, so passing the principal would
+        # file a prompt-injected agent's attempt as the owner's own act — the
+        # exact "the agent did it" vs "the person did it" line (Tandem R29) this
+        # capability exists to keep. For an agent principal: the agent is the
+        # actor, the owner rides as `actor_email`, and the key is named
         # explicitly (the service derives it from `actor_user` otherwise).
         agent = getattr(current_user, "agent_name", None)
         actor = {"actor_user": current_user} if not agent else {
@@ -2626,7 +2665,7 @@ async def enforce_agent_capability(
         }
         await platform_audit_service.log(
             event_type=AuditEventType.AUTHORIZATION,
-            event_action="capability_refused",
+            event_action=action,
             source="api",
             **actor,
             actor_ip=request.client.host if request.client else None,
@@ -2634,14 +2673,86 @@ async def enforce_agent_capability(
             target_id=target,
             endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
-            details={"capability": capability, "code": code, "method": request.method},
+            details={"capability": capability, "method": request.method, **details},
         )
     except Exception:  # noqa: BLE001
-        logger.warning("capability refusal audit failed for %s", capability)
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail={"code": code, "capability": capability, "message": message},
-    )
+        logger.warning("capability audit failed for %s (%s)", capability, action)
+
+
+async def _audit_capability_use(
+    request: Request, current_user: User, capability: str, target: Optional[str],
+) -> None:
+    """`capability_used`, once per capability and target per request. A metric
+    declaration write passes the route fence and then the Files write it
+    delegates to, both on `instructions.manage`: one call, one row."""
+    state = getattr(request, "state", None)
+    used = getattr(state, "capability_used", None)
+    if not isinstance(used, set):
+        used = set()
+        if state is not None:
+            state.capability_used = used
+    if (capability, target) in used:
+        return
+    used.add((capability, target))
+    await _audit_capability(request, current_user, "capability_used", capability, target)
+
+
+async def enforce_agent_capability(
+    request: Request, current_user: User, capability: str, *,
+    target: Optional[str] = None, owner_bound: bool = False,
+) -> None:
+    """Refuse with a named 403 — and an audit row — unless the principal may use
+    `capability`. The refused attempt of a prompt-injected agent is exactly the
+    event worth keeping, so a refusal is recorded, not only returned.
+
+    An agent key the grant admits leaves one `capability_used` row
+    (trinity-enterprise#871). It means the grant cleared this call, not that
+    the change landed: a handler can still refuse afterwards. No other principal
+    writes one, because no grant decided their call.
+
+    `owner_bound` is for a route that names its target: a holder then reaches
+    only agents its owner OWNS (#3236 review + validation). Every fenced handler
+    authorises through `can_user_access_agent` / `can_user_share_agent`, which
+    admit any `role == "admin"` — and an agent key carries its owner's role — so
+    without this one grant on a default admin-owned install reached every agent
+    on the instance, other users' included. `owner_username` equality, never the
+    admin short-circuit; not-owned and nonexistent answer the same 404, so a
+    holder learns nothing about agents outside its owner's. Only then does the
+    request's reach admit the target (ent#629): a fence that refused records no
+    reach and no use.
+    """
+    refusal = capability_refusal(current_user, capability)
+    if refusal is not None:
+        code, message = refusal
+        await _audit_capability(request, current_user, "capability_refused", capability, target, code=code)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": code, "capability": capability, "message": message},
+        )
+    if not _is_agent_principal(current_user):
+        return
+    if owner_bound and target:
+        if not owner_owns_agent(current_user, target):
+            await _audit_capability(request, current_user, "capability_refused", capability, target,
+                                    code="capability_target_not_owned")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+        _admit_capability_reach(current_user, target)
+    await _audit_capability_use(request, current_user, capability, target)
+
+
+async def record_capability_use(
+    request: Request, current_user: User, capability: str, *, target: Optional[str] = None,
+) -> None:
+    """`capability_used` for a write that judges by `capability_refusal` itself,
+    with no fence to write the row: a manifest deploy's skill phases, an honoured
+    skill-set probe. Never raises: it runs mid-way through work already done."""
+    try:
+        if not _is_agent_principal(current_user) or capability_refusal(current_user, capability) is not None:
+            return
+    except Exception:  # noqa: BLE001
+        logger.warning("capability use check failed for %s", capability)
+        return
+    await _audit_capability_use(request, current_user, capability, target)
 
 
 def can_manage_agent_skills(current_user: User, agent_name: str) -> bool:
@@ -2675,24 +2786,14 @@ def _path_agent(request: Request) -> Optional[str]:
     return params.get("agent_name") or params.get("name")
 
 
-def _refuse_unless_owners_agent(current_user: User, target: str) -> None:
-    """A capability HOLDER reaches only agents its owner OWNS (#3236 review +
-    validation). Every fenced handler authorises through `can_user_access_agent`
-    / `can_user_share_agent`, which admit any `role == "admin"` — and an agent
-    key carries its owner's role — so without this one grant on a default
-    admin-owned install reached every agent on the instance, other users'
-    included. `owner_username` equality, never the admin short-circuit;
-    not-owned and nonexistent answer the same 404, so a holder learns nothing
-    about agents outside its owner's."""
-    if not owner_owns_agent(current_user, target):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
-
-
 def owner_owns_agent(current_user, target: str) -> bool:
     """`owner_username` equality: the bound every capability holder meets. Never
-    the admin short-circuit an agent key's owner role carries."""
+    the admin short-circuit an agent key's owner role carries, and never the
+    system agent: an admin owns it, and what lands there runs under a key that
+    bypasses every permission check, so one narrow grant would be all of them."""
     owner = db.get_agent_owner(target) or {}
-    return bool(owner) and owner.get("owner_username") == current_user.username
+    return (bool(owner) and not owner.get("is_system")
+            and owner.get("owner_username") == current_user.username)
 
 
 def capability_fence(capability: str, *, own_agent_exempt: bool = False,
@@ -2717,9 +2818,9 @@ def capability_fence(capability: str, *, own_agent_exempt: bool = False,
     grant — ent#69 governs ghosts (spawn and discard), decided 2026-10-05.
 
     A holder that passes is then bounded to its owner's agents
-    (`_refuse_unless_owners_agent`) whenever the route names a target — the
-    capability check runs first, so a non-holder's 403 never depends on whether
-    the target exists (#186).
+    (`enforce_agent_capability`'s `owner_bound`) whenever the route names a
+    target — the capability check runs first, so a non-holder's 403 never
+    depends on whether the target exists (#186).
     """
     async def fence(request: Request, current_user: User = Depends(get_current_user)) -> None:
         target = _path_agent(request)
@@ -2733,10 +2834,7 @@ def capability_fence(capability: str, *, own_agent_exempt: bool = False,
             info = _db.get_agent_ephemeral_info(target)
             if isinstance(info, dict) and info.get("is_ephemeral"):
                 return
-        await enforce_agent_capability(request, current_user, capability, target=target)
-        if is_agent and target:
-            _refuse_unless_owners_agent(current_user, target)
-            _admit_capability_reach(current_user, target)
+        await enforce_agent_capability(request, current_user, capability, target=target, owner_bound=True)
     fence.__name__ = f"capability_fence_{capability.replace('.', '_')}"
     return fence
 
@@ -2787,10 +2885,7 @@ def require_person_or_capability(capability: str, *, self_person_only: bool = Fa
             target = _path_agent(request)
             if self_person_only and target == current_user.agent_name:
                 assert_person(current_user)
-            await enforce_agent_capability(request, current_user, capability, target=target)
-            if target:
-                _refuse_unless_owners_agent(current_user, target)
-                _admit_capability_reach(current_user, target)
+            await enforce_agent_capability(request, current_user, capability, target=target, owner_bound=True)
             return current_user
         assert_person(current_user)
         return current_user
@@ -2817,9 +2912,10 @@ def assert_skill_gates_readable(agent_name: str, current_user: User) -> str:
       uniform 404);
     * an agent key — its OWN gates (the in-container hook pulls; nothing is
       pushed into the workspace), or, holding `skills.manage`, an agent its
-      owner OWNS (the orchestrator reports drift). Never the admin
-      short-circuit an agent key's owner role would otherwise carry. Any other
-      target is the same 404 as an agent that does not exist;
+      owner OWNS (the orchestrator reports drift), never the system agent
+      (`owner_owns_agent`). Never the admin short-circuit an agent key's owner
+      role would otherwise carry. Any other target is the same 404 as an agent
+      that does not exist;
     * connector, portal delegate, any other scope and a principal with no scope
       at all — refused.
     """
@@ -2831,10 +2927,13 @@ def assert_skill_gates_readable(agent_name: str, current_user: User) -> str:
     own = getattr(current_user, "agent_name", None)
     if scope == "agent" and own and not getattr(current_user, "vouched_source_agent", None):
         from db.capability_grants import CAPABILITY_SKILLS_MANAGE
-        owner = db.get_agent_owner(agent_name) or {}
         holder = capability_refusal(current_user, CAPABILITY_SKILLS_MANAGE) is None
-        if owner and (agent_name == own
-                      or (holder and owner.get("owner_username") == current_user.username)):
+        # One owner read for every caller that reaches it (#186). A holder meets
+        # the bound every capability fence applies, which refuses the system agent.
+        if agent_name == own:
+            if db.get_agent_owner(agent_name):
+                return agent_name
+        elif holder and owner_owns_agent(current_user, agent_name):
             return agent_name
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
     raise HTTPException(
@@ -2863,15 +2962,12 @@ async def get_skill_managed_agent_by_name(
     skill-changing route there depends on this.
     """
     from db.capability_grants import CAPABILITY_SKILLS_MANAGE
+    # The bound every capability fence applies (trinity-enterprise#629 × #596):
+    # the owner must OWN the target, then the request's reach admits it. One
+    # mechanism — the owner fence below is the narrowed one.
     await enforce_agent_capability(
-        request, current_user, CAPABILITY_SKILLS_MANAGE, target=agent_name
+        request, current_user, CAPABILITY_SKILLS_MANAGE, target=agent_name, owner_bound=True
     )
-    if _is_agent_principal(current_user):
-        # The bound every capability fence applies (trinity-enterprise#629 ×
-        # #596): the owner must OWN the target, then the request's reach admits
-        # it. One mechanism — the owner fence below is the narrowed one.
-        _refuse_unless_owners_agent(current_user, agent_name)
-        _admit_capability_reach(current_user, agent_name)
     return get_owned_agent_by_name(agent_name=agent_name, current_user=current_user)
 
 
