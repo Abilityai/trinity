@@ -330,6 +330,19 @@ describe('stopping the agent on a Direct call', () => {
     await flushPromises()
   }
 
+  it('over quiet playback a normal voice pauses the agent: the bar follows what is playing', async () => {
+    // The mic hands each frame to the endpointer with the player's own output level. Quiet
+    // playback (getLevel 0) puts the bar at PLAY_MIN, so a normal voice (0.03) is heard;
+    // without that hand-off the endpointer falls back to the old 0.045 bar and stays deaf.
+    const { startMicCapture } = await import('@/utils/audio')
+    await startCall()
+    const onMic = startMicCapture.mock.calls.at(-1)[0]
+    player.playing = true
+    for (let i = 0; i < 20; i++) onMic(null, new Float32Array(320).fill(0.03))
+    await flushPromises()
+    expect(player.last.pause).toHaveBeenCalled()
+  })
+
   it('the Stop button is there with its reason when there is nothing to stop', async () => {
     await startCall()
     expect(stopButton().attributes('disabled')).toBeDefined()
