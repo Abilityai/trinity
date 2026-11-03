@@ -5,7 +5,7 @@ Related flows: workspace-agent-page.md, skills-tab.md.
 
 What these tests pin, each at the layer that owns it:
 
-1. One blank rule (`services/skill_description.clean_description`): missing,
+1. One blank rule (`services/skill_packaging.clean_description`): missing,
    empty, whitespace-only or non-text is `None`; a YAML scalar is its string
    form, like the agent server's `_coerce_optional_str`.
 2. The rule runs at the chokepoints where descriptions enter the backend:
@@ -55,7 +55,7 @@ pytestmark = pytest.mark.unit
     ],
 )
 def test_clean_description(raw, expected):
-    from services.skill_description import clean_description
+    from services.skill_packaging import clean_description
 
     assert clean_description(raw) == expected
 
@@ -426,3 +426,62 @@ def test_p002_treats_a_whitespace_description_as_missing():
 
     snap = _snap("", {".claude/skills/spaces/SKILL.md": _skill('"   "', name="spaces")})
     assert run_static(snap, ["P-002"])["P-002"][0] == "fail"
+
+
+# ---------------------------------------------------------------------------
+# 6. The skills library: no description is guessed from the body
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("---\nname: x\ndescription: Does X.\n---\n\n# X\n\nBody.\n", "Does X."),
+        # The old fallback took the first non-header line, which for this file
+        # is the frontmatter's own `name: x`.
+        ("---\nname: x\n---\n\n# X\n\nBody line.\n", None),
+        ("---\nname: x\ndescription: '  '\n---\nBody.\n", None),
+        ("# X\n\nA legacy body line.\n", None),
+        ("---\nname: x\ndescription: [a, b]\n---\nBody.\n", None),
+    ],
+)
+def test_library_parse_never_guesses_a_description(tmp_path, monkeypatch, text, expected):
+    from services.skill_service import SkillService
+
+    skill_md = tmp_path / "SKILL.md"
+    skill_md.write_text(text)
+    svc = SkillService()
+    monkeypatch.setattr(svc, "_skill_files", lambda clone, name: [])
+
+    info = svc._parse_skill_info(None, "x", skill_md)
+
+    assert info["description"] == expected
+    # No new warning code: a library whose CI runs this parser fails on
+    # `frontmatter_invalid*`, and a list description was never one.
+    assert not any(w.startswith("frontmatter_invalid:description") for w in info["contract_warnings"])
+
+
+def test_skill_packaging_imports_only_what_the_library_ci_downloads():
+    """The community skills library validates its SKILL.md files with this
+    parser by downloading exactly `services/skill_packaging.py` and
+    `utils/safe_yaml.py` at a pinned commit (its `.github/workflows/
+    validate.yml`). An import of any other backend module breaks that CI at
+    its next pin bump, which is why the blank rule lives in this file. Its
+    live consumer is that workflow, so this reads the source on purpose."""
+    import ast
+    import sys
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[2] / "src" / "backend" / "services" / "skill_packaging.py"
+    allowed_local = {"utils.safe_yaml"}
+    imported = set()
+    for node in ast.walk(ast.parse(src.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            imported |= {a.name for a in node.names}
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module)
+    foreign = {
+        m for m in imported
+        if m.split(".")[0] not in sys.stdlib_module_names and m.split(".")[0] != "yaml" and m not in allowed_local
+    }
+    assert foreign == set(), f"skill_packaging.py imports {sorted(foreign)}; the library CI downloads only it and utils/safe_yaml.py"

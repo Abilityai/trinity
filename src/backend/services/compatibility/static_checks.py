@@ -29,7 +29,7 @@ from utils.safe_yaml import (
     load_hardened_yaml,
 )
 
-from services.skill_description import clean_description
+from services.skill_packaging import clean_description
 from services.credential_charset import (
     CREDENTIAL_DETECTOR_NAME_RE,
     CREDENTIAL_DETECTOR_REF_RE,

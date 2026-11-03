@@ -43,7 +43,10 @@ the public repo and the entitlement gate was dropped front and back. Part B
 - **Allow-list** (`enterprise_connectors.exposed_playbooks`, JSON array; NULL ⇒ all
   `user_invocable`): `resolve_exposed_playbooks` drops `user_invocable:false`
   unconditionally (even if explicitly listed); `automation:gated` is passed through
-  as advisory metadata (not a filter).
+  as advisory metadata (not a filter). Each `description` goes through
+  `skill_packaging.clean_description` here (trinity-enterprise#584): blank or
+  whitespace → `null`, and a non-text value from an older agent image can no longer
+  fail `ConnectorPlaybook` and empty the list.
 
 ## Schema / migration
 

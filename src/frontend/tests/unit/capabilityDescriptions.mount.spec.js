@@ -59,6 +59,11 @@ import SkillCard from '@/components/skills/SkillCard.vue'
 import SkillDetailsModal from '@/components/skills/SkillDetailsModal.vue'
 import ExposedToolsPanel from '@/components/ExposedToolsPanel.vue'
 import InfoPanel from '@/components/InfoPanel.vue'
+import LibrarySkillsSection from '@/components/LibrarySkillsSection.vue'
+import SkillAssignModal from '@/components/skills/SkillAssignModal.vue'
+import { useSkillsStore } from '@/stores/skills'
+import { useSkillGatesStore } from '@/stores/skillGates'
+import { DOMWrapper } from '@vue/test-utils'
 
 globalThis.ResizeObserver = globalThis.ResizeObserver || class { observe() {} unobserve() {} disconnect() {} }
 window.matchMedia = window.matchMedia || ((q) => ({ matches: false, media: q, addEventListener() {}, removeEventListener() {} }))
@@ -247,5 +252,58 @@ describe('Technical details', () => {
     expect(block.text()).toContain('plain')
     expect(block.text()).not.toContain('legacy template text')
     expect(block.text()).toContain('What each skill does is on the Skills tab, from its SKILL.md.')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The Library and its assign dialog
+// ---------------------------------------------------------------------------
+
+const LIB = [
+  { name: 'described', description: 'Does the thing.', source_id: 's', source_name: 'Team', category: null },
+  { name: 'quiet', description: null, source_id: 's', source_name: 'Team', category: null },
+]
+
+function libraryAnswers(agent = 'agent-x') {
+  api.get.mockImplementation(async (url) => {
+    if (url === '/api/skills/library/status') return { data: { configured: true, cloned: true, skill_count: LIB.length } }
+    if (url === '/api/skills/library') return { data: LIB }
+    if (url === '/api/skills/assignments') return { data: { assignments: {}, scope: 'all', assignable_agents: [] } }
+    if (url === `/api/agents/${agent}/skill-gates`) return { data: { agent_name: agent, gates: [], approvers: [] } }
+    return { data: [] }
+  })
+}
+
+describe('the Library', () => {
+  it('a skill without a description says so on its card', async () => {
+    libraryAnswers()
+    const w = mount(LibrarySkillsSection, {
+      attachTo: document.body,
+      global: { stubs: { 'router-link': true, LibrarySkillSets: { template: '<section />' }, AssignedAgents: true } },
+    })
+    await flushPromises()
+    expect(w.find('[data-testid="library-skill-described"]').text()).toContain('Does the thing.')
+    const quiet = w.find('[data-testid="library-skill-quiet"]')
+    const line = quiet.findAll('p').find((p) => p.text() === 'No description yet')
+    expect(line).toBeTruthy()
+    expect(line.classes()).toContain('italic')
+    w.unmount()
+  })
+
+  it('the assign dialog says the same', async () => {
+    libraryAnswers()
+    await useSkillsStore().load('agent-x')
+    await useSkillGatesStore().load('agent-x')
+    const w = mount(SkillAssignModal, {
+      props: { modelValue: true },
+      attachTo: document.body,
+      global: { stubs: { SkillContractChips: true } },
+    })
+    await flushPromises()
+    const rows = new DOMWrapper(document.body).findAll('[data-testid="skill-assign-list"] li')
+    const quiet = rows.find((r) => r.text().includes('quiet'))
+    expect(quiet.text()).toContain('No description yet')
+    expect(rows.find((r) => r.text().includes('described')).text()).toContain('Does the thing.')
+    w.unmount()
   })
 })

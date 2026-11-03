@@ -21,7 +21,7 @@ from typing import List, Optional
 from fastapi import HTTPException
 
 from models import ConnectorClientSnippet, ConnectorPlaybook
-from services.skill_description import clean_description
+from services.skill_packaging import clean_description
 
 
 def connector_name(agent_name: str) -> str:

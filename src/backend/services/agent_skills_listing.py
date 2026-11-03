@@ -39,7 +39,7 @@ import httpx
 
 from services.agent_auth import agent_httpx_client
 from services.docker_service import agent_container_state
-from services.skill_description import clean_description
+from services.skill_packaging import clean_description
 from utils.helpers import utc_now_iso
 
 logger = logging.getLogger(__name__)
@@ -153,7 +153,7 @@ async def list_skills(agent_name: str, *, last_known: bool = False) -> Any:
     except SkillsListUnavailable as e:
         if not last_known or e.reason not in ("not_running", "unreachable"):
             raise
-        copy = _clean_descriptions(recall(agent_name))
+        copy = recall(agent_name)
         if copy is None:
             raise
         return {
@@ -215,7 +215,9 @@ def recall(agent_name: str) -> Optional[Dict[str, Any]]:
             or not isinstance(record.get("skill_paths"), list)
             or not isinstance(record.get("captured_at"), str)):
         return None
-    return record
+    # A copy kept before trinity-enterprise#584 may still hold a blank; every
+    # reader of the copy (the last-known listing, the gate cards) gets it clean.
+    return _clean_descriptions(record)
 
 
 def forget(agent_name: str) -> None:

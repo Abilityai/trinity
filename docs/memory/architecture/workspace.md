@@ -328,7 +328,7 @@ were silently always `None`. **Each hint says which tier it is (trinity-enterpri
 ask", never as a capability missing a description); the typeahead copy carries it too, and
 the default keeps an older payload reading as a playbook. Descriptions are cleaned once,
 where they enter (`connector_service.resolve_exposed_playbooks` →
-`services/skill_description.py`), not in `_agent_briefing`. `/page` carries
+`services/skill_packaging.py::clean_description`), not in `_agent_briefing`. `/page` carries
 `capabilities_state` (the card's `briefing_state`), so the rail's empty arm can tell
 "never answered" from "published nothing".
 
