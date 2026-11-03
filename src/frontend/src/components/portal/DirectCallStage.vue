@@ -19,7 +19,7 @@
       class="shrink-0 w-11 h-11 rounded-full flex items-center justify-center transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500 text-gray-700 hover:bg-gray-200 dark:text-gray-200 dark:hover:bg-gray-800 disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-not-allowed"
       :disabled="!call.canStop.value"
       :aria-label="call.canStop.value ? 'Stop' : 'Nothing to stop'"
-      :title="call.canStop.value ? 'Stop (Esc while it speaks)' : 'Nothing to stop'"
+      :title="call.canStop.value ? 'Stop the reply (Esc only silences it)' : 'Nothing to stop'"
       data-testid="direct-call-stop"
       @click="call.interrupt()"
     >
