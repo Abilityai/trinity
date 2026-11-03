@@ -2029,6 +2029,12 @@ class AgentCapacityUpdate(BaseModel):
     max_parallel_tasks: int
 
 
+class DirectVoiceSettingsUpdate(BaseModel):
+    """Body for PUT /api/settings/direct-voice (trinity-enterprise#1046). Partial."""
+    enabled: Optional[bool] = None
+    provider: Optional[Literal["auto", "gemini", "elevenlabs"]] = None
+
+
 class BrainOrbSettingsUpdate(BaseModel):
     """Body for PUT /api/settings/brain-orb (trinity-enterprise#85).
 

@@ -3,8 +3,11 @@
 Additive like tags: a declared library skill or set the member does not hold
 is assigned through the same sequence as the assign routes (row, gates,
 delivery, broadcast); one it holds that the manifest does not name is
-reported and never unassigned. A declared name the library cannot assign is
-a blocker, with the route's own refusal.
+reported and never unassigned for being undeclared. (The one unassign apply
+makes is the switch-gated consequence of a failed gate write on a held skill,
+trinity-enterprise#1068 — `test_ent1068_unassign_on_failed_gate.py`; a skill
+held through a set stays report-only there too.) A declared name the library
+cannot assign is a blocker, with the route's own refusal.
 
 Runs over the REAL `db` on a full schema; Docker is faked at its read seams
 (`_ent695_world.py`). Faked here: the library (which skills and sets exist),

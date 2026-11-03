@@ -84,8 +84,28 @@
            body goes through the one ask renderer (AskMarkdown → the app's
            sanitiser, #3115 — the same on every surface), never printed as its
            syntax (ent#610 sign-off). -->
+      <!-- trinity-enterprise#1066: a credential ask can come from any turn (a
+           schedule reaches the owner's Inbox), so the card itself says WHO asks
+           — whatever the surface's showAgent — and the reason is quoted as the
+           agent's own words, its claim, never the platform's. -->
+      <div
+        v-if="ask.kind === 'credential'"
+        class="mt-1 min-w-0 text-sm"
+        :data-testid="`${tid.prefix}-asker-${ask.id}`"
+      >
+        <p>
+          <span class="font-medium">{{ askerLabel(ask) }}</span> is asking you for
+          <code class="font-mono">{{ ask.credential_name }}</code>.<template v-if="!ask.question"> It gave no reason.</template>
+        </p>
+        <figure v-if="ask.question" class="mt-1">
+          <figcaption class="text-xs" :data-testid="`${tid.prefix}-why-by-${ask.id}`">In {{ askerLabel(ask) }}’s words:</figcaption>
+          <blockquote class="mt-0.5 border-l-2 border-current pl-2" :data-testid="`${tid.prefix}-why-${ask.id}`">
+            <AskMarkdown :text="ask.question" />
+          </blockquote>
+        </figure>
+      </div>
       <AskMarkdown
-        v-if="ask.question && ask.question !== ask.title && !isGateCard(ask)"
+        v-else-if="ask.question && ask.question !== ask.title && !isGateCard(ask)"
         :text="ask.question"
         class="mt-0.5 min-w-0 text-gray-600 dark:text-gray-300"
         :data-testid="`${tid.prefix}-question-${ask.id}`"
@@ -266,6 +286,15 @@
           </form>
         </template>
 
+        <!-- trinity-enterprise#1066: a credential ask is answered through the
+             masked secret field, never a typed answer — the value goes to the
+             agent's environment, the ask ends "provided" by name. -->
+        <PortalCredentialField
+          v-else-if="controlsKind(ask) === 'credential'"
+          :ask="ask"
+          @provided="(answered) => credentialProvided(ask, answered)"
+        />
+
         <!-- An alert only wants acknowledging; "Got it" mirrors desktop and /m. -->
         <button
           v-else-if="controlsKind(ask) === 'acknowledge'"
@@ -362,6 +391,8 @@ import AskMarkdown from '@/components/operator/AskMarkdown.vue'
 import QueueProposal from '../operator/QueueProposal.vue'
 import GatedSkillRequest from '../operator/GatedSkillRequest.vue'
 import QueueBrief from '../operator/QueueBrief.vue'
+import PortalCredentialField from './PortalCredentialField.vue'
+import { agentLabels } from './portalInbox'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import {
   expiredLabel, askThreadLink, answerConfirmation, ANSWER_CONFIRMATION_MS,
@@ -454,6 +485,9 @@ const props = defineProps({
 const emit = defineEmits(['open-thread'])
 
 const store = useClientPortalStore()
+// trinity-enterprise#1066: who is asking, by the name the person knows it by.
+const labelOf = computed(() => agentLabels(store.agents))
+const askerLabel = (ask) => props.agentLabel || labelOf.value[ask.agent_name] || ask.agent_name || 'An agent'
 const busyId = ref(null)
 const drafts = reactive({})   // question: the typed answer (the DECISION)
 const picks = reactive({})    // approval: the selected option
@@ -632,7 +666,9 @@ const controlsKind = (ask) => queueResponseKind({ type: ask.kind, options: ask.o
 // trinity-enterprise#816: not on a SHARED ask (one delivered to everyone a role
 // resolves to) — the server refuses both (`shared_ask`) until they are per
 // person, so the card does not offer them.
-const canDiscuss = (ask) => ask.kind !== 'alert' && !ask.shared
+// trinity-enterprise#1066: nor on a credential ask — a discussion chat is a
+// composer, which is exactly where the value must not be typed.
+const canDiscuss = (ask) => ask.kind !== 'alert' && ask.kind !== 'credential' && !ask.shared
   && !(ask.discussion_chat_id && ask.discussion_chat_id === props.currentSessionId)
 // trinity-enterprise#748: a question or an approval can be declined; an alert
 // is acknowledged ("Got it"), which already ends it without a decision.
@@ -663,6 +699,14 @@ function dismiss(ask) {
 
 async function undoDismiss(ask) {
   if (!store.undoDismissAsk(ask.id)) return
+  await nextTick()
+  cardEls.get(ask.id)?.focus?.({ preventScroll: true })
+}
+
+// trinity-enterprise#1066: the secret field answered — the same confirmation
+// and focus landing as a typed answer (below), nothing kept.
+async function credentialProvided(ask, answered) {
+  showConfirmation(answerConfirmation(answered, ask.agent_name))
   await nextTick()
   cardEls.get(ask.id)?.focus?.({ preventScroll: true })
 }
