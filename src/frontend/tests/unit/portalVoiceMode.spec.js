@@ -865,3 +865,15 @@ describe('background tasks are separate items, queued behind one another', () =>
     expect(taskItemLabel({ label: 'x'.repeat(100), status: 'queued' }).length).toBeLessThanOrEqual(48 + ' · queued'.length)
   })
 })
+
+describe('useVoiceSession uses the single API client (#2720)', () => {
+  it('imports the shared client and never a bare axios', () => {
+    expect(COMPOSABLE).toContain("import api from '@/api'")
+    expect(COMPOSABLE).not.toMatch(/from 'axios'/)
+    expect(COMPOSABLE).not.toContain('authStore.authHeader')
+  })
+
+  it('still authenticates the WebSocket with the store token', () => {
+    expect(COMPOSABLE).toContain('?token=${authStore.token}')
+  })
+})

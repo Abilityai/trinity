@@ -21,7 +21,7 @@ from models import (
     CANVAS_MAX_BLOCKS,
     REPORT_PAYLOAD_MAX_BYTES,
 )
-from services import admission_policy, user_memory_guard
+from services import user_memory_guard
 from services.prompt_tier import PromptTier, resolve_prompt_tier
 from utils.helpers import iso_cutoff
 
@@ -40,8 +40,6 @@ MAX_PLATFORM_URL_LEN = 200
 # MAX_FIELD_LEN = 80, which would truncate mid-name; a role id is an id.
 MAX_DISPLAY_NAME_LEN = 120
 MAX_ROLE_ID_LEN = 64
-# trinity-enterprise#1059: one or two plain-words sentences from a policy.
-MAX_USAGE_NOTICE_LEN = 400
 MAX_STAKEHOLDER_LEN = 140
 # Ended asks (trinity-enterprise#611): the agent's own request ids, how each
 # ended and when — a bounded list, one day back.
@@ -965,11 +963,6 @@ class ExecutionContext:
     # holds a seat itself). Rendered as its own line; the `Primary human` line
     # and its role stay the primary's.
     served_role_id: Optional[str] = None
-    # trinity-enterprise#1059: the registered admission policies' notice for
-    # this agent (`admission_policy.notice`) — e.g. how much of its usage share
-    # it has used and that it should raise its ask. Auto-filled; None in a
-    # build with no policy registered, so the block renders exactly as before.
-    usage_notice: Optional[str] = None
 
     @staticmethod
     def derive_mode(triggered_by: Optional[str]) -> str:
@@ -1252,10 +1245,6 @@ def build_execution_context(ctx: ExecutionContext) -> str:
         if ended_asks:
             lines.append(f"- **Ended asks (last {ENDED_ASKS_WINDOW_HOURS} h)**: {ended_asks}")
 
-        usage = _sanitize_field(ctx.usage_notice, max_len=MAX_USAGE_NOTICE_LEN)
-        if usage:
-            lines.append(f"- **Usage**: {usage}")
-
         timestamp = _sanitize_field(
             ctx.timestamp, max_len=MAX_TIMESTAMP_LEN
         ) or datetime.now(timezone.utc).isoformat()
@@ -1485,8 +1474,6 @@ def compose_system_prompt(
                     ctx.served_role_id if ctx.served_role_id is not None else served_role
                 ),
             )
-        if ctx.usage_notice is None:
-            ctx = replace(ctx, usage_notice=admission_policy.notice(ctx.agent_name))
         block = build_execution_context(ctx)
         if block:
             parts.append(block)

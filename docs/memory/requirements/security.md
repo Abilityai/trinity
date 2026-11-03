@@ -273,18 +273,6 @@
 - **The fleet denominator comes from the roster, not the results** — a member whose sampling raised is `UNASSESSABLE`, not absent. Filtering results on truthiness dropped exactly the members the ent#100 rule requires to block the claim, and the early return suppressed the per-subscription alerts, so the false claim was the only emission. Found in review of PR #2410; the durable class is in `learnings.md` (2026-08-26).
 - **No schema change, no migration** — the state machine is the alert id, and the threshold is a `system_settings` row.
 
-### 20.5d Pre-Admission Policy Seam (SUB-005, trinity-enterprise#1059)
-- **Status**: 🔨 In progress (2026-11-02) — the OSS seam; no policy ships in OSS
-- **Requirement ID**: SUB-005
-- **Extends**: SUB-004 (the per-agent cost accounting a policy may read)
-- **Description**: One edition-agnostic point where a registered policy may stop an agent's turn **before** it is admitted, on every door. With nothing registered nothing changes. The intended first policy is an agent's share of its subscription's usage, registered by an optional module through the generic seam.
-- **Seam** (`services/admission_policy.py`): `register(policy)` / `enforce(agent_name, *, triggered_by, source)` / `notice(agent_name)`. A policy refuses by raising `chat_signals.AdmissionRefused(code, agent_name, message, frees_at=, retryable=False)`; any other exception from a policy is logged and the turn is admitted (fail-open).
-- **Placement**: `/chat` (`admit_chat_request`) and `/task` (`dispatch_parallel_task`) after the skill gate and before the idempotency claim (a refusal leaves nothing behind; the same key works later); every other door at step 1c of `execute_task`, after the skill-gate backstop and before the capacity acquire.
-- **Outcomes**: `/chat` and `/task` answer **429** with `X-Trinity-Error-Code: <code>` (`usage_share` is the vocabulary entry), the policy's plain-words `message`, and `Retry-After` when the policy knows `frees_at`. An `execute_task` door closes its row **`skipped`** with the message (never `failed` — not the agent's fault, so no schedule failure count, no breaker, and a loop iteration it stops reads `skipped`, counts against nothing and ends the loop with the code as `stop_reason`) and returns `error_code` + `admission_refusal`.
-- **The refusal is a property of the result, not of the worker**: `chat_signals.admission_refusal_of(result, agent_name)` reads the attribute or rebuilds the refusal from the row's `skipped` + code shape, and `result_from_execution_row` attaches it, so a turn refused on another worker (a drained backlog, a long-poll that read the row back) arrives the same way. Every door that answers a person branches on it before `failed`/`cancelled`, never success-shaped: the paid door releases its claim and neither attaches nor settles (no charge); MCP inline chat and the public link answer 429 with the sentence and the code header (the async public turn stores the sentence as the reply); a channel sends the sentence and persists no empty assistant turn; a room posts the sentence and keeps its resume handle and cursor; the Workspace shows it as category `limit`, not retryable; A2A reports `rejected` with the sentence; a validation turn is an `ERROR` verdict; the scheduler, fan-out and operator-resume doors record the `skipped` row with its message.
-- **Agent's view**: `notice()` is rendered as `- **Usage**: …` in the Execution Context (`compose_system_prompt` auto-fill), absent when no policy has anything to say.
-- **No schema change, no MCP surface.** Tests: `tests/unit/test_ent1059_admission_policy_seam.py`.
-
 ### 20.6 Credential Rotation via Hot-Reload, not Container Recreate (#1089)
 - **Status**: ✅ Implemented (2026-06-13)
 - **GitHub Issue**: #1089

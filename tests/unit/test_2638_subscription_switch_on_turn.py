@@ -1026,9 +1026,8 @@ class TestEveryTerminalCarriesTheSwitch:
     # Returned BEFORE any dispatch and therefore before any switch can have
     # happened: admission refused at the capacity gate, and the circuit-breaker
     # fast-fail. Named rather than pattern-matched so a third one has to be
-    # justified here. trinity-enterprise#1059: `policy_denied` is the third — a
-    # registered admission policy refused the turn ahead of the capacity gate.
-    PRE_DISPATCH_RETURNS = {"admission_denied", "breaker_denied", "policy_denied"}
+    # justified here.
+    PRE_DISPATCH_RETURNS = {"admission_denied", "breaker_denied"}
 
     def test_every_terminal_return_is_wrapped(self):
         import ast
