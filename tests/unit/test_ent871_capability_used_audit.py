@@ -44,7 +44,7 @@ for _p in (str(_BACKEND), str(_UNIT)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from fastapi import FastAPI  # noqa: E402
+from fastapi import FastAPI, HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from starlette.requests import Request  # noqa: E402
 
@@ -547,6 +547,21 @@ def test_the_predicates_give_the_fences_answer_on_the_system_agent(world, proxie
     assert deps("can_manage_agent_skills")(user, SYSTEM_AGENT) is False
     assert deps("person_or_capability_admits")(user, "schedules.manage", SYSTEM_AGENT) is False
     assert files_svc._may_reach_for_path(user, SYSTEM_AGENT, "CLAUDE.md") is False
+    with pytest.raises(HTTPException) as e:   # the gate-map read, the same 404 as a foreign agent
+        deps("assert_skill_gates_readable")(SYSTEM_AGENT, user)
+    assert e.value.status_code == 404
+
+
+def test_the_gate_map_read_keeps_its_own_and_its_owners_agents(world, proxied, system_agent):
+    """The control for the system-agent refusal above: the same read answers for
+    the agent itself without a grant, and for a sibling with one."""
+    user = _agent_principal()
+    assert deps("assert_skill_gates_readable")(ORCH, user) == ORCH
+    with pytest.raises(HTTPException) as e:
+        deps("assert_skill_gates_readable")(AGENT, user)
+    assert e.value.status_code == 404
+    _grant("skills.manage")
+    assert deps("assert_skill_gates_readable")(AGENT, user) == AGENT
 
 
 @pytest.mark.parametrize("headers", [

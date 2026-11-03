@@ -63,7 +63,7 @@ An independent attacker pass produced the candidates. A second fresh verifier, g
 ## Variant analysis
 
 - Every `enforce_agent_capability` caller was walked. Three fences and the file routes carry the bound. Agent create names an agent that does not exist yet. The remaining caller targets the agent itself.
-- `assert_skill_gates_readable` keeps its inline owner comparison, so a holder can read the system agent's gate map. Read-only, no write path.
+- `assert_skill_gates_readable` kept its own owner comparison, so a holder could read the system agent's gate map (read-only). Found in review and moved onto `owner_owns_agent` in this PR.
 - An edge still gives the use tier on ordinary files. That is the ruled Files tier table (trinity-enterprise#820), not a capability path.
 
 ## Coverage gaps

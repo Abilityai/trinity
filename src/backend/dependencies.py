@@ -2912,9 +2912,10 @@ def assert_skill_gates_readable(agent_name: str, current_user: User) -> str:
       uniform 404);
     * an agent key — its OWN gates (the in-container hook pulls; nothing is
       pushed into the workspace), or, holding `skills.manage`, an agent its
-      owner OWNS (the orchestrator reports drift). Never the admin
-      short-circuit an agent key's owner role would otherwise carry. Any other
-      target is the same 404 as an agent that does not exist;
+      owner OWNS (the orchestrator reports drift), never the system agent
+      (`owner_owns_agent`). Never the admin short-circuit an agent key's owner
+      role would otherwise carry. Any other target is the same 404 as an agent
+      that does not exist;
     * connector, portal delegate, any other scope and a principal with no scope
       at all — refused.
     """
@@ -2926,10 +2927,13 @@ def assert_skill_gates_readable(agent_name: str, current_user: User) -> str:
     own = getattr(current_user, "agent_name", None)
     if scope == "agent" and own and not getattr(current_user, "vouched_source_agent", None):
         from db.capability_grants import CAPABILITY_SKILLS_MANAGE
-        owner = db.get_agent_owner(agent_name) or {}
         holder = capability_refusal(current_user, CAPABILITY_SKILLS_MANAGE) is None
-        if owner and (agent_name == own
-                      or (holder and owner.get("owner_username") == current_user.username)):
+        # One owner read for every caller that reaches it (#186). A holder meets
+        # the bound every capability fence applies, which refuses the system agent.
+        if agent_name == own:
+            if db.get_agent_owner(agent_name):
+                return agent_name
+        elif holder and owner_owns_agent(current_user, agent_name):
             return agent_name
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
     raise HTTPException(
