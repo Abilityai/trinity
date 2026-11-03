@@ -25,13 +25,16 @@ vi.mock('axios', () => {
   }
 })
 
-const player = vi.hoisted(() => ({ playing: false }))
+const player = vi.hoisted(() => ({ playing: false, last: null }))
 vi.mock('@/utils/audio', () => ({
   startMicCapture: vi.fn(async () => ({ stop: vi.fn() })),
-  createAudioPlayer: () => ({
-    play: vi.fn(), stop: vi.fn(), pause: vi.fn(), resume: vi.fn(), getAmplitude: () => 0,
-    isPlaying: () => player.playing,
-  }),
+  createAudioPlayer: () => {
+    player.last = {
+      play: vi.fn(), stop: vi.fn(), pause: vi.fn(), resume: vi.fn(), getAmplitude: () => 0, getLevel: () => 0,
+      isPlaying: () => player.playing,
+    }
+    return player.last
+  },
 }))
 
 globalThis.ResizeObserver = globalThis.ResizeObserver || class {
@@ -149,7 +152,7 @@ describe('a Direct call in the conversation', () => {
     expect(live.attributes('title')).toBe('Another call is on')
     const direct = wrapper.get('[data-testid="portal-direct-call"]')
     expect(direct.attributes('aria-pressed')).toBe('true')
-    expect(direct.attributes('title')).toBe('End the call (Esc)')
+    expect(direct.attributes('title')).toBe('End the call (Esc when it is quiet)')
     await direct.trigger('click')
     await flushPromises()
     expect(socket.of('end')).toHaveLength(1)
@@ -313,5 +316,126 @@ describe('a Direct call in the conversation', () => {
     await say(socket, 5, 'No.')
     expect(wrapper.get('[data-testid="direct-call-heard"]').text()).toContain('Use the card')
     expect(socket.of('ask_followup')).toEqual([])
+  })
+})
+
+// trinity-enterprise#1087: stopping the agent mid-reply, in the real conversation.
+describe('stopping the agent on a Direct call', () => {
+  const stopButton = () => wrapper.get('[data-testid="direct-call-stop"]')
+  const escape = () => document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+
+  async function turnRunning(socket) {
+    await say(socket, 1, 'Summarise the report.')
+    socket.push({ type: 'speak_state', state: 'thinking', execution_id: 'e1' })
+    await flushPromises()
+  }
+
+  it('the Stop button is there with its reason when there is nothing to stop', async () => {
+    await startCall()
+    expect(stopButton().attributes('disabled')).toBeDefined()
+    expect(stopButton().attributes('aria-label')).toBe('Nothing to stop')
+  })
+
+  it('Stop silences the agent, cancels its turn as the person, and the call stays on', async () => {
+    const socket = await startCall()
+    await turnRunning(socket)
+    expect(stopButton().attributes('disabled')).toBeUndefined()
+    await stopButton().trigger('click')
+    await flushPromises()
+    expect(socket.of('interrupt')).toHaveLength(1)
+    expect(store.cancelPortalTurn).toHaveBeenCalledWith('scout', 'e1')
+    expect(socket.of('end')).toHaveLength(0)
+    expect(composer().element.value).toBe('')
+    expect(wrapper.get('[data-testid="direct-call-heard"]').text()).toBe('Stopped.')
+  })
+
+  it('a spoken "stop" stops the turn and is never sent as one', async () => {
+    const socket = await startCall()
+    await turnRunning(socket)
+    await say(socket, 2, 'Stop.')
+    expect(store.cancelPortalTurn).toHaveBeenCalledWith('scout', 'e1')
+    expect(store.startPortalChat).toHaveBeenCalledTimes(1)
+    expect(socket.of('interrupt')).toHaveLength(1)
+  })
+
+  it('audio already on the wire when Stop was pressed does not play', async () => {
+    const socket = await startCall()
+    await turnRunning(socket)
+    await stopButton().trigger('click')
+    socket.push({ type: 'audio', data: 'AAE=' })
+    expect(player.last.play).not.toHaveBeenCalled()
+    socket.push({ type: 'audio_flush' })
+    socket.push({ type: 'audio', data: 'AAE=' })
+    expect(player.last.play).toHaveBeenCalledTimes(1)
+  })
+
+  it('the composer Stop on a Direct call stops the voice too, and puts no spoken words in the composer', async () => {
+    const socket = await startCall()
+    await turnRunning(socket)
+    await wrapper.get('[aria-label="Stop this turn"]').trigger('click')
+    await flushPromises()
+    expect(socket.of('interrupt')).toHaveLength(1)
+    expect(store.cancelPortalTurn).toHaveBeenCalledTimes(1)
+    expect(composer().element.value).toBe('')
+  })
+
+  it('Escape while the agent speaks silences it and keeps both the turn and the call', async () => {
+    const socket = await startCall()
+    await turnRunning(socket)
+    player.playing = true
+    escape()
+    await flushPromises()
+    expect(socket.of('interrupt')).toHaveLength(1)
+    expect(store.cancelPortalTurn).not.toHaveBeenCalled()
+    expect(socket.of('end')).toHaveLength(0)
+  })
+
+  it('Escape with nothing playing ends the call, and leaves a running turn running', async () => {
+    const socket = await startCall()
+    await turnRunning(socket)
+    player.playing = false
+    escape()
+    await flushPromises()
+    expect(socket.of('end')).toHaveLength(1)
+    expect(store.cancelPortalTurn).not.toHaveBeenCalled()
+  })
+
+  it('words queued behind the turn are not sent once Stop has ended it', async () => {
+    let finish
+    store.streamPortalExecution = vi.fn(() => new Promise((resolve) => { finish = resolve }))
+    const socket = await startCall()
+    await turnRunning(socket)
+    // Said while the turn was still running: queued, to go once it settles.
+    await say(socket, 2, 'And the appendix too.')
+    expect(store.startPortalChat).toHaveBeenCalledTimes(1)
+    await stopButton().trigger('click')
+    await flushPromises()
+    store.fetchHistory = vi.fn(async () => ({ sessionId: SID, messages: [], lastTurnOutcome: { category: 'cancelled', execution_id: 'e1' } }))
+    finish()
+    for (let i = 0; i < 20; i++) { await flushPromises(); await wait(5) }
+    expect(store.startPortalChat).toHaveBeenCalledTimes(1)
+  })
+
+  it('a stop said while the turn is still being sent cancels it as soon as it starts, and it is never spoken', async () => {
+    let started
+    store.startPortalChat = vi.fn(() => new Promise((resolve) => { started = () => resolve({ execution_id: 'e1', session_id: SID }) }))
+    const socket = await startCall()
+    await say(socket, 1, 'Summarise the report.')
+    expect(store.startPortalChat).toHaveBeenCalledTimes(1)
+    await say(socket, 2, 'Never mind.')
+    expect(store.cancelPortalTurn).not.toHaveBeenCalled()
+    started()
+    await flushPromises()
+    expect(store.cancelPortalTurn).toHaveBeenCalledWith('scout', 'e1')
+    expect(socket.of('speak')).toEqual([])
+  })
+
+  it('a stop on a run the composer does not hold (an approved run) cancels that run', async () => {
+    const socket = await startCall()
+    socket.push({ type: 'speak_state', state: 'thinking', execution_id: 'approved-run' })
+    await flushPromises()
+    await stopButton().trigger('click')
+    await flushPromises()
+    expect(store.cancelPortalTurn).toHaveBeenCalledWith('scout', 'approved-run')
   })
 })

@@ -389,6 +389,11 @@ class DirectBridge:
                                          "ask": sentence in self._ask_lines})
                         if self._turn_first_audio is not None and not self._turn_first_audio.done():
                             self._turn_first_audio.set_result(self.clock())
+                    # ent#1087: an interrupt can land while the `spoken` send above is in
+                    # flight. Its `audio_flush` is then already queued, so a chunk sent now
+                    # would arrive after the flush and play.
+                    if generation != self._generation:
+                        return
                     self._last_spoke_at = self.clock()
                     await self.send({"type": "audio",
                                      "data": base64.b64encode(chunk).decode("ascii")})

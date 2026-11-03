@@ -11,9 +11,25 @@
       <span class="shrink-0 w-20 text-xs font-medium text-gray-700 dark:text-gray-200" role="status" aria-live="polite" data-testid="direct-call-state">{{ stateText }}</span>
       <span class="min-w-0 truncate text-xs text-gray-500 dark:text-gray-400" data-testid="direct-call-heard">{{ detail }}</span>
     </div>
+    <!-- ent#1087: stops what the agent is saying and the turn behind it; the call stays
+         on. Always here, disabled with its reason when there is nothing to stop, so the
+         row never changes shape. -->
     <button
       type="button"
-      class="shrink-0 w-9 h-9 rounded-full flex items-center justify-center transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500"
+      class="shrink-0 w-11 h-11 rounded-full flex items-center justify-center transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500 text-gray-700 hover:bg-gray-200 dark:text-gray-200 dark:hover:bg-gray-800 disabled:opacity-40 disabled:hover:bg-transparent disabled:cursor-not-allowed"
+      :disabled="!call.canStop.value"
+      :aria-label="call.canStop.value ? 'Stop' : 'Nothing to stop'"
+      :title="call.canStop.value ? 'Stop (Esc while it speaks)' : 'Nothing to stop'"
+      data-testid="direct-call-stop"
+      @click="call.interrupt()"
+    >
+      <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+        <rect x="7" y="7" width="10" height="10" rx="1.5" stroke-width="2" />
+      </svg>
+    </button>
+    <button
+      type="button"
+      class="shrink-0 w-11 h-11 rounded-full flex items-center justify-center transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500"
       :class="call.muted.value
         ? 'bg-gray-200 text-gray-900 dark:bg-gray-750 dark:text-gray-100'
         : 'text-gray-600 hover:bg-gray-200 dark:text-gray-300 dark:hover:bg-gray-800'"
@@ -30,9 +46,9 @@
     </button>
     <button
       type="button"
-      class="shrink-0 w-9 h-9 rounded-full flex items-center justify-center text-white bg-status-danger-600 hover:bg-status-danger-700 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-status-danger-400 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-900"
+      class="shrink-0 w-11 h-11 rounded-full flex items-center justify-center text-white bg-status-danger-600 hover:bg-status-danger-700 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-status-danger-400 focus-visible:ring-offset-2 dark:focus-visible:ring-offset-gray-900"
       aria-label="End call"
-      title="End call (Esc)"
+      title="End call (Esc when it is quiet)"
       data-testid="direct-call-end"
       @click="$emit('end')"
     >
