@@ -98,6 +98,15 @@ describe('the store reads the refusal code', () => {
     await store.fetchRoster()
     expect(store.accountHasNoEmail).toBe(false)
   })
+
+  it('signing out clears it, so the next session does not inherit the page', async () => {
+    portalHttp.get.mockRejectedValue(NO_EMAIL)
+    const store = useClientPortalStore()
+    await store.fetchRoster()
+    expect(store.accountHasNoEmail).toBe(true)
+    store.signOut()
+    expect(store.accountHasNoEmail).toBe(false)
+  })
 })
 
 describe('Portal shows the remedy, not the shell', () => {

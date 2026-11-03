@@ -670,6 +670,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
       // client signing in on the same browser must not inherit this list.
       this.modelOptions = []
       this.rosterLoaded = false
+      // #3894: the no-email verdict is this session's roster refusal — the next
+      // client signing in must not see the "Add an email" page before its own
+      // roster answers.
+      this.accountHasNoEmail = false
       // trinity-enterprise#610 (PR A0): a failed read keeps the last good list,
       // so the list must not outlive the session it belongs to — or the next
       // client's first failed read shows them the previous client's asks.
