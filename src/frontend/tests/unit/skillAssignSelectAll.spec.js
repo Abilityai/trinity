@@ -241,17 +241,34 @@ describe('disabled, with the reason on the button', () => {
 })
 
 describe('keyboard: focus never falls out of the dialog', () => {
-  it('the dialog opens on Select all; Deselect all is marked so it never does', async () => {
+  it('the dialog opens on the filter (ent#660); Deselect all is marked so it never does', async () => {
     await mountModal()
-    expect(document.activeElement).toBe(selectAll().element)
+    expect(document.activeElement).toBe(tid('skill-assign-filter').element)
     expect(deselectAll().attributes()).toHaveProperty('data-destructive')
   })
 
-  it('with nothing to tick, it opens on the list, not on Deselect all', async () => {
+  it('with nothing to tick, it still opens on the filter, not on Deselect all', async () => {
     respond({ library: [LIBRARY[0]], assigned: [row('plain-on')] })
     await mountModal()
     expect(selectAll().element.disabled).toBe(true)
-    expect(document.activeElement).toBe(box('plain-on').element)
+    expect(document.activeElement).toBe(tid('skill-assign-filter').element)
+  })
+
+  it('a row that vanishes under focus gives focus back to the dialog (Safari keeps it on the row across a mouse pick)', async () => {
+    // `other-*` keeps both bulk buttons enabled: the row leaving is the only change.
+    respond({
+      library: [...LIBRARY, { name: 'other-on', description: 'x' }, { name: 'other-off', description: 'x' }],
+      assigned: [...HELD, row('other-on')],
+    })
+    await mountModal()
+    box('plain-on').element.focus()
+    await settle()
+    await tid('skill-assign-filter').setValue('other')           // moves no focus, like that mouse pick
+    await settle()
+    expect(box('plain-on').exists()).toBe(false)
+    expect(selectAll().element.disabled).toBe(false)
+    expect(deselectAll().element.disabled).toBe(false)
+    expect(document.activeElement).toBe(close().element)
   })
 
   it('a button that disables itself hands focus to the other one', async () => {
@@ -425,6 +442,289 @@ describe('Save asks first when it would drop an approval requirement', () => {
     expect(tid('confirm-dialog').exists()).toBe(false)
     expect(api.put).toHaveBeenCalledTimes(1)
     expect(document.activeElement).toBe(close().element)
+  })
+})
+
+// ---- trinity-enterprise#660 + trinity#3448: find a skill, see what Save would do ----
+
+const type = async (text) => { await tid('skill-assign-filter').setValue(text); await settle() }
+const choose = async (id, value) => { await tid(id).setValue(value); await settle() }
+const listed = () => page().findAll('[data-testid="skill-assign-list"] input[type="checkbox"]')
+  .map((b) => b.attributes('value') || b.attributes('data-testid').replace('skill-locked-', ''))
+const mark = (name) => tid(`skill-pending-${name}`)
+const pending = () => tid('skill-assign-pending').text()
+const options = (id) => tid(id).findAll('option').map((o) => o.text())
+const overlay = () => page().find('[role="dialog"]')
+
+const TAGGED = [
+  { name: 'team-one', description: 'x', source_id: 'src_a', source_name: 'Team', category: 'project-management' },
+  { name: 'team-two', description: 'x', source_id: 'src_a', source_name: 'Team', category: null },
+  { name: 'vendor-one', description: 'x', source_id: 'src_b', source_name: 'Vendor', category: 'research-and-analysis' },
+]
+
+describe('the filter narrows the list and both bulk buttons', () => {
+  it('states the total and what is shown; the unfiltered wording is today\'s', async () => {
+    await mountModal()
+    expect(tid('skill-assign-count').text()).toBe('6 skills in the library')
+    await type('plain')
+    expect(listed()).toEqual(['plain-on', 'plain-off'])
+    expect(tid('skill-assign-count').text()).toBe('6 in the library · 2 shown')
+  })
+
+  it('matches the description too: one rule with the Skills tab', async () => {
+    await mountModal()
+    await type('RETIRED')
+    expect(listed()).toEqual(['dep-on', 'dep-off'])
+  })
+
+  it('Select all ticks only what is shown', async () => {
+    respond({ library: [...LIBRARY, { name: 'other-off', description: 'also not held' }] })
+    await mountModal()
+    await type('plain')
+    await click(selectAll())
+    await type('')
+    expect(box('plain-off').element.checked).toBe(true)
+    expect(box('other-off').element.checked).toBe(false)
+  })
+
+  it('Deselect all unticks only what is shown', async () => {
+    await mountModal()
+    await type('plain')
+    await click(deselectAll())
+    await type('')
+    expect(ticked()).toEqual(['both', 'dep-on'])
+  })
+
+  it('with nothing shown, both are disabled and say why, and the list says so', async () => {
+    await mountModal()
+    await type('no such skill')
+    expect(listed()).toEqual([])
+    expect(tid('skill-assign-no-match').text()).toBe('No skill matches the filter.')
+    expect(selectAll().element.disabled).toBe(true)
+    expect(selectAll().attributes('title')).toBe(BULK_TITLES.noneListed)
+    expect(deselectAll().element.disabled).toBe(true)
+    expect(deselectAll().attributes('title')).toBe(BULK_TITLES.noneListed)
+  })
+
+  it('an empty library says that, not that a filter found nothing', async () => {
+    respond({ library: [], assigned: [] })
+    await mountModal()
+    expect(tid('skill-assign-no-match').text()).toBe('The library has no skills yet.')
+  })
+
+  it('a new query starts the list at the first row', async () => {
+    await mountModal()
+    const list = tid('skill-assign-list').element
+    list.scrollTop = 200
+    await type('plain')
+    expect(list.scrollTop).toBe(0)
+  })
+})
+
+describe('source and category', () => {
+  it('the source filter hides with one source, and shows with two', async () => {
+    respond({ library: TAGGED.slice(0, 2), assigned: [] })
+    await mountModal()
+    expect(tid('skill-assign-source').exists()).toBe(false)
+  })
+
+  it('the category filter hides when no skill has one', async () => {
+    respond({ library: LIBRARY })
+    await mountModal()
+    expect(tid('skill-assign-category').exists()).toBe(false)
+  })
+
+  it('offers what the skills carry, readable, and narrows by it', async () => {
+    respond({ library: TAGGED, assigned: [] })
+    await mountModal()
+    expect(options('skill-assign-source')).toEqual(['All sources', 'Team', 'Vendor'])
+    expect(options('skill-assign-category')).toEqual(['All categories', 'Project management', 'Research and analysis'])
+
+    await choose('skill-assign-source', 'src_a')
+    expect(listed()).toEqual(['team-one', 'team-two'])
+    await choose('skill-assign-category', 'project-management')
+    expect(listed()).toEqual(['team-one'])
+    expect(tid('skill-assign-count').text()).toBe('3 in the library · 1 shown')
+  })
+
+  it('a skill with no category appears only under All categories', async () => {
+    respond({ library: TAGGED, assigned: [] })
+    await mountModal()
+    await choose('skill-assign-category', 'research-and-analysis')
+    expect(listed()).toEqual(['vendor-one'])
+    await choose('skill-assign-category', '')
+    expect(listed()).toEqual(['team-one', 'team-two', 'vendor-one'])
+  })
+
+  it('a choice the list no longer offers clears itself: a hidden control never keeps narrowing', async () => {
+    respond({ library: TAGGED, assigned: [] })
+    await mountModal()
+    await choose('skill-assign-source', 'src_b')
+    expect(listed()).toEqual(['vendor-one'])
+
+    useSkillsStore().library = TAGGED.slice(0, 2)                  // a sync dropped that source
+    await settle()
+
+    expect(tid('skill-assign-source').exists()).toBe(false)
+    expect(listed()).toEqual(['team-one', 'team-two'])
+    expect(tid('skill-assign-count').text()).toBe('2 skills in the library')
+  })
+})
+
+describe('a filter never narrows what Save does', () => {
+  it('a ticked skill hidden by the filter stays in the draft, the count and the save', async () => {
+    await mountModal()
+    await box('plain-off').setValue(true)
+    await type('retired')
+    expect(box('plain-off').exists()).toBe(false)
+    expect(pending()).toBe('1 to add')
+
+    await click(save())
+
+    expect(sent()).toEqual(['both', 'dep-on', 'gone', 'plain-off', 'plain-on'])
+  })
+
+  it('an unticked skill hidden by the filter stays out of the save', async () => {
+    await mountModal()
+    await box('plain-on').setValue(false)
+    await type('retired')
+    expect(pending()).toBe('1 to remove')
+    await click(save())
+    expect(sent()).toEqual(['both', 'dep-on', 'gone'])
+  })
+
+  it('a hidden removal still asks for the approval confirm', async () => {
+    respond({ gates: [gate('plain-on')] })
+    await mountModal()
+    await box('plain-on').setValue(false)
+    await type('retired')
+    expect(box('plain-on').exists()).toBe(false)
+
+    await click(save())
+
+    expect(tid('confirm-dialog-title').text()).toBe('Unassign /plain-on?')
+    expect(api.put).not.toHaveBeenCalled()
+  })
+
+  it('a filter on its own changes nothing: Save stays disabled', async () => {
+    await mountModal()
+    await type('plain')
+    expect(save().element.disabled).toBe(true)
+    expect(pending()).toBe('')
+  })
+})
+
+describe('pending changes are marked before Save', () => {
+  it('rows and the count say to add and to remove; a row that changes nothing has no mark', async () => {
+    await mountModal()
+    await box('plain-off').setValue(true)
+    await box('plain-on').setValue(false)
+
+    expect(mark('plain-off').text()).toBe('to add')
+    expect(mark('plain-on').text()).toBe('to remove')
+    expect(mark('dep-on').exists()).toBe(false)
+    expect(pending()).toBe('1 to add, 1 to remove')
+  })
+
+  it('Reset clears the marks and the count', async () => {
+    await mountModal()
+    await box('plain-off').setValue(true)
+    await box('plain-on').setValue(false)
+
+    await click(reset())
+
+    expect(mark('plain-off').exists()).toBe(false)
+    expect(mark('plain-on').exists()).toBe(false)
+    expect(pending()).toBe('')
+  })
+
+  it('a save clears them too', async () => {
+    await mountModal()
+    await box('plain-off').setValue(true)
+    respond({ assigned: [...HELD, row('plain-off')] })
+    await click(save())
+    expect(mark('plain-off').exists()).toBe(false)
+    expect(pending()).toBe('')
+  })
+
+  it('unticking a skill a set also holds says it stays, and names the set', async () => {
+    await mountModal()
+    await box('both').setValue(false)
+
+    expect(mark('both').text()).toBe('kept by set')
+    expect(mark('both').attributes('title')).toBe('Stays on this agent through kit. Saving removes only the direct assignment.')
+    expect(pending()).toBe('1 kept by a set')
+    expect(save().element.disabled).toBe(false)
+  })
+
+  it('while a held set is unresolved the server may drop it, so it reads as a removal', async () => {
+    respond({ sets: [{ name: 'kit', status: 'unresolved' }] })
+    await mountModal()
+    await box('both').setValue(false)
+    expect(mark('both').text()).toBe('to remove')
+    expect(pending()).toBe('1 to remove')
+  })
+
+  it('a set\'s locked row never carries a mark', async () => {
+    await mountModal()
+    await click(selectAll())
+    await click(deselectAll())
+    expect(mark('locked').exists()).toBe(false)
+  })
+
+  it('the count is announced', async () => {
+    await mountModal()
+    expect(tid('skill-assign-pending').attributes('aria-live')).toBe('polite')
+  })
+})
+
+describe('the dialog and its filter', () => {
+  it('each opening starts unfiltered', async () => {
+    const w = await mountModal()
+    await type('plain')
+    await w.setProps({ modelValue: false })
+    await settle()
+    await w.setProps({ modelValue: true })
+    await settle()
+    expect(tid('skill-assign-filter').element.value).toBe('')
+    expect(listed()).toHaveLength(6)
+  })
+
+  it('Esc with text in the filter clears it and keeps the dialog; Esc again closes', async () => {
+    const w = await mountModal()
+    await box('plain-off').setValue(true)
+    await type('plain')
+
+    await tid('skill-assign-filter').trigger('keydown', { key: 'Escape' })
+    await settle()
+    expect(tid('skill-assign-filter').element.value).toBe('')
+    expect(w.emitted('update:modelValue')).toBeUndefined()
+    expect(box('plain-off').element.checked).toBe(true)            // the draft is untouched
+
+    await tid('skill-assign-filter').trigger('keydown', { key: 'Escape' })
+    await settle()
+    expect(w.emitted('update:modelValue')).toEqual([[false]])
+  })
+
+  it('a backdrop click closes a clean dialog, not one holding unsaved changes', async () => {
+    const w = await mountModal()
+    await box('plain-off').setValue(true)
+    await overlay().trigger('click')
+    await settle()
+    expect(w.emitted('update:modelValue')).toBeUndefined()
+
+    await box('plain-off').setValue(false)
+    await overlay().trigger('click')
+    await settle()
+    expect(w.emitted('update:modelValue')).toEqual([[false]])
+  })
+
+  it('the list has one fixed height, inside a panel capped to the window (the bound; geometry is the eyeball)', async () => {
+    await mountModal()
+    const list = tid('skill-assign-list')
+    expect(list.classes()).toEqual(expect.arrayContaining(['h-[50vh]', 'min-h-40', 'overflow-y-auto']))
+    expect([...list.element.parentElement.classList])
+      .toEqual(expect.arrayContaining(['flex', 'flex-col', 'max-h-[calc(100dvh-2rem)]', 'overflow-y-auto']))
   })
 })
 

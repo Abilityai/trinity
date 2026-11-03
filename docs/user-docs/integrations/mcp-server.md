@@ -1,6 +1,6 @@
 # MCP Server
 
-Trinity's MCP server exposes 176 tools across 39 modules for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication. 171 of them are the operator tool set; three consumption-only tools are visible only to connector keys, and two sign-in tools are registered only when inline email auth is enabled. A few operator tools are enterprise-gated and return `"disabled"` (or a `not available` result) where not entitled.
+Trinity's MCP server exposes 177 tools across 39 modules for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication. 172 of them are the operator tool set; three consumption-only tools are visible only to connector keys, and two sign-in tools are registered only when inline email auth is enabled. A few operator tools are enterprise-gated and return `"disabled"` (or a `not available` result) where not entitled.
 
 > 📺 **Watch:** [From Zero to Deployed AI Agent — MCP setup](https://youtu.be/-TSZyekDS6o) *(Apr 2026)* · [all videos](../videos.md)
 
@@ -85,7 +85,7 @@ The URL Trinity advertises — in the MCP Keys page's connection snippet and in 
 | `voice.ts` | 1 | `send_voice_reply` — speak one reply of the current channel turn as a voice note (see [Voice Replies](../advanced/voice-replies.md)) |
 | `files.ts` | 1 | `share_file` — publish file to a signed download URL |
 | `memory.ts` | 2 | `write_user_memory` — per-user memory blob, isolated server-side; `search_memory` — search the agent's retrieval memory on demand |
-| `decisions.ts` | 2 | `record_decision`, `list_seat_decisions` — record why something was approved, deferred or killed for the seat an agent serves, and read that seat's standing decisions back |
+| `decisions.ts` | 3 | `record_decision`, `list_seat_decisions` — record why something was approved, deferred or killed for the seat an agent serves, and read that seat's standing decisions back; `get_autonomy` — what this companion may do unprompted for that seat, and why not where it may not (trinity-enterprise#641) |
 | `loops.ts` | 3 | `run_agent_loop`, `get_loop_status`, `stop_loop` — sequential bounded task loops |
 | `voip.ts` | 1 | `call_user` — outbound phone call (flag-gated, requires a per-agent voice binding) |
 | `operator_queue.ts` | 7 | `list_operator_queue`, `get_operator_queue_item`, `respond_to_operator_queue`, `get_my_ask`, `ask_operator`, `withdraw_ask`, `ask_for_credential` — read and resolve Operating Room queue items; an agent raises its own asks, reads them back, and withdraws one that no longer needs an answer; `ask_for_credential` asks the person in the conversation for a secret by name, which they type into a masked field in their Workspace |

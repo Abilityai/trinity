@@ -133,6 +133,38 @@
 
          Below `sm` the columns collapse to the single stage the drawer and the
          bottom sheet already assume, so the variables are simply unused. -->
+    <!-- ===================== ACCOUNT HAS NO EMAIL ===================== -->
+    <!-- trinity#3894: the Workspace identifies a person by email, and a
+         platform account without one (the built-in `admin` on a default
+         install) is refused on every Workspace call. The shell used to render
+         anyway — "Couldn't load your agents" with a Try again that can never
+         succeed, beside "No agents yet. Create one" for an owner who just did.
+         Say what is missing and where to add it instead. -->
+    <div
+      v-else-if="store.accountHasNoEmail"
+      class="flex-1 flex items-center justify-center px-4"
+      data-testid="workspace-account-has-no-email"
+    >
+      <div class="w-full max-w-sm">
+        <div class="mb-6">
+          <PortalBrand mark-size="h-7 w-7" text-size="text-lg" />
+        </div>
+        <h1 class="text-lg font-semibold">Add an email to use the Workspace</h1>
+        <p class="mt-2 text-sm">
+          Your Trinity account has no email address, and the Workspace finds your agents —
+          the ones you own and the ones shared with you — by email.
+          Add one under Settings → General (Admin sign-in email), then reload this page.
+        </p>
+        <div class="mt-5 flex gap-2">
+          <BaseButton data-testid="workspace-add-email" @click="router.push({ path: '/settings', query: { tab: 'general' } })">
+            Open Settings
+          </BaseButton>
+          <BaseButton variant="secondary" data-testid="workspace-no-email-reload" @click="store.fetchRoster()">
+            Reload
+          </BaseButton>
+        </div>
+      </div>
+    </div>
     <div v-else class="flex-1 flex min-h-0" :style="columns.gridStyle.value">
       <!-- Sidebar: persistent on desktop, drawer on mobile -->
       <div class="hidden sm:flex shrink-0 min-w-0 overflow-hidden sm:w-[var(--ws-sidebar,18rem)]">
@@ -147,6 +179,7 @@
           :is-platform-session="store.isPlatformSession"
           :workspace-only="workspaceOnly"
           :projects-available="store.projectsAvailable"
+          :rooms-available="store.multiAgentChatAvailable"
           :projects-active="projectsRoute"
           :loading-roster="store.loading && !store.rosterLoaded"
           :settled="sidebarReady"
@@ -156,6 +189,7 @@
           :search-results="searchResults"
           :rename="renameChat"
           @new-chat="newChat"
+          @new-room="newRoom"
           @new-chat-with-agent="newChatWithAgent"
           @open-agent="openAgentPage"
           @open-thread="openThread"
@@ -200,6 +234,7 @@
             :is-platform-session="store.isPlatformSession"
             :workspace-only="workspaceOnly"
             :projects-available="store.projectsAvailable"
+          :rooms-available="store.multiAgentChatAvailable"
             :projects-active="projectsRoute"
             :loading-roster="store.loading && !store.rosterLoaded"
             :settled="sidebarReady"
@@ -209,6 +244,7 @@
             :search-results="searchResults"
             :rename="renameChat"
             @new-chat="() => { mobileNav = false; newChat() }"
+            @new-room="() => { mobileNav = false; newRoom() }"
             @new-chat-with-agent="(n) => { mobileNav = false; newChatWithAgent(n) }"
             @open-agent="(n) => { mobileNav = false; openAgentPage(n) }"
             @open-thread="(t) => { mobileNav = false; openThread(t) }"
@@ -316,6 +352,7 @@
           @open-menu="mobileNav = true"
           @dismiss-carry-notice="roomCarryNotice = null"
           @rooms-changed="refreshThreads"
+          @left-room="onLeftRoom"
           @read="(id) => markRead('room', id)"
           @toggle-star="toggleStar"
           @participants-changed="onRoomParticipants"
@@ -914,6 +951,7 @@
       v-if="pickerOpen"
       :agents="store.agents"
       :multi="store.multiAgentChatAvailable"
+      :mode="pickerMode"
       :busy="pickerBusy"
       :error="pickerError"
       @confirm="onPickerConfirm"
@@ -944,6 +982,7 @@ import { threadKey, shouldAutoFocusComposer } from '@/components/portal/portalDr
 import { safeStorage } from '@/utils/safeStorage'
 import PortalSidebar from '@/components/portal/PortalSidebar.vue'
 import PortalBrand from '@/components/portal/PortalBrand.vue'
+import BaseButton from '@/components/base/BaseButton.vue'
 import PortalConversation from '@/components/portal/PortalConversation.vue'
 import PortalBriefing from '@/components/portal/PortalBriefing.vue'
 import PortalLoops from '@/components/portal/PortalLoops.vue'
@@ -1674,8 +1713,20 @@ const startingNewChat = ref(false)
 // keyboard sliding up over a phone is exactly the "unprompted" the issue names.
 const composerFocusMode = ref('always')
 
+// trinity-enterprise#701: which door opened the picker — 'chat' or 'room'.
+const pickerMode = ref('chat')
+
 function newChat() {
   if (guardLeaveCall(() => newChat())) return   // ent#551: ask, then leave
+  pickerMode.value = 'chat'
+  pickerOpen.value = true
+}
+
+// trinity-enterprise#701: New room — always a room, even with one agent, so
+// colleagues can be seated in it.
+function newRoom() {
+  if (guardLeaveCall(() => newRoom())) return
+  pickerMode.value = 'room'
   pickerOpen.value = true
 }
 
@@ -1689,6 +1740,14 @@ function leaveRoomRoute() {
   activeRoomId.value = null
   pendingSession.value = null; prefill.value = ''; convGen.value++
   router.push('/workspace')
+}
+
+// trinity-enterprise#701: the person left this room — it is gone for them, so
+// take them off its URL (the server now answers it with a 404) and refresh the
+// sidebar, which no longer lists it.
+async function onLeftRoom() {
+  leaveRoomRoute()
+  await refreshThreads()
 }
 
 // The one way to hand the stage back. #2158 reached the same conclusion
@@ -1715,14 +1774,14 @@ async function onPickerConfirm(agentNames) {
   // ONE agent stays a portal thread: that path resumes, streams and reattaches
   // (ent#358/#286). TWO OR MORE needs a room — the only substrate that models
   // several agents and @mention-waking.
-  if (agentNames.length === 1) {
+  if (agentNames.length === 1 && pickerMode.value !== 'room') {
     pickerOpen.value = false
     newChatWithAgent(agentNames[0])
     return
   }
   pickerBusy.value = true
   try {
-    const room = await store.createRoom(agentNames, `Chat with ${agentNames.join(', ')}`)
+    const room = await store.createRoom(agentNames, `Room with ${agentNames.join(', ')}`)
     pickerOpen.value = false
     await refreshThreads()
     openRoom(room.id || room.room_id)

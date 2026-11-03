@@ -139,3 +139,19 @@ export function cancelOutcome({ ok, alreadyTerminal }) {
   if (ok) return { kind: 'cancelled', message: 'Stopped.' }
   return { kind: 'failed', message: "Couldn't stop the turn — it's still running." }
 }
+
+/**
+ * What Escape does on a Direct call (trinity-enterprise#1087).
+ *
+ *   - `'silence'` while the agent's voice is playing: the audio stops and the turn keeps
+ *     running. Hanging up deliberately leaves a turn running (ent#1046), and an Escape
+ *     pressed to hang up while the agent talks must not throw that work away.
+ *   - `'end'` otherwise: the call ends, as on a Live call.
+ *   - `null` when something nearer the keystroke owns it. Unlike a Live call the composer
+ *     stays live on a Direct call, so its typeahead and picker are overlays here too.
+ */
+export function directEscapeAction(event, { speaking = false, overlays = [] } = {}) {
+  if (!ownsEscape(event)) return null
+  if (overlays.some(Boolean)) return null
+  return speaking ? 'silence' : 'end'
+}

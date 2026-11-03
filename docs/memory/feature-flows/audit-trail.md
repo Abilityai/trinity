@@ -361,6 +361,8 @@ Failed logins have no `actor_user` — the service falls back to
 | `decide_access_request_endpoint` (approve) | `access_request_approved` | `{email, access_request_id}` |
 | `decide_access_request_endpoint` (reject) | `access_request_rejected` | `{email, access_request_id}` |
 
+Capability grants write `capability_used`, `capability_refused`, `capability_grant` and `capability_revoke`; [self-change-grants.md](self-change-grants.md) has the row-by-row table.
+
 ### Credentials (`routers/credentials.py`)
 
 | Handler | Event action | Details payload |

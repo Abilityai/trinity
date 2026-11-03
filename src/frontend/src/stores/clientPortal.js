@@ -291,6 +291,13 @@ function dismissedLocally(ask) {
   return { ...ask, status: 'dismissed', ended_by: 'you', ended_at: new Date().toISOString() }
 }
 
+// The machine-readable refusal code beside a human `detail`
+// (`X-Trinity-Error-Code`, the convention `utils/skillGate.js` reads).
+function refusalCode(err) {
+  const headers = err?.response?.headers || {}
+  return (typeof headers.get === 'function' ? headers.get('x-trinity-error-code') : headers['x-trinity-error-code']) || null
+}
+
 export const useClientPortalStore = defineStore('clientPortal', {
   state: () => ({
     // ent#555 — agent name → the canvas id the rail currently shows.
@@ -312,6 +319,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // re-appearing, which is indistinguishable from "you were never signed in"
     // and reads as the app having lost the thread.
     sessionExpired: false,
+    // trinity#3894: the platform account has no email, so the Workspace cannot
+    // seat it (the backend names the case with `X-Trinity-Error-Code`). The
+    // Workspace shows the remedy instead of a roster that can never load.
+    accountHasNoEmail: false,
     // #2261 — while true, a platform session does NOT re-derive a workspace
     // session in this tab. Set when a CLIENT session expires here, so the
     // browser that was a client's does not silently become the operator's; the
@@ -476,6 +487,14 @@ export const useClientPortalStore = defineStore('clientPortal', {
     _suggestionsInFlight: null, // the running load, shared by both placements
     _suggestionsLoadSeq: 0,     // only the LATEST load may write
     _suggestionsDismissed: [],  // keys dismissed since the last load STARTED
+    // ent#641 — the autonomy dial: what this agent may do unprompted for me.
+    autonomyAgent: null,
+    _autonomyGeneration: 0,
+    autonomy: null,           // PortalAutonomyDial
+    autonomyLoaded: false,
+    autonomyError: null,
+    autonomyActionError: null,
+    autonomyBusy: null,       // ask_class in flight
     reportPayloads: {},
     // id -> {total, loaded}; present only for a payload the server actually
     // windowed, so a bounded document never renders a paging footer.
@@ -656,6 +675,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
       this.modelOptions = []
       this.rosterLoaded = false
       this.termsRefusal = null
+      // #3894: the no-email verdict is this session's roster refusal — the next
+      // client signing in must not see the "Add an email" page before its own
+      // roster answers.
+      this.accountHasNoEmail = false
       // trinity-enterprise#610 (PR A0): a failed read keeps the last good list,
       // so the list must not outlive the session it belongs to — or the next
       // client's first failed read shows them the previous client's asks.
@@ -978,7 +1001,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       try {
         const { data } = await portalHttp.post(
           '/api/rooms',
-          { name: name || 'New chat', agents: agentNames },
+          { name: name || 'New room', agents: agentNames },
           { headers: this.authHeader }
         )
         return data
@@ -1338,6 +1361,63 @@ export const useClientPortalStore = defineStore('clientPortal', {
 
     clearSuggestionError() { this.suggestionError = null },
 
+    // ---- ent#641: the autonomy dial --------------------------------------
+
+    resetAgentAutonomy(agentName = null) {
+      this._autonomyGeneration += 1
+      this.autonomyAgent = agentName
+      this.autonomy = null
+      this.autonomyLoaded = false
+      this.autonomyError = null
+      this.autonomyActionError = null
+      this.autonomyBusy = null
+    },
+
+    async loadAgentAutonomy(agentName) {
+      if (this.autonomyAgent !== agentName) this.resetAgentAutonomy(agentName)
+      const gen = this._autonomyGeneration
+      this.autonomyError = null
+      try {
+        const { data } = await portalHttp.get(
+          `/api/enterprise/client-portal/agents/${agentName}/autonomy`,
+          { headers: this.authHeader },
+        )
+        if (gen !== this._autonomyGeneration) return
+        this.autonomy = data
+        this.autonomyLoaded = true
+      } catch {
+        if (gen !== this._autonomyGeneration) return
+        this.autonomyError = 'The request failed. Check your connection and try again.'
+      }
+    },
+
+    /** hold (anyone, own seat) / release (owner only — a grant). */
+    async actOnAskClass(agentName, askClass, body) {
+      const gen = this._autonomyGeneration
+      this.autonomyActionError = null
+      this.autonomyBusy = askClass
+      try {
+        const { data } = await portalHttp.post(
+          `/api/enterprise/client-portal/agents/${agentName}/autonomy/classes/${encodeURIComponent(askClass)}`,
+          body, { headers: this.authHeader },
+        )
+        if (gen !== this._autonomyGeneration) return data
+        await this.loadAgentAutonomy(agentName)
+        return data
+      } catch (e) {
+        if (gen !== this._autonomyGeneration) return null
+        const d = e?.response?.data?.detail
+        this.autonomyActionError = {
+          askClass,
+          message: (d && typeof d === 'object' && d.message) || (typeof d === 'string' ? d : null)
+            || 'That did not work. Try again.',
+        }
+        return null
+      } finally {
+        if (gen === this._autonomyGeneration) this.autonomyBusy = null
+      }
+    },
+
     // ---- ent#638: the seat decision record ------------------------------
 
     resetAgentDecisions(agentName = null) {
@@ -1652,6 +1732,56 @@ export const useClientPortalStore = defineStore('clientPortal', {
       } catch (err) {
         throw this._noteRoomsRefusal(err)
       }
+    },
+
+    // trinity-enterprise#701 — a person leaves a room. The room is gone for
+    // them afterwards (the server answers its uniform 404).
+    async leaveRoom(roomId) {
+      this._requireRooms()
+      try {
+        const { data } = await portalHttp.post(
+          `/api/rooms/${encodeURIComponent(roomId)}/leave`, {}, { headers: this.authHeader }
+        )
+        return data
+      } catch (err) {
+        throw this._noteRoomsRefusal(err)
+      }
+    },
+
+    // trinity-enterprise#701 — seating a colleague. Offered only when the room
+    // says `can_seat_people`; these calls do NOT go through
+    // `_noteRoomsRefusal`, because a refusal here is about seating, never a
+    // sign that rooms themselves are unavailable.
+    async fetchSeatablePeople(roomId, q) {
+      const { data } = await portalHttp.get(
+        `/api/enterprise/rooms/${encodeURIComponent(roomId)}/seatable`,
+        { headers: this.authHeader, params: { q } }
+      )
+      return Array.isArray(data?.people) ? data.people : []
+    },
+
+    async seatPerson(roomId, username, { showHistory = false } = {}) {
+      const { data } = await portalHttp.post(
+        `/api/enterprise/rooms/${encodeURIComponent(roomId)}/people`,
+        { username, show_history: showHistory }, { headers: this.authHeader }
+      )
+      return data
+    },
+
+    async removePerson(roomId, username) {
+      const { data } = await portalHttp.delete(
+        `/api/enterprise/rooms/${encodeURIComponent(roomId)}/people/${encodeURIComponent(username)}`,
+        { headers: this.authHeader }
+      )
+      return data
+    },
+
+    async showPersonHistory(roomId, username) {
+      const { data } = await portalHttp.post(
+        `/api/enterprise/rooms/${encodeURIComponent(roomId)}/people/${encodeURIComponent(username)}/history`,
+        {}, { headers: this.authHeader }
+      )
+      return data
     },
 
     // The client's conversation threads with an agent (most-recent first) — the
@@ -2557,6 +2687,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
           headers: this.authHeader,
         })
         this.clientEmail = data.client_email || null
+        this.accountHasNoEmail = false
         // #2163: the roster no longer CARRIES the briefing — every card
         // arrives `briefing_state: "pending"` and the description + hint
         // cards (#138 / ent#380) are hydrated by `GET /briefings` below. That
@@ -2628,6 +2759,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
         // trinity-enterprise#1082: the terms gate's `detail` is an object; the
         // stage renders `error` as text, so keep its message, never the object.
         this.termsRefusal = isTermsRefusal(err) ? err.response.data.detail.code : null
+        this.accountHasNoEmail = refusalCode(err) === 'account_has_no_email'
         this.error = this.unavailable
           ? 'The workspace is not available on this instance.'
           : this.termsRefusal

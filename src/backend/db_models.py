@@ -879,6 +879,10 @@ class SkillInfo(BaseModel):
     # trinity-enterprise#753: `recommended` — the skill is gated by default on
     # every agent it is assigned to (the owner can clear it). None otherwise.
     approval: Optional[str] = None
+    # trinity-enterprise#660: the author's `category:` (one line, <= 64 chars).
+    # It narrows the Skills lists and nothing else reads it. URL-free, like
+    # `source_name`.
+    category: Optional[str] = None
 
 
 class AgentSkillsUpdate(BaseModel):
