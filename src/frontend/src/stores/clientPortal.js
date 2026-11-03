@@ -19,6 +19,7 @@ import {
 } from '@/components/portal/portalBriefingState'
 import axios from 'axios'
 import { notifyPlatformUnauthorized, setPlatformUnauthorizedHandler } from '@/utils/platformSession'
+import { notifyTermsRefusal } from '@/utils/termsGate'
 import { useAuthStore } from './auth'
 // A cycle by shape (that store reads this one's `clientEmail`), safe by use:
 // neither side touches the other at module evaluation, only inside actions.
@@ -251,6 +252,14 @@ function installRotationInterceptor() {
           // Pinia not active (module-scope request, or teardown): no session to
           // reason about, so there is nothing to bounce.
         }
+      } else if (error?.response?.status === 403) {
+        // trinity-enterprise#1054: the terms gate refuses a Workspace-only
+        // PLATFORM account, never a client's portal session — same local gate.
+        try {
+          if (useClientPortalStore().isPlatformSession) notifyTermsRefusal(error)
+        } catch {
+          // Pinia not active: no session, nothing to send anywhere.
+        }
       }
       return Promise.reject(error)
     },
@@ -366,6 +375,8 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // control is not rendered at all. Named for the capability, not the
     // provider (ent#354).
     realtimeVoice: { available: false, reason: null },
+    // trinity-enterprise#1046. Same fail-closed reading as the field above.
+    directVoice: { available: false, reason: null, provider: null },
     // ent#403 — the curated model list the composer may offer, from the roster.
     // Instance-level, so it rides the roster and not every card; empty is the
     // fail-closed value and renders no control, exactly like the two flags
@@ -635,6 +646,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       // would read a stale one as authoritative.
       this.multiAgentChatAvailable = false
       this.realtimeVoice = { available: false, reason: null }
+      this.directVoice = { available: false, reason: null, provider: null }
       // ent#403: a per-session capability like the two above — a different
       // client signing in on the same browser must not inherit this list.
       this.modelOptions = []
@@ -804,7 +816,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // is unavailable.
     async startPortalChat(agentName, message, sessionId = null,
                     { newThread = false, openCanvasId = null, model = null, replyToMessageId = null,
-                      attachments = null, tags = null } = {}) {
+                      attachments = null, tags = null, voiceCallId = null } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat/stream`,
         {
@@ -824,6 +836,8 @@ export const useClientPortalStore = defineStore('clientPortal', {
           // keeps only names in this caller's own uploads, and stores them on
           // the user row so a reload shows them.
           attachments: attachments && attachments.length ? attachments : null,
+          // trinity-enterprise#1046 — this turn is part of the live Direct call.
+          voice_call_id: voiceCallId || null,
           // trinity-enterprise#631 — the people this message tags (addresses,
           // as picked). Only when there are some: every other body is unchanged.
           ...(tags && tags.length ? { tags } : {}),
@@ -1715,10 +1729,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // ent#534 — start a real-time voice call bound to a Workspace thread. The
     // platform-principal route (uniform 404 for anyone else); the audio socket
     // the response names is the OSS one and takes the platform JWT.
-    async startWorkspaceVoice(agentName, portalSessionId, voiceName = null) {
+    async startWorkspaceVoice(agentName, portalSessionId, voiceName = null, mode = 'live') {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/voice/start`,
-        { portal_session_id: portalSessionId, voice_name: voiceName },
+        { portal_session_id: portalSessionId, voice_name: voiceName, mode },
         { headers: this.authHeader }
       )
       return data
@@ -2395,6 +2409,25 @@ export const useClientPortalStore = defineStore('clientPortal', {
         { response, response_text: responseText, ...(acknowledgeDivergence ? { acknowledge_divergence: true } : {}) },
         { headers: this.authHeader },
       )
+      return this.mergeAnsweredAsk(askId, data)
+    },
+
+    // trinity-enterprise#1066 — the secret field's one call. The value travels
+    // in the BODY of one POST (never a URL, never stored here, never logged);
+    // what comes back is the ask, ended `provided` by name, merged like any
+    // other answer.
+    async provideCredential(askId, value) {
+      const { data } = await portalHttp.post(
+        `/api/enterprise/client-portal/asks/${askId}/credential`,
+        { value },
+        { headers: this.authHeader },
+      )
+      return this.mergeAnsweredAsk(askId, data)
+    },
+
+    // The answered row replaces the waiting one (shared by `answerAsk` and
+    // `provideCredential`).
+    mergeAnsweredAsk(askId, data) {
       this.asks = data && data.id === askId
         ? this.asks.map((a) => (a.id === askId ? data : a))
         : this.asks.filter((a) => a.id !== askId)
@@ -2548,6 +2581,11 @@ export const useClientPortalStore = defineStore('clientPortal', {
         this.realtimeVoice = {
           available: data.realtime_voice?.available === true,
           reason: typeof data.realtime_voice?.reason === 'string' ? data.realtime_voice.reason : null,
+        }
+        this.directVoice = {
+          available: data.direct_voice?.available === true,
+          reason: typeof data.direct_voice?.reason === 'string' ? data.direct_voice.reason : null,
+          provider: typeof data.direct_voice?.provider === 'string' ? data.direct_voice.provider : null,
         }
         // ent#403: same strictness, same fail-closed direction — an older
         // backend without the field, or a shape that is not an array, reads as

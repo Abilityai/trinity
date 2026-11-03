@@ -198,8 +198,11 @@ def test_genuine_failures_keep_their_classification(status, detail, kind):
 
 def test_a_turn_limit_mention_inside_an_auth_failure_is_still_auth():
     """The carve-out keys on the agent's prefix, not the words anywhere."""
-    msg = "Authentication failure: token expired while the task exceeded turn limit"
+    msg = "Authentication failure: token expired while the task exceeded turn limit: 20"
+    assert "task exceeded turn limit:" in msg.lower()  # the marker, colon included (#4123)
+    assert not is_turn_limit(msg)
     assert is_auth_failure(msg)
+    assert classify_switch_failure(_resp(500, msg)) == "auth"
 
 
 # --------------------------------------------------------------------------- #

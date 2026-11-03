@@ -23,10 +23,16 @@ this module clears, drops or tombstones a row.
   marker ordering contract (#752) and the audit row are the route's own.
   Runs BEFORE the skill phases (ent#753: gated before delivered). A write
   that fails on a skill the member ALREADY holds (trinity-enterprise#1043)
-  holds nothing back — there is no skill op to hold — so the run says what
-  that leaves: the skill stays assigned and runs with no approval gate
-  (`skill_runs_ungated`, plus one top-level warning line) or under the gate
-  stored before (`previous_gate_stands`). Reported, never unassigned.
+  holds nothing back — there is no skill op to hold. With no gate in force
+  and `apply_unassign_on_failed_gate` on (the default, trinity-enterprise#1068)
+  the run unassigns the skill, as a person's unassign
+  (`skill_assignment_service.unassign_and_remove`), and says so
+  (`skill_unassigned_gate_failed`): no gate, no skill. That is the one named
+  exception to "apply never revokes"; it clears no gate — there is none.
+  Otherwise the run says what is left running: the skill with no approval
+  gate (`skill_runs_ungated`, plus one top-level warning line — the switch is
+  off, or the skill is held through a set, `skill_held_via_set`) or under the
+  gate stored before (`previous_gate_stands`, always report-only).
 * `deploy` / `deploy_hold_back_warning` — create mode's phase, before skills.
   `deploy_system` is agent-callable through `agents.manage`, so an agent key
   writes gates only if it holds `skills.manage` — the gate routes' own
@@ -63,12 +69,24 @@ MARKER_NOTE = ("the gate is stored; the running agent's marker could not be writ
 #: lock; "runs ungated" means no live gate row, the one thing admission reads.
 UNGATED_CODE = "skill_runs_ungated"
 PREVIOUS_GATE_CODE = "previous_gate_stands"
-UNGATED_NOTE = ("apply never unassigns: the skill keeps running with no approval gate until "
-                "one exists. Fix the gate and re-apply, set it by hand in the agent's Skills "
-                "tab (or set_skill_gate), or unassign the skill by hand")
-PREVIOUS_GATE_NOTE = ("apply never unassigns: the gate stored before still applies until the "
-                      "rewrite lands. Fix the gate and re-apply, or set it by hand in the "
-                      "agent's Skills tab (or set_skill_gate)")
+UNGATED_NOTE = ("the skill keeps running with no approval gate until one exists. Fix the "
+                "gate and re-apply, set it by hand in the agent's Skills tab (or "
+                "set_skill_gate), or unassign the skill by hand")
+PREVIOUS_GATE_NOTE = ("apply does not unassign a skill a stored gate still covers: the gate "
+                      "stored before still applies until the rewrite lands. Fix the gate and "
+                      "re-apply, or set it by hand in the agent's Skills tab (or set_skill_gate)")
+#: trinity-enterprise#1068: the switch, and what a failed gate on a held skill leads to.
+SWITCH = "apply_unassign_on_failed_gate"
+SKILLS_STEP = "skills"
+UNASSIGNED_CODE = "skill_unassigned_gate_failed"
+VIA_SET_CODE = "skill_held_via_set"
+UNASSIGNED_NOTE = ("its declared gate was not written, so apply unassigned it (no gate, no "
+                   "skill); a run that loaded it before the removal finishes with it. Fix the "
+                   "gate, re-declare the skill under `skills:` if it is not there, and re-apply: "
+                   "the next apply holds the assignment back until the gate lands")
+VIA_SET_NOTE = ("not unassigned: an assigned skill set brings it, and an unassign would take "
+                "the set's other skills too. Fix the gate and re-apply, set it by hand in the "
+                "agent's Skills tab (or set_skill_gate), or unassign the set by hand")
 
 
 def declared(cfg) -> Dict[str, Dict[str, Any]]:
@@ -88,6 +106,26 @@ def read_held_skills(name: str) -> Set[str]:
     set-derived alike, the gate map's own population (trinity-enterprise#1043).
     Raises on a failed read; the snapshot turns that into a blocker (P-B)."""
     return {str(s).casefold() for s in db.get_agent_skill_names(name)}
+
+
+def read_held_via_sets(name: str) -> Set[str]:
+    """The held skills an assigned set names, casefolded
+    (trinity-enterprise#1068). Raises on a failed read."""
+    from services import skill_set_service
+    return {str(s).casefold() for s in skill_set_service.via_sets_map(name)}
+
+
+def _consequence_note(skill: str, *, live, unassign: bool, via_set: bool) -> str:
+    """What a dry run says a failed write on a held skill would lead to."""
+    if live is not None:
+        return f"if this rewrite fails, the gate stored before still applies to '{skill}'"
+    if via_set:
+        return (f"if this gate's write fails, '{skill}' stays assigned (a skill set brings it) "
+                "and runs with no approval gate")
+    if unassign:
+        return f"if this gate's write fails, '{skill}' is unassigned ({SWITCH})"
+    return (f"if this gate's write fails, '{skill}' stays assigned and runs with no approval "
+            f"gate ({SWITCH} is off)")
 
 
 def export_member(name: str) -> Dict[str, Dict[str, Any]]:
@@ -121,12 +159,16 @@ class _Refused(Exception):
 
 def plan(mp, *, stored: Optional[Dict[str, dict]], blockers: List,
          apply_change, apply_blocker, make_op,
-         skill_names: Optional[Set[str]] = None) -> None:
+         skill_names: Optional[Set[str]] = None, via_sets: Optional[Set[str]] = None,
+         unassign_on_failure: bool = True) -> None:
     """Changes, ops and blockers for one member. `stored` is None for a member
     apply will create (it carries nothing yet). `skill_names` is what the
     member holds (trinity-enterprise#1043): a `gate_set` op on a held skill
     carries `held=True` and the gate in force (`live`), so a failed write can
-    say what it leaves running."""
+    say what it leaves running. trinity-enterprise#1068: it also carries
+    `held_via_sets` (a set names it, from `via_sets`) and `unassign` (the
+    snapshot's switch), so the run's consequence is decided here, and the
+    change's note says it ahead of time."""
     cfg = mp.config
     if cfg.gates is None:
         return
@@ -169,12 +211,19 @@ def plan(mp, *, stored: Optional[Dict[str, dict]], blockers: List,
         current = ({"approver": live["approver"], "deadline_hours": live["deadline_hours"],
                     "origin": live["origin"]} if live else None)
         note = _reach_note(name, approver) if stored is not None else None
+        held_now = key.casefold() in held_skills
+        via_set = held_now and key.casefold() in (via_sets or set())
+        if held_now:
+            consequence = _consequence_note(key, live=live, unassign=unassign_on_failure,
+                                            via_set=via_set)
+            note = f"{note}; {consequence}" if note else consequence
         mp.changes.append(apply_change(
             STEP, "write", "gate_differs" if live else "gate_missing",
             current=current, desired=desired, note=note))
         mp.ops.append(make_op(OP_KIND, name, short, {
             "skill": key, "changes": fields,
-            "held": key.casefold() in held_skills,
+            "held": held_now, "held_via_sets": via_set,
+            "unassign": bool(unassign_on_failure),
             "live": _public(live) if live else None}))
     undeclared = [_public(r) for k, r in sorted(rows.items())
                   if k not in declared_keys and r["origin"] != ORIGIN_CLEARED]
@@ -207,7 +256,12 @@ async def run(op, actor, out, attempt, *, request, apply_change) -> None:
 
     if not await attempt(name, short, STEP, write, key=skill):
         if op.args.get("held"):
-            _held_skill_not_gated(op, out, apply_change)
+            # The gate failure is the last row; read it before a second write
+            # can append one.
+            failure = out.failed[-1]
+            if not await _unassign_held_skill(op, actor, out, attempt, failure,
+                                              request=request, apply_change=apply_change):
+                _held_skill_not_gated(op, out, apply_change, failure)
         return
     out.gates_unlanded.discard((name, skill))
     # ent#881: the write surface's warning is a report here — a gate whose
@@ -222,7 +276,80 @@ async def run(op, actor, out, attempt, *, request, apply_change) -> None:
                 STEP, "report", "gate_marker_not_written", desired=[skill], note=MARKER_NOTE))
 
 
-def _held_skill_not_gated(op, out, apply_change) -> None:
+def _gate_row_stored(name: str, skill: str) -> Optional[bool]:
+    """Is a live gate row stored for `skill` now? None when it cannot be read."""
+    try:
+        row = read_member(name).get(skill)
+    except Exception:  # noqa: BLE001 — unknown: the caller unassigns nothing
+        return None
+    return row is not None and row["origin"] != ORIGIN_CLEARED
+
+
+async def _unassign_held_skill(op, actor, out, attempt, failure, *, request,
+                               apply_change) -> bool:
+    """trinity-enterprise#1068: the gate on a held skill with no gate in force
+    was not written; with the switch on, unassign the skill (no gate, no
+    skill). Returns True when the result has said everything about the skill
+    — unassigned, or a gate row found stored after all — and False when the
+    ent#1043 report still describes it: the switch is off, a gate is in force,
+    a set holds it, the re-read failed, or the unassign was refused (its own
+    `failed[]` row)."""
+    from services import skill_assignment_service
+
+    name, short, skill = op.member, op.short_name, op.args["skill"]
+    if not op.args.get("unassign") or op.args.get("live") is not None:
+        return False
+    if op.args.get("held_via_sets"):
+        out.extra_changes.setdefault(name, []).append(apply_change(
+            STEP, "report", VIA_SET_CODE, desired=[skill], note=VIA_SET_NOTE))
+        return False
+    # A write that raised after its row landed must not unassign a gated skill.
+    stored = _gate_row_stored(name, skill)
+    if stored:
+        failure.reason += (f"; its gate row is stored all the same, so '{skill}' stays assigned "
+                           "and gated; re-apply to confirm")
+        out.gates_unlanded.discard((name, skill))
+        return True
+    if stored is None:
+        return False
+    result: Dict = {}
+
+    async def unassign():
+        result.update(await skill_assignment_service.unassign_and_remove(
+            name, skill, actor, request, keep_set_held=True))
+        if result.get("retained_via_sets"):
+            raise _Refused(f"skill_retained_via_set: '{skill}' is now brought by set "
+                           f"{', '.join(result['retained_via_sets'])}, so it was not unassigned")
+        if not result.get("removed"):
+            raise _Refused(f"skill_not_assigned: '{skill}' was no longer assigned to '{name}'")
+        return True
+
+    if not await attempt(name, short, SKILLS_STEP, unassign, key=skill):
+        return False
+    reason = failure.reason
+    failure.reason += f"; '{skill}' was unassigned from '{name}' because its gate was not written"
+    out.extra_changes.setdefault(name, []).append(apply_change(
+        SKILLS_STEP, "write", UNASSIGNED_CODE, current=None, desired=[skill],
+        note=UNASSIGNED_NOTE))
+    removal = result.get("removal") or {}
+    if removal.get("status") == "completed":
+        out.warnings.append(
+            f"'{name}': '{skill}' was unassigned because the manifest's gate on it was not "
+            f"written ({reason}).")
+        return True
+    why = removal.get("reason") or removal.get("status") or "not removed"
+    failure.reason += (f"; its package removal is pending ({why}), so it can still load until "
+                       "the agent's next start")
+    out.extra_changes[name].append(apply_change(
+        STEP, "report", UNGATED_CODE, current=None, desired=[skill], note=UNGATED_NOTE))
+    out.warnings.append(
+        f"'{name}': '{skill}' was unassigned, but its package stays on the agent until its "
+        f"next start and can run with no approval gate meanwhile; the manifest's gate was "
+        f"not written ({reason}).")
+    return True
+
+
+def _held_skill_not_gated(op, out, apply_change, failure) -> None:
     """trinity-enterprise#1043: `attempt` recorded the failed write as
     `out.failed[-1]`; the member already holds the skill, so nothing holds it
     back. Say what is running: the consequence is appended to that failure's
@@ -230,9 +357,9 @@ def _held_skill_not_gated(op, out, apply_change) -> None:
     gets a report change, and an ungated skill gets one top-level warning line
     after the held-back grant and seat lines. A write that raised AFTER its
     row landed reads as not written — the safe direction; re-apply shows the
-    truth. Nothing here unassigns."""
+    truth. Nothing here unassigns (trinity-enterprise#1068 decides that
+    before this runs)."""
     name, skill, live = op.member, op.args["skill"], op.args.get("live")
-    failure = out.failed[-1]
     assert (failure.name, failure.step, failure.key) == (name, STEP, skill), failure
     reason = failure.reason
     if live is None:
