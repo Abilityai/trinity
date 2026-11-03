@@ -21,6 +21,7 @@ from typing import List, Optional
 from fastapi import HTTPException
 
 from models import ConnectorClientSnippet, ConnectorPlaybook
+from services.skill_description import clean_description
 
 
 def connector_name(agent_name: str) -> str:
@@ -137,6 +138,11 @@ def resolve_exposed_playbooks(
 
     1. ``user_invocable == False`` playbooks are NEVER exposed.
     2. ``exposed_allow_list is None`` ⇒ expose all remaining; else only listed.
+
+    The description is cleaned here (trinity-enterprise#584): this is where the
+    connector and the Workspace briefing both take it in, so a blank reads as
+    ``None`` on both, and a non-text value from an older agent image can no
+    longer fail ``ConnectorPlaybook`` and take every playbook down with it.
     """
     allow = set(exposed_allow_list) if exposed_allow_list is not None else None
     out: List[ConnectorPlaybook] = []
@@ -151,7 +157,7 @@ def resolve_exposed_playbooks(
         out.append(
             ConnectorPlaybook(
                 name=name,
-                description=pb.get("description"),
+                description=clean_description(pb.get("description")),
                 argument_hint=pb.get("argument_hint"),
                 automation=pb.get("automation"),
             )

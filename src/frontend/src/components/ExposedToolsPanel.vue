@@ -59,7 +59,8 @@
           class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-300"
           title="Marked user-invocable: false in its SKILL.md — cannot be exposed"
         >not invocable</span>
-        <span v-if="pb.description" class="text-xs text-gray-500 dark:text-gray-400 truncate">— {{ pb.description }}</span>
+        <!-- trinity-enterprise#584: the one empty state, never a blank row. -->
+        <span class="text-xs text-gray-500 dark:text-gray-400 truncate" :class="{ italic: describeSkill(pb.description).missing }">— {{ describeSkill(pb.description).text }}</span>
       </li>
     </ul>
 
@@ -70,6 +71,7 @@
 <script setup>
 import { ref, onMounted, watch } from 'vue'
 import api from '../api'
+import { describeSkill } from '../utils/skillDescription'
 
 const props = defineProps({
   agentName: { type: String, required: true },

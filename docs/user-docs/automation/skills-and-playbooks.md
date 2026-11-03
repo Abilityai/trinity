@@ -207,7 +207,7 @@ Sync failures are never silent, and a sync contended by another worker reports `
 
 A skill's `SKILL.md` frontmatter can declare:
 
-- `description:` — shown in the library, on the skill's card, and in autocomplete.
+- `description:` — **the one place a capability is described.** Write what the skill does here, once, and every surface shows it: the Workspace's **What it can do** cards and new-chat hints, the agent's Skills tab, the Library and its assign dialog, the connector allow-list, the public link, the MCP skill tools, and the chat `/` menu. A skill with no description, or a blank one, shows **No description yet** everywhere; on the Skills tab the card adds where to write it. The Workspace `/` search lists skills by name only. `template.yaml` `capabilities:` are tags, not descriptions (see [Template tags are not capabilities](#template-tags-are-not-capabilities)).
 - `automation:` — the skill's intended automation level, shown on its card as a chip: *runs unattended* (`autonomous`), *asks mid-run* (`gated`) or *start by hand* (`manual`). It is the author's declaration; nothing enforces it.
 - `user-invocable:` — whether the skill can be run from its card and is offered in `/` autocomplete (default true).
 - `allowed-tools:` — the tools the skill may use, as Claude Code reads it. Write it in Claude Code's comma-separated form (`allowed-tools: Read, Bash, Bash(git:*)`) or as a YAML list (`[Read, Bash]`); both give the same list, and a comma inside parentheses (`Bash(npm run lint, npm test)`) stays part of one entry. Trinity reports this list in the agent's skill listing but does not enforce it — a Trinity run is restricted by the schedule, loop, or task's own allowed tools.
@@ -218,7 +218,15 @@ A skill's `SKILL.md` frontmatter can declare:
 
 At injection, Trinity runs a **declaration-only** dependency check and produces per-skill warnings (a missing binary, a missing environment variable) instead of failing. Declared package installs are surfaced but not performed. Environment checks report variable **names** only — values are never read.
 
-A skill whose frontmatter fails to parse gets a named warning and a description falling back to its first paragraph. It is never silently dropped.
+A skill whose frontmatter fails to parse gets a named warning and shows **No description yet**; nothing guesses a description from the file's body. It is never silently dropped.
+
+#### Template tags are not capabilities
+
+`template.yaml` can carry `capabilities:` (a list of tags) and `use_cases:` (example prompts). Neither describes a capability:
+
+- **Tags** label the agent and switch features on (`brain-orb` turns on the Brain Orb). Settings › General › Technical details shows them as **Template tags**. The template check **X-010** notes a tag that names no skill with a description, so the tags cannot drift from what the agent really has. The A2A agent card still lists these tags as its skills; moving the card to the agent's skills is a separate change.
+- **Use cases** are shown in the Workspace under **What you can ask** when the agent exposes no skills, as prompts you can click.
+- `skills:` in `template.yaml` declares skill names only; what each does is its `SKILL.md` `description:`.
 
 Inside the agent, the Skills tab, the `/` popup, and the chat empty state read each frontmatter field on its own. A field the agent cannot use — a list or mapping where text belongs, or an `allowed-tools` value that is a bare `yes`, a number, or has unbalanced parentheses — is dropped by itself, and the agent log warns once, naming the file and field. The skill keeps its description and every other field. Agents on an older base image instead lost the whole record over one such field, most often a comma-separated `allowed-tools`, and showed no description. The fix ships in the agent base image, so an existing agent picks it up after the base image is rebuilt (or re-pulled) and the agent is started cold — see [Upgrading → Base Image Upgrade](../guides/deploying/upgrading.md#base-image-upgrade-if-needed).
 

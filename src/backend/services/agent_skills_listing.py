@@ -39,6 +39,7 @@ import httpx
 
 from services.agent_auth import agent_httpx_client
 from services.docker_service import agent_container_state
+from services.skill_description import clean_description
 from utils.helpers import utc_now_iso
 
 logger = logging.getLogger(__name__)
@@ -123,8 +124,19 @@ async def fetch_live(agent_name: str) -> Any:
         raise SkillsListUnavailable(
             "agent_error", response.status_code, f"Agent returned error: {response.text}",
             agent_text=response.text)
-    body = response.json()
+    body = _clean_descriptions(response.json())
     remember(agent_name, body)
+    return body
+
+
+def _clean_descriptions(body: Any) -> Any:
+    """The listing with every skill's description through the one blank rule
+    (trinity-enterprise#584), in place. Anything that is not a listing is
+    returned untouched, for each caller to refuse as before."""
+    if isinstance(body, dict) and isinstance(body.get("skills"), list):
+        for skill in body["skills"]:
+            if isinstance(skill, dict) and "description" in skill:
+                skill["description"] = clean_description(skill["description"])
     return body
 
 
@@ -141,7 +153,7 @@ async def list_skills(agent_name: str, *, last_known: bool = False) -> Any:
     except SkillsListUnavailable as e:
         if not last_known or e.reason not in ("not_running", "unreachable"):
             raise
-        copy = recall(agent_name)
+        copy = _clean_descriptions(recall(agent_name))
         if copy is None:
             raise
         return {

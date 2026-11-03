@@ -386,3 +386,19 @@ entries (`actor_type=system` for the automated paths).
   - Loading uses the `ScanlineReveal` standard as **one persistent instance** with branching inside its slot (sibling `v-if` branches re-init from `loading=false` and never play), and `loading` means *no data yet* — the store splits `fetching` from `loading` so a revisit does not replay the beam over rendered data
 
 ---
+
+## 23. Capability descriptions: one source (trinity-enterprise#584)
+
+### 23.1 SKILL-DESC-001: a capability is described once, in its SKILL.md
+- **Status**: 🚧 In progress (trinity-enterprise#584; **OSS-core by decision**, ungated)
+- **Description**: What an agent can do used to be described in five places (`SKILL.md` frontmatter, `template.yaml` `capabilities:`, `use_cases`, `skills:` and a Library first-line guess), and each surface read a different one under the same word. The platform now names **one** field: a skill's `SKILL.md` frontmatter `description:`. Every surface that describes a capability reads that field (or a projection of it). Nothing else describes a capability.
+- **Key Features**:
+  - **The empty state is one rule.** A description that is missing, empty, whitespace-only or not text is `null` on every machine surface (REST, MCP, the Workspace payloads) and renders as **"No description yet"** on every UI surface that lists capabilities: the Workspace rail ("What it can do"), the Workspace new-chat hints, the agent's Skills tab (own and shared cards, the details dialog), the Library and its assign dialog, and the connector allow-list picker. Nothing guesses a description from the file body.
+  - **The author is told where to write it.** The Skills tab's card reads "No description yet. Add `description:` to its SKILL.md." and names the file on hover.
+  - **Normalised at the chokepoints, not per surface.** `services/skill_description.py::clean_description` runs where descriptions enter the backend: the connector/Workspace playbook resolution, the agent skills listing (live and last-known) and the library contract parse. Agent images that still serve blanks are cleaned on the way through, so no base-image rebuild is needed.
+  - **`template.yaml` `capabilities:` are tags, not capabilities.** They stay as labels and feature flags (`brain-orb` gates the Brain Orb). Settings › General › Technical details shows them as **Template tags**, raw, with a line saying what they do. Template check **X-010** (`info`) notes a tag with no matching described skill; the old T-011 ("capabilities array present") is retired, since it asked authors for exactly these tags.
+  - **`use_cases` are "what you can ask", not capabilities.** When an agent exposes no playbooks, the Workspace rail shows its use cases under **"What you can ask"**, never as title-only "What it can do" cards. Each Workspace hint carries `kind: "playbook" | "use_case"`.
+  - **An unreachable agent says so.** The Workspace rail renders "Couldn't load what this agent can do right now." when the briefing never got an answer (#2163's `unavailable`), never "hasn't published anything".
+  - **`template.yaml` `skills:` declares names only.** Technical details lists the declared names and points at the Skills tab for what each does.
+  - **Deliberate omissions**: the Workspace `/` typeahead carries no descriptions (#2213). Chat quick actions (operator and public link) label a skill with its description or, without one, `/name`. Workspace suggestions show a description only when there is one.
+- **Known limit**: the A2A agent card still builds `skills[]` from `template.yaml` `capabilities:` (id = name = the tag, each with the agent's description). Which skills the card lists, and how existing curated tag lists move to skill names, is trinity-enterprise#178.

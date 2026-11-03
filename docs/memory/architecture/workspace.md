@@ -322,7 +322,15 @@ exposable-skills config (ent#178) slots into this same seam. A chat holds one ag
 or, where the capability below is present, several — and the picker starts a new chat
 either way, so hints scope to the active agent by construction. ent#380 also fixed the
 briefing's metadata read — #138 called a nonexistent agent `/info` route, so descriptions
-were silently always `None`.
+were silently always `None`. **Each hint says which tier it is (trinity-enterprise#584):**
+`PortalPlaybook.kind` is `playbook` (a capability, described by its SKILL.md
+`description:`, `null` → "No description yet") or `use_case` (rendered as "What you can
+ask", never as a capability missing a description); the typeahead copy carries it too, and
+the default keeps an older payload reading as a playbook. Descriptions are cleaned once,
+where they enter (`connector_service.resolve_exposed_playbooks` →
+`services/skill_description.py`), not in `_agent_briefing`. `/page` carries
+`capabilities_state` (the card's `briefing_state`), so the rail's empty arm can tell
+"never answered" from "published nothing".
 
 **Briefing hint grid is bounded (#2101):** with no connector allow-list configured every
 `user_invocable` skill becomes a "Things you can ask" card, so the hint set is belted
