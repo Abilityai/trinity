@@ -168,20 +168,39 @@ class TestPortalRoute:
         assert exc.value.detail == "Invalid or expired code"
         assert redis.keys("login_handoff:*") == []
 
-    def test_wrong_portal_code_spends_the_platform_budget_of_a_platform_account(self, redis):
+    def test_wrong_portal_code_spends_the_platform_budget_of_every_address(self, redis):
         """A correct portal code now leads to a platform session, so portal
-        guesses at a platform account count where `/login`'s guesses count."""
+        guesses count where `/login`'s guesses count — for an outsider exactly
+        as for an account, or the buckets tell them apart."""
         from client_portal import service
         with patch("database.db", _db(whitelisted={PLATFORM}, users={PLATFORM}, code_ok=False)), \
              patch.object(service, "email_has_access", return_value=True):
             for who in (PLATFORM, OUTSIDER):
                 with pytest.raises(HTTPException):
                     _portal_verify(who, code="000000")
-        assert redis.get(f"otp_attempts:{PLATFORM}") == "1"
-        assert redis.get(f"login_attempts_acct:{PLATFORM}") == "1"
-        # An outsider's platform buckets stay untouched (ent#311 isolation).
-        assert redis.get(f"otp_attempts:{OUTSIDER}") is None
-        assert redis.get(f"login_attempts_acct:{OUTSIDER}") is None
+        for who in (PLATFORM, OUTSIDER):
+            assert redis.get(f"otp_attempts:{who}") == "1", who
+            assert redis.get(f"login_attempts_acct:{who}") == "1", who
+
+    @pytest.mark.parametrize("account", [PLATFORM, ADMIN, "outsider"])
+    def test_portal_guesses_are_no_account_oracle_at_the_platform_routes(self, redis, account):
+        """The reviewer's probe: exhaust the portal's OTP cap, then ask the
+        platform routes. Whatever the address is — an email-login account, a
+        password account that is not allow-listed, or nobody — the platform
+        OTP and per-account buckets read the same."""
+        from client_portal import service
+        from routers import auth as oss_auth
+        who = OUTSIDER if account == "outsider" else account
+        with patch("database.db", _db(whitelisted={PLATFORM}, users={PLATFORM, ADMIN},
+                                      passwords={ADMIN}, code_ok=False)), \
+             patch.object(service, "email_has_access", return_value=True):
+            for _ in range(oss_auth.OTP_MAX_ATTEMPTS):
+                with pytest.raises(HTTPException):
+                    _portal_verify(who, code="000000")
+        with pytest.raises(HTTPException) as otp:
+            oss_auth.check_otp_rate_limit(who)
+        assert otp.value.status_code == 429
+        assert redis.get(f"login_attempts_acct:{who}") == str(oss_auth.OTP_MAX_ATTEMPTS)
 
     def test_password_only_account_with_email_login_off_gets_no_token(self, redis):
         """`/login` cannot take this address by email, so a token is useless;
@@ -395,3 +414,60 @@ class TestRealFlowOneCode:
         logged = "\n".join(r.getMessage() for r in caplog.records)
         assert code not in logged
         assert token not in logged
+
+
+# ------------------------------------------------- one code, one verification
+
+class TestVerifyLoginCodeIsSingleUse:
+    """Review of #4157: `verify_login_code` read the row, then marked it used
+    with no `verified = 0` guard, so two concurrent verifies on PostgreSQL could
+    both pass and mint two hand-off tokens from one code. The UPDATE is now
+    conditional and its rowcount decides."""
+
+    def _run(self, monkeypatch, rowcount):
+        from datetime import datetime, timedelta
+        from db import email_auth
+
+        row = {"id": 7, "code": "123456", "verified": 0,
+               "expires_at": (datetime.utcnow() + timedelta(minutes=5)).isoformat()}
+        statements = []
+
+        class _Result:
+            def __init__(self, rc):
+                self.rowcount = rc
+
+            def mappings(self):
+                return self
+
+            def first(self):
+                return row
+
+        class _Conn:
+            def execute(self, stmt):
+                statements.append(stmt)
+                return _Result(rowcount if len(statements) == 2 else None)
+
+        class _Begin:
+            def __enter__(self):
+                return _Conn()
+
+            def __exit__(self, *exc):
+                return False
+
+        class _Engine:
+            def begin(self):
+                return _Begin()
+
+        monkeypatch.setattr(email_auth, "get_engine", lambda: _Engine())
+        ops = email_auth.EmailAuthOperations.__new__(email_auth.EmailAuthOperations)
+        return ops.verify_login_code("a@example.com", "123456"), statements
+
+    def test_the_verify_that_loses_the_race_is_an_invalid_code(self, monkeypatch):
+        result, _ = self._run(monkeypatch, rowcount=0)
+        assert result is None
+
+    def test_the_winner_verifies_and_the_update_is_conditional(self, monkeypatch):
+        result, statements = self._run(monkeypatch, rowcount=1)
+        assert result and result["verified"] is True
+        where = str(statements[1].compile(compile_kwargs={"literal_binds": True}))
+        assert "verified = 0" in where, where

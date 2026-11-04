@@ -319,13 +319,15 @@ def portal_auth_verify(body: PortalAuthVerify, request: Request):
     if not token:
         record_otp_attempt(otp_scope, success=False)
         # #4157: a correct code here now leads to a platform session (via the
-        # hand-off), so a wrong guess at a PLATFORM account also spends that
-        # account's platform budget — the guesses `/login` would have counted.
-        # Not an oracle: the response is the same 401, and the lookup runs for
-        # every wrong code. Not a new lockout: anyone can already spend those
-        # buckets at `POST /api/auth/email/verify`. Outsiders stay isolated
-        # (ent#311).
-        if service.platform_login_admits(email):
+        # hand-off), so a wrong guess also spends the address's PLATFORM budget —
+        # the guesses `/login` would have counted. For EVERY address, account or
+        # not: spending it only for platform accounts made those buckets an
+        # oracle (5 wrong portal codes, then one wrong `/api/auth/email/verify`:
+        # 429 for an account, 401 for an outsider). Not a new lockout: the
+        # platform route already spends both buckets for any address an
+        # unauthenticated caller names (`_email_login_failed`), so the ent#311
+        # isolation never protected them from a deliberate guesser.
+        if email:
             from routers.auth import record_login_attempt_account_only
             record_login_attempt_account_only(email, success=False)
             record_otp_attempt(email, success=False)
