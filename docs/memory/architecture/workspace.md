@@ -717,6 +717,8 @@ validation, or the control's own `""` default 422s every default turn), and the 
 `WORKSPACE_MODELS` set is the security control, since the value reaches the agent as a
 `--model` argv element.
 
+**Workspace Build (`components/portal/builder/`).** `/workspace/build` mounts the ordinary `PortalConversation` beside a world column, the way the voice canvas takes the right column. Each person who can build has their own guide agent, found on their roster by owner (`myGuideCard`); it reports through its `build` canvas and proposes settings changes on its `fleet` canvas, which the page turns into Confirm cards run with the person's own session against the main app's existing agent routes (`platformHttp`, `fleetActions.js`). The world adds no table; the one endpoint is `GET`/`PUT /api/workspace-build/company` (a system setting, `require_person` and the creator role), which keeps the company profile once per instance. `PortalConversation` gained one additive prop, `autoSendPrefill`, off everywhere else. See [workspace-build.md](../feature-flows/workspace-build.md).
+
 ### Multi-Agent Rooms (ent#169; OSS core since ent#443)
 
 `src/backend/shared_sessions/` — the substrate behind a Workspace chat that holds

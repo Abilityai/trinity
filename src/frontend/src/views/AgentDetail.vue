@@ -124,7 +124,7 @@
               <div class="flex-1 min-w-0">
                 <OverflowTabs :tabs="workingTabs" v-model="activeTab" />
               </div>
-              <div v-if="settingsTab.length" class="shrink-0 w-28">
+              <div v-if="settingsTab.length" class="shrink-0 w-28" data-walk="settings-tab">
                 <OverflowTabs :tabs="settingsTab" v-model="activeTab" />
               </div>
             </div>
@@ -412,6 +412,8 @@
       @resolve="resolveConflict"
       @dismiss="dismissConflict"
     />
+    <!-- Show me, from a settings card in the Workspace: one control lit up with a note. -->
+    <ShowMeSpotlight v-if="showMeKey" :show-key="showMeKey" @close="closeShowMe" />
   </div>
 </template>
 
@@ -419,6 +421,7 @@
 import { ref, computed, onMounted, onUnmounted, onActivated, onDeactivated, watch, nextTick } from 'vue'
 import { readStoredToken } from '../utils/platformSession'
 import { useRoute, useRouter } from 'vue-router'
+import ShowMeSpotlight from '../components/onboarding/ShowMeSpotlight.vue'
 import axios from 'axios'
 import { useAgentsStore } from '../stores/agents'
 import { useAuthStore } from '../stores/auth'
@@ -489,6 +492,13 @@ import { useTabRoute } from '../composables/useTabRoute'
 // Setup
 const route = useRoute()
 const router = useRouter()
+
+// Show me (`?showme=<key>`), opened from a settings card in the Workspace chat.
+const showMeKey = computed(() => (typeof route.query.showme === 'string' ? route.query.showme : ''))
+function closeShowMe() {
+  const { showme: _shown, ...rest } = route.query
+  router.replace({ query: rest })
+}
 const agentsStore = useAgentsStore()
 const authStore = useAuthStore()
 const sessionsStore = useSessionsStore()  // SESSION_TAB_2026-04 Phase 3

@@ -771,7 +771,7 @@
           </div>
 
           <!-- API Keys Section -->
-          <div v-if="activeTab === 'integrations'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
+          <div v-if="activeTab === 'integrations'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg" data-tour="showme-keys">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
               <h2 class="text-lg font-medium text-gray-900 dark:text-white">API Keys</h2>
               <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
@@ -2309,12 +2309,15 @@ Example:
       :variant="confirmDialog.variant"
       @confirm="confirmDialog.onConfirm"
     />
+    <!-- Show me, from a settings card in the Workspace: one control lit up with a note. -->
+    <ShowMeSpotlight v-if="showMeKey" :show-key="showMeKey" @close="closeShowMe" />
   </div>
 </template>
 
 <script setup>
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
+import ShowMeSpotlight from '../components/onboarding/ShowMeSpotlight.vue'
 import { useRole } from '../composables/useRole'
 import { useBuildInfo } from '../composables/useBuildInfo'
 import { useQueryTab } from '../composables/useQueryTab'
@@ -2384,6 +2387,13 @@ import InlineError from '../components/InlineError.vue'
 
 const router = useRouter()
 const route = useRoute()
+
+// Show me (`?showme=<key>`), opened from a settings card in the Workspace chat.
+const showMeKey = computed(() => (typeof route.query.showme === 'string' ? route.query.showme : ''))
+function closeShowMe() {
+  const { showme: _shown, ...rest } = route.query
+  router.replace({ query: rest })
+}
 const authStore = useAuthStore()
 const settingsStore = useSettingsStore()
 // trinity-enterprise#85: refreshed after a Brain Orb flag change so the

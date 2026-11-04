@@ -177,7 +177,7 @@
         </div>
 
         <div class="p-4 space-y-4">
-          <div class="relative">
+          <div class="relative" data-walk="quick-inject">
             <textarea
               v-model="quickInjectText"
               :disabled="agentStatus !== 'running' || quickInjectLoading"
@@ -199,6 +199,7 @@
             </span>
             <button
               @click="quickInject"
+              data-walk="quick-inject-save"
               :disabled="agentStatus !== 'running' || quickInjectLoading || !quickInjectText.trim()"
               class="inline-flex items-center px-4 py-2 text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
             >
@@ -213,6 +214,7 @@
           <!-- Quick inject result -->
           <div
             v-if="quickInjectResult"
+            :data-walk="quickInjectResult.success ? 'credentials-saved' : undefined"
             :class="[
               'p-4 rounded-lg',
               quickInjectResult.success ? 'bg-status-success-50 dark:bg-status-success-900/30 border border-status-success-200 dark:border-status-success-800' : 'bg-status-danger-50 dark:bg-status-danger-900/30 border border-status-danger-200 dark:border-status-danger-800'

@@ -35,6 +35,7 @@ from typing import List, Optional, Set
 from database import db
 from dependencies import principal_reach
 from models import User
+from services.build_crew import is_build_crew
 from services.cornelius_agent_service import CORNELIUS_AGENT_NAME
 from services.system_seed_service import seeded_agent_names as manifest_seeded_agent_names
 
@@ -88,6 +89,11 @@ def _pick_demo_agent(seeded_present: List[str]) -> Optional[str]:
     return sorted(seeded_present)[0] if seeded_present else None
 
 
+# Workspace Build's guides (one per person) and the old Agent Builder are the tools for
+# making a first agent, which nobody should see counted as having made one
+# (services/build_crew.py).
+
+
 def get_first_run_state(current_user: User) -> dict:
     """Assemble the caller's first-run state. Read-only, DB-only, never raises.
 
@@ -101,7 +107,7 @@ def get_first_run_state(current_user: User) -> dict:
         seeded = get_seeded_agent_names()
         visible = _visible_agents(current_user)
         visible_names = [a["name"] for a in visible]
-        own_agents = [n for n in visible_names if n not in seeded]
+        own_agents = [n for n in visible_names if n not in seeded and not is_build_crew(n)]
         seeded_present = [n for n in visible_names if n in seeded]
 
         return {

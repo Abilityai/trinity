@@ -37,7 +37,7 @@
           v-model="value"
           type="password"
           :label="copy.label"
-          :placeholder="copy.placeholder"
+          :placeholder="savedOn === tab ? SAVED_CREDENTIAL_DOTS : copy.placeholder"
           :help="copy.help"
           :error="fieldError"
           :disabled="busy"
@@ -99,6 +99,7 @@ import {
   CLAUDE_TAB_COPY,
   CLAUDE_ALREADY_CONNECTED,
   FIRST_RUN_SUBSCRIPTION_NAME,
+  SAVED_CREDENTIAL_DOTS,
   claudeCredentialError,
   claudeSavedText,
   claudeTabFor,
@@ -127,6 +128,20 @@ const connectedAgents = ref(null) // the save response's `connected_agents`
 
 const copy = computed(() => CLAUDE_TAB_COPY[tab.value])
 const connected = computed(() => savedHere.value || !!props.ctx.claudeAuthConfigured)
+
+// The tab whose field holds the saved credential, shown there as dots. A connected
+// instance with no platform API key is running on a subscription token.
+const savedOn = ref(props.ctx.claudeAuthConfigured ? 'subscription' : null)
+if (props.ctx.claudeAuthConfigured) {
+  keys.fetchStatus()
+    .then(() => {
+      if (!savedHere.value && keys.status?.anthropic?.configured) {
+        savedOn.value = 'api_key'
+        tab.value = 'api_key'
+      }
+    })
+    .catch(() => { /* unreadable: keep the subscription guess */ })
+}
 const otherTab = computed(() => claudeTabFor(tab.value, value.value))
 const otherTabLabel = computed(() => CLAUDE_TABS.find((t) => t.id === otherTab.value)?.label || '')
 
@@ -169,6 +184,7 @@ async function connect() {
       ? await subscriptions.registerToken(FIRST_RUN_SUBSCRIPTION_NAME, credential)
       : await keys.save('anthropic', { api_key: credential })
     connectedAgents.value = saved?.connected_agents
+    savedOn.value = tab.value
     value.value = ''
     warning.value = result.warning
     savedHere.value = true

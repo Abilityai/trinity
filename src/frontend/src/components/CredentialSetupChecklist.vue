@@ -192,7 +192,7 @@ watch(
 <template>
   <!-- The surface is BaseCard (#2122); `flush` because the header/body
        sections own their internal padding. -->
-  <BaseCard flush>
+  <BaseCard flush data-walk="credentials-checklist" :data-walk-ready="report || error ? 'true' : 'false'">
     <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-700 flex items-start justify-between gap-3">
       <div>
         <h3 class="text-lg font-medium text-gray-900 dark:text-white">Credential Setup</h3>
@@ -255,7 +255,14 @@ watch(
           {{ group.title }} ({{ group.rows.length }})
         </h4>
         <ul>
-          <li v-for="row in group.rows" :key="row.name" class="px-4 py-3 space-y-1.5">
+          <li
+            v-for="row in group.rows"
+            :key="row.name"
+            class="px-4 py-3 space-y-1.5"
+            :data-walk-credential="row.name"
+            :data-walk-status="row.status"
+            :data-walk-required="String(row.required)"
+          >
             <div class="flex items-center gap-2 flex-wrap">
               <span class="font-mono text-sm text-gray-900 dark:text-white">{{ row.name }}</span>
 
@@ -333,6 +340,7 @@ watch(
         </p>
         <p
           v-if="saveResult"
+          :data-walk="saveResult.success ? 'credentials-saved' : undefined"
           class="text-sm mb-2"
           :class="saveResult.success ? 'text-status-success-700 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'"
         >{{ saveResult.message }}</p>
@@ -345,6 +353,7 @@ watch(
             type="button"
             class="inline-flex items-center px-3 py-1.5 text-sm font-medium rounded-md text-white bg-action-primary-600 hover:bg-action-primary-700 disabled:bg-gray-400 disabled:cursor-not-allowed"
             :disabled="!canSubmit || saving || filled.length === 0"
+            data-walk="credentials-save"
             @click="submit"
           >{{ saving ? 'Saving…' : 'Save credentials' }}</button>
         </div>

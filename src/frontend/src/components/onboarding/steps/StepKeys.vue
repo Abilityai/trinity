@@ -10,8 +10,8 @@
   <div data-testid="first-run-step-keys">
     <FirstRunStepHeader
       kicker="Integrations"
-      title="Other keys"
-      lead="Each of these switches on one more capability. None of them blocks your first run — fill in what you have now and skip the rest."
+      title="Optional extras"
+      lead="You don't need any of these to get started, so it's fine to skip this whole step. Each one adds an extra feature, and you can add them any time in Settings → Integrations."
       badge="Optional"
       schematic="keys"
     />

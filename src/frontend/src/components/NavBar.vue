@@ -42,9 +42,12 @@
                hides four links on a 1440px display. -->
           <div ref="linksEl" class="hidden sm:ml-6 sm:flex min-w-0 flex-1 relative">
             <nav class="flex items-stretch gap-3 xl:gap-6 min-w-0 overflow-hidden">
+              <!-- `data-tour` only here: a link collapsed into "N more" isn't on screen,
+                   so the Dashboard's feature tour leaves its stop out. -->
               <router-link
                 v-for="link in inlineLinks"
                 :key="link.id"
+                :data-tour="`nav-${link.id}`"
                 :to="link.to"
                 :target="link.target"
                 :rel="link.rel"

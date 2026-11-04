@@ -71,6 +71,8 @@ export const PREF_KEYS = Object.freeze({
   org: 'grid_org',
   // ent#403 — the Workspace composer's model choice, `{agentName: modelId}`.
   workspaceModel: 'workspace_model',
+  // Workspace Build's setup answers, kept on the account.
+  workspaceIntake: 'workspace_intake',
 })
 
 /**

@@ -26,12 +26,16 @@ Login (or the /setup claim, ent#580 — which now signs straight in)
       waits for: flags (fetched OK) + /api/users/me + /api/onboarding/first-run
       opens when a state-derived step applies and is not skipped, or ?onboarding=1
         welcome  — what will be configured, about how long (constellation + manifest)
+        intro    — what an agent is and what Trinity adds, rides along            (workspace-build.md)
         secure   — domain field; Cloudflare Tunnel guidance behind <details>   (#2380)
         email    — sign-in email, fallback only                                 (#2381)
+        profile  — about you: role and experience, sets how the guide talks; newcomers see "What's an agent?", then an optional "what to build first" (workspace-build.md)
         claude   — REQUIRED; Continue disabled until it completes                (ent#582)
         keys     — optional credentials slot, rides along                        (ent#582)
-        agent    — Show me / Make me one (real CreateAgentModal) / Bring mine     (ent#319, ent#52)
+        company  — company and website; starts the research, sets up their own guide; a colleague's profile fills it in (workspace-build.md)
         sharing  — usage-sharing consent, one step in the sequence              (ent#437)
+        audit    — starting the AI audit leaves setup for the guide's chat, so usage sharing comes first. "I know exactly" makes talking it through with the guide the main button; an experienced person who skips the audit stays on the Dashboard, where the feature tour opens once the overlay has closed (workspace-build.md)
+        agent    — Show me / Make me one (real CreateAgentModal) / Bring mine     (ent#319, ent#52)
         done     — what is left and where; "Done" follows a door's destination
 ```
 
@@ -56,8 +60,11 @@ decision is spec-reachable. Each step has `eligible` (who it is for) and
   then `forced` → open; `closed` → shut; else any applicable non-ride-along step
   that is not skipped. An established fleet never sees it.
 - **Snapshot**: the chassis fixes the rail's membership when it opens
-  (`stepsForSession`: applicable steps, or every *eligible* step when forced), so
-  a step finished mid-session keeps its row and shows a check.
+  (`stepsForSession`: every *eligible* step), so a step finished mid-session keeps
+  its row and shows a check, and a step done before setup opened (Claude
+  connected, an email bound at /setup) is listed as done rather than left out.
+  A saved credential shows as dots in its field (`SAVED_CREDENTIAL_DOTS`) on the
+  Claude step and the first-run key cards; it is never read back.
 - **Completion is derived** (`stepState`): done when the predicate went false
   after a refresh, or the step emitted `complete` this session (the only way
   `keys` reads done). Persisted per browser: `trinity_first_run_closed` ("Finish

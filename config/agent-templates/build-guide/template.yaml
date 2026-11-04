@@ -1,0 +1,58 @@
+name: build-guide
+# Deployed with the Workspace Build page by config/manifests/workspace-build.yaml;
+# not something to create on its own from the catalog.
+hidden: true
+display_name: Atlas
+description: Walks a person from "what is an agent?" to agents running on their Trinity instance, builds them with them, and draws each step on the Build page as it happens.
+type: guide-agent
+tagline: "Find where agents help, then build them with you"
+
+resources:
+  cpu: "1"
+  memory: "2g"
+
+use_cases:
+  - "Find out where agents would help most in my company"
+  - "Build a small example agent so I can see what one is"
+  - "I already know what I want to build"
+
+capabilities:
+  - company-audit
+  - agent-design
+  - guided-build
+
+commands:
+  - name: example-agent
+    description: Build a tiny test agent that shows what an agent is, for someone who skipped the audit
+    usage: /example-agent
+  - name: company-research
+    description: Research the company from public sources in the background
+    usage: /company-research Company <name>. Website <url>.
+  - name: about-your-work
+    description: A short talk about what the person's own job involves, which completes their profile without the full audit
+    usage: /about-your-work
+  - name: company-audit
+    description: The AI audit - find where agents help, where the data lives, recommend a first agent, and write context.md
+    usage: /company-audit
+  - name: plan-agent
+    description: Turn one opportunity into an agent design
+    usage: /plan-agent [opportunity]
+  - name: plan-orchestrator
+    description: Design an agent that runs your other agents
+    usage: /plan-orchestrator
+  - name: build-agent
+    description: Build the planned agent yourself, in this chat, with the create-agent wizard
+    usage: /build-agent [agent]
+  - name: fleet
+    description: Change who an agent can call, who can use it, its schedules, links and skills, one confirmed change at a time
+    usage: /fleet [what to change]
+
+plugins:
+  marketplaces:
+    - name: abilityai
+      source: abilityai/abilities
+  installed:
+    # The create-agent wizard behind /build-agent.
+    - create-agent@abilityai
+    - agent-dev@abilityai
+    - trinity@abilityai

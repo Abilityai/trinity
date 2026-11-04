@@ -323,6 +323,13 @@ export const routes = [
     }
   },
   {
+    // Workspace Build: chat with the guide on the left, your world on the right.
+    path: '/workspace/build',
+    name: 'WorkspaceBuild',
+    component: () => import('../views/Portal.vue'),
+    meta: { title: 'Workspace · Build', hideHelpWidget: true }
+  },
+  {
     // ent#661: Projects — the person's list across agents, and one project.
     // Literal `projects` segment, safe beside `/c/`, `/r/`, `/a/` (ent#360).
     path: '/workspace/projects',

@@ -1,5 +1,6 @@
 <template>
-  <div class="space-y-6">
+  <!-- `data-walk-*`: the stops of Show me's schedules walk (showMeWalk.js). -->
+  <div class="space-y-6" :data-walk-autonomy="autonomyEnabled ? 'on' : 'off'">
     <!-- Header with Create Button -->
     <div class="flex justify-between items-center">
       <div>
@@ -38,6 +39,7 @@
           </p>
           <button
             @click="$emit('enable-autonomy')"
+            data-walk="autonomy-enable"
             class="mt-3 inline-flex items-center px-3 py-1.5 border border-transparent text-sm font-medium rounded-md text-white bg-amber-600 hover:bg-amber-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-amber-500"
           >
             Enable autonomy
@@ -323,7 +325,7 @@
       @retry="loadSchedules"
     />
 
-    <div v-else-if="schedules.length === 0" class="text-center py-12 bg-gray-50 dark:bg-gray-800 rounded-lg">
+    <div v-else-if="schedules.length === 0" class="text-center py-12 bg-gray-50 dark:bg-gray-800 rounded-lg" data-tour="showme-schedules">
       <svg class="mx-auto h-12 w-12 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
       </svg>
@@ -341,7 +343,7 @@
       </button>
     </div>
 
-    <div v-else class="space-y-4">
+    <div v-else class="space-y-4" data-tour="showme-schedules">
       <!-- Refetch failed with data on screen (#1926 × #1634): same failure,
            non-unmounting form — the stale rows stay put and keep their scroll
            position; the banner names the staleness and carries the retry. -->
@@ -359,6 +361,9 @@
         :key="schedule.id"
         data-testid="schedule-row"
         :data-schedule-id="schedule.id"
+        :data-walk-schedule="schedule.id"
+        :data-walk-enabled="String(!!schedule.enabled)"
+        :data-walk-schedule-name="schedule.name"
         class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg p-4 hover:shadow-sm transition-shadow"
       >
         <div class="flex justify-between items-start">
@@ -519,6 +524,7 @@
             <button
               @click="toggleSchedule(schedule)"
               data-testid="schedule-toggle"
+              data-walk="schedule-toggle"
               :disabled="toggleLoading.has(schedule.id)"
               class="p-1.5 rounded transition-colors"
               :class="schedule.enabled ? 'text-status-success-600 hover:text-gray-400' : 'text-gray-400 hover:text-status-success-600'"

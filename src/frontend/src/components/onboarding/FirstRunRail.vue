@@ -9,7 +9,7 @@
 -->
 <template>
   <aside
-    class="flex flex-col border-b sm:border-b-0 sm:border-r border-gray-200 dark:border-gray-750
+    class="flex min-h-0 flex-col border-b sm:border-b-0 sm:border-r border-gray-200 dark:border-gray-750
            bg-gray-100 dark:bg-gray-750 px-4 pb-4 pt-5 max-sm:py-3"
   >
     <div class="mb-1 flex items-center gap-2.5">
@@ -34,14 +34,15 @@
       />
     </div>
 
-    <nav aria-label="Setup steps" class="max-sm:hidden">
+    <!-- Scrolls on its own, so that the way out below it is always on screen. -->
+    <nav aria-label="Setup steps" class="min-h-0 flex-1 overflow-y-auto max-sm:hidden">
       <ul class="flex flex-col gap-0.5">
         <li v-for="s in steps" :key="s.key">
           <!-- Colour lives on mutually exclusive arms, never a static class
                plus an override (design-system contract, #2662). -->
           <button
             type="button"
-            class="flex w-full items-start gap-2.5 rounded-md px-2 py-2 text-left text-[13px] leading-[1.35]
+            class="flex w-full items-start gap-2.5 rounded-md px-2 py-1.5 text-left text-[13px] leading-[1.35]
                    focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40
                    dark:focus-visible:ring-action-primary-400/40 disabled:cursor-default"
             :class="states[s.key] === 'current'
@@ -83,7 +84,7 @@
       </ul>
     </nav>
 
-    <div class="mt-auto pt-4 max-sm:hidden">
+    <div class="flex-none pt-3 max-sm:hidden">
       <button
         type="button"
         class="rounded text-[12.5px] text-gray-500 underline underline-offset-2
@@ -94,13 +95,21 @@
       >
         Finish later
       </button>
+      <a
+        :href="helpHref"
+        class="mt-2 block text-[12.5px] text-gray-500 underline underline-offset-2 hover:text-gray-900 dark:text-gray-400 dark:hover:text-gray-100"
+        data-testid="first-run-get-help"
+      >Need help? Email the team</a>
     </div>
   </aside>
 </template>
 
 <script setup>
 import { computed } from 'vue'
+import { supportMailto } from '../portal/builder/portalBuild'
 import TrinityMark from '../TrinityMark.vue'
+
+const helpHref = supportMailto()
 
 const props = defineProps({
   steps: { type: Array, required: true },
@@ -117,7 +126,7 @@ const progressLabel = computed(() => `${doneCount.value} of ${props.steps.length
 
 const subline = (s) => {
   if (props.states[s.key] === 'skipped') return `Skipped — ${s.settingsPath}`
-  if (props.states[s.key] === 'done') return 'Done'
+  if (props.states[s.key] === 'done') return s.doneLabel || 'Done'
   return s.tag
 }
 </script>

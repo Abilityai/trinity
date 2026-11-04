@@ -58,9 +58,11 @@ describe('Claude step', () => {
 })
 
 describe('Claude step — what the save did', () => {
-  it('names the real number of agents the save connected', () => {
-    expect(claudeSavedText(3)).toMatch(/^Connected 3 agents that had no Claude credential/)
-    expect(claudeSavedText(1)).toMatch(/^Connected 1 agent that/)
+  it('says the built-in agents can use it, without a count that reads like work already done', () => {
+    for (const n of [1, 3]) {
+      expect(claudeSavedText(n)).toMatch(/^Saved\. Trinity's built-in agents can use it now/)
+      expect(claudeSavedText(n)).not.toMatch(/\d/)
+    }
   })
 
   it('says a save that connected nobody is saved for new agents, without claiming any', () => {

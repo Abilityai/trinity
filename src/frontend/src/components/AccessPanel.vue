@@ -43,7 +43,7 @@
          button sits below it (ent#837 eyeball: side by side, the field shrank to
          "name@compan"); `min-w-0` lets it give way in the row layout, where its
          intrinsic width plus the button once pushed the page past 390px. -->
-    <form @submit.prevent="addOperator" class="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+    <form @submit.prevent="addOperator" class="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3" data-tour="showme-people" data-walk="people-form">
       <input
         v-model="newEmail"
         type="email"
@@ -69,6 +69,7 @@
     <div
       v-if="message"
       role="status"
+      :data-walk="message.added ? 'people-added' : undefined"
       :class="['p-3 rounded-lg text-sm', message.type === 'success'
         ? 'bg-status-success-50 dark:bg-status-success-900/30 text-status-success-700 dark:text-status-success-300'
         : 'bg-status-danger-50 dark:bg-status-danger-900/30 text-status-danger-700 dark:text-status-danger-300']"
@@ -290,7 +291,7 @@ async function addOperator() {
   try {
     await agentsStore.shareAgent(props.agentName, email)
     newEmail.value = ''
-    message.value = { type: 'success', text: `Added ${email}.` }
+    message.value = { type: 'success', text: `Added ${email}.`, added: true }
     await load()
   } catch (e) {
     message.value = { type: 'error', text: e?.response?.data?.detail || 'Failed to add this person.' }

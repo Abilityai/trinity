@@ -167,6 +167,7 @@
                       class="text-sm font-semibold text-gray-900 dark:text-white truncate cursor-pointer hover:text-blue-600 dark:hover:text-blue-400"
                       @click="navigateToAgent(row.name)"
                       :title="agentNameTooltip({ name: row.name, display_label: row.displayLabel })"
+                      :data-walk-agent="row.name"
                     >
                       {{ agentDisplayName({ name: row.name, display_label: row.displayLabel }) }}
                     </span>

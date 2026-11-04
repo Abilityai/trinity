@@ -37,8 +37,8 @@
         </div>
 
         <!-- Agent Checkboxes -->
-        <ul class="divide-y divide-gray-200 dark:divide-gray-700 border border-gray-200 dark:border-gray-700 rounded-lg mb-4">
-          <li v-for="targetAgent in availableAgents" :key="targetAgent.name" class="px-4 py-3 flex items-center justify-between hover:bg-gray-50 dark:hover:bg-gray-700">
+        <ul class="divide-y divide-gray-200 dark:divide-gray-700 border border-gray-200 dark:border-gray-700 rounded-lg mb-4" data-tour="showme-permissions" data-walk="permissions-list">
+          <li v-for="targetAgent in availableAgents" :key="targetAgent.name" :data-walk-permission="targetAgent.name" :data-walk-checked="String(!!targetAgent.permitted)" class="px-4 py-3 flex items-center justify-between hover:bg-gray-50 dark:hover:bg-gray-700">
             <label :for="'perm-' + targetAgent.name" class="flex items-center space-x-3 cursor-pointer flex-1">
               <input
                 :id="'perm-' + targetAgent.name"
@@ -72,6 +72,8 @@
         <div class="flex items-center space-x-3">
           <button
             @click="saveAndRefresh"
+            data-walk="permissions-save"
+            :data-walk-idle="String(!permissionsDirty && !permissionsSaving)"
             :disabled="permissionsSaving || !permissionsDirty"
             class="inline-flex items-center px-4 py-2 border border-transparent text-sm font-medium rounded-md shadow-sm text-white bg-action-primary-600 hover:bg-action-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-action-primary-500 dark:focus:ring-offset-gray-800 disabled:bg-gray-400 dark:disabled:bg-gray-600 disabled:cursor-not-allowed"
           >
@@ -83,7 +85,7 @@
           </button>
 
           <!-- Status Message -->
-          <div v-if="permissionsMessage" :class="[
+          <div v-if="permissionsMessage" :data-walk="permissionsMessage.type === 'success' ? 'permissions-saved' : undefined" :class="[
             'text-sm',
             permissionsMessage.type === 'success' ? 'text-status-success-700 dark:text-status-success-400' : 'text-status-danger-600 dark:text-status-danger-400'
           ]">
@@ -97,7 +99,7 @@
       </div>
 
       <!-- No Other Agents -->
-      <div v-else class="text-center py-8 text-gray-500 dark:text-gray-400">
+      <div v-else class="text-center py-8 text-gray-500 dark:text-gray-400" :data-walk="permissionsMessage?.type === 'error' ? undefined : 'permissions-none'">
         <svg class="mx-auto h-12 w-12 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
         </svg>

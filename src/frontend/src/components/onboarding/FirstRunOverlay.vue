@@ -39,7 +39,7 @@
       <!-- Fixed height, not min-height: the PANEL never resizes between steps
            (contract p.4/6) — a long step scrolls its own body instead. -->
       <div
-        class="relative grid h-[600px] max-h-full w-full max-w-[940px]
+        class="relative grid h-[640px] max-h-full w-full max-w-[940px]
                grid-cols-1 grid-rows-[auto_minmax(0,1fr)] sm:grid-cols-[264px_minmax(0,1fr)] sm:grid-rows-1
                overflow-hidden rounded-[10px] border border-gray-200 dark:border-gray-750
                bg-white dark:bg-gray-800 shadow-2xl"
@@ -74,6 +74,7 @@
               :ctx="ctx"
               @complete="onStepComplete"
               @skip="skipCurrent"
+              @update-intake="setBuildIntake"
             />
           </div>
 
@@ -145,6 +146,7 @@ import { useAuthStore } from '../../stores/auth'
 import { useSessionsStore } from '../../stores/sessions'
 import { useFirstRunStore } from '../../stores/firstRun'
 import { useProductTelemetryStore } from '../../stores/productTelemetry'
+import { useBuildIntakeStore } from '../../stores/buildIntake'
 import BaseButton from '../base/BaseButton.vue'
 import ConfirmDialog from '../ConfirmDialog.vue'
 import FirstRunRail from './FirstRunRail.vue'
@@ -152,6 +154,10 @@ import StepWelcome from './steps/StepWelcome.vue'
 import StepDone from './steps/StepDone.vue'
 import StepSecure from './steps/StepSecure.vue'
 import StepEmail from './steps/StepEmail.vue'
+import StepIntro from './steps/StepIntro.vue'
+import StepAboutYou from './steps/StepAboutYou.vue'
+import StepCompany from './steps/StepCompany.vue'
+import StepAudit from './steps/StepAudit.vue'
 import StepClaude from './steps/StepClaude.vue'
 import StepKeys from './steps/StepKeys.vue'
 import StepAgent from './steps/StepAgent.vue'
@@ -169,18 +175,31 @@ import {
   stepState,
   stepsForSession,
 } from './firstRunSteps'
+import {
+  auditSkipDestination,
+  chooseAudit,
+  finishIntake,
+  intakeGroupDone,
+  skipIntake,
+} from '../portal/builder/portalBuild'
 
 const STEP_COMPONENTS = {
+  intro: StepIntro,
   secure: StepSecure,
   email: StepEmail,
+  profile: StepAboutYou,
+  company: StepCompany,
   claude: StepClaude,
   keys: StepKeys,
+  audit: StepAudit,
   agent: StepAgent,
   sharing: StepSharing,
 }
 
 // The parent binds this so its own hotkeys stand down while setup is open.
 const open = defineModel('open', { type: Boolean, default: false })
+// Closing to go to another page: the page beneath must not start anything in the gap.
+const emit = defineEmits(['leave'])
 
 const route = useRoute()
 const router = useRouter()
@@ -197,6 +216,16 @@ const skipped = ref(readFirstRunSkipped())
 const completed = ref([])
 
 const forced = computed(() => route.query.onboarding === '1')
+
+// Workspace Build: the answers the guide starts from, kept on the person's account and
+// shared with the Workspace's own onboarding window, so nothing is asked twice.
+const intakeStore = useBuildIntakeStore()
+const buildIntake = computed(() => intakeStore.intake)
+watch(() => auth.userEmail, (email) => intakeStore.rekey(email || ''))
+
+function setBuildIntake(next) {
+  intakeStore.set(next)
+}
 
 /**
  * The registry context. Step components receive it read-only; C's credential
@@ -217,6 +246,7 @@ const ctx = computed(() => ({
   publicUrlReached: sessions.publicUrlReached,
   hasEmail: !!auth.userEmail,
   userEmail: auth.userEmail,
+  emailDeliveryAvailable: auth.emailDeliveryAvailable,
   claudeAuthConfigured: sessions.claudeAuthConfigured,
   telemetryEnabled: sessions.telemetrySharingEnabled,
   telemetryHardDisabled: sessions.telemetrySharingHardDisabled,
@@ -224,6 +254,10 @@ const ctx = computed(() => ({
   telemetryFirstValue: sessions.telemetrySharingFirstValue,
   firstRun: firstRun.firstRun,
   demoAgent: firstRun.demoAgent,
+  buildIntake: buildIntake.value,
+  profileDone: intakeGroupDone(buildIntake.value, 'you'),
+  companyDone: intakeGroupDone(buildIntake.value, 'company'),
+  auditChoice: buildIntake.value.audit,
   forced: forced.value,
   closed: closed.value,
   skipped: skipped.value,
@@ -301,9 +335,17 @@ watch(
 )
 
 function close() {
+  // Sent here from the Workspace: leaving counts as skipping what's unanswered, which
+  // shows in red there, and it goes back where they came from.
+  const fromWorkspace = route.query.from === 'workspace'
+  if (fromWorkspace && !nextRoute.value) nextRoute.value = '/workspace/build'
+  if (nextRoute.value && nextRoute.value !== route.path) emit('leave')
   persistFirstRunClosed()
   closed.value = true
   open.value = false
+  if (fromWorkspace && !buildIntake.value.done) setBuildIntake(skipIntake(buildIntake.value))
+  // Answered or skipped: the Workspace has nothing left to ask.
+  if (buildIntake.value.done) setBuildIntake(finishIntake(buildIntake.value))
   if (nextRoute.value) {
     router.push(nextRoute.value).catch(() => {})
   } else if (forced.value) {
@@ -354,7 +396,21 @@ function markSkipped(key) {
 function skipCurrent() {
   if (!currentStep.value || currentStep.value.required) return
   markSkipped(currentKey.value)
+  applyBuildSkip(currentKey.value)
   advance()
+}
+
+// A skipped profile shows in red in the Workspace. A skipped audit means building any
+// agent as a test, which also happens with the guide; an experienced person stays on the
+// Dashboard instead, which shows them round Trinity's features.
+function applyBuildSkip(key) {
+  if (key === 'profile' || key === 'company') setBuildIntake(skipIntake(buildIntake.value))
+  if (key === 'audit') {
+    setBuildIntake(chooseAudit(buildIntake.value, 'skip'))
+    const destination = auditSkipDestination(buildIntake.value)
+    nextRoute.value = destination.next
+    nextLabel.value = destination.label
+  }
 }
 
 function next() {
@@ -387,6 +443,13 @@ function onStepComplete(payload) {
   if (payload?.next) {
     nextRoute.value = payload.next
     nextLabel.value = payload.label || ''
+  }
+  // The step has started something that happens elsewhere, so go there now.
+  if (payload?.finish) {
+    if (!buildIntake.value.done) setBuildIntake(skipIntake(buildIntake.value))
+    telemetry.record('setup_completed', { via: 'next_step' })
+    close()
+    return
   }
   refreshCtx()
 }
@@ -479,6 +542,7 @@ onMounted(() => {
   // there first. The profile is fetched by `initializeAuth`.
   sessions.loadFeatureFlags()
   firstRun.fetchState()
+  intakeStore.load(auth.userEmail || '')
   if (open.value) lock(true)
 })
 

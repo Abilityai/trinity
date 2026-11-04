@@ -250,6 +250,7 @@
               <div
                 class="flex rounded-md border border-gray-300 dark:border-gray-600 p-0.5 bg-gray-50 dark:bg-gray-700"
                 data-testid="view-mode-switcher"
+                data-tour="view-modes"
                 title="Switch view (press v to cycle)"
               >
                 <button
@@ -507,7 +508,10 @@
          that replaced the inline card ladder and the ent#52 wizard. It decides
          for itself when to open (`firstRunSteps.js`) and honours
          `?onboarding=1`; `firstRunOpen` only lets this view's hotkeys stand down. -->
-    <FirstRunOverlay v-model:open="firstRunOpen" />
+    <FirstRunOverlay v-model:open="firstRunOpen" @leave="setupLeaving = true" />
+    <!-- Trinity's features, once, for people who build agents all the time, after setup
+         and never over it. `/?tour=features` (from the Workspace's Get help) replays it. -->
+    <PortalBuildTour :open="featureTourShown" :steps="FEATURE_TOUR_STEPS" @close="closeFeatureTour" />
   </div>
 </template>
 
@@ -519,6 +523,11 @@ import SkeletonLoader from '@/components/SkeletonLoader.vue'
 import SystemViewsSidebar from '@/components/SystemViewsSidebar.vue'
 import SystemViewEditor from '@/components/SystemViewEditor.vue'
 import FirstRunOverlay from '@/components/onboarding/FirstRunOverlay.vue'
+import PortalBuildTour from '@/components/portal/builder/PortalBuildTour.vue'
+import { featureTourDue, featureTourSteps, markFeatureTourSeen } from '@/components/onboarding/featureTour'
+import { useBuildIntakeStore } from '@/stores/buildIntake'
+import { useSessionsStore } from '@/stores/sessions'
+import { useFirstRunStore } from '@/stores/firstRun'
 import axios from 'axios'
 import { ref, onMounted, onUnmounted, computed, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -567,6 +576,41 @@ const firstRunOpen = ref(false)
 watch(firstRunOpen, (now, was) => {
   if (was && !now) networkStore.fetchAgents()
 })
+
+// The feature tour. The overlay loads the setup answers; the tour waits until the overlay
+// has had what it needs to decide whether to open (the same three reads), for it to close,
+// and for a forced `?onboarding=1` to be consumed. It is never drawn while the overlay is
+// open, nor when the overlay closed to go to another page (the Build page, an agent).
+const intakeStore = useBuildIntakeStore()
+const sessionsStore = useSessionsStore()
+const firstRunStore = useFirstRunStore()
+const FEATURE_TOUR_STEPS = featureTourSteps()
+const featureTourOpen = ref(false)
+const setupLeaving = ref(false)
+const featureTourShown = computed(() => featureTourOpen.value && !firstRunOpen.value && !setupLeaving.value)
+const setupDecided = computed(() => sessionsStore.featureFlagsLoaded && authStore.profileVerified && firstRunStore.loaded)
+watch(
+  () => [setupDecided.value, firstRunOpen.value, setupLeaving.value, featureTourDue(intakeStore.intake), route.query.onboarding],
+  ([decided, setupOpen, leaving, due, forcing]) => {
+    if (decided && !setupOpen && !leaving && due && forcing !== '1') featureTourOpen.value = true
+  },
+  { immediate: true, flush: 'post' },
+)
+// Consumed, so a reload doesn't show it again.
+watch(() => route.query.tour, (tour) => {
+  if (tour !== 'features') return
+  featureTourOpen.value = true
+  const { tour: _consumed, ...rest } = route.query
+  router.replace({ query: rest }).catch(() => {})
+}, { immediate: true })
+
+function closeFeatureTour() {
+  featureTourOpen.value = false
+  // Only answers that exist are written back: an intake still loading must not
+  // overwrite the saved one.
+  const intake = intakeStore.intake
+  if (intake.done && !intake.featureTourSeen) intakeStore.set(markFeatureTourSeen(intake))
+}
 
 // System View Editor Modal State
 const isEditorOpen = ref(false)
@@ -765,7 +809,7 @@ function handleDashboardKeydown(e) {
     // .stop's before reaching here.
     if (!(filterOpen.value || filterActive.value)) return
     // Never race a modal's own Esc handling.
-    if (firstRunOpen.value || isEditorOpen.value || showCreateModal.value) return
+    if (firstRunOpen.value || isEditorOpen.value || showCreateModal.value || featureTourShown.value) return
     // Layered dismissal (strategy F5): an open tag dropdown consumes this
     // Esc; the filter survives — the second Esc clears.
     if (showTagDropdown.value) {
@@ -803,7 +847,7 @@ function handleDashboardKeydown(e) {
   const t = e.target
   if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return
   // Guard 5: open modals.
-  if (firstRunOpen.value || isEditorOpen.value || showCreateModal.value) return
+  if (firstRunOpen.value || isEditorOpen.value || showCreateModal.value || featureTourShown.value) return
 
   e.preventDefault() // `/`: blocks Firefox quick-find. `v`: no browser default — harmless, kept uniform.
   action()

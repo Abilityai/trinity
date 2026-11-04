@@ -443,6 +443,23 @@ def _multi_agent_chat_available() -> bool:
     return True
 
 
+def _orchestration_available(is_platform: bool) -> bool:
+    """Workspace Build: may this principal design orchestrators on the Build page?
+
+    An instance setting, for a platform user only. Anything but the literal
+    "true" is off, and an unreadable setting hides the surface rather than
+    failing the roster.
+    """
+    if not is_platform:
+        return False
+    try:
+        from services.settings_service import settings_service
+        return settings_service.get_setting("workspace_build_orchestrators") == "true"
+    except Exception:  # noqa: BLE001 — a roster must never 500 over a capability bit
+        logger.warning("[workspace-build] orchestration capability read failed", exc_info=True)
+        return False
+
+
 def _projects_available(is_platform: bool, email: str | None = None) -> bool:
     """ent#661: may this principal use Workspace Projects?
 
@@ -1128,6 +1145,7 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
         agents=cards,
         multi_agent_chat_available=multi_agent_chat,
         projects_available=_projects_available(include_owned, email),
+        orchestration_available=_orchestration_available(include_owned),
         realtime_voice=realtime_voice_capability(include_owned),
         direct_voice=direct_voice_capability(include_owned),
         # ent#403: instance-level, so it rides the roster rather than every card.
