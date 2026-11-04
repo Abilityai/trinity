@@ -1392,7 +1392,7 @@ When you deploy a manifest, Trinity:
 
 1. **Validates** the YAML (syntax, required fields, name formats, permissions)
 2. **Resolves names** (handles conflicts with `_N` suffix)
-3. **Updates trinity_prompt** (if specified in manifest)
+3. **Updates trinity_prompt** (if specified in manifest, and only when an admin deploys; anyone else gets a `prompt_requires_admin` warning and the prompt is left unchanged)
 4. **Creates all agents** (with templates, resources, credentials)
 5. **Configures shared folders** (expose/consume settings)
 6. **Grants permissions** (applies preset or explicit rules)
