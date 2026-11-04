@@ -9,7 +9,7 @@ mp_api() {
     local data=()
     [ -z "$body" ] || data=(--data-binary "@${body}")
     printf 'header = "Authorization: Bearer %s"\n' "$DIGITALOCEAN_TOKEN" \
-        | curl -sS -K - -X "$method" -H "Content-Type: application/json" \
+        | curl -sS -K - --max-time 60 -X "$method" -H "Content-Type: application/json" \
             ${data[@]+"${data[@]}"} -o "$out" -w '%{http_code}' "$url"
 }
 

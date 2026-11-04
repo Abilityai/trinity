@@ -160,11 +160,12 @@ ports="$(remote -n "docker ps --format '{{.Ports}}'" | grep -oE '0\.0\.0\.0:[0-9
 [ -n "$ports" ] || fail "read no published ports from docker ps"
 curl -fsS -o /dev/null --max-time 15 "${BASE}/" || fail "443 stopped answering, so the port probe proves nothing"
 for port in $(printf '%s\n' $ports 8081 | sort -un); do
-    curl -sS -o /dev/null --connect-timeout 5 --max-time 8 "http://${IP}:${port}" 2>/dev/null
-    case $? in
-        7|28) ;;
-        *) fail "port ${port} is reachable from off-box" ;;
-    esac
+    # A timeout is a closed port only when no connection ever opened.
+    connected="$(curl -sS -o /dev/null -w '%{time_connect}' --connect-timeout 5 --max-time 8 "http://${IP}:${port}" 2>/dev/null)"
+    rc=$?
+    if [ "$rc" != 7 ] && { [ "$rc" != 28 ] || [ -n "${connected//[0.]/}" ]; }; then
+        fail "port ${port} is reachable from off-box"
+    fi
 done
 say "container ports are closed from off-box"
 

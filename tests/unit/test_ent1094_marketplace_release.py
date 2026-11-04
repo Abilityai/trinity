@@ -25,6 +25,7 @@ _TOKEN = "dop_v1_testtoken"
 _TAG = "v1.0.0"
 _SNAPSHOT = "253014734"
 _APP = "app123"
+_PAGE = "https://203.0.113.7/"
 
 _FAKE = r'''#!__PY__
 import json, os, re, sys
@@ -82,10 +83,27 @@ if tool == "curl":
     url = next((a for a in reversed(args) if a.startswith("http")), "")
     if url.startswith("http://") and re.search(r":\d+$", url):
         port = url.rsplit(":", 1)[1]
-        finish("", 0 if port in world["open_ports"] else 7)
+        if port in world.get("silent_ports", []):
+            finish("0.012000", 28)  # accepted the connection, then said nothing
+        if port in world.get("dropped_ports", []):
+            finish("0.000000", 28)
+        finish("0.012000" if port in world["open_ports"] else "0.000000",
+               0 if port in world["open_ports"] else 7)
+    method = args[args.index("-X") + 1] if "-X" in args else "GET"
+    def matches(needle):
+        # A full URL means that URL only, so the page rule cannot answer for the API.
+        return needle == url if needle.startswith("https://") else needle in url
+    # A rule that survives a set number of answers, then fails: [needle, method, answers left, code, rc].
+    for rule in world.get("then_fail", []):
+        if matches(rule[0]) and rule[1] == method:
+            if rule[2] == 0:
+                if "-o" in args:
+                    open(args[args.index("-o") + 1], "w").write(world["curl_failure_body"])
+                finish(str(rule[3]) if "-w" in args else "", rule[4])
+            rule[2] -= 1
+            save()
     for needle, body, code, rc in world["curl"]:
-        if needle in url:
-            method = args[args.index("-X") + 1] if "-X" in args else "GET"
+        if matches(needle):
             if needle == "vendor-portal" and method == "PATCH":
                 body, code = world["patch"]
             if "-o" in args:
@@ -182,8 +200,9 @@ class Rig:
                 ["/api/token", '{"access_token": "jwt123"}', 200, 0],
                 ["/api/agents/boot-check-agent", '{"status": "running"}', 200, 0],
                 ["/api/agents", "{}", 200, 0],
-                ["203.0.113.7/", "HTTP/2 200\nx-do-marketplace: trinity\n\n<title>Trinity</title>", 200, 0],
+                [_PAGE, "HTTP/2 200\nx-do-marketplace: trinity\n\n<title>Trinity</title>", 200, 0],
             ],
+            "curl_failure_body": json.dumps(_LISTING),
             "patch": ['{"status": {"value": "pending"}}', 200],
             "packer_rc": 0,
             "built_id": "999",
@@ -295,6 +314,11 @@ class TestStatus:
         rig.set_curl("vendor-portal", '{"id":"Unauthorized"}', 401)
         assert rig.run("mp-status.sh").returncode == 1
 
+    def test_a_stalled_portal_times_out_as_an_api_failure(self, rig: Rig) -> None:
+        rig.set_curl("vendor-portal", "", 0, 28)
+        assert rig.run("mp-status.sh").returncode == 1
+        assert all("--max-time" in c["args"] for c in rig.calls("curl"))
+
     def test_token_stays_out_of_argv(self, rig: Rig) -> None:
         rig.run("mp-status.sh")
         assert rig.calls("curl")
@@ -354,6 +378,35 @@ class TestSubmit:
         assert rig.run("mp-submit.sh", _SNAPSHOT).returncode == 0
         body = json.loads(self._patches(rig)[0]["sent"])
         assert [s["version"] for s in body["softwareIncluded"] if s["name"] == "PostgreSQL"] == ["99"]
+
+    def test_a_failed_listing_read_sends_nothing(self, rig: Rig) -> None:
+        """mp-status reads the listing first, so only the second read fails here."""
+        rig.world["then_fail"] = [["vendor-portal", "GET", 1, 500, 0]]
+        rig.save()
+        record = rig.pass_record()
+        result = rig.run("mp-submit.sh", _SNAPSHOT)
+        assert result.returncode != 0
+        assert "listing read returned 500" in result.stderr, result.stderr
+        assert self._patches(rig) == []
+        assert record.exists()
+
+    def test_a_compose_file_without_postgres_sends_nothing(self, rig: Rig, tmp_path: Path) -> None:
+        """A blank version in a PATCH clears the field, so it must never be sent."""
+        repo = tmp_path / "repo"
+        scripts = repo / "packer" / "digitalocean" / "scripts"
+        scripts.mkdir(parents=True)
+        for name in ("mp-submit.sh", "mp-status.sh", "mp-lib.sh"):
+            (scripts / name).write_text((_SCRIPTS / name).read_text())
+        (repo / "docker-compose.hosted.yml").write_text("services:\n  redis:\n    image: redis:7\n")
+        record = rig.pass_record()
+        result = subprocess.run(
+            ["bash", str(scripts / "mp-submit.sh"), _SNAPSHOT],
+            cwd=rig.work, env=rig.env(), capture_output=True, text=True, timeout=60,
+        )
+        assert result.returncode != 0
+        assert "no postgres image" in result.stderr, result.stderr
+        assert self._patches(rig) == []
+        assert record.exists()
 
     def test_a_vendor_400_fails_and_keeps_the_pass_record(self, rig: Rig) -> None:
         record = rig.pass_record()
@@ -428,19 +481,20 @@ class TestBootCheck:
         rig.set_ssh("trinity-agent-base:latest", "sha256:other\n")
         assert self._run(rig).returncode != 0
 
-    @pytest.mark.parametrize("needle,body,code,rc", [
-        ("203.0.113.7/", "", 0, 60),  # untrusted certificate
-        ("203.0.113.7/", "HTTP/2 200\n\n<title>Trinity</title>", 200, 0),  # no marketplace header
-        ("203.0.113.7/", "HTTP/2 200\nx-do-marketplace: trinity\n\n<title>nginx</title>", 200, 0),
-        ("/api/setup/status", '{"setup_completed": false}', 200, 0),
-        ("/api/token", "{}", 401, 22),
-        ("/api/agents/boot-check-agent", '{"status": "starting"}', 200, 0),
-        ("/api/agents", "{}", 500, 22),
+    @pytest.mark.parametrize("needle,body,code,rc,reason", [
+        (_PAGE, "", 0, 60, "trusted certificate"),
+        (_PAGE, "HTTP/2 200\n\n<title>Trinity</title>", 200, 0, "X-DO-MARKETPLACE"),
+        (_PAGE, "HTTP/2 200\nx-do-marketplace: trinity\n\n<title>nginx</title>", 200, 0, "does not serve Trinity"),
+        ("/api/setup/status", '{"setup_completed": false}', 200, 0, "disagree on setup state"),
+        ("/api/token", "{}", 401, 22, "sign-in"),
+        ("/api/agents/boot-check-agent", '{"status": "starting"}', 200, 0, "the agent to run"),
+        ("/api/agents", "{}", 500, 22, "creating an agent failed"),
     ])
-    def test_each_off_box_failure_fails_and_destroys(self, rig: Rig, needle, body, code, rc) -> None:
+    def test_each_off_box_failure_fails_and_destroys(self, rig: Rig, needle, body, code, rc, reason) -> None:
         rig.set_curl(needle, body, code, rc)
         result = self._run(rig)
         assert result.returncode != 0, result.stdout
+        assert reason in result.stderr, result.stderr
         assert not self._pass_file(rig).exists()
         assert rig.state()["droplets"] == []
 
@@ -463,12 +517,28 @@ class TestBootCheck:
 
     def test_a_dead_network_never_reads_as_closed_ports(self, rig: Rig) -> None:
         """Closed ports and no network look alike, so 443 is the positive control."""
-        real = rig.world["curl"]
-        rig.world["curl"] = [c for c in real if c[0] != "203.0.113.7/"]
+        rig.world["then_fail"] = [[_PAGE, "GET", 1, 0, 7]]  # the page answers once, then the network dies
         rig.save()
         result = self._run(rig)
         assert result.returncode != 0
+        assert "443 stopped answering" in result.stderr, result.stderr
         assert not self._pass_file(rig).exists()
+
+    def test_a_port_that_accepts_and_stays_silent_fails(self, rig: Rig) -> None:
+        """A timeout after the connection opened is an open port."""
+        rig.world["silent_ports"] = ["8000"]
+        rig.save()
+        result = self._run(rig)
+        assert result.returncode != 0
+        assert "port 8000 is reachable" in result.stderr, result.stderr
+        assert not self._pass_file(rig).exists()
+
+    def test_a_port_the_firewall_drops_counts_as_closed(self, rig: Rig) -> None:
+        rig.world["dropped_ports"] = ["8000"]
+        rig.save()
+        result = self._run(rig)
+        assert result.returncode == 0, result.stderr
+        assert self._pass_file(rig).exists()
 
     def test_sigterm_mid_run_destroys_the_droplet(self, rig: Rig) -> None:
         rig.world["hang_on"] = "cloud-init status"
@@ -522,6 +592,14 @@ class TestBuild:
         result = self._run(rig)
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == "999"
+
+    def test_a_manifest_without_a_snapshot_id_fails(self, rig: Rig) -> None:
+        rig.world["built_id"] = ""
+        rig.save()
+        result = self._run(rig)
+        assert result.returncode != 0
+        assert "no snapshot ID" in result.stderr, result.stderr
+        assert result.stdout.strip() == ""
 
     def test_a_tag_missing_locally_builds_nothing(self, rig: Rig) -> None:
         rig.world["git_tag_rc"] = 1
