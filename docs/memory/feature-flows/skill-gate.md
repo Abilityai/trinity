@@ -135,6 +135,7 @@ A failed write is logged and the run proceeds; the hook then refuses the skill i
 ### 2. The decision — `may_end` and the observer
 
 - Only a person in the ask's `resolved_to` may answer; an admin may cancel but never approve. `answer`, `cancel` and `bulk_cancel` all apply `may_end` (`src/backend/services/ask_service.py:156`), and the routes map `AskNotAddressee` to 403 `not_addressee`.
+- `resolved_to` is the audience at raise time — until who fills the gate's role changes: a `primary` written or removed on an assignments provider re-addresses the agent's pending approvals (`ask_service.readdress_role`, trinity-enterprise#1095) through the gate's own `_approvers` (ent#881 reachability applied), so the new primary decides and the replaced one cannot. A requester who becomes primary may then approve their own request, as `enforce` self-approves at raise. Nobody filling `primary` leaves the row with no audience — admin cancel only — until one is set again; a refused role (`approver` unfilled, nobody seated who can open the agent) leaves it as it was.
 - `on_ending` (`skill_gate_service.py:754`) is registered in every worker at startup. It hops to the event loop and calls `resolve(request_id)` (`:814`). The operator-queue poll cycle runs `sweep()` (`:769`) after expiry, for endings no observer consumed.
 
 ### 3. Exactly once — `resolve` → `_approve` (`:858`) → `_dispatch_approved` (`:900`)

@@ -1,0 +1,51 @@
+{
+  "version": "1.2.3",
+  "date": "2026-11-04",
+  "mode": "diff",
+  "scope": "trinity-enterprise#1095",
+  "phases_run": [
+    0,
+    1,
+    2,
+    7,
+    8,
+    9,
+    12,
+    13,
+    14
+  ],
+  "stack_cve_quicklist": [],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "new_ws_channels": 0,
+    "new_mcp_tools": 0,
+    "new_platform_primitives": [
+      "ask_service.readdress_role",
+      "ask_service.readdress_item"
+    ],
+    "callers": [
+      "enterprise assignments router (admin + interactive writes)"
+    ]
+  },
+  "findings": [],
+  "hypotheses": [
+    "requester made primary after raise may approve own gated request \u2014 existing enforce rule, admin-created state",
+    "Main attached before a CAS that may lose \u2014 idempotent pair chat, no disclosure"
+  ],
+  "coverage_gaps": [
+    "phases 3,4,5,6: no diff overlap; phase 8 limited to the Unicode scan",
+    "no image rebuilt, no live instance driven",
+    "enterprise test_5_two_factor fails locally on missing pyotp (CI installs it)"
+  ],
+  "supply_chain_summary": {
+    "scanner": "none: no dependency changes"
+  },
+  "filter_stats": {},
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": "none"
+}

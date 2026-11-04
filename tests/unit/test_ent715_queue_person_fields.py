@@ -860,6 +860,10 @@ _ROW_ACCESSORS = frozenset({
     "respond_to_operator_queue_item", "cancel_operator_queue_item", "withdraw_operator_queue_item",
     "bulk_cancel_operator_queue_items", "end_operator_queue_items_by_platform",
     "mark_operator_queue_expired", "set_operator_queue_discussion_link",
+    # trinity-enterprise#1095: the address columns and the raw context a re-address
+    # compares and rewrites; only the ask service reads them, and nothing but a
+    # boolean or a count leaves it.
+    "read_operator_queue_address", "list_pending_role_addressed_operator_queue_items",
     "create_person_mention", "list_person_mentions_for", "get_person_mention",
     "mark_person_mention_read", "list_person_mentions_by_prefix",
 })
@@ -874,6 +878,7 @@ _NON_ROW_ACCESSORS = frozenset({
     "mark_operator_queue_unconfirmed", "refresh_operator_queue_last_confirmed",
     "set_operator_queue_sync_state", "set_operator_queue_delivery_state",
     "drop_operator_queue_addressee",   # trinity-enterprise#981: a boolean, did the address change
+    "readdress_operator_queue_item",   # trinity-enterprise#1095: a boolean, did the CAS write land
 })
 
 #: What happens to the rows each reader gets.
@@ -941,6 +946,13 @@ _ROW_READERS = {
         "agent", "the receipt of the agent's own ask, ids and enums; a reserved id is refused "
                  "before the replay lookup (§2 drives it)"),
     (_ASKS, "request_id_of"): ("internal", "a uuid's request_id, nothing else"),
+    (_ASKS, "readdress_item"): (
+        "internal", "one pending row's address columns and raw context, read to rewrite them under a "
+                    "compare-and-set (trinity-enterprise#1095); a boolean leaves, the audit carries ids "
+                    "and the reason"),
+    (_ASKS, "readdress_role"): (
+        "internal", "the agent's pending role-addressed rows, read to hand each to `readdress_item`; "
+                    "counts leave, the one trigger carries ids"),
     (_ASKS, "withdraw"): (
         "agent", "the receipt of the agent's own ask; a row it did not raise, or one about a "
                  "person, is the uniform 404 (§2 drives it)"),
