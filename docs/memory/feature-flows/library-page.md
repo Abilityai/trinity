@@ -184,6 +184,7 @@ CI runs admin-authenticated (`e2e/.auth/admin.json`), so the non-admin empty-sta
 
 | Date | Changes |
 |------|---------|
+| 2026-11-04 | **ent#736 + #3136** — a skill set's member list badges a deprecated member (`m.deprecated`, `DEPRECATED_TITLE`; members only, the collapsed card adds nothing); the set-assign note gains a binary-only dependency line and a deprecation line read from `result.status.members`; the card's `AssignedAgents` note gains a warning line naming a missing binary or env key (`dependencyText`) between the delivery and the deprecation lines. |
 | 2026-11-02 | **trinity-enterprise#660 + trinity#3448** — the Skills tab's cards gain a filter by text, source and category and a stated total, and scroll in a bounded region that fills the window; the page no longer grows with the library. |
 | 2026-10-08 | **trinity-enterprise#754** — the per-agent Skills tab absorbed Playbooks ([skills-tab.md](skills-tab.md)): `?tab=skills` links now land for shared users too, the KeepAlive note names `SkillsTab`, and the chips seam's per-agent consumer is `SkillAssignModal.vue`. No change to this page. |
 | 2026-09-30 | **ent#672 — deprecated skills are marked**: `deprecated` badge + "Superseded by …" line on the card (shared `contract.js::supersededLine`), and a warning line under the assign control's delivery note. The card stays in the grid and stays assignable. |

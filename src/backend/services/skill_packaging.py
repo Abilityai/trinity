@@ -303,6 +303,29 @@ def deprecation_warning(info: Dict[str, Any]) -> Optional[str]:
     return "deprecated"
 
 
+def is_deprecation_code(warning: Any) -> bool:
+    """True for the code `deprecation_warning` produces, in either shape."""
+    return warning == "deprecated" or (isinstance(warning, str) and warning.startswith("deprecated:"))
+
+
+# #2991 / ent#334 — what a per-skill warning may say outside the backend. A
+# warning's `kind:detail` detail can be free text (a path, a source label, an
+# exception string), so a REST/MCP body carries only bare codes and the three
+# kinds whose detail is a name by construction. One rule for every body that
+# projects injection warnings: the start endpoint (`public_skills_result`) and
+# the assign report (`skill_service._deliver_assigned`, #3136).
+PUBLIC_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
+_PUBLIC_NAMED_WARNING_RE = re.compile(r"^(missing_binary|missing_env|deprecated):[A-Za-z0-9_.+-]{1,128}$")
+
+
+def public_warnings(warnings: Any) -> List[str]:
+    """The warnings safe to return to a caller, in order; anything else is dropped."""
+    if not isinstance(warnings, (list, tuple)):
+        return []
+    return [w for w in warnings if isinstance(w, str)
+            and (_PUBLIC_NAMED_WARNING_RE.match(w) or PUBLIC_CODE_RE.match(w))]
+
+
 # =========================================================================
 # Tar packaging
 # =========================================================================

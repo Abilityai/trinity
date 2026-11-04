@@ -137,3 +137,70 @@ export function deprecationText(report) {
   }
   return parts.length ? `${parts.join('; ')}.` : null
 }
+
+/**
+ * ent#736 — a set's member rows (`status.members` on a set-assign response) as
+ * the report `deprecationText` reads, so a set assign names its deprecated
+ * members with the same sentence a skill assign uses. Read from the member
+ * rows, not from `delivery`: a re-assign that added nothing returns
+ * `delivery: null`, and a member the agent already held is not in it.
+ *
+ * @param {Array<{name: string, deprecated?: boolean, deprecation?: string|null}>|null|undefined} members
+ * @returns {{skills: Record<string, {warnings: string[]}>}}
+ */
+export function memberDeprecationReport(members) {
+  const skills = {}
+  for (const m of Array.isArray(members) ? members : []) {
+    const code = m?.deprecation || (m?.deprecated === true ? 'deprecated' : null)
+    if (m?.name && code) skills[m.name] = { warnings: [code] }
+  }
+  return { skills }
+}
+
+/** "a", "a and b", "a, b and c". */
+function listPhrase(items) {
+  if (items.length < 2) return items.join('')
+  return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`
+}
+
+/**
+ * #3136 — what an assign's injection found MISSING on this agent, or null.
+ *
+ * Its own line, beside the delivery note rather than a clause in it: the skill
+ * did reach the agent (the note stays green), and what the agent lacks to run
+ * it is a second fact (the ent#672 precedent). Reads `missing_binary:<b>` and
+ * `missing_env:<KEY>` from `delivery.skills[name].warnings`; codes that only say
+ * something was NOT CHECKED (`packages_not_checked`, `dep_check_skipped`) are
+ * not missing-anything and get no sentence. A manual Sync's per-skill list says
+ * the same codes in its own words (`skillCards.js::warningText`); keep the two
+ * in step when either changes.
+ *
+ * @param {{skills?: Record<string,{warnings?: string[]}>}|null|undefined} report
+ * @param {{ env?: boolean }} [opts]  `env: false` leaves env keys out, for the
+ *   set notes, whose prerequisites line already names them with the next step.
+ * @returns {string|null}
+ */
+export function dependencyText(report, { env = true } = {}) {
+  const sentences = []
+  for (const [name, v] of Object.entries(report?.skills || {})) {
+    const binaries = new Set()
+    const keys = new Set()
+    for (const w of v?.warnings || []) {
+      const text = String(w)
+      const at = text.indexOf(':')
+      if (at < 0) continue
+      const kind = text.slice(0, at)
+      const detail = text.slice(at + 1)
+      if (!detail) continue
+      if (kind === 'missing_binary') binaries.add(detail)
+      else if (kind === 'missing_env' && env) keys.add(detail)
+    }
+    const needs = []
+    if (binaries.size) needs.push(`${binaries.size === 1 ? 'the binary' : 'the binaries'} ${listPhrase([...binaries])}`)
+    if (keys.size) {
+      needs.push(`${keys.size === 1 ? 'the environment variable' : 'the environment variables'} ${listPhrase([...keys])}`)
+    }
+    if (needs.length) sentences.push(`${name} needs ${needs.join(' and ')}, which this agent doesn't have.`)
+  }
+  return sentences.length ? sentences.join(' ') : null
+}
