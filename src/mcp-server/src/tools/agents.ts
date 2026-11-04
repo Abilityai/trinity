@@ -656,9 +656,8 @@ export function createAgentTools(
         "file types: .env, .mcp.json, cloud service-account JSON (.config/gcloud/**), " +
         "kubeconfig (.kube/config), TLS/cert material (*.pem/*.key/*.crt/*.p12/*.pfx), " +
         "and SSH keys (.ssh/id_*). Use files_b64 for binary material. The agent must be running. " +
-        HUMAN_ONLY_WHO_MAY_CALL.interactive +
-        " Inject from the agent's credential settings in the web UI instead.",
-      canAccess: humanOnlyToolAccess("interactive"),
+        HUMAN_ONLY_WHO_MAY_CALL.person,
+      canAccess: humanOnlyToolAccess("person"),
       parameters: z.object({
         name: z.string().describe("The name of the agent to inject credentials into"),
         files: z.record(z.string(), z.string()).optional().describe(
@@ -1148,9 +1147,7 @@ export function createAgentTools(
         "Read and write) — wiring makes it available but cannot grant missing scopes. " +
         "To clear the PAT and revert to global, pass an empty string. " +
         "Note: Agent must be restarted for the new PAT to take effect. " +
-        HUMAN_ONLY_WHO_MAY_CALL.person +
-        " Setting a PAT binds a credential and takes a signed-in session, so a key can only clear it; " +
-        "set it from the agent's git settings in the web UI.",
+        HUMAN_ONLY_WHO_MAY_CALL.person,
       canAccess: humanOnlyToolAccess("person"),
       parameters: z.object({
         agent_name: z

@@ -88,14 +88,16 @@ describe("#3435 credential tools: advertisement", () => {
 describe("ent#719 credential tools: who is shown them", () => {
   // Since abilityai/trinity-enterprise#719 the backend's credential routes follow
   // the human-only rules: export is a person's call (a signed-in session or the
-  // person's own user-scoped key), inject and import bind credentials (a
+  // person's own user-scoped key), and so is inject, which writes a credential
+  // the caller supplies into its own agent (the ruled exception of
+  // requirements/auth.md §2.8); import restores a whole archive, a bind (a
   // signed-in session only). Each tool's canAccess is the shared predicate for
   // its rule, so no key is shown a tool its scope can never call.
   const { byName } = build(async () => ({}));
   const SCOPES = ["user", "agent", "system", "connector", "anonymous", "portal_delegate", "ops", "some_future_tier"];
   const LISTED: Record<string, string[]> = {
     export_credentials: ["user"],
-    inject_credentials: [],
+    inject_credentials: ["user"],
     import_credentials: [],
     get_credential_encryption_key: ["user", "system"],
   };
@@ -111,8 +113,10 @@ describe("ent#719 credential tools: who is shown them", () => {
   });
 
   it("each description carries the sentence for its rule", () => {
-    assert.ok(byName.export_credentials.description.includes(HUMAN_ONLY_WHO_MAY_CALL.person));
-    for (const t of ["inject_credentials", "import_credentials"]) {
+    for (const t of ["export_credentials", "inject_credentials"]) {
+      assert.ok(byName[t].description.includes(HUMAN_ONLY_WHO_MAY_CALL.person), t);
+    }
+    for (const t of ["import_credentials"]) {
       assert.ok(byName[t].description.includes(HUMAN_ONLY_WHO_MAY_CALL.interactive), t);
       assert.ok(byName[t].description.length <= 2048, `${t}: ${byName[t].description.length} chars`);
     }

@@ -292,9 +292,6 @@ const ADMIN_ONLY =
   "backend rejects agent principals (require_admin / assert_admin / reject_agent_principal, #1890)";
 const PERSON_ONLY = HUMAN_ONLY_POLICY_OWNER.person;
 const INTERACTIVE_ONLY = HUMAN_ONLY_POLICY_OWNER.interactive;
-const PAT_SET_AND_CLEAR =
-  "backend: setting the PAT takes require_interactive, clearing it require_person (abilityai/trinity-enterprise#719); " +
-  "the tool's canAccess lists it to user keys only, which can clear it";
 const KEY_ADMIN_ONLY =
   "backend require_admin (#1890): admin + human-only; hidden from agent sessions by a per-tool canAccess (#3435)";
 const TEARDOWN_HUMAN_ONLY =
@@ -347,7 +344,7 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   stop_agent: { kind: "enforce", param: "name" },
   list_templates: { kind: "none", why: "no agent target" },
   get_credential_status: { kind: "enforce", param: "name" },
-  inject_credentials: { kind: "baselined", owner: INTERACTIVE_ONLY },
+  inject_credentials: { kind: "baselined", owner: PERSON_ONLY },
   export_credentials: { kind: "baselined", owner: PERSON_ONLY },
   import_credentials: { kind: "baselined", owner: INTERACTIVE_ONLY },
   export_agent_data: { kind: "enforce", param: "name" },
@@ -357,7 +354,7 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   deploy_local_agent: { kind: "none", why: "creates the agent; `name` is the new agent's name, not a target" },
   initialize_github_sync: { kind: "baselined", owner: PERSON_ONLY },
   get_agent_github_pat_status: { kind: "enforce", param: "agent_name" },
-  set_agent_github_pat: { kind: "baselined", owner: PAT_SET_AND_CLEAR },
+  set_agent_github_pat: { kind: "baselined", owner: PERSON_ONLY },
   // --- chat.ts ---
   chat_with_agent: { kind: "in-tool", how: CHAT_GATE },
   get_chat_history: { kind: "enforce", param: "agent_name" },

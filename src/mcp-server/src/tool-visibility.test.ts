@@ -677,8 +677,9 @@ describe("ent#719 human-only tools are listed exactly to the keys their backend 
    * derived from the code under test: `person` routes admit a signed-in session
    * or the person's own user-scoped key, `interactive` routes (credential binds)
    * a signed-in session only, and the encryption key stays an admin's read that
-   * the platform's system key may also make. `set_agent_github_pat` is listed
-   * to user keys because clearing is a person's call; setting is refused there.
+   * the platform's system key may also make. Writing a credential the caller
+   * supplies into its own agent (`inject_credentials`, `set_agent_github_pat`)
+   * is a person's call: the ruled exception of requirements/auth.md §2.8.
    * Three more tools front a person-only route outside the agent's own
    * settings: closing a room (its moderator acts), revoking a Nevermined
    * mandate (`require_person`) and answering an operator-queue item
@@ -691,7 +692,7 @@ describe("ent#719 human-only tools are listed exactly to the keys their backend 
     export_credentials: ["user"],
     clear_agent_subscription: ["user"],
     toggle_nevermined: ["user"],
-    inject_credentials: [],
+    inject_credentials: ["user"],
     import_credentials: [],
     assign_subscription: [],
     configure_nevermined: [],
@@ -788,8 +789,8 @@ describe("ent#719 human-only tools are listed exactly to the keys their backend 
       });
       assert.deepEqual(srv.requests, [], `a ${key} key's refused calls reached the backend: ${srv.requests.join(", ")}`);
     }
-    // 4 interactive tools for the user key; 14 for the agent key; 13 for the system key.
-    assert.equal(refused, 4 + 14 + 13);
+    // 3 interactive tools for the user key; 14 for the agent key; 13 for the system key.
+    assert.equal(refused, 3 + 14 + 13);
   });
 
   it("every policy row that names a human-only rule is listed as that rule says", () => {
@@ -804,11 +805,10 @@ describe("ent#719 human-only tools are listed exactly to the keys their backend 
         assert.deepEqual(shown, scopes, `${tool}: its row says ${rule}, but it is listed to [${shown}]`);
       }
     }
-    // Every tool above but set_agent_github_pat (two rules on one tool), the key
-    // read, and the three whose rows keep their own kind (close_room `none`,
-    // respond_to_operator_queue `in-tool`, revoke_agent_delegation `enforce`);
-    // the first test above pins those three.
-    assert.equal(rows, 9, "the rows naming a human-only rule are not the nine this guard expects");
+    // Every tool above but the key read and the three whose rows keep their own
+    // kind (close_room `none`, respond_to_operator_queue `in-tool`,
+    // revoke_agent_delegation `enforce`); the first test above pins those three.
+    assert.equal(rows, 10, "the rows naming a human-only rule are not the ten this guard expects");
   });
 
   it("each description says who may call it and fits the 2,048-character cap, hidden tools included", async () => {
@@ -841,13 +841,11 @@ describe("ent#719 human-only tools are listed exactly to the keys their backend 
         assert.ok(found.description.includes(HUMAN_ONLY_WHO_MAY_CALL[rule]), `${tool}: the description does not carry the ${rule} sentence`);
       }
     }
-    const pat = all.find((t) => t.name === "set_agent_github_pat")!;
-    assert.match(pat.description, /setting[^.]*signed-in session/i, "set_agent_github_pat must say setting needs a signed-in session");
   });
 
   it("fresh install: a user key on an instance with no agents lists its tools and gets a clean 404", async () => {
     const shown = Object.keys(EXPECTED).filter((tool) => EXPECTED[tool].includes("user") && tool !== "get_credential_encryption_key");
-    assert.equal(shown.length, 9);
+    assert.equal(shown.length, 10);
     // Three tools map the backend's 404 to their own answer instead of a tool
     // error; each answer still comes from the backend, never from the tool list.
     const OWN_404: Record<string, RegExp> = {
