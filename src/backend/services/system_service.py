@@ -2292,7 +2292,9 @@ async def deploy_manifest(
         all_warnings = validation_warnings + name_warnings
         # #4025: decided once, before the preview, so the preview predicts the write.
         # The refusal is reported only when it withholds a change: a prompt that
-        # already matches is apply's `unchanged`, not a refusal.
+        # already matches is apply's `unchanged`, not a refusal. That tells a
+        # non-admin whether a guessed prompt matches, which apply's verdict already
+        # does, and every agent they own receives the prompt anyway.
         may_set_prompt = _caller_passes_admin_gate(current_user)
         prompt_refused = (
             bool(manifest.prompt)

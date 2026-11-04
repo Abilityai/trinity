@@ -12,7 +12,7 @@
     "regenerated_by": [
       "trinity-enterprise#1022 agent_ownership.memory_opt_out",
       "#4130 SystemDeployResponse.agents_declared_only",
-      "abilityai/trinity#4025"
+      "abilityai/trinity#4025 trinity_prompt written for an admin only"
     ]
   },
   "cases": {
