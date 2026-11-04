@@ -8181,6 +8181,17 @@
         "unit"
       ],
       "description": "trinity-enterprise#660: a library skill's `category:` frontmatter reaches the listing. extract_contract keeps it (a trinity: block wins), bounds it to one printable line, and reads garbage as no category with no warning; list_skills, get_skill and the REST listing's explicit SkillInfo(...) carry it."
+    },
+    {
+      "file": "unit/test_ent1094_marketplace_release.py",
+      "feature": "trinity-enterprise#1094",
+      "added": "2026-11-04",
+      "categories": [
+        "deploy",
+        "marketplace",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1094: runs packer/digitalocean/scripts (mp-status, mp-build, boot-check, mp-submit) against fake doctl, curl, ssh, packer and git. Status exit codes, submit refusals and software merge, each boot-check failure destroying the droplet, signal handling, secrets outside argv."
     }
   ]
 }
