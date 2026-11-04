@@ -12,6 +12,7 @@ from models import DismissAllRequest
 
 from database import db
 from dependencies import get_current_user, AuthorizedAgent, assert_agent_access
+from services.tool_access_guard import assert_tool_allowed
 from services.agent_service import get_accessible_agents
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from db_models import (
@@ -83,6 +84,8 @@ async def create_notification(
     For user-scoped keys, the notification is created on behalf of the user
     (useful for testing or manual notification creation).
     """
+    # trinity-enterprise#341: refused when this agent's tool access removes send_notification.
+    assert_tool_allowed(current_user, "send_notification")
     # Validate notification_type
     valid_types = {"alert", "info", "status", "completion", "question"}
     if data.notification_type not in valid_types:

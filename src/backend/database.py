@@ -1459,6 +1459,13 @@ class DatabaseManager:
     def set_guardrails_config(self, agent_name: str, config: dict = None) -> bool:
         return self._agent_ops.set_guardrails_config(agent_name, config)
 
+    # Tool access (GUARD-008, trinity-enterprise#341)
+    def get_tool_access_row(self, agent_name: str):
+        return self._agent_ops.get_tool_access_row(agent_name)
+
+    def write_tool_access_row(self, agent_name: str, **kwargs) -> bool:
+        return self._agent_ops.write_tool_access_row(agent_name, **kwargs)
+
     # =========================================================================
     # Parallel Capacity (delegated to db/agents.py) - CAPACITY-001
     # =========================================================================

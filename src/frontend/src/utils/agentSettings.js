@@ -26,7 +26,7 @@ export const SETTINGS_SECTIONS = Object.freeze([
     keywords: [
       'name', 'display name', 'label', 'id', 'rename', 'avatar', 'description', 'tags',
       'runtime', 'model', 'funding', 'subscription', 'api key', 'timeout', 'execution',
-      'capacity', 'parallel', 'read-only', 'read only', 'memory', 'cpu', 'resources',
+      'capacity', 'parallel', 'memory', 'cpu', 'resources',
       'template', 'technical details', 'reset', 'delete', 'danger',
     ],
   },
@@ -49,6 +49,8 @@ export const SETTINGS_SECTIONS = Object.freeze([
     question: 'What it may do',
     keywords: [
       'guardrails', 'max turns', 'rules', 'permissions', 'change itself', 'self-change',
+      // trinity-enterprise#341: read-only mode is a tool-access profile here.
+      'tool access', 'tools', 'profile', 'read-only', 'read only', 'send', 'disallowed',
       'skills', 'approval', 'autonomy', 'unprompted', 'cross-model', 'validation',
       'circuit breaker', 'reliability',
     ],
