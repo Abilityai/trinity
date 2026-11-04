@@ -33,12 +33,13 @@ During a channel turn, the agent calls `send_voice_reply` to speak that specific
 
 ### 4. Agent — speak to someone proactively (scheduled briefs)
 
-A scheduled run, loop, or reminder has no conversation to reply into, so a plain `send_voice_reply` call there is refused with guidance. To send a voice note from such a run, the agent also passes who to speak to — a role with `to` (`primary`, `approver` or `viewer`; the platform picks the person) or an email with `recipient_email` — and a `channel` (`telegram` or `whatsapp`). This works like `send_message`:
+A scheduled run, loop, or reminder has no conversation to reply into, so a plain `send_voice_reply` call there is refused with guidance. To send a voice note from such a run, the agent also passes who to speak to — a role with `to` (`primary`, `approver` or `viewer`; the platform picks the person, and the agent's owner receives it when nobody holds the primary seat) or an email with `recipient_email` — and a `channel` (`telegram` or `whatsapp`). This works like `send_message`:
 
 - The person must be **linked** on that channel (verified email) and must have **opted in to proactive messages** from the agent (or be its owner).
 - The **per-person hourly limit** for proactive messages applies, and voice and text share it.
 - Every send is recorded in the audit log.
 - The agent-level voice setting and the channel's voice flag still apply.
+- A recurring run can pass an `idempotency_key` so a retried run does not speak twice; a note that did not go out does not use the key up. The key covers voice notes only, so the same name on a text is a separate delivery.
 
 Keep proactive voice notes short. Text longer than the cap (`TTS_MAX_CHARS`, 1500 characters by default) is refused with `text_too_long`, so a daily brief should be a short spoken summary followed by the detail in text.
 

@@ -999,7 +999,8 @@ of the epic #24 voice-replies feature.
   the way `send_message` resolves it — one service rule,
   `role_addressing.resolve_single_recipient`, shared by both routes (a role that
   several people fill, or nobody fills, is refused by role and never names a
-  person) — then the recipient's verified chat link on that channel, never the
+  person; `primary` with no seat reaches the agent's owner, trinity-enterprise#904,
+  so a scheduled brief works on a fresh install) — then the recipient's verified chat link on that channel, never the
   execution row, and the send passes the **same gates
   as proactive text**: `db.can_agent_message_email` consent (owner, or a share
   with `allow_proactive`), the shared per-recipient hourly rate limit (one budget
@@ -1007,19 +1008,29 @@ of the epic #24 voice-replies feature.
   `PROACTIVE_MESSAGE` audit row (`modality: voice`). The agent + per-channel voice
   flags still apply. `execution_id` stays required — it validates the caller and
   is the #1084 dedup scope; the effect key is the resolved `(recipient email,
-  channel)`, so a re-delivered or retried run does not double-speak. A pre-send
-  refusal (rate limit, no chat link) and a transient delivery failure
-  (`send_failed`, `delivery_error` — on both paths) release the claim so a retry
-  in the same run tries again; a configuration miss (`no_binding`, …) stays
-  recorded. Without an address the call is the in-session reply,
-  unchanged (FR-1..FR-9). Proactive voice delivers on **Telegram and WhatsApp**;
+  channel)`, so a re-delivered turn does not double-speak. On this path a pre-send
+  refusal (rate limit, no chat link) and a send that blew up (`delivery_error`)
+  release the claim so a retry in the same run tries again; a provider refusal
+  (`send_failed`: WhatsApp outside its 24-hour window, a Telegram user who blocked
+  the bot) and a configuration miss (`no_binding`, …) stay recorded, because a retry
+  fails the same way and would pay for another synthesis; `send_failed` carries
+  `guidance` saying so. That scope is one execution, and a scheduler retry is a new
+  execution row, so the addressed path also takes `idempotency_key` /
+  `idempotency_ttl` (the ent#665 contract of `send_message`): one note per (agent,
+  recipient, key) within the TTL across all runs, a suppressed call answering
+  `delivered: true, sent: false, suppressed_by, first_sent_at, first_execution_id`
+  plus a `suppressed` audit row. A note that did not go out never spends the key.
+  Voice keys are their own namespace: a brief is a voice note and a text, and one
+  name must not silence the second modality. Without an address the call is the
+  in-session reply, unchanged (FR-1..FR-9): it records every delivery outcome and
+  takes no key. Proactive voice delivers on **Telegram and WhatsApp**;
   Slack is refused with `proactive_channel_unsupported` (its voice path resolves a
   bot token by bound channel, not by DM) — deferred to
   abilityai/trinity-enterprise#923. Deferred too: conversation-history / Workspace
   rail persistence of a proactive note (abilityai/trinity-enterprise#922) and
   schedule-declared channel delivery, shape (b) (abilityai/trinity-enterprise#924). Refusals on this path carry
   a named `reason` plus a `guidance` sentence (#2157 pattern): `not_authorized`,
-  `rate_limited`, `recipient_not_linked`, `proactive_channel_unsupported`, and the
+  `rate_limited`, `recipient_not_linked`, `send_failed`, `proactive_channel_unsupported`, and the
   role refusals `role_unassigned` / `role_resolves_to_several` (role-only, no person named); and an
   un-addressed call from a run with no conversation keeps `not_a_channel_turn` but
   now says how to address a recipient (abilityai/trinity#2999 AC 3).
