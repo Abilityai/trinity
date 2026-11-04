@@ -37,6 +37,6 @@ echo "live_version=${live} current=${current} queued=${queued}"
 
 case "$queued" in
     none) [ "$current" = "approved" ] && exit 0; exit 4 ;;
-    pending|"in review"|in_review) exit 3 ;;
+    pending|"in review"|in_review|inReview) exit 3 ;;
     *) exit 4 ;;
 esac
