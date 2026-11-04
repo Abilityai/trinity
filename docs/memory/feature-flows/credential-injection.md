@@ -299,14 +299,15 @@ fails if the agent image calls a backend path the app does not register.
 
 ## MCP Tools
 
-**Who sees which tool (#3435).** `export_credentials`, `import_credentials` and `get_credential_encryption_key` each carry a per-tool `canAccess` allow-list `{user, system}`, so an agent-scoped session neither lists nor can call them (FastMCP answers "not found"). The backend admits fewer than that list for two of them (trinity-enterprise#719): export takes a signed-in session or the person's own `user` key, and import a signed-in session only; neither admits the system key. Their descriptions name the caller class (owner or admin for export/import, administrator for the key). A backend 403 comes back as `{success:false, error, human_only|admin_only|not_authorized}` through `accessDenied`, so the audit row reads `denied` (#2807); 400/404/503 are still thrown. `inject_credentials` is still advertised to agent sessions (shrink-only baseline in `tool-visibility.test.ts`).
+**Who sees which tool (#3435, trinity-enterprise#719).** Each credential tool carries a per-tool `canAccess` allow-list equal to the key scopes its backend route admits, built by one shared predicate (`access.ts::humanOnlyToolAccess`): `inject_credentials` and `export_credentials` are listed to a person's own `user` key only (their routes take a signed-in session or that key; inject is the ruled exception of `requirements/auth.md` §2.8, a credential the caller supplies), `import_credentials` to no key (its route takes a signed-in session only), and `get_credential_encryption_key` to `user` and `system` keys (an admin read). No key is shown a tool that its scope can never call; naming one anyway gets FastMCP's "not found" before any backend request. Visibility is decided by scope alone, so within a listed scope the route still decides who passes: a user key that is not the owner's or an admin's is shown `export_credentials`, and a non-admin's user key is shown `get_credential_encryption_key`, and the backend refuses each. Each description carries the caller sentence for its rule (owner or admin; administrator for the key). On export, import and the key, a backend 403 comes back as `{success:false, error, human_only|admin_only|not_authorized}` through `accessDenied`, so the audit row reads `denied` (#2807); 400/404/503 are still thrown. With `MCP_REQUIRE_API_KEY=false` (no auth context) FastMCP lists every tool and the backend decides.
 
 ### inject_credentials
 ```typescript
 // src/mcp-server/src/tools/agents.ts
 {
   name: "inject_credentials",
-  description: "Inject credential files into a running agent",
+  description: "Inject credential files into a running agent (a person: a signed-in session or their own user key)",
+  canAccess: humanOnlyToolAccess("person"),  // listed to user keys only (trinity-enterprise#719)
   inputSchema: {
     type: "object",
     properties: {
@@ -326,7 +327,8 @@ fails if the agent image calls a backend path the app does not register.
 ```typescript
 {
   name: "export_credentials",
-  description: "Export agent credentials to encrypted .credentials.enc file",
+  description: "Export agent credentials to encrypted .credentials.enc file (a person)",
+  canAccess: humanOnlyToolAccess("person"),  // listed to user keys only (trinity-enterprise#719)
   inputSchema: {
     type: "object",
     properties: {
@@ -341,7 +343,8 @@ fails if the agent image calls a backend path the app does not register.
 ```typescript
 {
   name: "import_credentials",
-  description: "Import credentials from .credentials.enc file",
+  description: "Import credentials from .credentials.enc file (a signed-in session only)",
+  canAccess: humanOnlyToolAccess("interactive"),  // listed to no key (trinity-enterprise#719)
   inputSchema: {
     type: "object",
     properties: {

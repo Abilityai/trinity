@@ -10,6 +10,9 @@
  * is the grant, and a non-member gets a uniform 404 (never a 403 that would
  * confirm the room exists). The acting identity comes from the API key, so an
  * agent-scoped key always acts as its own agent and cannot post as anyone else.
+ * What is LISTED narrows once: `close_room` moderates, and only a person
+ * moderates a room, so it is shown to user-scoped keys only
+ * (abilityai/trinity-enterprise#719); the backend still decides who may close.
  *
  * Rooms are OSS core since ent#443, so on a CURRENT backend the routes always
  * answer. Against an older backend that does not serve them, these tools return
@@ -19,6 +22,7 @@
 import { z } from "zod";
 import { ApiError, TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
+import { HUMAN_ONLY_KEYS_NOT_SHOWN, humanOnlyToolAccess } from "../access.js";
 
 const NOT_ENABLED = {
   error: "shared_sessions_not_enabled",
@@ -169,7 +173,13 @@ export function createRoomTools(client: TrinityClient, requireApiKey: boolean) {
       name: "close_room",
       description:
         "Close a room. The transcript stays readable; no further messages can be " +
-        "posted. Idempotent.",
+        "posted. Idempotent. " +
+        "WHO MAY CALL: the room's moderator or an admin, as a person: a signed-in session or their own user-scoped key. " +
+        HUMAN_ONLY_KEYS_NOT_SHOWN.person,
+      // Closing moderates the room, and only a person moderates one
+      // (abilityai/trinity-enterprise#719; agent keys since ent#220), so it is
+      // listed to user keys only. Posting and reading stay the caller's own.
+      canAccess: humanOnlyToolAccess("person"),
       parameters: z.object({
         room_id: z.string(),
         reason: z.string().optional(),

@@ -343,6 +343,7 @@ def rename_agent(self, old_name: str, new_name: str) -> bool:
 ```typescript
 renameAgent: {
   name: "rename_agent",
+  canAccess: humanOnlyToolAccess("person"),  // listed to user keys only (trinity-enterprise#719)
   parameters: z.object({
     name: z.string().describe("Current agent name"),
     new_name: z.string().describe("New agent name"),

@@ -954,7 +954,10 @@ def portal_agent_autonomy_act(
 
     Asymmetric on purpose: **hold** is a refusal anyone may make for their own
     seat; **release** re-enables unprompted work and is the agent owner's alone
-    (a grant, Invariant #8). There is no promote — promotion is earned."""
+    (a grant, Invariant #8). There is no promote — promotion is earned.
+    Both directions take a person (trinity-enterprise#719): the door admits the
+    system key, which the owner check alone would let release a hold."""
+    _require_person(principal)
     email = principal.email
     _require_roster(agent_name, email, principal.is_platform)
     from services import rate_limiter
@@ -977,7 +980,9 @@ def portal_agent_autonomy_guard(
     """Record canon's guard-metric cap for a class (owner only, ent#641): a
     class that moves another role's held metric can never graduate on rating
     history alone. The default is `not_assessed`, so an unreviewed class says
-    so rather than reading as cleared."""
+    so rather than reading as cleared. An owner's grant, so a person's
+    (trinity-enterprise#719)."""
+    _require_person(principal)
     email = principal.email
     _require_roster(agent_name, email, principal.is_platform)
     from services import rate_limiter
