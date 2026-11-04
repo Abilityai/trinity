@@ -5,7 +5,7 @@ SQLite reached end-of-support on 2026-09-01 (#1278). Every one-click channel
 ``docker-compose.hosted.yml`` + ``start.sh --hosted``, so the fix and its guard
 live there.
 
-The start.sh cases execute the shipped ``ensure_hosted_database`` function
+The start.sh cases execute the shipped ``ensure_database`` function
 under bash with ``docker`` stubbed; the compose cases read the raw YAML so the
 unexpanded ``${VAR...}`` forms are what is checked.
 """
@@ -95,13 +95,17 @@ def _extract(func: str) -> str:
 
 
 def _run(tmp_path: Path, *, hosted: str = "1", db_file: bool = False, pg_volume: bool = False,
-         env_lines: str = "", extra_env: dict | None = None) -> subprocess.CompletedProcess:
+         dev_db: bool = False, env_lines: str = "", extra_env: dict | None = None) -> subprocess.CompletedProcess:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     docker = bin_dir / "docker"
     docker.write_text(
         "#!/bin/bash\n"
-        'if [ "$1" = "volume" ] && [ "$2" = "inspect" ]; then exit "${SHIM_VOLUME_RC:-1}"; fi\n'
+        'if [ "$1" = "volume" ] && [ "$2" = "inspect" ]; then\n'
+        '    case "$3" in *_trinity-data) exit "${SHIM_DEV_VOLUME_RC:-1}" ;; esac\n'
+        '    exit "${SHIM_VOLUME_RC:-1}"\n'
+        'fi\n'
+        'if [ "$1" = "run" ]; then exit "${SHIM_DEV_DB_RC:-1}"; fi\n'
         "exit 1\n"
     )
     docker.chmod(0o755)
@@ -117,13 +121,16 @@ def _run(tmp_path: Path, *, hosted: str = "1", db_file: bool = False, pg_volume:
         f". '{_ENV_FILE_SH}'",
         _extract("env_value"),
         _extract("compose_project_name"),
-        _extract("ensure_hosted_database"),
+        _extract("dev_volume_has_db"),
+        _extract("ensure_database"),
         f"HOSTED={hosted}",
-        "ensure_hosted_database",
+        "ensure_database",
     ])
     env = {
         "PATH": f"{bin_dir}:/usr/bin:/bin:/usr/sbin:/sbin",
         "SHIM_VOLUME_RC": "0" if pg_volume else "1",
+        "SHIM_DEV_VOLUME_RC": "0" if dev_db else "1",
+        "SHIM_DEV_DB_RC": "0" if dev_db else "1",
     }
     env.update(extra_env or {})
     return subprocess.run(["bash", "-c", script], cwd=tmp_path, capture_output=True, text=True, env=env)
@@ -160,18 +167,47 @@ def test_rerun_is_idempotent(tmp_path: Path) -> None:
 
 
 @_BASH
-def test_existing_sqlite_install_stays_on_sqlite(tmp_path: Path) -> None:
+def test_existing_sqlite_install_is_refused(tmp_path: Path) -> None:
     proc = _run(tmp_path, db_file=True, env_lines="REDIS_PASSWORD=x\n")
-    assert proc.returncode == 0, proc.stderr
+    assert proc.returncode != 0
+    assert "db.sqlite_to_postgres" in proc.stderr
+    assert "docs/migrations/SQLITE_TO_POSTGRES.md" in proc.stderr
     env = _env(tmp_path)
-    assert env["DATABASE_URL"] == "", "an existing trinity.db must pin SQLite with an explicit empty DATABASE_URL"
-    assert env["POSTGRES_PASSWORD"], "the compose file still needs a password to render"
-    assert "docs/migrations/SQLITE_TO_POSTGRES.md" in proc.stdout
-    # and stays there on every later update
-    proc = _run(tmp_path, db_file=True)
+    assert "DATABASE_URL" not in env, "an empty database must never be pointed at"
+    assert env["POSTGRES_PASSWORD"], "the copy command needs the compose file to render"
+
+
+@_BASH
+def test_pinned_sqlite_without_the_hatch_is_refused(tmp_path: Path) -> None:
+    proc = _run(tmp_path, db_file=True, env_lines="DATABASE_URL=\n")
+    assert proc.returncode != 0
+    assert "TRINITY_ALLOW_SQLITE" in proc.stderr
+
+
+@_BASH
+def test_pinned_sqlite_with_the_hatch_stays(tmp_path: Path) -> None:
+    proc = _run(tmp_path, db_file=True, env_lines="DATABASE_URL=\nTRINITY_ALLOW_SQLITE=1\n")
     assert proc.returncode == 0, proc.stderr
     assert _env(tmp_path)["DATABASE_URL"] == ""
     assert "docs/migrations/SQLITE_TO_POSTGRES.md" in proc.stdout
+
+
+@_BASH
+def test_hatch_alone_never_keeps_an_install_on_sqlite(tmp_path: Path) -> None:
+    """The hatch needs the empty pin as well: without it compose's default URL
+    points at PostgreSQL, where the backend refuses."""
+    proc = _run(tmp_path, db_file=True, env_lines="TRINITY_ALLOW_SQLITE=1\n")
+    assert proc.returncode != 0
+    assert "DATABASE_URL" not in _env(tmp_path)
+
+
+@_BASH
+def test_empty_file_counts_as_fresh(tmp_path: Path) -> None:
+    (tmp_path / "trinity-data").mkdir()
+    (tmp_path / "trinity-data" / "trinity.db").write_bytes(b"")
+    proc = _run(tmp_path)
+    assert proc.returncode == 0, proc.stderr
+    assert _env(tmp_path)["DATABASE_URL"].startswith("postgresql://")
 
 
 @_BASH
@@ -185,7 +221,7 @@ def test_operator_database_url_is_kept(tmp_path: Path) -> None:
 
 @_BASH
 def test_shell_database_url_counts_as_decided(tmp_path: Path) -> None:
-    proc = _run(tmp_path, extra_env={"DATABASE_URL": ""})
+    proc = _run(tmp_path, extra_env={"DATABASE_URL": "postgresql://u:p@db.example.com/t"})
     assert proc.returncode == 0, proc.stderr
     assert "DATABASE_URL" not in _env(tmp_path)
 
@@ -199,16 +235,33 @@ def test_populated_volume_without_password_refuses(tmp_path: Path) -> None:
 
 
 @_BASH
-def test_dev_mode_is_untouched(tmp_path: Path) -> None:
-    proc = _run(tmp_path, hosted="0")
+def test_dev_fresh_install_gets_postgres(tmp_path: Path) -> None:
+    proc = _run(tmp_path, hosted="0", env_lines="POSTGRES_USER=me\nPOSTGRES_DB=mine\n")
     assert proc.returncode == 0, proc.stderr
-    assert _env(tmp_path) == {}
+    env = _env(tmp_path)
+    assert env["DATABASE_URL"] == f"postgresql://me:{env['POSTGRES_PASSWORD']}@postgres:5432/mine"
+
+
+@_BASH
+def test_dev_sqlite_in_the_named_volume_is_refused(tmp_path: Path) -> None:
+    proc = _run(tmp_path, hosted="0", dev_db=True)
+    assert proc.returncode != 0
+    assert "db.sqlite_to_postgres" in proc.stderr
+    assert "DATABASE_URL" not in _env(tmp_path)
+
+
+@_BASH
+def test_dev_existing_postgres_volume_keeps_its_default_password(tmp_path: Path) -> None:
+    """The compose file defaulted this before #4175, and the volume kept it."""
+    proc = _run(tmp_path, hosted="0", pg_volume=True)
+    assert proc.returncode == 0, proc.stderr
+    assert _env(tmp_path)["POSTGRES_PASSWORD"] == "trinity"
 
 
 def test_called_after_the_data_switch_guard_and_before_pull() -> None:
     """A refused run must write nothing, and `compose pull` renders the file."""
     text = _START.read_text()
-    call = text.index("\nensure_hosted_database\n")
+    call = text.index("\nensure_database\n")
     assert text.index("# --- Refuse a silent data switch") < call
     assert call < text.index('docker compose "${COMPOSE_FILES[@]}" pull')
 

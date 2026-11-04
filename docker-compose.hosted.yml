@@ -3,17 +3,14 @@
 # Identical to docker-compose.prod.yml in every respect except one: it carries
 # NO `build:` blocks. (Plus the ent#580 marketplace admin claim: this file
 # renders an explicitly blank ADMIN_PASSWORD and forwards ADMIN_PASSWORD_SOURCE;
-# prod refuses a blank one. Plus the bundled PostgreSQL of #3159: a `postgres`
-# service, its volume, and a DATABASE_URL that defaults to it. The parity test
-# allowlists exactly those lines.)
+# prod refuses a blank one. The parity test allowlists exactly those lines.)
 #
 # DATABASE: hosted installs run on the bundled PostgreSQL. POSTGRES_PASSWORD is
 # REQUIRED; the file does not render without it. `start.sh --hosted` generates
 # it. A compose-only install (a template or a managed host that runs this file
 # directly) sets it in its environment, e.g. `openssl rand -hex 24`, and leaves
-# DATABASE_URL unset. An install that already has /data/trinity.db sets
-# `DATABASE_URL=` (empty) to stay on SQLite; moving it to PostgreSQL is
-# docs/migrations/SQLITE_TO_POSTGRES.md.
+# DATABASE_URL unset. An install with data in /data/trinity.db does not boot
+# until it moves to PostgreSQL: docs/migrations/SQLITE_TO_POSTGRES.md.
 # Every service resolves a prebuilt image from GHCR, so a
 # fresh VM is serving in ~2 minutes instead of spending 5-10 of them compiling
 # the agent base image on first boot. That build time is what fails the
@@ -468,12 +465,13 @@ services:
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET}
       # Database backend (#3159, HOST-022). Hosted installs default to the
       # bundled `postgres` service below. `-` with no colon is load-bearing:
-      # UNSET resolves to the bundled PostgreSQL; set-but-EMPTY (`DATABASE_URL=`,
-      # which start.sh --hosted writes for an install that already has
-      # /data/trinity.db) keeps SQLite, so an update never boots an empty
-      # PostgreSQL beside a populated SQLite file. Any other postgresql:// URL
-      # points at an operator-managed server (docs/POSTGRESQL_SETUP.md).
+      # UNSET resolves to the bundled PostgreSQL. Set-but-EMPTY (`DATABASE_URL=`)
+      # selects SQLite, which the image refuses unless TRINITY_ALLOW_SQLITE=1
+      # (#4175). Any other postgresql:// URL points at an operator-managed server
+      # (docs/POSTGRESQL_SETUP.md).
       - DATABASE_URL=${DATABASE_URL-postgresql://trinity:${POSTGRES_PASSWORD}@postgres:5432/trinity}
+      # #4175: time-boxed. With DATABASE_URL= (empty), keeps this release on SQLite.
+      - TRINITY_ALLOW_SQLITE=${TRINITY_ALLOW_SQLITE:-}
       - DB_POOL_SIZE=${DB_POOL_SIZE:-10}
       - DB_MAX_OVERFLOW=${DB_MAX_OVERFLOW:-20}
       # Fire-and-forget dispatch (#1083). When true, eligible autonomous turns
@@ -781,7 +779,7 @@ services:
     environment:
       - POSTGRES_DB=trinity
       - POSTGRES_USER=trinity
-      - "POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env (generate openssl rand -hex 24; start.sh --hosted does this)}"
+      - "POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env (generate with openssl rand -hex 24; start.sh does this). Existing SQLite install: see docs/migrations/SQLITE_TO_POSTGRES.md}"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks:
@@ -809,6 +807,8 @@ services:
       # #300/#3159: the same database the backend uses — see the backend's
       # DATABASE_URL comment for why the default uses `-` with no colon.
       - DATABASE_URL=${DATABASE_URL-postgresql://trinity:${POSTGRES_PASSWORD}@postgres:5432/trinity}
+      # #4175: time-boxed. With DATABASE_URL= (empty), keeps this release on SQLite.
+      - TRINITY_ALLOW_SQLITE=${TRINITY_ALLOW_SQLITE:-}
       # Scheduler uses the same `backend` ACL user (identical access patterns).
       - "REDIS_URL=redis://backend:${REDIS_BACKEND_PASSWORD:?REDIS_BACKEND_PASSWORD must be set in .env}@redis:6379"
       - HEALTH_PORT=8001
@@ -1047,6 +1047,8 @@ volumes:
   agent-configs:
   redis-data:
   postgres-data:  # PostgreSQL data (#3159)
+    # TRINITY_POSTGRES_VOLUME adopts an existing volume with no data copy.
+    name: ${TRINITY_POSTGRES_VOLUME:-${COMPOSE_PROJECT_NAME}_postgres-data}
   trinity-logs:  # Vector log storage
   # trinity-data: using bind mount via TRINITY_DATA_PATH env var
 

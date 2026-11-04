@@ -157,7 +157,9 @@ Do not substitute a bare `docker compose -f docker-compose.hosted.yml pull`: the
 
 `--caddy-only` remains available for deliberate reconfiguration (for example after changing `PRIVATE_NETWORK_CIDRS`); it applies the same listener check.
 
-**Upgrading a hosted install that runs on SQLite.** The first run on a release that bundles PostgreSQL generates `POSTGRES_PASSWORD`, sees your existing `trinity.db`, and writes `DATABASE_URL=` (empty) to `.env` — so the install **stays on SQLite** and nothing is migrated. It prints a warning that SQLite reached end-of-support, with a pointer to `docs/migrations/SQLITE_TO_POSTGRES.md`, on every run until you move. An idle `trinity-postgres` container starts beside it. Moving is a separate, deliberate step: the Ops Agent's `/migrate-to-postgres` skill, or the manual guide. Never delete that `DATABASE_URL=` line: on the hosted compose file an *absent* line selects the bundled PostgreSQL — which is empty — and only an *empty* line keeps SQLite. See [Single Server → Database backend](single-server.md#database-backend).
+**Upgrading an install that runs on SQLite.** Trinity refuses to start until the data moves, and never comes up on an empty database. `start.sh` stops before pulling and prints the copy command; a directly-run compose stack shows the same guidance in `docker compose logs backend`, with the backend unhealthy. Follow `docs/migrations/SQLITE_TO_POSTGRES.md`. The copy never writes to your SQLite file.
+
+**Upgrading a source-built install on a PostgreSQL container you started by hand.** `docker-compose.prod.yml` now runs that service itself, so the file stops at a render error until you adopt it. The same guide covers it, and no data is copied.
 
 On a Marketplace Droplet or a droplet made by the DigitalOcean install script, where the admin was created in the browser, `.env` carries a blank `ADMIN_PASSWORD` with `ADMIN_PASSWORD_SOURCE=browser`; the re-run honours that marker and never generates a password over the one you chose. Setting a real `ADMIN_PASSWORD` in `.env` before the re-run is the deliberate way to reset it.
 

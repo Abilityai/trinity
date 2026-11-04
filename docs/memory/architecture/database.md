@@ -12,6 +12,10 @@
 
 ## Database Schema
 
+### PostgreSQL by default, SQLite refused in images (#4175, HOST-023)
+
+Every compose file defaults `DATABASE_URL` to the bundled `postgres` service. The images set `TRINITY_REQUIRE_POSTGRES=1`, which arms two refusals in `db/engine.py`: `refuse_sqlite_backend` (from `init_database`, before any file is touched; `TRINITY_ALLOW_SQLITE=1` opens it) and `refuse_empty_postgres_beside_sqlite` (from `alembic_runner.upgrade_to_head`, under the advisory lock, when `trinity.db` has data and `users` is absent or empty; nothing opens it). An `upgrade_to_head` that fires this cannot have built anything. `db/sqlite_to_postgres.py` is the only caller of `allow_sqlite_source=True`, and it must never import `database`, whose import runs `init_database()`. Outside an image the unit tier keeps running on SQLite until the runner is removed.
+
 ### SQLite (`/data/trinity.db`)
 
 **Orphan tables (#3432):** installs upgraded from before #3432 — SQLite and PostgreSQL alike — may carry `process_schedules` and `process_schedule_executions`, which the scheduler's boot path created ad hoc outside both migration tracks; the scheduler no longer creates or reads them, nothing else references them, and they are deliberately left in place (no migration), so #746 autogenerate will surface them as unknown tables.

@@ -211,6 +211,10 @@ def init_database():
         _record_install_source_engine()
         return
 
+    # #4175: before mkdir and connect, so a refused boot creates nothing.
+    from db.engine import refuse_sqlite_backend
+    refuse_sqlite_backend()
+
     db_path = Path(DB_PATH)
     db_path.parent.mkdir(parents=True, exist_ok=True)
 

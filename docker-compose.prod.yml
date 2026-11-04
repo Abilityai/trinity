@@ -402,12 +402,13 @@ services:
       - TEMPLATE_REGISTRY_URL=${TEMPLATE_REGISTRY_URL:-https://raw.githubusercontent.com/Abilityai/trinity-templates/main/registry.yaml}
       # Internal API shared secret (C-003) - for scheduler/agent communication
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET}
-      # Configurable database backend (#300, experimental) — mirrors
-      # docker-compose.yml; without these lines the .env lever is inert in prod
-      # (the #1039/#1056 packaging-gap class). Unset → SQLite at /data/trinity.db.
-      # Prod compose ships no postgres service: a postgresql:// URL must point at
-      # an operator-managed PostgreSQL instance (see docs/POSTGRESQL_SETUP.md).
-      - DATABASE_URL=${DATABASE_URL:-}
+      # UNSET resolves to the bundled PostgreSQL. Set-but-EMPTY (`DATABASE_URL=`)
+      # selects SQLite, which the image refuses unless TRINITY_ALLOW_SQLITE=1
+      # (#4175). Any other postgresql:// URL points at an operator-managed server
+      # (docs/POSTGRESQL_SETUP.md).
+      - DATABASE_URL=${DATABASE_URL-postgresql://trinity:${POSTGRES_PASSWORD}@postgres:5432/trinity}
+      # #4175: time-boxed. With DATABASE_URL= (empty), keeps this release on SQLite.
+      - TRINITY_ALLOW_SQLITE=${TRINITY_ALLOW_SQLITE:-}
       - DB_POOL_SIZE=${DB_POOL_SIZE:-10}
       - DB_MAX_OVERFLOW=${DB_MAX_OVERFLOW:-20}
       # Fire-and-forget dispatch (#1083). When true, eligible autonomous turns
@@ -506,6 +507,8 @@ services:
       # + deletes archived originals.
       - trinity-logs:/data/logs
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
       vector:
@@ -703,6 +706,32 @@ services:
       retries: 5
       start_period: 5s
 
+  postgres:
+    image: postgres:16-alpine
+    container_name: trinity-postgres
+    logging: *default-logging
+    restart: unless-stopped
+    expose:
+      - "5432"
+    environment:
+      - POSTGRES_DB=trinity
+      - POSTGRES_USER=trinity
+      - "POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env (generate with openssl rand -hex 24; start.sh does this). Existing SQLite install: see docs/migrations/SQLITE_TO_POSTGRES.md}"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - trinity-platform   # Issue #589: PostgreSQL is NOT on agent network
+    security_opt:
+      - no-new-privileges:true
+    # TCP probe: the image's first-boot init runs a socket-only temporary
+    # server, so a socket probe can report ready before the real server listens.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U trinity -d trinity"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
   # Scheduler - dedicated service for cron-based agent task execution
   # Prevents duplicate executions that occurred with multiple backend workers
   scheduler:
@@ -714,9 +743,11 @@ services:
     restart: unless-stopped
     environment:
       - DATABASE_PATH=/data/trinity.db
-      # #300: when set to a postgresql:// URL the scheduler reads/writes Postgres
-      # (the same DB the backend uses); unset → shared SQLite at DATABASE_PATH.
-      - DATABASE_URL=${DATABASE_URL:-}
+      # #300/#3159: the same database the backend uses — see the backend's
+      # DATABASE_URL comment for why the default uses `-` with no colon.
+      - DATABASE_URL=${DATABASE_URL-postgresql://trinity:${POSTGRES_PASSWORD}@postgres:5432/trinity}
+      # #4175: time-boxed. With DATABASE_URL= (empty), keeps this release on SQLite.
+      - TRINITY_ALLOW_SQLITE=${TRINITY_ALLOW_SQLITE:-}
       # Scheduler uses the same `backend` ACL user (identical access patterns).
       - "REDIS_URL=redis://backend:${REDIS_BACKEND_PASSWORD:?REDIS_BACKEND_PASSWORD must be set in .env}@redis:6379"
       - HEALTH_PORT=8001
@@ -733,6 +764,8 @@ services:
     volumes:
       - ${TRINITY_DATA_PATH:-./trinity-data}:/data
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
       backend:
@@ -952,6 +985,9 @@ volumes:
   agent-configs:
   redis-data:
   trinity-logs:  # Vector log storage
+  postgres-data:  # PostgreSQL data (#3159)
+    # TRINITY_POSTGRES_VOLUME adopts an existing volume with no data copy.
+    name: ${TRINITY_POSTGRES_VOLUME:-${COMPOSE_PROJECT_NAME}_postgres-data}
   # trinity-data: using bind mount via TRINITY_DATA_PATH env var
 
 networks:

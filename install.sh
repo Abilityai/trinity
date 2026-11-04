@@ -187,6 +187,7 @@ SECRET_KEY=$(generate_secret_key)
 ADMIN_PASSWORD=$(generate_password)
 
 # Update .env with generated values
+printf 'POSTGRES_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> .env
 if [[ "$OSTYPE" == "darwin"* ]]; then
     # macOS sed syntax
     sed -i '' "s/^SECRET_KEY=.*/SECRET_KEY=$SECRET_KEY/" .env
@@ -229,11 +230,20 @@ docker compose up -d
 log_info "Waiting for services to start..."
 sleep 5
 
-# Check if services are running
-if docker compose ps | grep -q "running"; then
+# A running container is not enough: a backend that refuses to boot keeps
+# respawning its workers and stays "running" (#4175).
+backend_healthy=0
+for _ in $(seq 1 60); do
+    if curl -fsS http://localhost:8000/health >/dev/null 2>&1; then
+        backend_healthy=1
+        break
+    fi
+    sleep 5
+done
+if [ "$backend_healthy" = "1" ]; then
     log_success "Services started"
 else
-    log_error "Some services failed to start. Check 'docker compose logs' for details."
+    log_error "The backend did not become healthy. Check 'docker compose logs backend' for details."
     exit 1
 fi
 
