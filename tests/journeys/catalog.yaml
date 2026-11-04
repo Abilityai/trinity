@@ -142,7 +142,9 @@ journeys:
     harness: null
     built: false
     owner: trinity
-    invariants: [SK-01, SK-02, SK-03]
+    # SK-04 (trinity-enterprise#584): the description an author writes once in
+    # SKILL.md is the description every surface shows.
+    invariants: [SK-01, SK-02, SK-03, SK-04]
 
   - id: J08
     issue: 2347

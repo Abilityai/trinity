@@ -873,7 +873,12 @@ describe('useVoiceSession uses the single API client (#2720)', () => {
     expect(COMPOSABLE).not.toContain('authStore.authHeader')
   })
 
-  it('still authenticates the WebSocket with the store token', () => {
-    expect(COMPOSABLE).toContain('?token=${authStore.token}')
+  // trinity-enterprise#595: the socket authenticates with the start response's
+  // single-use ticket as its first frame; no session token is in any URL.
+  // (Behaviour is pinned in useVoiceSessionAuth.spec.js; this is the source guard.)
+  it('never puts a session token in the WebSocket URL', () => {
+    expect(COMPOSABLE).not.toContain('?token=')
+    expect(COMPOSABLE).not.toContain('authStore.token')
+    expect(COMPOSABLE).toContain("type: 'auth', ticket")
   })
 })

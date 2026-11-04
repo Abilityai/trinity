@@ -556,6 +556,9 @@ def build_page(email: str, agent_name: str, card: Optional[dict],
         # carries (#138 / ent#380), NOT a second mechanism. ent#178 is the
         # unified exposable-skills config this becomes a view of when it lands.
         "capabilities": card.get("playbooks") or [],
+        # trinity-enterprise#584: the card's #2163 verdict, projected so the
+        # rail can tell "couldn't reach the agent" from "nothing published".
+        "capabilities_state": "unavailable" if card.get("briefing_state") == "unavailable" else "ready",
         "stats": _stats(agent_name, window, is_platform=is_platform, viewer_email=email),
         # ent#366 AC #4: a RAW TALLY, never a percentage. At the volumes this
         # page sees, one thumbs-down out of one rating renders as "100%

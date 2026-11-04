@@ -593,6 +593,21 @@ fence instead: the platform chose the addressee; the roster was never its fence.
   reason=…)` removes one person from a row's `resolved_to` (and clears the
   single addressee when it named them), compare-and-set; the row stays for the
   others. The audit row carries ids and the reason, never the address.
+- **A role-addressed row follows the role (trinity-enterprise#1095).**
+  `ask_service.readdress_role(agent, role, reason=…)` re-resolves `role` and
+  rewrites the audience of the agent's pending rows that were addressed BY
+  ROLE — an allowlist: the agent's own raises and gated-skill approvals
+  (`gate-` + 40 hex); a row the platform addressed to a named person (a gate
+  note, a project consent card, a reach row) never moves. `readdress_item` is
+  the one-row primitive beneath it (compare-and-set on the address columns
+  and `status='pending'`; the Workspace chat keys dropped on a single-addressee
+  change and the new person's Main re-attached). Nobody filling `primary` →
+  NULL audience (the operators, as a fresh raise); an unfilled `approver` /
+  `viewer` → rows untouched (ent#1053); a credential row moves only to one
+  person (ent#1066). One audit row per changed row (`platform_readdressed`,
+  ids and the reason), one agent-keyed `operator_queue_new` trigger per call.
+  The Inbox has no WebSocket — the new addressee sees it on the next poll. The
+  trigger today is a `primary` write on an assignments provider.
 - **No chat, platform-written context.** A gate raise may pass
   `attach_chat=False` (no Workspace attachment, no Main minted, no `chat_id`)
   and `platform_context`, merged into `context` after the agent-content strip

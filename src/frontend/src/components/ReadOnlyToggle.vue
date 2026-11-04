@@ -15,8 +15,8 @@
       :disabled="disabled || loading"
       role="switch"
       :aria-checked="modelValue"
-      :aria-label="`Read-only mode is ${modelValue ? 'enabled' : 'disabled'}. Click to ${modelValue ? 'allow' : 'prevent'} code modifications.`"
-      :title="modelValue ? 'Read-Only Mode ON - Agent cannot modify source code' : 'Read-Only Mode OFF - Agent can modify all files'"
+      :aria-label="`Strict read-only is ${modelValue ? 'on' : 'off'}. Click to ${modelValue ? 'return to the previous tool-access profile' : 'switch to Strict read-only'}.`"
+      :title="modelValue ? 'Strict read-only: no edits to code or config, no sends. Click to return to the previous profile.' : 'Click for Strict read-only: no edits to code or config, no sends.'"
       class="relative inline-flex items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 dark:focus:ring-offset-gray-800"
       :class="[
         sizeClasses,

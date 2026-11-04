@@ -150,7 +150,8 @@ check guarding autonomous runs from hanging (**P-006**) was silently inert.
   ~200, fail at 500.
 - **Unactionable SOFTs downgraded to INFO** — `T-007`/`T-008` (metadata),
   `T-010`/`T-011` (only `_build_local_template()` surfaces these; the
-  GitHub-sourced builder, now the default path, never reads them), `K-003`,
+  GitHub-sourced builder, now the default path, never reads them; T-011 was
+  later retired for X-010 in trinity-enterprise#584), `K-003`,
   `C-012`, and `A-001` (prose schedule messages are valid Trinity input, and the
   wizards generate prose for all 13 of their scheduled tasks). `F-004` became
   conditional on the agent actually declaring credentials.
