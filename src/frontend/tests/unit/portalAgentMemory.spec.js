@@ -149,6 +149,51 @@ describe('PortalAgentMemory (mounted)', () => {
   })
 })
 
+describe('PortalAgentMemory — ent#962: paging and an operator undo', () => {
+  it('a write someone else undid reads "Undone by an operator of this agent", never who', async () => {
+    axios.get.mockResolvedValueOnce({ data: payload({ writes: [
+      { ...payload().writes[0], undone_at: new Date().toISOString(), undoable: false, undone_by_operator: true },
+      { ...payload().writes[1], undone_at: new Date().toISOString(), undoable: false, undone_by_operator: false },
+    ] }) })
+    const w = mount(PortalAgentMemory, { props: { agentName: AGENT } })
+    await flushPromises()
+    const lines = w.findAll('[data-testid="portal-memory-undone-by-operator"]')
+    expect(lines).toHaveLength(1)
+    expect(lines[0].text()).toBe('Undone by an operator of this agent')
+    expect(w.text()).not.toContain('@')                                   // no identity leaks
+  })
+
+  it('Load more follows the cursor and appends; the last page hides the button', async () => {
+    axios.get.mockResolvedValueOnce({ data: payload({ next_before: 'T|w1' }) })
+    const w = mount(PortalAgentMemory, { props: { agentName: AGENT } })
+    await flushPromises()
+    axios.get.mockResolvedValueOnce({ data: payload({ writes: [
+      { ...payload().writes[1], id: 'w0', undoable: false },
+    ], next_before: null }) })
+    await w.get('[data-testid="portal-memory-more"]').trigger('click')
+    await flushPromises()
+    expect(axios.get).toHaveBeenLastCalledWith(MEMORY_URL, expect.objectContaining({ params: { before: 'T|w1' } }))
+    expect(w.findAll('[data-testid="portal-memory-write"], [data-testid="portal-memory-write-scheduled"]')).toHaveLength(3)
+    expect(w.find('[data-testid="portal-memory-more"]').exists()).toBe(false)
+  })
+
+  it('an Undo after Load more re-reads as many rows as were shown', async () => {
+    axios.get.mockResolvedValueOnce({ data: payload({ next_before: 'T|w1' }) })
+    const w = mount(PortalAgentMemory, { props: { agentName: AGENT } })
+    await flushPromises()
+    axios.get.mockResolvedValueOnce({ data: payload({ writes: [{ ...payload().writes[1], id: 'w0' }], next_before: null }) })
+    await w.get('[data-testid="portal-memory-more"]').trigger('click')
+    await flushPromises()
+
+    axios.post.mockResolvedValueOnce({ data: { write_id: 'w2', notes: '' } })
+    axios.get.mockResolvedValueOnce({ data: payload({ next_before: 'T|w1' }) })
+    axios.get.mockResolvedValueOnce({ data: payload({ writes: [{ ...payload().writes[1], id: 'w0' }], next_before: null }) })
+    await w.get('[data-testid="portal-memory-undo"]').trigger('click')
+    await flushPromises()
+    expect(w.findAll('[data-testid="portal-memory-write"], [data-testid="portal-memory-write-scheduled"]')).toHaveLength(3)
+  })
+})
+
 describe('clientPortal store — memory slice', () => {
   it('a response that lands after an agent switch is discarded, never shown under the new name', async () => {
     const store = useClientPortalStore()

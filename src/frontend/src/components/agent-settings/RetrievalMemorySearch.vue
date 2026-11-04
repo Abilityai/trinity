@@ -13,16 +13,18 @@
     rather than re-flashing the skeleton.
   -->
   <div data-testid="retrieval-memory-search">
-    <p class="text-sm font-medium text-gray-900 dark:text-gray-100">Search memory</p>
+    <p class="text-sm font-medium text-gray-900 dark:text-gray-100">{{ userEmail ? 'Search their facts' : 'Search memory' }}</p>
     <p class="mt-0.5 mb-3 text-[12.5px] text-gray-600 dark:text-gray-400">
-      What the agent would be reminded of for a given question, and where each fact came from.
+      {{ userEmail
+        ? 'What the agent would be reminded of in a conversation with this person, and where each fact came from.'
+        : 'What the agent would be reminded of for a given question, and where each fact came from.' }}
     </p>
 
     <form class="flex items-start gap-2" @submit.prevent="run">
       <BaseInput
         v-model="query"
         class="min-w-0 flex-1"
-        placeholder="Search what this agent remembers…"
+        :placeholder="userEmail ? 'Search what this agent remembers about them…' : 'Search what this agent remembers…'"
         aria-label="Search memory"
         :disabled="inFlight"
         data-testid="retrieval-memory-search-input"
@@ -124,6 +126,9 @@ import { viewState } from '../../utils/loadingState'
 
 const props = defineProps({
   agentName: { type: String, required: true },
+  // trinity-enterprise#962: a person's scope (the owner's Person memory
+  // dialog); empty = the agent scope, as before.
+  userEmail: { type: String, default: '' },
   notify: { type: Function, default: null },
 })
 
@@ -145,7 +150,7 @@ const view = computed(() => {
 
 // AgentDetail keeps this instance across agents (no :key, KeepAlive), so a
 // switch starts over: another agent's hits must never sit under this one's name.
-watch(() => props.agentName, () => {
+watch(() => [props.agentName, props.userEmail], () => {
   query.value = ''
   hits.value = []
   inFlight.value = false
@@ -169,7 +174,8 @@ async function run() {
   hasSearched.value = true
   error.value = ''
   try {
-    const { data } = await api.get(`/api/agents/${props.agentName}/retrieval-memory/search`, { params: { q, k: K } })
+    const params = props.userEmail ? { q, k: K, user_email: props.userEmail } : { q, k: K }
+    const { data } = await api.get(`/api/agents/${props.agentName}/retrieval-memory/search`, { params })
     hits.value = Array.isArray(data) ? data : []
     hasLoaded.value = true
   } catch (e) {

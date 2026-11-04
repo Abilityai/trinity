@@ -29,7 +29,8 @@
         :message="memoryUndoError"
         @dismiss="store.memoryUndoError = null"
       />
-      <ul class="space-y-1.5">
+      <!-- ent#962: Load more pages through every change, so the list is bounded (contract p28). -->
+      <ul class="max-h-96 overflow-y-auto space-y-1.5">
         <li v-for="w in memoryWrites" :key="w.id"
             class="rounded-lg border border-gray-200 dark:border-gray-800 px-3 py-2 text-[12.5px]"
             :class="w.undone_at ? 'opacity-60' : ''"
@@ -52,8 +53,26 @@
             >Undo</BaseButton>
           </div>
           <p v-if="w.kind === 'scheduled_run'" class="mt-1 whitespace-pre-wrap break-words">{{ w.notes || '(cleared)' }}</p>
+          <!-- ent#962: someone else undid it. One line for the owner and an admin; never who. -->
+          <p v-if="w.undone_at && w.undone_by_operator" class="mt-1 text-gray-600 dark:text-gray-400" data-testid="portal-memory-undone-by-operator">Undone by an operator of this agent</p>
         </li>
       </ul>
+      <div v-if="memory.next_before" class="mt-2">
+        <BaseButton
+          size="sm"
+          variant="secondary"
+          data-testid="portal-memory-more"
+          :loading="store.memoryLoadingMore"
+          loading-label="Loading…"
+          @click="store.loadMoreAgentMemory(agentName)"
+        >Load more</BaseButton>
+      </div>
+      <InlineError
+        v-if="memoryMine && store.memoryMoreError"
+        class="mt-2"
+        :message="store.memoryMoreError"
+        @dismiss="store.memoryMoreError = null"
+      />
     </template>
   </template>
 </section>
