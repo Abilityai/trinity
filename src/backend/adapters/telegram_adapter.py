@@ -412,6 +412,21 @@ class TelegramAdapter(ChannelAdapter):
             return None
         return db.get_telegram_verified_email(binding["id"], message.sender_id)
 
+    def requester_identity(self, message: NormalizedMessage) -> dict:
+        """trinity-enterprise#737: the Telegram user id, @username and the
+        first/last name from the update itself (a DM carries no
+        ``sender_display_name``). A DM's chat id is the user id, so no chat."""
+        identity = super().requester_identity(message)
+        identity.pop("requester_thread_id", None)  # the message id, not a thread
+        meta = message.metadata or {}
+        sender = (meta.get("raw_message") or {}).get("from") or {}
+        name = " ".join(p for p in (sender.get("first_name"), sender.get("last_name")) if p).strip()
+        if name and not identity.get("requester_name"):
+            identity["requester_name"] = name
+        if meta.get("username") and not identity.get("requester_handle"):
+            identity["requester_handle"] = meta["username"]
+        return identity
+
     async def record_inbound_activity(
         self, message: NormalizedMessage, agent_name: str
     ) -> None:
@@ -1024,7 +1039,13 @@ class TelegramAdapter(ChannelAdapter):
                 )
 
             try:
-                db.upsert_access_request(agent_name, pending_email, "telegram")
+                # trinity-enterprise#737: who asked, from the same /login message.
+                identity = None
+                try:
+                    identity = self.requester_identity(message)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"requester_identity failed: {type(e).__name__}")
+                db.upsert_access_request(agent_name, pending_email, "telegram", identity=identity)
             except Exception as e:
                 logger.error(
                     f"Failed to upsert access_request for {pending_email} on agent={agent_name}: {e}"

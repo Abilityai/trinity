@@ -322,7 +322,12 @@ describe("ent#980 — the steward proposes people; the creator approves once", (
   });
 
   it("a pending proposal and a missing grant come back as named refusals", async () => {
-    for (const [status, code] of [[409, "already_pending"], [403, "project_management_not_permitted"]] as const) {
+    for (const [status, code] of [
+      [409, "already_pending"], [403, "project_management_not_permitted"],
+      // trinity-enterprise#1089: the four primary-contact refusals are relayed by name.
+      [422, "primary_unassigned"], [422, "primary_cannot_open_agent"],
+      [422, "primary_cannot_open_project"], [422, "primary_cannot_apply"],
+    ] as const) {
       const tools = makeTools({
         proposeProjectChanges: async () => {
           throw apiError(status, { code, message: "refused" });
@@ -331,6 +336,55 @@ describe("ent#980 — the steward proposes people; the creator approves once", (
       const out = JSON.parse(await tools.propose_project_changes.execute({ project_id: PROJECT.id, members: ["b@example.com"] }));
       assert.equal(out.success, false);
       assert.equal(out.code, code);
+    }
+  });
+});
+
+describe("trinity-enterprise#1089 — any agent on the project requests; its primary approves", () => {
+  it("forwards remove_members and remove_agents with the other verbs", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      proposeProjectChanges: async (projectId: string, body: Record<string, unknown>) => {
+        calls.push([projectId, body]);
+        return { proposal_id: "ppr_2", state: "pending", waiting_on: "primary" };
+      },
+    } as Partial<TrinityClient>);
+    const out = JSON.parse(await tools.propose_project_changes.execute({
+      project_id: PROJECT.id,
+      members: ["bob@example.com"],
+      remove_members: ["carol@example.com"],
+      remove_agents: ["scout"],
+    }));
+    assert.equal(out.success, true);
+    assert.equal(out.waiting_on, "primary");
+    assert.deepEqual(calls, [[PROJECT.id, {
+      members: ["bob@example.com"],
+      remove_members: ["carol@example.com"],
+      remove_agents: ["scout"],
+    }]]);
+  });
+
+  it("bounds the removal lists as the backend does (20 members, 10 agents)", () => {
+    const shape = makeTools({} as Partial<TrinityClient>).propose_project_changes.parameters;
+    const emails = (n: number) => Array.from({ length: n }, (_, i) => `p${i}@example.com`);
+    const agents = (n: number) => Array.from({ length: n }, (_, i) => `a${i}`);
+    assert.equal(shape.safeParse({ project_id: PROJECT.id, remove_members: emails(20) }).success, true);
+    assert.equal(shape.safeParse({ project_id: PROJECT.id, remove_members: emails(21) }).success, false);
+    assert.equal(shape.safeParse({ project_id: PROJECT.id, remove_agents: agents(10) }).success, true);
+    assert.equal(shape.safeParse({ project_id: PROJECT.id, remove_agents: agents(11) }).success, false);
+  });
+
+  it("the description says who decides and what Approve does, within the budget", () => {
+    const d = makeTools({} as Partial<TrinityClient>).propose_project_changes.description;
+    assert.ok(d.length <= 2048, `${d.length} chars`);
+    assert.ok(d.includes(
+      "It goes to YOUR primary contact (Agent › Access) as one Inbox decision — not to the project's creator"));
+    assert.ok(d.includes(
+      "Approve applies it as them, once; anything they couldn't do on the project themselves is reported as not applied, by name"));
+    assert.doesNotMatch(d, /As a project's steward/);
+    for (const code of ["primary_unassigned", "primary_cannot_open_agent", "primary_cannot_open_project",
+      "primary_cannot_apply", "already_pending", "proposal_pending", "project_management_not_permitted"]) {
+      assert.ok(d.includes(code), `missing ${code}`);
     }
   });
 });
