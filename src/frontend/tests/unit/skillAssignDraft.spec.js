@@ -8,6 +8,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   bulkSelection, withSelectAll, withDeselectAll, removedNames, gatedRemovals, removalConfirm,
+  pendingChanges, pendingLine, pendingMarks,
   BULK_TITLES, selectAllTitle, deselectAllTitle,
 } from '../../src/utils/skillAssignDraft'
 
@@ -68,6 +69,8 @@ describe('Select all — enabled, or the reason it is not', () => {
     ['only a deprecated row is left', { draft: [...SAVED, 'plain-off', '_scratch'] }, BULK_TITLES.deprecatedLeft],
     ['only an unassignable row is left', { draft: [...SAVED, 'plain-off', 'dep-off'] }, BULK_TITLES.unassignableLeft],
     ['deprecated and unassignable rows are left', { draft: [...SAVED, 'plain-off'] }, BULK_TITLES.deprecatedLeft],
+    ['a filter left no rows', { rows: [] }, BULK_TITLES.noneListed],
+    ['a filter left no rows on an agent with nothing assigned', { rows: [], draft: [], emptyReason: 'none_assigned' }, BULK_TITLES.noneListed],
   ])('disabled when %s', (_, over, title) => {
     expect(sel(over).select).toEqual({ disabled: true, title })
   })
@@ -122,6 +125,58 @@ describe('the titles say what the rule is', () => {
   it('every reason reads differently', () => {
     const all = Object.values(BULK_TITLES)
     expect(new Set(all).size).toBe(all.length)
+  })
+})
+
+describe('Deselect all with nothing listed', () => {
+  it('a filter that left no rows says so, an empty library does not blame a filter', () => {
+    expect(sel({ rows: [] }).deselect).toEqual({ disabled: true, title: BULK_TITLES.noneListed })
+    expect(sel({ rows: [], emptyReason: 'library_empty' }).deselect)
+      .toEqual({ disabled: true, title: BULK_TITLES.noneTicked })
+  })
+})
+
+describe('what a save would change (trinity-enterprise#660)', () => {
+  const SET_HELD = new Set(['both'])
+
+  it('adds, removes and keeps, over the whole draft', () => {
+    const out = pendingChanges({ saved: ['plain-on', 'both', 'gone'], draft: ['plain-off', 'gone'], setHeld: SET_HELD })
+    expect(out).toEqual({ added: ['plain-off'], removed: ['plain-on'], kept: ['both'] })
+  })
+
+  it('nothing when the draft equals the saved set, whatever the order', () => {
+    expect(pendingChanges({ saved: ['a', 'b'], draft: ['b', 'a'] })).toEqual({ added: [], removed: [], kept: [] })
+  })
+
+  it('"removed" is the confirm\'s own definition, so the two cannot disagree', () => {
+    const p = { saved: ['plain-on', 'both'], draft: [], setHeld: SET_HELD }
+    expect(pendingChanges(p).removed).toEqual(removedNames(p))
+  })
+
+  it('with the sets untrusted (an empty setHeld), a set-held name reads as removed: the server may drop it', () => {
+    expect(pendingChanges({ saved: ['both'], draft: [], setHeld: new Set() }))
+      .toEqual({ added: [], removed: ['both'], kept: [] })
+  })
+
+  it.each([
+    [{ added: ['a', 'b'], removed: ['c'], kept: [] }, '2 to add, 1 to remove'],
+    [{ added: ['a'], removed: [], kept: [] }, '1 to add'],
+    [{ added: [], removed: ['a', 'b'], kept: [] }, '2 to remove'],
+    [{ added: [], removed: [], kept: ['a'] }, '1 kept by a set'],
+    [{ added: ['a'], removed: ['b'], kept: ['c', 'd'] }, '1 to add, 1 to remove, 2 kept by a set'],
+    [{ added: [], removed: [], kept: [] }, ''],
+  ])('the count of %j reads %j', (pending, line) => {
+    expect(pendingLine(pending)).toBe(line)
+  })
+
+  it('each name gets one mark, and a name that changes nothing gets none', () => {
+    const marks = pendingMarks({ added: ['a'], removed: ['b'], kept: ['c'] })
+    expect(marks.get('a')).toMatchObject({ kind: 'add', label: 'to add' })
+    expect(marks.get('b')).toMatchObject({ kind: 'remove', label: 'to remove' })
+    expect(marks.get('c')).toMatchObject({ kind: 'kept', label: 'kept by set' })
+    expect(marks.has('d')).toBe(false)
+    // A valid skill name that is also an Object.prototype key.
+    expect(marks.get('constructor')).toBeUndefined()
   })
 })
 

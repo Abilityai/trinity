@@ -661,9 +661,11 @@ class SlackService:
         source: str = "agent"
     ) -> str:
         """Get the redirect URL after OAuth completion."""
-        base_url = FRONTEND_URL
+        # FRONTEND_URL wins; otherwise use the Public URL setting, which the
+        # OAuth redirect URI was already built from.
+        base_url = FRONTEND_URL or get_public_chat_url()
         if not base_url:
-            logger.error("FRONTEND_URL not configured — OAuth redirect will fail. Set FRONTEND_URL in .env")
+            logger.error("Neither FRONTEND_URL nor Public URL configured — OAuth redirect will fail. Set FRONTEND_URL in .env")
             base_url = "http://localhost"
         if source == "platform":
             if success:

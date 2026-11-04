@@ -109,8 +109,16 @@ const who = computed(() => {
   return isMe.value ? 'You' : s.ref
 })
 const proposal = computed(() => props.project.proposal || null)
-const waitsOnMe = computed(() => Boolean(props.myEmail) && proposal.value?.waiting_on === props.myEmail)
-const waitingOn = computed(() => (waitsOnMe.value ? 'you' : proposal.value?.waiting_on || 'the creator'))
+// trinity-enterprise#1089: the request waits on the agent's primary contact,
+// who may be several people — `waiting_on_people` is the list (an older
+// backend sends only `waiting_on`, one email).
+const waitingOnPeople = computed(() => {
+  const p = proposal.value
+  if (!p) return []
+  return Array.isArray(p.waiting_on_people) ? p.waiting_on_people : (p.waiting_on ? [p.waiting_on] : [])
+})
+const waitsOnMe = computed(() => Boolean(props.myEmail) && waitingOnPeople.value.includes(props.myEmail))
+const waitingOn = computed(() => (waitsOnMe.value ? 'you' : proposal.value?.waiting_on || "the agent's primary contact"))
 // The Needs you row's link: straight to this decision in the Inbox, routed in
 // the app (no Workspace reload).
 const inboxRoute = computed(() => {
