@@ -39,6 +39,18 @@
       "description": "A refused human-only attempt (require_person / assert_person / require_interactive / reject_non_interactive_principal / reject_non_person_principal now raise HumanOnlyRefused) is recorded once by the app handler in error_handlers.py, through the REAL app in a subprocess (helper tests/unit/_human_only_audit_app.py) on a fresh database: one authorization/human_only_refused row per Depends and imperative refusal, naming the agent, trinity-system or the person (never the owner for a key); every other machine scope filed as itself; the response byte-identical with the handler removed and answered by whatever handler the app registers for HTTPException; an audit failure still answers the same 403 and does not use the window (the same refusal a second later writes its row); the already-auditing owner-tier file read writes no second row; one row per principal, method and route (the template) per 60 s window, a full window recording nothing new rather than forgetting a key; principals naming no agent or key filed as the platform; an unrelated 403 writes none; the path, agent name and request id cut to 256 characters; no row carries a sentinel sent in the body, the query, User-Agent, a custom header or the forwarding headers (X-Forwarded-For, X-Real-IP, CF-Connecting-IP), the handler copying no header but the request id; the driver removes its temp dir."
     },
     {
+      "file": "unit/test_ent719_workspace_autonomy_person_only.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-11-04",
+      "categories": [
+        "unit",
+        "backend",
+        "auth",
+        "workspace"
+      ],
+      "description": "The autonomy dial's owner writes (release of a held class, the guard cap; trinity-enterprise#641) take a person: through the real Workspace router, door and keys, the system key is refused 403 person_required before the roster and the held/capped seed does not move; the owner on a session or a user key still releases and sets the guard."
+    },
+    {
       "file": "unit/test_3007_update_command.py",
       "feature": "#3007",
       "added": "2026-10-15",
