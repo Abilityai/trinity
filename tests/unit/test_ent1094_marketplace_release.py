@@ -302,7 +302,7 @@ class TestStatus:
         assert result.returncode == 0, result.stderr
         assert "live_version=0.9.5" in result.stdout
 
-    @pytest.mark.parametrize("value", ["pending", "in review"])
+    @pytest.mark.parametrize("value", ["pending", "in review", "inReview"])
     def test_a_queued_submission_exits_three(self, rig: Rig, value: str) -> None:
         rig.listing(unpublished={"status": {"value": value}})
         assert rig.run("mp-status.sh").returncode == 3
