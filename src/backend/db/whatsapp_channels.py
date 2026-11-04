@@ -273,6 +273,22 @@ class WhatsAppChannelOperations:
             row = conn.execute(stmt).mappings().first()
         return row["verified_email"] if row and row["verified_email"] else None
 
+    def list_verified_links_for_user(self, user_id: str) -> List[dict]:
+        """Every agent this channel user has verified an email on
+        (trinity-enterprise#737): ``agent_name`` + ``verified_email``. A bot is
+        per agent, but the user id is the person's own, so the same id on two
+        bindings is the same person. The caller filters to what its viewer may see."""
+        stmt = (
+            select(whatsapp_bindings.c.agent_name, whatsapp_chat_links.c.verified_email)
+            .select_from(whatsapp_chat_links.join(whatsapp_bindings, whatsapp_chat_links.c.binding_id == whatsapp_bindings.c.id))
+            .where(whatsapp_chat_links.c.wa_user_phone == str(user_id))
+            .where(whatsapp_chat_links.c.verified_email.isnot(None))
+        )
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [{"agent_name": r["agent_name"], "verified_email": r["verified_email"]}
+                for r in rows if r["verified_email"]]
+
     def list_clients_for_agent(self, agent_name: str) -> List[dict]:
         """External WhatsApp clients who have messaged this agent (#20 roster).
 

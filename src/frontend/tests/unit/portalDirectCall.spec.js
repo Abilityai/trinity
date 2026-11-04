@@ -84,7 +84,7 @@ describe('the two call buttons', () => {
   })
   it('while one call is on, its button ends it and the other says a call is on', () => {
     const onDirect = callButtons({ isPlatform: true, realtimeVoice: live, directVoice: direct, directActive: true })
-    expect([onDirect.direct.enabled, onDirect.direct.label]).toEqual([true, 'End the call (Esc)'])
+    expect([onDirect.direct.enabled, onDirect.direct.label]).toEqual([true, 'End the call (Esc when it is quiet)'])
     expect([onDirect.live.enabled, onDirect.live.label]).toEqual([false, 'Another call is on'])
     const onLive = callButtons({ isPlatform: true, realtimeVoice: live, directVoice: direct, liveActive: true })
     expect([onLive.live.enabled, onLive.direct.enabled]).toEqual([true, false])
@@ -158,7 +158,9 @@ describe('the endpointer', () => {
   it('needs more to start over playback, and says it began during playback', () => {
     const onSpeechStart = vi.fn()
     const ep = createEndpointer({ onSpeechStart, onUtterance: vi.fn() })
-    feed(ep, loud, 3, { playing: true })
+    const onset = Math.ceil(VAD.startMsPlayback / 100)
+    expect(VAD.startMsPlayback).toBeGreaterThan(VAD.startMs)
+    feed(ep, loud, onset - 1, { playing: true })
     expect(onSpeechStart).not.toHaveBeenCalled()
     feed(ep, loud, 1, { playing: true })
     expect(onSpeechStart).toHaveBeenCalledWith({ duringPlayback: true })

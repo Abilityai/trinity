@@ -448,7 +448,7 @@ class TestAgentContentIsStrippedOfTheProjectKeys:
 
     def test_on_the_file_path(self, agent, people, monkeypatch):
         from services import operator_queue_service as oqs
-        monkeypatch.setattr(oqs, "_validated_addressee", lambda a, raw: raw)
+        monkeypatch.setattr(oqs.filechannel, "_validated_addressee", lambda a, raw: raw)
 
         out = oqs._clamp_ingested_item(
             {"id": "f981-forged", "title": "t", "question": "q",
