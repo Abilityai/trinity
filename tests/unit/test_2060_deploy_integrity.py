@@ -33,6 +33,7 @@ import io
 import json
 import os
 import stat
+import sys
 import tarfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,6 +46,9 @@ from fastapi import HTTPException
 from models import AgentStatus
 from services.agent_service import deploy as deploy_mod
 from services.agent_service.deploy import deploy_local_agent_logic
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # `_ent695_lua`
+import _ent695_lua as lua  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
@@ -899,6 +903,10 @@ class _FakeRedis:
         self.set_result = set_result
         self.store = {}
         self.deleted = []
+        # trinity#4028: the lock releases through a Lua script; this one
+        # EXECUTES the production text against `store`.
+        self.scripts = []
+        self.register_script = lua.dict_register_script(self.store, log=self.scripts)
 
     def set(self, key, value, nx=False, ex=None):
         if not self.set_result:
@@ -937,7 +945,8 @@ class TestDeployLock:
         archive = _build_archive("lockok-agent")
         result = await _deploy(_body(archive, "lockok-agent"), user)
         assert result.status == "success"
-        assert fake.deleted == ["agent:deploy_op:lockok-agent"]
+        assert fake.scripts == [("release", "agent:deploy_op:lockok-agent")]
+        assert "agent:deploy_op:lockok-agent" not in fake.store
 
 
 # ---------------------------------------------------------------------------
