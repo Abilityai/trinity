@@ -650,6 +650,36 @@ class TestCompareAndSet:
         assert svc.readdress_item("no-such-row", [people["bob"]], people["bob"],
                                   reason=svc.ASSIGNMENT_CHANGED) is False
 
+    def test_a_row_whose_audience_moved_between_the_read_and_the_write_is_not_overwritten(
+            self, real_db, agent, people, provider):
+        """The `resolved_to` arm of the CAS. A concurrent `drop_addressee` (or
+        another re-address) changes `resolved_to` while the row stays
+        `pending` and `addressed_to_email` stays as read — so neither the
+        status arm nor the single arm would catch it. Only a write that
+        presents the stale raw `resolved_to` proves this arm is live."""
+        provider.roles["primary"] = [people["alice"]]
+        ask = _agent_ask(agent)
+        as_read = real_db.read_operator_queue_address(ask)
+        assert as_read["status"] == "pending"
+
+        # Another writer moves the audience first, from the same read — and
+        # keeps the single addressee, so only `resolved_to` differs afterwards.
+        single = as_read["addressed_to_email"]
+        assert real_db.readdress_operator_queue_item(
+            ask, [people["bob"]], single,
+            expect_single=as_read["addressed_to_email"],
+            expect_resolved_raw=as_read["resolved_to"]) is True
+
+        # Our write still carries the stale `resolved_to`: refused, row untouched.
+        assert real_db.readdress_operator_queue_item(
+            ask, [people["carol"]], single,
+            expect_single=as_read["addressed_to_email"],
+            expect_resolved_raw=as_read["resolved_to"]) is False
+        row = _row(real_db, ask)
+        assert row["status"] == "pending"
+        assert row["addressed_to_email"] == single
+        assert row["resolved_to"] == [people["bob"]]
+
 
 # ===========================================================================
 # The trigger is a literal the ent#467 guard discovers
