@@ -283,9 +283,10 @@ export function createAgentTools(
         "(2) pre-defined templates from list_templates, or (3) local templates. " +
         "The agent will be started automatically after creation. " +
         "Fork-to-own (import_intent 'fork' + a fork_to_own block) copies a 'github:owner/repo' template into a new repo " +
-        "you own and creates the agent from that copy, using your saved personal GitHub token (Settings); there is no PAT " +
-        "argument here because tool arguments land in transcripts. With an agent key the backend refuses it with " +
-        "`FORK_PAT_REQUIRED` — an agent cannot spend its owner's token. A template that declares fork_to_own required " +
+        "you own and creates the agent from that copy. There is no PAT argument here because tool arguments land in " +
+        "transcripts, and the backend spends your saved personal GitHub token (Settings) only from a signed-in session, " +
+        "because the fork makes it the new agent's token; so over MCP every key is refused with `FORK_PAT_REQUIRED`, " +
+        "and the fork is created from the web UI. A template that declares fork_to_own required " +
         "is refused with `FORK_TO_OWN_REQUIRED` unless the block is present.",
       parameters: z.object({
         name: z
@@ -372,7 +373,7 @@ export function createAgentTools(
           .optional()
           .describe(
             "Fork-to-own (trinity-enterprise#93): copy the 'github:' template into destination_repo " +
-            "first; the agent is created from the copy. Uses your saved personal GitHub token."
+            "first; the agent is created from the copy. Spends your saved personal GitHub token, from a signed-in session only."
           ),
         ephemeral: z
           .object({
