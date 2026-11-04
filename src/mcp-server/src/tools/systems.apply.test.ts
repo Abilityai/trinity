@@ -792,7 +792,7 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
     it("the description tells the caller a failed deploy is a returned report (a description pin)", () => {
       const d = createSystemTools(new TrinityClient("http://127.0.0.1:1"), false).deploySystem.description;
       assert.match(d, /A `failed` deploy \(no member created\) comes back as that report with `http_status: 500`/);
-      assert.match(d, /has `success: false`, `http_status` and the backend's `detail`/);
+      assert.match(d, /has `success: false`, `http_status` and the backend's `detail` when it sent one/);
     });
 
     it("a session with no API key still THROWS, and nothing reaches the backend (unchanged)", async () => {

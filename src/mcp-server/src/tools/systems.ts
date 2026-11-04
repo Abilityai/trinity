@@ -169,7 +169,8 @@ export const applySystemAccess = (auth: any): boolean =>
  *
  * Audit (#4026): every branch but the 403 is a returned failure that is NOT an
  * authorization denial, so it is stamped through `toolFailed` (`success:
- * false`, no `denied`) with a short reason (`bodyAsResult`, shared with
+ * false`, no `denied`) with a short reason: `httpAuditReason`, built here for
+ * 404/405 and, for the generic tail, through `bodyAsResult` (shared with
  * deploy_system, #4027). A raw non-object body never reaches the row.
  */
 function applyFailure(
@@ -241,13 +242,9 @@ interface ErrorBody {
 }
 
 function readErrorBody(error: ApiError): ErrorBody {
-  let body: unknown;
-  let isJson = true;
-  try {
-    body = JSON.parse(error.body);
-  } catch {
-    isJson = false;
-  }
+  // `JSON.parse` never yields `undefined`, so `undefined` here means "not JSON".
+  const body = parseJsonOrUndefined(error.body);
+  const isJson = body !== undefined;
   const isObject = isJson && body !== null && typeof body === "object" && !Array.isArray(body);
   // FastAPI's own refusals are `{detail}`: surface that, else the whole body.
   const detail = !isJson
@@ -266,20 +263,17 @@ function readErrorBody(error: ApiError): ErrorBody {
  * anything else (a JSON scalar, array or null, or a non-JSON body) becomes
  * `{success: false, http_status, detail}`.
  *
- * The audit reason is `httpAuditReason`'s (#4026); a non-object body gets
- * the bare status, so a raw body never reaches the row.
+ * The audit reason is `httpAuditReason`'s (#4026), which gives anything that
+ * is not a JSON object the bare status, so a raw body never reaches the row.
  */
 function bodyAsResult(
   status: number,
   { body, isObject, detail }: ErrorBody
 ): { envelope: Record<string, unknown>; auditReason: string } {
-  if (!isObject) {
-    return { envelope: { success: false, http_status: status, detail }, auditReason: `HTTP ${status}` };
-  }
-  return {
-    envelope: { ...(body as Record<string, unknown>), http_status: status, success: false },
-    auditReason: httpAuditReason(status, body),
-  };
+  const envelope = isObject
+    ? { ...(body as Record<string, unknown>), http_status: status, success: false }
+    : { success: false, http_status: status, detail };
+  return { envelope, auditReason: httpAuditReason(status, body) };
 }
 
 /**
@@ -357,7 +351,7 @@ export function createSystemTools(
         "Pass strict: true to restore abort-on-first-error. " +
         "A `failed` deploy (no member created) comes back as that report with `http_status: 500` and " +
         "`success: false`; any other result without `status` (e.g. a 400 manifest error, a 403, a `strict` abort) " +
-        "has `success: false`, `http_status` and the backend's `detail`.",
+        "has `success: false`, `http_status` and the backend's `detail` when it sent one.",
       parameters: z.object({
         manifest: z
           .string()
