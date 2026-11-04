@@ -141,6 +141,32 @@ describe('the store sends what was held', () => {
     expect(portalHttp.post).toHaveBeenCalledWith(READ('thread', 's1'), null, expect.anything())
   })
 
+  it('before any state was read, a rendered row sends no through either (review of #4103)', async () => {
+    // The first read is the ent#557 account baseline: one chat's message
+    // instant there would badge every never-opened chat newer than it.
+    await store.markChatReadStrict('room', 'r1', '2026-09-01T08:00:00Z')
+    expect(portalHttp.post).toHaveBeenCalledWith(READ('room', 'r1'), null, expect.anything())
+  })
+
+  it('records what each read covered, per chat', async () => {
+    await store.fetchChatState()
+    await store.markChatReadStrict('thread', 's1')
+    portalHttp.get = vi.fn(async () => ({ data: { chats: [], as_of: '2026-10-01T10:01:00.000000Z' } }))
+    await store.fetchChatState()                      // a later poll moves as_of on
+    await store.markChatReadStrict('thread', 's2', '2026-10-01T10:01:30Z')
+    await store.markChatReadStrict('thread', 's3', READ_UP_TO_NOW)
+    expect(store.readCovered['thread:s1']).toBe('2026-10-01T10:00:05.000000Z')
+    expect(store.readCovered['thread:s2']).toBe('2026-10-01T10:01:30Z')
+    expect(store.readCovered['thread:s3']).toBe('2026-10-01T10:01:00.000000Z')
+    expect(store.chatStateAsOf).toBe('2026-10-01T10:01:00.000000Z')
+  })
+
+  it('a live call reads up to now even with an as_of on hand', async () => {
+    await store.fetchChatState()
+    await store.markChatRead('thread', 's1', READ_UP_TO_NOW)
+    expect(portalHttp.post).toHaveBeenCalledWith(READ('thread', 's1'), null, expect.anything())
+  })
+
   it('before any state was read and with nothing rendered, no body', async () => {
     await store.markChatRead('thread', 's1')
     expect(portalHttp.post).toHaveBeenCalledWith(READ('thread', 's1'), null, expect.anything())

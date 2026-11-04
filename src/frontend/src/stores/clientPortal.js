@@ -369,6 +369,12 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // read — the instant the badges on screen were read. A read write sends it
     // back as `through` when nothing newer was rendered for that chat.
     chatStateAsOf: null,
+    // trinity-enterprise#1010 (review of #4103): per `${kind}:${id}`, the
+    // instant the last read write for that chat covered — what a later load
+    // compares against (`heldPast`), not the newest `as_of`, which a poll can
+    // advance past an arrival the read never covered. A lower bound: a write
+    // with no body read "up to now", recorded as the `as_of` known when it left.
+    readCovered: {},
     // Where the user was when it expired, so re-authenticating returns them
     // there instead of the roster root.
     resumePath: null,
@@ -1690,8 +1696,16 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // read settles many of these and must report how many failed —
     // `markChatRead` swallows every error by design, so `Promise.allSettled`
     // over it would report zero failures even if all of them failed.
+    //
+    // Before any chat state was read there is no `as_of`, and a `through` taken
+    // from one chat's rows would also be the viewer's FIRST read — the ent#557
+    // account baseline, set at that instant for every chat they never opened.
+    // So with no `as_of` yet, no body: the server reads up to now, as before #1010.
     async markChatReadStrict(kind, chatId, through) {
-      const held = through === READ_UP_TO_NOW ? null : laterInstant(this.chatStateAsOf, through)
+      const held = through === READ_UP_TO_NOW || !this.chatStateAsOf
+        ? null : laterInstant(this.chatStateAsOf, through)
+      const key = `${kind}:${chatId}`
+      this.readCovered = { ...this.readCovered, [key]: laterInstant(this.readCovered[key], held || this.chatStateAsOf) }
       await portalHttp.post(
         `/api/enterprise/client-portal/chat-state/${kind}/${encodeURIComponent(chatId)}/read`,
         held ? { through: held } : null,

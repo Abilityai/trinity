@@ -502,3 +502,51 @@ def test_a_lost_race_never_moves_the_cursor_back(cursor_db, monkeypatch):
 
     assert _rows()[("thread", "s1")]["last_read_at"] == "2026-10-01T11:00:00Z"
     assert _unread("thread", "s1") == 0
+
+
+# ---------------------------------------------------------------------------
+# Review of #4103 (second round)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("reader", [WS_READER, PLATFORM_READER], ids=["workspace", "platform"])
+def test_a_room_read_since_the_split_can_be_starred_at_the_cap(cursor_db, monkeypatch, reader):
+    """A viewer at the row cap who has read a room holds only its identity-space
+    cursor row, so starring it needs the plain `room` row — which the cap used
+    to refuse with a 409 for a room already on their list."""
+    from client_portal import db as pdb, service
+
+    _room("r1", people=(reader,))
+    _mark("room", "r1", through="2026-10-01T10:00:00Z", reader=reader, now=NOW, monkeypatch=monkeypatch)
+    monkeypatch.setattr(pdb, "MAX_CHAT_STATE_ROWS", pdb.count_chat_state_rows(ALICE))
+    service.set_chat_star(ALICE, "room", "r1", True)
+    assert _rows()[("room", "r1")]["starred_at"]
+
+
+def test_starring_an_unread_room_at_the_cap_is_still_refused(cursor_db, monkeypatch):
+    from client_portal import db as pdb, service
+    from client_portal.service import ClientPortalError
+
+    _room("r1")
+    monkeypatch.setattr(pdb, "MAX_CHAT_STATE_ROWS", pdb.count_chat_state_rows(ALICE))
+    with pytest.raises(ClientPortalError) as exc:
+        service.set_chat_star(ALICE, "room", "r1", True)
+    assert exc.value.status_code == 409
+
+
+def test_the_previews_as_of_is_the_instant_before_their_counts(cursor_db, monkeypatch):
+    """Dropping `as_of=as_of` in `chat_previews` let `get_chat_state` stamp its
+    own, AFTER the previews' unread reads: an arrival between the two was then
+    inside `as_of` but absent from what the client was shown."""
+    from client_portal import chat_previews, db, service
+
+    stamps = iter(["2026-10-01T10:00:00.000000Z", "2026-10-01T10:00:09.000000Z"])
+    order = []
+    real = db.unread_arrivals_with_latest
+    monkeypatch.setattr(service, "roster_agent_names", lambda email, include_owned: set())
+    monkeypatch.setattr(service, "utc_now_iso", lambda: order.append("as_of") or next(stamps))
+    monkeypatch.setattr(db, "unread_arrivals_with_latest", lambda email: order.append("counts") or real(email))
+    state = chat_previews.get_chat_state_with_previews(ALICE, False, room_reader=WS_READER)
+    as_of = state["as_of"] if "as_of" in state else state["state"]["as_of"]
+    assert as_of == "2026-10-01T10:00:00.000000Z"
+    assert order.index("as_of") < order.index("counts")

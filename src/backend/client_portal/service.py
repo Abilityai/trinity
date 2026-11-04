@@ -6103,7 +6103,14 @@ def set_chat_star(email: str, chat_kind: str, chat_id: str, starred: bool) -> No
         # accumulate from ordinary use and unstar cannot remove them.
         if db.count_starred_rows(email) >= db.MAX_STARRED_CHATS:
             raise ClientPortalError(409, "Too many saved chats — unstar some first")
-        if _would_create_row_past_cap(email, kind, cid):
+        if _would_create_row_past_cap(email, kind, cid) and not (
+                kind == "room" and any(db.chat_state_row_exists(email, db.room_cursor_kind(space), cid)
+                                       for space in ("user", "workspace_user"))):
+            # The mirror of `mark_chat_read`'s exemption (#1011 review): a
+            # viewer who has READ a room since the split holds only its
+            # identity-space cursor row, so starring it needs the plain `room`
+            # row — refused at the cap, a 409 for a room already on their list.
+            # Bounded the same way: one `room` row beside a row they own.
             raise ClientPortalError(409, "Too much saved chat state — open fewer new chats")
     db.set_chat_star(email, kind, cid, starred, utc_now_iso())
 

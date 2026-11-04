@@ -536,8 +536,15 @@ POST /client-portal/chat-state/room/{id}/read
   `through`, clamped to now and never backwards (`db._later`, compared as instants, stored in
   the client's own spelling so a message's `created_at` sent back reads that message). An
   arrival after the last fetch therefore still counts. No body = up to now (the old meaning);
-  a live reply with no instant sends none (`READ_UP_TO_NOW`). The first read's ent#557
-  baseline takes the same instant. A `through` that is not an ISO-Z instant is a 422.
+  a live reply with no instant sends none (`READ_UP_TO_NOW`), and so does a live call's read,
+  the whole thread being on screen (a spoken turn persists after the last poll, which the call
+  skips). Before any chat state was read there is no `as_of`, and no body is sent either: that
+  read is also the viewer's first, and its ent#557 baseline (which otherwise takes the same
+  instant) must not land at one chat's message. The conversation's after-load read compares
+  what it holds with what this chat's last read covered (`store.readCovered`), not the newest
+  `as_of`, which a poll during the load can move past an arrival. A `through` that is not an
+  ISO-Z instant is a 422. A room read only through its identity-space row can still be starred
+  at the row cap (the `room` row is created beside it, the mirror of the read's exemption).
 - **One room read state per identity space (trinity-enterprise#1011)**: a room's cursor lives
   in `chat_kind = 'room:<participant kind>'` (`db.room_cursor_kind`), so one email seated as
   both `user` and `workspace_user` reads the room separately in each. The plain `room` row keeps

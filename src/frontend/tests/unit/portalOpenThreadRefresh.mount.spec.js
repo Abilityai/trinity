@@ -150,3 +150,25 @@ describe('#3439 — the open thread catches up when its row moves', () => {
     expect(shown(w)).toEqual(['u1', 'a1'])
   })
 })
+
+describe('trinity-enterprise#1010 — the load is compared with what the open READ, not the newest as_of', () => {
+  // Review of #4103: the open read the chat at 10:00:30; a poll that came back
+  // during the history load moved `as_of` to 10:06. A reply at 10:05 is past
+  // the read but not past that `as_of`, and the chat on screen stayed badged.
+  const OPEN_READ = '2026-10-26T10:00:30Z'
+  const LATER_POLL = '2026-10-26T10:06:00Z'
+
+  it('an arrival the open read did not cover is read once the history shows it', async () => {
+    store.chatStateAsOf = LATER_POLL
+    store.readCovered = { 'thread:s1': OPEN_READ }
+    const w = await open({ initial: [u1, a1, a2] })
+    expect(w.emitted('thread-caught-up')).toEqual([['s1', T1]])
+  })
+
+  it('a load holding nothing past what the open read writes nothing (#3439)', async () => {
+    store.chatStateAsOf = LATER_POLL
+    store.readCovered = { 'thread:s1': LATER_POLL }
+    const w = await open({ initial: [u1, a1, a2] })
+    expect(w.emitted('thread-caught-up')).toBeUndefined()
+  })
+})

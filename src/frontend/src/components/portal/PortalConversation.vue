@@ -933,7 +933,7 @@
 </template>
 
 <script setup>
-import { heldPast, heldThrough } from '@/utils/readThrough'
+import { heldPast, heldThrough, READ_UP_TO_NOW } from '@/utils/readThrough'
 import ProjectChatControls from './projects/ProjectChatControls.vue'
 import { wrapUpPrompt } from './projects/projectsUtils'
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, useId } from 'vue'
@@ -1605,8 +1605,12 @@ async function loadThread(sessionId) {
     // badge the conversation the person is looking at. Only then, though: a load
     // that brings nothing past that state owes no read (#3439 — no write for
     // nothing new).
+    // Compared with what the open's read COVERED for this chat, not the newest
+    // `as_of`: a poll that returns during the load moves `as_of` past an arrival
+    // the open's read never covered (review of #4103).
     const held = heldThrough(messages.value, 'at')
-    if (sessionId && heldPast(held, store.chatStateAsOf)) emit('thread-caught-up', sessionId, held)
+    const covered = (store.readCovered || {})[`thread:${sessionId}`] || store.chatStateAsOf
+    if (sessionId && heldPast(held, covered)) emit('thread-caught-up', sessionId, held)
     inFlight = inFlightExecutionId
     inFlightBudget = inFlightWaitBudgetSeconds
     outcome = lastTurnOutcome
@@ -3400,7 +3404,10 @@ watch([() => voice.transcriptEntries.value.length, () => voice.panelVersion.valu
   if (!voiceCallActive.value || !currentSessionId.value) return
   clearTimeout(voiceReadTimer)
   voiceReadTimer = setTimeout(() => {
-    if (voiceCallActive.value && currentSessionId.value) void store.markChatRead('thread', currentSessionId.value)
+    // "Up to now", not the last `as_of`: the whole thread is on screen, and a
+    // spoken turn persists after the last poll (which the call skips), so an
+    // `as_of` up to 20 s old left the newest turn badged (review of #4103).
+    if (voiceCallActive.value && currentSessionId.value) void store.markChatRead('thread', currentSessionId.value, READ_UP_TO_NOW)
   }, 800)
 })
 // The call ended — by End, by the cap, by the provider — and the bridge has
