@@ -206,19 +206,55 @@ describe('the Skills tab', () => {
 // ---------------------------------------------------------------------------
 
 describe('the connector picker', () => {
-  it('a playbook without a description says so', async () => {
+  // The eyeball's ruling (ent#584): every row is two lines. Line 1 is the
+  // checkbox, the full `/name` on one line (cut with … only when wider than
+  // the panel, full name on hover) and its badges; line 2 is the description,
+  // one line cut with …, full text on hover. A long description used to share
+  // the name's line and squeeze it, wrapping "/add-pipeline" to "/add-" +
+  // "pipeline". jsdom cannot measure: this pins the structure and the classes
+  // that make it so; the geometry is the eyeball.
+  const LONG = 'Scaffold a Trinity-compatible long-running pipeline inside any agent, with its stages, state and heartbeat schedule.'
+
+  async function picker() {
     api.get.mockImplementation(async (url) => {
       if (url.endsWith('/connector')) return { data: { exposed_playbooks: null } }
       return { data: { skills: [
-        { name: 'weekly-report', description: 'Writes it.', user_invocable: true },
+        { name: 'add-pipeline', description: LONG, user_invocable: true, automation: 'gated' },
         { name: 'quiet', description: null, user_invocable: true },
       ] } }
     })
     const w = mount(ExposedToolsPanel, { props: { agentName: 'scout' } })
     await flushPromises()
-    const rows = w.findAll('li')
-    expect(rows[0].text()).toContain('— Writes it.')
-    expect(rows[1].text()).toContain('— No description yet')
+    return w.findAll('li')
+  }
+
+  it('puts the full name on line 1, on one line, with its badges', async () => {
+    const [row] = await picker()
+    const name = row.find('[data-testid="exposed-skill-name"]')
+    expect(name.text()).toBe('/add-pipeline')
+    expect(name.classes()).toEqual(expect.arrayContaining(['font-mono', 'truncate', 'min-w-0']))
+    expect(name.attributes('title')).toBe('/add-pipeline')
+    const line1 = name.element.parentElement
+    expect(line1.textContent).toContain('approval-gated')
+    expect(line1.textContent).not.toContain(LONG)
+  })
+
+  it('puts the description on line 2, one line, full text on hover, no dash', async () => {
+    const [row] = await picker()
+    const desc = row.find('[data-testid="exposed-skill-description"]')
+    expect(desc.text()).toBe(LONG)
+    expect(desc.classes()).toContain('truncate')
+    expect(desc.attributes('title')).toBe(LONG)
+    expect(desc.element.parentElement).not.toBe(row.find('[data-testid="exposed-skill-name"]').element.parentElement)
+    expect(row.text()).not.toContain('—')
+  })
+
+  it('a row without a description has the same two lines, the second italic', async () => {
+    const [, quiet] = await picker()
+    const desc = quiet.find('[data-testid="exposed-skill-description"]')
+    expect(desc.text()).toBe('No description yet')
+    expect(desc.classes()).toContain('italic')
+    expect(quiet.find('[data-testid="exposed-skill-name"]').text()).toBe('/quiet')
   })
 })
 

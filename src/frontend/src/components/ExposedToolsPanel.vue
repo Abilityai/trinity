@@ -35,32 +35,51 @@
     </div>
 
     <ul v-else class="divide-y divide-gray-200 dark:divide-gray-700 border border-gray-200 dark:border-gray-700 rounded-lg">
+      <!-- trinity-enterprise#584 (ruled at the eyeball): every row is two
+           lines, so rows stay one height and a long description can never
+           squeeze the name. Line 1: checkbox, the full `/name` on one line
+           (cut with … only when wider than the panel, whole on hover) and its
+           badges. Line 2: the description, one line cut with …, whole on
+           hover, or "No description yet" in italic. -->
       <li
         v-for="pb in playbooks"
         :key="pb.name"
-        class="px-3 py-2 flex items-center gap-2"
+        class="px-3 py-2 flex items-start gap-2"
         :class="{ 'opacity-60': !pb.user_invocable }"
       >
         <input
           type="checkbox"
+          class="mt-1 shrink-0"
           :value="pb.name"
           v-model="selected"
           :disabled="exposeAll || busy || !pb.user_invocable"
           @change="debouncedSaveAllowList"
         />
-        <span class="text-sm text-gray-900 dark:text-gray-100 font-mono">/{{ pb.name }}</span>
-        <span
-          v-if="pb.automation === 'gated'"
-          class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-state-autonomous-100 dark:bg-state-autonomous-900/40 text-state-autonomous-800 dark:text-state-autonomous-200"
-          title="Runs require operator approval"
-        >approval-gated</span>
-        <span
-          v-if="!pb.user_invocable"
-          class="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-300"
-          title="Marked user-invocable: false in its SKILL.md — cannot be exposed"
-        >not invocable</span>
-        <!-- trinity-enterprise#584: the one empty state, never a blank row. -->
-        <span class="text-xs text-gray-500 dark:text-gray-400 truncate" :class="{ italic: describeSkill(pb.description).missing }">— {{ describeSkill(pb.description).text }}</span>
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-2 min-w-0">
+            <span
+              class="text-sm text-gray-900 dark:text-gray-100 font-mono truncate min-w-0"
+              :title="`/${pb.name}`"
+              data-testid="exposed-skill-name"
+            >/{{ pb.name }}</span>
+            <span
+              v-if="pb.automation === 'gated'"
+              class="shrink-0 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-state-autonomous-100 dark:bg-state-autonomous-900/40 text-state-autonomous-800 dark:text-state-autonomous-200"
+              title="Runs require operator approval"
+            >approval-gated</span>
+            <span
+              v-if="!pb.user_invocable"
+              class="shrink-0 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-200 dark:bg-gray-700 text-gray-600 dark:text-gray-300"
+              title="Marked user-invocable: false in its SKILL.md — cannot be exposed"
+            >not invocable</span>
+          </div>
+          <p
+            class="text-xs text-gray-500 dark:text-gray-400 truncate"
+            :class="{ italic: describeSkill(pb.description).missing }"
+            :title="describeSkill(pb.description).text"
+            data-testid="exposed-skill-description"
+          >{{ describeSkill(pb.description).text }}</p>
+        </div>
       </li>
     </ul>
 

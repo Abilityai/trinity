@@ -1369,7 +1369,9 @@ def c_x003(snap):
                     existing.add(parts[-2])
         missing = [n for n in names if n and n not in existing]
         if missing:
-            return _fail("template.yaml declares skills with no SKILL.md", {"missing": missing})
+            return _fail(  # ent#584: the card shows the message, never `detail`, so name them
+                "template.yaml declares skills with no SKILL.md: " + _named(_clip(n) for n in missing),
+                {"missing": missing})
         return _ok("declared skills exist in .claude/skills/")
     return _with_template(snap, f)
 
@@ -1438,7 +1440,9 @@ def c_x010(snap):
         unmatched = [t for t in tags if _tag_key(t) not in status]
         undescribed = [t for t in tags if status.get(_tag_key(t)) == "undescribed"]
         if unmatched or undescribed:
-            return _fail("capabilities tags with no described skill", {
+            flagged = [t for t in tags if t in unmatched or t in undescribed]
+            # The card shows the message, never `detail`: name what was found.
+            return _fail("capabilities tags with no described skill: " + _named(_clip(t) for t in flagged), {
                 "unmatched": [_clip(t, 80) for t in unmatched[:25]],
                 "undescribed": [_clip(t, 80) for t in undescribed[:25]],
             })

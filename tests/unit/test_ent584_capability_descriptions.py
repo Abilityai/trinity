@@ -485,3 +485,37 @@ def test_skill_packaging_imports_only_what_the_library_ci_downloads():
         if m.split(".")[0] not in sys.stdlib_module_names and m.split(".")[0] != "yaml" and m not in allowed_local
     }
     assert foreign == set(), f"skill_packaging.py imports {sorted(foreign)}; the library CI downloads only it and utils/safe_yaml.py"
+
+
+# ---------------------------------------------------------------------------
+# 7. The finding names what it found (the Compatibility card shows `message`)
+# ---------------------------------------------------------------------------
+
+
+def test_x010_message_names_the_tags_and_caps_the_list():
+    status, msg, detail = _x010(_snap("capabilities:\n  - lead_triage\n  - obj-tag\n"))
+    assert status == "fail"
+    assert msg == "capabilities tags with no described skill: lead_triage, obj-tag"
+    assert detail == {"unmatched": ["lead_triage", "obj-tag"], "undescribed": []}
+
+    tags = "".join(f"  - tag{i}\n" for i in range(8))
+    _s, msg, _d = _x010(_snap("capabilities:\n" + tags))
+    assert msg == "capabilities tags with no described skill: tag0, tag1, tag2, tag3, tag4, +3 more"
+
+
+def test_x010_message_keeps_tag_order_across_unmatched_and_undescribed():
+    snap = _snap(
+        "capabilities:\n  - quiet\n  - nowhere\n",
+        {".claude/skills/quiet/SKILL.md": _skill(None, name="quiet")},
+    )
+    assert _x010(snap)[1] == "capabilities tags with no described skill: quiet, nowhere"
+
+
+def test_x003_message_names_the_missing_skills():
+    from services.compatibility.static_checks import run_static
+
+    snap = _snap("skills:\n  - alpha\n  - beta\n", {".claude/skills/alpha/SKILL.md": _skill("A.")})
+    status, msg, detail = run_static(snap, ["X-003"])["X-003"]
+    assert status == "fail"
+    assert msg == "template.yaml declares skills with no SKILL.md: beta"
+    assert detail == {"missing": ["beta"]}
