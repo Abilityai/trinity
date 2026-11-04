@@ -7,14 +7,16 @@
   -->
   <section
     v-if="!store.hidden"
-    class="rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden p-6"
+    :class="embedded ? '' : 'rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden p-6'"
     data-testid="self-change-permissions"
   >
-    <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Permissions to change itself</h3>
-    <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
-      What this agent may change about itself and other agents on its own. Every one is off until an
-      instance admin turns it on; people and the system agent never need them.
-    </p>
+    <template v-if="!embedded">
+      <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Permissions to change itself</h3>
+      <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+        What this agent may change about itself and other agents on its own. Every one is off until an
+        instance admin turns it on; people and the system agent never need them.
+      </p>
+    </template>
 
     <div v-if="view.state === 'loading'" aria-busy="true" data-testid="self-change-loading">
       <span class="sr-only">Loading permissions…</span>
@@ -55,8 +57,11 @@
         None granted. Without them the agent is refused, by name, when it tries any of the changes below.
       </p>
 
+      <!-- Below `sm` a row stacks: toggle and label, then the status on its own
+           line, then the description, all from one left edge. Side by side at
+           390px the status column left the label a few words wide (#3542). -->
       <div v-for="cap in rows" :key="cap.id" :data-testid="`self-change-${cap.id}`">
-        <div class="flex items-start justify-between gap-3">
+        <div class="flex flex-col items-start gap-1 sm:flex-row sm:justify-between sm:gap-3">
           <BaseToggle
             :model-value="cap.granted"
             :disabled="!canEdit || !!store.busy[cap.id]"
@@ -65,17 +70,19 @@
             @update:model-value="(v) => store.setGranted(agentName, cap.id, v)"
           />
           <span
-            class="shrink-0 text-xs text-gray-500 dark:text-gray-400 tabular-nums"
+            class="text-xs text-gray-500 dark:text-gray-400 tabular-nums sm:text-right"
             :title="cap.granted ? absolute(cap.granted_at) : ''"
             :data-testid="`self-change-granted-${cap.id}`"
           >
+            <!-- An email is one unbreakable word, so only the granter may break
+                 anywhere; "Off" and the time still wrap at spaces only. -->
             <template v-if="cap.granted">
-              Granted by {{ cap.granted_by || 'an admin' }} · {{ relative(cap.granted_at) }}
+              Granted by <span class="[overflow-wrap:anywhere]">{{ cap.granted_by || 'an admin' }}</span> · {{ relative(cap.granted_at) }}
             </template>
             <template v-else>Off</template>
           </span>
         </div>
-        <p class="mt-1 pl-[46px] text-xs text-gray-500 dark:text-gray-400">
+        <p class="mt-1 text-xs text-gray-500 dark:text-gray-400 sm:pl-[46px]">
           {{ cap.can }} {{ cap.without }}
         </p>
         <InlineError
@@ -143,6 +150,9 @@ import SkeletonLoader from '../SkeletonLoader.vue'
 
 const props = defineProps({
   agentName: { type: String, required: true },
+  // trinity-enterprise#887: inside an agent Settings pane the row supplies
+  // the title and description, so the panel drops its own.
+  embedded: { type: Boolean, default: false },
 })
 
 const store = useCapabilityGrantsStore()

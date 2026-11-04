@@ -26,7 +26,7 @@ answers.
 | DB | `src/backend/db/agent_settings/` + `db/schema.py` / `db/tables.py` | `a2a_exposed` getter/setter on the `AgentOperations` mixin (Invariant #2) |
 | MCP tools | `src/mcp-server/src/tools/a2a.ts` (+ `a2a.test.ts`) | ent#160 control surface (Invariant #13) |
 | UI | `components/A2aPanel.vue` | Sharing tab: exposure toggle, card URL, advertised skills, inbound allow-list, outbound endpoints |
-| Front door | `src/frontend/nginx.conf` | `location /a2a/` → backend, `proxy_buffering off` for SSE, `X-Real-IP` set so the rate limiter sees the true client |
+| Front door | `src/frontend/nginx.conf` + `nginx-server.conf` | `location /a2a/` → backend, `proxy_buffering off` for SSE; appends the caller to `X-Forwarded-For`, which the backend's client-address middleware reads from this trusted hop only (ent#873) |
 
 ## Endpoints
 
@@ -57,6 +57,26 @@ before an envelope exists to carry an error.
 3. **On the allow-list?** `a2a_gate.check_inbound_allowed(...)` — else 403.
    This one is a *restriction on an already-authenticated caller*, not a
    security boundary: it runs last, and it fails open.
+
+## Who may poll or cancel a task (#3751)
+
+Each door binds a task handle to the caller that minted it:
+
+| Door | Binding |
+|---|---|
+| Bearer (MCP key or JWT) | `routers/a2a.py::_bearer_started_by` — the row's `triggered_by == "a2a"`, `source_user_id == caller.id` (never None), `source_mcp_key_id == caller.mcp_key_id` (None on both sides for a JWT) |
+| AAuth | `aauth_inbound.execution_owned_by(exec_id, identity)` |
+| Paid | `_payer_for_task` — the payer bound to the row |
+
+The key id, not the user id, is the bearer identity: every agent key of one
+owner resolves to that owner's user id and role, so the user id alone would let a
+sibling agent poll another agent's task. There is no owner/admin override for the
+same reason. A refusal is the unknown-id `Task not found` (no existence oracle),
+and a refused `tasks/cancel` signals nothing. A re-minted key loses its in-flight
+tasks, as it loses its `messageId` namespace. This scopes the A2A task handle
+only; `GET /api/agents/{name}/executions/{id}` and its terminate route are the
+execution REST surface (trinity-enterprise#875). Pinned by
+`tests/unit/test_3751_a2a_bearer_task_scope.py`.
 
 ## `messageId` dedup — why the scope carries the caller
 
@@ -91,9 +111,13 @@ from one URL.
 `A2A_CARD_RATE_LIMIT = 60` per `A2A_CARD_RATE_WINDOW = 60`s per IP, via the
 shared `services/rate_limiter` (Redis sliding window, fail-open), enforced
 **before** any of that work — limiting after the expensive part would not fix
-the flood. Client IP resolves through `routers.public._get_client_ip`, which
-only trusts `X-Real-IP`/`X-Forwarded-For` from a trusted proxy, so headers can't
-spoof past it. Mirrors `public.py` (`PUBLIC_LINK_LOOKUP_RATE_LIMIT`), `files.py`
+the flood. The key is the canonical client address `routers.public._get_client_ip`
+returns — since trinity-enterprise#873 a plain reader of what
+`utils/client_ip.ClientAddressMiddleware` resolved for every request, so
+headers from anything but a trusted proxy (`architecture/security.md` §1a)
+cannot choose it. The address is attribution and rate-limit identity only; it
+never authenticates an inbound caller (every inbound call needs a credential or
+payment, whatever its source). Mirrors `public.py` (`PUBLIC_LINK_LOOKUP_RATE_LIMIT`), `files.py`
 (`_DOWNLOAD_RATE_LIMIT`), and `webhooks.py` (#1424).
 
 The JSON-RPC body is capped at `_MAX_RPC_BODY_BYTES` (1 MB) **before** parsing —

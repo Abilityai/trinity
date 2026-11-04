@@ -9,13 +9,16 @@ from models import User
 from database import db, McpApiKeyCreate, McpApiKey, McpApiKeyWithSecret
 from dependencies import (
     OPS_SCOPE,
+    OPS_WRITE_SCOPE,
     PORTAL_DELEGATE_SCOPE,
     _reject_connector_principal,
+    agent_principal_name,
     assert_admin,
     get_current_user,
     reject_agent_principal,
     reject_non_interactive_principal,
     require_interactive,
+    require_person,
 )
 from services.platform_audit_service import platform_audit_service, AuditEventType
 
@@ -37,17 +40,18 @@ async def create_mcp_api_key_endpoint(
 
     Scope is `user` unless explicitly requested. `portal_delegate` (ent#163) is
     admin-only: it lets the holder act as any end user who has portal access, so
-    it must never be self-issuable by an ordinary account.
+    it must never be self-issuable by an ordinary account. `ops` (#2323) and
+    `ops_write` (#3180) are admin-only bounded machine credentials.
     """
     requested_scope = (getattr(key_data, "scope", None) or "user").strip()
     if requested_scope != "user":
-        if requested_scope not in (PORTAL_DELEGATE_SCOPE, OPS_SCOPE):
+        if requested_scope not in (PORTAL_DELEGATE_SCOPE, OPS_SCOPE, OPS_WRITE_SCOPE):
             raise HTTPException(
                 status_code=400,
                 detail=f"Unsupported key scope '{requested_scope}'",
             )
-        if requested_scope == OPS_SCOPE:
-            # #2323 — minting a credential is a GRANT, and the guards used for
+        if requested_scope in (OPS_SCOPE, OPS_WRITE_SCOPE):
+            # #2323 / #3180 — minting a credential is a GRANT, and the guards used for
             # `portal_delegate` below are the wrong shape for this one: both
             # `reject_agent_principal` and `assert_admin`'s named rejections are
             # no-ops for an ops principal, so an ops key could mint ops keys.
@@ -186,7 +190,13 @@ async def get_mcp_api_key_endpoint(
     request: Request,
     current_user: User = Depends(get_current_user)
 ):
-    """Get details of a specific MCP API key."""
+    """Get details of a specific MCP API key.
+
+    An agent key reads only its own key (trinity-enterprise#872): it resolves to
+    its owner, whose other keys (siblings' included) are not its to read.
+    """
+    if agent_principal_name(current_user) is not None and key_id != current_user.mcp_key_id:
+        raise HTTPException(status_code=404, detail="MCP API key not found")
     key = db.get_mcp_api_key(key_id, current_user.username)
 
     if not key:
@@ -195,7 +205,7 @@ async def get_mcp_api_key_endpoint(
     return key
 
 
-@router.post("/keys/{key_id}/revoke")
+@router.post("/keys/{key_id}/revoke", dependencies=[Depends(require_person)])
 async def revoke_mcp_api_key_endpoint(
     key_id: str,
     request: Request,
@@ -232,7 +242,7 @@ async def revoke_mcp_api_key_endpoint(
     return {"message": f"MCP API key {key_id} revoked"}
 
 
-@router.delete("/keys/{key_id}")
+@router.delete("/keys/{key_id}", dependencies=[Depends(require_person)])
 async def delete_mcp_api_key_endpoint(
     key_id: str,
     request: Request,

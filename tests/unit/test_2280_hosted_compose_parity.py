@@ -231,8 +231,9 @@ def test_top_level_parity(prod: dict, hosted: dict) -> None:
     for key in ("networks",):
         assert hosted.get(key) == prod.get(key), (
             f"top-level '{key}' differs between prod and hosted — named volumes "
-            f"and the two-network isolation (#589) must be identical or a hosted "
-            f"install silently loses data or puts agents on the platform network."
+            f"and the network isolation (#589, plus the ent#873 ingress network) must "
+            f"be identical or a hosted install silently loses data, puts agents on "
+            f"the platform network, or trusts a forwarder address it never assigned."
         )
 
 

@@ -99,6 +99,20 @@
         </template>
 
         <p v-if="error" class="mt-3 text-sm text-status-danger-600 dark:text-status-danger-400">{{ error }}</p>
+
+        <!-- #3466: this card is the door for people an agent was shared with.
+             An operator whose platform session ended here (signed out in
+             another tab, back after it expired) gets the platform login too,
+             on both steps. Not while a platform session is held: the
+             "Continue as" card above is the way back then. -->
+        <p v-if="!authStore.isAuthenticated" :class="[HELP_CLASS, 'mt-6 text-center']">
+          Have a Trinity account?
+          <router-link
+            :to="platformLoginLocation"
+            data-testid="workspace-platform-login"
+            class="font-medium text-action-primary-600 dark:text-action-primary-400 hover:underline"
+          >Sign in</router-link>
+        </p>
       </div>
     </div>
 
@@ -119,6 +133,38 @@
 
          Below `sm` the columns collapse to the single stage the drawer and the
          bottom sheet already assume, so the variables are simply unused. -->
+    <!-- ===================== ACCOUNT HAS NO EMAIL ===================== -->
+    <!-- trinity#3894: the Workspace identifies a person by email, and a
+         platform account without one (the built-in `admin` on a default
+         install) is refused on every Workspace call. The shell used to render
+         anyway — "Couldn't load your agents" with a Try again that can never
+         succeed, beside "No agents yet. Create one" for an owner who just did.
+         Say what is missing and where to add it instead. -->
+    <div
+      v-else-if="store.accountHasNoEmail"
+      class="flex-1 flex items-center justify-center px-4"
+      data-testid="workspace-account-has-no-email"
+    >
+      <div class="w-full max-w-sm">
+        <div class="mb-6">
+          <PortalBrand mark-size="h-7 w-7" text-size="text-lg" />
+        </div>
+        <h1 class="text-lg font-semibold">Add an email to use the Workspace</h1>
+        <p class="mt-2 text-sm">
+          Your Trinity account has no email address, and the Workspace finds your agents —
+          the ones you own and the ones shared with you — by email.
+          Add one under Settings → General (Admin sign-in email), then reload this page.
+        </p>
+        <div class="mt-5 flex gap-2">
+          <BaseButton data-testid="workspace-add-email" @click="router.push({ path: '/settings', query: { tab: 'general' } })">
+            Open Settings
+          </BaseButton>
+          <BaseButton variant="secondary" data-testid="workspace-no-email-reload" @click="store.fetchRoster()">
+            Reload
+          </BaseButton>
+        </div>
+      </div>
+    </div>
     <div v-else class="flex-1 flex min-h-0" :style="columns.gridStyle.value">
       <!-- Sidebar: persistent on desktop, drawer on mobile -->
       <div class="hidden sm:flex shrink-0 min-w-0 overflow-hidden sm:w-[var(--ws-sidebar,18rem)]">
@@ -133,6 +179,7 @@
           :is-platform-session="store.isPlatformSession"
           :workspace-only="workspaceOnly"
           :projects-available="store.projectsAvailable"
+          :rooms-available="store.multiAgentChatAvailable"
           :projects-active="projectsRoute"
           :loading-roster="store.loading && !store.rosterLoaded"
           :settled="sidebarReady"
@@ -142,6 +189,7 @@
           :search-results="searchResults"
           :rename="renameChat"
           @new-chat="newChat"
+          @new-room="newRoom"
           @new-chat-with-agent="newChatWithAgent"
           @open-agent="openAgentPage"
           @open-thread="openThread"
@@ -186,6 +234,7 @@
             :is-platform-session="store.isPlatformSession"
             :workspace-only="workspaceOnly"
             :projects-available="store.projectsAvailable"
+          :rooms-available="store.multiAgentChatAvailable"
             :projects-active="projectsRoute"
             :loading-roster="store.loading && !store.rosterLoaded"
             :settled="sidebarReady"
@@ -195,6 +244,7 @@
             :search-results="searchResults"
             :rename="renameChat"
             @new-chat="() => { mobileNav = false; newChat() }"
+            @new-room="() => { mobileNav = false; newRoom() }"
             @new-chat-with-agent="(n) => { mobileNav = false; newChatWithAgent(n) }"
             @open-agent="(n) => { mobileNav = false; openAgentPage(n) }"
             @open-thread="(t) => { mobileNav = false; openThread(t) }"
@@ -302,6 +352,8 @@
           @open-menu="mobileNav = true"
           @dismiss-carry-notice="roomCarryNotice = null"
           @rooms-changed="refreshThreads"
+          @left-room="onLeftRoom"
+          @read="(id) => markRead('room', id)"
           @toggle-star="toggleStar"
           @participants-changed="onRoomParticipants"
           @work-state="onWorkState"
@@ -345,6 +397,13 @@
             <p :class="STAGE_BODY">
               It isn't enabled here. Ask an administrator if you expected access.
             </p>
+          </template>
+          <!-- trinity-enterprise#1082: refused by the terms gate. No "Try
+               again" — it can only be refused again; the way on is /terms. -->
+          <template v-else-if="store.termsRefusal">
+            <p :class="STAGE_TITLE">{{ termsRefusalTitle }}</p>
+            <p :class="STAGE_BODY">{{ store.error }}</p>
+            <RouterLink :to="termsRefusalLink" :class="STAGE_ACTION" data-testid="portal-terms-required">Review the terms</RouterLink>
           </template>
           <template v-else-if="store.error">
             <p :class="STAGE_TITLE">{{ ROSTER_LOAD_FAILED_TITLE }}</p>
@@ -448,6 +507,7 @@
           @session-adopted="onSessionAdopted"
           @thread-missing="onThreadMissing"
           @sessions-changed="onConversationTurnDone"
+          @thread-caught-up="onThreadCaughtUp"
           @open-menu="mobileNav = true"
           @escalate-to-room="onEscalateToRoom"
           @toggle-star="toggleStar"
@@ -573,6 +633,13 @@
             <p :class="STAGE_BODY">
               It isn't enabled here. Ask an administrator if you expected access.
             </p>
+          </template>
+          <!-- trinity-enterprise#1082: refused by the terms gate. No "Try
+               again" — it can only be refused again; the way on is /terms. -->
+          <template v-else-if="store.termsRefusal">
+            <p :class="STAGE_TITLE">{{ termsRefusalTitle }}</p>
+            <p :class="STAGE_BODY">{{ store.error }}</p>
+            <RouterLink :to="termsRefusalLink" :class="STAGE_ACTION" data-testid="portal-terms-required">Review the terms</RouterLink>
           </template>
           <template v-else-if="store.error">
             <p :class="STAGE_TITLE">{{ ROSTER_LOAD_FAILED_TITLE }}</p>
@@ -884,6 +951,7 @@
       v-if="pickerOpen"
       :agents="store.agents"
       :multi="store.multiAgentChatAvailable"
+      :mode="pickerMode"
       :busy="pickerBusy"
       :error="pickerError"
       @confirm="onPickerConfirm"
@@ -906,11 +974,15 @@ import { useRoute, useRouter } from 'vue-router'
 import { useClientPortalStore, MULTI_AGENT_UNAVAILABLE, PLATFORM_LOGIN_ROUTE } from '@/stores/clientPortal'
 import { useAuthStore } from '@/stores/auth'
 import { canvasReturnPath, isWorkspaceOnlyRole } from '@/utils/workspaceOnly'
+import { loginLocation } from '@/utils/platformSession'
+import { closedInviteMessage, termsLocation } from '@/utils/termsGate'
+import { HELP_CLASS } from '@/components/base/fieldClasses'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
 import { threadKey, shouldAutoFocusComposer } from '@/components/portal/portalDrafts'
 import { safeStorage } from '@/utils/safeStorage'
 import PortalSidebar from '@/components/portal/PortalSidebar.vue'
 import PortalBrand from '@/components/portal/PortalBrand.vue'
+import BaseButton from '@/components/base/BaseButton.vue'
 import PortalConversation from '@/components/portal/PortalConversation.vue'
 import PortalBriefing from '@/components/portal/PortalBriefing.vue'
 import PortalLoops from '@/components/portal/PortalLoops.vue'
@@ -1030,6 +1102,14 @@ const canContinueAsOperator = computed(
 )
 const operatorEmail = computed(() => authStore.userEmail || 'your Trinity account')
 
+// trinity-enterprise#1082 — the stage's named state when the terms gate refused
+// the roster: a closed invitation says so, and the link goes exactly where the
+// refusal handler would send the person (one builder, `termsLocation`).
+const termsRefusalTitle = computed(
+  () => closedInviteMessage(store.termsRefusal) || 'Accept the terms to continue'
+)
+const termsRefusalLink = computed(() => termsLocation(route.fullPath, store.termsRefusal))
+
 function continueAsOperator() {
   store.continueAsPlatform()
   // The roster is fetched by the same bootstrap the implicit-entry path uses;
@@ -1041,6 +1121,11 @@ const route = useRoute()
 const router = useRouter()
 
 // ---- Sign-in ------------------------------------------------------------------
+// #3466: the card's platform-login line returns to this page, or to the shared
+// canvas a visitor came from (the same return the code sign-in honours).
+const platformLoginLocation = computed(() =>
+  loginLocation(canvasReturnPath(route.query.redirect) || route.fullPath)
+)
 const step = ref('email')
 const email = ref('')
 const code = ref('')
@@ -1073,21 +1158,29 @@ function backToEmail() { step.value = 'email'; code.value = ''; error.value = nu
 async function onVerify() {
   if (code.value.length < 6 || busy.value) return
   busy.value = true; error.value = null
+  // #2261 — read the resume target BEFORE the roster load, since the sign-in
+  // that consumed the expiry is what makes it spendable. `endSession` recorded
+  // where the client was when their session lapsed, and until now nothing ever
+  // read it back: the expired notice promises "pick up where you left off", so
+  // it has to actually land there rather than on the roster root.
+  // trinity-enterprise#837: or the shared canvas whose "Sign in" sent them here.
+  const resumeTo = store.resumePath || canvasReturnPath(route.query.redirect)
+  const address = email.value.trim().toLowerCase()
   try {
-    // #2261 — read the resume target BEFORE the roster load, since the sign-in
-    // that consumed the expiry is what makes it spendable. `endSession` recorded
-    // where the client was when their session lapsed, and until now nothing ever
-    // read it back: the expired notice promises "pick up where you left off", so
-    // it has to actually land there rather than on the roster root.
-    // trinity-enterprise#837: or the shared canvas whose "Sign in" sent them here.
-    const resumeTo = store.resumePath || canvasReturnPath(route.query.redirect)
-    await store.verifyCode(email.value.trim().toLowerCase(), code.value.trim())
+    await store.verifyCode(address, code.value.trim())
     await bootstrap()
     if (resumeTo && resumeTo !== route.fullPath) {
       store.resumePath = null
       router.push(resumeTo)
     }
   } catch (err) {
+    // #3922: the code was right, but this address has a platform account. It
+    // signs in at `/login`, which gives it the team view, then comes back here.
+    if (err.response?.status === 409 && err.response?.data?.detail?.reason === 'platform_login_required') {
+      store.resumePath = null
+      router.push({ path: '/login', query: { redirect: resumeTo || route.fullPath, email: address } })
+      return
+    }
     error.value = err.response?.status === 401 ? 'Invalid or expired code.' : (err.response?.data?.detail || 'Verification failed.')
     code.value = ''
     await nextTick(); codeInput.value?.focusFirst()
@@ -1620,8 +1713,20 @@ const startingNewChat = ref(false)
 // keyboard sliding up over a phone is exactly the "unprompted" the issue names.
 const composerFocusMode = ref('always')
 
+// trinity-enterprise#701: which door opened the picker — 'chat' or 'room'.
+const pickerMode = ref('chat')
+
 function newChat() {
   if (guardLeaveCall(() => newChat())) return   // ent#551: ask, then leave
+  pickerMode.value = 'chat'
+  pickerOpen.value = true
+}
+
+// trinity-enterprise#701: New room — always a room, even with one agent, so
+// colleagues can be seated in it.
+function newRoom() {
+  if (guardLeaveCall(() => newRoom())) return
+  pickerMode.value = 'room'
   pickerOpen.value = true
 }
 
@@ -1635,6 +1740,14 @@ function leaveRoomRoute() {
   activeRoomId.value = null
   pendingSession.value = null; prefill.value = ''; convGen.value++
   router.push('/workspace')
+}
+
+// trinity-enterprise#701: the person left this room — it is gone for them, so
+// take them off its URL (the server now answers it with a 404) and refresh the
+// sidebar, which no longer lists it.
+async function onLeftRoom() {
+  leaveRoomRoute()
+  await refreshThreads()
 }
 
 // The one way to hand the stage back. #2158 reached the same conclusion
@@ -1661,14 +1774,14 @@ async function onPickerConfirm(agentNames) {
   // ONE agent stays a portal thread: that path resumes, streams and reattaches
   // (ent#358/#286). TWO OR MORE needs a room — the only substrate that models
   // several agents and @mention-waking.
-  if (agentNames.length === 1) {
+  if (agentNames.length === 1 && pickerMode.value !== 'room') {
     pickerOpen.value = false
     newChatWithAgent(agentNames[0])
     return
   }
   pickerBusy.value = true
   try {
-    const room = await store.createRoom(agentNames, `Chat with ${agentNames.join(', ')}`)
+    const room = await store.createRoom(agentNames, `Room with ${agentNames.join(', ')}`)
     pickerOpen.value = false
     await refreshThreads()
     openRoom(room.id || room.room_id)
@@ -1862,7 +1975,10 @@ function openRoom(roomId) {
   if (!roomId) return
   if (guardLeaveCall(() => openRoom(roomId))) return   // ent#551: ask, then leave
   unreachableAgent.value = null
-  markRead('room', roomId)
+  // trinity-enterprise#959 fix round 1: no read here. The room reads itself
+  // (`PortalRoom` → `read`) once its whole transcript is on screen; a write at
+  // the click cleared it before anything was fetched, and kept it cleared when
+  // the open failed.
   activeRoomId.value = roomId
   pendingSession.value = null
   // ent#451 review: every site that nulls `pendingSession` also settles the
@@ -2252,6 +2368,17 @@ async function refreshThreads() {
   // keys, so a refresh triggered by an incoming reply cannot walk back a send's
   // bump and re-sort the sidebar under the cursor.
   store.seedAgentRecency(threads.value)
+}
+
+// #3439: the open conversation appended rows the agent wrote on its own (a
+// report, an approval outcome, a background task's reply) — what the person is
+// looking at is read. Mark-read only: unlike a finished turn this neither
+// re-reads the list (the 20 s tick that surfaced the row already did) nor
+// touches the #2579 title-settle cycle, which an agent-initiated row must not
+// cancel or arm. Same "still here?" question as a turn, for the same reason.
+function onThreadCaughtUp(sessionId) {
+  const open = activeSessionId.value || pendingSession.value
+  if (shouldMarkTurnRead(sessionId, open)) markRead('thread', sessionId)
 }
 
 // A turn finishing in the conversation the user is LOOKING AT is read by
@@ -3122,10 +3249,23 @@ function startAsksPoll() {
     // enough to ride here.
     refreshThreads()
   }, ASKS_POLL_MS)
+  // #3439: coming back to the tab is the moment the person wants to know what
+  // happened while they were away — catch up now rather than at the next tick
+  // (up to 20 s of a transcript the badge already contradicts). One tick body,
+  // on the same visibility rule the interval skips on.
+  document.addEventListener('visibilitychange', onTabVisible)
+}
+
+function onTabVisible() {
+  if (document.visibilityState !== 'visible' || !asksTimer) return
+  store.fetchAsks()
+  store.fetchMentions()
+  refreshThreads()
 }
 
 function stopAsksPoll() {
   if (asksTimer) { clearInterval(asksTimer); asksTimer = null }
+  document.removeEventListener('visibilitychange', onTabVisible)
 }
 
 async function bootstrap() {

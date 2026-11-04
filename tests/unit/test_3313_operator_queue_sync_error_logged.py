@@ -40,7 +40,7 @@ import services.operator_queue_service as oqs  # noqa: E402
 def _wire(monkeypatch, synced):
     svc = oqs.OperatorQueueSyncService()
     monkeypatch.setattr(svc, "_try_acquire_leadership", lambda: True)
-    monkeypatch.setattr(oqs.ask_service, "expire", lambda: MagicMock(rows=[]))
+    monkeypatch.setattr(oqs.deps.ask_service, "expire", lambda: MagicMock(rows=[]))
 
     async def _sweep():
         return None
@@ -53,7 +53,7 @@ def _wire(monkeypatch, synced):
     db = MagicMock()
     db.mark_operator_queue_unconfirmed.return_value = 0
     db.mark_operator_queue_undeliverable_not_running.return_value = []
-    monkeypatch.setattr(oqs, "db", db)
+    monkeypatch.setattr(oqs.deps, "db", db)
 
     async def _sync_agent(name):
         synced.append(name)

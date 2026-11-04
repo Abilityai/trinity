@@ -12,6 +12,9 @@ person has to act:
       401 requirement=person-token      → person token from the PS (ent#878) → retry once
       401 requirement=auth-token        → VERIFY the resource token (the sink) → exchange at
                                           the PS → auth token → retry once (step-up: once)
+                                          (four-party, ent#928: the token's aud names an
+                                          access server; still OUR PS's endpoint, the PS
+                                          federates — the agent never dials the AS)
       401 Signature-Error expired/revoked on an auth token → evict, person token, ONE re-auth
       PS: expired/invalid presented     → forget the person token, ONE fresh chain
       402 / 403 / 408 / 410 / 429       → payment_required / denied / expired / gone / rate_limited
@@ -100,6 +103,8 @@ class ResourceResult:
     path: str
     budget: Optional[resource_meta.Budget] = None
     content_type: Optional[str] = None
+    #: ent#928: the access server the auth token came from (four-party), None otherwise.
+    access_server: Optional[str] = None
     outcome: str = "result"
 
 
@@ -205,6 +210,7 @@ class _Call:
     stepped_up: bool = False
     override_url: Optional[str] = None                       # a poll of a pending URL (resume)
     polling: Optional[Tuple[str, Dict[str, Any]]] = None     # (handle, record) being polled
+    access_server: Optional[str] = None                      # ent#928: the auth token's AS (four-party)
 
     @property
     def url(self) -> str:
@@ -222,10 +228,18 @@ class _Call:
 # --------------------------------------------------------------------------- #
 def _held_auth(call: _Call) -> Optional[auth_token.HeldAuthToken]:
     try:
-        return ps_client.held_auth_token(call.agent, resource=call.resource, key_thumbprint=call.jkt, now=call.now)
+        held = ps_client.held_auth_token(call.agent, resource=call.resource, key_thumbprint=call.jkt, now=call.now)
     except Exception:  # noqa: BLE001 — a cache that cannot be read is "not held"
         logger.warning("[aauth] auth-token cache unreadable for %s", call.agent, exc_info=True)
         return None
+    if held is not None:
+        _note_auth_issuer(call, held)
+    return held
+
+
+def _note_auth_issuer(call: _Call, held: auth_token.HeldAuthToken) -> None:
+    """Record which server minted the auth token in use (ent#928): our PS, or an access server."""
+    call.access_server = held.iss if held.iss and held.iss != call.ps else None
 
 
 def _store_auth(call: _Call, held: auth_token.HeldAuthToken) -> None:
@@ -507,7 +521,8 @@ def _result(call: _Call, resp: egress.CappedResponse, presented: Presented) -> R
     text, truncated = _sanitize(resp.body.decode("utf-8", "replace"), call)
     return ResourceResult(status=resp.status, body=text, truncated=truncated, token_kind=presented.kind,
                           challenges=list(call.challenges), resource=call.resource, method=call.method,
-                          path=call.path, budget=_budget(resp), content_type=resp.headers.get("content-type"))
+                          path=call.path, budget=_budget(resp), content_type=resp.headers.get("content-type"),
+                          access_server=call.access_server if presented.kind == "auth" else None)
 
 
 async def _person(call: _Call) -> Union[Presented, Outcome]:
@@ -612,6 +627,7 @@ async def _exchange_and_continue(call: _Call, verified: resource_token.ResourceT
         held = out.held
         call.tokens.add(held.token)
         _store_auth(call, held)
+        _note_auth_issuer(call, held)
         return Presented("auth", held.token, held.sub, held.jti, held.exp)
     if isinstance(out, auth_token.ExchangePending):
         kind = "ps_interaction" if out.requirement == "interaction" else "ps_approval"
@@ -620,6 +636,7 @@ async def _exchange_and_continue(call: _Call, verified: resource_token.ResourceT
             "status": out.status, "presented_jti": presented.jti, "presented_kind": presented.kind,
             "presented_sub": presented.sub, "presented_exp": presented.exp,
             "resource_token_jti": verified.jti, "next_poll_at": call.now + out.retry_after,
+            "as_url": verified.as_url,
         })
         if isinstance(handle, Refusal):
             return handle
@@ -772,6 +789,7 @@ async def _resume_exchange(call: _Call, handle: str, record: Dict[str, Any], *, 
         held = out.held
         call.tokens.add(held.token)
         _store_auth(call, held)
+        _note_auth_issuer(call, held)
         ps_client.delete_pending(handle, record)
         return await _run(call, Presented("auth", held.token, held.sub, held.jti, held.exp))
     if isinstance(out, auth_token.ExchangePending):

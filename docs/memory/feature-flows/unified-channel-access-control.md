@@ -145,6 +145,14 @@ New ops class (not a mixin — `access_requests` is its own domain table):
 | `get(request_id)` | Single-row lookup. |
 | `decide(request_id, approve, decided_by_user_id)` | Sets `status` to `approved` or `denied`, stamps `decided_by` and `decided_at`. |
 | `delete_for_agent(agent_name)` | Cascade delete on agent removal. |
+| `list_by_requester(channel, channel_user_id)` | Every request, on any agent and in any status, made by one channel identity (trinity-enterprise#737). |
+
+**Who asked (trinity-enterprise#737).** `upsert_pending(..., identity=)` stores `REQUESTER_FIELDS` (`requester_channel_id`, `_handle`, `_name`, `_chat_id`, `_thread_id`). The values come from `ChannelAdapter.requester_identity(message)`:
+- the base default reads `sender_id`, `sender_username` / `sender_display_name`, and the chat and thread when they differ from the DM;
+- Telegram adds @username and first/last name from the update;
+- WhatsApp adds the profile name.
+
+A refresh replaces the whole identity. `services/access_request_service.list_access_requests` adds `identity_captured` and `known_as` (prior requests plus verified Telegram/WhatsApp links for the same channel id, limited to agents the viewer may manage).
 
 ### Extended `AgentSharingMixin` (`src/backend/db/agent_settings/sharing.py`)
 
@@ -663,6 +671,7 @@ Working. Telegram, Slack, and web public-chat all run the same gate.
 
 | Date | Changes |
 |------|---------|
+| 2026-11-03 | **trinity-enterprise#737** — an access request names who asked: the channel's user id, handle, display name, chat and thread, captured on the router gate and both `/login` flows. The pending list shows the person and where they were seen before. |
 | 2026-10-09 | **trinity-enterprise#837** — approving an access request no longer adds the email to the login whitelist; the requester signs in to the Workspace with the code. |
 | 2026-04-22 | **#446 — team-share gate hardening + Sharing UX**: (1) `share_agent` now deletes any stale pending `access_requests` row for the same `(agent, email)` atomically with the share insert, so a manual Team Share add clears the owner's Pending list. (2) Defense-in-depth email normalization (`.strip().lower()`) added in `email_has_agent_access`, `is_agent_shared_with_email`, `routers/public.py` gate, and both DM+group branches of `adapters/message_router.py` so mixed-case session emails can't bypass the allow-list. (3) `SharingPanel.vue` restructured: new framing banner distinguishes "Identity proof" (verify who the user is) from "Authorization" (allow-list + approval queue); "Team Sharing" heading tagged "— allow-list"; dead-end warning banner when `require_email=true && !open_access && shares.length===0`. New unit tests: `tests/test_team_share_gate_unit.py` (8 tests). |
 | 2026-04-12 | Initial implementation (#311). New migration `access_control`, `AccessPolicyMixin`, `AccessRequestOperations`, ABC additions, Telegram `/login` state machine, Slack `users.info` resolver, four owner endpoints, SharingPanel UI. |

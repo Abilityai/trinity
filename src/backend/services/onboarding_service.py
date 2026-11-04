@@ -33,6 +33,7 @@ import logging
 from typing import List, Optional, Set
 
 from database import db
+from dependencies import principal_reach
 from models import User
 from services.cornelius_agent_service import CORNELIUS_AGENT_NAME
 from services.system_seed_service import seeded_agent_names as manifest_seeded_agent_names
@@ -67,10 +68,13 @@ def _visible_agents(current_user: User) -> List[dict]:
     user_row = db.get_user_by_username(current_user.username) or {}
     is_admin = user_row.get("role") == "admin"
     metadata = db.get_all_agent_metadata(user_row.get("email"))
+    reach = principal_reach(current_user)  # an agent key sees its reach (trinity-enterprise#872)
 
     visible = []
     for name, meta in (metadata or {}).items():
         if meta.get("is_system"):
+            continue
+        if reach is not None and name not in reach:
             continue
         if is_admin or meta.get("owner_id") == user_row.get("id") or meta.get("is_shared_with_user"):
             visible.append({"name": name, **meta})

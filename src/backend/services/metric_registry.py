@@ -55,7 +55,9 @@ _EXEC_TIMEOUT = 15
 
 # Every trigger that may write the registry. Recorded on the row so an operator
 # can tell "this came in with the agent" from "this arrived on a pull".
-SOURCES = ("create", "import", "pull", "reset", "sync", "start", "refresh")
+# `ui` (ent#1006) is a form write: the template was edited through the UI and
+# the reconcile ran right after, from the file it wrote.
+SOURCES = ("create", "import", "pull", "reset", "sync", "start", "refresh", "ui")
 
 
 class RefreshUnavailable(Exception):
@@ -254,6 +256,16 @@ def _reconcile(
             agent_name, refused["name"], refused["from"], refused["to"],
         )
     return summary
+
+
+async def read_template_text(agent_name: str) -> str:
+    """The agent's raw `template.yaml`, read the same way a refresh reads it.
+
+    Public for the UI declaration editor (ent#1006), which edits the exact text
+    it read and must refuse with the same named reasons (`agent_not_running`,
+    `template_unreadable`) a refresh gives. Raises `RefreshUnavailable`.
+    """
+    return await _read_template_from_container(agent_name)
 
 
 async def _read_template_from_container(agent_name: str) -> str:

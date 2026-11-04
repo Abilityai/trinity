@@ -31,6 +31,7 @@ import { useWebSocket, reconnectWebSocket } from '../../src/utils/websocket'
 import { useAuthStore } from '../../src/stores/auth'
 import { useLoopsStore } from '../../src/stores/loops'
 import { useSkillsStore } from '../../src/stores/skills'
+import { useNetworkStore } from '../../src/stores/network'
 
 class FakeSocket {
   static last = null
@@ -113,6 +114,33 @@ describe('/ws events and the Workspace-only rung', () => {
 
   it('an operator’s loop and skills events still do', async () => {
     expect(await storeHitsAs('operator')).toEqual({ loops: 1, skills: 1 })
+  })
+
+  // ent#955: the fleet store's `workingState` (agent-header capacity bars,
+  // dashboard "working" chip) follows THIS socket, not only the store's own
+  // dashboard-scoped one — so a 10-second task lights the bars on the agent page.
+  async function workingAs(role) {
+    const auth = useAuthStore()
+    auth.isAuthenticated = true
+    auth.token = 'jwt'
+    auth.user = { email: 'x@example.com', role }
+    const network = useNetworkStore()
+    const socket = useWebSocket()
+    await socket.connect()
+    FakeSocket.last.onmessage({ data: JSON.stringify({ type: 'agent_activity', activity_type: 'chat_start', activity_state: 'started', agent_name: 'scout', timestamp: '2026-10-19T00:00:00Z' }) })
+    const lit = !!network.workingState.scout
+    FakeSocket.last.onmessage({ data: JSON.stringify({ type: 'agent_activity', activity_type: 'chat_start', activity_state: 'completed', agent_name: 'scout' }) })
+    const cleared = !network.workingState.scout
+    socket.disconnect()
+    return { lit, cleared }
+  }
+
+  it('an operator’s activity events light and clear the working state over the app-wide socket', async () => {
+    expect(await workingAs('operator')).toEqual({ lit: true, cleared: true })
+  })
+
+  it('a member’s activity events do not touch the operator-side working state', async () => {
+    expect(await workingAs('user')).toEqual({ lit: false, cleared: true })
   })
 
   // trinity-enterprise#837 review: a socket's scope is fixed when it connects.

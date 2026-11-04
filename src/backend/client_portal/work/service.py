@@ -83,7 +83,8 @@ def work_kind(row: dict) -> WorkKind:
         return "loop"
     if trigger == "room":
         return "room"
-    if trigger in ("schedule", "scheduled"):
+    # #3363: a retry of a scheduled run is the same scheduled work, attempt N.
+    if trigger in ("schedule", "scheduled", "retry"):
         return "schedule"
     if channel == PORTAL_SOURCE_CHANNEL and trigger == "public":
         return "turn"
@@ -350,6 +351,68 @@ def _chat_is_callers(chat_id: Optional[str], agents: List[str], email: str) -> b
     return False
 
 
+def _execution_is_viewers(execution_id, agent: str, own: Dict) -> bool:
+    try:
+        row = core_db.get_execution(str(execution_id))
+    except Exception:  # noqa: BLE001 — fail closed: an unreadable row is not shown
+        return False
+    if row is None or getattr(row, "agent_name", None) != agent:
+        return False
+    return _row_is_viewers(row, own)
+
+
+def _own_rows(email: str) -> Dict:
+    """The trinity-enterprise#875 narrowing for this viewer's ledger reads.
+
+    On an agent the viewer OWNS every row is theirs to see; on an agent that is
+    only shared with them, just the rows they started — by their user id, or by
+    their email (a Workspace turn is stamped with the email, not the id). The
+    roster already unions owned and shared agents, so without this a share
+    holder read the title (the first 120 characters of the prompt) of every
+    other person's turn on a shared agent.
+
+    Written as an EXEMPTION list, like `viewer_own_rows`: narrowing is the
+    default and only a provably owned agent escapes it. A failed lookup
+    narrows more, never less."""
+    from dependencies import NO_ROWS_USER_ID
+    try:
+        owned = sorted({r["agent_name"] for r in portal_db.get_owned_roster(email)})
+    except Exception:  # noqa: BLE001 — fail closed: no agent exempt
+        logger.warning("[ent#875] owned-roster read failed", exc_info=True)
+        owned = []
+    uid = NO_ROWS_USER_ID
+    try:
+        user = core_db.get_user_by_email(email) if email else None
+        raw = user.get("id") if isinstance(user, dict) else None
+        if isinstance(raw, int) and not isinstance(raw, bool) and raw > 0:
+            uid = raw
+    except Exception:  # noqa: BLE001 — fail closed: the email alone still identifies their rows
+        logger.warning("[ent#875] viewer id lookup failed", exc_info=True)
+    return {
+        "own_rows_user_id": uid,
+        "own_rows_email": (email or "").strip().lower() or None,
+        "own_rows_exempt_agents": owned,
+    }
+
+
+def _row_is_viewers(row, own: Dict) -> bool:
+    """Python twin of the SQL own-rows predicate, for one ledger row."""
+    get = row.get if isinstance(row, dict) else (lambda k: getattr(row, k, None))
+    if get("agent_name") in own["own_rows_exempt_agents"]:
+        return True
+    uid = get("source_user_id")
+    try:
+        if uid is not None and int(uid) == own["own_rows_user_id"]:
+            return True
+    except (TypeError, ValueError):
+        pass
+    email = own["own_rows_email"]
+    if not email:
+        return False
+    return any((get(k) or "").strip().lower() == email
+               for k in ("source_user_email", "source_channel_client"))
+
+
 async def get_work(email: str, names: List[str], chat_id: Optional[str] = None) -> PortalWork:
     """The chat's work, three ways. Platform principals only — the router gates.
 
@@ -369,10 +432,13 @@ async def get_work(email: str, names: List[str], chat_id: Optional[str] = None) 
                           window_days=WINDOW_DAYS, earlier_limit=EARLIER_LIMIT)
 
     try:
-        running_rows = core_db.get_fleet_executions(agents, status="running", hours=0, limit=50)
-        queued_rows = core_db.get_fleet_executions(agents, status="queued", hours=0, limit=50)
-        recent_rows = core_db.get_fleet_executions(agents, hours=hours, limit=EARLIER_LIMIT + 20)
-        stats = core_db.get_fleet_execution_stats(agents, hours=hours) or {}
+        # ent#875: on a shared agent, only the viewer's own rows — in the WHERE,
+        # before each LIMIT, and the window count over the same rows.
+        own = _own_rows(email)
+        running_rows = core_db.get_fleet_executions(agents, status="running", hours=0, limit=50, **own)
+        queued_rows = core_db.get_fleet_executions(agents, status="queued", hours=0, limit=50, **own)
+        recent_rows = core_db.get_fleet_executions(agents, hours=hours, limit=EARLIER_LIMIT + 20, **own)
+        stats = core_db.get_fleet_execution_stats(agents, hours=hours, **own) or {}
         children = core_db.get_running_for_chat(chat_id) if _chat_is_callers(chat_id, agents, email) else []
     except Exception:  # noqa: BLE001 — the ledger is the one thing this read cannot do without
         logger.warning("[ent#525] work read failed", exc_info=True)
@@ -491,8 +557,13 @@ async def get_work_activity(email: str, names: List[str]) -> PortalWorkActivity:
     agents = [n for n in names if n in roster]
     now = datetime.now(timezone.utc)
     items: Dict[str, WorkActivity] = {}
+    own = _own_rows(email) if agents else None
     for agent, by_id in _activity_by_agent(agents).items():
         for eid, entry in by_id.items():
+            # ent#875: a shared agent's beat lists every running turn; a line is
+            # returned only for a turn that is the viewer's (owned agents: all).
+            if agent not in own["own_rows_exempt_agents"] and not _execution_is_viewers(eid, agent, own):
+                continue
             cleaned = clean_activity(entry, roster, now=now)
             if cleaned is not None:
                 items[str(eid)] = cleaned

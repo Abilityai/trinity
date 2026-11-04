@@ -270,7 +270,7 @@ def test_the_refused_value_is_bounded_before_it_is_echoed(svc):
     `PortalChatRequest.model` is deliberately unvalidated at the payload layer
     (a length rule there would refuse before the 403 that says this principal
     has no control at all), and every sibling field on that model IS bounded —
-    `message` is `max_length=8000`. Without the truncation an authenticated
+    `message` is `max_length=100_000`. Without the truncation an authenticated
     caller posts a megabyte-long `model` and has it echoed verbatim into the
     error body.
     """

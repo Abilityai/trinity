@@ -175,6 +175,26 @@ class MetricPointOperations:
                 conn.execute(select(func.count()).select_from(sub)).scalar_one()
             )
 
+    def point_usage(self, agent_name: str, metric: str, limit: int):
+        """How many points one metric holds, counted to `limit`, and its newest `ts`.
+
+        For the retire warning (trinity-enterprise#1006): "412 recorded points,
+        last 2 hours ago". Bounded like `count_points_today` — the warning needs
+        "how many, roughly", never a full scan of a busy metric's history — and
+        both halves ride `idx_metric_points_agent_metric_ts`.
+        """
+        if limit <= 0:
+            return 0, None
+        t = metric_points
+        where = (t.c.agent_name == agent_name, t.c.metric == metric)
+        sub = select(t.c.idempotency_key).where(*where).limit(limit).subquery()
+        with get_engine().connect() as conn:
+            count = int(conn.execute(select(func.count()).select_from(sub)).scalar_one())
+            newest = conn.execute(
+                select(t.c.ts).where(*where).order_by(t.c.ts.desc()).limit(1)
+            ).scalar()
+        return count, newest
+
     def latest_points_for(
         self,
         agent_name: str,

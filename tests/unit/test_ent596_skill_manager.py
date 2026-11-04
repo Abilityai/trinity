@@ -205,7 +205,9 @@ def test_a_holder_manages_itself_and_siblings_but_never_beyond_its_owner(grants,
     with pytest.raises(HTTPException) as exc:
         _run_fence(_principal("agent", HOLDER), OUTSIDER)
     assert exc.value.status_code == 404   # the grant widened nothing
-    audit.assert_not_awaited()
+    # ent#871: two uses, then the refusal the owner bound writes.
+    assert [c.kwargs["event_action"] for c in audit.await_args_list] == [
+        "capability_used", "capability_used", "capability_refused"]
 
 
 def test_a_holder_never_reaches_another_users_agent_even_on_an_admin_owned_install(grants, owner_fence, audit):
@@ -377,6 +379,10 @@ def files_mod(monkeypatch, grants, audit):
     import dependencies
     monkeypatch.setattr(dependencies.db, "get_agent_owner",
                         lambda name: {"owner_username": "owner"})
+    # ent#820: the human here is the agent's owner (a share holder is refused
+    # the skills dir by tier — test_ent820_files_tier_census.py).
+    monkeypatch.setattr(files, "_passes_owner_tier",
+                        lambda u, a: getattr(u, "mcp_scope", "x") is None)
     # Past the gate, the next thing each logic function does is look up the
     # container; "not found" is the observable proof the gate let it through.
     monkeypatch.setattr(files, "get_agent_container", lambda name: None)
@@ -560,7 +566,7 @@ def test_the_grant_route_grants_and_audits_only_real_changes(monkeypatch, audit)
                                                  _request(), admin_user=admin))
     assert first.changed is True and again.changed is False
     audit.assert_awaited_once()
-    assert audit.await_args.kwargs["event_action"] == "skill_manager_grant"
+    assert audit.await_args.kwargs["event_action"] == "capability_grant"
 
 
 # ---- 7. attribution over a real SQLite file ------------------------------------

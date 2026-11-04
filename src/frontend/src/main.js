@@ -8,7 +8,7 @@ import './style.css'
 import { useAuthStore } from './stores/auth'
 import { useClientPortalStore } from './stores/clientPortal'
 import {
-  applyRequestCredential, notifyPlatformUnauthorized, pathForVerdict,
+  applyRequestCredential, fullPathForVerdict, notifyPlatformUnauthorized, pathForVerdict,
   reactToPlatformUnauthorized, reactToStorageEvent, setPlatformUnauthorizedHandler,
 } from './utils/platformSession'
 import { installConsoleBuffer } from './utils/consoleBuffer'
@@ -16,6 +16,7 @@ import { reconnectWebSocket } from './utils/websocket'
 import {
   notifyWorkspaceOnly, reactToWorkspaceOnly, setWorkspaceOnlyHandler,
 } from './utils/workspaceOnly'
+import { notifyTermsRefusal, reactToTermsRefusal, setTermsRefusalHandler } from './utils/termsGate'
 
 // #1116: capture recent console errors/warnings from the very start so the
 // in-app bug reporter can attach them (scrubbed) to a report. Runs before the
@@ -72,10 +73,12 @@ function handlePlatformUnauthorized(error) {
     // #3406 — the address being loaded until the first navigation settles;
     // `currentRoute` reads "/" (START_LOCATION) until then.
     path: pathForVerdict(router, START_LOCATION, window.location.pathname),
+    // #3444 — the page to come back to after signing in, query and hash included.
+    returnPath: fullPathForVerdict(router, START_LOCATION, window.location),
     portalTokenPresent,
     adoptStoredSession: () => authStore.adoptStoredSession(),
     logout: () => authStore.logout(),
-    goToLogin: () => router.push('/login'),
+    goToLogin: (location) => router.push(location),
   })
   // RETURNED, so `notifyPlatformUnauthorized` can absorb a rejected redundant
   // navigation. The first version of this handler dropped the promise on the
@@ -98,6 +101,14 @@ setWorkspaceOnlyHandler(() => reactToWorkspaceOnly({
   currentRole: () => useAuthStore().user?.role,
   rescope: () => reconnectWebSocket(),
   replace: (path) => router.replace(path),
+}))
+
+// trinity-enterprise#1054 — the terms gate refused this person (403
+// `terms_required`, or an invitation no longer live): open the terms page,
+// carrying the page to come back to. Never from /terms itself or a sign-in page.
+setTermsRefusalHandler((error) => reactToTermsRefusal(error, {
+  currentPath: () => fullPathForVerdict(router, START_LOCATION, window.location),
+  push: (location) => router.push(location),
 }))
 
 // #2791 — every bare-`axios` caller gets the CURRENT credential, per request.
@@ -125,6 +136,7 @@ axios.interceptors.response.use(
   error => {
     if (error.response?.status === 401) notifyPlatformUnauthorized(error)
     else notifyWorkspaceOnly(error)
+    notifyTermsRefusal(error)
     return Promise.reject(error)
   }
 )

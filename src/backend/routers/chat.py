@@ -3,7 +3,7 @@ Agent chat and activity routes for the Trinity backend.
 
 Includes execution queue integration to prevent parallel execution on the same agent.
 """
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 import asyncio
 import httpx
@@ -12,14 +12,19 @@ import logging
 from datetime import datetime
 from typing import NoReturn, Optional
 
-from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, TaskExecutionStatus
+from models import User, ChatMessageRequest, ModelChangeRequest, ParallelTaskRequest, ReportBackRequest, TaskExecutionStatus
 from dependencies import (
+    assert_not_share_viewer,
     capability_fence,
     get_current_user,
     get_authorized_agent,
     get_owned_agent,
     assert_owns_or_admin,
+    is_fleet_admin,
     resolve_source_agent,
+    ops_write_route,
+    row_is_viewers,
+    viewer_row_scope,
 )
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
@@ -44,6 +49,7 @@ from services.execution_envelope import TaskExecutionErrorCode
 from database import db
 from utils.helpers import utc_now_iso
 from db.write_params import ExecutionResult
+from services.platform_audit_service import platform_audit_service, AuditEventType
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +147,21 @@ def _raise_circuit_open_503(agent_name: str, execution_id, exc: CircuitOpen) -> 
         status_code=503,
         detail={"error": "circuit_open", "retry_after_seconds": retry_after},
         headers={"X-Circuit-Open": "true", "Retry-After": str(retry_after)},
+    )
+
+
+def _raise_if_stored_error(snapshot) -> None:
+    """#3993: a replay of a key whose run ended in a terminal error (a turn
+    limit, #3988) answers that error again, with its code, and never runs the
+    task a second time."""
+    stored = chat_execution_service.stored_error(snapshot)
+    if stored is None:
+        return
+    raise HTTPException(
+        status_code=stored["status_code"],
+        detail=stored.get("detail"),
+        headers=chat_execution_service._error_code_headers(
+            stored.get("error_code"), {"X-Idempotent-Replay": "true"}),
     )
 
 
@@ -263,6 +284,7 @@ async def chat_with_agent(
                     "execution_id": admission.execution_id,
                 },
             )
+        _raise_if_stored_error(admission.snapshot)
         return JSONResponse(
             content=admission.snapshot
             or {"execution": {"task_execution_id": admission.execution_id}},
@@ -280,20 +302,27 @@ async def chat_with_agent(
     # user-message log. Returns the ids/records the execute+finalize body below
     # consumes; every field is unpacked (slice-1 lesson: a stranded local
     # NameErrors the admitted path).
-    ctx = await chat_execution_service.prepare_chat_execution(
-        name=name,
-        request=request,
-        current_user=current_user,
-        x_source_agent=x_source_agent,
-        x_via_mcp=x_via_mcp,
-        idem=idem,
-        chat_execution_id=chat_execution_id,
-        capacity_result=capacity_result,
-        queue_result=queue_result,
-        chain_depth=admission.chain_depth,
-        # trinity-enterprise#752: a self-approval is recorded on the row.
-        gate=admission.gate,
-    )
+    # #3998: the slot and the idempotency claim are released by
+    # run_chat_turn's `finally`, which a setup that raises never reaches.
+    try:
+        ctx = await chat_execution_service.prepare_chat_execution(
+            name=name,
+            request=request,
+            current_user=current_user,
+            x_source_agent=x_source_agent,
+            x_via_mcp=x_via_mcp,
+            idem=idem,
+            chat_execution_id=chat_execution_id,
+            capacity_result=capacity_result,
+            queue_result=queue_result,
+            chain_depth=admission.chain_depth,
+            # trinity-enterprise#752: a self-approval is recorded on the row.
+            gate=admission.gate,
+        )
+    except BaseException:
+        await chat_execution_service.release_admission(
+            name, execution_id=chat_execution_id, capacity=capacity, idem=idem)
+        raise
     execution = ctx.execution
     task_execution_id = ctx.task_execution_id
     triggered_by = ctx.triggered_by
@@ -424,7 +453,9 @@ async def execute_parallel_task(
                 status_code=400,
                 detail="This execution was never assigned a resumable session.",
             )
-        if current_user.role != "admin" and not db.resume_session_belongs_to_user(
+        # trinity-enterprise#872: the admin bypass is for an admin PERSON; an
+        # agent key carrying its owner's role is checked for ownership too.
+        if not _sees_every_user(current_user) and not db.resume_session_belongs_to_user(
             name, rid, current_user.id
         ):
             raise HTTPException(status_code=404, detail="Session not found.")
@@ -449,6 +480,22 @@ async def execute_parallel_task(
             logger.warning("[#1068] agent '%s': %s", name, _timeout_warning)
             _record_deprecated_task_timeout_use()  # durable signal for the soak gate
         request.timeout_seconds = _resolved_timeout
+
+    # #2328: a per-task max_turns now reaches the agent on every push path, and an
+    # agent image that predates the agent-side min() lets the caller's value win
+    # over the owner's guardrail. Clamp it here to the owner's `max_turns_task`, in
+    # place like the timeout above, so the cap never depends on which image the
+    # agent runs. The model already bounds the value to the guardrail's 1-500.
+    # With no owner override the backend cannot see the image's own default, so
+    # the value passes through within that bound.
+    if request.max_turns is not None:
+        _owner_turn_cap = db.get_guardrails_config(name).get("max_turns_task")
+        if _owner_turn_cap is not None and request.max_turns > _owner_turn_cap:
+            logger.warning(
+                "[#2328] agent '%s': max_turns=%s exceeds the owner's max_turns_task=%s; clamping.",
+                name, request.max_turns, _owner_turn_cap,
+            )
+            request.max_turns = _owner_turn_cap
 
     # Derive → idempotency → file upload → create-row → async/sync dispatch all
     # live in chat_execution_service now (Invariant #1). It is HTTP-free: it
@@ -481,6 +528,7 @@ async def execute_parallel_task(
                     "execution_id": result.execution_id,
                 },
             )
+        _raise_if_stored_error(result.snapshot)
         return JSONResponse(
             content=result.snapshot
             or {"task_execution_id": result.execution_id, "async_mode": bool(request.async_mode)},
@@ -514,6 +562,10 @@ async def get_agent_chat_history(
             # trinity#3526: a held gated request and its notice are not turns.
             if not chat_persistence_service.is_gate_message(m)
         ]
+
+    # ent#875: the container's own conversation holds every user's turns
+    # together; a share holder reads their own through chat/history/persistent.
+    assert_not_share_viewer(current_user, name)
 
     if container.status != "running":
         raise HTTPException(
@@ -626,6 +678,7 @@ async def get_agent_activity(
     current_user: User = Depends(get_current_user)
 ):
     """Get session activity for real-time monitoring."""
+    assert_not_share_viewer(current_user, name)  # ent#875: shared container state
     container = get_agent_container(name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -672,6 +725,7 @@ async def get_agent_activity_detail(
     current_user: User = Depends(get_current_user)
 ):
     """Get full details for a specific tool call."""
+    assert_not_share_viewer(current_user, name)  # ent#875: shared container state
     container = get_agent_container(name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -705,6 +759,7 @@ async def clear_agent_activity(
     current_user: User = Depends(get_current_user)
 ):
     """Clear session activity (called when starting a new session)."""
+    assert_not_share_viewer(current_user, name)  # ent#875: shared container state
     container = get_agent_container(name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -759,18 +814,15 @@ async def get_agent_model(
             response.raise_for_status()
             return response.json()
     except httpx.HTTPError as e:
-        import logging
-        logging.getLogger("trinity.errors").error(f"Failed to get model info for {name}: {e}")
-        raise HTTPException(
-            status_code=503,
-            detail="Failed to get model info"
-        )
+        _raise_model_route_error(name, e, "Failed to get model info", "get model info")
 
 
 @router.put("/{name}/model", dependencies=[Depends(capability_fence("agents.manage"))])
 async def set_agent_model(
     request: ModelChangeRequest,
-    name: str = Depends(get_authorized_agent),
+    # ent#875: the model is the agent's for every user — owner tier. An agent key
+    # keeps its `agents.manage` capability fence on the route decorator.
+    name: str = Depends(get_owned_agent),
     current_user: User = Depends(get_current_user)
 ):
     """Set agent's model for subsequent messages."""
@@ -795,12 +847,34 @@ async def set_agent_model(
 
             return response.json()
     except httpx.HTTPError as e:
-        import logging
-        logging.getLogger("trinity.errors").error(f"Failed to set model for {name}: {e}")
-        raise HTTPException(
-            status_code=503,
-            detail="Failed to set model"
+        _raise_model_route_error(name, e, "Failed to set model", "set model")
+
+
+def _raise_model_route_error(name: str, e: httpx.HTTPError, unavailable: str, action: str):
+    """#3677: an agent's own 4xx is the caller's answer (an invalid model names
+    the valid ones), with its status and detail and no ERROR line; anything
+    else (unreachable, timed out, an agent 5xx) is still 503.
+
+    Not a 401: the agent's auth middleware answers 401 when the BACKEND's
+    per-agent token does not match (#1159; a rotated AGENT_AUTH_SECRET, an old
+    container). That is the platform's credential failing, not the caller's,
+    and a 401 reaching the browser signs the person out (platformSession's
+    `logout` verdict) on every load of the agent page. It stays a 503."""
+    import logging
+    response = getattr(e, "response", None) if isinstance(e, httpx.HTTPStatusError) else None
+    if response is not None and 400 <= response.status_code < 500 and response.status_code != 401:
+        try:
+            detail = response.json().get("detail")
+        except (ValueError, AttributeError):
+            detail = None
+        if detail in (None, ""):
+            detail = (response.text or "").strip()[:500] or f"The agent refused to {action}"
+        logging.getLogger("trinity.errors").info(
+            f"Agent {name} refused to {action}: {response.status_code}"
         )
+        raise HTTPException(status_code=response.status_code, detail=detail)
+    logging.getLogger("trinity.errors").error(f"Failed to {action} for {name}: {e}")
+    raise HTTPException(status_code=503, detail=unavailable)
 
 
 # Persistent Chat History Routes
@@ -853,7 +927,7 @@ def _sees_every_user(current_user: User) -> bool:
     so with an `agent_permissions` edge to B it read every user's chats with B
     — "may call" is not "may read everyone's conversations with it"
     (trinity-enterprise#629, #3346 review)."""
-    return current_user.role == "admin" and not getattr(current_user, "agent_name", None)
+    return is_fleet_admin(current_user)
 
 
 @router.get("/{name}/chat/sessions")
@@ -962,11 +1036,15 @@ async def close_chat_session(
 # ============================================================================
 
 @router.post("/{name}/executions/{execution_id}/terminate")
+@ops_write_route("#3180: cancels one execution on an agent the key owner reaches")
 async def terminate_agent_execution(
     execution_id: str,
     task_execution_id: Optional[str] = None,
     name: str = Depends(get_authorized_agent),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    # Audit context only (#3180): FastAPI injects a `Request`-annotated
+    # parameter regardless of its default, while direct callers need not pass one.
+    request: Request = None,
 ):
     """
     Terminate a running execution on an agent.
@@ -984,15 +1062,82 @@ async def terminate_agent_execution(
     if not task_execution_id:
         task_execution_id = execution_id
 
+    # ent#875: below the owner tier a caller may end only a turn they started.
+    # Both ids must be rows of THIS agent that are the caller's (the agent
+    # process is addressed by one, the database row by the other), and a missing
+    # row is a refusal, not a pass. Uniform 404, the answer for an unknown id.
+    scope = viewer_row_scope(current_user, name)
+    if scope is not None:
+        for _eid in {execution_id, task_execution_id}:
+            _row = db.get_execution(_eid)
+            if (
+                not _row
+                or getattr(_row, "agent_name", None) != name
+                or not row_is_viewers(scope, getattr(_row, "source_user_id", None))
+            ):
+                raise HTTPException(status_code=404, detail="Execution not found in agent")
+
     # The termination orchestration (BACKLOG-001 queued-cancel, agent-proxy,
     # capacity force-release, #679 CANCELLED CAS, #1332 dispatch-activity close)
     # lives in chat_execution_service (Invariant #1). HTTP-free — it raises
     # ChatDispatchError (404/503/502/504/non-200), mapped 1:1 here.
+    # #3180: a terminate had no audit row. The service calls this once, and
+    # only when THIS request ended work (a queued, parked or container cancel
+    # that won its CANCELLED CAS); a repeat, `already_finished` and every error
+    # arm write nothing. `log` derives the key fields from the
+    # principal (#2389), so a key's terminate names the key.
+    async def _audit_terminate(outcome: str) -> None:
+        await platform_audit_service.log(
+            event_type=AuditEventType.EXECUTION,
+            event_action="execution_terminate",
+            source="api",
+            actor_user=current_user,
+            actor_ip=request.client.host if request and request.client else None,
+            target_type="agent",
+            target_id=name,
+            details={
+                "execution_id": execution_id,
+                "task_execution_id": task_execution_id,
+                "status": outcome,
+            },
+        )
+
     try:
         return await chat_execution_service.terminate_execution(
             name=name,
             execution_id=execution_id,
             task_execution_id=task_execution_id,
+            current_user=current_user,
+            on_ended=_audit_terminate,
+        )
+    except ChatDispatchError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail, headers=e.headers)
+
+
+@router.post("/{name}/executions/{execution_id}/report-back")
+async def arm_execution_report_back(
+    execution_id: str,
+    request: ReportBackRequest,
+    name: str = Depends(get_authorized_agent),
+    current_user: User = Depends(get_current_user),
+):
+    """#3295: ask that a sequential ``/chat`` execution report its terminal into
+    the caller's conversation (Slack / Telegram / Workspace).
+
+    Called by the MCP server at the moment it hands the caller a receipt instead
+    of the reply — so a call that answered inline is never armed and cannot
+    post twice. The body names the CALLER's own turn; the execution inherits
+    that turn's channel context through the same provenance guard a ``/task``
+    child uses. Agent-callable by design: the arming agent is the one that
+    dispatched the row (the service checks that), and the capability it uses
+    — reporting into a conversation it is already serving — is the ent#224
+    consent-gated completion report, never a new send path.
+    """
+    try:
+        return await chat_execution_service.arm_chat_report_back(
+            name=name,
+            execution_id=execution_id,
+            request=request,
             current_user=current_user,
         )
     except ChatDispatchError as e:
@@ -1022,9 +1167,23 @@ async def get_agent_running_executions(
                 f"http://agent-{name}:8000/api/executions/running"
             )
             response.raise_for_status()
-            return response.json()
+            data = response.json()
     except httpx.HTTPError:
         return {"executions": []}
+
+    # ent#875: a share holder sees only the turns they started. An entry with no
+    # row of this agent's (or no id) is dropped, never passed through.
+    scope = viewer_row_scope(current_user, name)
+    if scope is not None and isinstance(data, dict):
+        kept = []
+        for entry in data.get("executions") or []:
+            row = db.get_execution(str(entry.get("execution_id", ""))) if isinstance(entry, dict) else None
+            if row and getattr(row, "agent_name", None) == name and row_is_viewers(
+                scope, getattr(row, "source_user_id", None)
+            ):
+                kept.append(entry)
+        data = {**data, "executions": kept}
+    return data
 
 
 # ============================================================================
@@ -1049,6 +1208,19 @@ async def stream_execution_log(
 
     Use this endpoint for live monitoring of running executions.
     """
+    # ent#875: a share holder streams only a turn they started — the row must be
+    # this agent's and theirs; anything else is the uniform "not found". The
+    # check precedes the stream, so nothing of another person's turn is read.
+    scope = viewer_row_scope(current_user, name)
+    if scope is not None:
+        _row = db.get_execution(execution_id)
+        if (
+            not _row
+            or getattr(_row, "agent_name", None) != name
+            or not row_is_viewers(scope, getattr(_row, "source_user_id", None))
+        ):
+            raise HTTPException(status_code=404, detail="Execution not found")
+
     container = get_agent_container(name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")

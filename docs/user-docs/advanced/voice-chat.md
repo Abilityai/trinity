@@ -10,14 +10,10 @@ Real-time voice conversations with agents, inside a Workspace chat. Audio stream
 - **Animated Orb** — Canvas-rendered visualization that reflects session state via color and particle movement. During a call it takes the conversation column.
 - **Tool Calling (`run_task`)** — During a call, Gemini can hand real work to the agent. In a Workspace call the task runs *as the agent*, in that chat — with its skills, files, memory and mid-work state — in the background: the conversation goes on, and the answer lands in the chat as a turn and is voiced when it arrives. The orb shows a pill naming each task while it runs.
 - **Voice System Prompt** — Controls Gemini's persona for the session. Looked up in order: DB setting → `voice-agent-system-prompt.md` in the container → auto-generated from template info → generic fallback.
-- **Talk** — The button in an agent's Agent Detail header that opens the Workspace with the call already starting. See [Voice mode in the Workspace](#voice-mode-in-the-workspace).
 
 ## How It Works
 
-**The Workspace is the only place a voice call runs.** There are two ways in, and they end up in the same call:
-
-- **From Agent Detail** — click **Talk** in the header, beside **Workspace**. Trinity opens the Workspace on a new chat with that agent and starts the call there. Talk is always there; if the instance cannot run a call, the Workspace tells you why.
-- **From the Workspace** — click the call button, the leftmost control in the composer (**Start a voice call**), in whichever chat you want the call to belong to.
+**The Workspace is the only place a voice call runs.** Open the Workspace from the navigation bar, pick the agent, and click the call button — the leftmost control in the composer (**Start a voice call**) — in whichever chat you want the call to belong to. Agent Detail has no voice control.
 
 Once the call is up:
 
@@ -101,7 +97,7 @@ All `run_task` invocations are written to the platform audit log.
 
 ## Voice mode in the Workspace
 
-The call starts in the chat you are in — modal, the way ChatGPT's voice mode is: you are either in the chat or in the call. Pressing **Talk** on Agent Detail brings you here with the call already starting.
+The call starts in the chat you are in — modal, the way ChatGPT's voice mode is: you are either in the chat or in the call.
 
 ### What happens
 
@@ -116,7 +112,7 @@ The call knows the recent turns of the chat it started in, and its transcript be
 
 The call button is shown to signed-in platform users. When the instance cannot run a call, the button is disabled and its tooltip says why: voice is turned off, or no voice provider key is configured. External clients signed in with an email code do not see it.
 
-**Talk**, on Agent Detail, is never hidden — that is deliberate. Hiding it would mean a working feature disappears whenever the flag has not loaded yet or the request to fetch it failed, and you would have no way to tell that from "this instance has no voice". So Talk always takes you to the Workspace, and the Workspace tells you in words if a call cannot start. A pasted or bookmarked link with `voice=1` in it opens the chat and starts nothing — only the button starts a call.
+A pasted or bookmarked link with `voice=1` in it opens the chat and starts nothing — only the call button starts a call.
 
 ### Limits, and what you hear
 

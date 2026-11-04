@@ -190,8 +190,12 @@ def _problem_error(body: bytes) -> str:
 
 def _accept(resp: egress.CappedResponse, *, endpoint: str, meta: person_server.PersonServerMetadata,
             resource: str, agent_jkt: str, presented_sub: str, presented_exp: int,
-            now: int) -> auth_token.ExchangeOutcome:
-    """Map one PS answer (to the POST or to a poll) to an exchange outcome."""
+            now: int, as_url: Optional[str] = None) -> auth_token.ExchangeOutcome:
+    """Map one PS answer (to the POST or to a poll) to an exchange outcome.
+
+    ``as_url`` is the verified resource token's access server (four-party,
+    ent#928): the auth token must then be the AS's, not the PS's.
+    """
     status = resp.status
     if status == 200:
         try:
@@ -201,7 +205,7 @@ def _accept(resp: egress.CappedResponse, *, endpoint: str, meta: person_server.P
             held = auth_token.inspect_auth_token(doc.get("auth_token"), resource=resource, ps=meta.issuer,
                                                  agent_jkt=agent_jkt, presented_sub=presented_sub,
                                                  presented_exp=presented_exp, now=now,
-                                                 expires_in=doc.get("expires_in"))
+                                                 expires_in=doc.get("expires_in"), expected_iss=as_url)
         except (ValueError, UnicodeDecodeError) as exc:
             return auth_token.ExchangeRefused("auth_token_invalid",
                                               f"the auth token failed the held-token checks: {exc}", 200)
@@ -281,7 +285,8 @@ async def exchange_auth_token(agent_name: str, *, resource: str, resource_token:
     if info.thumbprint != key_thumbprint:
         return auth_token.ExchangeRefused("key_rotated", "the agent key rotated under the exchange")
     return _accept(resp, endpoint=meta.auth_token_endpoint, meta=meta, resource=resource, agent_jkt=key_thumbprint,
-                   presented_sub=presented.sub, presented_exp=presented.exp, now=now)
+                   presented_sub=presented.sub, presented_exp=presented.exp, now=now,
+                   as_url=resource_token.as_url)
 
 
 async def poll_exchange(agent_name: str, record: Dict[str, Any], *, wait: int, now: int,
@@ -301,6 +306,8 @@ async def poll_exchange(agent_name: str, record: Dict[str, Any], *, wait: int, n
         return auth_token.ExchangeRefused("person_server_unreachable", "the person server did not answer in time")
     if info.thumbprint != key_thumbprint:
         return auth_token.ExchangeRefused("key_rotated", "the agent key rotated under the pending exchange")
+    as_url = record.get("as_url")
     return _accept(resp, endpoint=record["pending_url"], meta=meta, resource=record["resource"],
                    agent_jkt=key_thumbprint, presented_sub=record.get("presented_sub", ""),
-                   presented_exp=int(record.get("presented_exp") or 0), now=now)
+                   presented_exp=int(record.get("presented_exp") or 0), now=now,
+                   as_url=as_url if isinstance(as_url, str) and as_url else None)

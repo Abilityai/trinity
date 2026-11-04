@@ -97,11 +97,16 @@ class TestUniqueAndOneWriter:
         assert users_db.update_user(me["username"], {"email": a.upper()})["email"] == a
 
     def test_the_password_upsert_cannot_insert_a_duplicate(self, users_db):
-        EmailInUseError = _users_mod(users_db).EmailInUseError
+        """#3554: the upsert's create branch writes no email at all (it used to
+        copy the username in, which ent#720 then had to refuse when the username
+        was someone else's address). So a username that IS a taken address
+        creates an account with no email, and the address keeps one owner."""
         taken = f"admin-{uuid.uuid4().hex[:6]}@example.com"
-        _make_user(users_db, email=taken)
-        with pytest.raises(EmailInUseError):
-            users_db.update_user_password(taken, "x")   # inserts username=email=taken
+        holder = _make_user(users_db, email=taken)
+        assert users_db.update_user_password(taken, "x")   # username=taken, email=NULL
+        created = users_db.get_user_by_username(taken)
+        assert created["email"] is None
+        assert users_db.get_user_by_email(taken)["username"] == holder["username"]
 
     def test_a_lost_race_on_the_index_is_the_same_refusal(self, users_db, monkeypatch):
         """Check-then-write can lose a race; the unique index is what holds, and

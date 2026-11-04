@@ -4,6 +4,7 @@ System deployment routes for the Trinity backend.
 Provides endpoints for deploying multi-agent systems from YAML manifests.
 """
 import logging
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -13,13 +14,24 @@ from models import (
     BundledManifestSummary,
     ScheduleResponse,
     User,
+    SystemApplyRequest,
+    SystemApplyResponse,
     SystemDeployRequest,
     SystemDeployResponse,
 )
 from database import db
-from dependencies import get_current_user, require_role, reject_agent_principal, capability_fence
+from dependencies import (
+    get_current_user,
+    require_role,
+    require_person,
+    reject_agent_principal,
+    capability_fence,
+)
+from routers import tags as tags_router
+from services.platform_audit_service import platform_audit_service, AuditEventType
 from services.system_service import (
     system_member_names,
+    apply_manifest,
     deploy_manifest,
     list_bundled_manifests,
     read_bundled_manifest,
@@ -82,49 +94,173 @@ async def deploy_system(
     return result
 
 
+@router.post("/apply", response_model=SystemApplyResponse, dependencies=[Depends(require_person)])
+async def apply_system(
+    body: SystemApplyRequest,
+    request: Request,
+    current_user: User = Depends(require_role("creator"))
+):
+    """
+    Reconcile a live system to its manifest (trinity-enterprise#695).
+
+    Per declared member: absent -> create, present -> update the declared
+    fields in place, present but undeclared -> report as drift. Never
+    suffixes, never removes, never restarts an existing member. Thin wrapper
+    over `services.system_service.apply_manifest`.
+
+    A sibling of `POST /deploy`, not a `mode` field on it: create mode keeps a
+    zero-line diff, and a build without this route answers 405 here instead of
+    silently running create (an ignored `mode` field would suffix the fleet).
+
+    Persons only (`require_person`) plus `creator`. On EXISTING agents apply
+    reaches permission grants (human-only), other agents' schedules and the
+    platform prompt, so deploy's agent-callable `capability_fence` would be a
+    back door to all three.
+
+    `dry_run` defaults to TRUE. Status: 200 for `valid` / `invalid` (dry run)
+    and `applied` / `partial`; 409 `refused` with any non-retryable blocker,
+    503 `refused` with only retryable ones; 500 `failed`. 409, 503 and 500
+    carry the full report as the body; 400 (parse/validate, create's own
+    text) and 422 (a malformed or over-keyed body) do not.
+    """
+    result = await apply_manifest(
+        body.manifest,
+        current_user,
+        request,
+        dry_run=body.dry_run,
+    )
+
+    if not result.dry_run and result.status in ("applied", "partial", "failed"):
+        # The run reached execution: one audit row. A refused run changed
+        # nothing and writes none (the request log records the attempt).
+        try:
+            await platform_audit_service.log(
+                event_type=AuditEventType.CONFIGURATION,
+                event_action="system_apply",
+                source="api",
+                actor_user=current_user,
+                actor_ip=request.client.host if request.client else None,
+                target_type="system",
+                target_id=result.system_name,
+                endpoint=request.scope["path"],
+                request_id=getattr(request.state, "request_id", None),
+                details={
+                    # What happened, never the plan: a create that failed is
+                    # not a create, a refused write is not a write.
+                    "status": result.status,
+                    "created": result._created,
+                    "writes": result._writes_ok,
+                    "failed": len(result.failed),
+                },
+            )
+        except Exception as e:  # noqa: BLE001 — the writes already happened
+            logger.warning(f"system_apply audit write failed for '{result.system_name}': {e}")
+            result.warnings.append(
+                "The changes were applied, but the platform audit record could not be written."
+            )
+        # The same thin trigger the tags API emits, identifiers only (#918,
+        # #305): a created member's `agent_created` broadcast fires before its
+        # tags exist, so a listener refreshing on it alone would miss them.
+        for name in result._tags_written:
+            await tags_router._broadcast_tags_changed(name)
+
+    if result.status == "refused":
+        retryable_only = all(b.retryable for b in result.blockers)
+        return JSONResponse(
+            status_code=503 if retryable_only else 409, content=result.model_dump()
+        )
+    if result.status == "failed":
+        return JSONResponse(status_code=500, content=result.model_dump())
+    return result
+
+
 @router.get("")
 async def list_systems(current_user: User = Depends(get_current_user)):
     """
-    List all systems (agents grouped by prefix).
+    List deployed systems (#4129): one entry per system tag carried by an
+    agent the caller can access, with the agents that carry it.
 
-    Groups agents by system prefix (before first '-').
-    Returns system summaries with agent counts and details.
+    The tag is what deploy and apply write to record membership; a name is
+    never split at a hyphen, so a `naming: bare` system lists under its own
+    name and `content-writer` does not invent a `content` system. A stored
+    system tag looks like any other tag, so a tag is listed only with evidence
+    that it is a system: the auto-created system view for it, a `system_apply`
+    audit row naming it, or a carrier named `<tag>-*`. A plain tag (`prod`,
+    a manifest's `default_tags`) is not listed.
     """
     try:
         # Import here to avoid circular dependency
         from routers.agents import get_accessible_agents
+        from services.system_service import SYSTEM_VIEW_AUTO_DESCRIPTION
+        from utils.helpers import parse_iso_timestamp, to_utc_iso
 
-        # Get all agents user can access
         agents = get_accessible_agents(current_user)
+        try:
+            names = [a['name'] for a in agents]
+            tags_by_agent = (db.get_tags_for_agents(names) or {}) if names else {}
+        except Exception:
+            logger.exception("list_systems: agent tag read failed")
+            raise HTTPException(status_code=503,
+                                detail="Systems could not be listed: agent tags could not be read. Retry.")
 
-        # Group by system prefix
-        systems_dict: dict = {}
+        # Members are the roster agents that CARRY the tag (members ⊆ roster).
+        groups: dict = {}
         for agent in agents:
-            # Extract system prefix (everything except last component after final '-')
-            # Example: "my-system-abc-worker1" -> "my-system-abc"
-            if '-' in agent['name']:
-                parts = agent['name'].split('-')
-                prefix = '-'.join(parts[:-1])  # All parts except the last (short name)
-                if prefix not in systems_dict:
-                    systems_dict[prefix] = {
-                        "name": prefix,
-                        "agents": [],
-                        "agent_count": 0,
-                        "created_at": agent.get('created_at')
-                    }
-                systems_dict[prefix]["agents"].append({
-                    "name": agent['name'],
-                    "status": agent.get('status', 'unknown'),
-                    "template": agent.get('template')
-                })
-                systems_dict[prefix]["agent_count"] += 1
+            for tag in tags_by_agent.get(agent['name']) or []:
+                groups.setdefault(tag, []).append(agent)
 
-        # Sort by created_at (newest first)
-        systems = list(systems_dict.values())
-        systems.sort(key=lambda s: s.get('created_at') or '', reverse=True)
+        try:
+            proven = {t for t, members in groups.items()
+                      if any(a['name'].startswith(f"{t}-") for a in members)}
+            pending = [t for t in groups if t not in proven]
+            if pending:
+                for view in db.list_all_system_views() or []:
+                    view_tags = {str(x).lower().strip() for x in (view.filter_tags or [])}
+                    for t in pending:
+                        if t in view_tags and view.description == SYSTEM_VIEW_AUTO_DESCRIPTION.format(system_name=t):
+                            proven.add(t)
+            for t in [t for t in pending if t not in proven]:
+                offset = 0
+                while True:
+                    rows = db.get_audit_entries(event_type=AuditEventType.CONFIGURATION.value,
+                                                target_type="system", target_id=t,
+                                                limit=100, offset=offset)
+                    if any(r.get('event_action') == "system_apply" for r in rows):
+                        proven.add(t)
+                        break
+                    if len(rows) < 100:
+                        break
+                    offset += 100
+        except Exception:
+            logger.exception("list_systems: system evidence read failed")
+            raise HTTPException(status_code=503,
+                                detail="Systems could not be listed: system views or the audit log could not be read. Retry.")
+
+        systems = []
+        for name in sorted(proven):
+            members = groups[name]
+            created = []
+            for a in members:
+                c = a.get('created')
+                if isinstance(c, str):
+                    c = parse_iso_timestamp(c)
+                if c:
+                    created.append(to_utc_iso(c))
+            systems.append({
+                "name": name,
+                "agents": [{"name": a['name'], "status": a.get('status', 'unknown'),
+                            "template": a.get('template')} for a in members],
+                "agent_count": len(members),
+                "created_at": min(created) if created else None,
+            })
+
+        # Newest first (earliest member's `created`), name order on a tie.
+        systems.sort(key=lambda s: s['created_at'] or '', reverse=True)
 
         return {"systems": systems}
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception(f"Failed to list systems: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to list systems: {str(e)}")
@@ -228,6 +364,7 @@ async def get_system(
             )
 
         # Get detailed info for each agent
+        accessible = {a['name'] for a in agents}
         detailed_agents = []
         for agent in system_agents:
             agent_detail = {
@@ -237,20 +374,32 @@ async def get_system(
                 "created_at": agent.get('created_at')
             }
 
-            # Try to get additional details (permissions, folders, schedules)
+            # Additional details, each in its OWN `try` (#4128): one shared
+            # `try` let the first raise hide the other two keys, and
+            # `db.get_agent_permissions` / `db.get_agent_folder_config` do not
+            # exist on the facade, so all three were absent for every member.
+            # Same reads as apply's snapshot: `get_permitted_agents` and
+            # `get_shared_folder_config` (a pydantic row, read by attribute).
             try:
-                # Get permissions
-                perms = db.get_agent_permissions(agent['name'])
-                agent_detail["permissions"] = [p["target_agent"] for p in perms]
+                # Targets narrowed to the caller's accessible roster, exactly
+                # what `GET /api/agents/{name}/permissions` shows the same caller.
+                agent_detail["permissions"] = sorted(
+                    t for t in db.get_permitted_agents(agent['name']) if t in accessible
+                )
+            except Exception as e:
+                logger.warning(f"Failed to get permissions for agent {agent['name']}: {e}")
 
-                # Get folders config
-                folder_config = db.get_agent_folder_config(agent['name'])
-                if folder_config:
+            try:
+                folder_config = db.get_shared_folder_config(agent['name'])
+                if folder_config is not None:
                     agent_detail["folders"] = {
-                        "expose": folder_config["expose_enabled"],
-                        "consume": folder_config["consume_enabled"]
+                        "expose": bool(folder_config.expose_enabled),
+                        "consume": bool(folder_config.consume_enabled)
                     }
+            except Exception as e:
+                logger.warning(f"Failed to get folders for agent {agent['name']}: {e}")
 
+            try:
                 # #2373: `db.get_agent_schedules` DOES NOT EXIST — the facade
                 # exposes `list_agent_schedules`, and `database.py` deliberately
                 # has no `__getattr__` fallback. The AttributeError was swallowed
@@ -283,7 +432,7 @@ async def get_system(
                 ]
 
             except Exception as e:
-                logger.warning(f"Failed to get details for agent {agent['name']}: {e}")
+                logger.warning(f"Failed to get schedules for agent {agent['name']}: {e}")
 
             detailed_agents.append(agent_detail)
 
@@ -402,6 +551,7 @@ async def restart_system(
 @router.get("/{system_name}/manifest", response_class=PlainTextResponse)
 async def get_system_manifest(
     system_name: str,
+    naming: Optional[str] = None,
     current_user: User = Depends(get_current_user)
 ):
     """
@@ -431,8 +581,13 @@ async def get_system_manifest(
                 detail=f"System '{system_name}' not found or no accessible agents"
             )
 
-        # Export manifest
-        yaml_content = export_manifest(system_name, system_agents)
+        # Export manifest. trinity-enterprise#1030: `?naming=prefixed|bare`
+        # overrides; absent, the exporter infers it from the members' names.
+        try:
+            yaml_content = export_manifest(
+                system_name, system_agents, naming=naming, viewer=current_user)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
         return yaml_content
 

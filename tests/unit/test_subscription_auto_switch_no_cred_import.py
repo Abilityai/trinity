@@ -336,39 +336,28 @@ def _reset():
 
 
 def test_auto_switch_restart_chain_does_not_invoke_credential_import():
-    """SUB-003 auto-switch path: the full chain entry at ``_restart_agent``
-    must short-circuit credential injection cleanly for a subscription-mode
-    agent.
+    """SUB-003 auto-switch path, entered at ``_restart_agent``: the #606 harm
+    must not come back.
 
-    Pins the chain end-to-end. The companion leaf test in
-    ``test_inject_assigned_credentials.py`` covers the short-circuit in
-    isolation; this test pins that the chain ACTUALLY reaches the
-    short-circuit on the auto-switch path — without it, a future refactor
-    of ``_perform_auto_switch`` or ``_restart_agent`` could quietly bypass
-    the guard.
-
-    The ``reason == "subscription_mode"`` assertion is load-bearing: it
-    proves the line-155 short-circuit fired, NOT the ``#421``
-    ``container_already_running`` skip. A refactor that moved the
-    short-circuit to a different branch (e.g. coalesced it with ``#421``)
-    would silently pass without that specific assertion.
+    #606 was a subscription agent with NO .credentials.enc whose restart
+    retried a failing import three times and marked the triggering execution
+    FAILED. #3510 (ruled 2026-10-19) lets subscription agents import a
+    committed file (their MCP keys live there), so the chain now reaches the
+    import; what this pins is that a missing file there is awaited ONCE and
+    reads as a clean ``no_credentials_enc_file`` skip, and the restart still
+    succeeds. (The name is kept so history and the registry still find it.)
     """
     # Subscription has just been assigned by `_perform_auto_switch`.
     _mock_db.get_agent_subscription_id.return_value = "sub-new-id"
 
-    # Sentinel: import_to_agent must NEVER be awaited on this chain. Wired
-    # via the encryption service so we'd see it even if the short-circuit
-    # regresses by one layer (e.g. somebody guards the retry loop but not
-    # the ``get_credential_encryption_service`` call).
-    sentinel_should_not_be_called = AsyncMock(
-        side_effect=AssertionError(
-            "import_to_agent must not be called on the auto-switch chain "
-            "for a subscription-mode agent — the lifecycle.py:155 "
-            "short-circuit failed to fire"
+    # The subscription agent has no committed .credentials.enc (the #606 case).
+    missing_file = AsyncMock(
+        side_effect=_credential_encryption.CredentialsFileNotFoundError(
+            "No .credentials.enc file found in agent workspace"
         )
     )
     mock_encryption_service = MagicMock()
-    mock_encryption_service.import_to_agent = sentinel_should_not_be_called
+    mock_encryption_service.import_to_agent = missing_file
 
     # Mock container starts as "running" so `_restart_agent` proceeds past
     # its early-return guard, then flips to "stopped" when
@@ -452,25 +441,10 @@ def test_auto_switch_restart_chain_does_not_invoke_credential_import():
         f"Expected `_restart_agent` to return 'success', got {result!r}"
     )
 
-    # 2. The sentinel was never awaited — the short-circuit fired before
-    #    the file-import path was reached.
-    sentinel_should_not_be_called.assert_not_awaited()
+    # 2. The import was tried once, never retried (the #606 retries are gone).
+    assert missing_file.await_count == 1
 
-    # 3. Load-bearing reason check: the short-circuit that fired is
-    #    specifically the line-155 subscription-mode guard — NOT the #421
-    #    ``container_already_running`` skip. A future refactor that moved
-    #    the short-circuit to a different branch (or coalesced it with
-    #    #421) would silently pass without this assertion.
+    # 3. And it read as a clean skip, not a failure.
     creds = captured.get("credentials_result")
     assert creds is not None, "inject_assigned_credentials was not invoked"
-    assert creds["status"] == "skipped", (
-        f"Expected credentials_result.status == 'skipped', got {creds!r}"
-    )
-    assert creds["reason"] == "subscription_mode", (
-        f"Expected credentials_result.reason == 'subscription_mode' "
-        f"(the lifecycle.py:155 short-circuit), got reason="
-        f"{creds.get('reason')!r}. If this says 'container_already_running' "
-        f"the #421 skip fired instead — that branch does not apply on the "
-        f"auto-switch path because `_restart_agent` explicitly stops the "
-        f"container before `start_agent_internal`."
-    )
+    assert creds == {"status": "skipped", "reason": "no_credentials_enc_file"}, creds

@@ -13,8 +13,8 @@
  *    notice says it plainly when an agent was created pull-only
  *  - the Git panel badge names the binding
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { flushPromises, mount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { flushPromises, mount, DOMWrapper } from '@vue/test-utils'
 
 const createAgent = vi.fn()
 vi.mock('../../src/stores/agents', () => ({ useAgentsStore: () => ({ createAgent }) }))
@@ -30,6 +30,13 @@ vi.mock('../../src/api', () => ({ default: { get: vi.fn(async () => ({ data: TEM
 
 // eslint-disable-next-line import/first
 import CreateAgentModal from '../../src/components/CreateAgentModal.vue'
+
+// #3792: the dialog sits in BaseModal, which teleports to <body>, so DOM
+// queries go through `dom()`. Not stubbed: test-utils' `teleport: true` stub
+// remounts its children on every parent render, which wipes child state (the
+// token field's override toggle) in a way the real Teleport never does.
+const dom = () => new DOMWrapper(document.body)
+afterEach(() => { document.body.innerHTML = '' })
 // eslint-disable-next-line import/first
 import GitModeNotice from '../../src/components/GitModeNotice.vue'
 // eslint-disable-next-line import/first
@@ -40,19 +47,19 @@ async function mountModal() {
     global: { stubs: { ImportValidationStep: { props: ['agentName', 'importSnapshot', 'gitMode'], template: '<div data-testid="validation-step" />' } } },
   })
   await flushPromises()
-  await wrapper.find('input[type="text"]').setValue('my-agent')
+  await dom().find('#agent-name').setValue('my-agent')
   return wrapper
 }
 
-const picker = (w) => w.find('[data-testid="agent-kind-picker"]')
+const picker = (w) => dom().find('[data-testid="agent-kind-picker"]')
 
 async function pickTemplate(wrapper, text) {
-  const card = wrapper.findAll('div.cursor-pointer').find((d) => d.text().includes(text))
+  const card = dom().findAll('[data-testid="source-option"]').find((d) => d.text().includes(text))
   await card.trigger('click')
 }
 
 async function submit(wrapper) {
-  await wrapper.find('form').trigger('submit')
+  await dom().find('form').trigger('submit')
   await flushPromises()
   return createAgent.mock.calls.at(-1)?.[0]
 }
@@ -86,16 +93,16 @@ describe('the create flow asks what the repository is', () => {
 
   it('is asked for a custom repo clone, and not for copy or fork', async () => {
     const wrapper = await mountModal()
-    await pickTemplate(wrapper, 'GitHub Repository')
+    await pickTemplate(wrapper, 'Import a GitHub repository')
     expect(picker(wrapper).exists()).toBe(true)
 
-    await wrapper.find('input[name="import-intent"][value="copy"]').setValue(true)
+    await dom().find('input[name="import-intent"][value="copy"]').setValue(true)
     expect(picker(wrapper).exists()).toBe(false)
-    await wrapper.find('input[name="import-intent"][value="fork"]').setValue(true)
+    await dom().find('input[name="import-intent"][value="fork"]').setValue(true)
     expect(picker(wrapper).exists()).toBe(false)
 
-    await wrapper.find('input[name="import-intent"][value="clone"]').setValue(true)
-    await wrapper.find('input[placeholder^="owner/repo"]').setValue('acme/tool')
+    await dom().find('input[name="import-intent"][value="clone"]').setValue(true)
+    await dom().find('input[placeholder^="owner/repo"]').setValue('acme/tool')
     const payload = await submit(wrapper)
     expect(payload).toMatchObject({ template: 'github:acme/tool', import_intent: 'clone', kind: 'agent' })
   })
@@ -110,8 +117,8 @@ describe('the create flow asks what the repository is', () => {
     const gitMode = { kind: 'agent', source_mode: true, reason: 'the token cannot push to acme/tool: pull-only.' }
     createAgent.mockResolvedValue({ name: 'my-agent', git_mode: gitMode })
     const wrapper = await mountModal()
-    await pickTemplate(wrapper, 'GitHub Repository')
-    await wrapper.find('input[placeholder^="owner/repo"]').setValue('acme/tool')
+    await pickTemplate(wrapper, 'Import a GitHub repository')
+    await dom().find('input[placeholder^="owner/repo"]').setValue('acme/tool')
     await submit(wrapper)
     const step = wrapper.findComponent('[data-testid="validation-step"]')
     expect(step.exists()).toBe(true)
@@ -136,7 +143,7 @@ describe('the create flow asks what the repository is', () => {
     const wrapper = await mountModal()
     await pickTemplate(wrapper, 'Scout')
     await submit(wrapper)
-    expect(wrapper.find('[data-testid="validation-step"]').exists()).toBe(false)
+    expect(dom().find('[data-testid="validation-step"]').exists()).toBe(false)
     expect(wrapper.emitted('close')).toHaveLength(1)
   })
 })

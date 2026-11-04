@@ -67,8 +67,9 @@ export function partitionStarred(threads) {
 //
 // A room contributes to every agent in it, because there is no single agent the
 // conversation is "with" — if three agents are in a room you are behind on, all
-// three rows should say so. Rooms report `unread: 0` today (the backend counts
-// threads only), so this is the shape being right ahead of the data.
+// three rows should say so. Since trinity-enterprise#959 the backend counts a
+// room's unread for its members (an agent's messages after the reader's room
+// cursor), so a room's count arrives here like a chat's.
 export function unreadByAgent(threads) {
   const out = {}
   for (const t of Array.isArray(threads) ? threads : []) {
@@ -572,6 +573,19 @@ export function agentEmptyChat(threads, agentName) {
   return id(empty[0]) || null
 }
 
+/**
+ * #3795: does this transcript still read as a NEW chat?
+ *
+ * True when nothing in it is a turn — only `system` lines, the platform speaking
+ * about the thread. Reset (ent#523) leaves exactly one such line in the Main it
+ * mints, and the backend already counts that row as empty (`message_count` is
+ * not bumped, so `agentEmptyChat` lands on it). The renderer must agree, or the
+ * signpost hides the briefing it was meant to sit above.
+ */
+export function isNewChatTranscript(messages) {
+  return !(Array.isArray(messages) ? messages : []).some((m) => m && m.role !== 'system')
+}
+
 // #2579: is this thread inside the window where a generated title may still
 // land? Two `touch_portal_session(added=1)` calls happen per exchange (the
 // user's message and the reply), and `_title_plan` gates on the PRE-turn
@@ -639,10 +653,14 @@ export function titleGenerationNotice(health) {
   if (!health || typeof health !== 'object') return null
   const when = health.last_failure_at ? ` Last attempt: ${health.last_failure_at}.` : ''
   if (health.state === 'no_credential') {
+    // The health record quotes the model gateway's reason (an unreadable
+    // subscription token, no platform key the agent may use…), so the remedy
+    // is named by the cause rather than always "add a key".
+    const why = health.last_failure ? ` (${health.last_failure})` : ''
     return {
       level: 'warning',
       title: "Workspace chat titles aren't being generated",
-      body: `No Anthropic API key and no subscription token was available for the agent, so new chats keep a title taken from their first message. Add an API key under Credentials, or assign the agent a subscription.${when}`,
+      body: `No credential could answer for the agent${why}, so new chats keep a title taken from their first message. Assign the agent a Claude subscription the platform can read, or let it use the platform API key under Credentials.${when}`,
     }
   }
   if (health.state === 'failing') {

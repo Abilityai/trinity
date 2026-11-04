@@ -116,6 +116,17 @@ describe("ent#707 get_fleet_health carries sync health", () => {
     assert.equal(bravo.sync, null);
   });
 
+  it("#3950: passes the staleness bound through, null from an older backend", async () => {
+    const fresh = { ...FLEET, stale_after_seconds: 90 };
+    const out = JSON.parse(
+      await (tools({ getFleetHealth: async () => fresh as any }).getFleetHealth.execute as any)({}, {}),
+    );
+    assert.equal(out.stale_after_seconds, 90);
+    const legacy = JSON.parse(await (tools().getFleetHealth.execute as any)({}, {}));
+    assert.ok(Object.prototype.hasOwnProperty.call(legacy, "stale_after_seconds"));
+    assert.equal(legacy.stale_after_seconds, null);
+  });
+
   it("an older backend without the fields yields null, never undefined", async () => {
     const legacy = {
       ...FLEET,

@@ -7,8 +7,10 @@
     this panel with v-if so the 30s poll is torn down when the tab is left.
     The per-execution detail route (/agents/:name/executions/:executionId)
     is unchanged.
+    #3451: a link in Operations' flex chain — the list card takes the height the
+    toolbar, stats and filters leave and is itself the scroll region.
   -->
-  <div class="max-w-7xl mx-auto">
+  <div class="max-w-7xl mx-auto w-full grow basis-0 flex flex-col">
     <!-- Toolbar: live status + refresh -->
     <div class="flex items-center justify-end gap-3 mb-6">
       <span class="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400" :title="wsTooltip">
@@ -184,9 +186,19 @@
         />
       </div>
 
-      <!-- Result count + clear -->
+      <!-- Result count + clear. #3451: "running now" sits in this row. As a
+           strip of its own above the list, every 0 ↔ N change in the running
+           count moved the list by the strip's height (design-system p30). -->
       <div class="flex items-center px-4 py-2 text-xs text-gray-500 dark:text-gray-400 gap-3">
-        <span>{{ store.rows.length }} shown</span>
+        <span data-testid="executions-shown">{{ store.rows.length }} shown</span>
+        <span
+          v-if="store.runningCount > 0"
+          class="inline-flex items-center gap-1.5 font-medium text-status-warning-700 dark:text-status-warning-400"
+          data-testid="executions-running"
+        >
+          <span class="w-2 h-2 rounded-full bg-status-warning-500 animate-pulse motion-reduce:animate-none flex-shrink-0"></span>
+          {{ store.runningCount }} running now
+        </span>
         <button
           v-if="store.hasActiveFilters"
           @click="store.clearFilters()"
@@ -197,17 +209,14 @@
       </div>
     </div>
 
-    <!-- Running now strip -->
-    <div
-      v-if="store.runningCount > 0"
-      class="flex items-center gap-2 px-4 py-2.5 mb-2 bg-status-warning-50 dark:bg-status-warning-900/10 border border-status-warning-200 dark:border-status-warning-800 rounded-lg text-sm text-status-warning-800 dark:text-status-warning-300"
+    <!-- Execution list. #3451: the card is the bounded region — rows, their
+         states and Load more scroll inside it, never the page. -->
+    <BoundedRegion
+      ref="listRegion"
+      label="Executions"
+      data-testid="ops-list-region"
+      class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg"
     >
-      <span class="w-2 h-2 rounded-full bg-status-warning-500 animate-pulse flex-shrink-0"></span>
-      {{ store.runningCount }} running now
-    </div>
-
-    <!-- Execution list -->
-    <div class="bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg overflow-hidden">
       <!-- Loading state -->
       <!-- #1921: a LIST first-load, so row-shaped placeholders in the list's own
            footprint rather than a centred spinner in a 12-unit box. The
@@ -245,6 +254,7 @@
         <div
           v-for="row in store.rows"
           :key="row.id"
+          data-testid="execution-row"
           class="p-4 cursor-pointer group transition-colors hover:bg-gray-50 dark:hover:bg-gray-700/40 hover:shadow-[inset_3px_0_0_0] hover:shadow-action-primary-400"
           :class="rowTintClass(row.status)"
           @click="goToDetail(row)"
@@ -307,6 +317,7 @@
       <!-- Load more -->
       <div v-if="store.hasMore" class="px-4 py-3 border-t border-gray-200 dark:border-gray-700">
         <button
+          data-testid="executions-load-more"
           @click="store.loadMore()"
           :disabled="store.loading"
           class="w-full text-sm text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 transition-colors disabled:opacity-50"
@@ -314,13 +325,14 @@
           {{ store.loading ? 'Loading…' : 'Load more' }}
         </button>
       </div>
-    </div>
+    </BoundedRegion>
   </div>
 </template>
 
 <script setup>
 import SkeletonLoader from './SkeletonLoader.vue'
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import BoundedRegion from './BoundedRegion.vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { formatCost, formatCostCompact } from '../composables/useFormatters'
 import axios from 'axios'
@@ -343,6 +355,11 @@ const stopError = ref('')
 const stopErrorDetail = ref('')
 const stopTarget = ref(null)
 const { isConnected } = useWebSocket()
+
+// #3451: the filters stay in view beside a list scrolled deep, so a new query
+// returns the list to its first row. A poll never changes `filters`.
+const listRegion = ref(null)
+watch(() => store.filters, () => listRegion.value?.scrollToTop(), { deep: true })
 
 const agentNames = computed(() =>
   agentsStore.agents.map(a => a.name).sort()

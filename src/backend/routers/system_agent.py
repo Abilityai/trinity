@@ -33,7 +33,7 @@ from services.docker_utils import (
 )
 from services.agent_service.helpers import check_base_image_state
 from services.agent_service.lifecycle import public_skills_result, start_agent_internal
-from services.system_agent_service import BASE_IMAGE_STATE_LABELS
+from services.system_agent_service import BASE_IMAGE_STATE_LABELS, system_agent_service
 from db.agents import SYSTEM_AGENT_NAME
 
 router = APIRouter(prefix="/api/system-agent", tags=["system-agent"])
@@ -274,6 +274,9 @@ async def restart_system_agent(
         if refreshed is not None:
             await container_reload(refreshed)
             status = refreshed.status
+            # #3814: a restart is the remedy the pull-drift alert names; re-read
+            # the new container so the alert ends here, not at the next boot.
+            system_agent_service._report_pull_mode(refreshed)
         else:
             status = "unknown"
 

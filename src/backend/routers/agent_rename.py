@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from models import RenameAgentRequest, User
 from database import db
-from dependencies import get_current_user, reject_agent_principal
+from dependencies import get_current_user, reject_agent_principal, require_person
 from services.docker_service import get_agent_container
 from services.docker_utils import container_stop, container_rename
 from services.image_generation_prompts import AVATAR_EMOTIONS
@@ -35,7 +35,7 @@ def set_filtered_websocket_manager(ws_manager):
     filtered_manager = ws_manager
 
 
-@router.put("/{agent_name}/rename")
+@router.put("/{agent_name}/rename", dependencies=[Depends(require_person)])
 async def rename_agent_endpoint(
     agent_name: str,
     body: RenameAgentRequest,
@@ -144,8 +144,9 @@ async def rename_agent_endpoint(
         new_container_name = f"agent-{sanitized_name}"
         await container_rename(container, new_container_name)
 
-        # Update container labels (need to recreate for label changes)
-        # For now, we'll update just the database and handle labels on next start
+        # Container env and labels change only on recreate. The next start's
+        # recreate re-bakes AGENT_NAME and the trinity.agent-name label from the
+        # new name (#3813, check_agent_name_env_matches).
         #
         # #1159: the running container still carries TRINITY_AGENT_AUTH_TOKEN=
         # derive(old_name); under the new name that token is stale and would 401

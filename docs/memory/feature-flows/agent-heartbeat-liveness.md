@@ -170,7 +170,7 @@ into the request path.
 
 | Function | Line | Description |
 |----------|------|-------------|
-| `authorize_heartbeat(validation_result, agent_name)` | 80 | Pure predicate: True iff key is agent-scoped **and** bound to this agent |
+| `authorize_heartbeat(validation_result, agent_name)` | 80 | Pure predicate: True iff key is bound to this agent **and** agent-scoped (or the system agent's own system-scoped key, #3814) |
 | `record_heartbeat(agent_name, payload)` | 99 | SETEX 15s + `seen` marker (nx); stamps `ts`; returns `stored` bool |
 | `clear_heartbeat(agent_name)` | 121 | DELETE all three keys (delete/rename cleanup); best-effort |
 | `read_heartbeat(agent_name)` | 144 | Last payload or None |

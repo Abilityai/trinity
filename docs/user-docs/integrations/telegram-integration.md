@@ -83,9 +83,20 @@ User sends message -> Telegram API -> Trinity webhook -> Agent -> Response -> Te
 
 The agent receives the message text plus context for any media (photos, documents, voice notes). Responses are sent back as replies in the same chat.
 
+### Albums
+
+When someone sends several photos or files together as an album, the agent gets them as **one message**: every file, in the order they were sent, with the album's caption. The agent answers once, not once per photo. Trinity waits about 1.5 seconds after the album's last item before handing it over, so an album takes slightly longer to start than a single photo.
+
+- In a group, a mention in the album's caption (or a reply to the bot on any item) triggers the agent for the whole album. A mention in a single photo's caption counts as a mention too.
+- An album can hold up to 10 files, and images in one album share a 10 MB total. An image past that limit is skipped, and the agent is told which one.
+- Videos and audio files in an album are listed for the agent but it cannot open them.
+- In a group with **Privacy Mode** on, Telegram only sends the bot messages that mention it. The other photos of a tagged album may never reach the bot, so the agent may see only the tagged one. Turn Privacy Mode off (see Step 2) if your group sends albums.
+
 ### Formatting in replies
 
 Agent replies are written in Markdown and rendered as Telegram formatting: bold, italic, strikethrough, inline code, fenced code blocks (with syntax highlighting when a language is given), headings, links, bullet lists, horizontal rules, `||spoilers||`, and `>` blockquotes (long ones collapse as expandable quotes). Tables are rendered as preformatted text. Literal `<`, `>` and `&` in a reply — a code snippet, an HTML tag, a comparison — survive intact instead of breaking the message's formatting. A reply longer than Telegram's 4,096-character limit is split into several messages, and each chunk keeps its formatting intact: a bold run or code block that straddles a cut is closed at the end of one chunk and reopened in the next. Proactive messages and completion reports use the same rendering.
+
+Large code blocks stay inline in Telegram replies instead of being replaced by file references. The limit is counted the way Telegram counts it (emoji and other non-Latin characters can take two units each) and includes the formatting markup, so a chunk is never cut inside a tag or an HTML entity. Chunks are sent in order; if a chunk cannot be confirmed after the rate-limit retry or the plain-text formatting fallback, delivery stops before later chunks, and the chunks already confirmed are not sent again within that delivery attempt. A Telegram rate-limit wait of up to 30 seconds is honoured once; a longer wait stops delivery. A proactive message or completion report whose chunk cannot be confirmed reports failure; with automatic channel selection, the full message may then be sent through Slack or web even if its first chunks reached Telegram. A separate retry or crash recovery can still repeat earlier chunks. Unusually large nested formatting that leaves no room for text is dropped, and the remaining text is sent unformatted so nothing is lost.
 
 ### Knowing the Agent Is Working
 

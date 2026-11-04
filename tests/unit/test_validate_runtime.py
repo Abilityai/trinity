@@ -10,6 +10,7 @@ instead of letting the agent container crash-loop on boot when the agent-side
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -32,8 +33,22 @@ _STUBBED_MODULE_NAMES = [
     "services.agent_service",
 ]
 
+# Only a STAND-IN is evicted. Evicting the genuine modules too would re-import
+# them as second copies, and every module that already bound a name from the
+# first copy (e.g. a router's `get_accessible_agents`, bound when another file
+# imported `main` at collection) would then be patched through the wrong copy.
+_REAL_AGENT_SERVICE_DIR = str(
+    Path(__file__).resolve().parents[2] / "src" / "backend" / "services" / "agent_service")
+
+
+def _is_stand_in(module) -> bool:
+    path = getattr(module, "__file__", None)
+    return not (path and str(Path(path).resolve()).startswith(_REAL_AGENT_SERVICE_DIR))
+
+
 for _stub in _STUBBED_MODULE_NAMES:  # import-time eviction (monkeypatch can't reach)
-    sys.modules.pop(_stub, None)
+    if _stub in sys.modules and _is_stand_in(sys.modules[_stub]):
+        sys.modules.pop(_stub, None)
 
 from services.agent_service.helpers import (  # noqa: E402  (must follow the stub eviction above)
     KNOWN_RUNTIME_NAMES,

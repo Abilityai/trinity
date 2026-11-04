@@ -202,7 +202,7 @@ def created_spec(monkeypatch):
 
 
 def _all_eight_predicates(container, agent_name="trinity-system"):
-    """Evaluate the exact eight predicates ``start_agent_internal`` composes
+    """Evaluate the config predicates ``start_agent_internal`` composes
     into ``needs_recreation`` (``lifecycle.py``). Returns {name: bool}."""
     from services.agent_service import helpers
     from services.agent_service.file_sharing import check_public_folder_mount_matches
@@ -222,6 +222,7 @@ def _all_eight_predicates(container, agent_name="trinity-system"):
         "agent_auth_token": helpers.check_agent_auth_token_env_matches(
             container, agent_name
         ),
+        "agent_name_env": helpers.check_agent_name_env_matches(container, agent_name),
     }
 
 
@@ -307,12 +308,34 @@ def test_creation_labels_full_capabilities_true(created_spec):
     assert created_spec["cap_drop"] == ["ALL"]
 
 
-def test_creation_does_not_arm_the_heartbeat(created_spec):
+@pytest.fixture
+def not_piloted(monkeypatch):
+    monkeypatch.setenv("PULL_MODE_PILOT_AGENTS", "")
+
+
+@pytest.fixture
+def piloted(monkeypatch):
+    monkeypatch.setenv("PULL_MODE_PILOT_AGENTS", "trinity-system")
+
+
+def test_creation_does_not_arm_the_heartbeat(not_piloted, created_spec):
     """``TRINITY_BACKEND_URL`` is the agent-side heartbeat loop's gate, and
-    ``heartbeat_service.authorize_heartbeat`` accepts only ``scope == "agent"``
-    keys. The system agent's key is ``scope == "system"``, so arming it yields a
-    permanent 5-second 403 loop (~17k backend log lines/day)."""
+    whether the orchestrator belongs in fleet health is #1816 §10's open
+    question. Off unless it is a pull pilot (#3814)."""
     assert "TRINITY_BACKEND_URL" not in created_spec["environment"]
+    assert "TRINITY_PULL_MODE" not in created_spec["environment"]
+
+
+def test_creation_arms_a_piloted_system_agents_pull_worker(piloted, created_spec):
+    """#3814: a piloted system agent is born with its worker and the URL it
+    polls with, and converges with the drift check at once."""
+    from services.agent_service.helpers import check_pull_mode_env_matches
+
+    env = created_spec["environment"]
+    assert env.get("TRINITY_PULL_MODE") == "true"
+    assert env.get("TRINITY_BACKEND_URL")
+    container = types.SimpleNamespace(attrs={"Config": {"Env": [f"{k}={v}" for k, v in env.items()]}})
+    assert check_pull_mode_env_matches(container, "trinity-system") is True
 
 
 def test_creation_keeps_the_agent_network_hard_coded(created_spec):
@@ -430,6 +453,6 @@ def _env_keys_assigned_in_creation() -> set:
 
 def test_ast_creation_never_arms_trinity_backend_url():
     assert "TRINITY_BACKEND_URL" not in _env_keys_assigned_in_creation(), (
-        "the system agent's MCP key is scope='system'; authorize_heartbeat "
-        "accepts only scope='agent', so arming the heartbeat is a permanent 403 loop"
+        "creation must not arm the system agent's heartbeat on its own; only "
+        "apply_pull_mode_env does, for a pull pilot (#3814, #1816 §10)"
     )

@@ -313,6 +313,9 @@ class ScheduleExecution(BaseModel):
     open_canvas_id: Optional[str] = None
     # #2806 — agent-to-agent hops from a non-agent root (NULL/None = root).
     chain_depth: Optional[int] = None
+    # ent#862 — verified AAuth peer identity of an inbound A2A caller
+    # (`aauth:<local>@<host>`); None for bearer/non-A2A rows.
+    a2a_caller_identity: Optional[str] = None
 
 
 # =========================================================================
@@ -549,6 +552,16 @@ class SystemSettingUpdate(BaseModel):
 # Public Agent Link Models (Phase 12.2: Public Agent Links)
 # =========================================================================
 
+def _check_link_expiry(v: Optional[str]) -> Optional[str]:
+    """Reject an `expires_at` that is not an ISO timestamp (#3583)."""
+    if v:
+        try:
+            datetime.fromisoformat(v)
+        except ValueError:
+            raise ValueError("expires_at must be an ISO 8601 timestamp")
+    return v
+
+
 class PublicLinkCreate(BaseModel):
     """Request model for creating a public link.
 
@@ -559,12 +572,16 @@ class PublicLinkCreate(BaseModel):
     expires_at: Optional[str] = None  # ISO timestamp for expiration
     link_type: str = "chat"  # currently only 'chat' is supported
 
+    _expiry = field_validator("expires_at")(_check_link_expiry)
+
 
 class PublicLinkUpdate(BaseModel):
     """Request model for updating a public link."""
     name: Optional[str] = None
     enabled: Optional[bool] = None
     expires_at: Optional[str] = None
+
+    _expiry = field_validator("expires_at")(_check_link_expiry)
 
 
 class PublicLink(BaseModel):
@@ -673,6 +690,9 @@ class PublicChatMessage(BaseModel):
     # #903: per-message speaker attribution (thread-scoped channel sessions).
     sender_email: Optional[str] = None
     sender_label: Optional[str] = None
+    # trinity#3402: set when the skill gate stopped this row's turn — never
+    # replayed to the agent (`db/schema.py` documents the values).
+    gate_hold: Optional[str] = None
 
 
 # =========================================================================
@@ -811,6 +831,12 @@ class SkillSource(BaseModel):
     created_by: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+    # trinity-enterprise#529: True while the seeded default still points where
+    # the platform put it, so a newer bundled pin moves it at boot. The latest
+    # move is recorded in the two fields after it (Settings → Library line).
+    follows_bundled_pin: bool = False
+    followed_from_ref: Optional[str] = None
+    followed_at: Optional[datetime] = None
 
 
 class SkillInfo(BaseModel):
@@ -853,6 +879,10 @@ class SkillInfo(BaseModel):
     # trinity-enterprise#753: `recommended` — the skill is gated by default on
     # every agent it is assigned to (the owner can clear it). None otherwise.
     approval: Optional[str] = None
+    # trinity-enterprise#660: the author's `category:` (one line, <= 64 chars).
+    # It narrows the Skills lists and nothing else reads it. URL-free, like
+    # `source_name`.
+    category: Optional[str] = None
 
 
 class AgentSkillsUpdate(BaseModel):
@@ -1174,6 +1204,8 @@ class AgentHealthDetail(BaseModel):
     agent_name: str
     aggregate_status: str
     last_check_at: Optional[str] = None
+    # #3950: a stored reading older than this many seconds reads `unknown`.
+    stale_after_seconds: Optional[int] = None
     docker: Optional[DockerHealthCheck] = None
     network: Optional[NetworkHealthCheck] = None
     business: Optional[BusinessHealthCheck] = None
@@ -1261,6 +1293,9 @@ class FleetHealthStatus(BaseModel):
     enabled: bool = True
     last_check_at: Optional[str] = None
     summary: FleetHealthSummary
+    # #3950: a stored reading older than this many seconds reads `unknown`
+    # (and is counted so); 3× the check interval.
+    stale_after_seconds: Optional[int] = None
     agents: List[AgentHealthSummary] = []
     circuit_breakers: Optional[Dict[str, Any]] = None
     sync_summary: Optional[FleetSyncSummary] = None  # trinity-enterprise#707

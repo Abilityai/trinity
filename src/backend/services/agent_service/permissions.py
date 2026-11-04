@@ -9,7 +9,7 @@ from fastapi import HTTPException, Request
 
 from models import User
 from database import db
-from dependencies import agent_may_reach
+from dependencies import agent_may_reach, principal_reach
 from services.docker_service import agent_container_states, get_agent_container
 from .helpers import get_accessible_agents
 
@@ -133,11 +133,14 @@ def _strict_permissions(agent_name: str, current_user: User) -> dict:
     user_data = db.get_user_by_username(current_user.username)
     is_admin = bool(user_data) and user_data["role"] == "admin"
     all_metadata = db.get_all_agent_metadata(user_data.get("email")) if user_data else {}
+    reach = principal_reach(current_user)  # an agent key lists its reach (trinity-enterprise#872)
 
     permitted_agents = []
     available_agents = []
     for name in sorted(states):
         if name == agent_name or not user_data:
+            continue
+        if reach is not None and name not in reach:
             continue
         metadata = all_metadata.get(name)
         if metadata:

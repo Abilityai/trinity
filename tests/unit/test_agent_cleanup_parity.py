@@ -99,6 +99,7 @@ _AGENT_ID_COLUMNS = (
     "target_agent",
     "subscriber_agent",
     "source_channel_agent",
+    "caller_agent",  # ent#662: agent_peer_skill_grants
 )
 
 _COL_RE = re.compile(
@@ -210,6 +211,10 @@ def test_keep_policy_tables_have_retention_discipline():
         # so the SAME #772 90-day terminal-row sweep is its retention discipline.
         ("schedule_executions", "source_channel_agent"),
         ("nevermined_payment_log", "agent_name"),  # forever financial record
+        # ent#966: forever financial record of who funded the agent through
+        # Nevermined; cascade_delete stamps `agent_deleted_at` so a kept row is
+        # never "active" again.
+        ("agent_delegations", "agent_name"),
     }, (
         f"KEEP-policy set changed: {sorted(keep)}. A KEEP table with no "
         "retention sweep is a slow leak — confirm the retention "

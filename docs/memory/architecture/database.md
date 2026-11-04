@@ -16,6 +16,8 @@
 
 **Orphan tables (#3432):** installs upgraded from before #3432 — SQLite and PostgreSQL alike — may carry `process_schedules` and `process_schedule_executions`, which the scheduler's boot path created ad hoc outside both migration tracks; the scheduler no longer creates or reads them, nothing else references them, and they are deliberately left in place (no migration), so #746 autogenerate will surface them as unknown tables.
 
+**Upgrade parity (#3395):** `test_schema_parity.py` models a fresh install only, so it cannot see a `schema.py` column on a table only `init_schema` creates (`users`, `schedule_executions`, ...) that no registered migration adds — present on every fresh install, absent on every existing one; `scripts/ci/check_sqlite_upgrade_parity.py` (a `schema-parity` step) builds an install with the PR's merge-base, upgrades it with the PR's code, and fails on any table, column, index or trigger `schema.py` declares that did not arrive.
+
 **users:**
 ```sql
 CREATE TABLE users (
@@ -124,6 +126,9 @@ CREATE TABLE access_requests (
     decided_by TEXT,                      -- user_id of approver
     decided_at TEXT,
     created_at TEXT NOT NULL,
+    -- trinity-enterprise#737: who asked, as the channel saw them (all nullable)
+    requester_channel_id TEXT, requester_handle TEXT, requester_name TEXT,
+    requester_chat_id TEXT, requester_thread_id TEXT,
     UNIQUE(agent_name, email)
 );
 
@@ -218,6 +223,8 @@ CREATE TABLE schedule_executions (
                                                  -- NULL = no evidence, never "verified healthy"
     chain_depth INTEGER,                         -- #2806: agent-to-agent hops from a non-agent root; NULL = root (0).
                                                  -- Stamped 1 + MAX(caller's running depths) on agent-principal children
+    chat_session_id TEXT,                        -- #3380: the /chat thread this turn answers (NULL = not a /chat turn);
+                                                 -- read by the #2944 watchdog claim to write the recovered reply
     FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
 );
 
@@ -553,6 +560,63 @@ CREATE TABLE public_user_memory_writes (
 );
 CREATE INDEX idx_public_user_memory_writes_lookup ON public_user_memory_writes(agent_name, user_email, written_at);
 ```
+
+**agent_memory_facts** (trinity-enterprise#1022, MEM-002 — one row per retrieved-memory
+fact; `user_email = ''` is the agent scope, shared with the owner; never NULL so the
+partial unique index holds on both engines; `embedding` is a float32 LE vector,
+`BLOB` on SQLite / `BYTEA` on PostgreSQL via `to_postgres_table_ddl`; forget is a
+soft delete recording who; Alembic `0108`. `agent_ownership.memory_opt_out INTEGER
+DEFAULT 0` is the per-agent opt-out, Alembic `0109`. `updated_by_execution_id` is the
+last run that rewrote or retired the row — `execution_id` stays the run it was born
+in — and `agent_memory_fact_events` below is the journal; both Alembic `0110`.)
+```sql
+CREATE TABLE agent_memory_facts (
+    id TEXT PRIMARY KEY,
+    agent_name TEXT NOT NULL,
+    user_email TEXT NOT NULL DEFAULT '',
+    text TEXT NOT NULL,
+    text_hash TEXT NOT NULL,
+    embedding BLOB NOT NULL,
+    embedding_model TEXT NOT NULL,
+    source TEXT NOT NULL,
+    execution_id TEXT,
+    updated_by_execution_id TEXT,
+    recall_count INTEGER DEFAULT 0,
+    last_recalled_at TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    deleted_at TEXT,
+    deleted_by TEXT
+);
+CREATE INDEX idx_agent_memory_facts_scope ON agent_memory_facts(agent_name, user_email, deleted_at);
+CREATE UNIQUE INDEX idx_agent_memory_facts_live_hash ON agent_memory_facts(agent_name, user_email, text_hash) WHERE deleted_at IS NULL;
+```
+
+**agent_memory_fact_events** (trinity-enterprise#1022 — the retrieval-memory journal: one
+append-only row per op on a fact or on a candidate that never became one — `add` /
+`update` / `delete` / `none` / `screened` / `prune` / `recall` / `forget` — keyed to the
+execution that did it, with the candidate the extractor proposed, the text it replaced
+and the neighbour ids the reconciler was shown; `score` is the recall cosine; `actor` the
+person who forgot. Rows older than 90 days are dropped per agent at the next retain.
+Written only by `services/memory_service.py` and the forget route; `AgentRef(…, CASCADE)`.)
+```sql
+CREATE TABLE agent_memory_fact_events (
+    id TEXT PRIMARY KEY,
+    agent_name TEXT NOT NULL,
+    user_email TEXT NOT NULL DEFAULT '',
+    fact_id TEXT,
+    op TEXT NOT NULL,
+    execution_id TEXT,
+    candidate_text TEXT,
+    previous_text TEXT,
+    neighbour_ids TEXT,
+    score REAL,
+    actor TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX idx_agent_memory_fact_events_fact ON agent_memory_fact_events(agent_name, fact_id, created_at);
+CREATE INDEX idx_agent_memory_fact_events_execution ON agent_memory_fact_events(agent_name, execution_id);
+```
 Both tracks: SQLite `public_user_memory_writes_table`, Alembic `0066_public_user_memory_writes`;
 `AgentRef("public_user_memory_writes", "agent_name", Policy.CASCADE)`. Written only by
 `db/public_links.py::write_user_memory_agent_notes`, in the same transaction as the notes
@@ -604,6 +668,30 @@ correction inserts a new row with `supersedes_id` and flips the old one to `supe
 in one CAS transaction (`db/seat_decisions.py::supersede_seat_decision`); nothing is
 deleted or edited in place. JSON lists ride in TEXT (no JSON type on either engine);
 every stat is computed in Python over one seat's rows.
+
+**seat_ask_class_state** (trinity-enterprise#641 / P12 — the autonomy dial's earned half):
+```sql
+CREATE TABLE seat_ask_class_state (
+    id TEXT PRIMARY KEY,
+    agent_name TEXT NOT NULL, seat_email TEXT NOT NULL, ask_class TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'on_request',   -- on_request | graduated  (EARNED, not live)
+    blocked_by TEXT NOT NULL DEFAULT '[]',      -- JSON list of named blockers
+    evidence TEXT NOT NULL DEFAULT '{}',        -- criterion, decision ids, counts, rule_version
+    evidence_hash TEXT,                         -- the CAS key; an unchanged verdict writes nothing
+    evidence_expires_at TEXT,                   -- the EARLIEST review_by of the window
+    guard_metric TEXT NOT NULL DEFAULT 'not_assessed',  -- not_assessed | capped | clear
+    held INTEGER NOT NULL DEFAULT 0, held_by TEXT, held_at TEXT,
+    promoted_at TEXT, demoted_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+    UNIQUE(agent_name, seat_email, ask_class)
+);
+CREATE INDEX idx_seat_ask_class_state_seat ON seat_ask_class_state(agent_name, seat_email);
+```
+Both tracks: SQLite `seat_ask_class_state_table`, Alembic `0113_seat_ask_class_state`
+(← `0107_skill_sources_follow_bundled_pin`); `AgentRef(..., Policy.CASCADE)`. The row holds only what was EARNED —
+the instance level, the agent's autonomy switch and the clock are ANDed at read
+time (`services/autonomy_dial_service.live_verdict`), never materialised. The
+instance LEVEL is not a table at all: one validated `system_settings` key,
+`autonomy_dial_level:instance`.
 
 **agent_event_subscriptions / agent_events** (EVT-001 — agent event pub/sub):
 ```sql
@@ -800,6 +888,7 @@ CREATE TABLE agent_sync_state (
     pack_count INTEGER,                    -- #1595: packs from `git count-objects -v`
     loose_objects INTEGER,                 -- #1595: loose objects (gc-health signal)
     maintenance_failures INTEGER DEFAULT 0, -- #1595: consecutive failed maintenance attempts
+    git_stats_at TEXT,                     -- #4000: when the git stats above were measured (agent-written, coerced)
     diverged_since TEXT,                   -- ent#706: divergence episode start (ISO-Z; set once, cleared at 0/0)
     dirty_files INTEGER,                   -- ent#706: porcelain change count
     dirty_since TEXT,                      -- ent#706: dirt episode start (ISO-Z; cleared at 0)
@@ -883,13 +972,14 @@ CREATE INDEX idx_canary_violations_snapshot
 **idempotency_keys** (RELIABILITY-006 — see [Idempotency](execution.md#idempotency-reliability-006-525) and Invariant #18):
 ```sql
 CREATE TABLE idempotency_keys (
-    scope TEXT NOT NULL,              -- tenant isolation: "agent:{name}" | "webhook:{token}"
+    scope TEXT NOT NULL,              -- tenant isolation: "agent:{name}" (platform-derived keys) | "agent:{name}:caller:{principal}" (client header keys, ent#830) | "webhook:{token}"
     idempotency_key TEXT NOT NULL,    -- caller-supplied or derived
     execution_id TEXT,               -- nullable (webhook short-circuit has none)
     status TEXT NOT NULL,            -- 'in_flight' | 'completed'
     response_snapshot TEXT,          -- JSON of the original response, for replay
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
+    claim_token TEXT,                 -- #3298: in_flight owner token; writes are CAS on it
     PRIMARY KEY (scope, idempotency_key)
 );
 CREATE INDEX idx_idempotency_created ON idempotency_keys(created_at);
@@ -1110,10 +1200,29 @@ CREATE TABLE skill_sources (
     last_commit_sha TEXT,                -- the pin comparison's durable side (tag sources)
     last_error TEXT,
     created_at TEXT NOT NULL,
-    created_by TEXT
+    created_by TEXT,                     -- 'seed:ent237' on the bundled seed
+    follows_bundled_pin INTEGER NOT NULL DEFAULT 0,  -- trinity-enterprise#529
+    followed_from_ref TEXT,              -- latest boot follow: the ref it moved from
+    followed_at TEXT                     -- … and when
 );
 CREATE UNIQUE INDEX idx_skill_sources_url_ref ON skill_sources(url, ref);
 ```
+
+**Following the bundled pin** (trinity-enterprise#529; SQLite
+`skill_sources_follow_bundled_pin` + Alembic `0107_skill_sources_follow_bundled_pin`).
+`follows_bundled_pin` is 1 while the seeded default still points where the platform put it:
+the seed writes it for the built-in catalog URL only, and `update_source` writes 0 when
+an edit names `url`, `ref` or `ref_type`, even unchanged (`apply` passes only the fields
+that differ). The boot follow moves only such a row to a newer
+`DEFAULT_SKILL_SOURCE_REF`, through a compare-and-set UPDATE whose WHERE carries every
+eligibility predicate. Pre-existing rows were classified by
+`db/migrations.SKILL_SOURCE_FOLLOW_BACKFILL_SQL`, the one statement both tracks execute
+(built-in URL, a historical bundled pin, no `skill_source_update` audit row naming
+`ref`/`url`/`ref_type`). The Alembic revision uses `ADD COLUMN IF NOT EXISTS` because
+`0001_baseline` builds a fresh database from the current DDL. `record_sync` also takes the
+synced `url`/`ref`/`ref_type` and writes only while the row still matches, so a sync in
+flight across a retarget cannot stamp the old commit onto the new ref. Flow:
+[skills-library-sync.md](../feature-flows/skills-library-sync.md).
 
 `agent_skills.source_id` records which source an assignment resolved from — recorded, not
 keyed (the UNIQUE stays `(agent_name, skill_name)`, since two sources' copies cannot
@@ -1167,6 +1276,24 @@ CREATE INDEX idx_agent_capability_grants_cap ON agent_capability_grants(capabili
 Both tracks: SQLite `agent_capability_grants`, Alembic `0072_agent_capability_grants` (← `0071`).
 `AgentRef(..., CASCADE)` — rename re-keys, delete removes. Every read joins `agent_ownership`
 and filters `deleted_at`, so a soft-deleted agent holds nothing and recovery restores its grant.
+
+**agent_peer_skill_grants** (abilityai/trinity-enterprise#662) — caller X may run library-assigned
+skill Y on target Z over their `agent_permissions` edge (`db/peer_skill_grants.py`); without a row a
+peer may invoke only Z's declared skills (`services/peer_skill_policy.py`):
+```sql
+CREATE TABLE agent_peer_skill_grants (
+    caller_agent TEXT NOT NULL,
+    target_agent TEXT NOT NULL,
+    skill_name TEXT NOT NULL,
+    granted_by TEXT NOT NULL,
+    granted_at TEXT NOT NULL,
+    PRIMARY KEY (caller_agent, target_agent, skill_name)
+);
+CREATE INDEX idx_agent_peer_skill_grants_target ON agent_peer_skill_grants(target_agent);
+```
+Both tracks: SQLite `agent_peer_skill_grants`, Alembic `0099_agent_peer_skill_grants` (← `0098`).
+Both agent columns are `AgentRef(..., CASCADE)`. A grant goes with its edge: `db/permissions.py`
+`remove_permission` and `set_permissions` (full replace) delete the grants on the edges they drop.
 
 **skill_gate_requests** (trinity-enterprise#751) — a gated-skill request frozen while its approval ask is open (`db/skill_gate_requests.py`); the ask records the decision, this row the effect: `pending → dispatching` is a CAS and `dispatched_execution_id` is UNIQUE, so an approval runs exactly once; a `self_approved` row (#752) is the clearance the in-container hook honours. Both tracks (SQLite `skill_gate_requests_table`, Alembic `0088`); `agent_name` and `source_agent` are CASCADE AgentRefs; machine keys never read these rows (#715).
 

@@ -1,7 +1,8 @@
-import { ref } from 'vue'
+import { ref, shallowRef } from 'vue'
 import axios from 'axios'
 import { readStoredToken } from './platformSession'
 import { useAgentsStore } from '../stores/agents'
+import { useNetworkStore } from '../stores/network'
 import { useNotificationsStore } from '../stores/notifications'
 import { useOperatorQueueStore } from '../stores/operatorQueue'
 import { useExecutionsStore } from '../stores/executions'
@@ -15,12 +16,35 @@ import { useSkillsStore } from '../stores/skills'
 import { useClientPortalStore } from '../stores/clientPortal'
 import { useAuthStore } from '../stores/auth'
 import { isWorkspaceOnlyRole } from './workspaceOnly'
+import { socketActionFor } from './socketSession'
 
-const ws = ref(null)
+// shallowRef: the handlers below compare `ws.value` with their own socket, and
+// a deep ref would hand back a reactive proxy that never equals it (#3445).
+const ws = shallowRef(null)
 const isConnected = ref(false)
 // #306 Redis Streams reconnect replay: track the last Redis stream id we saw
 // so a brief disconnect replays missed events rather than dropping them.
 let lastEventId = null
+
+// #3445: the socket follows the platform session (`socketActionFor`, shared
+// with the Dashboard's socket). `generation` is bumped by every deliberate
+// `disconnect()`, so a ticket still being minted and a close event from a
+// socket already let go of both find out they belong to a session that is over;
+// `disconnect()` also cancels a pending retry. `socketToken` is the platform
+// token the socket was opened for, which is how a changed token is told apart;
+// `connect()` records it once a ticket is on its way, never before.
+let generation = 0
+let minting = null
+let retryTimer = null
+let socketToken = null
+
+function scheduleReconnect(connect) {
+  clearTimeout(retryTimer)
+  retryTimer = setTimeout(() => {
+    retryTimer = null
+    connect()
+  }, 5000)
+}
 
 // #550: mint a fresh single-use ticket immediately before each connect.
 // Tickets are 30s TTL and consumed on use, so reconnects always re-fetch.
@@ -41,6 +65,7 @@ export function reconnectWebSocket() {
 
 export function useWebSocket() {
   const agentsStore = useAgentsStore()
+  const networkStore = useNetworkStore()
   const notificationsStore = useNotificationsStore()
   const operatorQueueStore = useOperatorQueueStore()
   const executionsStore = useExecutionsStore()
@@ -56,7 +81,8 @@ export function useWebSocket() {
   const authStore = useAuthStore()
 
   const connect = async () => {
-    if (ws.value) return
+    // One socket, and one ticket being minted for it at a time.
+    if (ws.value || minting === generation) return
 
     const token = readStoredToken()
     if (!token) {
@@ -64,27 +90,44 @@ export function useWebSocket() {
       return
     }
 
+    const gen = generation
+    minting = gen
+    // Recorded here, where the socket actually starts — not in `followToken`,
+    // where a token whose socket could not start (nothing stored yet) would
+    // read as "open for this token" and its next call would do nothing.
+    socketToken = token
     let ticket
     try {
       ticket = await fetchWsTicket()
     } catch (err) {
+      if (minting === gen) minting = null
+      if (gen !== generation) return
       console.error('WebSocket: failed to mint ticket, retrying in 5s', err)
-      setTimeout(connect, 5000)
+      scheduleReconnect(connect)
       return
     }
+    if (minting === gen) minting = null
+    // #3445: the session this ticket was minted for ended while it was minted.
+    if (gen !== generation) return
 
     let wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws?ticket=${encodeURIComponent(ticket)}`
     if (lastEventId) {
       wsUrl += `&last-event-id=${encodeURIComponent(lastEventId)}`
     }
-    ws.value = new WebSocket(wsUrl)
+    const socket = new WebSocket(wsUrl)
+    ws.value = socket
 
-    ws.value.onopen = () => {
+    // #3445: each handler answers for its OWN socket only. A socket let go of
+    // (a sign-out, a new session) still delivers its close event later, and
+    // must not null the socket that replaced it or schedule a second one.
+    socket.onopen = () => {
+      if (ws.value !== socket) return
       isConnected.value = true
       console.log('WebSocket connected')
     }
 
-    ws.value.onmessage = (event) => {
+    socket.onmessage = (event) => {
+      if (ws.value !== socket) return
       try {
         const data = JSON.parse(event.data)
         if (data._eid) {
@@ -96,7 +139,8 @@ export function useWebSocket() {
       }
     }
 
-    ws.value.onclose = (event) => {
+    socket.onclose = (event) => {
+      if (ws.value !== socket) return
       isConnected.value = false
       ws.value = null
       // Don't reconnect on auth rejection (code 4001)
@@ -105,21 +149,41 @@ export function useWebSocket() {
         return
       }
       console.log('WebSocket disconnected')
-      // Attempt to reconnect after 5 seconds
-      setTimeout(connect, 5000)
+      // Attempt to reconnect after 5 seconds (a dropped connection, or
+      // `reconnectWebSocket`'s rescope)
+      scheduleReconnect(connect)
     }
 
-    ws.value.onerror = (error) => {
+    socket.onerror = (error) => {
       console.error('WebSocket error:', error)
     }
   }
 
+  // Deliberate: the session this socket belonged to is over (#3445). Nothing
+  // reconnects behind it — no retry timer, no ticket in flight, no close
+  // handler — and the replay cursor goes too, since it is the old session's.
   const disconnect = () => {
-    if (ws.value) {
-      ws.value.close()
-      ws.value = null
-      isConnected.value = false
-    }
+    generation += 1
+    minting = null
+    clearTimeout(retryTimer)
+    retryTimer = null
+    socketToken = null
+    lastEventId = null
+    const socket = ws.value
+    ws.value = null
+    isConnected.value = false
+    if (socket) socket.close(1000, 'session ended')
+  }
+
+  /**
+   * Keep the socket on the platform session `token` (#3445): `App.vue`
+   * watches the store's token and hands each value here.
+   */
+  const followToken = (token) => {
+    const action = socketActionFor({ socketToken, token })
+    if (action === 'disconnect' || action === 'reconnect') disconnect()
+    if (action === 'connect' || action === 'reconnect') connect()
+    return action
   }
 
   const handleMessage = (data) => {
@@ -200,6 +264,13 @@ export function useWebSocket() {
         }
         if (data.type === 'agent_activity') {
           if (operatorStores) executionsStore.handleWebSocketEvent(data)
+          // ent#955: the fleet store's WS-driven `workingState` (the agent
+          // header's capacity bars, the dashboard tile's "working" chip) used
+          // to update only through the store's OWN socket, which the Dashboard
+          // opens on mount and closes on unmount — so on the agent page a
+          // 10-second task never lit the bars. This app-wide socket carries
+          // the same `agent_activity` events; feed them through.
+          if (operatorStores) networkStore.handleActivityStatusChange(data)
           // ent#475: a TERMINAL activity on a Workspace participant means it
           // may have rewritten a canvas or shared a file — the rail's feed
           // store re-reads (debounced) through the access-controlled routes.
@@ -256,6 +327,7 @@ export function useWebSocket() {
   return {
     connect,
     disconnect,
+    followToken,
     isConnected
   }
 }

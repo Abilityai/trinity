@@ -15,6 +15,7 @@ from fastapi import HTTPException
 
 from models import User, AgentStatus
 from database import db
+from dependencies import principal_reach
 from db.agents import SYSTEM_AGENT_NAME
 from services.docker_service import (
     docker_client,
@@ -225,7 +226,12 @@ def visible_agent_names(current_user: User) -> Optional[set]:
     shared — except the DB set also contains the caller's OWN agents that
     currently have no container (#1747 documents that state as routine). It
     never contains somebody else's agent.
+
+    An agent key gets its reach, never None (trinity-enterprise#872).
     """
+    reach = principal_reach(current_user)
+    if reach is not None:
+        return reach
     if current_user.role == "admin":
         return None
     metadata = db.get_all_agent_metadata(current_user.email or "")
@@ -246,7 +252,12 @@ def get_accessible_agents(current_user: User) -> list:
 
     OPTIMIZED: Uses batch query to fetch all metadata in 2 queries total
     instead of 8-10 queries per agent (N+1 problem fix).
+
+    An agent key sees only its reach (trinity-enterprise#872): it carries its
+    owner's role, so the admin branch below would otherwise list every agent.
     """
+    reach = principal_reach(current_user)
+
     # Fast Docker call (no stats) - avoids slow Docker API calls
     all_agents = list_all_agents_fast()
 
@@ -265,6 +276,8 @@ def get_accessible_agents(current_user: User) -> list:
     for agent in all_agents:
         agent_dict = agent.dict() if hasattr(agent, 'dict') else dict(agent)
         agent_name = agent_dict.get("name")
+        if reach is not None and agent_name not in reach:
+            continue
 
         # Get metadata from batch result (not individual queries)
         metadata = all_metadata.get(agent_name)
@@ -327,10 +340,60 @@ def accessible_agent_names(current_user: User) -> Optional[List[str]]:
     Returns None for admins (no filter — see every agent).
     Returns a list (possibly empty) for non-admins.
     Used by fleet-level endpoints that filter schedule_executions by agent_name.
+
+    An agent key gets its reach, from the DB, never None (trinity-enterprise#872),
+    so `narrow_to_agent` access-gates its `?agent=` and a stopped child's
+    history still shows.
     """
+    reach = principal_reach(current_user)
+    if reach is not None:
+        return sorted(reach)
     if current_user.role == "admin":
         return None
     return [a["name"] for a in get_accessible_agents(current_user)]
+
+
+def viewer_own_rows(current_user: User) -> tuple:
+    """`(own_rows_user_id, own_rows_exempt_agents)` for a fleet-level read of
+    executions or activity (trinity-enterprise#875).
+
+    The fleet routes span every agent the caller can reach, and the answer is
+    per agent: on an agent the caller OWNS (or as an admin) every row is theirs
+    to see; on any other agent they can reach, just the rows they started.
+
+    The rule is written as an EXEMPTION list, not a list of the agents to narrow:
+    narrowing is the default and only an agent the caller provably owns escapes
+    it. An agent that is reachable but missing from the owned list (a stale
+    roster, a metadata gap) is therefore narrowed, never shown in full — the
+    failure direction is "too few rows", not "everyone's rows".
+
+    * `(None, None)` — no narrowing: an admin person, and agent/system/ops/
+      connector keys — except an agent key acting in a shared person's turn,
+      which reads `(that person, [])` (ent#926, `acting_turn_user_id`).
+    * `(uid, [owned names])` — narrow every agent except those the caller owns.
+    * `(uid, [])` — narrow on EVERY agent: a principal this module does not list
+      as a key (fails closed, like `viewer_principal_kind`'s "other").
+
+    `uid` is `NO_ROWS_USER_ID` when the principal has no usable id, which
+    matches no row — a missing id never reads as "no filter"."""
+    from dependencies import (
+        NO_ROWS_USER_ID, acting_turn_user_id, is_fleet_admin, viewer_principal_kind,
+    )
+
+    kind = viewer_principal_kind(current_user)
+    if kind == "key":
+        # ent#926: an agent's key in a shared person's turn reads that person's
+        # rows on every agent; none is exempt (the key owner's agents are not theirs).
+        acting = acting_turn_user_id(current_user)
+        return (None, None) if acting is None else (acting, [])
+    uid = getattr(current_user, "id", None)
+    uid = uid if isinstance(uid, int) and not isinstance(uid, bool) and uid > 0 else NO_ROWS_USER_ID
+    if kind == "other":
+        return uid, []
+    if is_fleet_admin(current_user):
+        return None, None
+    owned = [a["name"] for a in get_accessible_agents(current_user) if a.get("is_owner")]
+    return uid, owned
 
 
 def narrow_to_agent(
@@ -348,6 +411,36 @@ def narrow_to_agent(
     if agent_names is None:
         return [agent]  # admin: any single agent is fine
     return [agent] if agent in agent_names else []  # non-admin: access-gate
+
+
+# `agent_names` on a fleet read (#3300, the trinity-enterprise#815 shape): the
+# MCP passes its own permit set, one query parameter per name. Bounded so a
+# request line stays well inside every HTTP server's limit.
+AGENT_NAMES_MAX = 500
+
+
+def narrow_to_names(
+    agent_names: Optional[List[str]], wanted: Optional[List[str]]
+) -> Optional[List[str]]:
+    """Narrow an accessible-agent set to the names a caller asked for.
+
+    Only ever NARROWS: intersected with what the caller may see, or taken as
+    given when the caller sees every agent (``agent_names is None``, an admin).
+    ``wanted is None`` passes through. Narrowing for COMPLETENESS, not an
+    authorization point: the cut a route makes at ``limit`` is then made over
+    exactly the rows the caller will keep, so a short page means nothing else
+    matched. Raises ``ValueError`` (the route's 422) for more than
+    ``AGENT_NAMES_MAX`` names or a blank one.
+    """
+    if wanted is None:
+        return agent_names
+    if len(wanted) > AGENT_NAMES_MAX:
+        raise ValueError(f"agent_names: at most {AGENT_NAMES_MAX} names")
+    if any(not name or not name.strip() for name in wanted):
+        raise ValueError("agent_names: a blank name is not allowed")
+    if agent_names is None:
+        return sorted(set(wanted))
+    return sorted(set(agent_names) & set(wanted))
 
 
 def sanitize_and_validate_name(name: str) -> str:
@@ -464,10 +557,17 @@ def get_latest_version(base_name: str) -> Optional[AgentStatus]:
 _SHARED_IN_PREFIX = "/home/developer/shared-in/"
 
 
-async def check_shared_folder_mounts_match(container, agent_name: str) -> bool:
+async def check_shared_folder_mounts_match(container, agent_name: str, *, strict: bool = False) -> bool:
     """
     Check if container's shared folder mounts match the current config.
     Returns True if mounts are correct, False if recreation needed.
+
+    ``strict`` (trinity-enterprise#695, keyword-only, default False so the
+    start path is unchanged): re-raise a source-volume inspect that failed
+    for a reason other than NotFound instead of keeping the mount. The start
+    path wants "unknown" to mean "do not recreate"; a caller that REPORTS the
+    answer (system apply's `restart_required`) must not present an unknown
+    as "matches".
     """
     config = db.get_shared_folder_config(agent_name)
     if not config:
@@ -511,6 +611,8 @@ async def check_shared_folder_mounts_match(container, agent_name: str) -> bool:
                 # Docker unreadable is not "no volume" (#2196): an unknown
                 # answer must not read as drift and recreate a running
                 # container, so keep whatever mount is there.
+                if strict:
+                    raise
                 if mount_path in mount_dests:
                     expected.add(mount_path)
                 continue
@@ -579,13 +681,18 @@ def check_guardrails_env_matches(container, agent_name: str) -> bool:
     env_dict = {e.split("=", 1)[0]: e.split("=", 1)[1] for e in env_list if "=" in e}
     current = env_dict.get("AGENT_GUARDRAILS", "")
 
-    desired = db.get_guardrails_config(agent_name) or {}
-    expected = _json.dumps(desired) if desired else ""
+    # ent#926: `visitor_shell` is read live by the backend on every turn, so a
+    # change to it alone must not recreate the container.
+    live = {"visitor_shell"}
+    desired = {k: v for k, v in (db.get_guardrails_config(agent_name) or {}).items() if k not in live}
 
     if not desired and not current:
         return True
     try:
-        return _json.loads(current or "{}") == desired
+        running = _json.loads(current or "{}")
+        if isinstance(running, dict):
+            running = {k: v for k, v in running.items() if k not in live}
+        return running == desired
     except (_json.JSONDecodeError, ValueError):
         return False
 
@@ -615,7 +722,14 @@ def check_pull_mode_env_matches(container, agent_name: str) -> bool:
     except Exception:  # noqa: BLE001 — attrs absent or shaped differently
         return True
     baked = env_dict.get("TRINITY_PULL_MODE", "").strip().lower() == "true"
-    return baked == bool(is_pull_pilot_agent(agent_name))
+    piloted = bool(is_pull_pilot_agent(agent_name))
+    if baked != piloted:
+        return False
+    # #3814: a piloted system agent also needs the URL its worker polls with
+    # (regular agents always carry it). Without it the pool never starts.
+    if piloted and is_system_agent_name(agent_name):
+        return bool(env_dict.get("TRINITY_BACKEND_URL"))
+    return True
 
 
 def check_agent_auth_token_env_matches(container, agent_name: str) -> bool:
@@ -635,6 +749,33 @@ def check_agent_auth_token_env_matches(container, agent_name: str) -> bool:
     env_list = container.attrs.get("Config", {}).get("Env", [])
     env_dict = {e.split("=", 1)[0]: e.split("=", 1)[1] for e in env_list if "=" in e}
     return env_dict.get("TRINITY_AGENT_AUTH_TOKEN") == derive_agent_token(agent_name)
+
+
+def check_agent_name_env_matches(container, agent_name: str) -> bool:
+    """#3813: the container's ``AGENT_NAME`` env and ``trinity.agent-name``
+    label name the agent's CURRENT name. ``False`` (→ recreate) when either is
+    present and different.
+
+    Rename moves only the Docker container name. The first start after it
+    recreates via the token predicate above, and that recreate now re-bakes the
+    name too. This predicate repairs agents that went through that recreate
+    before it did: token current, name stale, so nothing else fires. The agent
+    server reads ``AGENT_NAME`` for ``/health``, the heartbeat, pull worker ids,
+    the result callback and git auto-sync, all of which 403 under the old name.
+
+    Absent values match: every create site bakes both, and an absent value is
+    never a drift verdict (same rule as ``check_pull_mode_env_matches``).
+    Unreadable attrs match, never a 500 on the start path.
+    """
+    try:
+        config = container.attrs.get("Config", {}) or {}
+        env_list = config.get("Env", []) or []
+        env_dict = {e.split("=", 1)[0]: e.split("=", 1)[1] for e in env_list if "=" in e}
+        label = (config.get("Labels") or {}).get("trinity.agent-name")
+    except Exception:  # noqa: BLE001 — attrs absent or shaped differently
+        return True
+    env_name = env_dict.get("AGENT_NAME")
+    return (env_name is None or env_name == agent_name) and (label is None or label == agent_name)
 
 
 def check_agent_mcp_key_matches(container, agent_name: str) -> bool:

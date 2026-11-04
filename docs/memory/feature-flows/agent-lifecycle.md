@@ -81,6 +81,7 @@ As a Trinity platform user, I want to create, start, stop, and delete agents so 
 - Line 9: Form submit calls `createAgent()`
 - Agent identifier input previews the formatted name before submission (#3463), matching `utils/helpers.py::sanitize_agent_name`: ASCII letters/numbers plus dots, underscores and hyphens, leading non-alphanumeric characters removed, repeated hyphens collapsed, trailing hyphens removed, then lowercase. The raw input still goes to the API. Names that format to empty are blocked with an example next to the field; there is no client-side length cap.
 - Line 26-137: Template selection (blank, GitHub, local)
+- Name prefill from the source (trinity-enterprise#964): `sourceName` is the repository's own name without the owner for **Import a GitHub repository** (any accepted form, any import intent, via `parseGithubRepo`), or a GitHub template's `agent_name` (its template.yaml `name:`, surfaced by `template_service._build_template`), else that template's repo name. Blank and local templates carry none. A `watch` writes it into Name only while Name is empty or still equals the previous prefill, so a hand-typed Name survives a source change; `idOverride` is never touched. A candidate that sanitizes to nothing leaves Name empty. The create payload is unchanged.
 - Lines 191-196: `initialTemplate` prop - Pre-selects template when modal opens
 - Line 198: `emit('created', agent)` - Emits created agent for navigation
 - Lines 207-210: Watch for `initialTemplate` prop changes
@@ -264,7 +265,7 @@ from services.settings_service import get_anthropic_api_key  # Line 29 - central
 > They are added after creation via:
 > - Quick Inject (paste .env text in Credentials tab)
 > - Import from `.credentials.enc` on startup
-> - `inject_credentials` MCP tool
+> - `POST /api/agents/{name}/credentials/inject` as a person: a signed-in session or the owner's own user-scoped key, which is how the `inject_credentials` MCP tool reaches it (agent and system keys are refused)
 >
 > **Bug Fix (2026-02-05)**: Removed orphaned credential injection loop (lines 312-332 in crud.py) that referenced undefined `agent_credentials` variable. This dead code was left behind during the CRED-002 refactor but never executed since the variable was already removed.
 
@@ -412,6 +413,11 @@ async def start_agent_internal(agent_name: str) -> dict:
         not check_pull_mode_env_matches(container, agent_name) or   # #3590, flag only
         not mcp_key_match
     )
+
+    # #3813: name drift (AGENT_NAME env or trinity.agent-name label present and
+    # != the live name) recreates on COLD start only, like the image predicate.
+    if not needs_recreation and not was_already_running:
+        needs_recreation = not check_agent_name_env_matches(container, agent_name)
 
     # #1809: image predicate — a rebuilt trinity-agent-base is adopted on the
     # next COLD start. Lazy (the Docker round-trip runs only when no other

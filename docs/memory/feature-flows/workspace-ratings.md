@@ -74,8 +74,14 @@ The issue left this open. Decided: **tallies yes, the words never.**
 
 `_redact_for_agent_principal` strips `comment` for an agent-scoped caller and
 sets `comment_withheld: true`, so a reader can tell *"no comment"* from *"not
-yours to read"*. Quality, target and evaluator all survive, so the agent can
-count its own ratings and no operator surface loses anything.
+yours to read"*. Quality and target survive, so the agent can count its own
+ratings. The rater survives only as its kind: every machine reader (the rated
+agent's key, the system scope, a connector key) and every person the agent is
+merely shared with reads `workspace` or `operator`, never the address. A human
+owner or admin of the agent — by JWT or their own `user`-scoped key — reads the
+row as stored, comment and full `workspace:<email>` included, so no operator
+surface loses anything. The grader rule is the same allowlist for every
+evaluation row (ent#781; lifecycle-observability §46 FR-3).
 
 Two reasons, and the second is the harder one:
 
@@ -124,6 +130,23 @@ same problem, and the free text was the valuable part anyway.
 | `components/portal/PortalRating.vue` | The control + the comment box |
 | `components/portal/PortalConversation.vue`, `PortalDeliverables.vue`, `PortalAgentPage.vue` | The three places it appears |
 | `tests/unit/test_ent366_workspace_ratings.py`, `src/frontend/tests/unit/portalRatings.spec.js` | The rules |
+
+## Testing
+
+Automated (unit island, no live stack):
+
+- `tests/unit/test_ent366_workspace_ratings.py` — the gates, the correction
+  semantics, the tally and the comment withholding.
+- `tests/unit/test_937_ent781_census.py` — drives the real `submit_rating` as a
+  client (`workspace:`) and as an operator preview (`operator:`) through the
+  `upsert_workspace_rating` facade with an email-shaped rater, and reads each
+  stored row back as four kinds of machine: only the kind survives. It also
+  fails when a new statically named call to a writer API appears without a
+  driver.
+- `tests/unit/test_937_projection.py` (the ent#781 regression) and
+  `tests/unit/test_ent781_read_routes.py` (the output contract and all three GET
+  routes over HTTP) pin the same projection for the admin-written rows that share
+  this table.
 
 ## Known limits
 

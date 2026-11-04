@@ -11,7 +11,8 @@ What is proven here, on synthetic keys and recorded Senzing/Hellō header shapes
   * `resource_meta`: issuer equality, same-origin jwks/control endpoints,
     tolerant `AAuth-Budget`, caches;
   * `resource_token.verify_resource_token`: the happy path and ONE RED TEST PER
-    CHECK (wrong iss / dwk / aud / agent_jkt / ps / sub / presented_jti, expired,
+    CHECK (wrong iss / dwk / aud [non-identifier; the four-party aud is ent#928] /
+    agent_jkt / ps / sub / presented_jti, expired,
     future iat, lifetime, bad typ / alg / header params / kid, unknown kid, bad
     signature, malformed) — the security sink;
   * the ladder: every transition in the module docstring of `resource_client`,
@@ -481,8 +482,9 @@ def test_resource_token_happy_path():
     ("iss", lambda rk: mint(rk, iss=OTHER)),
     ("iss", lambda rk: mint(rk, iss=...)),
     ("dwk", lambda rk: mint(rk, dwk="aauth-agent.json")),
-    ("aud", lambda rk: mint(rk, aud="https://as.example")),       # four-party: unsupported_aud
-    ("aud", lambda rk: mint(rk, aud=...)),
+    ("aud", lambda rk: mint(rk, aud="as.example")),               # not a server identifier (ent#928: a
+    ("aud", lambda rk: mint(rk, aud="https://as.example:8443")),  # four-party aud must be https://host;
+    ("aud", lambda rk: mint(rk, aud=...)),                        # the discoverable-AS success is in ent#928)
     ("agent_jkt", lambda rk: mint(rk, agent_jkt="someone-elses-key")),
     ("ps", lambda rk: mint(rk, ps=OTHER)),
     ("sub", lambda rk: mint(rk, sub="another-person")),

@@ -6,6 +6,8 @@
 
 > **One front door (#2559).** The **Workspace conversation** is the only surface that starts this session — the modal call with the orb and the canvas column, transcript into the Workspace thread; see [workspace-voice-conversation.md](workspace-voice-conversation.md). Agent Detail offers a **door into it**, not a second surface: a `Talk` button in `AgentHeader` that navigates to `/workspace?agent=<name>&voice=1`. The chat-panel overlay that used to run a parallel call — its own start route, its own transcript home in `chat_messages`, its own per-agent availability probe — is retired. The session, the tools, the canvas verbs and the WebSocket bridge below are the shared machinery both start routes drive.
 
+> **Update (trinity-enterprise#950).** The `Talk` (and `Workspace`) doors were removed from `AgentHeader`. The Workspace composer's Call control is now the only way a call starts; `armVoiceAutoStart()` has no in-app caller, so `?voice=1` is always inert (the strip-and-disarm in `Portal.vue` still runs). The Talk-door sections below are kept as the record of #2559.
+
 ---
 
 ## Problem Statement
@@ -97,7 +99,7 @@ and a `prefers-reduced-motion`-aware cross-fade on canvas updates.
 
 ## User Flow
 
-### Starting a call — through the Talk door
+### Starting a call — through the Talk door (removed by trinity-enterprise#950)
 
 1. User is on Agent Detail, any tab (authenticated, platform principal).
 2. User clicks **Talk** in the header, beside **Workspace**. It is always there:
@@ -247,7 +249,7 @@ follow-up as the caller-less backend routes.
 | Requirement | Detail |
 |-------------|--------|
 | Trigger (Workspace) | **Call** control in the conversation header — `voiceEntryState`: platform sessions only, disabled *with the reason* when the instance cannot |
-| Trigger (Agent Detail) | **Talk** button in `AgentHeader.vue`, beside Workspace. A door, not a surface: `armVoiceAutoStart()` + `router.push('/workspace?agent=<name>&voice=1')`. **Ungated** — no `v-if`, no stopped-agent disable |
+| Trigger (Agent Detail) | *(removed by trinity-enterprise#950)* **Talk** button in `AgentHeader.vue`, beside Workspace. A door, not a surface: `armVoiceAutoStart()` + `router.push('/workspace?agent=<name>&voice=1')`. **Ungated** — no `v-if`, no stopped-agent disable |
 | Voice overlay | `VoiceOverlay.vue` — full canvas orb, pure JS (no CDN). **One consumer**: `PortalConversation.vue` |
 | Particle system | Value noise + curl noise, 220 smoke particles in 3 layers, 9 pre-rendered sprite canvases |
 | State hues | idle/connecting: 0°, listening: +90° (green), speaking: +210° (indigo), tool_calling: amber badge |
@@ -332,7 +334,7 @@ retired page; where they name an entry point or a route, read VOICE-010.
 
 | Requirement | Detail |
 |-------------|--------|
-| Entry point | *(retired)* "Workspace" button in `AgentHeader.vue`; today that button opens THE Workspace (ent#438) and its neighbour **Talk** opens it with the call starting (#2559) |
+| Entry point | *(retired)* "Workspace" button in `AgentHeader.vue`; that button later opened THE Workspace (ent#438) beside a **Talk** door (#2559); trinity-enterprise#950 removed both |
 | Route | *(retired)* `/agents/:name/workspace` → `AgentWorkspace.vue` |
 | Layout | Left 40% (orb + controls) + Right 60% (canvas panel) |
 | `workspace_mode` flag | Passed in `POST /voice/start` body; appends `WORKSPACE_PANEL_INSTRUCTIONS` to system prompt |
@@ -469,7 +471,7 @@ Returns current canvas panel state. Returns empty state (not 404) for non-existe
 | **Frontend** | `src/frontend/src/components/portal/portalVoiceMode.js` | Every voice RULE as a pure function: `voiceEntryState`, `voicePreflight`, `voiceHeaderLine`, `groupVoiceBlocks` — plus the `?voice=1` armed one-shot (`armVoiceAutoStart` / `voiceAutoStart`, #2559) |
 | **Frontend** | `src/frontend/src/views/Portal.vue` | Consumes the intent once in `bootstrap()`, strips the key in the `finally`, hands off via a template ref |
 | **Frontend** | `src/frontend/src/components/chat/VoiceOverlay.vue` | The orb (unchanged). Mounted only by `PortalConversation.vue` since #2559 |
-| **Frontend** | `src/frontend/src/components/AgentHeader.vue` | `goToWorkspace()` and — since #2559 — `goToTalk()`: the ungated **Talk** door that arms the one-shot and pushes `?voice=1` |
+| **Frontend** | `src/frontend/src/components/AgentHeader.vue` | *(removed by trinity-enterprise#950)* `goToWorkspace()` and `goToTalk()` — the ungated **Talk** door that armed the one-shot and pushed `?voice=1` |
 | **Frontend** | `src/frontend/src/composables/useVoiceSession.js` | `startWith(requestFn, {restStop})` / `stop()`. The Agent-Detail-shaped `start(sessionId, voiceName, workspaceMode)` was removed with its only caller (#2559) |
 | **Frontend** | `src/frontend/src/stores/sessions.js` | `voiceAvailable` from feature flags — **no reader in `src/` since #2559**; kept pending the follow-up that retires the caller-less voice surface |
 | **Frontend** | `src/frontend/src/utils/audio.js` | AudioWorklet-first capture/playback, `getAmplitude()` via `AnalyserNode` |
@@ -525,7 +527,7 @@ Returns current canvas panel state. Returns empty state (not 404) for non-existe
 
 - ✅ The call lives inside the Workspace conversation, modal, with the canvas column (ent#534)
 - ✅ The transcript is written turn by turn into the Workspace thread, not saved at end
-- ✅ The Agent Detail chat-panel overlay is retired; `AgentHeader` offers a **Talk** door instead (#2559)
+- ✅ The Agent Detail chat-panel overlay is retired; `AgentHeader` offered a **Talk** door instead (#2559), itself removed by trinity-enterprise#950
 - ✅ `?voice=1` is an in-app armed one-shot, stripped once on every exit — a pasted link never starts a call
 - ⏳ Retire the now caller-less OSS `/voice/start|stop|status` routes, after a release
 

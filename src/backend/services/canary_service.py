@@ -383,6 +383,10 @@ def _truncate_error(error: Optional[str]) -> Optional[str]:
     return text[:_MAX_ALERT_ERROR_CHARS]
 
 
+_CANARY_TRUTHY = frozenset({"1", "true", "yes", "on"})
+_CANARY_FALSY = frozenset({"", "0", "false", "no", "off"})
+
+
 class CanaryService:
     """Background watcher loop for the canary invariant harness."""
 
@@ -430,7 +434,14 @@ class CanaryService:
     def start(self):
         """Start the background loop. No-op if already running or disabled."""
         if not self._is_enabled():
-            logger.info("canary: disabled (set CANARY_ENABLED=1 to enable)")
+            raw = os.getenv("CANARY_ENABLED", "")
+            if raw.strip().lower() not in _CANARY_FALSY:
+                logger.warning(
+                    f"canary: CANARY_ENABLED={raw!r} is not a recognised value, "
+                    f"so the canary is disabled (use 1/true/yes/on to enable)"
+                )
+            else:
+                logger.info("canary: disabled (set CANARY_ENABLED=1 to enable)")
             return
         if self._running:
             return
@@ -483,7 +494,9 @@ class CanaryService:
 
     @staticmethod
     def _is_enabled() -> bool:
-        return os.getenv("CANARY_ENABLED", "0") == "1"
+        # #1988: any common truthy spelling, any case. Strict "1" made
+        # CANARY_ENABLED=true a silently dead canary.
+        return os.getenv("CANARY_ENABLED", "").strip().lower() in _CANARY_TRUTHY
 
     @staticmethod
     def is_enabled() -> bool:

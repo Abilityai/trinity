@@ -69,6 +69,8 @@ Evaluations are written by the platform or by a human admin — never by the age
 
 An agent can read its own evaluations — seeing its own bad score is the feedback loop. Only humans with admin rights can write one.
 
+What a reader sees of **who graded** depends on who is reading. The agent's owner and admins — signed in, or using their own user-scoped MCP key — see the full grader, for example `admin:you@example.com`. Agents, other machine keys, and people the agent is only shared with see just the kind of grader: `admin`, `workspace` (a Workspace user's rating) or `operator` (an owner's preview rating), and never the person's name or email. The stored evaluation is not changed; only what each reader is shown.
+
 ### Execution Detail Page
 
 1. Displays agent name, status, timestamps, duration, cost, model used, and trigger source.

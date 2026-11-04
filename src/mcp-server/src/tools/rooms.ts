@@ -108,9 +108,14 @@ export function createRoomTools(client: TrinityClient, requireApiKey: boolean) {
         name: z.string().describe("Short room name"),
         agents: z.array(z.string()).min(1).describe("Agent names to add as participants"),
         topic: z.string().optional().describe("What the room is for"),
-        max_messages: z.number().int().positive().optional().describe("Message budget (default 60)"),
-        max_cost_usd: z.number().positive().optional().describe("Cost budget in USD"),
-        ttl_hours: z.number().int().min(0).optional().describe("Auto-close after N hours (default 24; 0 = never)"),
+        // Budgets are an operator control (ent#387, #3495): omitted fields take the
+        // operator's defaults, and a key below `operator` has its values ignored.
+        max_messages: z.number().int().positive().max(500).optional()
+          .describe("Message budget, at most 500 (default: the operator's room default)"),
+        max_cost_usd: z.number().positive().max(1000).optional()
+          .describe("Cost budget in USD, at most 1000 (default: the operator's room default, usually none)"),
+        ttl_hours: z.number().int().min(0).max(168).optional()
+          .describe("Auto-close after N hours, at most 168; 0 = never (default: the operator's room default)"),
         scribe: z.string().optional().describe("Participant designated to record outcomes"),
       }),
       execute: async (args: any, context?: { session?: McpAuthContext }) =>

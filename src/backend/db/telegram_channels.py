@@ -15,7 +15,7 @@ import logging
 import secrets
 from typing import Optional, List
 
-from sqlalchemy import select, insert, update, delete, and_, func
+from sqlalchemy import select, insert, update, delete, and_, or_, func
 
 from .engine import get_engine, make_insert
 from .tables import (
@@ -228,10 +228,16 @@ class TelegramChannelOperations:
         return (result.rowcount or 0) > 0
 
     def update_last_update_id(self, agent_name: str, update_id: int) -> None:
-        """Update the last processed update_id for dedup."""
+        """Advance the last processed update_id (the Redis-down dedup fallback).
+
+        Forward only (ent#934): Telegram delivers updates in parallel and out of
+        order, so a slower request for an older update must not rewind the row.
+        """
         stmt = (
             update(telegram_bindings)
             .where(telegram_bindings.c.agent_name == agent_name)
+            .where(or_(telegram_bindings.c.last_update_id.is_(None),
+                       telegram_bindings.c.last_update_id < update_id))
             .values(last_update_id=update_id)
         )
         with get_engine().begin() as conn:
@@ -359,6 +365,22 @@ class TelegramChannelOperations:
         """Return the verified email for this Telegram user, or None."""
         link = self.get_chat_link(binding_id, telegram_user_id)
         return link["verified_email"] if link else None
+
+    def list_verified_links_for_user(self, user_id: str) -> List[dict]:
+        """Every agent this channel user has verified an email on
+        (trinity-enterprise#737): ``agent_name`` + ``verified_email``. A bot is
+        per agent, but the user id is the person's own, so the same id on two
+        bindings is the same person. The caller filters to what its viewer may see."""
+        stmt = (
+            select(telegram_bindings.c.agent_name, telegram_chat_links.c.verified_email)
+            .select_from(telegram_chat_links.join(telegram_bindings, telegram_chat_links.c.binding_id == telegram_bindings.c.id))
+            .where(telegram_chat_links.c.telegram_user_id == str(user_id))
+            .where(telegram_chat_links.c.verified_email.isnot(None))
+        )
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [{"agent_name": r["agent_name"], "verified_email": r["verified_email"]}
+                for r in rows if r["verified_email"]]
 
     def list_clients_for_agent(self, agent_name: str) -> List[dict]:
         """External Telegram clients who have messaged this agent (#20 roster).

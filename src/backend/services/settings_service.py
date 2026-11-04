@@ -74,6 +74,7 @@ OPS_SETTINGS_DESCRIPTIONS = {
     "ops_log_retention_days": "Number of days to retain container logs (default: 7)",
     "ops_health_check_interval": "Seconds between automated health checks (default: 60)",
     "ssh_access_enabled": "Enable ephemeral SSH access to agent containers via MCP tool (default: false)",
+    "apply_unassign_on_failed_gate": "When a system apply cannot write the gate a manifest declares on a skill the agent already holds, unassign that skill instead of leaving it running with no approval gate (default: true)",
     "execution_log_retention_days": "Days to retain the JSONL transcript on schedule_executions (default: 30, 0 = disabled, #772)",
     "execution_row_retention_days": "Days to retain finished schedule_execution rows; rows older than this are deleted (default: 90, 0 = disabled, #772)",
     "health_check_retention_days": "Days to retain agent_health_checks rows (default: 7, 0 = disabled, #772)",
@@ -421,12 +422,22 @@ class SettingsService:
         """Get Slack Signing Secret: encrypted setting → legacy → env (ent#435)."""
         return self._resolve_secret_setting('slack_signing_secret', 'SLACK_SIGNING_SECRET')
 
+    def get_public_chat_url_setting(self) -> str:
+        """The stored `public_chat_url` row only (no env fallback), normalised
+        (#3881). For the webhook registrars that have always read the row
+        directly; they must not register a dotted host either."""
+        return normalize_public_url(self.get_setting('public_chat_url', '') or '')
+
     def get_public_chat_url(self) -> str:
-        """Get Public Chat URL from settings, fallback to env var."""
+        """Get Public Chat URL from settings, fallback to env var.
+
+        Normalised on read too (#3881), so a row stored before the save path
+        stripped a trailing host dot, or a dotted env value, never reaches a
+        webhook or a link."""
         url = self.get_setting('public_chat_url')
         if url:
-            return url.rstrip('/')
-        return os.getenv('PUBLIC_CHAT_URL', '').rstrip('/')
+            return normalize_public_url(url)
+        return normalize_public_url(os.getenv('PUBLIC_CHAT_URL', ''))
 
     def get_slack_transport_mode(self) -> str:
         """Get Slack transport mode: 'socket' (default) or 'webhook'."""
@@ -512,6 +523,22 @@ class SettingsService:
         requires the base flag AND GEMINI_API_KEY (env-only secret) — composed
         at the consumers, not here."""
         return self._resolve_bool_flag("brain_orb_voice_enabled", "BRAIN_ORB_VOICE_ENABLED")
+
+    def is_direct_voice_enabled(self) -> bool:
+        """Workspace Direct calls (trinity-enterprise#1046). On by default, unlike the
+        opt-in flags `_resolve_bool_flag` was written for, so an env "false" has to be
+        honoured here: that helper reads env values only as an opt-in."""
+        env_off = os.getenv("DIRECT_VOICE_ENABLED", "").strip().lower() in ("false", "0", "no")
+        return self._resolve_bool_flag("direct_voice_enabled", "DIRECT_VOICE_ENABLED", default=not env_off)
+
+    def get_direct_voice_provider(self) -> str:
+        """`auto` | `gemini` | `elevenlabs`. An unrecognised stored value reads as
+        `auto` rather than breaking every call."""
+        try:
+            stored = (self.get_setting("direct_voice_provider") or "").strip().lower()
+        except Exception:  # noqa: BLE001 - a settings read must not break the roster
+            stored = ""
+        return stored if stored in ("auto", "gemini", "elevenlabs") else "auto"
 
     def is_brain_orb_write_enabled(self) -> bool:
         """Brain Orb KB-write kill-switch (trinity-enterprise#61). Distinct from
@@ -1117,6 +1144,30 @@ def clear_secret_setting(key: str) -> bool:
 def has_secret_setting(key: str) -> bool:
     """Whether a credential-bearing setting is configured in the DB."""
     return settings_service.has_secret_setting(key)
+
+
+def normalize_public_url(url: str) -> str:
+    """Trim whitespace and a trailing `/`, and drop a trailing dot from the host
+    (#3881). `host.example.com.` is the same name, but its TLS certificate is
+    for `host.example.com`, so Telegram (and any strict client) refuses it."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    url = (url or "").strip().rstrip("/")
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        # A malformed authority (`https://[::1`). Hand the input through: on the
+        # save path this runs before `classify_advertised_url`, which answers
+        # 422 for it, so raising here would turn that refusal into a 500.
+        return url
+    if not (parts.hostname or "").endswith("."):
+        return url
+    userinfo, at, hostport = parts.netloc.rpartition("@")
+    host, colon, port = hostport.rpartition(":")
+    if not (colon and port.isdigit()):
+        host, colon, port = hostport, "", ""
+    netloc = f"{userinfo}{at}{host.rstrip('.')}{colon}{port}"
+    return urlunsplit(parts._replace(netloc=netloc)).rstrip("/")
 
 
 def classify_advertised_url(url: str) -> str:

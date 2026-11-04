@@ -5,8 +5,9 @@
  * can answer: vitest runs `environment: 'node'` with no component-mount harness.
  * The rules themselves (the `?voice=1` one-shot) are pure functions and are
  * tested as functions in `portalVoiceMode.spec.js`; what is left here is
- * *absence* — that a removal stayed removed — plus the two things this PR added
- * to `AgentHeader` and the one line it must NOT have removed from the composable.
+ * *absence* — that a removal stayed removed — plus the one line it must NOT have
+ * removed from the composable. (The header's Talk door this PR added was itself
+ * removed by trinity-enterprise#950; that absence is pinned below too.)
  *
  * The load-bearing case is the last one. `useVoiceSession` returned
  * `start, startWith, stop, …` as shorthand. Deleting `start()` and leaving the
@@ -42,7 +43,7 @@ const SOURCES = {
   PANEL: ['../../src/components/ChatPanel.vue', 'const loadSessions = async'],
   INPUT: ['../../src/components/chat/ChatInput.vue', 'const emit = defineEmits('],
   COMPOSABLE: ['../../src/composables/useVoiceSession.js', 'async function startWith'],
-  HEADER: ['../../src/components/AgentHeader.vue', 'function goToTalk()'],
+  HEADER: ['../../src/components/AgentHeader.vue', 'defineEmits(['],
   DETAIL: ['../../src/views/AgentDetail.vue', 'sessionsStore.loadFeatureFlags'],
   BUBBLE: ['../../src/components/chat/ChatBubble.vue', "source === 'voice'"],
   CONVERSATION: ['../../src/components/portal/PortalConversation.vue', 'defineExpose('],
@@ -57,7 +58,6 @@ const DETAIL = stripComments(RAW.DETAIL)
 const BUBBLE = stripComments(RAW.BUBBLE)
 const CONVERSATION = stripComments(RAW.CONVERSATION)
 const STRIPPED = { PANEL, INPUT, COMPOSABLE, HEADER, DETAIL, BUBBLE, CONVERSATION }
-const HEADER_RAW = RAW.HEADER
 
 describe('the guard can still see the code it guards', () => {
   it.each(Object.keys(SOURCES))('%s survives comment-stripping intact', (key) => {
@@ -111,38 +111,20 @@ describe('ChatInput has no mic, and no props for one', () => {
   })
 })
 
-describe('AgentHeader offers the door', () => {
-  const talk = HEADER_RAW.slice(
-    HEADER_RAW.indexOf('data-testid="agent-talk"') - 400,
-    HEADER_RAW.indexOf('data-testid="agent-talk"') + 900,
-  )
-
-  it('renders Talk with a stable test id and a click that navigates', () => {
-    expect(HEADER).toContain('data-testid="agent-talk"')
-    expect(HEADER).toContain('@click="goToTalk"')
-    expect(talk).toContain('>\n            Talk\n          </button>')
+describe('the agent header no longer carries the doors (trinity-enterprise#950)', () => {
+  // #2559 put a Talk door (and ent#438 a Workspace door) in the header. The
+  // product review on the ent#887 header took both out: the Workspace is
+  // reachable from the nav, and the call lives in the Workspace composer
+  // (ent#547). Voice itself is untouched — see "the orb kept its consumer".
+  it('renders neither the Talk nor the Workspace button', () => {
+    expect(HEADER).not.toContain('data-testid="agent-talk"')
+    expect(HEADER).not.toContain('goToTalk')
+    expect(HEADER).not.toContain('goToWorkspace')
+    expect(HEADER).not.toContain("path: '/workspace'")
   })
 
-  it('is NOT gated — no `v-if` on the button (#2559 G-1)', () => {
-    // The instance-wide flag the old mic used is the same boolean the Workspace
-    // itself checks, so a gate here would only add a cold-load pop-in and a
-    // sticky-false hide. A dead button is a worse answer than a page that says
-    // why — and the Workspace says why.
-    const openTag = talk.slice(talk.indexOf('<button'), talk.indexOf('>', talk.indexOf('data-testid="agent-talk"')))
-    expect(openTag).not.toContain('v-if')
-  })
-
-  it('stays in the same tab — the one-shot and the AudioContext both need it', () => {
-    // Scoped to the Talk block on purpose: the Git remote link elsewhere in this
-    // header legitimately carries `target="_blank"`, so a file-wide check would
-    // fail on arrival.
-    expect(talk).not.toContain('target="_blank"')
-    expect(HEADER_RAW).toContain('target="_blank"')   // the Git link, still there
-  })
-
-  it('says where the call happens and that the conversation changes home', () => {
-    expect(talk).toMatch(/title="[^"]*Workspace[^"]*"/)
-    expect(talk).toMatch(/title="[^"]*not in this chat[^"]*"/)
+  it('no longer arms the voice one-shot', () => {
+    expect(HEADER).not.toContain('armVoiceAutoStart')
   })
 
   it('declares no `voiceAvailable` prop, and AgentDetail passes none', () => {

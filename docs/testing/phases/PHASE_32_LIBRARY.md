@@ -90,10 +90,9 @@ curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/templates \
 - Click "Cancel"
 
 **Expected**:
-- [ ] A modal titled "Create New Agent" opens
-- [ ] It has a "Slug / Identifier" field (placeholder `my-agent`), a display-name field (placeholder `e.g. Marketing Assistant`), and a "Template" chooser listing "Blank Agent (Claude Code)", "GitHub Repository" and a "Local Templates" group
-- [ ] The card you clicked is the highlighted (ringed) entry in the chooser
-- [ ] Buttons "Create Agent" and "Cancel"
+- [ ] A modal titled "New agent" opens (#3792): a source list on the left ("Blank agent", "Import a GitHub repository", then template groups such as "Local templates") and, on the right, the selected source, one "Name" field (placeholder `e.g. Marketing Assistant`) with an "ID" row, and a read-only "Runtime" row
+- [ ] The card you clicked is the highlighted (ringed) entry in the left list, and its name heads the right pane
+- [ ] Buttons "Cancel" and "Create agent"
 - [ ] After Cancel the modal is gone and you are still on `/library?tab=templates`
 
 ### Step 5: Blank agent entry point, cancelled
@@ -102,7 +101,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/templates \
 - Click "Cancel"
 
 **Expected**:
-- [ ] The same modal opens with "Blank Agent (Claude Code)" highlighted
+- [ ] The same modal opens with "Blank agent" highlighted
 - [ ] Cancel closes it; no agent was created (confirmed in Cleanup)
 
 ## Test: Systems tab

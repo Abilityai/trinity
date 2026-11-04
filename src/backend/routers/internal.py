@@ -18,6 +18,7 @@ import logging
 from database import db
 from models import (
     InternalAuditRequest,
+    InternalPreCheckRequest,
     InternalTaskExecutionRequest,
     PullTaskResultRequest,
     TaskExecutionStatus,
@@ -84,7 +85,7 @@ router = APIRouter(
 pull_router = APIRouter(prefix="/api/internal", tags=["internal"])
 
 _PULL_AUTH_DENIED = (
-    "Pull seam requires a valid X-Internal-Secret or the agent's own agent-scoped MCP key"
+    "Pull seam requires a valid X-Internal-Secret or the agent's own MCP key"
 )
 
 
@@ -102,8 +103,9 @@ def _pull_authorized(request: Request, agent_name: str) -> bool:
     """Dual-auth predicate for a pull seam bound to ``agent_name``: the trusted
     backend (valid internal secret) OR the agent's OWN agent-scoped MCP key,
     reusing ``heartbeat_service.authorize_heartbeat`` (the same "an agent may act
-    only on itself" rule that gates the heartbeat + #1083 callback). A
-    user/system/mismatched key ⇒ False (caller raises 403)."""
+    only on itself" rule that gates the heartbeat + #1083 callback). The
+    system agent's own system-scoped key qualifies for its own name (#3814).
+    A user or mismatched key ⇒ False (caller raises 403)."""
     if _internal_secret_valid(request):
         return True
     # #1081 B1: the agent-key (worker) path is additionally gated on the pilot
@@ -138,7 +140,7 @@ async def internal_next_task(request: Request, agent_name: str, worker_id: str):
 
     Auth (dual): a valid ``X-Internal-Secret`` (trusted backend) OR the agent's
     own agent-scoped MCP key bound to ``agent_name`` — an agent may only claim
-    its OWN queue. A user/system/mismatched scoped key → 403.
+    its OWN queue. A user or mismatched key → 403 (the system agent's key qualifies for its own name only, #3814).
 
     Query params: ``agent_name`` + ``worker_id``. On success returns the §3.1
     claim response (envelope frame + lease metadata). When the queue is empty it
@@ -155,6 +157,7 @@ async def internal_next_task(request: Request, agent_name: str, worker_id: str):
     if claim is None:
         # §3.2 — no work available.
         return {"envelope": None}
+    await pull_coordination_service.open_claim_activity(claim["execution_id"])
     return claim
 
 
@@ -172,7 +175,7 @@ async def internal_task_result(
     ``agent_name`` must equal the execution's) — an agent may only report results
     for its OWN executions. This ownership gate is IN ADDITION to the
     ``claim_token`` CAS below (which independently blocks a stale/wrong-token
-    write). A user/system/non-agent key → 403; an unknown OR not-owned execution
+    write). A user or unbound key → 403; an unknown OR not-owned execution
     → a **uniform 404** (self-uniform enumeration-safety, Invariant #186 — a
     404/403 split would leak the existence of another agent's execution id).
 
@@ -192,7 +195,9 @@ async def internal_task_result(
     # check; the agent path requires the scoped key to OWN this execution.
     if not _internal_secret_valid(request):
         key = _validated_agent_key(request)
-        if not (key and key.get("scope") == "agent"):
+        # A key that cannot act for its OWN bound name (user, connector, an
+        # unbound system key) is refused before any lookup (#3814).
+        if not (key and heartbeat_service.authorize_heartbeat(key, key.get("agent_name"))):
             raise HTTPException(status_code=403, detail=_PULL_AUTH_DENIED)
         execution = db.get_execution(execution_id)
         if execution is None or not heartbeat_service.authorize_heartbeat(
@@ -206,7 +211,7 @@ async def internal_task_result(
 
     from services import pull_coordination_service
 
-    outcome = pull_coordination_service.apply_task_result(
+    outcome = await pull_coordination_service.handle_task_result(
         execution_id,
         payload.claim_token,
         status=payload.status,
@@ -219,6 +224,10 @@ async def internal_task_result(
         metadata=payload.metadata,
     )
 
+    if outcome.kind == "retry":
+        # #3487: the turn was refused on a credential and the pool has another
+        # one — run it again under the same claim (the new token is in here).
+        return {"applied": False, "retry": outcome.retry}
     if outcome.kind == "applied":
         return {"applied": True, "status": outcome.status}
     if outcome.kind == "replayed":
@@ -238,17 +247,21 @@ async def internal_task_result(
 
 
 @router.post("/agents/{agent_name}/pre-check")
-async def internal_agent_pre_check(agent_name: str):
+async def internal_agent_pre_check(
+    agent_name: str, body: Optional[InternalPreCheckRequest] = None
+):
     """Run the agent's optional pre-check hook (SCHED-COND-001 / #454).
 
     Thin passthrough — all logic lives in
     ``services/pre_check_service.py`` (Invariant #1: Router → Service
-    → DB). See that module for the full contract.
+    → DB). See that module for the full contract. The optional body names
+    the schedule being gated (#3966); without it the hook runs as before.
     """
     from services.pre_check_service import run_pre_check, AgentNotFound
 
+    schedule = body.model_dump(exclude_none=True) if body else {}
     try:
-        return await run_pre_check(agent_name)
+        return await run_pre_check(agent_name, **schedule)
     except AgentNotFound:
         raise HTTPException(status_code=404, detail="Agent not found")
 
@@ -413,9 +426,23 @@ async def execute_task_internal(
                 "message": refusal.detail,
                 "execution_id": request.execution_id,
             })
+        # trinity-enterprise#1022: the seat's retrieval memory for this run's
+        # prompt — awaited first, then threaded into the block.
+        try:
+            from services import memory_service
+            seat_retrieved = await memory_service.recall(
+                request.agent_name, request.deliver_to_workspace_email, request.message,
+            )
+        except Exception as e:  # noqa: BLE001 — never block a scheduled run on memory
+            logger.debug("[ent#1022] seat recall skipped: %s", e)
+            seat_retrieved = ()
+        # The keyword rides only when there is something to carry, so the call
+        # is byte-identical to the pre-#1022 one while memory is off (the default).
+        seat_kwargs = {"retrieved": seat_retrieved} if seat_retrieved else {}
         seat_system_prompt = await asyncio.to_thread(
-            schedule_seat_memory.build_seat_caller_prompt,
-            request.agent_name, request.deliver_to_workspace_email,
+            lambda: schedule_seat_memory.build_seat_caller_prompt(
+                request.agent_name, request.deliver_to_workspace_email, **seat_kwargs,
+            )
         )
 
     if request.async_mode:

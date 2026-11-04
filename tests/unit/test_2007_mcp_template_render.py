@@ -361,13 +361,14 @@ def test_startup_sh_invokes_the_renderer():
 
 
 def test_the_renderer_runs_after_credentials_are_available():
-    """Ordering: `.env` arrives either from the /generated-creds copy or from
-    the decrypt-and-inject fallback. Rendering before the latter would resolve
-    placeholders against a file that is not there yet."""
+    """Ordering: `.env` arrives from the /generated-creds copy (a committed
+    `.credentials.enc` is imported by the owner, not at startup — #3510).
+    Rendering before it would resolve placeholders against a file that is not
+    there yet."""
     startup = (_ROOT / "docker" / "base-image" / "startup.sh").read_text()
-    assert startup.index("decrypt-and-inject") < startup.index("agent_server.mcp_template"), (
-        "the renderer runs before the credential auto-import — placeholders "
-        "would be unresolvable on that path"
+    assert startup.index("/generated-creds/.env") < startup.index("agent_server.mcp_template"), (
+        "the renderer runs before .env is copied in — placeholders would be "
+        "unresolvable"
     )
 
 

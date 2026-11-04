@@ -6,6 +6,8 @@
 
 | Date | Changes |
 |------|---------|
+| 2026-11-02 | **trinity-enterprise#660 + trinity#3448** — the Assign skills dialog finds a skill and says what Save would do: a filter by text, source and category (`components/skills/SkillFilterBar.vue`, `composables/useSkillFilter.js`, `utils/skillFilter.js`) narrows the rows and both bulk buttons, never the draft, and each row plus the footer count marks "to add", "to remove" or "kept by set". `SkillInfo` gains `category` (frontmatter, §21.6). Save and sync semantics unchanged. |
+| 2026-10-22 | **trinity-enterprise#539** — the Assign skills dialog gains **Select all** / **Deselect all**, which build the draft over the listed rows only (rules in `utils/skillAssignDraft.js`; set rows, deprecated skills and unlisted assignments are left as they are), and **Save** confirms first when it would drop an approval requirement. Writes unchanged: still the one bulk PUT. Line cites below re-pointed. See [skills-tab.md](skills-tab.md). |
 | 2026-10-08 | **trinity-enterprise#754** — the assignment UI is now the **Shared skills** section of the merged Skills tab ([skills-tab.md](skills-tab.md)), visible to everyone with access; the controls stay owner/admin-only. `SkillsPanel.vue` is deleted: assigned rows became cards, the library picker moved into `SkillAssignModal.vue` ("Assign skills"), the #2914 conflict / delivery warnings / superseded text open in `SkillDetailsModal.vue`, and sets show as chips with `AgentSkillSets.vue` in a "Manage sets" dialog. Routes and store unchanged. |
 | 2026-10-07 | **trinity-enterprise#753** — every route here that writes `agent_skills` (PUT, POST, DELETE, the inject Sync, POST/DELETE set) now also keeps the agent's skill gate map in line (`_sync_gates` → `skill_gate_map_service`), and answers with a `gates` block (`gate_defaults` applied/removed, `gates_removed`, `gates_kept`, or null). A library skill whose metadata says `approval: recommended` is gated BEFORE its package is delivered; a gate on an unassigned skill goes only once its package removal completed, and an explicit gate only when a person unassigned it. See [skill-gate.md](skill-gate.md) §6. |
 | 2026-09-30 | **ent#672** — a deprecated library skill is marked and its assignment says so. `SkillsPanel.vue` shows a `deprecated` badge + "Superseded by …" line on the assigned rows (an agent already holding one shows it on load) and on the picker rows (before the tick); `POST` / `PUT` still succeed and their `delivery.skills[name].warnings` carries `deprecated[:<successor>]`, rendered as a warning line under the save note; after a manual Sync the per-skill warning list says it in words. See "Deprecated skills" below and [skill-injection.md](skill-injection.md). |
@@ -29,7 +31,7 @@ As an agent owner, I want to assign platform skills to my agents so that they fo
 ## Entry Points
 
 ### User Configuration (UI)
-- **Component**: `src/frontend/src/components/skills/SkillAssignModal.vue:75-77` - "Save assignments" (bulk PUT), opened by **Assign skills** in the Skills tab's Shared section (`SkillsTab.vue:136`)
+- **Component**: `src/frontend/src/components/skills/SkillAssignModal.vue:107-130` - "Save assignments" (bulk PUT), with **Select all** / **Deselect all** on the list's header row (`:28-54`), opened by **Assign skills** in the Skills tab's Shared section (`SkillsTab.vue:136`)
 - **Tab Access**: Agent Detail page -> Skills tab, visible to everyone with access since trinity-enterprise#754; the assignment controls (Assign skills, Manage sets, Sync now, Unassign) are for the owner or an admin, never on the system agent. See [skills-tab.md](skills-tab.md)
 
 ### Backend API
@@ -49,7 +51,7 @@ Since trinity-enterprise#754 the assignment surface is the **Shared skills** sec
 
 | Control | File | Call |
 |---|---|---|
-| **Assign skills** → tick → **Save assignments** | `components/skills/SkillAssignModal.vue:134-146` | `store.saveAssignments(draft)` → `PUT /api/agents/{name}/skills` |
+| **Assign skills** → tick (or **Select all** / **Deselect all**) → **Save assignments** | `components/skills/SkillAssignModal.vue:236-337` (a save that drops an approval requirement confirms first, `:290-323`) | `store.saveAssignments(draft)` → `PUT /api/agents/{name}/skills` |
 | **Unassign** on a Shared card | `components/skills/SkillsTab.vue:546-564`, after its confirm (`:566-578`) | `store.saveAssignments(individualNames − name)` → the same PUT |
 | **Unassign library skill** (#2914 conflict) | `components/skills/SkillDetailsModal.vue:31-41` → `SkillsTab.onUnassign` | the same PUT |
 | **Manage sets** | `components/skills/AgentSkillSets.vue` in a `BaseModal` (`SkillsTab.vue:271-276`) | `store.assignSet` / `unassignSet` → `POST` / `DELETE /api/agents/{name}/skill-sets/{set}` |
@@ -63,7 +65,11 @@ The picker keeps its ent#235 / ent#530 / ent#672 / #2914 behaviour: the draft is
 
 - `library`, `libraryStatus`, `assigned` (the rows, with `individual` / `via_sets` / `delivery_status`), `sets`, `librarySets`; `injectionResults` + `lastInjectionAt` (the last Sync, per skill); `lastDelivery` (the last save's #2703 report).
 - Derived: `individualNames` (the draft's source — what the bulk PUT replaces), `setOnlyNames` (locked rows), `conflictNames` (#2914), `emptyReason` (`library_unconfigured` / `library_empty` / `none_assigned`).
-- The picker's dirty check compares the sorted draft with `individualNames` (`SkillAssignModal.vue:120-124`); the draft resets only when that set changes (`:132`).
+- The picker's dirty check compares the sorted draft with `individualNames` (`SkillAssignModal.vue:245`); the draft resets only when that set changes (`:269`).
+- The filter (trinity-enterprise#660) narrows `listed`, the one value the list and both bulk buttons read. Nothing that decides a save reads it: `removedNames` and `gatedRemovals` take the whole draft, so a tick the filter hides is still sent, and a hidden removal still asks. The filters reset on each opening, a choice the list no longer offers clears itself (`useSkillFilter`), and Esc in the filter with text in it clears the text instead of closing the dialog and dropping the draft (`SkillFilterBar.vue::onEscape`). A backdrop click closes only a clean dialog (`:close-on-backdrop="!dirty"`).
+- Pending changes are `skillAssignDraft.js::pendingChanges` → `{added, removed, kept}` over the whole draft (`SkillAssignModal.vue:284`). `removed` IS `removedNames`, so a mark and the confirm cannot disagree; `kept` is a saved name an assigned set still holds, which the save only demotes. `pendingLine` is the footer's count and `pendingMarks` the row badges, in a slot reserved so a tick never reflows the row.
+- The list has one height (`h-[50vh] min-h-40`) in a panel capped to the window (`max-h-[calc(100dvh-2rem)]`, flex column): BaseModal centres the panel, so a list that shrank would move the input under the cursor, and a panel taller than a phone would clip its own top.
+- Select all / Deselect all (trinity-enterprise#539) are pure rules in `utils/skillAssignDraft.js` (`bulkSelection`, read at `SkillAssignModal.vue:223-230`): they change only the draft, act only on the listed rows, never move a set row, never tick a deprecated skill or a name the PUT refuses, and keep an assignment the dialog does not list. Before the PUT, a save that removes anything re-reads the gate map and `gatedRemovals` decides whether Save confirms (`:290-318`).
 
 ### API Calls
 
@@ -79,7 +85,7 @@ lastDelivery.value = saved?.delivery ?? null
 const { data } = await api.get(`/api/agents/${agentName.value}/skills`)   // re-read the rows
 ```
 
-The dialog then emits `saved` with `deliveryText(lastDelivery, {saved: true})` and `deprecationText(lastDelivery)` (`SkillAssignModal.vue:134-146`); the tab shows it on the Shared line and arms the Sync emphasis only when delivery did not land.
+The dialog then emits `saved` with `deliveryText(lastDelivery, {saved: true})` and `deprecationText(lastDelivery)` (`SkillAssignModal.vue:325-337`); the tab shows it on the Shared line and arms the Sync emphasis only when delivery did not land.
 
 **`inject()`** (`stores/skills.js:403-432`): `POST /api/agents/{name}/skills/inject` (a repair: `force` server-side). Results are stored per skill (`injectionResults`), then the rows are re-read so a #2914 verdict that was set or cleared shows at once. A 409 reads "A skill sync is already running for this agent. Try again in a moment."
 

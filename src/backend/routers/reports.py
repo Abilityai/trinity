@@ -14,7 +14,8 @@ Create is **self-gated** (review/Codex #1): ``AuthorizedAgent`` checks the key
 owner can access the path agent, but does NOT stop an agent-scoped key from
 reporting as a *sibling* agent the owner also accesses. So we additionally
 require an agent-scoped caller's bound ``agent_name`` to equal the path agent
-(mirrors heartbeat_service.authorize_heartbeat). User-scoped callers fall back to
+(the agent-scope half of heartbeat_service.authorize_heartbeat; the system
+agent's system-scoped key is not admitted here). User-scoped callers fall back to
 the access check.
 """
 import json
@@ -27,6 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response,
 from database import db
 from dependencies import (
     agent_may_reach,
+    assert_own_agent,
     get_current_user,
     AuthorizedAgent,
     OwnedAgent,
@@ -43,7 +45,7 @@ from models import (
     User,
 )
 from services import rate_limiter, report_export, report_service
-from services.agent_service.helpers import accessible_agent_names, narrow_to_agent
+from services.agent_service.helpers import accessible_agent_names, narrow_to_agent, narrow_to_names
 
 logger = logging.getLogger(__name__)
 
@@ -183,11 +185,7 @@ async def create_report(
 
     Self-gated: an agent-scoped key may only report as itself.
     """
-    if current_user.agent_name and current_user.agent_name != name:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Agent-scoped key may only report as itself",
-        )
+    assert_own_agent(current_user, name, detail="Agent-scoped key may only report as itself")
 
     # Cap report volume per agent so a runaway agent can't flood the table
     # between retention sweeps (review I3). Fail-open if Redis is down.
@@ -399,10 +397,28 @@ async def list_fleet_reports(
     agent: Optional[str] = Query(None, description="Filter to a single agent"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
+    agent_names: Optional[List[str]] = Query(
+        None,
+        description=(
+            "Narrow to these agents (repeat the parameter per name, at most 500). "
+            "Only ever narrows what the caller may see (#3300)."
+        ),
+    ),
     current_user: User = Depends(get_current_user),
 ):
-    """List reports across all accessible agents (metadata only)."""
-    agent_names = narrow_to_agent(accessible_agent_names(current_user), agent)
+    """List reports across all accessible agents (metadata only).
+
+    #3300: `agent_names` narrows in SQL, before `limit`. The MCP `list_reports`
+    tool sends an agent key's `{self} ∪ permitted` here, so the page is cut
+    over exactly the rows the tool keeps; post-filtering after the cut let a
+    permitted peer's reports sit below a window of rows the tool then dropped.
+    """
+    try:
+        scope = narrow_to_names(
+            narrow_to_agent(accessible_agent_names(current_user), agent), agent_names)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(e))
+    agent_names = scope
     effective_hours = hours if hours in _VALID_HOURS else 168
     rows = db.get_fleet_reports(
         agent_names,

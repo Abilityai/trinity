@@ -24,7 +24,8 @@ deliberately does **not** re-render any header element; where it references one
   ├── mount → loadSidecars()   → Promise.allSettled([
   │      GET /api/executions/stats?agent=name          (live running/queued)
   │      GET /api/agents/{name}/notifications/count     ┐
-  │      GET /api/operator-queue/agents/{name}?status=pending  ├ attention badge
+  │      GET /api/operator-queue?agent_name={name}&status=pending&limit=1 ├ attention badge
+  │        (#3302: reads `total`; the old /agents/{name} `count` was a page length)
   │      GET /api/agents/{name}/git/sync-state          ┘ (count + link only)
   │      GET /api/monitoring/agents/{name}              (current health indicators)
   │      GET /api/monitoring/agents/{name}/history?check_type=network (uptime/latency trend)

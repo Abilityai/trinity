@@ -65,6 +65,34 @@ def test_an_empty_list_turns_it_off():
     assert tn.normalize_entries([]) == []
 
 
+# trinity-enterprise#873: prod/hosted add a third managed bridge, the ingress
+# network the bundled nginx and cloudflared sit on. Its prefix is configurable,
+# so the refusal must follow the ACTIVE prefix, not a literal.
+@pytest.mark.parametrize("prefix,entry,neighbour", [
+    ("172.30.0", "172.30.0.0/24", "172.30.1.0/24"),
+    ("172.31.7", "172.31.7.128/25", "172.31.8.0/24"),
+])
+def test_the_active_ingress_network_is_refused_like_the_other_bridges(monkeypatch, prefix, entry, neighbour):
+    monkeypatch.setenv("TRINITY_BUNDLED_PROXY_TRUST", "1")
+    monkeypatch.setenv("TRINITY_PROXY_PREFIX", prefix)
+    monkeypatch.delenv("TRUSTED_PROXIES", raising=False)
+    with pytest.raises(tn.TrustedNetworkError) as exc:
+        tn.normalize_entries([TAILNET, entry])
+    assert "platform" in str(exc.value) and entry in str(exc.value)
+    # An unrelated neighbouring range is still accepted.
+    assert tn.normalize_entries([TAILNET, neighbour]) == [TAILNET, neighbour]
+
+
+def test_a_trusted_name_never_resolves_into_the_active_ingress_network(monkeypatch):
+    monkeypatch.setenv("TRINITY_BUNDLED_PROXY_TRUST", "1")
+    monkeypatch.setenv("TRINITY_PROXY_PREFIX", "172.31.7")
+    monkeypatch.delenv("TRUSTED_PROXIES", raising=False)
+    with pytest.raises(A2AEndpointUrlError):
+        validate_a2a_endpoint_url("http://peer.tail1234.ts.net/a2a/x",
+                                  trusted_entries=["*.tail1234.ts.net"],
+                                  resolver=_resolver("172.31.7.3"))
+
+
 # --------------------------------------------------------------------------- #
 # Outbound
 # --------------------------------------------------------------------------- #

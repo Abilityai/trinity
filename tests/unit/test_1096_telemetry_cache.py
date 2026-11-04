@@ -101,6 +101,12 @@ def _load_telemetry_router():
     _docker_svc.docker_client = object()          # truthy → not the 503 branch
     _docker_svc.list_all_agents_fast = MagicMock(return_value=[])
 
+    # trinity-enterprise#872: the handler scopes the payload to the caller's
+    # visible agents; None (an admin) leaves the cached payload unchanged.
+    _agent_svc = types.ModuleType("services.agent_service")
+    _helpers = types.ModuleType("services.agent_service.helpers")
+    _helpers.visible_agent_names = lambda current_user: None
+
     # test_inject_assigned_credentials.py can overwrite sys.modules['fastapi']
     # with a Mock at collection time; evict briefly so @router.get() binds the
     # real decorator, then restore.
@@ -112,10 +118,14 @@ def _load_telemetry_router():
     path = _BACKEND / "routers" / "telemetry.py"
     spec = importlib.util.spec_from_file_location("routers.telemetry", str(path))
     mod = importlib.util.module_from_spec(spec)
-    sys.modules["routers.telemetry"] = mod
+    # Registered only while the module executes: a stub-loaded copy left in
+    # sys.modules would be what a later test's `import routers.telemetry` gets.
     with patch.dict(sys.modules, {
+        "routers.telemetry": mod,
         "dependencies": _deps,
         "services.docker_service": _docker_svc,
+        "services.agent_service": _agent_svc,
+        "services.agent_service.helpers": _helpers,
         "fastapi": _real_fastapi,
         "psutil": _make_psutil_stub(),
     }):

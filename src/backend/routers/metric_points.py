@@ -69,7 +69,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.exc import DBAPIError, OperationalError
 
 from database import db
-from dependencies import AuthorizedAgent, get_current_user
+from dependencies import AuthorizedAgent, assert_own_agent, get_current_user
 from models import (
     METRIC_BATCH_MAX_BYTES,
     MetricPointsBatch,
@@ -141,18 +141,25 @@ def _ops_int(key: str, fallback: int) -> int:
       basis while the sweep was disabled would enforce a window nothing is
       actually pruning to.
 
+    A negative value is garbage too (#3089): clamping it to `0` would lift the
+    cap. Every reader that REPORTS the cap goes through this function, so the
+    report cannot disagree with what the write path enforces.
+
     (`PUT /api/settings/{key}` can no longer write garbage to either key, but a
     hand-edited row still can.)
     """
     raw, _source = settings_service.resolve_ops_setting(key)
     try:
-        return max(int(raw), 0)
+        value = int(raw)
     except (TypeError, ValueError):
+        value = -1
+    if value < 0:
         logger.warning(
-            "[Metrics] Unparseable %s=%r — using the built-in default %s",
+            "[Metrics] Unusable %s=%r — using the built-in default %s",
             key, raw, fallback,
         )
         return fallback
+    return value
 
 
 @router.post(
@@ -177,11 +184,7 @@ async def record_metric_points(
     against what it meant to send.
     """
     # --- self-gate (before any read: the answer must not vary by existence) --
-    if current_user.agent_name and current_user.agent_name != name:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Agent-scoped key may only record metrics as itself",
-        )
+    assert_own_agent(current_user, name, detail="Agent-scoped key may only record metrics as itself")
 
     rate_limiter.enforce(
         f"agent_metrics:{name}",

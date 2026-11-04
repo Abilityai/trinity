@@ -114,6 +114,9 @@ CHECKS: List[CheckDef] = [
     _c("F-009", "info", "static", "F", "at least one skill or command file exists", claude_only=True),
     _c("F-010", "soft", "static", "F", "dashboard.yaml exists"),
     _c("F-011", "info", "static", "F", "ARCHITECTURE.md (or docs/architecture.md) exists"),
+    # #4002. SOFT: a failed setup hook leaves the agent running without the
+    # packages it declared. F-012/F-013 are retired, hence F-014.
+    _c("F-014", "soft", "static", "F", "last .trinity/setup.sh run exited 0"),
     # --- S: Security -------------------------------------------------------
     _c("S-001", "hard", "static", "S", ".env is excluded in .gitignore", auto_fixable=True),
     _c("S-002", "hard", "static", "S", ".mcp.json is excluded in .gitignore", auto_fixable=True),

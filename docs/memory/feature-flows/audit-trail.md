@@ -312,6 +312,18 @@ await platform_audit_service.log(
 )
 ```
 
+`actor_ip` is the canonical client address (trinity-enterprise#873):
+`utils/client_ip.ClientAddressMiddleware` rewrites `request.client` once per
+HTTP/WebSocket request before any route runs, so behind the bundled nginx or
+Cloudflare Tunnel the row records the visitor, not the proxy container. The
+middleware keeps a provenance (`peer`, `xff`, `cf`, `proxy_fallback`) in the
+ASGI scope; a request that reached a trusted proxy without forwarded identity
+is recorded under that proxy's address (`proxy_fallback`) rather than a guessed
+client. Not covered: historical rows (never rewritten), system and scheduled
+events (no request), and rows the MCP server relays to `/api/internal/audit`,
+which keep the address the relay supplies. Rules: `architecture/security.md`
+§1a.
+
 Log call lives in the **router**, not the service, so `current_user` stays in
 scope without threading through service signatures. Placement is always
 **after the state transition has committed** (container running, DB rows
@@ -348,6 +360,8 @@ Failed logins have no `actor_user` — the service falls back to
 | `unshare_agent_endpoint` | `unshare` | `{removed_email}` |
 | `decide_access_request_endpoint` (approve) | `access_request_approved` | `{email, access_request_id}` |
 | `decide_access_request_endpoint` (reject) | `access_request_rejected` | `{email, access_request_id}` |
+
+Capability grants write `capability_used`, `capability_refused`, `capability_grant` and `capability_revoke`; [self-change-grants.md](self-change-grants.md) has the row-by-row table.
 
 ### Credentials (`routers/credentials.py`)
 

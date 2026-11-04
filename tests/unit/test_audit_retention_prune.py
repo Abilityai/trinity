@@ -106,7 +106,9 @@ def audit_ops(tmp_path, monkeypatch):
         "db.audit", str(_BACKEND / "db" / "audit.py")
     )
     audit_mod = importlib.util.module_from_spec(spec)
-    sys.modules["db.audit"] = audit_mod
+    # Restored at teardown (#3390): left in place, this private copy and the real
+    # package's `db.audit` attribute were two modules for the rest of the run.
+    monkeypatch.setitem(sys.modules, "db.audit", audit_mod)
     spec.loader.exec_module(audit_mod)
     return audit_mod.PlatformAuditOperations()
 

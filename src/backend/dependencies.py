@@ -1,11 +1,12 @@
 """
 FastAPI dependencies for the Trinity backend.
 """
+import json
 import logging
 import re
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Annotated
+from typing import Any, Callable, Optional, Annotated
 from fastapi import Depends, HTTPException, status, Request, Path
 from fastapi.security import OAuth2PasswordBearer
 from jose import JWTError, jwt
@@ -24,6 +25,18 @@ logger = logging.getLogger(__name__)
 # threat (UnderDefense 3.3.4) is Low/CVSS 2.0 and backend restarts already
 # rotate SECRET_KEY (invalidating every token).
 _JWT_REVOKED_PREFIX = "jwt:revoked:"
+
+# Per-user platform-session cutoff (#3825): "sign this account out everywhere
+# else", written when its password is changed. Same shape as the portal cutoff
+# below (a per-`jti` blacklist cannot name every token a user holds): one key per
+# username holding `{"at": <epoch>, "at_ms": <epoch ms>, "keep": <jti>}`; a
+# session token issued at or before the cutoff is refused, except the one `keep`
+# names — the fresh token the change handed back to the person who made it.
+# Tokens are dated to the millisecond (`iat_ms`) so a sign-in later in the same
+# second as the change is not refused; a token dated only by `iat` is refused for
+# the whole cutoff second. Event-loopback tokens are not sessions and are exempt.
+# Reads fail open like the `jti` check; the TTL outlives the longest token.
+_USER_SESSIONS_REVOKED_PREFIX = "trinity:user_sessions_revoked:"
 
 # Bulk portal-session revocation (trinity-enterprise#281): "log this client out
 # everywhere, now". A per-`jti` blacklist cannot express it — `jti` is random per
@@ -164,6 +177,83 @@ def is_token_revoked(jti: Optional[str]) -> bool:
         return False
 
 
+def _epoch_ms() -> int:
+    """Wall-clock epoch milliseconds — the one clock that dates platform tokens
+    and the #3825 cutoff, so the two can be compared below one second."""
+    return int(datetime.now(timezone.utc).timestamp() * 1000)
+
+
+def revoke_user_sessions(username: str, keep_jti: Optional[str] = None) -> bool:
+    """Refuse every platform session token `username` was issued up to now,
+    except `keep_jti` (#3825). True when the cutoff was durably written, so the
+    caller can report honestly on a Redis outage."""
+    if not username:
+        return False
+    r = get_breaker_redis()
+    if r is None:
+        logger.warning("[auth] user session revoke skipped — Redis unavailable")
+        return False
+    from config import ACCESS_TOKEN_EXPIRE_MINUTES
+
+    now_ms = _epoch_ms()
+    try:
+        r.setex(
+            f"{_USER_SESSIONS_REVOKED_PREFIX}{username}",
+            ACCESS_TOKEN_EXPIRE_MINUTES * 60 + 60,  # + slack for clock skew
+            json.dumps({"at": now_ms // 1000, "at_ms": now_ms, "keep": keep_jti}),
+        )
+        return True
+    except Exception as exc:  # pragma: no cover — fail-open
+        logger.warning(f"[auth] revoke_user_sessions failed: {exc}")
+        return False
+
+
+def session_predates_user_revoke(payload: dict) -> bool:
+    """True when this platform token was issued before its user's #3825 cutoff.
+
+    A token with no `iat` (minted before #3825) cannot be shown to post-date the
+    cutoff, so it is refused — but only for a user who HAS a cutoff, i.e. who
+    changed their password, which is the kill switch it is meant to be.
+
+    Dating: a token with `iat_ms` is refused when issued at or before the
+    cutoff's millisecond, so a sign-in later in the same second survives while a
+    token minted earlier in that second does not. A token with only `iat`
+    (whole seconds — e.g. a caller-supplied `iat`) cannot be placed inside the
+    cutoff second, so that whole second is refused: rounding toward revoking.
+
+    An event-loopback token (EVT-001) is not a session: the backend mints one per
+    dispatch with `sub` = the provisioned admin, no `iat` and a 5-minute life,
+    fenced to one route. Without the exemption an admin password change would
+    refuse every event dispatch for the cutoff's whole TTL."""
+    if payload.get("scope") == EVENT_LOOPBACK_SCOPE:
+        return False
+    username = payload.get("sub")
+    r = get_breaker_redis() if username else None
+    if r is None:
+        return False
+    try:
+        raw = r.get(f"{_USER_SESSIONS_REVOKED_PREFIX}{username}")
+        if raw is None:
+            return False
+        cutoff = json.loads(raw.decode() if isinstance(raw, (bytes, bytearray)) else raw)
+        at = int(cutoff["at"])
+        at_ms = int(cutoff.get("at_ms", at * 1000 + 999))
+        keep = cutoff.get("keep")
+    except Exception as exc:  # pragma: no cover — fail-open
+        logger.warning(f"[auth] session_predates_user_revoke failed (fail-open): {exc}")
+        return False
+    if keep and payload.get("jti") == keep:
+        return False
+    iat_ms = payload.get("iat_ms")
+    iat = payload.get("iat")
+    try:
+        if iat_ms is not None:
+            return int(iat_ms) <= at_ms
+        return iat is None or int(iat) <= at_ms // 1000
+    except (TypeError, ValueError):
+        return True
+
+
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 # ent#554 — the same scheme with `auto_error=False`, so a route can accept an
@@ -233,6 +323,15 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None, m
         "mode": mode,  # Track auth mode to prevent dev/prod token mixing
         "jti": secrets.token_urlsafe(16),  # #187: per-token id for revocation
     })
+    # #3825: dates the token for the per-user session cutoff. A caller that
+    # supplies its own `iat` (the portal session, ent#375) keeps it.
+    # `iat_ms` dates it below the second, so a sign-in in the same second as a
+    # password change is not caught by that change's cutoff. Only when we set
+    # `iat` ourselves: a caller-supplied `iat` keeps second precision.
+    if "iat" not in to_encode:
+        now_ms = _epoch_ms()
+        to_encode["iat"] = now_ms // 1000
+        to_encode["iat_ms"] = now_ms
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
@@ -645,6 +744,9 @@ def decode_token(token: str) -> Optional[dict]:
         # #187 — a token revoked via logout is no longer valid (also for WS).
         if is_token_revoked(payload.get("jti")):
             return None
+        # #3825 — nor one issued before the user changed their password.
+        if session_predates_user_revoke(payload):
+            return None
 
         # Get full user record from database
         user = db.get_user_by_username(username)
@@ -689,7 +791,24 @@ async def resolve_platform_user_unfloored(request: Request, token: str) -> User:
     where a Workspace-only member belongs. Every other caller goes through
     `get_current_user`. `test_837_workspace_only_floor.py` pins the caller set,
     so a new door is a reviewed edit rather than a quiet way around the floor.
+
+    trinity-enterprise#1054 — the terms-acceptance gate (`services/terms_gate.py`)
+    is consulted HERE, once, after the credential is fully resolved: this is the
+    one function every door shares, so a Workspace-only person who has not
+    accepted the current terms is refused on all of them (403 `terms_required`),
+    and a route the person must reach before accepting is marked `@terms_route`.
+    Operator and above are never gated; an agent's credential is untouched.
     """
+    user = await _resolve_platform_credential(request, token)
+    from services import terms_gate  # late: the seam imports this module's marker
+    terms_gate.enforce(request, user)
+    return user
+
+
+async def _resolve_platform_credential(request: Request, token: str) -> User:
+    """The credential resolution itself — every scope fence, the revocation and
+    suspension checks — with no gate on top. Only `resolve_platform_user_unfloored`
+    calls this; the gate it adds is the reason the body is split out."""
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -735,6 +854,9 @@ async def resolve_platform_user_unfloored(request: Request, token: str) -> User:
 
         # #187 — reject a token revoked via logout.
         if is_token_revoked(payload.get("jti")):
+            raise credentials_exception
+        # #3825 — reject a session issued before the user changed their password.
+        if session_predates_user_revoke(payload):
             raise credentials_exception
 
         user = db.get_user_by_username(username)
@@ -833,8 +955,13 @@ async def resolve_platform_user_unfloored(request: Request, token: str) -> User:
             # resolves to the key OWNER, so any endpoint doing an inline access
             # check would otherwise treat it as that human.
             if scope == OPS_SCOPE:
+                _enforce_ops_key_owner(user)
                 _enforce_ops_key_fence(request)
-            return User(
+            # #3180 — the bounded write tier: listed route, marked handler, and an
+            # owner who is still an admin (it dies with its owner on every route).
+            if scope == OPS_WRITE_SCOPE:
+                _enforce_ops_write_key_fence(request, user)
+            principal = User(
                 id=user["id"],
                 username=user["username"],
                 email=user.get("email"),
@@ -860,6 +987,12 @@ async def resolve_platform_user_unfloored(request: Request, token: str) -> User:
                 mcp_key_id=mcp_key_info.get("key_id"),
                 mcp_key_name=mcp_key_info.get("key_name"),
             )
+            record_acting_turn(request, principal)
+            # PR #3778 review: for EVERY agent key, header or not — the fence
+            # judges a header-less request by the ledger (`restricted_agent_turn`),
+            # so a curl with the agent's key cannot skip it by omitting the header.
+            _enforce_standing_work_fence(request, principal)
+            return principal
 
     # Both JWT and MCP key failed
     raise credentials_exception
@@ -1059,6 +1192,32 @@ def workspace_route(reason: str):
     return mark
 
 
+TERMS_ROUTE_ATTR = "__trinity_terms_route__"
+
+
+def terms_route(reason: str):
+    """Mark a route a person must reach BEFORE accepting the terms (trinity-enterprise#1054).
+
+    The terms gate (`services/terms_gate.py`) skips a marked route. The set is
+    deliberately tiny: signing out, the identity read the SPA lands on, and the
+    acceptance routes themselves. Same shape and same placement rule as
+    `workspace_route` — keep it BELOW the route decorator::
+
+        @router.post("/terms/accept")
+        @workspace_route("the terms screen is a Workspace page")
+        @terms_route("accepting is what ends the refusal")
+        async def accept_terms(current_user: User = Depends(require_interactive)):
+    """
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("terms_route needs a reason")
+
+    def mark(endpoint):
+        setattr(endpoint, TERMS_ROUTE_ATTR, reason)
+        return endpoint
+
+    return mark
+
+
 def enforce_operator_floor(request: Request, user: User) -> None:
     """Refuse a Workspace-only principal off its allowed routes (403 `workspace_only`)."""
     if not is_workspace_only_role(user.role):
@@ -1236,6 +1395,26 @@ def scope_may_open_event_stream(
     return not info["is_ephemeral"]
 
 
+OPS_OWNER_DETAIL = {
+    "code": "ops_owner_not_admin",
+    "message": "Ops keys work only while the account that minted them is an admin",
+}
+
+
+def _enforce_ops_key_owner(owner: dict) -> None:
+    """An `ops` key dies with its owner's admin role on EVERY route (#3180).
+
+    The fence below reads the method and path only, so the routes it admits
+    with no admin gate of their own (version, monitoring, telemetry, the agent
+    roster, the execution reads, subscriptions) kept answering a demoted
+    owner's key, though the docs said demotion stops it. Same rule and the same
+    place as `_enforce_ops_write_key_fence`: the owner row is already loaded,
+    so the check costs no query and cannot fail open.
+    """
+    if (owner or {}).get("role") != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=dict(OPS_OWNER_DETAIL))
+
+
 def _enforce_ops_key_fence(request: Request) -> None:
     """Route containment for `ops`-scoped keys (#2323).
 
@@ -1252,6 +1431,119 @@ def _enforce_ops_key_fence(request: Request) -> None:
         status_code=status.HTTP_403_FORBIDDEN,
         detail="Ops keys are read-only and limited to fleet health, telemetry, execution and subscription reads",
     )
+
+
+# --------------------------------------------------------------------------- #
+# #3180 — the `ops_write` scope: the bounded WRITE tier beside `ops`.
+# --------------------------------------------------------------------------- #
+# `ops` (above) is read-only. `ops_write` is its write sibling for the
+# operational writes a machine actually makes: the four routes below, measured
+# from the ops toolkit's deploy records and nothing else. It does NOT include
+# the `ops` reads — a writer holds both keys — so the read tier and its seven
+# opt-ins are untouched.
+#
+# A request from this scope is admitted only when ALL THREE hold, checked here
+# at the single auth entry point (the ent#293/#297 placement, beside the other
+# fences):
+#
+#   1. (method, routed path) full-matches an entry in `_OPS_WRITE_ALLOWED_ROUTES`;
+#   2. the routed handler carries the `@ops_write_route("<why>")` mark, read from
+#      `scope["route"].endpoint`;
+#   3. the key's OWNER is still an admin.
+#
+# (1) and (2) are two independently maintained declarations with ONE
+# enforcement point. An overbroad or holed regex is refused by every unmarked
+# handler (every grant route among them), a stray mark is refused by the path
+# list, and the mark is what lets a test catch an overbroad regex at all — a
+# sweep that uses the regex itself cannot. They are not independent
+# ENFORCEMENT: removing the call below bypasses all three. Route-local
+# enforcement exists only where a route has its own scope-aware gate — reset
+# (`require_admin_allowing("ops_write")`) and start/stop (the target policy in
+# `enforce_agent_spawn_scope`). Terminate has only this fence.
+#
+# (3) is what makes the key die with its owner on routes with no admin gate:
+# the owner row is already loaded by the resolver, so the comparison costs no
+# query and cannot fail open. Suspension is refused one line before this runs
+# (#995); demotion is refused here; a password change with "revoke keys"
+# revokes it (`services/password_service.PERSON_KEY_SCOPES`). It applies to the
+# next request, not to an operation already running.
+#
+# Same rules as the `ops` fence: method and path only, no DB, no Redis, no
+# settings lookup; `scope["path"]`, never `request.url` (#3102); every entry
+# anchored; fail CLOSED on a route that moves. The mark is also read from the
+# scope, never from the Host-built URL.
+OPS_WRITE_SCOPE = "ops_write"
+
+OPS_WRITE_ROUTE_ATTR = "__trinity_ops_write_route__"
+
+_OPS_WRITE_ALLOWED_ROUTES = (
+    # Re-close both breakers on an agent the operator knows is healthy (#526).
+    ("POST", re.compile(r"^/api/agents/[^/]+/circuit-breaker/reset$")),
+    # Start / stop one agent. The system agent and ephemeral agents are refused
+    # in `enforce_agent_spawn_scope`, the lifecycle gate both handlers call first.
+    ("POST", re.compile(r"^/api/agents/[^/]+/start$")),
+    ("POST", re.compile(r"^/api/agents/[^/]+/stop$")),
+    # Cancel one execution.
+    ("POST", re.compile(r"^/api/agents/[^/]+/executions/[^/]+/terminate$")),
+)
+
+OPS_WRITE_ROUTE_MESSAGE = (
+    "Ops-write keys may only reset an agent's circuit breaker, start or stop an "
+    "agent, or terminate an execution"
+)
+OPS_WRITE_NOT_LISTED_DETAIL = {"code": "ops_write_route_not_listed", "message": OPS_WRITE_ROUTE_MESSAGE}
+OPS_WRITE_NOT_MARKED_DETAIL = {"code": "ops_write_route_not_marked", "message": OPS_WRITE_ROUTE_MESSAGE}
+OPS_WRITE_OWNER_DETAIL = {
+    "code": "ops_write_owner_not_admin",
+    "message": "Ops-write keys work only while the account that minted them is an admin",
+}
+OPS_WRITE_PROTECTED_TARGET_DETAIL = {
+    "code": "ops_write_protected_target",
+    "message": "Ops-write keys cannot start or stop the system agent or an ephemeral agent",
+}
+
+
+def ops_write_route(reason: str):
+    """Mark a handler an `ops_write` key may reach (#3180).
+
+    The second admission predicate of the `ops_write` fence: a request is
+    admitted only when its routed handler carries this mark AND its method and
+    path are listed in `_OPS_WRITE_ALLOWED_ROUTES`. Sets an attribute on the
+    function and returns the function itself, so FastAPI sees the same
+    signature. Keep it BELOW the route decorator (the census test checks this),
+    so the registered function is the marked one. The reason says why the route
+    is a USE, never a grant (Invariant #8)::
+
+        @router.post("/{agent_name}/start")
+        @ops_write_route("starts one agent; no credential reaches the caller")
+        async def start_agent_endpoint(...):
+    """
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("ops_write_route needs a reason")
+
+    def mark(endpoint):
+        setattr(endpoint, OPS_WRITE_ROUTE_ATTR, reason)
+        return endpoint
+
+    return mark
+
+
+def _enforce_ops_write_key_fence(request: Request, owner: dict) -> None:
+    """Route containment for `ops_write`-scoped keys (#3180).
+
+    `owner` is the key owner's row the resolver already loaded. Each refusal
+    depends only on the principal and the matched route, never on whether an
+    addressed agent exists, so it discloses nothing (Invariant #8, #186).
+    """
+    if (owner or {}).get("role") != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=dict(OPS_WRITE_OWNER_DETAIL))
+    method = request.method.upper()
+    path = request.scope["path"]
+    if not any(method == m and pattern.fullmatch(path) for m, pattern in _OPS_WRITE_ALLOWED_ROUTES):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=dict(OPS_WRITE_NOT_LISTED_DETAIL))
+    endpoint = getattr(request.scope.get("route"), "endpoint", None)
+    if not getattr(endpoint, OPS_WRITE_ROUTE_ATTR, None):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=dict(OPS_WRITE_NOT_MARKED_DETAIL))
 
 
 def reject_agent_principal(current_user: User) -> None:
@@ -1312,6 +1604,34 @@ def reject_non_interactive_principal(current_user: User) -> None:
                 "MCP API keys cannot perform it"
             ),
         )
+
+
+def assert_interactive_admin(current_user: User) -> None:
+    """The GRANT gate (trinity-enterprise#1030 CP2): an admin in a signed-in
+    session — `assert_admin` AND `reject_non_interactive_principal`, spelled
+    here and nowhere else.
+
+    The two capability-grant routes call it after their `Depends(require_admin)`;
+    the manifest apply snapshot and create-mode deploy ask `is_interactive_admin`
+    before planning a `grants:` write and otherwise REPORT the grant as held
+    back. One spelling, so a manifest can never grant what the route would
+    refuse: an agent key resolving to its admin owner, or an admin's own MCP
+    key, fails here exactly as it fails at `PUT /capability-grants/{cap}`.
+    Raises 403; returns None on success.
+    """
+    assert_admin(current_user)
+    reject_non_interactive_principal(current_user)
+
+
+def is_interactive_admin(current_user: User) -> bool:
+    """`assert_interactive_admin` as a predicate, for the surfaces that hold a
+    write back instead of refusing the request (the `is_interactive_principal`
+    precedent)."""
+    try:
+        assert_interactive_admin(current_user)
+    except HTTPException:
+        return False
+    return True
 
 
 def is_interactive_principal(current_user: User) -> bool:
@@ -1487,6 +1807,34 @@ def _spawned_by_caller(agent_name: str, target_agent: str) -> bool:
     return bool(parent_key) and parent_key.id == expected_key_id
 
 
+def _refuse_ops_write_protected_target(target_agent: str) -> None:
+    """#3180 — the agents an `ops_write` key may not start or stop.
+
+    * The system agent: stopping and then starting it replaces its container,
+      which is the operation #1816 made human-only (`POST /api/system-agent/
+      restart`); admitting both halves would admit that restart by another
+      spelling. Refused by name and by the `is_system` flag.
+    * An ephemeral ("ghost") agent: a start with config drift recreates it, and
+      a ghost is volume-less, so that destroys its workspace; ghost lifecycle
+      belongs to its spawner (trinity-enterprise#69).
+
+    Fails CLOSED: a lookup that raises, or an answer that does not carry the
+    flag, is refused — an unprovable claim of "durable" is not a claim.
+    """
+    from db.agents import SYSTEM_AGENT_NAME
+
+    try:
+        system = target_agent == SYSTEM_AGENT_NAME or db.is_system_agent(target_agent)
+        info = None if system else db.get_agent_ephemeral_info(target_agent)
+    except Exception as exc:
+        # An unreadable answer is not a durable agent: refuse, and say why here,
+        # because the caller only sees the protected-target refusal.
+        logger.warning("ops_write target lookup failed for %s; refusing: %s", target_agent, exc)
+        info = None
+    if not (isinstance(info, dict) and "is_ephemeral" in info and not info["is_ephemeral"]):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=dict(OPS_WRITE_PROTECTED_TARGET_DETAIL))
+
+
 def enforce_agent_spawn_scope(current_user: User, target_agent: str) -> None:
     """Lifecycle-mutation gate for agent-scoped callers
     (trinity-enterprise#69 Part 2) — INTERIM until #948 capability tokens.
@@ -1497,7 +1845,15 @@ def enforce_agent_spawn_scope(current_user: User, target_agent: str) -> None:
     name reuse; the key id is stable and cascade-deletes with the parent).
     No-op for human/system principals. #948 workflow-scoped capability tokens
     will subsume this parenthood check; ``spawned_by_*`` stays as provenance.
+
+    #3180 — the TARGET policy for an `ops_write` key: it may not start or stop
+    the system agent or an ephemeral agent (`_refuse_ops_write_protected_target`).
     """
+    # `getattr(..., None)` is safe here, unlike at an allowlist gate: the default
+    # can only ever mean "not an ops_write key", and an ops_write principal is
+    # built by the resolver, which always sets `mcp_scope`.
+    if getattr(current_user, "mcp_scope", None) == OPS_WRITE_SCOPE:
+        _refuse_ops_write_protected_target(target_agent)
     if not current_user.agent_name:
         return
     if not _spawned_by_caller(current_user.agent_name, target_agent):
@@ -1533,12 +1889,20 @@ def enforce_agent_spawn_scope(current_user: User, target_agent: str) -> None:
 # target (`_admit_capability_reach`), and only that request's reach checks see
 # it. Holding `schedules.manage` therefore reaches a sibling's schedule routes
 # and nothing else; the gate never has to know which capability a route checked.
+def agent_principal_name(current_user) -> Optional[str]:
+    """The agent an agent-scoped principal acts as, else None.
+
+    `isinstance`, not truthiness: a bare MagicMock principal (older suites)
+    carries a truthy mock attribute and is not an agent. The one predicate the
+    per-agent gate and the fleet narrowing share (trinity-enterprise#872)."""
+    agent = getattr(current_user, "agent_name", None)
+    return agent if isinstance(agent, str) and agent else None
+
+
 def agent_may_reach(current_user, target_agent: str, *, manage: bool = False) -> bool:
     """False only when an agent-scoped principal is outside its reach."""
-    agent = getattr(current_user, "agent_name", None)
-    # `isinstance`, not truthiness: a bare MagicMock principal (older suites)
-    # carries a truthy mock attribute and is not an agent.
-    if not isinstance(agent, str) or not agent:
+    agent = agent_principal_name(current_user)
+    if agent is None:
         return True
     if target_agent == agent:
         return True
@@ -1566,8 +1930,8 @@ def _admit_capability_reach(current_user, target_agent: str) -> None:
     """Record that a capability fence admitted an agent key to `target_agent`.
 
     Call only after the grant check AND the owner bound
-    (`_refuse_unless_owners_agent`) have passed, so the reach it earns stays
-    inside the agents the key's owner owns."""
+    (`enforce_agent_capability`'s `owner_bound`) have passed, so the reach it
+    earns stays inside the agents the key's owner owns."""
     reach = getattr(current_user, "_capability_reach", None)
     if isinstance(reach, set):
         reach.add(target_agent)
@@ -1581,6 +1945,76 @@ def _has_edge(agent_name: str, target_agent: str) -> bool:
         logger.warning("[ent#629] edge lookup %s -> %s failed; treating as no edge",
                        agent_name, target_agent)
         return False
+
+
+# ----------------------------------------------------------------------------
+# Fleet reach (trinity-enterprise#872)
+# ----------------------------------------------------------------------------
+# The set form of `agent_may_reach`'s USE tier, for routes that take no single
+# agent in the path (lists, counts, timelines, the event stream). Every roster
+# accessor intersects with it, so an agent key's fleet view is its reach and
+# never its owner's. Per-request capability reach is deliberately NOT included:
+# it is earned per route, and a fleet list is no such route.
+
+def agent_reach_names(agent_name: str, owner_names: Optional[set] = None) -> set:
+    """{self} ∪ its `agent_permissions` edges ∪ the agents it spawned with the
+    key it holds now. `owner_names` is the owner's accessible set, or None for
+    an admin owner (every agent). Pure DB; every read fails closed, keeping self."""
+    try:
+        edges = set(db.get_permitted_agents(agent_name) or [])
+    except Exception:
+        logger.warning("[ent#872] edge list for %s failed; treating as no edges", agent_name)
+        edges = set()
+    try:  # one query, same key-id rule as `_spawned_by_caller`
+        key = db.get_agent_mcp_api_key(agent_name)
+        spawned = set(db.list_agents_spawned_by_key(agent_name, key.id)) if key else set()
+    except Exception:
+        logger.warning("[ent#872] spawned list for %s failed; treating as none", agent_name)
+        spawned = set()
+    reach = edges | spawned
+    if owner_names is not None:
+        reach &= set(owner_names)
+    return reach | {agent_name}
+
+
+def owner_agent_names(role: Optional[str], email: Optional[str]) -> Optional[set]:
+    """The owner bound for `agent_reach_names`: None for an admin owner, else the
+    agents the owner may access. No email or a failed read is the empty set."""
+    if role == "admin":
+        return None
+    if not email:
+        return set()
+    try:
+        return set(db.get_accessible_agent_names(email, is_admin=False) or [])
+    except Exception:
+        logger.warning("[ent#872] owner roster read failed; bounding reach to self")
+        return set()
+
+
+def principal_reach(current_user) -> Optional[set]:
+    """An agent principal's fleet reach, or None for every other principal.
+
+    Memoized on the principal (one object per request, like `_capability_reach`),
+    so a route that consults it through several accessors reads the DB once."""
+    agent = agent_principal_name(current_user)
+    if agent is None:
+        return None
+    cached = getattr(current_user, "_fleet_reach", None)
+    if isinstance(cached, set):
+        return set(cached)
+    reach = agent_reach_names(agent, owner_agent_names(
+        getattr(current_user, "role", None), getattr(current_user, "email", None)))
+    try:
+        current_user._fleet_reach = set(reach)
+    except Exception:  # a stand-in principal without the private slot
+        pass
+    return reach
+
+
+def is_fleet_admin(current_user) -> bool:
+    """An admin that sees every agent: the admin role on anything but an agent
+    key, which carries its owner's role (trinity-enterprise#872)."""
+    return getattr(current_user, "role", None) == "admin" and agent_principal_name(current_user) is None
 
 
 def _reject_connector_principal(current_user: User) -> None:
@@ -1774,6 +2208,14 @@ def owner_is_workspace_only(owner_row: Optional[dict]) -> bool:
     the way `get_current_user` refuses a key with no owner.
     """
     return is_workspace_only_role((owner_row or {}).get("role"))
+
+
+def owner_is_suspended(owner_row: Optional[dict]) -> bool:
+    """A door that resolves a key's owner ROW itself (`/ws/events`) applies the
+    #995 deactivation check `get_current_user` and `/ws` apply: a suspended
+    owner's still-active key is refused. An unresolvable owner is refused by
+    `owner_is_workspace_only`, so None reads as "not suspended" here."""
+    return bool((owner_row or {}).get("suspended_at"))
 
 
 def require_role(min_role: str):
@@ -1976,8 +2418,9 @@ def get_self_agent(current_user: User = Depends(get_current_user)) -> str:
     agent-scoped key is its own agent, the system key is `trinity-system`.
     Nothing in the request can name another one — and nothing has to, which
     matters because a renamed agent's container keeps its old `AGENT_NAME`
-    while its key follows the rename. Every other principal gets
-    `get_self_acting_agent`'s uniform 403, then the access check its 404.
+    until its next recreate (#3813), while its key follows the rename. Every
+    other principal gets `get_self_acting_agent`'s uniform 403, then the access
+    check its 404.
     """
     return get_self_acting_agent(acting_agent_name(current_user) or "", current_user)
 
@@ -2131,8 +2574,9 @@ _CAPABILITY_REFUSALS = {
         "schedule_management_not_permitted",
         "This agent does not hold the schedule-management permission, which "
         "creating, changing, enabling, disabling or deleting ANOTHER agent's "
-        "schedules (and their webhooks) requires. An agent's own schedules need "
-        "no grant." + _ask_for_it("schedules.manage"),
+        "schedules requires, as does creating, reading, signing or revoking "
+        "any schedule's webhook \u2014 its own included. An agent's own schedules "
+        "otherwise need no grant." + _ask_for_it("schedules.manage"),
     ),
     "instructions.manage": (
         "instruction_management_not_permitted",
@@ -2200,24 +2644,20 @@ def capability_refusal(current_user, capability: str) -> Optional[tuple]:
     return code, f"A '{scope}' key cannot do this: {message}"
 
 
-async def enforce_agent_capability(
-    request: Request, current_user: User, capability: str, *, target: Optional[str] = None,
+async def _audit_capability(
+    request: Request, current_user: User, action: str, capability: str,
+    target: Optional[str], **details,
 ) -> None:
-    """Refuse with a named 403 — and an audit row — unless the principal may use
-    `capability`. The refused attempt of a prompt-injected agent is exactly the
-    event worth keeping, so a refusal is recorded, not only returned."""
-    refusal = capability_refusal(current_user, capability)
-    if refusal is None:
-        return
-    code, message = refusal
-    try:  # best-effort: an audit failure must never turn a 403 into a 500
+    """One AUTHORIZATION row about a capability. Best-effort: an audit failure
+    never changes what the caller gets."""
+    try:
         from services.platform_audit_service import platform_audit_service, AuditEventType
-        # The refused ACTOR is the agent, not its owner. `platform_audit_service`
-        # ranks `actor_user` above `actor_agent_name`, so passing the principal
-        # would file a prompt-injected agent's attempt as the owner's own act —
-        # the exact "the agent did it" vs "the person did it" line (Tandem R29)
-        # this capability exists to keep. For an agent principal: the agent is
-        # the actor, the owner rides as `actor_email`, and the key is named
+        # The ACTOR is the agent, not its owner. `platform_audit_service` ranks
+        # `actor_user` above `actor_agent_name`, so passing the principal would
+        # file a prompt-injected agent's attempt as the owner's own act — the
+        # exact "the agent did it" vs "the person did it" line (Tandem R29) this
+        # capability exists to keep. For an agent principal: the agent is the
+        # actor, the owner rides as `actor_email`, and the key is named
         # explicitly (the service derives it from `actor_user` otherwise).
         agent = getattr(current_user, "agent_name", None)
         actor = {"actor_user": current_user} if not agent else {
@@ -2229,7 +2669,7 @@ async def enforce_agent_capability(
         }
         await platform_audit_service.log(
             event_type=AuditEventType.AUTHORIZATION,
-            event_action="capability_refused",
+            event_action=action,
             source="api",
             **actor,
             actor_ip=request.client.host if request.client else None,
@@ -2237,14 +2677,86 @@ async def enforce_agent_capability(
             target_id=target,
             endpoint=request.scope["path"],
             request_id=getattr(request.state, "request_id", None),
-            details={"capability": capability, "code": code, "method": request.method},
+            details={"capability": capability, "method": request.method, **details},
         )
     except Exception:  # noqa: BLE001
-        logger.warning("capability refusal audit failed for %s", capability)
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail={"code": code, "capability": capability, "message": message},
-    )
+        logger.warning("capability audit failed for %s (%s)", capability, action)
+
+
+async def _audit_capability_use(
+    request: Request, current_user: User, capability: str, target: Optional[str],
+) -> None:
+    """`capability_used`, once per capability and target per request. A metric
+    declaration write passes the route fence and then the Files write it
+    delegates to, both on `instructions.manage`: one call, one row."""
+    state = getattr(request, "state", None)
+    used = getattr(state, "capability_used", None)
+    if not isinstance(used, set):
+        used = set()
+        if state is not None:
+            state.capability_used = used
+    if (capability, target) in used:
+        return
+    used.add((capability, target))
+    await _audit_capability(request, current_user, "capability_used", capability, target)
+
+
+async def enforce_agent_capability(
+    request: Request, current_user: User, capability: str, *,
+    target: Optional[str] = None, owner_bound: bool = False,
+) -> None:
+    """Refuse with a named 403 — and an audit row — unless the principal may use
+    `capability`. The refused attempt of a prompt-injected agent is exactly the
+    event worth keeping, so a refusal is recorded, not only returned.
+
+    An agent key the grant admits leaves one `capability_used` row
+    (trinity-enterprise#871). It means the grant cleared this call, not that
+    the change landed: a handler can still refuse afterwards. No other principal
+    writes one, because no grant decided their call.
+
+    `owner_bound` is for a route that names its target: a holder then reaches
+    only agents its owner OWNS (#3236 review + validation). Every fenced handler
+    authorises through `can_user_access_agent` / `can_user_share_agent`, which
+    admit any `role == "admin"` — and an agent key carries its owner's role — so
+    without this one grant on a default admin-owned install reached every agent
+    on the instance, other users' included. `owner_username` equality, never the
+    admin short-circuit; not-owned and nonexistent answer the same 404, so a
+    holder learns nothing about agents outside its owner's. Only then does the
+    request's reach admit the target (ent#629): a fence that refused records no
+    reach and no use.
+    """
+    refusal = capability_refusal(current_user, capability)
+    if refusal is not None:
+        code, message = refusal
+        await _audit_capability(request, current_user, "capability_refused", capability, target, code=code)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": code, "capability": capability, "message": message},
+        )
+    if not _is_agent_principal(current_user):
+        return
+    if owner_bound and target:
+        if not owner_owns_agent(current_user, target):
+            await _audit_capability(request, current_user, "capability_refused", capability, target,
+                                    code="capability_target_not_owned")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+        _admit_capability_reach(current_user, target)
+    await _audit_capability_use(request, current_user, capability, target)
+
+
+async def record_capability_use(
+    request: Request, current_user: User, capability: str, *, target: Optional[str] = None,
+) -> None:
+    """`capability_used` for a write that judges by `capability_refusal` itself,
+    with no fence to write the row: a manifest deploy's skill phases, an honoured
+    skill-set probe. Never raises: it runs mid-way through work already done."""
+    try:
+        if not _is_agent_principal(current_user) or capability_refusal(current_user, capability) is not None:
+            return
+    except Exception:  # noqa: BLE001
+        logger.warning("capability use check failed for %s", capability)
+        return
+    await _audit_capability_use(request, current_user, capability, target)
 
 
 def can_manage_agent_skills(current_user: User, agent_name: str) -> bool:
@@ -2278,24 +2790,14 @@ def _path_agent(request: Request) -> Optional[str]:
     return params.get("agent_name") or params.get("name")
 
 
-def _refuse_unless_owners_agent(current_user: User, target: str) -> None:
-    """A capability HOLDER reaches only agents its owner OWNS (#3236 review +
-    validation). Every fenced handler authorises through `can_user_access_agent`
-    / `can_user_share_agent`, which admit any `role == "admin"` — and an agent
-    key carries its owner's role — so without this one grant on a default
-    admin-owned install reached every agent on the instance, other users'
-    included. `owner_username` equality, never the admin short-circuit;
-    not-owned and nonexistent answer the same 404, so a holder learns nothing
-    about agents outside its owner's."""
-    if not owner_owns_agent(current_user, target):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
-
-
 def owner_owns_agent(current_user, target: str) -> bool:
     """`owner_username` equality: the bound every capability holder meets. Never
-    the admin short-circuit an agent key's owner role carries."""
+    the admin short-circuit an agent key's owner role carries, and never the
+    system agent: an admin owns it, and what lands there runs under a key that
+    bypasses every permission check, so one narrow grant would be all of them."""
     owner = db.get_agent_owner(target) or {}
-    return bool(owner) and owner.get("owner_username") == current_user.username
+    return (bool(owner) and not owner.get("is_system")
+            and owner.get("owner_username") == current_user.username)
 
 
 def capability_fence(capability: str, *, own_agent_exempt: bool = False,
@@ -2320,9 +2822,9 @@ def capability_fence(capability: str, *, own_agent_exempt: bool = False,
     grant — ent#69 governs ghosts (spawn and discard), decided 2026-10-05.
 
     A holder that passes is then bounded to its owner's agents
-    (`_refuse_unless_owners_agent`) whenever the route names a target — the
-    capability check runs first, so a non-holder's 403 never depends on whether
-    the target exists (#186).
+    (`enforce_agent_capability`'s `owner_bound`) whenever the route names a
+    target — the capability check runs first, so a non-holder's 403 never
+    depends on whether the target exists (#186).
     """
     async def fence(request: Request, current_user: User = Depends(get_current_user)) -> None:
         target = _path_agent(request)
@@ -2336,12 +2838,28 @@ def capability_fence(capability: str, *, own_agent_exempt: bool = False,
             info = _db.get_agent_ephemeral_info(target)
             if isinstance(info, dict) and info.get("is_ephemeral"):
                 return
-        await enforce_agent_capability(request, current_user, capability, target=target)
-        if is_agent and target:
-            _refuse_unless_owners_agent(current_user, target)
-            _admit_capability_reach(current_user, target)
+        await enforce_agent_capability(request, current_user, capability, target=target, owner_bound=True)
     fence.__name__ = f"capability_fence_{capability.replace('.', '_')}"
     return fence
+
+
+def _is_capability_agent_key(current_user) -> bool:
+    """The caller `require_person_or_capability` judges by its grant: an agent
+    key that is not a vouched loopback. Every other caller meets `assert_person`."""
+    return bool(getattr(current_user, "mcp_scope", None) == "agent"
+                and getattr(current_user, "agent_name", None)
+                and not getattr(current_user, "vouched_source_agent", None))
+
+
+def person_or_capability_admits(current_user, capability: str, target: str) -> bool:
+    """Would `require_person_or_capability(capability)` admit this caller on
+    `target`? The same predicate, answered without raising or writing the
+    refusal's audit row, for a response field that says what the caller may do
+    (`ScheduleResponse.can_manage_webhook`, trinity-enterprise#719). Not for a
+    route with `self_person_only`."""
+    if _is_capability_agent_key(current_user):
+        return capability_refusal(current_user, capability) is None and owner_owns_agent(current_user, target)
+    return is_person_principal(current_user) and not getattr(current_user, "vouched_source_agent", None)
 
 
 def require_person_or_capability(capability: str, *, self_person_only: bool = False):
@@ -2367,16 +2885,11 @@ def require_person_or_capability(capability: str, *, self_person_only: bool = Fa
       not be the one that lifts it (the grant-vs-use line, Invariant #8).
     """
     async def dep(request: Request, current_user: User = Depends(get_current_user)) -> User:
-        if (getattr(current_user, "mcp_scope", None) == "agent"
-                and getattr(current_user, "agent_name", None)
-                and not getattr(current_user, "vouched_source_agent", None)):
+        if _is_capability_agent_key(current_user):
             target = _path_agent(request)
             if self_person_only and target == current_user.agent_name:
                 assert_person(current_user)
-            await enforce_agent_capability(request, current_user, capability, target=target)
-            if target:
-                _refuse_unless_owners_agent(current_user, target)
-                _admit_capability_reach(current_user, target)
+            await enforce_agent_capability(request, current_user, capability, target=target, owner_bound=True)
             return current_user
         assert_person(current_user)
         return current_user
@@ -2388,6 +2901,11 @@ async def get_skill_gate_readable_agent_by_name(
     agent_name: str = Path(..., description="Agent name from path"),
     current_user: User = Depends(get_current_user),
 ) -> str:
+    """The route's dependency over `assert_skill_gates_readable`."""
+    return assert_skill_gates_readable(agent_name, current_user)
+
+
+def assert_skill_gates_readable(agent_name: str, current_user: User) -> str:
     """Who may read an agent's skill gate map (trinity-enterprise#753).
 
     An ALLOWlist decided on the principal first, so a refused scope learns
@@ -2398,9 +2916,10 @@ async def get_skill_gate_readable_agent_by_name(
       uniform 404);
     * an agent key — its OWN gates (the in-container hook pulls; nothing is
       pushed into the workspace), or, holding `skills.manage`, an agent its
-      owner OWNS (the orchestrator reports drift). Never the admin
-      short-circuit an agent key's owner role would otherwise carry. Any other
-      target is the same 404 as an agent that does not exist;
+      owner OWNS (the orchestrator reports drift), never the system agent
+      (`owner_owns_agent`). Never the admin short-circuit an agent key's owner
+      role would otherwise carry. Any other target is the same 404 as an agent
+      that does not exist;
     * connector, portal delegate, any other scope and a principal with no scope
       at all — refused.
     """
@@ -2412,10 +2931,13 @@ async def get_skill_gate_readable_agent_by_name(
     own = getattr(current_user, "agent_name", None)
     if scope == "agent" and own and not getattr(current_user, "vouched_source_agent", None):
         from db.capability_grants import CAPABILITY_SKILLS_MANAGE
-        owner = db.get_agent_owner(agent_name) or {}
         holder = capability_refusal(current_user, CAPABILITY_SKILLS_MANAGE) is None
-        if owner and (agent_name == own
-                      or (holder and owner.get("owner_username") == current_user.username)):
+        # One owner read for every caller that reaches it (#186). A holder meets
+        # the bound every capability fence applies, which refuses the system agent.
+        if agent_name == own:
+            if db.get_agent_owner(agent_name):
+                return agent_name
+        elif holder and owner_owns_agent(current_user, agent_name):
             return agent_name
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
     raise HTTPException(
@@ -2444,15 +2966,12 @@ async def get_skill_managed_agent_by_name(
     skill-changing route there depends on this.
     """
     from db.capability_grants import CAPABILITY_SKILLS_MANAGE
+    # The bound every capability fence applies (trinity-enterprise#629 × #596):
+    # the owner must OWN the target, then the request's reach admits it. One
+    # mechanism — the owner fence below is the narrowed one.
     await enforce_agent_capability(
-        request, current_user, CAPABILITY_SKILLS_MANAGE, target=agent_name
+        request, current_user, CAPABILITY_SKILLS_MANAGE, target=agent_name, owner_bound=True
     )
-    if _is_agent_principal(current_user):
-        # The bound every capability fence applies (trinity-enterprise#629 ×
-        # #596): the owner must OWN the target, then the request's reach admits
-        # it. One mechanism — the owner fence below is the narrowed one.
-        _refuse_unless_owners_agent(current_user, agent_name)
-        _admit_capability_reach(current_user, agent_name)
     return get_owned_agent_by_name(agent_name=agent_name, current_user=current_user)
 
 
@@ -2530,6 +3049,57 @@ def assert_agent_access(current_user: User, agent_name: str, *, detail: str = "A
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
 
 
+OWN_AGENT_DETAIL = "Agent-scoped key may only act as its own agent"
+
+
+def assert_own_agent(
+    current_user: User,
+    agent_name: str,
+    *,
+    detail: Any = OWN_AGENT_DETAIL,
+    refusal: Optional[Callable[[], HTTPException]] = None,
+) -> None:
+    """The agent-key self-gate (trinity-enterprise#840) — 403 when a key that
+    acts as one agent names a different one.
+
+    An agent key resolves to its owner carrying the owner's role, so
+    ``AuthorizedAgent`` / ``assert_agent_access`` answer "may this key reach that
+    agent" (since ent#629: itself, its permission-edge targets, the agents it
+    spawned), never "is it acting on its own agent". A route an agent key may
+    call that reads or changes one agent's state calls this as its FIRST
+    statement, after the docstring, on its ``get_current_user`` principal and
+    the path agent. That shape is what the route census
+    (``tests/unit/_route_census.py``) recognises for ``AGENT_CALLABLE_SELF``.
+    On a route with an access dependency it runs after that dependency, so a
+    nonexistent or out-of-reach agent gets its uniform 404 and only an agent the
+    key already reaches gets this 403; on a route without one it runs before
+    any lookup. Either way the refusal discloses nothing new (#186).
+
+    Two keys act as an agent: an agent-scoped key (``agent_principal_name``, the
+    predicate ``agent_may_reach`` uses) and the system key, which carries no
+    agent name on REST and acts as ``trinity-system`` (trinity-enterprise#719) —
+    the rule ``get_self_acting_agent`` already applies. Its scope is read with
+    the ``_SCOPE_ABSENT`` sentinel and compared to the string, so a test double
+    whose ``mcp_scope`` is absent or a mock is not the system key. A no-op for
+    every other principal — a person, a ``user`` / connector key, the event
+    loopback: whether those may reach the agent is the access check's question,
+    not this one's.
+
+    ``detail`` is the route's own message. ``refusal`` builds the exception
+    instead, for a router whose access dependency answers a uniform 404 and
+    whose self refusal must stay byte-identical to it.
+    """
+    caller = agent_principal_name(current_user)
+    if caller is None and getattr(current_user, "mcp_scope", _SCOPE_ABSENT) == "system":
+        from db.agents import SYSTEM_AGENT_NAME
+        caller = SYSTEM_AGENT_NAME
+    if caller is None or caller == agent_name:
+        return
+    if refusal is not None:
+        raise refusal()
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+
 def assert_agent_owner(current_user: User, agent_name: str, *, detail: str = "Not authorized") -> None:
     """Imperative agent owner gate — 403 unless the caller owns ``agent_name``
     (``db.can_user_share_agent``; owner-or-admin).
@@ -2543,6 +3113,257 @@ def assert_agent_owner(current_user: User, agent_name: str, *, detail: str = "No
     if not (db.can_user_share_agent(current_user.username, agent_name)
             and agent_may_reach(current_user, agent_name, manage=True)):  # ent#629
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+    # ent#926: an agent's key resolves to its owner, so an owner check inside a
+    # handler (a force-reset pull) would pass it in a shared person's turn.
+    if restricted_agent_turn(current_user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=OWNER_TIER_TURN_REFUSED)
+
+
+# ---------------------------------------------------------------------------
+# Viewer tier on an agent's executions (trinity-enterprise#875)
+#
+# `can_user_access_agent` (admin | owner | shared) means "may chat with this
+# agent". The execution and control routes read it as "may read and steer
+# everyone's turns". These helpers name the three callers those routes have to
+# tell apart, so each route asks one question instead of re-spelling it:
+#
+#   owner  a PERSON who owns the agent, or an admin: sees every row.
+#   share  any other PERSON with access (a JWT, or their own user-scope key):
+#          sees only the executions they started.
+#   key    an agent, system, ops, ops_write or connector key: unchanged
+#          (ent#875 ruling — an agent reading its own executions stays full;
+#          that residual and the fleet-wide default are ent#926). `ops_write`
+#          (#3180) is listed because its one execution route, terminate, is for
+#          ending any stuck turn on an agent its admin owner reaches.
+#
+# An ALLOWlist both ways, for the reason `is_person_principal` is one:
+# `mcp_api_keys.scope` is free text, so every scope this module has not heard
+# of (portal_delegate, a sixth one a future PR invents) resolves to SHARE and is
+# filtered — it never inherits the unfiltered `key` view by default.
+# ---------------------------------------------------------------------------
+
+VIEWER_OWNER = "owner"
+VIEWER_SHARE = "share"
+VIEWER_KEY = "key"
+
+_VIEWER_KEY_SCOPES = frozenset({"agent", "system"})
+
+
+def viewer_principal_kind(current_user: User) -> str:
+    """"person" | "key" | "other" — which kind of caller this is, before any
+    agent is named. "other" is every non-person principal this module does not
+    list as a key (fail closed: it is filtered like a share holder)."""
+    if is_person_principal(current_user) and not getattr(
+        current_user, "vouched_source_agent", None
+    ):
+        return "person"
+    scope = getattr(current_user, "mcp_scope", "__missing__")
+    agent = getattr(current_user, "agent_name", None)
+    connector = getattr(current_user, "connector_agent", None)
+    if (
+        (isinstance(agent, str) and agent)
+        or (isinstance(connector, str) and connector)
+        or scope in _VIEWER_KEY_SCOPES
+        or scope in (OPS_SCOPE, OPS_WRITE_SCOPE)
+    ):
+        return "key"
+    return "other"
+
+
+EXECUTION_ID_HEADER = "X-Trinity-Execution-Id"
+_MANUAL_EXECUTION_ID = "manual"
+_MAX_EXECUTION_ID_LEN = 128
+
+
+def record_acting_turn(request, principal: User) -> None:
+    """Note which turn an AGENT-scoped key is acting in (trinity-enterprise#926).
+
+    The MCP server forwards the spawning process's `TRINITY_EXECUTION_ID` as
+    `X-Trinity-Execution-Id` (#2392). Only an agent key's request is read: no
+    other principal acts for anyone else's turn."""
+    if getattr(principal, "mcp_scope", None) != "agent" or not principal.agent_name:
+        return
+    raw = request.headers.get(EXECUTION_ID_HEADER) if request is not None else None
+    if isinstance(raw, str) and raw and len(raw) <= _MAX_EXECUTION_ID_LEN:
+        principal._acting_execution_id = raw
+
+
+def acting_turn_user_id(current_user: User) -> Optional[int]:
+    """The person an agent key's reads are narrowed to, or None for the full view.
+
+    trinity-enterprise#875 left an agent's key at the full view; an agent acts
+    for whoever chats with it, so while it runs a turn for a person the agent is
+    merely shared with, its own reads are that person's (ent#926).
+
+    The `X-Trinity-Execution-Id` header is NOT proof of which turn a request
+    comes from: nothing on this side stops a running turn from calling the API
+    with the agent's key and omitting the header, sending `manual`, or naming
+    another turn. So the decision starts from the LEDGER — the people of the
+    agent's running `share`-tier turns (`turn_tier_service.running_share_people`)
+    — and the header can only narrow further, never widen:
+
+      * not an agent key                                   -> None;
+      * an id that is not one of the key's agent's executions -> `NO_ROWS_USER_ID`;
+      * the header names a `share` turn -> that turn's person, provided no other
+        person's share turn is running (otherwise `NO_ROWS_USER_ID`);
+      * otherwise (no header, `manual`, an `owner`-tier turn): no share turn
+        running -> None (the full view); exactly one person's -> that person;
+        several, or one with no platform user (a public link, a channel)
+        -> `NO_ROWS_USER_ID`.
+
+    Fails closed: a ledger that cannot be read returns `NO_ROWS_USER_ID`. The
+    turn is the KEY's agent's, whatever agent the route names."""
+    agent = getattr(current_user, "agent_name", None)
+    if getattr(current_user, "mcp_scope", None) != "agent" or not (isinstance(agent, str) and agent):
+        return None
+    from services import turn_tier_service
+    try:
+        people = turn_tier_service.running_share_people(db, agent)
+        run = getattr(current_user, "_acting_execution_id", None)
+        if run and run != _MANUAL_EXECUTION_ID:
+            execution = db.get_execution(run)
+            tier = turn_tier_service.turn_tier(db, agent, execution=execution)
+            if tier == turn_tier_service.UNKNOWN:
+                return NO_ROWS_USER_ID
+            if tier == turn_tier_service.SHARE:
+                person = turn_tier_service.turn_person(db, agent, execution)
+                if person is None or people - {person}:
+                    return NO_ROWS_USER_ID
+                return person
+            # An owner-tier header widens nothing: fall through to the ledger.
+    except Exception:  # noqa: BLE001 — fail closed: an unreadable ledger narrows to nothing
+        logger.warning("[ent#926] acting-turn read failed", exc_info=True)
+        return NO_ROWS_USER_ID
+    if not people:
+        return None
+    if len(people) == 1:
+        (person,) = people
+        if isinstance(person, int) and person > 0:
+            return person
+    return NO_ROWS_USER_ID
+
+
+# An agent key acting in a turn the platform restricts (a shared person's, or a
+# visitor's once the owner turned `visitor_shell` off) is refused, at the one
+# auth entry point like the ephemeral and ops fences, on every route the route
+# census rates owner tier, on standing work (schedules and their webhooks and
+# triggers, loops, reminders, events, event subscriptions: work that later runs
+# as the owner), and on an agent-naming route the census has never seen (ent#926
+# ruling 2026-10-19; PR #3778 review: a fixed list of regexes left every other
+# owner-tier route open, because the agent's key resolves to its owner). The
+# table is `services/agent_route_tiers.json`, held to the code by the census test.
+
+STANDING_WORK_REFUSED = (
+    "This turn is for a person the agent is shared with (or a visitor the owner has "
+    "limited), so it cannot set up work that runs later as the agent's owner: schedules, "
+    "loops, reminders and events. Ask the agent's owner to set it up."
+)
+OWNER_TIER_TURN_REFUSED = (
+    "This turn is for a person the agent is shared with (or a visitor the owner has "
+    "limited), and this is something only the agent's owner may do. Ask the agent's "
+    "owner to do it."
+)
+
+
+def restricted_agent_turn(principal) -> bool:
+    """Whether `principal` is an agent key acting in a turn the platform rates
+    below the owner (the shell's line: a shared person always, a visitor when
+    the owner turned `visitor_shell` off, an unknown or foreign turn always).
+
+    The turn header can only narrow: a call that omits it (a shell `curl` with
+    the agent's key) or names an owner turn is still restricted while any
+    running turn on the agent is (`running_turn_restricts`, the ledger — the
+    rule the key's reads follow, ent#875). The price is the same as there: while
+    a shared person's turn runs, the owner's concurrent runs are fenced too."""
+    agent = getattr(principal, "agent_name", None)
+    if getattr(principal, "mcp_scope", None) != "agent" or not (isinstance(agent, str) and agent):
+        return False
+    from services import turn_tier_service
+    acting = turn_tier_service.acting_turn(db, principal)
+    if acting is not None and turn_tier_service.restricts_standing_work(db, agent, acting[0], acting[1]):
+        return True
+    return turn_tier_service.running_turn_restricts(db, agent)
+
+
+def _enforce_standing_work_fence(request, principal: User) -> None:
+    from services import route_tier_service
+    method = (getattr(request, "method", "") or "").upper()
+    refused = route_tier_service.refused_in_restricted_turn(method, request)
+    if refused is None or not restricted_agent_turn(principal):
+        return
+    detail = STANDING_WORK_REFUSED if refused == "standing_work" else OWNER_TIER_TURN_REFUSED
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+
+def agent_viewer_tier(current_user: User, agent_name: str) -> str:
+    """The caller's tier on `agent_name`'s executions: owner, share or key.
+
+    OWNER is the `assert_agent_owner` predicate (the owner or an admin, with
+    the ent#629 reach bound), evaluated here without raising."""
+    kind = viewer_principal_kind(current_user)
+    if kind == "key":
+        # ent#926: an agent's key in a shared person's turn reads as that person.
+        return VIEWER_SHARE if acting_turn_user_id(current_user) is not None else VIEWER_KEY
+    if kind == "person" and db.can_user_share_agent(
+        current_user.username, agent_name
+    ) and agent_may_reach(current_user, agent_name, manage=True):
+        return VIEWER_OWNER
+    return VIEWER_SHARE
+
+
+# What a share holder is told when a route returns the container's SINGLE shared
+# state (its in-memory conversation, live tool activity, raw log): it holds every
+# user's turns together, so it cannot be narrowed to one person's. Fixed text, no
+# names or ids, so the refusal discloses nothing (Invariant #8).
+SHARED_STATE_OWNER_TIER_DETAIL = {
+    "code": "owner_tier_path",
+    "message": (
+        "This shows every user's activity on the agent, so only the agent's "
+        "owner or an admin can open it. Your own conversations are under "
+        "chat history."
+    ),
+}
+
+
+def assert_not_share_viewer(current_user: User, agent_name: str) -> None:
+    """403 a SHARE-tier caller on a route that returns the container's shared
+    state; owner, admin and key tiers pass unchanged (trinity-enterprise#875)."""
+    if agent_viewer_tier(current_user, agent_name) == VIEWER_SHARE:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=dict(SHARED_STATE_OWNER_TIER_DETAIL),
+        )
+
+
+# Matches no row: every real `users.id` is positive. Returned for a share-tier
+# caller whose principal carries no usable id, so a missing id fails CLOSED
+# instead of reading as "no filter".
+NO_ROWS_USER_ID = -1
+
+
+def viewer_row_scope(current_user: User, agent_name: str) -> Optional[int]:
+    """The user id whose executions the caller may see on `agent_name`, or None
+    when they may see every row (owner, admin, key tier)."""
+    acting = acting_turn_user_id(current_user)
+    if acting is not None:
+        return acting
+    if agent_viewer_tier(current_user, agent_name) != VIEWER_SHARE:
+        return None
+    uid = getattr(current_user, "id", None)
+    return uid if isinstance(uid, int) and not isinstance(uid, bool) and uid > 0 else NO_ROWS_USER_ID
+
+
+def row_is_viewers(scope_user_id: Optional[int], source_user_id) -> bool:
+    """Whether a row whose `source_user_id` is given is visible under
+    `viewer_row_scope`. The column is INTEGER but the in-memory queue carries
+    the id as a string, so both sides are compared as integers; a NULL or
+    unparseable owner never matches (fail closed)."""
+    if scope_user_id is None:
+        return True
+    try:
+        return source_user_id is not None and int(source_user_id) == scope_user_id
+    except (TypeError, ValueError):
+        return False
 
 
 def assert_owns_or_admin(current_user: User, owner_id: int, *, detail: str = "Not authorized") -> None:

@@ -47,7 +47,7 @@
       <div class="relative min-w-0" ref="pickerRef">
         <button
           class="flex items-center gap-2 max-w-full rounded-lg px-2 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 transition disabled:cursor-not-allowed"
-          :disabled="voiceCallActive"
+          :disabled="anyCallActive"
           data-testid="portal-agent-picker"
           @click="pickerOpen = !pickerOpen"
         >
@@ -122,7 +122,7 @@
           :title="`New chat (${newChatHotkey})`"
           :aria-label="`New chat (${newChatHotkey})`"
           :aria-keyshortcuts="newChatHotkey === '⌘J' ? 'Meta+J' : 'Control+J'"
-          :disabled="voiceCallActive"
+          :disabled="anyCallActive"
           data-testid="new-chat-header"
           @click="emit('new-chat')"
         >
@@ -171,8 +171,8 @@
         <button
           v-if="isMainChat"
           class="px-2.5 py-1.5 rounded-lg text-xs font-medium text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition disabled:opacity-40 disabled:cursor-not-allowed"
-          :disabled="sending || resetting || voiceCallActive"
-          :title="voiceCallActive ? 'End the call, then reset' : (sending ? 'Wait for the current reply, then reset' : 'Archive this conversation and start the agent cold')"
+          :disabled="sending || resetting || anyCallActive"
+          :title="anyCallActive ? 'End the call, then reset' : (sending ? 'Wait for the current reply, then reset' : 'Archive this conversation and start the agent cold')"
           data-testid="portal-reset-main"
           @click="onResetMain"
         >{{ resetting ? 'Resetting…' : 'Reset' }}</button>
@@ -205,7 +205,7 @@
       :threads="threads"
       :agent-name="agent.name"
       :active-id="currentSessionId"
-      :disabled="voiceCallActive"
+      :disabled="anyCallActive"
       :draft="newChat || bornHere"
       :draft-keys="drafts.keys"
       :order="tabOrder"
@@ -259,6 +259,10 @@
       >Dismiss</button>
     </div>
 
+    <!-- trinity-enterprise#1046: a Direct call is a strip above the thread, not a cover
+         over it. The thread is where the agent's words and any approval appear. -->
+    <DirectCallStage v-if="directCallActive" :call="direct" @end="endVoiceCall" />
+
     <!-- Messages. The wrapper is the orb's positioned box (ent#534): while a
          call is on `VoiceOverlay` covers the thread region and the header,
          tabs and composer stay in view, inert. -->
@@ -274,9 +278,6 @@
       <div class="max-w-[var(--ws-message-max,64rem)] mx-auto min-h-[10rem]">
       <PortalSkeleton v-if="!historyLoaded" variant="thread" />
       <div v-else class="space-y-6">
-
-        <!-- Briefing (new-chat state) rendered by the parent via slot -->
-        <slot v-if="!loadingHistory && messages.length === 0 && !sending" name="empty" />
 
         <!-- ent#523: a SYSTEM line — the platform speaking about the thread,
              not the agent speaking in it. Today its only author is Reset,
@@ -414,6 +415,12 @@
                  ordinary turn (it was not spoken, so it is not in the block);
                  the caption is the attribution. -->
             <p
+              v-if="item.message.spoken"
+              class="text-[11px]"
+              :class="META_INK_CLASS"
+              data-testid="portal-direct-spoken-chip"
+            >spoken</p>
+            <p
               v-if="voiceTaskCaption(item.message)"
               class="text-[11px]"
               :class="META_INK_CLASS"
@@ -485,6 +492,12 @@
         </div>
         </div>
         </template>
+
+        <!-- Briefing (new-chat state) rendered by the parent via slot. #3795:
+             gated on "no turns yet", not "no rows" — Reset's system line sits
+             in an otherwise new Main and must not hide this. Placed after the
+             rows so that signpost reads above the briefing. -->
+        <slot v-if="!loadingHistory && isNewChatTranscript(messages) && !sending" name="empty" />
 
         <!-- ent#525: the live execution card under the message that started
              the job (ent#457's card, as ruled). Status, elapsed, the stream's
@@ -588,6 +601,12 @@
             @click="voiceError = ''"
           >Dismiss</button>
         </p>
+        <!-- trinity-enterprise#1066: a message the server refused because it
+             looked like a secret. The text is kept nowhere on this side — no
+             failed bubble, no Retry, no draft — so only the pointer stays. -->
+        <div v-if="secretRefusal" class="mb-2" data-testid="portal-secret-refused">
+          <InlineError :message="secretRefusal" @dismiss="secretRefusal = ''" />
+        </div>
         <!-- ent#155: a cancel that was REFUSED. Deliberately not `markFailed` —
              the turn is still running and still spending, so calling it failed
              would be the dishonest half of "honest status". -->
@@ -631,17 +650,7 @@
             @remove="removeAttachment(f)"
           />
         </div>
-        <!-- #3460: the server bounds a message, so the composer says so FIRST —
-             a count for the last stretch, then a named refusal with Send held.
-             Before this the limit was first mentioned by a 422, after the words
-             had left the composer. One line, mutually exclusive ink arms. -->
-        <p
-          v-if="messageLimit.near"
-          class="mb-2 text-xs tabular-nums"
-          :class="messageLimit.over ? 'text-status-danger-700 dark:text-status-danger-400' : META_INK_CLASS"
-          :role="messageLimit.over ? 'alert' : undefined"
-          data-testid="portal-message-limit"
-        >{{ messageLimit.message }}</p>
+        <PortalMessageLimit :limit="messageLimit" />
         <!-- ent#534: the composer is visible but inert while a call is on —
              the orb has the conversation; typing resumes the moment it ends. -->
         <!-- ent#547: the inert class moved off the <form> and onto the WRAPPER
@@ -788,29 +797,48 @@
                 @paste="dropHandlers.onPaste"
               ></textarea>
             </div>
-            <!-- ent#547: the call toggle stays LIVE while everything else goes
+            <!-- ent#547: the call buttons stay LIVE while everything else goes
                  inert, and the split is the point rather than a tidy-up. The
-                 same button starts and ends the call; inside a region carrying
+                 button that starts a call also ends it; inside a region carrying
                  `pointer-events-none` it would render pressed for the whole
                  call and refuse the click that ends it — a control that looks
                  live and does nothing. Two inert regions now, because the
                  stacked layout puts the field and the other controls on
-                 different rows and `opacity` needs a real box on each. -->
+                 different rows and `opacity` needs a real box on each.
+                 trinity-enterprise#1046: two buttons, one per call kind — a Live
+                 call (the waveform) and a Direct call (the handset). Each carries
+                 its own reason when it is off; while one call is on, the other
+                 button says so. -->
             <div class="mt-1 flex items-center gap-1">
               <button
-                v-if="voiceEntry.render"
+                v-if="callUi.render"
                 type="button"
                 class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl transition disabled:opacity-40 disabled:cursor-not-allowed"
-                :class="voiceCallActive ? 'bg-action-primary-100 dark:bg-action-primary-900/40 text-action-primary-600 dark:text-action-primary-300' : 'text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-750'"
-                :disabled="!voiceEntry.enabled || voiceStarting"
-                :title="voiceCallActive ? 'End the voice call (Esc)' : (voiceEntry.enabled ? 'Start a voice call' : voiceEntry.reason)"
-                :aria-label="voiceCallActive ? 'End the voice call' : (voiceEntry.enabled ? 'Start a voice call' : voiceEntry.reason)"
+                :class="voiceCallActive ? CALL_BUTTON_CLASS.on : CALL_BUTTON_CLASS.off"
+                :disabled="!callUi.live.enabled || voiceStarting"
+                :title="callUi.live.label"
+                :aria-label="callUi.live.label"
                 :aria-pressed="voiceCallActive"
                 data-testid="portal-voice-call"
-                @click="voiceCallActive ? endVoiceCall() : startVoiceCall()"
+                @click="voiceCallActive ? endVoiceCall() : startVoiceCall('live')"
               >
                 <svg v-if="voiceCallActive" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 6h12v12H6z" /></svg>
                 <svg v-else class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10v4m4-7v10m4-7v4M4 12h.01M20 12h.01" /></svg>
+              </button>
+              <button
+                v-if="callUi.render"
+                type="button"
+                class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl transition disabled:opacity-40 disabled:cursor-not-allowed"
+                :class="directCallActive ? CALL_BUTTON_CLASS.on : CALL_BUTTON_CLASS.off"
+                :disabled="!callUi.direct.enabled || voiceStarting"
+                :title="callUi.direct.label"
+                :aria-label="callUi.direct.label"
+                :aria-pressed="directCallActive"
+                data-testid="portal-direct-call"
+                @click="directCallActive ? endVoiceCall() : startVoiceCall('direct')"
+              >
+                <svg v-if="directCallActive" class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 6h12v12H6z" /></svg>
+                <svg v-else class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 5a2 2 0 012-2h3.28a1 1 0 01.948.684l1.498 4.493a1 1 0 01-.502 1.21l-2.257 1.13a11.042 11.042 0 005.516 5.516l1.13-2.257a1 1 0 011.21-.502l4.493 1.498a1 1 0 01.684.949V19a2 2 0 01-2 2h-1C9.716 21 3 14.284 3 6V5z" /></svg>
               </button>
               <div class="flex-1 min-w-0 flex items-center gap-1" :class="voiceCallActive ? 'opacity-60 pointer-events-none' : ''">
                 <button
@@ -830,7 +858,7 @@
                   :title="micTitle"
                   :aria-label="micTitle"
                   :aria-pressed="listening"
-                  :disabled="transcribing || voiceCallActive"
+                  :disabled="transcribing || anyCallActive"
                   @click="toggleMic"
                 >
                   <svg class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-14 0m7 7v3m0-3a4 4 0 004-4V7a4 4 0 10-8 0v6a4 4 0 004 4z" /></svg>
@@ -913,6 +941,7 @@ import { agentDisplayName } from '@/utils/agentName'
 import PortalAgentBubble from './PortalAgentBubble.vue'
 import { BUBBLE_WRAP_CLASS } from './portalBubble'
 import { messageLimitState, messageRefusalReason } from './portalMessageLimit'
+import PortalMessageLimit from './PortalMessageLimit.vue'
 import PortalWorkCard from './PortalWorkCard.vue'
 import { usePortalWorkStore } from '@/stores/portalWork'
 import { askAboutItPrefill, childrenForChat, clockRestartsAt, itemById, liveElapsedSeconds, pendingTurnOutcome, previewTitle } from './portalWork'
@@ -921,7 +950,8 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
-import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline, agentChatTabs, NEW_CHAT_TAB_ID, pairRepliesWithQuestions, turnGateFlags } from './portalUtils'
+import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline, agentChatTabs, NEW_CHAT_TAB_ID, pairRepliesWithQuestions, turnGateFlags, isNewChatTranscript } from './portalUtils'
+import { tailSignature, tailLimit, adoptLocalIds, freshRows, tailOverflowed, TAIL_LIMIT_CAP } from './portalThreadTail'
 // ent#621: the same wrap the typeahead's roving selection uses — one modulo.
 import { cycleIndex } from './portalKeymap'
 // ent#738: the chip's one-line excerpt — the same one the Inbox's arrow hands over.
@@ -938,6 +968,7 @@ import { useStickToBottom } from '@/composables/useStickToBottom'
 import { useConversationAnchor } from '@/composables/useConversationAnchor'
 import { useRoute, useRouter } from 'vue-router'
 import { useComposerDraft } from '@/composables/useComposerDraft'
+import InlineError from '@/components/InlineError.vue'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
 import { draftKeyFor, shouldAutoFocusComposer } from './portalDrafts'
 import PortalTypeahead from './PortalTypeahead.vue'
@@ -985,11 +1016,14 @@ import {
   speechErrorMessage,
   transcriptionErrorMessage,
 } from './portalUtils'
-import { shouldCancelOnEscape, shouldEndCallOnEscape, restoreDraft, cancelOutcome, isNoopCancel } from '../../utils/turnCancel'
+import { directEscapeAction, shouldCancelOnEscape, shouldEndCallOnEscape, restoreDraft, cancelOutcome, isNoopCancel } from '../../utils/turnCancel'
 // ent#534: the voice CALL — the platform's real-time orb, in this chat. Its
 // rules live in their own pure module (vitest runs `environment: 'node'` with
 // no mount harness, so a rule kept in here is a rule no test can reach); this
 // component is the dispatcher over them and the composable.
+import DirectCallStage from './DirectCallStage.vue'
+import { useDirectVoiceSession } from '../../composables/useDirectVoiceSession'
+import { callButtons, cardOutcome, optionForAnswer } from './portalDirectCall'
 import VoiceOverlay from '../chat/VoiceOverlay.vue'
 import { useVoiceSession } from '../../composables/useVoiceSession'
 import {
@@ -1061,7 +1095,7 @@ const props = defineProps({
 // controls that raised them — the rail strip is the door to both now.
 // Declared emits are the component's contract, so a name left here after
 // its only `$emit` is deleted is a promise nothing keeps.
-const emit = defineEmits(['reply', 'reply-done', 'switch-agent', 'session-adopted', 'sessions-changed', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset', 'voice-call', 'voice-panel', 'open-project', 'thread-missing', 'close-chat', 'dismiss-close-error'])
+const emit = defineEmits(['reply', 'reply-done', 'switch-agent', 'session-adopted', 'sessions-changed', 'thread-caught-up', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset', 'voice-call', 'voice-panel', 'open-project', 'thread-missing', 'close-chat', 'dismiss-close-error'])
 
 // ent#451/#473: the active thread as the shell's list knows it. Null until the
 // list carries the thread (a just-adopted session lands on the next refresh),
@@ -1319,6 +1353,9 @@ const activeExecutionId = ref(null)
 const pendingUserText = ref('')
 const cancelling = ref(false)
 const cancelError = ref('')
+// trinity-enterprise#1066: the server's pointer after a `secret_in_message`
+// refusal. Cleared by the next send.
+const secretRefusal = ref('')
 // Review finding: `terminate_portal_turn` writes the CANCELLED terminal, and
 // the still-running background turn then finishes — `portal_chat` sees a
 // non-success status, matches no `error_code` branch, and raises the generic
@@ -1340,6 +1377,12 @@ const cancelledExecutionIds = ref(new Set())
 // know which execution the turn it is about to judge actually ran under.
 const lastDeliveredExecutionId = ref(null)
 const canCancelTurn = computed(() => sending.value && !!activeExecutionId.value)
+// trinity-enterprise#1087: a spoken turn's words were said, not drafted; a Stop never
+// puts them in the composer, whichever Stop it was.
+const activeTurnSpoken = ref(false)
+// A stop said on the call before the server has named the run: cancel it the moment it
+// starts, and never ask for it to be spoken.
+let stopWhenStarted = false
 
 // ---- ent#525: the live card and the terminal card ---------------------------
 const workStore = usePortalWorkStore()
@@ -1487,7 +1530,7 @@ const {
   // An empty chat is not a transcript: it reads from the top, and a section that
   // arrives late (the suggestions) grows downward without moving the hints or
   // scrolling the agent's identity away. Sticking resumes with the first turn.
-  enabled: () => messages.value.length > 0 || sending.value,
+  enabled: () => !isNewChatTranscript(messages.value) || sending.value,
 })
 // trinity-enterprise#610 (D11): the one-shot `?anchor=m:<id>|d:<id>` the
 // Inbox's "Open in chat" sets. Resolved after the history lands (messages) or
@@ -1508,6 +1551,23 @@ const composerWrap = ref(null)
 const typeaheadTrigger = ref(null)
 const activeIndex = ref(-1)
 const dismissed = ref(null)
+
+// A persisted history row as the transcript shows it — the ONE mapper for a
+// row read back from the server, used by the load and by the catch-up read
+// (#3439), so the two cannot disagree about a row's shape. A user row keeps its
+// own role; only the assistant shape is shared with the two live-turn sites.
+function historyRow(m) {
+  return {
+    ...(m.role === 'assistant'
+      ? assistantRow(m)
+      // ent#534: spoken rows and the call they belong to — folded by `threadItems`.
+      : { role: m.role, content: m.content, id: m.id, myRating: m.my_rating || null,
+          source: m.source || null, voiceCallId: m.voice_call_id || null,
+          // #3265: what the turn carried, stored on its row.
+          attachments: m.attachments || null }),
+    at: m.created_at || null,
+  }
+}
 
 // ---- Load history when the thread/agent changes -------------------------------
 async function loadThread(sessionId) {
@@ -1537,16 +1597,7 @@ async function loadThread(sessionId) {
     // trinity-enterprise#610: `at` is the row's persisted time, which is what
     // places a chat-turn ask among the messages (`threadRows`).
     // #3166: each reply under its own question, when two turns overlapped.
-    messages.value = pairRepliesWithQuestions(msgs).map((m) => ({
-      ...(m.role === 'assistant'
-        ? assistantRow(m)
-        // ent#534: spoken rows and the call they belong to — folded by `threadItems`.
-        : { role: m.role, content: m.content, id: m.id, myRating: m.my_rating || null,
-            source: m.source || null, voiceCallId: m.voice_call_id || null,
-            // #3265: what the turn carried, stored on its row.
-            attachments: m.attachments || null }),
-      at: m.created_at || null,
-    }))
+    messages.value = pairRepliesWithQuestions(msgs).map(historyRow)
     inFlight = inFlightExecutionId
     inFlightBudget = inFlightWaitBudgetSeconds
     outcome = lastTurnOutcome
@@ -1683,11 +1734,11 @@ watch(() => [props.agent.name, props.sessionId], async ([, sid], [oldName]) => {
   // `startVoiceCall` creates the thread and adopts it BEFORE the call starts,
   // and the shell's route replace lands here a moment later with that same id.
   if (threadChangeEndsCall({
-    callActive: voiceCallActive.value,
+    callActive: anyCallActive.value,
     agentChanged: props.agent.name !== oldName,
     newSessionId: sid,
-    boundSessionId: voice.portalSessionId.value || currentSessionId.value,
-  })) await voice.stop()
+    boundSessionId: (directCallActive.value ? direct.portalSessionId.value : voice.portalSessionId.value) || currentSessionId.value,
+  })) await endVoiceCall()
   currentSessionId.value = sid
   resetTypeahead()
   // #2624: the outgoing thread's element is about to be replaced, so re-arm
@@ -2112,6 +2163,7 @@ function startElapsedClock() {
 
 async function deliver(text, { replyId = null, attachments = null, tags = null } = {}) {
   terminalOutcome.value = null
+  secretRefusal.value = ''
   sending.value = true
   startElapsedClock()
   const startedNew = currentSessionId.value === null
@@ -2133,10 +2185,15 @@ async function deliver(text, { replyId = null, attachments = null, tags = null }
     // synchronous fallback below run the same turn on the same model — a value
     // re-read between the two could differ if the record settled in between.
     const chosenModel = modelControl.value.enabled ? selectedModel.value : ''
+    // trinity-enterprise#1046: any turn sent during a Direct call, spoken or typed,
+    // belongs to it and is read aloud. The sync fallback below carries no id and is
+    // not spoken: its reply lands in the chat as usual.
+    const voiceCallId = directCallActive.value ? direct.voiceSessionId.value : null
     try {
       started = await store.startPortalChat(props.agent.name, text, currentSessionId.value,
                                             { newThread: props.newChat && !currentSessionId.value,
                                               model: chosenModel,
+                                              voiceCallId,
                                               // ent#555 — what the user is looking at.
                                               openCanvasId: openCanvasId.value,
                                               // ent#610 — the message this replies to.
@@ -2175,6 +2232,10 @@ async function deliver(text, { replyId = null, attachments = null, tags = null }
       activeExecutionId.value = started.execution_id || null
       lastDeliveredExecutionId.value = started.execution_id || null
       pendingUserText.value = text
+      if (stopWhenStarted) {
+        stopWhenStarted = false
+        if (started.execution_id) void cancelTurn({ restore: false, fromCall: true })
+      } else if (voiceCallId && started.execution_id) direct.speak(started.execution_id)
       // Stamp the dispatch instant: the server's marker TTL starts here, so the
       // client's ceiling must too (see awaitPersistedReply).
       const dispatchedAt = Date.now()
@@ -2263,7 +2324,7 @@ async function deliver(text, { replyId = null, attachments = null, tags = null }
     // ent#534: never narrate over a live voice call — the orb owns playback
     // then (the speaker toggle is hidden for the call's duration).
     if (voiceMode.value && ttsEnabled.value && data.response
-        && !voiceCallActive.value) speak(data.response)
+        && !anyCallActive.value) speak(data.response)
     if (data.session_id && currentSessionId.value !== data.session_id) {
       adoptSession(data.session_id)
     }
@@ -2289,6 +2350,13 @@ async function deliver(text, { replyId = null, attachments = null, tags = null }
     // words, never as a status code. It is also the one failure a Retry cannot
     // fix — the same words earn the same answer — so the draft goes back to
     // the composer to be edited instead (`settleDelivery`).
+    // trinity-enterprise#1066: refused BEFORE admission because it looks like a
+    // secret — nothing was stored, and nothing on this side may keep it either
+    // (`settleDelivery` drops the bubble and the draft).
+    const detail = err?.response?.status === 422 ? err.response.data?.detail : null
+    if (detail && typeof detail === 'object' && detail.code === 'secret_in_message') {
+      return { error: detail.message || 'That looks like a secret. Nothing was stored.', retryable: false, secret: true }
+    }
     const refused = messageRefusalReason(err)
     if (refused) return { error: refused, retryable: false, restoreText: text }
     return { error: deliveryFailureReason(err) }
@@ -2298,6 +2366,8 @@ async function deliver(text, { replyId = null, attachments = null, tags = null }
     activeExecutionId.value = null
     pendingUserText.value = ''
     cancelling.value = false
+    activeTurnSpoken.value = false
+    stopWhenStarted = false
     // #2624: the reply landing is an arrival. The SEND that started this turn
     // already pinned and re-armed (below), so a reader who stayed at the bottom
     // still follows the answer down — and one who scrolled up mid-turn, to
@@ -2331,16 +2401,30 @@ function onEscapeKeydown(event) {
   // which reads `defaultPrevented`, and was invisible to this one: the overlay
   // closed AND the call ended on a single keystroke. Both branches now start
   // from the same `ownsEscape` preconditions, so they cannot drift again.
-  if (shouldEndCallOnEscape(event, { callActive: voiceCallActive.value })) {
+  // trinity-enterprise#1087: on a Direct call Escape silences the agent while it speaks
+  // and ends the call otherwise; it never cancels a turn, because hanging up leaves one
+  // running on purpose. The composer is live here, so its overlays own Escape first.
+  if (directCallActive.value && event.key === 'Escape') {
+    const action = directEscapeAction(event, {
+      speaking: direct.isSpeaking(),
+      overlays: [typeaheadOpen.value, pickerOpen.value, listening.value],
+    })
+    if (action) event.preventDefault()
+    if (action === 'silence') direct.interrupt({ cancelTurn: false })
+    else if (action === 'end') void endVoiceCall()
+    return
+  }
+  if (shouldEndCallOnEscape(event, { callActive: anyCallActive.value })) {
     event.preventDefault()
     void endVoiceCall()
     return
   }
   // ent#551 QA: M mutes and unmutes the mic during a call (the overlay's mute
   // button says so). Same shared-rule shape as Escape, for the same reason.
-  if (isMuteHotkey(event, { callActive: voiceCallActive.value })) {
+  if (isMuteHotkey(event, { callActive: anyCallActive.value })) {
     event.preventDefault()
-    voice.toggleMute()
+    if (directCallActive.value) direct.toggleMute()
+    else voice.toggleMute()
     return
   }
   if (!shouldCancelOnEscape(event, {
@@ -2366,7 +2450,12 @@ function onEscapeKeydown(event) {
   cancelTurn()
 }
 
-async function cancelTurn() {
+async function cancelTurn({ restore = true, fromCall = false } = {}) {
+  // trinity-enterprise#1087: the composer's Stop on a Direct call stops the voice too, or
+  // the sentences already queued keep playing over a cancelled turn. The call's own stops
+  // (`fromCall`) have already silenced it.
+  if (directCallActive.value && !fromCall) direct.interrupt({ cancelTurn: false })
+  if (activeTurnSpoken.value) restore = false
   const executionId = activeExecutionId.value
   if (!executionId || cancelling.value) return
   cancelling.value = true
@@ -2377,7 +2466,9 @@ async function cancelTurn() {
     const outcome = cancelOutcome({ ok: true, alreadyTerminal: isNoopCancel(res?.status) })
     if (outcome.kind === 'cancelled') {
       cancelledExecutionIds.value.add(executionId)
-      input.value = restoreDraft(restoreText, input.value)
+      // trinity-enterprise#1046: talking over a Direct call's turn stops it, but those
+      // words were said, not drafted, and must not land in the composer.
+      if (restore === true) input.value = restoreDraft(restoreText, input.value)
       autoGrowAfterUpdate()
       // ent#525: a stop the person asked for is an honest terminal the card
       // keeps ("Stopped by you") — recorded at the act, shown once the turn
@@ -2687,7 +2778,7 @@ async function send() {
 // be a second conversation wearing the same thread, which is the whole thing
 // this feature exists not to be. Returns the outcome so a caller that is not a
 // person watching the screen — the voice loop — can decide what to do next.
-async function submitUserText(text, { replyId = null, replyExcerpt = '', attachments: carried = null, tags = null } = {}) {
+async function submitUserText(text, { spoken = false, replyId = null, replyExcerpt = '', attachments: carried = null, tags = null } = {}) {
   // ent#491: the user's own activity is the ordering signal, so the bump happens
   // HERE — on send — and not when a reply lands. Any agent this message wakes
   // counts, mirroring the room fan-out (`unreadByAgent`): if you @mention two
@@ -2708,6 +2799,8 @@ async function submitUserText(text, { replyId = null, replyExcerpt = '', attachm
     // trinity-enterprise#631: who it tags — Retry resends them; the reload
     // brings the server's delivered/read marks.
     tagEmails: tags && tags.length ? tags : null,
+    // trinity-enterprise#1046: said on a Direct call, not typed. The reload folds it.
+    spoken: spoken || null,
     // trinity-enterprise#610: sent from here — placed at the newest server time
     // before it, so an ask this turn raises lands below it without the browser's
     // clock taking part (`placeAsksInThread`); the reload brings the server's time.
@@ -2717,6 +2810,7 @@ async function submitUserText(text, { replyId = null, replyExcerpt = '', attachm
   // re-arms whatever the prior scroll position, so the reader is never handed
   // an unread badge for their own message.
   await pinToBottom()
+  activeTurnSpoken.value = !!spoken
   // A stale "couldn't stop the turn" must not outlive the turn it described.
   cancelError.value = ''
   const res = await deliver(text, { replyId, attachments: carried, tags })
@@ -2758,6 +2852,22 @@ async function showOwnTags(text) {
   }
 }
 
+// trinity-enterprise#1066: a message refused as a secret leaves no copy here.
+// The bubble goes (a Retry would only re-send it, and the terminal card would
+// title itself with it), it is never handed back to the composer, and any draft
+// still holding it is cleared — the drafts mirror into localStorage.
+function dropSecretMessage(index, text, error) {
+  const row = messages.value[index]
+  if (row && row.role === 'user' && row.content === text) messages.value.splice(index, 1)
+  if (input.value.includes(text)) input.value = ''
+  for (const [key, entry] of Object.entries(drafts.drafts)) {
+    if (entry?.text?.includes(text)) drafts.clear(key)
+  }
+  terminalOutcome.value = null
+  secretRefusal.value = error
+  return { ok: false, error }
+}
+
 function settleDelivery(index, text, res) {
   if (res === true) return { ok: true }
   // #2320: `retryable` when `deliver` decided it (a server verdict, or a
@@ -2778,6 +2888,7 @@ function settleDelivery(index, text, res) {
     cancelledExecutionIds.value.delete(lastDeliveredExecutionId.value)
     return { ok: false, cancelled: true }
   }
+  if (res?.secret) return dropSecretMessage(index, text, res.error)
   markFailed(index, text, res?.error, { retryable: res?.retryable ?? !res?.lost })
   // ent#403: a turn the chosen model could not complete clears that choice, so
   // the server's "switched back to the agent's default" is true next turn.
@@ -2857,7 +2968,7 @@ watch(() => props.agent?.name, () => {
   // ent#534: a call belongs to the agent it was started with — carrying an
   // open microphone across a switch would send the next utterance to someone
   // the user never chose to talk to.
-  if (voiceCallActive.value) void voice.stop()
+  if (anyCallActive.value) void endVoiceCall()
   stopSpeaking(); voiceError.value = ''; voiceMode.value = loadVoiceMode()
 })
 const speaking = ref(false)
@@ -3102,6 +3213,116 @@ const voiceEntry = computed(() => voiceEntryState({
   realtimeVoice: store.realtimeVoice,
 }))
 const voiceCallActive = computed(() => voice.isActive.value)
+// ---- trinity-enterprise#1046: Direct calls ----------------------------------------
+// `voiceCallActive` keeps meaning a LIVE call, which makes the composer inert because
+// the voice model owns the thread. A Direct call leaves the composer live: what it
+// shares with Live is only what `anyCallActive` guards.
+let spokenQueue = ''
+function sendSpoken(text) {
+  if (sending.value) { spokenQueue = spokenQueue ? `${spokenQueue} ${text}` : text; return }
+  void submitUserText(text, { spoken: true, tags: [] }).then((res) => {
+    if (res && !res.ok && !res.cancelled) direct.notice.value = "That didn't send. It's marked in the chat."
+  })
+}
+const direct = useDirectVoiceSession({
+  onTranscript: sendSpoken,
+  onBargeIn: ({ executionId } = {}) => stopCallTurn(executionId),
+  // ent#1087: a Stop is not more words. Whatever was waiting to be sent after the turn
+  // stays unsent, or the cancel would land and the queue would start the next turn.
+  onStop: () => { spokenQueue = '' },
+  // A spoken turn still being dispatched is something to stop, before its id is known.
+  isBusy: () => sending.value,
+  onAnswer: answerAskByVoice,
+})
+// The turn a stop on the call reaches: the composer's own, or the run the bridge is
+// speaking when that is another one (an approved run). Same route either way, as the
+// person; a 404 is the lost race and says nothing.
+function stopCallTurn(executionId) {
+  if (canCancelTurn.value) { void cancelTurn({ restore: false, fromCall: true }); return }
+  if (sending.value && !activeExecutionId.value) { stopWhenStarted = true; return }
+  if (!executionId) return
+  cancelledExecutionIds.value.add(executionId)
+  void store.cancelPortalTurn(props.agent.name, executionId).catch(() => {})
+}
+const directCallActive = computed(() => direct.isActive.value)
+const anyCallActive = computed(() => voiceCallActive.value || directCallActive.value)
+watch(sending, (isSending) => {
+  if (isSending || !spokenQueue) return
+  const text = spokenQueue
+  spokenQueue = ''
+  if (directCallActive.value) sendSpoken(text)
+})
+// Answered as the person, on the same route their click uses. The socket never decides.
+async function answerAskByVoice(ask, answer) {
+  const option = optionForAnswer(ask, answer)
+  if (!option) return
+  try {
+    await store.answerAsk(ask.id, { response: option })
+    direct.notice.value = answer === 'yes' ? 'Approved by voice' : 'Rejected by voice'
+    direct.askAnswered(ask.id, answer === 'yes' ? 'approved' : 'rejected')
+  } catch (e) {
+    direct.notice.value = "That answer didn't go through. Use the card."
+    console.warn('[workspace] voice answer failed:', e?.message || e)
+  }
+}
+const pendingAsksPrompted = new Set()
+watch(directCallActive, (on) => {
+  pendingAsksPrompted.clear()
+  // What was already waiting when the call began stays on its card, unspoken.
+  if (on) chatTurnAskList.value.filter((a) => a.status === 'pending').forEach((a) => pendingAsksPrompted.add(a.id))
+})
+watch(
+  () => [directCallActive.value, direct.status.value === 'connecting', direct.waitingAsk.value?.id, chatTurnAskList.value.filter((a) => a.status === 'pending').map((a) => a.id).join()],
+  () => {
+    // Until the socket is open a prompt would go nowhere, and the ask would count as read.
+    if (!directCallActive.value || direct.status.value === 'connecting') return
+    const waiting = direct.waitingAsk.value
+    if (waiting) {
+      // Answered on its card: the same follow-up a spoken answer gets.
+      const now = chatTurnAskList.value.find((a) => a.id === waiting.id)
+      if (now && now.status === 'pending') return
+      direct.clearAsk()
+      const outcome = cardOutcome(now)
+      if (outcome) direct.askAnswered(waiting.id, outcome)
+      return
+    }
+    const next = chatTurnAskList.value.find((a) => a.status === 'pending' && !pendingAsksPrompted.has(a.id))
+    if (next) { pendingAsksPrompted.add(next.id); direct.promptAsk(next) }
+  },
+)
+// The Direct button's own availability, the same shape as `voiceEntry` for the Live one.
+const directEntry = computed(() => voiceEntryState({
+  isPlatform: store.isPlatformSession,
+  realtimeVoice: store.directVoice,
+}))
+// One recipe for both call buttons (#2662: the state colour on mutually exclusive arms).
+const CALL_BUTTON_CLASS = Object.freeze({
+  on: 'bg-action-primary-100 dark:bg-action-primary-900/40 text-action-primary-600 dark:text-action-primary-300',
+  off: 'text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-750',
+})
+const callUi = computed(() => callButtons({
+  isPlatform: store.isPlatformSession,
+  realtimeVoice: store.realtimeVoice,
+  directVoice: store.directVoice,
+  liveActive: voiceCallActive.value,
+  directActive: directCallActive.value,
+}))
+watch(directCallActive, async (on, was) => {
+  if (!was || on) return
+  spokenQueue = ''
+  voiceEndNotice.value = endedNotice({ reason: direct.endReason.value, message: direct.endMessage.value })
+  if (direct.error.value && !voiceEndNotice.value) voiceError.value = direct.error.value
+  const sid = currentSessionId.value
+  emit('sessions-changed', sid)
+  if (!sid) return
+  // A turn left running keeps its reply on the way. Reload once it has landed.
+  if (!sending.value) { await loadThread(sid); return }
+  const off = watch(sending, (isSending) => {
+    if (isSending) return
+    off()
+    if (currentSessionId.value === sid) void loadThread(sid)
+  })
+})
 const voiceHeaderText = computed(() => voiceHeaderLine({
   status: voice.status.value,
   toolName: voice.toolName.value,
@@ -3110,7 +3331,7 @@ const voiceHeaderText = computed(() => voiceHeaderLine({
   backgroundTasks: voice.backgroundTasks.value,
 }))
 // The thread, with each voice call's rows folded into one block.
-const threadItems = computed(() => groupVoiceBlocks(messages.value))
+const threadItems = computed(() => groupVoiceBlocks(messages.value, { liveCallId: directCallActive.value ? direct.voiceSessionId.value : null }))
 // trinity-enterprise#610: the thread's rows with this chat's chat-turn asks
 // placed among them by time, each as a card or a history row.
 const threadRows = computed(() => placeAsksInThread(threadItems.value, chatTurnAskList.value, { truncated: historyTruncated.value, sessionId: currentSessionId.value }).map((row) => (
@@ -3153,8 +3374,10 @@ const rowKey = (item) => (
 // `active` alone carried no session id and the canvas column fetched
 // `/voice//panel`. Both facts are watched; the shell mounts the column only
 // once the id is known.
-watch([voiceCallActive, () => voice.voiceSessionId.value], ([on, sid]) => {
-  emit('voice-call', { active: on, agentName: props.agent?.name, voiceSessionId: on ? sid : null })
+// trinity-enterprise#1046: a Direct call counts as on for the shell's leave guard, but
+// names no session id: the canvas column belongs to the Live call's voice model.
+watch([anyCallActive, voiceCallActive, () => voice.voiceSessionId.value], ([on, live, sid]) => {
+  emit('voice-call', { active: on, agentName: props.agent?.name, voiceSessionId: live ? sid : null })
 })
 watch(() => voice.panelVersion.value, (v) => emit('voice-panel', v))
 // ent#551: the thread is on screen for the whole call, so nothing that lands in
@@ -3182,13 +3405,13 @@ watch(voiceCallActive, async (on, was) => {
   emit('sessions-changed', currentSessionId.value)
 })
 
-async function startVoiceCall() {
-  if (voiceCallActive.value || voiceStarting.value) return
+async function startVoiceCall(mode = 'live') {
+  if (anyCallActive.value || voiceStarting.value) return
   voiceError.value = ''
   voiceEndNotice.value = ''
   // Re-checked at click even though the control is disabled when unavailable:
   // the roster refreshes in the background, so the answer has to be words.
-  const entry = voiceEntry.value
+  const entry = mode === 'direct' ? directEntry.value : voiceEntry.value
   if (!entry.render || !entry.enabled) { voiceError.value = entry.reason || VOICE_UNAVAILABLE_FALLBACK; return }
   const pre = voicePreflight({
     canCapture: canRecord,
@@ -3212,6 +3435,11 @@ async function startVoiceCall() {
       adoptSession(sid)
       emit('sessions-changed', sid)
     }
+    if (mode === 'direct') {
+      const ok = await direct.startWith(() => store.startWorkspaceVoice(props.agent.name, sid, null, 'direct'))
+      if (!ok) voiceError.value = direct.error.value || VOICE_UNAVAILABLE_FALLBACK
+      return
+    }
     const ok = await voice.startWith(
       () => store.startWorkspaceVoice(props.agent.name, sid),
       { restStop: false },
@@ -3225,6 +3453,7 @@ async function startVoiceCall() {
 }
 
 async function endVoiceCall() {
+  if (directCallActive.value) { await direct.stop(); return }
   if (!voiceCallActive.value) return
   await voice.stop()
 }
@@ -3293,10 +3522,95 @@ watch(
 )
 onBeforeUnmount(() => emit('work-state', workSignalFrom({ sending: false })))
 
+// ---- The open thread catches up (#3439) --------------------------------------
+//
+// Anything written into THIS thread after the person's turn ended — a
+// completion report, an approval outcome (#3709), a recovered lost turn
+// (#2319), a background task's later reply — reached the sidebar badge on the
+// shell's 20 s tick and never the transcript: `loadThread` runs on mount and on
+// a switch only. The shell hands this component its thread list on every tick
+// (`props.threads`, re-stamped with unread and stars), so the row for the open
+// thread is the signal. No new timer, no new transport (the Workspace has no
+// WebSocket by design — see `startAsksPoll` in the shell).
+//
+// `reconcileTail` is the ONE fetch-dedupe-append for a row that arrived on its
+// own: the ent#747 ask-result poll below rides it too, as a faster cadence over
+// the same function, rather than keeping its own copy.
+//
+// Returns the rows it appended (possibly none). A read failure is swallowed —
+// the row is still there on the next move, and a 404 here is never
+// `thread-missing` (a gone thread leaves the list and the signal stops).
+async function reconcileTail(sid, { limit = REPLY_POLL_ROWS } = {}) {
+  let data
+  try {
+    data = await store.fetchHistory(props.agent.name, sid, { limit })
+  } catch { return [] }
+  if (currentSessionId.value !== sid) return []
+  // The server's copy of the person's own question carries the id the local
+  // row lacks — adopt it, or the first read after their own turn shows the
+  // question twice.
+  adoptLocalIds(messages.value, data.messages)
+  let rows = data.messages
+  if (tailOverflowed(messages.value, rows, limit)) {
+    // Every row of a full-length read was unseen: the gap may be deeper than
+    // the read. Re-read the window and merge — never `loadThread`, which empties
+    // and pins the viewport; this is an arrival, not an intent (#2624).
+    try { rows = (await store.fetchHistory(props.agent.name, sid)).messages } catch { return [] }
+    if (currentSessionId.value !== sid) return []
+    adoptLocalIds(messages.value, rows)
+  }
+  const fresh = freshRows(messages.value, rows)
+  if (!fresh.length) return []
+  messages.value = [...messages.value, ...fresh.map(historyRow)]
+  onMessagesArrived(fresh.length)
+  return fresh
+}
+
+// What the open thread's row last looked like when this component read its
+// tail — compared as a STRING (`tailSignature`), because `decorate()` hands
+// down new objects every tick. Set only when a reconcile actually ran, so a move
+// that landed mid-turn (skipped below) fires the moment the turn ends.
+let reconciledSignature = null
+const countOf = (sig) => Number(String(sig || '').split('|')[0]) || 0
+watch(
+  () => [tailSignature(currentThread.value), currentSessionId.value, sending.value, voiceCallActive.value, loadingHistory.value],
+  async ([sig, sid, inTurn, inCall, loading], old) => {
+    if (sig === null || !sid) { reconciledSignature = null; return }
+    // First sight of this thread's row (the mount, a switch, an adoption landing
+    // in the list): the load itself is the baseline. The row cannot be ahead of
+    // a load that just ran, and a tick arriving later compares against it.
+    if (reconciledSignature === null || old?.[0] === null || old?.[1] !== sid) { reconciledSignature = sig; return }
+    if (sig === reconciledSignature) return
+    // A turn's own path delivers its reply; a call's spoken rows are folded once
+    // at its end (`loadThread` below `voice.stop`). Leave the signature alone so
+    // this re-runs when the flag clears.
+    if (inTurn || inCall || loading) return
+    const before = reconciledSignature
+    reconciledSignature = sig
+    const fresh = await reconcileTail(sid, { limit: tailLimit(currentThread.value?.unread, REPLY_POLL_ROWS, TAIL_LIMIT_CAP) })
+    if (currentSessionId.value !== sid) return
+    if (fresh.length) {
+      // The shell marks the thread read — only if the person is still looking
+      // at it. A distinct event, not `sessions-changed`: that one also clears and
+      // re-arms the #2579 title-settle cycle and re-reads the list, none of which
+      // an agent-initiated row should drive.
+      emit('thread-caught-up', sid)
+    } else if (countOf(sig) === countOf(before)) {
+      // The time moved and the count did not: a deliverable touched the row
+      // (`report_service`, `added=0`) — the one writer with that shape. The card
+      // list re-reads on this cue the way it does after the person's own turn
+      // (ent#365). A moved count with nothing fresh is the person's own turn,
+      // already on screen, and `deliver()` bumped this itself.
+      deliverableTick.value += 1
+    }
+  },
+  { immediate: true },
+)
+
 // trinity-enterprise#747: an answer here woke the agent, and its result is
-// delivered into this chat as a completion report (ent#457). The chat has no
-// history poll, so it looks for that report itself — every few seconds, for a
-// bounded time, only while this chat is the one on screen — and appends it.
+// delivered into this chat as a completion report (ent#457). The 20 s tick above
+// would bring it; this looks every few seconds instead, for a bounded time, only
+// while this chat is the one on screen — and stops once a report has landed.
 const ASK_RESULT_POLL_MS = 5000
 const ASK_RESULT_WAIT_MS = 5 * 60 * 1000
 let askResultTimer = null
@@ -3311,18 +3625,12 @@ async function checkAskResult(watch) {
     if (store.askResultWatch === watch) store.askResultWatch = null
     return
   }
-  let data
-  try {
-    data = await store.fetchHistory(props.agent.name, sid, { limit: REPLY_POLL_ROWS })
-  } catch (_) { return }   // the next tick tries again; the report is a row, not an event
-  if (currentSessionId.value !== sid) return
-  const have = new Set(messages.value.map((m) => m.id).filter(Boolean))
-  const fresh = (data.messages || []).filter((m) => (
-    m.id && !have.has(m.id) && m.role === 'assistant' && String(m.source || '').startsWith('completion:')
-  ))
-  if (!fresh.length) return
-  messages.value = [...messages.value, ...fresh.map((m) => ({ ...assistantRow(m), at: m.created_at || null }))]
-  onMessagesArrived(fresh.length)
+  const fresh = await reconcileTail(sid)
+  // #3439: what landed here was watched landing — read, the same as the
+  // signature path says it. Before this the report appeared and the chat the
+  // person was sitting in kept its badge until the next turn.
+  if (fresh.length) emit('thread-caught-up', sid)
+  if (!fresh.some((m) => m.role === 'assistant' && String(m.source || '').startsWith('completion:'))) return
   stopAskResultPoll()
   if (store.askResultWatch === watch) store.askResultWatch = null
 }

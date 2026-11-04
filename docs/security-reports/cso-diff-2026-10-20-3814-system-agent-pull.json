@@ -1,0 +1,7 @@
+{"version":"1.2.3","date":"2026-10-20","mode":"diff","scope":"all","issue":"abilityai/trinity#3814","base":"origin/dev@d1c2447c4",
+"phases_run":[0,1,2,6,7,9,12,13,14],
+"findings":[],"hypotheses":[],
+"coverage_gaps":["docker pass not run (no Dockerfile/dependency/compose change in diff)","independent verifier not spawned (no findings)"],
+"supply_chain_summary":{"scanner":"none — diff adds no dependencies"},
+"totals":{"critical":0,"high":0,"medium":0,"low":0},
+"trend":"n/a (diff run)"}

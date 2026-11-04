@@ -72,12 +72,37 @@
           External clients who verified their identity but aren't approved yet. Approving lets them chat.
         </p>
         <ul class="divide-y divide-gray-200 dark:divide-gray-700 border border-gray-200 dark:border-gray-700 rounded-lg">
-          <li v-for="req in pendingRequests" :key="req.id" class="px-4 py-3 flex items-center justify-between">
-            <div>
-              <p class="text-sm font-medium text-gray-900 dark:text-gray-100">{{ req.email }}</p>
-              <p class="text-xs text-gray-500 dark:text-gray-400">
-                via {{ req.channel || 'unknown' }} · {{ formatRequestedAt(req.requested_at) }}
+          <!-- trinity-enterprise#737: the requester as a person — name, handle,
+               channel and its own id — with the email as one attribute. -->
+          <li v-for="req in pendingRequests" :key="req.id" class="px-4 py-3 flex items-center justify-between gap-3" :data-testid="`access-request-${req.id}`">
+            <div class="min-w-0">
+              <p class="text-sm font-medium text-gray-900 dark:text-gray-100" data-testid="access-request-who">{{ requesterTitle(req) }}</p>
+              <p class="text-xs text-gray-500 dark:text-gray-400" data-testid="access-request-facts">
+                {{ requesterFacts(req) }} · {{ formatRequestedAt(req.requested_at) }}
               </p>
+              <div v-if="!req.identity_captured || req.known_as?.length" class="mt-1 flex flex-wrap gap-1">
+                <BaseBadge
+                  v-if="!req.identity_captured"
+                  size="sm"
+                  variant="neutral"
+                  :title="req.channel === 'web' ? 'A public-link request carries a verified email and nothing else.' : 'This request predates identity capture.'"
+                  data-testid="access-request-no-identity"
+                >{{ req.channel === 'web' ? 'Email only — public link' : 'Identity not captured' }}</BaseBadge>
+                <BaseBadge
+                  v-for="k in (req.known_as || []).slice(0, 3)"
+                  :key="`${k.agent_name}:${k.status}:${k.email}`"
+                  size="sm"
+                  :variant="KNOWN_AS_VARIANT[k.status] || 'neutral'"
+                  :title="k.email ? `as ${k.email}` : undefined"
+                  data-testid="access-request-known-as"
+                >{{ KNOWN_AS_LABEL[k.status] || k.status }} on {{ k.agent_name }}</BaseBadge>
+                <BaseBadge
+                  v-if="(req.known_as || []).length > 3"
+                  size="sm"
+                  variant="neutral"
+                  :title="req.known_as.slice(3).map(k => `${KNOWN_AS_LABEL[k.status] || k.status} on ${k.agent_name}`).join(', ')"
+                >+{{ req.known_as.length - 3 }} more</BaseBadge>
+              </div>
             </div>
             <div class="flex items-center gap-2">
               <button
@@ -275,19 +300,21 @@
       </div>
     </div>
 
-    <!-- Distribution: content/links sharing — not client access (#18 nudge) -->
+    <!-- Web — public chat links outsiders open in a browser. This block was
+         "Distribution"; trinity-enterprise#888 moved File sharing to
+         Settings › Storage (it governs what leaves the disk, not reach). -->
     <div>
-      <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100 mb-1">Distribution</h4>
+      <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100 mb-1">Web</h4>
       <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
-        Share generated files and public chat links. This is about distributing output, not granting client access.
+        Public chat links outsiders open in a browser. Shared files are under
+        <router-link
+          :to="{ query: { ...$route.query, tab: 'settings', section: 'storage' } }"
+          class="font-medium text-action-primary-600 hover:text-action-primary-700 dark:text-action-primary-400 dark:hover:text-action-primary-300"
+        >Settings › Storage</router-link>.
       </p>
       <div class="space-y-2">
         <ChannelDisclosure title="Public links" subtitle="Shareable public chat URLs" icon="🔗">
           <PublicLinksPanel :agent-name="agentName" />
-        </ChannelDisclosure>
-
-        <ChannelDisclosure title="File sharing" subtitle="Outbound shared files" icon="📂">
-          <FileSharingPanel :agent-name="agentName" />
         </ChannelDisclosure>
       </div>
     </div>
@@ -311,7 +338,7 @@ import WhatsAppChannelPanel from './WhatsAppChannelPanel.vue'
 import VoipChannelPanel from './VoipChannelPanel.vue'
 import ConnectorChannelPanel from './ConnectorChannelPanel.vue'
 import PortalClientsPanel from './PortalClientsPanel.vue'
-import FileSharingPanel from './FileSharingPanel.vue'
+import BaseBadge from './base/BaseBadge.vue'
 
 const props = defineProps({
   agentName: {
@@ -515,6 +542,21 @@ const decideRequest = async (req, approve) => {
   } finally {
     decisionLoading.value = null
   }
+}
+
+// trinity-enterprise#737 — who asked, as the channel saw them.
+const CHANNEL_LABEL = { telegram: 'Telegram', whatsapp: 'WhatsApp', slack: 'Slack', web: 'Public link' }
+const KNOWN_AS_LABEL = { approved: 'Approved', denied: 'Denied', pending: 'Asked', verified: 'Verified' }
+const KNOWN_AS_VARIANT = { approved: 'success', denied: 'danger', pending: 'warning', verified: 'info' }
+const handleOf = (req) => (req.requester_handle ? `@${req.requester_handle.replace(/^@/, '')}` : '')
+const requesterTitle = (req) => req.requester_name || handleOf(req) || req.email
+const requesterFacts = (req) => {
+  const channel = CHANNEL_LABEL[req.channel] || req.channel || 'unknown channel'
+  const parts = []
+  if (req.requester_name && handleOf(req)) parts.push(handleOf(req))
+  parts.push(req.requester_channel_id ? `${channel} id ${req.requester_channel_id}` : `via ${channel}`)
+  if (requesterTitle(req) !== req.email) parts.push(req.email)
+  return parts.join(' · ')
 }
 
 const formatRequestedAt = (iso) => {
