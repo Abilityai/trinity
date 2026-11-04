@@ -246,9 +246,10 @@ describe('placement and sharing (source guards)', () => {
     // without its fill it was the one screen with no theme control. #3060: the
     // Inbox's own skeleton draws its header, so it carries the switch too, or
     // the control popped in when the stage landed. ent#661 added the Projects
-    // stage — another surface with its own header.
+    // stage — another surface with its own header. Workspace Build added the
+    // sixth: the Build page, whose world column carries the switch.
     const fills = PORTAL.split('<template #header-end>').length - 1
-    expect(fills).toBe(5)
+    expect(fills).toBe(6)
     expect(PORTAL).toContain("import PortalThemeSwitch from '@/components/portal/PortalThemeSwitch.vue'")
   })
 

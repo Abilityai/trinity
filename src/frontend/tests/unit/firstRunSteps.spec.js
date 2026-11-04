@@ -72,23 +72,26 @@ const established = {
   claudeAuthConfigured: true,
   telemetryDismissed: true,
   firstRun: false,
+  profileDone: true,
+  companyDone: true,
+  auditChoice: 'start',
 }
 
 beforeEach(() => localStorage.clear())
 
 describe('the registry', () => {
-  it('has the six steps in the fixed order', () => {
-    expect(keys(FIRST_RUN_STEPS)).toEqual(['secure', 'email', 'claude', 'keys', 'agent', 'sharing'])
+  it('has the steps in the fixed order', () => {
+    expect(keys(FIRST_RUN_STEPS)).toEqual(['intro', 'secure', 'email', 'profile', 'claude', 'keys', 'company', 'sharing', 'audit', 'agent'])
   })
 
   it('has exactly one required step: claude', () => {
     expect(keys(FIRST_RUN_STEPS.filter((s) => s.required))).toEqual(['claude'])
   })
 
-  it('names a real Settings tab (or the dashboard) as every skip destination', () => {
+  it('names a real Settings tab (or the dashboard, or the Workspace) as every skip destination', () => {
     // The spec's "Settings → Privacy" / "Settings → Setup" do not exist.
     for (const s of FIRST_RUN_STEPS) {
-      expect(['Settings → General', 'Settings → Integrations', 'the dashboard'], s.key).toContain(
+      expect(['Settings → General', 'Settings → Integrations', 'the dashboard', 'the Workspace', 'Get help in the Workspace'], s.key).toContain(
         s.settingsPath
       )
     }
@@ -96,7 +99,7 @@ describe('the registry', () => {
 
   it('a fresh marketplace admin gets every step', () => {
     expect(keys(applicableSteps(freshMarketplace))).toEqual([
-      'secure', 'email', 'claude', 'keys', 'agent', 'sharing',
+      'intro', 'secure', 'email', 'profile', 'claude', 'keys', 'company', 'sharing', 'audit', 'agent',
     ])
     expect(estimateMinutes(applicableSteps(freshMarketplace))).toBeGreaterThan(0)
   })
@@ -124,10 +127,11 @@ describe('the registry', () => {
 })
 
 describe('no duplicate asks after /setup (AC 6)', () => {
-  it('an email bound at /setup means the email step is absent', () => {
+  it('an email bound at /setup is not asked for again: it is listed as already done', () => {
     const claimed = { ...freshMarketplace, hasEmail: true }
     expect(keys(applicableSteps(claimed))).not.toContain('email')
-    expect(keys(stepsForSession(claimed))).not.toContain('email')
+    const email = stepsForSession(claimed).find((s) => s.key === 'email')
+    expect(stepState({ step: email, currentKey: 'welcome', ctx: claimed })).toBe('done')
   })
 
   it('a decided usage-sharing ask is not asked again', () => {
@@ -158,7 +162,7 @@ describe('isFirstRunOverlayVisible', () => {
   it('stays hidden on an established fleet (the spec correction)', () => {
     // `keys` still applies to every admin here, and would open the overlay on
     // every new browser if a ride-along step could open it on its own.
-    expect(keys(applicableSteps(established))).toEqual(['keys'])
+    expect(keys(applicableSteps(established))).toEqual(['intro', 'keys'])
     expect(isFirstRunOverlayVisible(established)).toBe(false)
   })
 
@@ -196,21 +200,50 @@ describe('isFirstRunOverlayVisible', () => {
   })
 })
 
+describe('Workspace Build: about you, your company, the AI audit', () => {
+  const unanswered = { ...established, profileDone: false, companyDone: false, auditChoice: undefined }
+
+  it('never opens the overlay by itself on an established fleet', () => {
+    expect(isFirstRunOverlayVisible(unanswered)).toBe(false)
+    expect(keys(applicableSteps(unanswered))).toEqual(['intro', 'profile', 'keys', 'company', 'audit'])
+  })
+
+  it('stay skippable, but Continue waits for an answer', () => {
+    for (const key of ['profile', 'company', 'audit']) {
+      expect(step(key).required, key).toBe(false)
+      expect(canContinue({ step: step(key), ctx: unanswered }), key).toBe(false)
+      expect(canContinue({ step: step(key), ctx: established }), key).toBe(true)
+    }
+  })
+
+  it('asks about the person, then Claude, then the company and the audit, which both use it', () => {
+    const order = keys(FIRST_RUN_STEPS)
+    expect(order.indexOf('profile')).toBeLessThan(order.indexOf('claude'))
+    expect(order.indexOf('company')).toBeGreaterThan(order.indexOf('claude'))
+    expect(order.indexOf('audit')).toBeGreaterThan(order.indexOf('company'))
+    expect(order.indexOf('audit')).toBeLessThan(order.indexOf('agent'))
+  })
+})
+
 describe('forced reopen keeps completed steps complete', () => {
   it('the session set is every ELIGIBLE step, and the done ones read done', () => {
     const ctx = { ...established, forced: true }
     const steps = stepsForSession(ctx)
-    expect(keys(steps)).toEqual(['secure', 'email', 'claude', 'keys', 'agent', 'sharing'])
+    expect(keys(steps)).toEqual(['intro', 'secure', 'email', 'profile', 'claude', 'keys', 'company', 'sharing', 'audit', 'agent'])
     const states = Object.fromEntries(
       steps.map((s) => [s.key, stepState({ step: s, currentKey: 'welcome', ctx })])
     )
     expect(states).toEqual({
-      secure: 'done', email: 'done', claude: 'done', keys: 'upcoming', agent: 'done', sharing: 'done',
+      intro: 'upcoming', secure: 'done', email: 'done', profile: 'done', claude: 'done', keys: 'upcoming', company: 'done', audit: 'done', agent: 'done', sharing: 'done',
     })
   })
 
-  it('an auto-open shows only what applies', () => {
-    expect(keys(stepsForSession({ ...established, hasEmail: false }))).toEqual(['email', 'keys'])
+  it('an auto-open lists every step too, with what was already done checked', () => {
+    const ctx = { ...established, hasEmail: false }
+    const steps = stepsForSession(ctx)
+    expect(keys(steps)).toEqual(keys(stepsForSession({ ...ctx, forced: true })))
+    const todo = steps.filter((s) => stepState({ step: s, currentKey: 'welcome', ctx }) !== 'done')
+    expect(keys(todo)).toEqual(['intro', 'email', 'keys'])
   })
 })
 
@@ -451,5 +484,27 @@ describe('the chassis replaced the card ladder (structure)', () => {
     expect(settings).toMatch(/v-if="activeTab === 'general'"[\s\S]{0,40}<FirstRunRerunPanel \/>/)
     const panel = read('../../src/components/settings/FirstRunRerunPanel.vue')
     expect(panel).toContain("query: { onboarding: '1' }")
+  })
+})
+
+describe('Workspace Build: the audit in setup', () => {
+  const audit = FIRST_RUN_STEPS.find((s) => s.key === 'audit')
+  const ctx = { ...ready, isAdmin: true }
+
+  it('is still to do when skipped, because skipping is not doing it', () => {
+    const c = { ...ctx, auditChoice: 'skip' }
+    expect(audit.applies(c)).toBe(true)
+    expect(stepState({ step: audit, currentKey: 'agent', ctx: c, skipped: ['audit'] })).toBe('skipped')
+  })
+
+  it('reads as started rather than done once it has begun', () => {
+    const c = { ...ctx, auditChoice: 'start' }
+    expect(audit.applies(c)).toBe(false)
+    expect(audit.doneLabel).toBe('Started')
+  })
+
+  it('comes after usage sharing, because starting it leaves setup', () => {
+    const order = FIRST_RUN_STEPS.map((s) => s.key)
+    expect(order.indexOf('sharing')).toBeLessThan(order.indexOf('audit'))
   })
 })

@@ -33,7 +33,7 @@ export const CONSENT_COPY = {
   cold: {
     title: 'Help improve Trinity',
     lead:
-      'Share anonymous, aggregate usage so we can see whether the platform works outside our own instance — and so you can see how your setup compares to the fleet.',
+      "This is optional, and Trinity works the same either way. If you say yes, Trinity sends us a few anonymous numbers, so we can see what works and you can see how your setup compares with others.",
   },
   warm: {
     title: 'Your first scheduled run just completed',
@@ -42,13 +42,37 @@ export const CONSENT_COPY = {
   },
   shared: {
     detail:
-      'Off by default. Coarse counts and version info only — no prompts, no agent content, no emails, no agent names. Turning it on also shares the last 30 days of local counts so your benchmarks are accurate. Keyed by a random share id minted when you turn this on and discarded when you turn it off. Reversible any time in Settings → Usage sharing.',
-    previewSummary: 'See what would be sent',
-    share: 'Share anonymous usage',
+      "Off by default, and reversible any time in Settings → Usage sharing. Only totals and version numbers. Saying yes also sends the totals from the last 30 days, so your comparison is accurate. They're filed under a random share id, made when you say yes and thrown away when you turn this off.",
+    previewSummary: 'See exactly what would be sent',
+    share: 'Yes, share these numbers',
     notNow: 'Not now',
-    dontAsk: "Don't ask again",
+    dontAsk: 'No thanks',
     shared: 'Sharing is on. Each send shows in Settings → Usage sharing → Recent sends.',
   },
+}
+
+/**
+ * The payload preview in plain words, for people who don't read JSON. Only what's in
+ * the payload: a field that's missing drops its row, and the raw data stays one click
+ * away for anything this doesn't cover.
+ */
+export function payloadSummary(payload) {
+  if (!payload || typeof payload !== 'object') return []
+  const { instance = {}, counts = {}, activation_funnel: funnel = {}, outcomes = {}, window_days: days } = payload
+  const period = Number.isInteger(days) ? `the last ${days} days` : 'this period'
+  const rows = []
+  const add = (label, value) => { if (value !== undefined && value !== null && value !== '') rows.push({ label, value: String(value) }) }
+  if (instance.trinity_version) add('Trinity version', instance.edition ? `${instance.trinity_version}, ${instance.edition} edition` : instance.trinity_version)
+  add('Computer system', instance.platform)
+  add('Number of agents', counts.agents)
+  if (counts.executions_total !== undefined) {
+    add(`Agent runs in ${period}`, `${counts.executions_total}, of which ${counts.executions_success ?? 0} worked and ${counts.executions_failed ?? 0} failed`)
+  }
+  const started = Object.entries(outcomes.by_trigger || {}).map(([how, n]) => `${how}: ${n?.total ?? 0}`)
+  if (started.length) add('How runs were started', started.join(', '))
+  if (funnel.setup_completed !== undefined) add('Times this setup was finished', funnel.setup_completed)
+  if (payload.sharing_id) add('Your ID', 'A random number, not linked to you')
+  return rows
 }
 
 /**

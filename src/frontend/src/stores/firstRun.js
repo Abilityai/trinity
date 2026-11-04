@@ -24,6 +24,9 @@ export const useFirstRunStore = defineStore('firstRun', {
     // during the fetch.
     loaded: false,
     loading: false,
+    // The last fetch failed, so `seededAgents` is unknown rather than empty. A reader
+    // that must not mistake a sample for someone's own agent waits for a good answer.
+    failed: false,
     firstRun: false,
     seededAgents: [],
     ownAgentCount: 0,
@@ -40,10 +43,12 @@ export const useFirstRunStore = defineStore('firstRun', {
         this.seededAgents = Array.isArray(r.data?.seeded_agents) ? r.data.seeded_agents : []
         this.ownAgentCount = r.data?.own_agent_count ?? 0
         this.demoAgent = r.data?.demo_agent ?? null
+        this.failed = false
       } catch (e) {
         // Fail toward "not first run": a missed nudge is a non-event, whereas a
         // prompt that appears over a mature fleet is noise nobody asked for.
         this.firstRun = false
+        this.failed = true
         console.warn('[firstRun] state unavailable:', e?.message || e)
       } finally {
         this.loading = false

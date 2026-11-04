@@ -44,7 +44,11 @@
       </button>
 
       <!-- Agent picker (ChatGPT model-picker position) -->
-      <div class="relative min-w-0" ref="pickerRef">
+      <div v-if="focused" class="flex items-center gap-2 min-w-0 px-2 py-1.5" data-testid="portal-focused-agent">
+        <PortalAvatar :name="agent.name" :avatar-url="agent.avatar_url" :size="26" />
+        <span class="font-semibold truncate">{{ agentDisplayName(agent) }}</span>
+      </div>
+      <div v-else class="relative min-w-0" ref="pickerRef">
         <button
           class="flex items-center gap-2 max-w-full rounded-lg px-2 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 transition disabled:cursor-not-allowed"
           :disabled="anyCallActive"
@@ -84,6 +88,8 @@
            you, so a title derived from whatever was said in it first (or a
            person's rename) would make the pinned tab and this header disagree
            about which chat you are in. Every other chat renames as before. -->
+      <span v-if="focused" class="hidden sm:inline min-w-0 flex-1"></span>
+      <template v-else>
       <span
         v-if="isMainChat"
         class="hidden sm:inline min-w-0 flex-1 truncate text-sm font-medium"
@@ -98,13 +104,14 @@
         text-class="text-sm font-medium"
       />
       <span v-else-if="!currentSessionId" class="hidden sm:inline min-w-0 flex-1 truncate text-sm text-gray-500 dark:text-gray-400">New chat</span>
+      </template>
 
       <div class="ml-auto flex items-center gap-1 shrink-0">
         <!-- ent#661: the chat's project — its badge and Detach, or one
              "Project" button. Hidden in Main, for an outside client, before
              the chat exists, and on a build without projects. -->
         <ProjectChatControls
-          v-if="currentSessionId"
+          v-if="currentSessionId && !focused"
           kind="thread"
           :agent-name="agent.name"
           :target-id="currentSessionId"
@@ -117,6 +124,7 @@
              Ctrl+J, ruled 2026-09-06). Starts a fresh thread with THIS agent —
              the sidebar's button is the cross-agent one (the picker). -->
         <button
+          v-if="!focused"
           type="button"
           class="inline-flex items-center gap-1 rounded-lg px-2 py-1.5 text-sm font-medium text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 hover:text-gray-900 dark:hover:text-gray-100 transition"
           :title="`New chat (${newChatHotkey})`"
@@ -135,7 +143,7 @@
              control that silently does nothing is the dead end this family of
              issues keeps removing. -->
         <PortalStarButton
-          v-if="currentSessionId"
+          v-if="currentSessionId && !focused"
           :class="voiceCallActive ? 'opacity-40 pointer-events-none' : ''"
           :starred="starred"
           @toggle="$emit('toggle-star', { id: currentSessionId, is_room: false, starred })"
@@ -168,6 +176,7 @@
              and Files. ent#523's reasoning above it — "the band is numbers;
              this is the door to everything else" — still holds; only the door's
              location moved. -->
+        <template v-if="!focused">
         <button
           v-if="isMainChat"
           class="px-2.5 py-1.5 rounded-lg text-xs font-medium text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800 transition disabled:opacity-40 disabled:cursor-not-allowed"
@@ -176,6 +185,7 @@
           data-testid="portal-reset-main"
           @click="onResetMain"
         >{{ resetting ? 'Resetting…' : 'Reset' }}</button>
+        </template>
         <!-- ent#547: ONE paperclip, and it is the composer's. This header
              control opened the rail's Files tab with the same glyph the
              composer uses to ATTACH — two paperclips a few hundred pixels
@@ -202,6 +212,7 @@
          is still an unsaved fresh start, or it was born here a moment ago and
          the list has not caught up yet. -->
     <PortalChatTabs
+      v-if="!focused"
       :threads="threads"
       :agent-name="agent.name"
       :active-id="currentSessionId"
@@ -380,6 +391,13 @@
           :class="PLATFORM_LINE_CLASS"
           data-testid="portal-system-line"
         >{{ item.message.content }}</p>
+        <!-- Workspace Build: a line the page sent for the person (a level reached) is a
+             note, not something they said. A failed one keeps its bubble and Retry. -->
+        <p
+          v-else-if="noteFor(item.message)"
+          :class="PLATFORM_LINE_CLASS"
+          data-testid="portal-note-line"
+        >{{ noteFor(item.message) }}</p>
         <div v-else :class="item.message.role === 'user' ? 'flex justify-end' : 'flex items-start gap-2.5'">
           <PortalAvatar v-if="item.message.role !== 'user'" :name="agent.name" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
           <div v-if="item.message.role === 'user'" class="max-w-[85%] flex flex-col items-end gap-1">
@@ -811,7 +829,7 @@
                  button says so. -->
             <div class="mt-1 flex items-center gap-1">
               <button
-                v-if="callUi.render"
+                v-if="callUi.render && !focused"
                 type="button"
                 class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl transition disabled:opacity-40 disabled:cursor-not-allowed"
                 :class="voiceCallActive ? CALL_BUTTON_CLASS.on : CALL_BUTTON_CLASS.off"
@@ -826,7 +844,7 @@
                 <svg v-else class="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 10v4m4-7v10m4-7v4M4 12h.01M20 12h.01" /></svg>
               </button>
               <button
-                v-if="callUi.render"
+                v-if="callUi.render && !focused"
                 type="button"
                 class="shrink-0 h-11 w-11 flex items-center justify-center rounded-xl transition disabled:opacity-40 disabled:cursor-not-allowed"
                 :class="directCallActive ? CALL_BUTTON_CLASS.on : CALL_BUTTON_CLASS.off"
@@ -1076,6 +1094,16 @@ const props = defineProps({
   // deep link), so focus only where it cannot summon an on-screen keyboard.
   focusOnMount: { type: String, default: 'always' },
   prefill: { type: String, default: '' },
+  // Workspace Build: send the prefill as soon as the conversation has mounted,
+  // because the person has just given these words by answering the Build page's
+  // questions. Off everywhere else, where a prefill never sends on its own.
+  autoSendPrefill: { type: Boolean, default: false },
+  // Workspace Build: this chat is one pane of a page rather than a stop among
+  // chats, so what would leave the page or start another chat is not offered.
+  focused: { type: Boolean, default: false },
+  // Workspace Build: turns a line the page sent for the person into a short note to show
+  // instead of their bubble (null for anything else).
+  asNote: { type: Function, default: null },
   // ent#610 round 8: `{ sessionId, messageId, excerpt }` from the Inbox arrow.
   // Shown only on the chat it belongs to; the shell clears it on `reply-done`.
   replyTarget: { type: Object, default: null },
@@ -1095,7 +1123,13 @@ const props = defineProps({
 // controls that raised them — the rail strip is the door to both now.
 // Declared emits are the component's contract, so a name left here after
 // its only `$emit` is deleted is a promise nothing keeps.
-const emit = defineEmits(['reply', 'reply-done', 'switch-agent', 'session-adopted', 'sessions-changed', 'thread-caught-up', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset', 'voice-call', 'voice-panel', 'open-project', 'thread-missing', 'close-chat', 'dismiss-close-error'])
+const emit = defineEmits(['reply', 'reply-done', 'switch-agent', 'session-adopted', 'sessions-changed', 'thread-caught-up', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset', 'voice-call', 'voice-panel', 'open-project', 'thread-missing', 'close-chat', 'dismiss-close-error', 'first-message-sent'])
+
+// A message the page sent for the person that reads better as a note (Workspace Build).
+function noteFor(message) {
+  if (!props.asNote || message?.role !== 'user' || message.failed) return null
+  return props.asNote(message.content) || null
+}
 
 // ent#451/#473: the active thread as the shell's list knows it. Null until the
 // list carries the thread (a just-adopted session lands on the next refresh),
@@ -1395,9 +1429,11 @@ function lastUserText() {
 // The feed's row for THIS turn, by id; until the feed has read it, a
 // synthetic item that says what is known (steps `undefined` = not read yet,
 // which the card renders as nothing — never as "could not be read").
+// Workspace Build: a card for a line the page sent says so, as the note in the thread does.
+const noted = (text) => (props.asNote && props.asNote(text)) || text
 const liveCardItem = computed(() => {
   const fromFeed = itemById(workStore.now, activeExecutionId.value)
-  if (fromFeed) return fromFeed
+  if (fromFeed) return props.asNote ? { ...fromFeed, title: noted(fromFeed.title) } : fromFeed
   return {
     id: activeExecutionId.value || 'pending',
     agent_name: props.agent.name,
@@ -1405,7 +1441,7 @@ const liveCardItem = computed(() => {
     outcome: pendingTurnOutcome(liveStreamActivity.value, props.agent.pulls_turns),
     kind: 'turn',
     // The feed's own title shape, so its row lands without re-wrapping it (#2964).
-    title: previewTitle(pendingUserText.value || lastUserText()),
+    title: previewTitle(noted(pendingUserText.value || lastUserText())),
     chat_id: currentSessionId.value,
     steps: undefined,
     can_stop: false,
@@ -1448,7 +1484,7 @@ const terminalCardItem = computed(() => {
     status: outcome === 'cancelled' ? 'cancelled' : 'failed',
     outcome,
     kind: 'turn',
-    title: previewTitle(lastUserText()),
+    title: previewTitle(noted(lastUserText())),
     chat_id: currentSessionId.value,
     error: outcome === 'cancelled' || outcome === 'lost' ? null : (msg || null),
     steps: null,
@@ -1811,6 +1847,11 @@ onMounted(async () => {
     if (props.newChat && mayAutoFocus()) nextTick(focusComposer)
   }
   autoGrowAfterUpdate()   // `props.prefill` was assigned above; wait for the patch
+  if (props.autoSendPrefill && props.prefill) {
+    await nextTick()
+    send()
+    emit('first-message-sent')
+  }
 })
 // Review finding: `overflow-y` is now pinned, so the height must be recomputed when
 // the box REWRAPS — narrowing the window (or opening a drawer) makes a fitting draft

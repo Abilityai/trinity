@@ -180,7 +180,7 @@
     </div>
 
     <!-- Channels: compact summary rows; config opens in a dialog (#19) -->
-    <div>
+    <div data-tour="showme-channels">
       <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100 mb-1">Channels</h4>
       <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
         Connect this agent to messaging channels. Use <strong>Configure</strong> to set one up.
@@ -303,7 +303,7 @@
     <!-- Web — public chat links outsiders open in a browser. This block was
          "Distribution"; trinity-enterprise#888 moved File sharing to
          Settings › Storage (it governs what leaves the disk, not reach). -->
-    <div>
+    <div data-tour="showme-public-links">
       <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100 mb-1">Web</h4>
       <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
         Public chat links outsiders open in a browser. Shared files are under

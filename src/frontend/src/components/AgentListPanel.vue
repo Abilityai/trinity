@@ -336,6 +336,7 @@
                 :to="`/agents/${agent.name}`"
                 class="text-gray-900 dark:text-white font-semibold text-sm truncate hover:text-action-primary-600 dark:hover:text-action-primary-400"
                 :title="agentNameTooltip(agent)"
+                :data-walk-agent="agent.name"
               >
                 {{ agentNameParts(agent).primary }}
               </router-link>
@@ -578,6 +579,7 @@
               :to="`/agents/${agent.name}`"
               class="text-gray-900 dark:text-white font-semibold text-sm truncate hover:text-action-primary-600 dark:hover:text-action-primary-400"
               :title="agentNameTooltip(agent)"
+              :data-walk-agent="agent.name"
             >
               {{ agentNameParts(agent).primary }}
             </router-link>
@@ -765,6 +767,7 @@
               :to="`/agents/${agent.name}`"
               class="text-gray-900 dark:text-white font-semibold text-sm truncate hover:text-action-primary-600 dark:hover:text-action-primary-400 flex-1 min-w-0"
               :title="agentNameTooltip(agent)"
+              :data-walk-agent="agent.name"
             >
               {{ agentNameParts(agent).primary }}
             </router-link>

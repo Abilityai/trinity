@@ -28,6 +28,19 @@ export const FIRST_RUN_SKIPPED_KEY = 'trinity_first_run_skipped' // JSON array o
  */
 const REGISTRY = [
   {
+    key: 'intro',
+    name: "See what's possible",
+    tag: 'Optional',
+    required: false,
+    minutes: 1,
+    settingsPath: 'Get help in the Workspace',
+    // Workspace Build: the value before the setup. Like `keys`, nothing says it's
+    // done, so it reads done once watched this session, and it never opens the overlay.
+    ridesAlong: true,
+    eligible: (c) => !!c.isAdmin,
+    pending: () => true,
+  },
+  {
     key: 'secure',
     name: 'Secure this instance',
     tag: 'Recommended',
@@ -56,6 +69,22 @@ const REGISTRY = [
     pending: (c) => !c.hasEmail,
   },
   {
+    key: 'profile',
+    name: 'About you',
+    tag: 'Recommended',
+    required: false,
+    gated: true,
+    minutes: 1,
+    settingsPath: 'the Workspace',
+    // Workspace Build: what the guide and the Agent Builder pitch themselves to.
+    // `ridesAlong`, and likewise `company` and `audit`: answers live per browser, so an
+    // established fleet must not meet this overlay on every new browser for them.
+    // Anyone who doesn't see this panel gets the Workspace's onboarding window.
+    ridesAlong: true,
+    eligible: (c) => !!c.isAdmin,
+    pending: (c) => !c.profileDone,
+  },
+  {
     key: 'claude',
     name: 'Connect Claude',
     tag: 'Required',
@@ -67,7 +96,7 @@ const REGISTRY = [
   },
   {
     key: 'keys',
-    name: 'Other keys',
+    name: 'Optional extras',
     tag: 'Optional',
     required: false,
     minutes: 2,
@@ -77,6 +106,47 @@ const REGISTRY = [
     // No state says "the optional keys are done"; it reads done only once the
     // step itself emits `complete` this session.
     pending: () => true,
+  },
+  {
+    key: 'company',
+    name: 'Your company',
+    tag: 'Recommended',
+    required: false,
+    gated: true,
+    minutes: 1,
+    settingsPath: 'the Workspace',
+    // After Claude: answering starts the research, the first real use of Claude.
+    ridesAlong: true,
+    eligible: (c) => !!c.isAdmin,
+    pending: (c) => !c.companyDone,
+  },
+  {
+    key: 'sharing',
+    name: 'Usage sharing',
+    tag: 'Optional',
+    required: false,
+    minutes: 1,
+    settingsPath: 'Settings → General',
+    // Absorbs FinishSetupCard section 2 (ent#437 / ent#12). Same server terms:
+    // consent on, or "Don't ask again", or disabled by config.
+    eligible: (c) => !!c.isAdmin && !c.telemetryHardDisabled,
+    pending: (c) => !c.telemetryEnabled && !c.telemetryDismissed,
+  },
+  {
+    key: 'audit',
+    name: 'AI audit',
+    tag: 'Recommended',
+    required: false,
+    gated: true,
+    minutes: 10,
+    settingsPath: 'the Workspace',
+    // After Claude, because the audit is a conversation with the guide, and near the
+    // end, because starting it leaves setup for that chat. Skipping it isn't doing it,
+    // so only starting it takes this off the list, and that reads as started, not done.
+    doneLabel: 'Started',
+    ridesAlong: true,
+    eligible: (c) => !!c.isAdmin,
+    pending: (c) => c.auditChoice !== 'start',
   },
   {
     key: 'agent',
@@ -90,18 +160,6 @@ const REGISTRY = [
     // the front desk used and this step's completion: create one and it is done.
     eligible: () => true,
     pending: (c) => !!c.firstRun,
-  },
-  {
-    key: 'sharing',
-    name: 'Usage sharing',
-    tag: 'Optional',
-    required: false,
-    minutes: 1,
-    settingsPath: 'Settings → General',
-    // Absorbs FinishSetupCard section 2 (ent#437 / ent#12). Same server terms:
-    // consent on, or "Don't ask again", or disabled by config.
-    eligible: (c) => !!c.isAdmin && !c.telemetryHardDisabled,
-    pending: (c) => !c.telemetryEnabled && !c.telemetryDismissed,
   },
 ]
 
@@ -124,9 +182,13 @@ export function eligibleSteps(ctx = {}) {
  * The rail's membership, snapshotted by the chassis when the overlay OPENS so a
  * step that gets done mid-session stays in the rail with a check instead of
  * vanishing and renumbering everything after it.
+ *
+ * Every eligible step, also on a first open: a step that was done before setup
+ * opened (Claude connected, an email already bound) is listed with a check, not
+ * left out, so the person sees the whole setup and what is already in place.
  */
 export function stepsForSession(ctx = {}) {
-  return ctx.forced ? eligibleSteps(ctx) : applicableSteps(ctx)
+  return eligibleSteps(ctx)
 }
 
 /**
@@ -176,7 +238,9 @@ export function stepState({ step, currentKey, ctx = {}, skipped = [], completed 
  * softer makes the Required badge decoration (spec §3).
  */
 export function canContinue({ step, ctx = {}, completed = [] }) {
-  if (!step?.required) return true
+  // `gated`: skippable, but Continue waits for an answer, so that a half-answered
+  // step isn't recorded as skipped. Skip stays offered beside it.
+  if (!step?.required && !step?.gated) return true
   return completed.includes(step.key) || !step.applies(ctx)
 }
 

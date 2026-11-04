@@ -35,6 +35,9 @@ PREFERENCE_KEYS = frozenset({
     # server knows who is asking, so "never leaks between agents or between
     # clients" is a property of the storage rather than of a key.
     "workspace_model",
+    # Workspace Build's setup answers. A server record for the same reason, and so
+    # that signing in as admin or with that account's email reads the same answers.
+    "workspace_intake",
 })
 
 # A DoS bound, not a feature limit: a 500-agent layout serializes to ~15 KB.

@@ -98,6 +98,9 @@ export function claudeTabFor(tab, raw) {
 export const FIRST_RUN_SUBSCRIPTION_NAME = 'primary'
 
 /** Shown when the instance already had a Claude credential before this step. */
+/** Stands in for a saved credential in its field: there is one, and it is never shown. */
+export const SAVED_CREDENTIAL_DOTS = '••••••••••••••••••••••••'
+
 export const CLAUDE_ALREADY_CONNECTED =
   'This instance already has a Claude credential, so agents can run. Continue, or paste a new one ' +
   `below: a token is saved as the "${FIRST_RUN_SUBSCRIPTION_NAME}" subscription and an API key as ` +
@@ -113,11 +116,9 @@ export function claudeSavedText(connectedAgents) {
   const later = `Manage it later in ${SETTINGS_PATH}.`
   if (!Number.isInteger(connectedAgents) || connectedAgents < 0) return `Saved. ${later}`
   if (connectedAgents === 0) return `Saved. New agents will use it. ${later}`
-  const agents = connectedAgents === 1 ? '1 agent' : `${connectedAgents} agents`
-  return (
-    `Connected ${agents} that had no Claude credential — running ones restart in the ` +
-    `background, which takes about a minute. ${later}`
-  )
+  // No count: on a first setup these are Trinity's own agents, not anything the person
+  // made, so a number reads as if something had already happened to their work.
+  return `Saved. Trinity's built-in agents can use it now, and take about a minute to restart. ${later}`
 }
 
 // ---------------------------------------------------------------------------

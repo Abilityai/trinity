@@ -103,6 +103,8 @@ let wrapper
 async function operatorInWorkspace(path) {
   localStorage.setItem('token', 'OP')
   localStorage.setItem('auth0_user', JSON.stringify({ email: 'op@example.com', role: 'admin' }))
+  // Someone already onboarded: these tests are about sessions, not Workspace Build.
+  localStorage.setItem('trinity-workspace-onboarding:op@example.com', JSON.stringify({ answers: {}, finished: true }))
   const auth = useAuthStore()
   Object.assign(auth, {
     isLoading: false, isAuthenticated: true, token: 'OP', profileVerified: true,

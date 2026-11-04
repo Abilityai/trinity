@@ -7,6 +7,7 @@
  * endpoints — 404 in OSS/unentitled builds, but the route guard
  * ent#356 moved the module into OSS core, so it ships in every build.
  */
+import { BUILD_CREW_MODEL, BUILD_GUIDE_AGENT, BUILD_GUIDE_NAME } from '../components/portal/builder/portalBuild'
 import { markRaw } from 'vue'
 import { defineStore } from 'pinia'
 import {
@@ -380,6 +381,9 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // same fail-closed direction as the flag above: only a successful roster
     // that says so raises it (internal-only, so an outside client never does).
     projectsAvailable: false,
+    // Workspace Build: whether this principal may design orchestrators. Same
+    // channel and same fail-closed direction: absent reads as not available.
+    orchestrationAvailable: false,
     // ent#534 — may THIS principal start a real-time voice call from the
     // Workspace, and if not, why (words for the disabled control). Fail-closed
     // like the flag above; `reason: null` for a portal-token client means the
@@ -1979,6 +1983,59 @@ export const useClientPortalStore = defineStore('clientPortal', {
       return data
     },
 
+    // Workspace Build: creates the person's own guide on this instance, through the
+    // ordinary system deploy route (creator role, enforced there), so they own it.
+    async deployBuildSystem(manifest, guideName = BUILD_GUIDE_AGENT) {
+      const { data } = await portalHttp.post('/api/systems/deploy', { manifest }, { headers: this.authHeader })
+      // Trinity adds _2 to a name a live agent has, so the label goes on what it created.
+      const created = Array.isArray(data?.agents_created) && data.agents_created[0] ? data.agents_created[0] : guideName
+      // Best effort: a guide without these still works, under its address and default model.
+      await Promise.allSettled([
+        portalHttp.put(`/api/agents/${created}/public-channel-model`, { model: BUILD_CREW_MODEL }, { headers: this.authHeader }),
+        portalHttp.put(`/api/agents/${created}/label`, { label: BUILD_GUIDE_NAME }, { headers: this.authHeader }),
+      ])
+      return data
+    },
+
+    // Workspace Build: the person's own session for the main app's agent routes, which
+    // the settings cards call exactly as the main app's own controls do.
+    platformHttp() {
+      const headers = () => ({ headers: this.authHeader })
+      return {
+        get: (url) => portalHttp.get(url, headers()),
+        post: (url, body) => portalHttp.post(url, body, headers()),
+        put: (url, body) => portalHttp.put(url, body, headers()),
+        delete: (url) => portalHttp.delete(url, headers()),
+      }
+    },
+
+    // Workspace Build: the company profile kept once per instance (core-agent AC-14).
+    async fetchCompanyProfile() {
+      const { data } = await portalHttp.get('/api/workspace-build/company', { headers: this.authHeader })
+      return data
+    },
+
+    async saveCompanyProfile(profile) {
+      const { data } = await portalHttp.put('/api/workspace-build/company', profile, { headers: this.authHeader })
+      return data
+    },
+
+    // Workspace Build: a job on the guide that runs beside its chat.
+    async startGuideTask(agentName, message) {
+      const { data } = await portalHttp.post(`/api/agents/${agentName}/task`, { message, async_mode: true, model: BUILD_CREW_MODEL }, { headers: this.authHeader })
+      return data
+    },
+
+    async fetchGuideExecution(agentName, executionId) {
+      const { data } = await portalHttp.get(`/api/agents/${agentName}/executions/${encodeURIComponent(executionId)}`, { headers: this.authHeader })
+      return data
+    },
+
+    async fetchCapabilityGrants(agentName) {
+      const { data } = await portalHttp.get(`/api/agents/${agentName}/capability-grants`, { headers: this.authHeader })
+      return data
+    },
+
     // ent#553 — the lifecycle writes. Roster-scoped and owner-gated server
     // side; the card's `can_manage_canvases` only decides whether the control
     // is rendered, so these never need to guess at permission themselves.
@@ -2715,6 +2772,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
         this.multiAgentChatAvailable = data.multi_agent_chat_available === true
         // ent#661: same strictness, same reason.
         this.projectsAvailable = data.projects_available === true
+        this.orchestrationAvailable = data.orchestration_available === true
         // ent#534: same strictness — an older backend without the field reads
         // as "not available", never as truthy.
         this.realtimeVoice = {

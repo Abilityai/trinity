@@ -181,6 +181,9 @@
           :projects-available="store.projectsAvailable"
           :rooms-available="store.multiAgentChatAvailable"
           :projects-active="projectsRoute"
+          :build-available="buildAvailable"
+          :build-active="buildRoute"
+          :profile-incomplete="profileIncomplete"
           :loading-roster="store.loading && !store.rosterLoaded"
           :settled="sidebarReady"
           :threads-failed="store.sessionsFailed"
@@ -188,6 +191,9 @@
           :searching="searching"
           :search-results="searchResults"
           :rename="renameChat"
+          @open-build="openBuild"
+          @finish-profile="reopenOnboarding"
+          @get-help="helpOpen = true"
           @new-chat="newChat"
           @new-room="newRoom"
           @new-chat-with-agent="newChatWithAgent"
@@ -236,6 +242,9 @@
             :projects-available="store.projectsAvailable"
           :rooms-available="store.multiAgentChatAvailable"
             :projects-active="projectsRoute"
+            :build-available="buildAvailable"
+            :build-active="buildRoute"
+            :profile-incomplete="profileIncomplete"
             :loading-roster="store.loading && !store.rosterLoaded"
             :settled="sidebarReady"
             :threads-failed="store.sessionsFailed"
@@ -243,6 +252,9 @@
             :searching="searching"
             :search-results="searchResults"
             :rename="renameChat"
+            @open-build="openBuild"
+            @finish-profile="() => { mobileNav = false; reopenOnboarding() }"
+            @get-help="() => { mobileNav = false; helpOpen = true }"
             @new-chat="() => { mobileNav = false; newChat() }"
             @new-room="() => { mobileNav = false; newRoom() }"
             @new-chat-with-agent="(n) => { mobileNav = false; newChatWithAgent(n) }"
@@ -468,6 +480,43 @@
           <p :class="STAGE_TITLE">Projects aren't available here</p>
           <p :class="STAGE_BODY">
             They're not enabled on this instance, or not for your account. Ask an administrator if you expected them.
+          </p>
+          <button :class="STAGE_ACTION" @click="router.push('/workspace')">Back to chats</button>
+        </div>
+
+        <!-- Workspace Build. Before the conversation branch for the same reason
+             as Projects above: `activeAgent` defaults to the first roster entry. -->
+        <PortalBuild
+          v-else-if="buildRoute && buildAvailable"
+          :roster="store.agents"
+          :roster-loaded="store.rosterLoaded"
+          :roster-error="store.error || ''"
+          :threads="sidebarThreads"
+          :threads-loaded="threadsLoaded || store.sessionsFailed"
+          :rename="renameChat"
+          :orchestration-available="store.orchestrationAvailable"
+          :intake="buildIntake"
+          :onboarding-open="onboardingOpen"
+          @update:intake="setBuildIntake"
+          @state="guideState = $event"
+          @need-onboarding="openOnboarding"
+          @finish-profile="reopenOnboarding"
+          @get-help="helpOpen = true"
+          @open-menu="mobileNav = true"
+          @open-thread="openThread"
+          @new-chat="newChatWithAgent(myGuide?.name)"
+          @escalate-to-room="onEscalateToRoom"
+          @sessions-changed="refreshThreads"
+          @retry-roster="store.fetchRoster()"
+        >
+          <template #header-end>
+            <PortalThemeSwitch />
+          </template>
+        </PortalBuild>
+        <div v-else-if="buildRoute" :class="STAGE_WRAP" data-testid="build-unavailable">
+          <p :class="STAGE_TITLE">Building isn't available on your account</p>
+          <p :class="STAGE_BODY">
+            Creating agents takes an account that can manage agents on this instance. Ask an administrator if you expected to.
           </p>
           <button :class="STAGE_ACTION" @click="router.push('/workspace')">Back to chats</button>
         </div>
@@ -937,6 +986,23 @@
          unmount it mid-sentence. -->
     <p class="sr-only" aria-live="polite" data-testid="ws-key-announce">{{ keyAnnouncement }}</p>
 
+    <!-- Workspace Build: outside the page branches, because a first visit can land on
+         any of them. -->
+    <PortalBuildOnboarding
+      :open="onboardingOpen"
+      :intake="buildIntake"
+      :roster="store.agents"
+      @answer="(id, value) => setBuildIntake(answerIntake(buildIntake, id, value))"
+      @skip="skipOnboarding"
+      @research-started="(id) => setBuildIntake(markResearchStarted(buildIntake, id, Date.now(), myGuideName({ roster: store.agents, username: authStore.principalId })))"
+      @research-failed="setBuildIntake(clearResearch(buildIntake))"
+      @explained="setBuildIntake(markAgentExplained(buildIntake))"
+      @close="closeOnboarding"
+      @help="helpOpen = true"
+      @finish="finishOnboarding"
+    />
+    <PortalBuildHelp :open="helpOpen" :can-open-dashboard="buildAvailable" @close="helpOpen = false" @tour="retakeTour" @features="showFeatureTour" />
+
     <!-- ent#621: `⌥/`. ALWAYS mounted and v-model driven — a `v-if` toggle
          unmounts past `BaseModal`'s close branch and focus never comes back to
          the message field. Rows come from the map, never from this template. -->
@@ -973,6 +1039,9 @@ import { ref, computed, watch, onMounted, onBeforeUnmount, onUnmounted, nextTick
 import { useRoute, useRouter } from 'vue-router'
 import { useClientPortalStore, MULTI_AGENT_UNAVAILABLE, PLATFORM_LOGIN_ROUTE } from '@/stores/clientPortal'
 import { useAuthStore } from '@/stores/auth'
+import { myGuideName } from '@/components/portal/builder/useMyGuide'
+import { useBuildIntakeStore } from '@/stores/buildIntake'
+import { readFirstRunClosed } from '@/components/onboarding/firstRunSteps'
 import { canvasReturnPath, isWorkspaceOnlyRole } from '@/utils/workspaceOnly'
 import { loginLocation } from '@/utils/platformSession'
 import { closedInviteMessage, termsLocation } from '@/utils/termsGate'
@@ -1018,6 +1087,15 @@ import PortalRail from '@/components/portal/PortalRail.vue'
 import PortalRailPlaceholder from '@/components/portal/PortalRailPlaceholder.vue'
 import PortalRailStrip from '@/components/portal/PortalRailStrip.vue'
 import PortalVoiceCanvas from '@/components/portal/PortalVoiceCanvas.vue'
+import PortalBuild from '@/components/portal/builder/PortalBuild.vue'
+import { useFirstRunStore } from '@/stores/firstRun'
+import PortalBuildHelp from '@/components/portal/builder/PortalBuildHelp.vue'
+import PortalBuildOnboarding from '@/components/portal/builder/PortalBuildOnboarding.vue'
+import {
+  BUILD_CANVAS_ID, answerIntake, companyFromProfile, myGuideCard, buildAvailableFor, chooseAudit, chooseFirstAgent, chooseProfileChat, clearResearch,
+  canvasToState, finishIntake, finishProfileAction, markAgentExplained, markResearchStarted, reopenIntake, shouldOpenOnboarding,
+  skipIntake, worldView,
+} from '@/components/portal/builder/portalBuild'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import { usePortalRailFeeds } from '@/composables/usePortalRailFeeds'
 import { usePortalRailFeedsStore } from '@/stores/portalRailFeeds'
@@ -1083,6 +1161,7 @@ import {
 
 const store = useClientPortalStore()
 const authStore = useAuthStore()
+const firstRunStore = useFirstRunStore()
 // trinity-enterprise#837 — a `user` works in the Workspace only: the next step
 // on an empty roster is the one an external client gets, not "Go to your agents".
 const workspaceOnly = computed(() => isWorkspaceOnlyRole(authStore.user?.role))
@@ -1257,6 +1336,132 @@ const inboxAgentLabels = computed(() => agentLabels(store.agents))
 // ent#661: `/workspace/projects` and `/workspace/projects/:projectId`.
 const projectsRoute = computed(() => route.name === 'WorkspaceProjects' || route.name === 'WorkspaceProject')
 const activeProjectId = computed(() => route.params.projectId || null)
+// Workspace Build: `/workspace/build`, a page that brings its own right column.
+const buildRoute = computed(() => route.name === 'WorkspaceBuild')
+const buildAvailable = computed(() => buildAvailableFor({
+  isPlatformSession: store.isPlatformSession,
+  workspaceOnly: workspaceOnly.value,
+}))
+// The onboarding window and the answers it collects. The Build page reads them too.
+// Kept on the account, in the same store as the setup panel, so the two share them.
+const buildIntakeEmail = () => store.clientEmail || authStore.user?.email || ''
+const intakeStore = useBuildIntakeStore()
+const buildIntake = computed(() => intakeStore.intake)
+const onboardingOpen = ref(false)
+const helpOpen = ref(false)
+// The guide's state, read once here and kept current by the Build page, so the sidebar's
+// red follows the same rule as the page's stepper.
+const guideState = ref(null)
+const profileIncomplete = computed(() => buildAvailable.value && worldView(guideState.value, buildIntake.value).profileIncomplete)
+
+// The person's own guide, never someone else's shared with them.
+const myGuide = computed(() => myGuideCard(store.agents))
+
+// A colleague already told Trinity about the company, so this person starts from it
+// and isn't asked the company questions again (core-agent AC-14).
+async function seedCompanyFromColleague() {
+  if (!buildAvailable.value || buildIntake.value?.answers?.company) return
+  try {
+    const seeded = companyFromProfile(buildIntake.value, await store.fetchCompanyProfile())
+    if (seeded !== buildIntake.value) setBuildIntake(seeded)
+  } catch {
+    // None yet (404), or not readable: they answer the company questions themselves.
+  }
+}
+
+async function readGuideState() {
+  if (!buildAvailable.value || !myGuide.value) return
+  try {
+    guideState.value = canvasToState(await store.fetchAgentCanvas(myGuide.value.name, BUILD_CANVAS_ID))
+  } catch {
+    // Nothing drawn yet (404) or unreadable: the sidebar goes by the answers alone.
+  }
+}
+
+function setBuildIntake(next) {
+  intakeStore.set(next)
+}
+
+function skipOnboarding() {
+  setBuildIntake(finishIntake(skipIntake(buildIntake.value)))
+  onboardingOpen.value = false
+}
+
+function closeOnboarding() {
+  setBuildIntake(finishIntake(buildIntake.value))
+  onboardingOpen.value = false
+}
+
+function retakeTour() {
+  helpOpen.value = false
+  setBuildIntake({ ...buildIntake.value, tourSeen: false })
+  if (!buildRoute.value) router.push('/workspace/build')
+}
+
+// Get help → "Show me the advanced features": the tour lives on the Dashboard.
+function showFeatureTour() {
+  helpOpen.value = false
+  router.push({ path: '/', query: { tour: 'features' } })
+}
+
+function reopenOnboarding() {
+  // Every question answered: what's missing is the short talk with the guide about their work.
+  if (finishProfileAction(buildIntake.value) === 'atlas') {
+    setBuildIntake(chooseProfileChat(buildIntake.value))
+    if (!buildRoute.value) router.push('/workspace/build')
+    return
+  }
+  setBuildIntake(reopenIntake(buildIntake.value))
+  openOnboarding()
+}
+
+// An admin has one setup flow: the panel, which also has the sign-in email and Claude.
+// Anyone else who can build gets the window, which asks only what's theirs to answer.
+async function openOnboarding() {
+  if (!authStore.profileVerified) await authStore.fetchUserProfile().catch(() => {})
+  if (authStore.role === 'admin') {
+    router.replace({ path: '/', query: { onboarding: '1', from: 'workspace' } })
+    return true
+  }
+  onboardingOpen.value = true
+  return false
+}
+
+// 'start' or 'skip' the audit, or 'agent': talk through what they already know they want.
+function finishOnboarding(choice) {
+  const chosen = choice === 'agent' ? chooseFirstAgent(buildIntake.value, '') : chooseAudit(buildIntake.value, choice)
+  setBuildIntake(finishIntake(chosen))
+  onboardingOpen.value = false
+  if (!buildRoute.value) router.push('/workspace/build')
+}
+
+// A guide that already knows them, from another browser, means they aren't new.
+async function guideAlreadyKnowsThem() {
+  if (!myGuide.value) return false
+  try {
+    await store.fetchAgentCanvas(myGuide.value.name, BUILD_CANVAS_ID)
+    return true
+  } catch (e) {
+    return e?.response?.status !== 404
+  }
+}
+
+async function openOnboardingIfNew() {
+  // Only someone who can build gets the window, and the setup state is an operator read
+  // a Workspace-only member is refused on, so it isn't asked for anyone else.
+  if (!buildAvailable.value) return false
+  // A failed read leaves this empty, which treats sample agents as theirs and stays shut.
+  await firstRunStore.fetchState()
+  if (shouldOpenOnboarding({
+    buildAvailable: buildAvailable.value,
+    threads: threads.value,
+    threadsTrusted: threadListTrusted(),
+    roster: store.agents,
+    intake: buildIntake.value,
+    seededAgents: firstRunStore.seededAgents,
+  }) && !(await guideAlreadyKnowsThem())) return openOnboarding()
+  return false
+}
 // ent#784 (review): `/workspace/a/:name` used to be left within a tick, so the
 // rail rules could read it as "a page, not a conversation". It is now where a
 // landed new chat RESTS — the same conversation `/workspace` and
@@ -1270,7 +1475,9 @@ const unlandedAgentPage = computed(() => (
     : null))
 // A stage page that carries no rail: an agent URL that has not landed yet, and
 // the Projects pages (ent#661). The rail rules read it as their `agentPage`.
-const railFreePage = computed(() => unlandedAgentPage.value || (projectsRoute.value ? 'projects' : null))
+const railFreePage = computed(() => unlandedAgentPage.value
+  || (projectsRoute.value ? 'projects' : null)
+  || (buildRoute.value ? 'build' : null))
 const activeAgent = computed(() => {
   if (isInboxRoute.value) {
     return inboxSelectedAgent({ item: inboxSelection.value, threads: threads.value, asks: store.asks, agents: store.agents, mentions: store.mentions })
@@ -1480,7 +1687,7 @@ const RAIL_MOTION = 'transition-[width] duration-300 ease-out overflow-hidden '
 // column for a route that is now a 1:1 conversation like `/workspace/c/:id`.
 const railColumnReserved = computed(() => Boolean(
   railColumnReservedFor({
-    agentPage: projectsRoute.value ? 'projects' : null,
+    agentPage: projectsRoute.value ? 'projects' : (buildRoute.value ? 'build' : null),
     stageState: stage.value.state,
     roomId: activeRoomIdFromRoute.value,
   }) && !voiceCanvasHasColumn.value
@@ -1960,6 +2167,11 @@ function openProjects(id) {
   if (guardLeaveCall(() => openProjects(id))) return
   mobileNav.value = false
   router.push(id ? `/workspace/projects/${encodeURIComponent(id)}` : '/workspace/projects')
+}
+function openBuild() {
+  if (guardLeaveCall(openBuild)) return
+  mobileNav.value = false
+  router.push('/workspace/build')
 }
 // The project the chat on screen is in, for the rail tab's "This chat" mark.
 // Read from the store's per-chat cache, which the chat header fills.
@@ -3292,11 +3504,25 @@ async function bootstrap() {
   // from the route as it was BEFORE any await, and replaced before the stage
   // resolves, so no conversation flashes for `agents[0]` first.
   const landing = inboxLandingTarget({ path: route.path, params: route.params, query: route.query })
+  // Workspace Build: a link to one chat or one ask is followed. Onboarding only takes
+  // over where someone has just arrived, which includes the Inbox address a browser remembers.
+  const justArrived = Boolean(landing) || (isInboxPath(route.path) && Object.keys(route.query).length === 0)
   try {
+    // Workspace Build: the Workspace knows people by email, so an admin without one can't
+    // load it at all. Setup is where they add it, unless they've already left setup.
+    if (store.isPlatformSession && !readFirstRunClosed()) {
+      if (!authStore.profileVerified) await authStore.fetchUserProfile().catch(() => {})
+      if (authStore.role === 'admin' && !authStore.userEmail) { await openOnboarding(); return }
+    }
     if (landing) await router.replace(landing)
     await store.fetchRoster()
+    // The roster is what confirms the address they sign in with.
+    await intakeStore.load(buildIntakeEmail())
+    await seedCompanyFromColleague()
+    readGuideState()
     await refreshThreads()
     startAsksPoll()
+    if (justArrived && await openOnboardingIfNew()) return
     const sid = route.params.sessionId
     if (sid) {
       const known = threads.value.find((t) => (t.id || t.session_id) === sid)

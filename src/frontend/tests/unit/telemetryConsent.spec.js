@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url'
 import {
   consentVariant,
   CONSENT_COPY,
+  payloadSummary,
   receiverCopy,
   receiverLabel,
   readSnoozedUntil,
@@ -214,5 +215,29 @@ describe('the sharing step (ent#581)', () => {
   it('loads the payload preview on expand, never on mount', () => {
     expect(STEP).toMatch(/@toggle="onPreviewToggle"/)
     expect(STEP).not.toMatch(/onMounted\([^)]*store\.load/)
+  })
+})
+
+describe('payloadSummary puts the payload in plain words', () => {
+  const payload = {
+    sharing_id: '0000', window_days: 30,
+    instance: { trinity_version: '1.0.0', edition: 'community', platform: 'Linux' },
+    counts: { agents: 2, executions_total: 9, executions_success: 3, executions_failed: 5 },
+    activation_funnel: { setup_completed: 4 },
+    outcomes: { by_trigger: { chat: { total: 5 }, agent: { total: 2 } } },
+  }
+
+  it('says what each number means, without field names', () => {
+    const text = JSON.stringify(payloadSummary(payload))
+    expect(text).toContain('Number of agents')
+    expect(text).toContain('Agent runs in the last 30 days')
+    expect(text).toContain('9, of which 3 worked and 5 failed')
+    expect(text).not.toMatch(/executions_|sharing_id|window_days/)
+  })
+
+  it('keeps zeros, and drops what is missing', () => {
+    expect(payloadSummary({ counts: { agents: 0 } })).toEqual([{ label: 'Number of agents', value: '0' }])
+    expect(payloadSummary({})).toEqual([])
+    expect(payloadSummary(null)).toEqual([])
   })
 })

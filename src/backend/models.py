@@ -6304,3 +6304,16 @@ class NeverminedDelegationBind(BaseModel):
         if any(c in v for c in "\r\n"):
             raise ValueError("provider must be a single line")
         return v or None
+
+
+class WorkspaceCompany(BaseModel):
+    """Workspace Build: the company profile kept once per instance (core-agent AC-14)."""
+    name: str = Field("", max_length=500)
+    website: str = Field("", max_length=500)
+    research_md: str = Field("", max_length=200_000)
+    context_md: str = Field("", max_length=100_000)
+
+
+class WorkspaceCompanyResponse(WorkspaceCompany):
+    updated_by: str = ""
+    updated_at: str = ""

@@ -37,7 +37,7 @@
         v-model="key"
         type="password"
         :label="p.label"
-        :placeholder="status?.configured ? 'Paste a new key to replace it' : p.placeholder"
+        :placeholder="status?.configured ? (firstRun ? SAVED_CREDENTIAL_DOTS : 'Paste a new key to replace it') : p.placeholder"
         :error="keyError"
         :disabled="busy"
         autocomplete="off"
@@ -100,6 +100,7 @@ import BaseInput from '../base/BaseInput.vue'
 import InlineError from '../InlineError.vue'
 import {
   KEY_PROVIDERS,
+  SAVED_CREDENTIAL_DOTS,
   configuredLine,
   describeKeyTest,
   fromAddressError,

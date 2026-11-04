@@ -18,7 +18,9 @@
       <!-- Round 3 (§3g F4): said out loud, because on the drawer's landing
            URL (/workspace/inbox) the row changes no route, and the shell's
            route watcher is what closes the drawer everywhere else. -->
-      <PortalInboxRow :needs="inbox.needs" :came="inbox.came" @click="$emit('open-inbox')" />
+      <PortalInboxRow data-tour="inbox" :needs="inbox.needs" :came="inbox.came" @click="$emit('open-inbox')" />
+
+      <PortalSidebarBuildLink v-if="buildAvailable" :active="buildActive" :profile-incomplete="profileIncomplete" @open="$emit('open-build')" @finish-profile="$emit('finish-profile')" @get-help="$emit('get-help')" />
 
       <!-- ent#661: the person's Projects list — shown only when the roster
            says this principal has the capability (internal-only).
@@ -106,7 +108,7 @@
            is a destination now; a chat is a record of visiting one. Giving the
            two the same visual weight is what made the old sidebar read as one
            undifferentiated list. -->
-      <section class="mt-2 rounded-xl bg-white dark:bg-gray-900 ring-1 ring-gray-200 dark:ring-gray-800 p-1.5">
+      <section data-tour="agents" class="mt-2 rounded-xl bg-white dark:bg-gray-900 ring-1 ring-gray-200 dark:ring-gray-800 p-1.5">
         <!-- ent#402: while searching the label states the MATCH count. The
              toggle beside the rows states the overflow, so this must not
              repeat it — one fact, one place. -->
@@ -131,6 +133,7 @@
         <button
           v-for="a in shownAgents"
           :key="a.name"
+          :data-tour-agent="a.name"
           class="w-full flex items-center gap-2.5 rounded-lg px-2 py-2 transition hover:bg-gray-50 dark:hover:bg-gray-800"
           :class="a.name === activeAgentName ? ROW_ACTIVE : ''"
           :aria-current="a.name === activeAgentName ? 'true' : undefined"
@@ -464,6 +467,7 @@ import PortalKeyCap from './PortalKeyCap.vue'
 import ChatRow from './PortalChatRow.vue'
 import PortalBrand from './PortalBrand.vue'
 import PortalInboxRow from './PortalInboxRow.vue'
+import PortalSidebarBuildLink from './builder/PortalSidebarBuildLink.vue'
 import PortalSkeleton from './PortalSkeleton.vue'
 import InlineError from '@/components/InlineError.vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
@@ -522,6 +526,10 @@ const props = defineProps({
   // trinity-enterprise#701: rooms exist on this install (the roster's bit).
   roomsAvailable: { type: Boolean, default: false },
   projectsActive: { type: Boolean, default: false },
+  // Workspace Build: whether this person may build here, and whether the page is on screen.
+  buildAvailable: { type: Boolean, default: false },
+  profileIncomplete: { type: Boolean, default: false },
+  buildActive: { type: Boolean, default: false },
   // #2159: distinguishes "still loading" from "loaded, and you have none".
   loadingRoster: { type: Boolean, default: false },
   // #3672: the list's ONE first-load verdict (`sidebarSettled`, latched by the
@@ -544,7 +552,7 @@ const NEW_CONVERSATION_CLASS = 'w-full flex items-center gap-2 rounded-xl border
 
 const emit = defineEmits([
   'new-chat', 'new-room', 'new-chat-with-agent', 'open-agent', 'open-thread', 'toggle-star', 'open-inbox',
-  'update:search', 'sign-out', 'open-projects', 'open-keys', 'retry-threads',
+  'update:search', 'sign-out', 'open-projects', 'open-build', 'finish-profile', 'get-help', 'open-keys', 'retry-threads',
 ])
 
 const isSearching = computed(() => (props.search || '').trim().length >= 2)

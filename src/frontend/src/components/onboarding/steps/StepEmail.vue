@@ -18,116 +18,36 @@
       schematic="email"
     />
 
-    <form v-if="!ctx.hasEmail" class="mt-5 max-w-md space-y-2" novalidate @submit.prevent="save">
-      <BaseInput
-        v-model="email"
-        type="email"
-        label="Email"
-        placeholder="you@company.com"
-        autocomplete="email"
-        :error="fieldError"
-        :disabled="saving || codeSent"
-        :help="codeSent ? '' : 'We\'ll email a 6-digit code to confirm the address is yours.'"
-        data-testid="first-run-email-input"
-      />
-      <!-- ent#720: binding a sign-in email needs proof of the mailbox. -->
-      <BaseInput
-        v-if="codeSent"
-        v-model="code"
-        label="Confirmation code"
-        placeholder="6-digit code"
-        inputmode="numeric"
-        autocomplete="one-time-code"
-        :disabled="saving"
-        :help="`Sent to ${email.trim()}. It expires in 10 minutes.`"
-        data-testid="first-run-email-code"
-      />
-      <div class="flex items-center gap-2">
-        <BaseButton
-          type="submit"
-          variant="secondary"
-          size="sm"
-          :loading="saving"
-          :loading-label="codeSent ? 'Confirming…' : 'Saving…'"
-          :disabled="!email.trim() || (codeSent && code.trim().length !== 6)"
-          data-testid="first-run-email-save"
-        >
-          {{ codeSent ? 'Confirm email' : 'Save email' }}
-        </BaseButton>
-        <BaseButton
-          v-if="codeSent"
-          variant="ghost"
-          size="sm"
-          :disabled="saving"
-          data-testid="first-run-email-change"
-          @click="reset"
-        >
-          Use a different email
-        </BaseButton>
-      </div>
-    </form>
-    <InlineError v-if="saveError" class="mt-3" :message="saveError" @dismiss="saveError = ''" />
+    <SignInEmailForm v-if="!ctx.hasEmail" class="mt-5" @saved="$emit('complete')" />
+    <!-- A warning they have to act on, so the design system's alert, not body text. -->
+    <div
+      v-if="ctx.emailDeliveryAvailable === false"
+      class="mt-4 flex max-w-lg items-start gap-2.5 rounded-lg bg-status-warning-100 px-3.5 py-3 text-sm text-status-warning-700 dark:bg-status-warning-500/16 dark:text-status-warning-300"
+      role="status"
+      data-testid="first-run-email-no-provider"
+    >
+      <svg class="mt-0.5 h-4 w-4 shrink-0" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+      </svg>
+      <p>
+        <strong class="font-semibold">Signing in with a code sent by email won't work yet.</strong>
+        This install can't send email. To turn it on, add an email provider under Optional extras, later in this setup.
+      </p>
+    </div>
   </div>
 </template>
 
 <script setup>
-import { computed, ref } from 'vue'
-import { useAuthStore } from '../../../stores/auth'
-import BaseButton from '../../base/BaseButton.vue'
-import BaseInput from '../../base/BaseInput.vue'
-import InlineError from '../../InlineError.vue'
-import { apiErrorMessage } from '../../../utils/apiError'
+import { computed } from 'vue'
 import FirstRunStepHeader from '../FirstRunStepHeader.vue'
+import SignInEmailForm from './SignInEmailForm.vue'
 
 const props = defineProps({ ctx: { type: Object, default: () => ({}) } })
-const emit = defineEmits(['complete', 'skip'])
-
-const auth = useAuthStore()
-
-// Mirrors the backend _EMAIL_RE shape check, as /setup does.
-const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s.]+$/
+defineEmits(['complete', 'skip'])
 
 const lead = computed(() =>
   props.ctx.hasEmail
-    ? `You can sign in with ${props.ctx.userEmail} and your password. Change it in Settings → General.`
-    : 'You sign in with the username admin today. Bind an email and you can sign in with that and your password instead.'
+    ? `You can sign in with ${props.ctx.userEmail} and your admin password. Change it in Settings → General.`
+    : 'You sign in with the username admin today. Add an email and you can sign in with that and your password instead.'
 )
-
-const email = ref('')
-const code = ref('')
-const codeSent = ref(false)
-const saving = ref(false)
-const fieldError = ref('')
-const saveError = ref('')
-
-function reset() {
-  codeSent.value = false
-  code.value = ''
-  saveError.value = ''
-}
-
-async function save() {
-  const value = email.value.trim()
-  if (!EMAIL_RE.test(value)) {
-    fieldError.value = 'Enter a full email address — for example you@company.com'
-    return
-  }
-  fieldError.value = ''
-  saveError.value = ''
-  saving.value = true
-  try {
-    const out = await auth.bindOwnEmail(value, codeSent.value ? code.value.trim() : null)
-    if (out.needsCode) {
-      codeSent.value = true
-      return
-    }
-    email.value = ''
-    reset()
-    emit('complete')
-  } catch (e) {
-    saveError.value = apiErrorMessage(e, 'Could not save the email. Try again.')
-  } finally {
-    saving.value = false
-  }
-}
 </script>

@@ -26,6 +26,7 @@
           <span
             class="t-name nodrag"
             :title="agentNameTooltip(agent)"
+            :data-walk-agent="agent.name"
             @click="viewDetails"
           >{{ agentNameParts(agent).primary }}</span>
           <RuntimeBadge :runtime="agent.runtime || 'claude-code'" :show-label="false" class="flex-none" />

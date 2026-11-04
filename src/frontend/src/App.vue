@@ -38,6 +38,10 @@
       v-if="authStore.isAuthenticated && !route.meta.hideHelpWidget"
       :hide-launcher="helpLauncherHidden"
     />
+
+    <!-- Show me as a walk across pages, opened from a Show me card in the Workspace
+         chat (`?walk=`). Here, beside the router view, so it survives the page changes. -->
+    <ShowMeWalk v-if="authStore.isAuthenticated" />
   </div>
 </template>
 
@@ -49,6 +53,7 @@ import { readStoredToken } from './utils/platformSession'
 import { useThemeStore } from './stores/theme'
 import { useWebSocket } from './utils/websocket'
 import HelpChatWidget from './components/HelpChatWidget.vue'
+import ShowMeWalk from './components/onboarding/ShowMeWalk.vue'
 
 const route = useRoute()
 const authStore = useAuthStore()

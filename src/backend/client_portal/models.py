@@ -309,6 +309,9 @@ class PortalRoster(BaseModel):
     # user on an entitled build, or an outside client invited to a project.
     # Defaults False (fails closed on an older backend or a failed read).
     projects_available: bool = False
+    # Workspace Build: whether this principal may design orchestrators on the
+    # Build page. Fails closed, like the two fields above.
+    orchestration_available: bool = False
     # ent#403 — the curated model list the composer offers. INSTANCE-level, like
     # the two fields above and for the same reason `realtime_voice` is: the
     # option list is identical for every agent, and putting it on each card would

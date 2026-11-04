@@ -420,6 +420,7 @@ onUnmounted(() => {
       <CloseWrap v-for="(tab, i) in inlineTabs" :key="tab.id" :tab="tab" shrink @close="(id) => emit('close', id)">
       <button
         type="button"
+        :data-tab="tab.id"
         :title="tab.signalTitle || (fixedWidth ? tab.label : undefined)"
         :aria-keyshortcuts="tab.ariaKeyshortcuts || undefined"
         :role="tablistLabel ? 'tab' : undefined"
@@ -516,6 +517,7 @@ onUnmounted(() => {
       <CloseWrap v-for="tab in overflowTabs" :key="tab.id" :tab="tab" @close="(id) => emit('close', id)">
       <button
         data-menu-item
+        :data-tab="tab.id"
         type="button"
         :aria-label="tab.badgeLabel || undefined"
         :title="tab.signalTitle || (fixedWidth ? tab.label : undefined)"

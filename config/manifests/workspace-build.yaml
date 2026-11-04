@@ -1,0 +1,13 @@
+# Workspace Build: the guide behind the Build page.
+# It talks to the person, and it builds the agents itself.
+name: workspace-build
+description: The guide behind the Workspace Build page
+naming: bare
+agents:
+  build-guide:
+    template: local:build-guide
+    # Needed to create the agents it builds. It still asks the person to approve each one.
+    grants:
+      - agents.manage
+permissions:
+  preset: none

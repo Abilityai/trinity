@@ -158,7 +158,7 @@
             </div>
             <!-- Only once this agent's assignments are known: a draft built from
                  an unanswered (or failed) read would save over the real list. -->
-            <div v-if="showManage && store.sharedLoaded && store.libraryStatus?.configured" class="flex flex-wrap items-center gap-1.5">
+            <div v-if="showManage && store.sharedLoaded && store.libraryStatus?.configured" class="flex flex-wrap items-center gap-1.5" data-tour="showme-skills">
               <BaseButton size="sm" data-testid="skills-assign-open" @click="assignOpen = true">Assign skills</BaseButton>
               <BaseButton size="sm" variant="secondary" data-testid="skills-sets-open" @click="setsOpen = true">Manage sets</BaseButton>
               <BaseButton
