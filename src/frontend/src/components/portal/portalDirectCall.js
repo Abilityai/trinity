@@ -47,6 +47,23 @@ export function cardOutcome(ask) {
   return null
 }
 
+// trinity-enterprise#1087: the WHOLE utterance has to be one of these, like a spoken yes.
+// "Stop the build" is words for the agent. "stop" and "cancel" are also a no to a waiting
+// approval, which is checked first: the person is saying don't.
+const STOP = new Set(['stop', 'wait', 'hold on', 'hang on', 'ok stop', 'okay stop', 'stop please',
+  'please stop', 'stop stop', 'stop talking', 'never mind', 'nevermind', 'shh', 'shush', 'be quiet',
+  'quiet', 'pause', 'enough', 'thats enough', 'ok wait', 'wait wait', 'one sec', 'one second'])
+
+export function isStopUtterance(text) {
+  return STOP.has(normalize(text))
+}
+
+// A sentence the agent itself just said, heard back word for word.
+export function isOwnSentence(heard, recentlySpoken = []) {
+  const t = normalize(heard)
+  return !!t && recentlySpoken.some((s) => normalize(s) === t)
+}
+
 const UNFINISHED_END = /\b(uh|um|er|erm|and|but|or|so|to|the|a|an|of|on|in|with|for|that|because|like)[.?!,]*$/i
 
 export function looksUnfinished(text) {
@@ -77,15 +94,16 @@ export function answersAsk({ waiting, text, duringPlayback, startedAt, promptEnd
 // off for the call's duration and says which call is on.
 export function callButtons({ isPlatform = false, realtimeVoice = null, directVoice = null, liveActive = false, directActive = false } = {}) {
   if (!isPlatform) return { render: false, live: null, direct: null }
-  const one = (voice, label, active, otherActive) => ({
+  // ent#1087: on a Direct call Escape first silences the agent while it speaks.
+  const one = (voice, label, active, otherActive, endLabel = 'End the call (Esc)') => ({
     active,
     enabled: active || (voice?.available === true && !otherActive),
-    label: active ? 'End the call (Esc)' : otherActive ? 'Another call is on' : (voice?.available === true ? label : (voice?.reason || VOICE_UNAVAILABLE_FALLBACK)),
+    label: active ? endLabel : otherActive ? 'Another call is on' : (voice?.available === true ? label : (voice?.reason || VOICE_UNAVAILABLE_FALLBACK)),
   })
   return {
     render: true,
     live: one(realtimeVoice, 'Start a voice call', liveActive, directActive),
-    direct: one(directVoice, 'Start a Direct call', directActive, liveActive),
+    direct: one(directVoice, 'Start a Direct call', directActive, liveActive, 'End the call (Esc when it is quiet)'),
   }
 }
 

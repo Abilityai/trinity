@@ -1,7 +1,7 @@
 <template>
   <div
     ref="el"
-    class="overflow-y-auto overflow-x-hidden [scrollbar-gutter:stable] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40 dark:focus-visible:ring-action-primary-400/40"
+    class="relative overflow-y-auto overflow-x-hidden [scrollbar-gutter:stable] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40 dark:focus-visible:ring-action-primary-400/40"
     :class="fill ? 'grow basis-0 min-h-[20rem]' : null"
     tabindex="0"
     role="region"
@@ -26,6 +26,18 @@
  * region and the page root must be a flex column with `grow basis-0` too, and
  * one with `mx-auto` needs `w-full` (auto margins suppress the stretch).
  * Without `fill` the consumer sets the cap (`max-h-*`).
+ *
+ * `relative` is load-bearing. An overflow box contains an absolutely positioned
+ * descendant only if it is that descendant's containing block, and `sr-only` is
+ * `position: absolute`. Unpositioned, one visually hidden label per card escaped
+ * the box and Chrome counted them in the page's scrollable area: a 900 px window
+ * reached 9,976 px while the cards scrolled inside the box (trinity#3448). Firefox
+ * does not show it and jsdom has no layout, so only
+ * `e2e/skills-bounded-lists.spec.js`, in Chromium, can see a regression.
+ *
+ * Padding on the region is the consumer's, with one exception: a `sticky bottom-0`
+ * child stops at the region's padding edge, so a region with one keeps its bottom
+ * padding at zero and puts it on an element inside.
  *
  * One axis only (principle 8): wide content scrolls in its own container. The
  * gutter is reserved so the width never jumps when the rows first overflow
