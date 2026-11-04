@@ -151,10 +151,16 @@ PULL_REACHABLE_TRIGGERS = frozenset(
 
 
 # Triggers a producer writes that are deliberately in NEITHER pull set, each
-# with the reason. Empty today. ``test_4105_pull_trigger_census.py`` fails on a
+# with the reason. ``test_4105_pull_trigger_census.py`` fails on a
 # written trigger that is in no pull set and not listed here, and
 # ``note_unreachable_pull_trigger`` stays quiet for the ones listed.
-PULL_UNPULLED_TRIGGERS: Dict[str, str] = {}
+PULL_UNPULLED_TRIGGERS: Dict[str, str] = {
+    "summarizer": (
+        "labels a public_user_memory_writes history row written by the MEM-001 "
+        "background summarizer (trinity-enterprise#962); it is never an "
+        "execution's trigger and dispatches no agent work"
+    ),
+}
 
 
 # Triggers with a CALLER waiting in-line on the reply. A pull worker claims
