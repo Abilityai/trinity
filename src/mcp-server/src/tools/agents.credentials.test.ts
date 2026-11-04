@@ -222,7 +222,7 @@ describe("ent#719 credential tools: both human-only gates' refusals map to human
         auditRows.push(JSON.parse(String(init?.body)));
         return new Response(JSON.stringify({ status: "logged" }), { status: 200 });
       }
-      if (!url.startsWith(BACKEND)) throw new Error(`unstubbed fetch: ${url}`);
+      if (new URL(url).origin !== new URL(BACKEND).origin) throw new Error(`unstubbed fetch: ${url}`);
       const headers = (init?.headers ?? {}) as Record<string, string>;
       seen.push({ line: `${init?.method ?? "GET"} ${url.slice(BACKEND.length)}`, auth: headers.Authorization ?? null });
       return new Response(body, { status, headers: { "content-type": "application/json" } });

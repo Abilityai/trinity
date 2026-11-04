@@ -673,7 +673,7 @@ describe("ent#719 — both A2A mappers read the object detail (real client, stub
     const seen: string[] = [];
     globalThis.fetch = (async (input: unknown, init?: RequestInit) => {
       const url = String(input);
-      if (!url.startsWith(BACKEND)) throw new Error(`unstubbed fetch: ${url}`);
+      if (new URL(url).origin !== new URL(BACKEND).origin) throw new Error(`unstubbed fetch: ${url}`);
       seen.push(`${init?.method ?? "GET"} ${url.slice(BACKEND.length)}`);
       return new Response(body, { status, headers: { "content-type": "application/json" } });
     }) as typeof fetch;
