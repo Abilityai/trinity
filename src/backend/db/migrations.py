@@ -6067,11 +6067,23 @@ def _migrate_platform_alert_subjects_resweep(cursor, conn):
         logger.info("Platform-alert backlog re-sweep (#3254): %s", counts)
 
 
+def _migrate_access_requests_requester_identity(cursor, conn):
+    """trinity-enterprise#737 — an access request records who asked, as the
+    channel saw them: its stable user id, handle, display name, and the chat /
+    thread the request came from. All nullable. Schema is also in db/schema.py
+    for fresh installs; mirrored by Alembic revision
+    0115_access_requests_requester_identity.
+    """
+    for column in ("requester_channel_id", "requester_handle", "requester_name", "requester_chat_id", "requester_thread_id"):
+        _safe_add_column(cursor, "access_requests", column,
+                         f"ALTER TABLE access_requests ADD COLUMN {column} TEXT")
+
+
 def _migrate_channel_client_blocks(cursor, conn):
     """trinity-enterprise#21 — an owner's per-agent block on one external
     channel client, checked by the channel access gate on every message.
     Schema is also in db/schema.py for fresh installs; mirrored by Alembic
-    revision 0115_channel_client_blocks.
+    revision 0116_channel_client_blocks.
     """
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS channel_client_blocks (
@@ -6272,5 +6284,6 @@ MIGRATIONS = [
     ("loop_runs_stale_duplicates", _migrate_loop_runs_stale_duplicates),
     ("seat_ask_class_state_table", _migrate_seat_ask_class_state_table),
     ("room_participant_visible_from", _migrate_room_participant_visible_from),
+    ("access_requests_requester_identity", _migrate_access_requests_requester_identity),
     ("channel_client_blocks", _migrate_channel_client_blocks),
 ]

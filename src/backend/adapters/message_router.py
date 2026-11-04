@@ -176,6 +176,17 @@ def _format_group_sender(message: NormalizedMessage) -> str:
     return "\n".join(parts)
 
 
+def _requester_identity(adapter: ChannelAdapter, message: NormalizedMessage) -> Optional[dict]:
+    """Who asked, for the access request (trinity-enterprise#737). Best-effort:
+    a failure to read it records the request without identity rather than
+    losing the request."""
+    try:
+        return adapter.requester_identity(message)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[ROUTER] requester_identity failed: {type(e).__name__}")
+        return None
+
+
 def _format_channel_identity(message: NormalizedMessage) -> str:
     """Format channel + sender identity for a non-group channel message (#350).
 
@@ -1310,7 +1321,8 @@ class ChannelMessageRouter:
             elif verified_email:
                 # Verified email + restrictive policy → record access request
                 try:
-                    db.upsert_access_request(agent_name, verified_email, channel)
+                    db.upsert_access_request(agent_name, verified_email, channel,
+                                             identity=_requester_identity(adapter, message))
                 except Exception as e:
                     logger.error(f"[ROUTER:{channel}] Failed to upsert access_request: {e}")
                 logger.info(

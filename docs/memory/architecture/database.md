@@ -126,6 +126,9 @@ CREATE TABLE access_requests (
     decided_by TEXT,                      -- user_id of approver
     decided_at TEXT,
     created_at TEXT NOT NULL,
+    -- trinity-enterprise#737: who asked, as the channel saw them (all nullable)
+    requester_channel_id TEXT, requester_handle TEXT, requester_name TEXT,
+    requester_chat_id TEXT, requester_thread_id TEXT,
     UNIQUE(agent_name, email)
 );
 

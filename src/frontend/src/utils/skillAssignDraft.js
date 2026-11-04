@@ -1,6 +1,7 @@
 /**
- * The Assign skills dialog's draft rules (trinity-enterprise#539):
- * Select all / Deselect all, and whether Save must ask first.
+ * The Assign skills dialog's draft rules (trinity-enterprise#539, #660):
+ * Select all / Deselect all, whether Save must ask first, and what a save
+ * would change.
  *
  * Pure, so `tests/unit/skillAssignDraft.spec.js` runs every row type and every
  * reason; `components/skills/SkillAssignModal.vue` wires them.
@@ -15,7 +16,9 @@
  *   - Select all never ticks a name the PUT would refuse: the library lists
  *     every directory with a SKILL.md, unvalidated, and one refused name fails
  *     the whole save.
- * A filter, if one arrives, narrows `rows`, and both buttons follow it.
+ * The filter (trinity-enterprise#660) narrows `rows`, and both buttons follow
+ * it. It never narrows the draft: a tick it hides is still saved, and everything
+ * below this file's bulk rules reads the whole draft.
  */
 import { SKILL_NAME_RE } from './skillCards'
 
@@ -30,6 +33,7 @@ export const BULK_TITLES = Object.freeze({
   unassignableLeft: "The skills left unticked have names the platform can't assign",
   noneTicked: 'No skill listed here is ticked',
   onlySetTicked: 'Only skills a set assigns are ticked here: unassign the set to remove them',
+  noneListed: 'No skill matches the filter',
 })
 
 export function selectAllTitle(count, { skipsUnassignable = false } = {}) {
@@ -42,19 +46,21 @@ export function deselectAllTitle(count) {
     + 'Saving then unassigns them, and asks first if that would drop an approval requirement.'
 }
 
-function selectReason({ loaded, emptyReason, saving, toAdd, unticked }) {
+function selectReason({ loaded, emptyReason, saving, toAdd, unticked, noneListed }) {
   if (!loaded) return BULK_TITLES.loading
   if (emptyReason === 'library_unconfigured') return BULK_TITLES.unconfigured
   if (emptyReason === 'library_empty') return BULK_TITLES.empty
   if (saving) return BULK_TITLES.saving
+  if (noneListed) return BULK_TITLES.noneListed
   if (toAdd.length) return null
   if (!unticked.length) return BULK_TITLES.allTicked
   return unticked.some((s) => s.deprecated) ? BULK_TITLES.deprecatedLeft : BULK_TITLES.unassignableLeft
 }
 
-function deselectReason({ loaded, saving, toRemove, hasLocked }) {
+function deselectReason({ loaded, saving, toRemove, hasLocked, noneListed }) {
   if (!loaded) return BULK_TITLES.loading
   if (saving) return BULK_TITLES.saving
+  if (noneListed) return BULK_TITLES.noneListed
   if (toRemove.length) return null
   return hasLocked ? BULK_TITLES.onlySetTicked : BULK_TITLES.noneTicked
 }
@@ -80,8 +86,11 @@ export function bulkSelection({
   const hasLocked = rows.some((s) => locked.has(s.name))
   const skipsUnassignable = unticked.some((s) => !s.deprecated && !SKILL_NAME_RE.test(s.name))
 
-  const selectWhy = selectReason({ loaded, emptyReason, saving, toAdd, unticked })
-  const deselectWhy = deselectReason({ loaded, saving, toRemove, hasLocked })
+  // Nothing listed in a library that has skills: the filter left none.
+  const noneListed = !rows.length && !['library_unconfigured', 'library_empty'].includes(emptyReason)
+
+  const selectWhy = selectReason({ loaded, emptyReason, saving, toAdd, unticked, noneListed })
+  const deselectWhy = deselectReason({ loaded, saving, toRemove, hasLocked, noneListed })
   return {
     toAdd,
     toRemove,
@@ -108,6 +117,57 @@ export function withDeselectAll(draft, toRemove) {
 export function removedNames({ saved = [], draft = [], setHeld = new Set() } = {}) {
   const keep = new Set(draft)
   return [...saved].filter((name) => !keep.has(name) && !setHeld.has(name))
+}
+
+/**
+ * What a save would change (trinity-enterprise#660), over the WHOLE draft: a
+ * filter hides a row, never its change. `removed` is `removedNames`, the
+ * confirm's own definition, so a mark and the confirm cannot disagree. A saved
+ * name a set still holds is `kept`: the save drops the direct assignment and the
+ * skill stays, so "to remove" would be false.
+ * @returns {{added: string[], removed: string[], kept: string[]}}
+ */
+export function pendingChanges({ saved = [], draft = [], setHeld = new Set() } = {}) {
+  const had = new Set(saved)
+  const keep = new Set(draft)
+  return {
+    added: [...keep].filter((name) => !had.has(name)),
+    removed: removedNames({ saved, draft, setHeld }),
+    kept: [...had].filter((name) => !keep.has(name) && setHeld.has(name)),
+  }
+}
+
+/** "2 to add, 1 to remove"; a kind with nothing pending is left out. */
+export function pendingLine({ added = [], removed = [], kept = [] } = {}) {
+  const parts = []
+  if (added.length) parts.push(`${added.length} to add`)
+  if (removed.length) parts.push(`${removed.length} to remove`)
+  if (kept.length) parts.push(`${kept.length} kept by a set`)
+  return parts.join(', ')
+}
+
+const PENDING_MARKS = Object.freeze({
+  add: Object.freeze({ kind: 'add', label: 'to add', variant: 'primary' }),
+  remove: Object.freeze({ kind: 'remove', label: 'to remove', variant: 'warning' }),
+  kept: Object.freeze({ kind: 'kept', label: 'kept by set', variant: 'neutral' }),
+})
+
+/**
+ * The mark each changed name's row carries. A Map, because `constructor` is a
+ * valid skill name and would answer on a plain object.
+ * @returns {Map<string, {kind: string, label: string, variant: string}>}
+ */
+export function pendingMarks({ added = [], removed = [], kept = [] } = {}) {
+  return new Map([
+    ...added.map((name) => [name, PENDING_MARKS.add]),
+    ...removed.map((name) => [name, PENDING_MARKS.remove]),
+    ...kept.map((name) => [name, PENDING_MARKS.kept]),
+  ])
+}
+
+/** The hover on a "kept by set" row. */
+export function keptTitle(sets) {
+  return `Stays on this agent through ${sets.join(', ')}. Saving removes only the direct assignment.`
 }
 
 /**

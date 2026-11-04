@@ -120,6 +120,13 @@ def _drain(db):
             db.spawn_errors.append(e)
 
 
+def _followup_errors(caplog):
+    """#4055: the raises `platform_alerts._spawn` logged at ERROR, by message."""
+    return [str(r.exc_info[1]) for r in caplog.records
+            if r.levelno == logging.ERROR and r.exc_info
+            and r.getMessage().startswith("[platform-alerts] a follow-up for a/")]
+
+
 def _calls(db):
     _drain(db)
     return db.seam_calls
@@ -314,11 +321,12 @@ class TestEpisodeAlert:
         assert len(_budget_alerts(db)) == 1
         assert [c["cap"] for c in _calls(db) if c["item"]["id"].startswith("alert-budget-")] == [None]
 
-    def test_ws_broadcast_failure_swallowed(self, monkeypatch):
+    def test_ws_broadcast_failure_swallowed(self, monkeypatch, caplog):
         db = _budget_db(monkeypatch, pending=_CAP)
         ws = MagicMock()
         ws.broadcast = AsyncMock(side_effect=Exception("ws down"))
         monkeypatch.setattr(oqs, "_websocket_manager", ws)
+        caplog.set_level(logging.ERROR, logger="services.platform_alerts")
         asyncio.run(create_bounded_alert("a", _skill_item()))  # must not raise
         assert len(_budget_alerts(db)) == 1
         assert ws.broadcast.await_count == 1
@@ -326,7 +334,10 @@ class TestEpisodeAlert:
         # trigger (#918), sent from a spawned task — its failure stays there.
         assert json.loads(ws.broadcast.await_args.args[0]) == {
             "type": "operator_queue_sync", "data": {"agent_name": "a"}}
-        assert [str(e) for e in db.spawn_errors] == ["ws down"]
+        # #4055 re-pin: the spawned task logs its raise once at ERROR instead
+        # of letting it escape the factory.
+        assert db.spawn_errors == []
+        assert _followup_errors(caplog) == ["ws down"]
 
     def test_episode_create_failure_swallowed_cooldown_prestamped(self, monkeypatch):
         # The cooldown is stamped BEFORE the create, so a persistently-failing
@@ -371,11 +382,14 @@ class TestEpisodeAlert:
             raise RuntimeError("episode helper broke")
 
         monkeypatch.setattr(oqs, "_maybe_emit_alert_budget_episode", _boom)
-        with caplog.at_level(logging.WARNING, logger="services.operator_queue_service"):
-            ok = asyncio.run(create_bounded_alert("a", _skill_item()))
+        caplog.set_level(logging.WARNING, logger="services.operator_queue_service")
+        caplog.set_level(logging.WARNING, logger="services.platform_alerts")
+        ok = asyncio.run(create_bounded_alert("a", _skill_item()))
         assert ok is False
         assert _non_budget_creates(db) == []  # item stays refused
-        assert [str(e) for e in db.spawn_errors] == ["episode helper broke"]
+        # #4055 re-pin: the episode's raise is logged once at ERROR in its task.
+        assert db.spawn_errors == []
+        assert _followup_errors(caplog) == ["episode helper broke"]
         assert any("[#1677 budget]" in r.message for r in caplog.records)
 
 

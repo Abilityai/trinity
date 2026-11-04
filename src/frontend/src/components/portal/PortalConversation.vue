@@ -1016,7 +1016,7 @@ import {
   speechErrorMessage,
   transcriptionErrorMessage,
 } from './portalUtils'
-import { shouldCancelOnEscape, shouldEndCallOnEscape, restoreDraft, cancelOutcome, isNoopCancel } from '../../utils/turnCancel'
+import { directEscapeAction, shouldCancelOnEscape, shouldEndCallOnEscape, restoreDraft, cancelOutcome, isNoopCancel } from '../../utils/turnCancel'
 // ent#534: the voice CALL — the platform's real-time orb, in this chat. Its
 // rules live in their own pure module (vitest runs `environment: 'node'` with
 // no mount harness, so a rule kept in here is a rule no test can reach); this
@@ -1377,6 +1377,12 @@ const cancelledExecutionIds = ref(new Set())
 // know which execution the turn it is about to judge actually ran under.
 const lastDeliveredExecutionId = ref(null)
 const canCancelTurn = computed(() => sending.value && !!activeExecutionId.value)
+// trinity-enterprise#1087: a spoken turn's words were said, not drafted; a Stop never
+// puts them in the composer, whichever Stop it was.
+const activeTurnSpoken = ref(false)
+// A stop said on the call before the server has named the run: cancel it the moment it
+// starts, and never ask for it to be spoken.
+let stopWhenStarted = false
 
 // ---- ent#525: the live card and the terminal card ---------------------------
 const workStore = usePortalWorkStore()
@@ -2226,7 +2232,10 @@ async function deliver(text, { replyId = null, attachments = null, tags = null }
       activeExecutionId.value = started.execution_id || null
       lastDeliveredExecutionId.value = started.execution_id || null
       pendingUserText.value = text
-      if (voiceCallId && started.execution_id) direct.speak(started.execution_id)
+      if (stopWhenStarted) {
+        stopWhenStarted = false
+        if (started.execution_id) void cancelTurn({ restore: false, fromCall: true })
+      } else if (voiceCallId && started.execution_id) direct.speak(started.execution_id)
       // Stamp the dispatch instant: the server's marker TTL starts here, so the
       // client's ceiling must too (see awaitPersistedReply).
       const dispatchedAt = Date.now()
@@ -2357,6 +2366,8 @@ async function deliver(text, { replyId = null, attachments = null, tags = null }
     activeExecutionId.value = null
     pendingUserText.value = ''
     cancelling.value = false
+    activeTurnSpoken.value = false
+    stopWhenStarted = false
     // #2624: the reply landing is an arrival. The SEND that started this turn
     // already pinned and re-armed (below), so a reader who stayed at the bottom
     // still follows the answer down — and one who scrolled up mid-turn, to
@@ -2390,6 +2401,19 @@ function onEscapeKeydown(event) {
   // which reads `defaultPrevented`, and was invisible to this one: the overlay
   // closed AND the call ended on a single keystroke. Both branches now start
   // from the same `ownsEscape` preconditions, so they cannot drift again.
+  // trinity-enterprise#1087: on a Direct call Escape silences the agent while it speaks
+  // and ends the call otherwise; it never cancels a turn, because hanging up leaves one
+  // running on purpose. The composer is live here, so its overlays own Escape first.
+  if (directCallActive.value && event.key === 'Escape') {
+    const action = directEscapeAction(event, {
+      speaking: direct.isSpeaking(),
+      overlays: [typeaheadOpen.value, pickerOpen.value, listening.value],
+    })
+    if (action) event.preventDefault()
+    if (action === 'silence') direct.interrupt({ cancelTurn: false })
+    else if (action === 'end') void endVoiceCall()
+    return
+  }
   if (shouldEndCallOnEscape(event, { callActive: anyCallActive.value })) {
     event.preventDefault()
     void endVoiceCall()
@@ -2426,7 +2450,12 @@ function onEscapeKeydown(event) {
   cancelTurn()
 }
 
-async function cancelTurn({ restore = true } = {}) {
+async function cancelTurn({ restore = true, fromCall = false } = {}) {
+  // trinity-enterprise#1087: the composer's Stop on a Direct call stops the voice too, or
+  // the sentences already queued keep playing over a cancelled turn. The call's own stops
+  // (`fromCall`) have already silenced it.
+  if (directCallActive.value && !fromCall) direct.interrupt({ cancelTurn: false })
+  if (activeTurnSpoken.value) restore = false
   const executionId = activeExecutionId.value
   if (!executionId || cancelling.value) return
   cancelling.value = true
@@ -2781,6 +2810,7 @@ async function submitUserText(text, { spoken = false, replyId = null, replyExcer
   // re-arms whatever the prior scroll position, so the reader is never handed
   // an unread badge for their own message.
   await pinToBottom()
+  activeTurnSpoken.value = !!spoken
   // A stale "couldn't stop the turn" must not outlive the turn it described.
   cancelError.value = ''
   const res = await deliver(text, { replyId, attachments: carried, tags })
@@ -3196,9 +3226,24 @@ function sendSpoken(text) {
 }
 const direct = useDirectVoiceSession({
   onTranscript: sendSpoken,
-  onBargeIn: () => { if (canCancelTurn.value) void cancelTurn({ restore: false }) },
+  onBargeIn: ({ executionId } = {}) => stopCallTurn(executionId),
+  // ent#1087: a Stop is not more words. Whatever was waiting to be sent after the turn
+  // stays unsent, or the cancel would land and the queue would start the next turn.
+  onStop: () => { spokenQueue = '' },
+  // A spoken turn still being dispatched is something to stop, before its id is known.
+  isBusy: () => sending.value,
   onAnswer: answerAskByVoice,
 })
+// The turn a stop on the call reaches: the composer's own, or the run the bridge is
+// speaking when that is another one (an approved run). Same route either way, as the
+// person; a 404 is the lost race and says nothing.
+function stopCallTurn(executionId) {
+  if (canCancelTurn.value) { void cancelTurn({ restore: false, fromCall: true }); return }
+  if (sending.value && !activeExecutionId.value) { stopWhenStarted = true; return }
+  if (!executionId) return
+  cancelledExecutionIds.value.add(executionId)
+  void store.cancelPortalTurn(props.agent.name, executionId).catch(() => {})
+}
 const directCallActive = computed(() => direct.isActive.value)
 const anyCallActive = computed(() => voiceCallActive.value || directCallActive.value)
 watch(sending, (isSending) => {

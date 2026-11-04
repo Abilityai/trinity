@@ -833,6 +833,47 @@ through the agent-wide access policy. OSS-core, like the portal-client controls
 - **FR-7 — Lifecycle**: `channel_client_blocks` is registered in the agent
   cleanup registry (CASCADE): re-keyed on rename, removed on delete.
 
+### 46.3 An Access Request Names Who Asked (trinity-enterprise#737)
+
+**Description**: The owner approves a person, not a bare email. A channel access
+request records who asked, as the channel saw them, and the owner's pending list
+shows that person, plus where the same channel identity has been seen before.
+
+- **FR-1 — Capture**: `access_requests` gains `requester_channel_id` (the
+  channel's stable user id: Telegram id, Slack member id, WhatsApp number),
+  `requester_handle`, `requester_name`, `requester_chat_id` and
+  `requester_thread_id`. All nullable, and filled only from what the channel
+  exposes (`ChannelAdapter.requester_identity`):
+  - **Telegram:** id, @username and first/last name.
+  - **WhatsApp:** number and profile name.
+  - **Slack:** member id, handle, display name, channel and thread.
+
+  Nothing is guessed. Values are trimmed and bounded at 256 characters.
+- **FR-2 — Every path**: the per-message router gate and the Telegram and
+  WhatsApp `/login` flows pass the identity. Extraction is best-effort: a
+  failure records the request without identity rather than losing it. The
+  public link has no channel identity and records none.
+- **FR-3 — One request, one identity**: a refreshed request replaces the whole
+  identity, so a request from a channel that exposes less never inherits
+  another's. A decision keeps the identity on the decided row.
+- **FR-4 — The owner's view**: `GET /api/agents/{name}/access-requests` returns
+  the identity fields, `identity_captured` (False for the public link and for
+  rows older than this change), and `known_as`. `known_as` lists the same
+  channel identity seen before: an earlier request (approved / denied / asked)
+  or an email it verified on a Telegram/WhatsApp bot. It is limited to agents
+  the viewer may manage (`can_user_share_agent`: owner or admin), excludes the
+  request itself, and is capped at 10.
+- **FR-5 — UI**: the Sharing tab's pending list leads with the name (or
+  @handle, or the email), then the handle, the channel and its id, then the
+  email. Up to three "seen before" chips are shown, with a counted rest. A
+  public-link request reads "Email only — public link", and an older one reads
+  "Identity not captured".
+- **FR-6 — Personal data**: the list is owner/admin only, as before. The rows
+  are removed with the agent (`access_requests` is CASCADE in
+  `db/agent_cleanup.py`). Not done: the agent data export (#1169) carries the
+  container's `data/` only, with no platform records of any kind, so there is
+  no export these rows could join without a new export format.
+
 ---
 
 ## 47. Public & Channel Custom Instructions (#1205)
@@ -988,9 +1029,59 @@ of the epic #24 voice-replies feature.
   back. Checked before any channel branch; this route has no proactive-consent
   check of its own, and #3232's async report-back default makes such children
   common.
+- **FR-10 — Proactive voice: an addressing surface (abilityai/trinity-enterprise#700)**:
+  `send_voice_reply` also takes an address — `to` (a role, the ent#606 shape of
+  `send_message`) or, deprecated, `recipient_email`, never both — plus `channel`, so
+  a run with no inbound conversation — a schedule, a loop, a reminder, an
+  agent-to-agent task — can speak. With an address the destination is resolved
+  the way `send_message` resolves it — one service rule,
+  `role_addressing.resolve_single_recipient`, shared by both routes (a role that
+  several people fill, or nobody fills, is refused by role and never names a
+  person; `primary` with no seat reaches the agent's owner, trinity-enterprise#904,
+  so a scheduled brief works on a fresh install) — then the recipient's verified chat link on that channel, never the
+  execution row, and the send passes the **same gates
+  as proactive text**: `db.can_agent_message_email` consent (owner, or a share
+  with `allow_proactive`), the shared per-recipient hourly rate limit (one budget
+  across text and voice, so voice is never the cheaper way around it), and a
+  `PROACTIVE_MESSAGE` audit row (`modality: voice`). The agent + per-channel voice
+  flags still apply. `execution_id` stays required — it validates the caller and
+  is the #1084 dedup scope; the effect key is the resolved `(recipient email,
+  channel)`, so a re-delivered turn does not double-speak. On this path a pre-send
+  refusal (rate limit, no chat link) and a send that blew up (`delivery_error`)
+  release the claim so a retry in the same run tries again; a provider refusal
+  (`send_failed`: WhatsApp outside its 24-hour window, a Telegram user who blocked
+  the bot) and a configuration miss (`no_binding`, …) stay recorded, because a retry
+  fails the same way and would pay for another synthesis; `send_failed` carries
+  `guidance` saying so. That scope is one execution, and a scheduler retry is a new
+  execution row, so the addressed path also takes `idempotency_key` /
+  `idempotency_ttl` (the ent#665 contract of `send_message`): one note per (agent,
+  recipient, key) within the TTL across all runs, a suppressed call answering
+  `delivered: true, sent: false, suppressed_by, first_sent_at, first_execution_id`
+  plus a `suppressed` audit row. A note that did not go out never spends the key.
+  Voice keys are their own namespace: a brief is a voice note and a text, and one
+  name must not silence the second modality. Without an address the call is the
+  in-session reply, unchanged (FR-1..FR-9): it records every delivery outcome and
+  takes no key. Proactive voice delivers on **Telegram and WhatsApp**;
+  Slack is refused with `proactive_channel_unsupported` (its voice path resolves a
+  bot token by bound channel, not by DM) — deferred to
+  abilityai/trinity-enterprise#923. Deferred too: conversation-history / Workspace
+  rail persistence of a proactive note (abilityai/trinity-enterprise#922) and
+  schedule-declared channel delivery, shape (b) (abilityai/trinity-enterprise#924). Refusals on this path carry
+  a named `reason` plus a `guidance` sentence (#2157 pattern): `not_authorized`,
+  `rate_limited`, `recipient_not_linked`, `send_failed`, `proactive_channel_unsupported`, and the
+  role refusals `role_unassigned` / `role_resolves_to_several` (role-only, no person named); and an
+  un-addressed call from a run with no conversation keeps `not_a_channel_turn` but
+  now says how to address a recipient (abilityai/trinity#2999 AC 3).
+- **FR-11 — The cost cap is a named contract**: a text longer than
+  `TTS_MAX_CHARS` (default 1500) is refused before any synthesis with
+  `reason: "text_too_long"`, `max_chars`, and guidance to shorten — distinct from
+  `synthesis_failed` (a provider/credential miss) on both the in-session and the
+  proactive path (abilityai/trinity#2999 AC 5). Long deliverables (a daily brief)
+  are the caller's job to condense into a short spoken summary, then send the
+  detail as text; no chunked multi-note send.
 - **API**: `send_voice_reply` MCP tool → `POST /api/agents/{name}/voice-reply`
-  (`AuthorizedAgentByName` + agent-scoped self-check; user-facing channel triggers
-  only); `GET/PUT /api/agents/{name}/voice-replies` extended with per-channel
+  (`AuthorizedAgentByName` + agent-scoped self-check; in-session on user-facing
+  channel triggers, or addressed via `recipient_email` + `channel` from any run, FR-10); `GET/PUT /api/agents/{name}/voice-replies` extended with per-channel
   flags + `effective_voice_id`; `GET/PUT /api/settings/elevenlabs`.
 
 ### 48.2 Narrated Surfaces — the Workspace speaks, and agents know it (#2157)
@@ -1172,6 +1263,24 @@ own reply. Live stays the default and is unchanged.
 - **FR-5 — Barge-in**: talking over the agent pauses playback; if it was real speech the
   running turn is cancelled through the terminate primitive and the new words run next.
   Echo of the agent's own voice resumes playback.
+- **FR-5a — Stopping the agent (trinity-enterprise#1087)**: the person can stop the agent
+  mid-reply without hanging up, by voice or by hand, and the call returns to listening.
+  - A whole short stop phrase ("stop", "wait", "hold on", "never mind", …) said while
+    there is something to stop silences the agent, cancels its turn, and is never sent
+    as a turn. With nothing to stop the same words go to the agent. While an approval
+    waits, "stop" and "cancel" answer it **no**.
+  - Over playback, the speech bar follows the agent's own output level (linear RMS), so a
+    normal voice is heard over a quiet passage and the agent's echo is not taken for speech.
+  - The call strip carries a Stop control, always present, disabled with "Nothing to
+    stop" when idle. The composer's Stop on a Direct call silences the voice too.
+  - Escape silences the agent while its voice is playing and never cancels a turn;
+    with nothing playing it ends the call (a running turn keeps going, as on hang-up).
+  - A stop reaches the run being spoken, including an approved run that is not the
+    composer's own turn. Words queued behind it, a transcript already in flight and audio
+    already on the wire are dropped. An approval prompt cut off by a stop is answered on
+    its card, never by a later spoken yes.
+  - The strip says "Stopped." or, when the reply had finished and only its audio was cut,
+    "Stopped. The full reply is in the chat."
 - **FR-6 — Approvals are Trinity's asks**: an ask raised in the turn appears as the
   normal chat card and is read aloud. A whole short yes or no answers it through the
   person's own answer route, so the Inbox is the record. Anything else runs as the next
