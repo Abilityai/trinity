@@ -219,9 +219,55 @@ describe("the turn's own execution id wins (trinity-enterprise#1062)", () => {
     assert.equal(sent.length, 0);
   });
 
+  it("record_decision with an agent key and no platform turn records nothing and says why", async () => {
+    // Review of #4204: the typed id was forwarded without the header, and the
+    // backend could only answer `not_this_turn`.
+    const sent = spy();
+    const tools = createDecisionTools(fake, true) as any;
+    for (const executionId of [undefined, "manual"]) {
+      const out = JSON.parse(await tools.recordDecision.execute({ ...RECORD, execution_id: "exec-typed" }, session(executionId)));
+      assert.equal(out.success, false);
+      assert.match(out.error, /did not supply this turn's id/);
+      assert.match(out.error, /not recorded/);
+    }
+    assert.equal(sent.length, 0);
+  });
+
+  it("get_autonomy sends the header's turn, not a stale typed id", async () => {
+    const sent: string[] = [];
+    mock.method(RealClient.prototype, "getSeatAutonomy", async (_a: string, execId: string) => {
+      sent.push(execId);
+      return {};
+    });
+    const tools = createDecisionTools(fake, true) as any;
+    await tools.getAutonomy.execute({ execution_id: "exec-stale" }, session("exec-live"));
+    assert.deepEqual(sent, ["exec-live"]);
+  });
+
+  it("get_autonomy refuses another agent's name before any call", async () => {
+    const sent: string[] = [];
+    mock.method(RealClient.prototype, "getSeatAutonomy", async (_a: string, execId: string) => {
+      sent.push(execId);
+      return {};
+    });
+    const tools = createDecisionTools(fake, true) as any;
+    const out = JSON.parse(await tools.getAutonomy.execute({ agent_name: "victim" }, session("exec-live")));
+    assert.equal(out.success, false);
+    assert.equal(sent.length, 0);
+  });
+
+  it("no tool still advertises an agent_name override for a user-scoped key", () => {
+    const tools = createDecisionTools(fake, false) as any;
+    for (const tool of [tools.recordDecision, tools.listSeatDecisions, tools.getAutonomy]) {
+      const desc = tool.parameters.shape.agent_name.description as string;
+      assert.doesNotMatch(desc, /for a user-scoped key only|override/i);
+      assert.match(desc, /agent_only/);
+    }
+  });
+
   it("the descriptions name the refusals", () => {
     const tools = createDecisionTools(fake, false) as any;
-    for (const tool of [tools.recordDecision, tools.listSeatDecisions]) {
+    for (const tool of [tools.recordDecision, tools.listSeatDecisions, tools.getAutonomy]) {
       assert.match(tool.description, /decision_turn_not_live/);
       assert.match(tool.description, /decision_turn_ambiguous/);
     }

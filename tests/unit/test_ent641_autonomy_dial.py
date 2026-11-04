@@ -941,9 +941,9 @@ class TestADecisionIsRecordedInItsOwnTurn:
         res = record_api(_principal("agent_key"), turn=turn)
         assert res.status_code == 422 and res.json()["detail"]["code"] == "not_this_turn"
 
-    def test_a_turn_that_is_no_longer_running_is_refused(self, record_api):
-        res = record_api(_principal("agent_key"), status="success")
-        assert res.status_code == 422 and res.json()["detail"]["code"] == "turn_not_running"
+    # A turn that is no longer running is refused once, by `_seat_for`
+    # (`decision_turn_not_live`), which this fixture stubs: pinned through the
+    # real route in test_ent1062_live_turn_doors.py.
 
     def test_a_person_is_refused_as_not_the_agent(self, record_api):
         # trinity-enterprise#1062: these are the agent's own doors; a person

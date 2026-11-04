@@ -165,6 +165,24 @@ class TestDecisionsServeTheLiveTurn:
         run(agent.name, email="Ann@Example.com")
         assert record(client, agent, first).status_code == 200
 
+    def test_a_headless_run_beside_the_owners_turn_is_ambiguous(self, client, agent):
+        """Review of #4204: the owner and a headless run share one MEMORY scope,
+        so a cron turn naming the owner's live run recorded under the owner's
+        seat (200, stored) while another person's seat in the same setup got
+        422. A decision is one person's: the headless neighbour is someone else."""
+        owners = run(agent.name, email=agent.owner)
+        cron = run(agent.name, "schedule", email=None)
+        refused(record(client, agent, owners), 422, "decision_turn_ambiguous")
+        refused(read(client, agent, owners), 422, "decision_turn_ambiguous")
+        assert decisions(agent, agent.owner) == []
+        end(cron)
+        assert record(client, agent, owners).status_code == 200, "once alone, the owner's turn records"
+
+    def test_a_headless_run_beside_another_persons_turn_is_ambiguous(self, client, agent):
+        ann = run(agent.name)
+        run(agent.name, "schedule", email=None)
+        refused(record(client, agent, ann), 422, "decision_turn_ambiguous")
+
     def test_an_unreadable_ledger_refuses(self, client, agent, monkeypatch):
         ann = run(agent.name)
         monkeypatch.setattr(db, "get_running_turn_attribution", lambda name: (_ for _ in ()).throw(RuntimeError("down")))

@@ -70,10 +70,8 @@ def _require_running_turn(current_user: User, execution_id: str, turn_header: Op
     could cite three past executions of the seat and graduate a class nobody
     asked about. The turn is the PLATFORM-stamped `X-Trinity-Execution-Id`
     (#2392), which the model cannot set; the body must name that same turn, and
-    `record_seat_decision` checks it is still `running`. A person's own record
-    (a non-agent principal) is not an agent inventing evidence and keeps its path."""
-    if not current_user.agent_name:
-        return
+    `_seat_for` checks it is still `running`. Only an agent key reaches here
+    (`_agent_only`, trinity-enterprise#1062)."""
     turn = (turn_header or "").strip()
     if not turn or turn == "manual" or turn != (execution_id or "").strip():
         raise HTTPException(status_code=422, detail={
@@ -132,11 +130,14 @@ def _seat_for(agent_name: str, execution_id: str) -> tuple[str, object]:
                                                      "message": "No verified person on this execution."})
     email = email.lower()
     # The other half of the ledger rule: no other live turn on this agent may
-    # resolve to a different scope. While one does, nothing tells the two turns
-    # apart, so the door fails closed. The cost, as on the memory doors: two
-    # live turns for different people refuse each other.
-    scope = memory_service.scope_for(agent_name, email)
-    if memory_service.another_live_scope(agent_name, execution.id, scope):
+    # serve anyone else. While one does, nothing tells the two turns apart, so
+    # the door fails closed. Stricter than the memory doors on purpose: there
+    # the owner and a headless run share one scope, but a decision is ONE
+    # person's, so a headless neighbour is "someone else" too (review of #4204:
+    # a cron turn naming the owner's live run recorded under the owner's seat).
+    # The cost: two live turns for different people, or a person's turn beside
+    # a scheduled run, refuse each other.
+    if memory_service.another_live_turn_not_serving(agent_name, execution.id, email):
         logger.info(f"[SeatDecision] Refused on {agent_name} (decision_turn_ambiguous, execution={execution_id})")
         raise HTTPException(status_code=422, detail={
             "code": "decision_turn_ambiguous",
@@ -161,12 +162,8 @@ async def record_seat_decision(
     assert_agent_access(current_user, agent_name, detail="Not authorized")
     rate_limiter.enforce(f"seat_decision_record:{agent_name}", 60, 60)
     _require_running_turn(current_user, body.execution_id, x_trinity_execution_id)
+    # A finished run is refused once, by `_seat_for` (`decision_turn_not_live`).
     seat_email, execution = _seat_for(agent_name, body.execution_id)
-    _status = getattr(execution, "status", "")
-    if current_user.agent_name and str(getattr(_status, "value", _status)).lower() != "running":
-        raise HTTPException(status_code=422, detail={
-            "code": "turn_not_running",
-            "message": "A decision is recorded during the turn it was made in; this execution is not running."})
 
     scope = f"seat_decision:{agent_name}:{seat_email}"
     idem = idempotency_service.begin(scope, idempotency_key)
