@@ -29,7 +29,8 @@ def find_update_script(directory: Optional[str], env: Mapping[str, str] = os.env
         raise NotACheckout(
             f"{base} is not a Trinity checkout (no {UPDATE_SCRIPT.as_posix()} there). "
             "Run `trinity update` from the directory Trinity is installed in, or pass "
-            "--dir /path/to/trinity (or set TRINITY_HOME)."
+            "--dir /path/to/trinity (or set TRINITY_HOME). A checkout older than this command "
+            "needs the first-time step in docs/user-docs/guides/deploying/upgrading.md."
         )
     return script
 
