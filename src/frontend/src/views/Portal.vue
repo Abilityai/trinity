@@ -133,6 +133,38 @@
 
          Below `sm` the columns collapse to the single stage the drawer and the
          bottom sheet already assume, so the variables are simply unused. -->
+    <!-- ===================== ACCOUNT HAS NO EMAIL ===================== -->
+    <!-- trinity#3894: the Workspace identifies a person by email, and a
+         platform account without one (the built-in `admin` on a default
+         install) is refused on every Workspace call. The shell used to render
+         anyway — "Couldn't load your agents" with a Try again that can never
+         succeed, beside "No agents yet. Create one" for an owner who just did.
+         Say what is missing and where to add it instead. -->
+    <div
+      v-else-if="store.accountHasNoEmail"
+      class="flex-1 flex items-center justify-center px-4"
+      data-testid="workspace-account-has-no-email"
+    >
+      <div class="w-full max-w-sm">
+        <div class="mb-6">
+          <PortalBrand mark-size="h-7 w-7" text-size="text-lg" />
+        </div>
+        <h1 class="text-lg font-semibold">Add an email to use the Workspace</h1>
+        <p class="mt-2 text-sm">
+          Your Trinity account has no email address, and the Workspace finds your agents —
+          the ones you own and the ones shared with you — by email.
+          Add one under Settings → General (Admin sign-in email), then reload this page.
+        </p>
+        <div class="mt-5 flex gap-2">
+          <BaseButton data-testid="workspace-add-email" @click="router.push({ path: '/settings', query: { tab: 'general' } })">
+            Open Settings
+          </BaseButton>
+          <BaseButton variant="secondary" data-testid="workspace-no-email-reload" @click="store.fetchRoster()">
+            Reload
+          </BaseButton>
+        </div>
+      </div>
+    </div>
     <div v-else class="flex-1 flex min-h-0" :style="columns.gridStyle.value">
       <!-- Sidebar: persistent on desktop, drawer on mobile -->
       <div class="hidden sm:flex shrink-0 min-w-0 overflow-hidden sm:w-[var(--ws-sidebar,18rem)]">
@@ -366,6 +398,13 @@
               It isn't enabled here. Ask an administrator if you expected access.
             </p>
           </template>
+          <!-- trinity-enterprise#1082: refused by the terms gate. No "Try
+               again" — it can only be refused again; the way on is /terms. -->
+          <template v-else-if="store.termsRefusal">
+            <p :class="STAGE_TITLE">{{ termsRefusalTitle }}</p>
+            <p :class="STAGE_BODY">{{ store.error }}</p>
+            <RouterLink :to="termsRefusalLink" :class="STAGE_ACTION" data-testid="portal-terms-required">Review the terms</RouterLink>
+          </template>
           <template v-else-if="store.error">
             <p :class="STAGE_TITLE">{{ ROSTER_LOAD_FAILED_TITLE }}</p>
             <p :class="STAGE_BODY">{{ store.error }}</p>
@@ -594,6 +633,13 @@
             <p :class="STAGE_BODY">
               It isn't enabled here. Ask an administrator if you expected access.
             </p>
+          </template>
+          <!-- trinity-enterprise#1082: refused by the terms gate. No "Try
+               again" — it can only be refused again; the way on is /terms. -->
+          <template v-else-if="store.termsRefusal">
+            <p :class="STAGE_TITLE">{{ termsRefusalTitle }}</p>
+            <p :class="STAGE_BODY">{{ store.error }}</p>
+            <RouterLink :to="termsRefusalLink" :class="STAGE_ACTION" data-testid="portal-terms-required">Review the terms</RouterLink>
           </template>
           <template v-else-if="store.error">
             <p :class="STAGE_TITLE">{{ ROSTER_LOAD_FAILED_TITLE }}</p>
@@ -929,12 +975,14 @@ import { useClientPortalStore, MULTI_AGENT_UNAVAILABLE, PLATFORM_LOGIN_ROUTE } f
 import { useAuthStore } from '@/stores/auth'
 import { canvasReturnPath, isWorkspaceOnlyRole } from '@/utils/workspaceOnly'
 import { loginLocation } from '@/utils/platformSession'
+import { closedInviteMessage, termsLocation } from '@/utils/termsGate'
 import { HELP_CLASS } from '@/components/base/fieldClasses'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
 import { threadKey, shouldAutoFocusComposer } from '@/components/portal/portalDrafts'
 import { safeStorage } from '@/utils/safeStorage'
 import PortalSidebar from '@/components/portal/PortalSidebar.vue'
 import PortalBrand from '@/components/portal/PortalBrand.vue'
+import BaseButton from '@/components/base/BaseButton.vue'
 import PortalConversation from '@/components/portal/PortalConversation.vue'
 import PortalBriefing from '@/components/portal/PortalBriefing.vue'
 import PortalLoops from '@/components/portal/PortalLoops.vue'
@@ -1053,6 +1101,14 @@ const canContinueAsOperator = computed(
   () => store.platformFallbackSuppressed && authStore.isAuthenticated
 )
 const operatorEmail = computed(() => authStore.userEmail || 'your Trinity account')
+
+// trinity-enterprise#1082 — the stage's named state when the terms gate refused
+// the roster: a closed invitation says so, and the link goes exactly where the
+// refusal handler would send the person (one builder, `termsLocation`).
+const termsRefusalTitle = computed(
+  () => closedInviteMessage(store.termsRefusal) || 'Accept the terms to continue'
+)
+const termsRefusalLink = computed(() => termsLocation(route.fullPath, store.termsRefusal))
 
 function continueAsOperator() {
   store.continueAsPlatform()

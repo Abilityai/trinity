@@ -133,6 +133,8 @@ async def list_skills(current_user: User = Depends(get_current_user)):
             # trinity-enterprise#753/#754: the author's `approval` declaration —
             # declared on SkillInfo but never named here, so it was always null.
             approval=s.get("approval"),
+            # trinity-enterprise#660: named here for the same reason.
+            category=s.get("category"),
         )
         for s in skills
     ]

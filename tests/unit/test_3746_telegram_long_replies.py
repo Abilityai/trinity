@@ -230,10 +230,10 @@ async def test_proactive_auto_falls_back_after_partial_telegram_failure(wire, mo
     database.get_telegram_bot_token.return_value = "test-token"
     monkeypatch.setattr(pm, "db", database)
     service = pm.ProactiveMessageService()
-    monkeypatch.setattr(service, "_check_rate_limit", lambda *a: True)
-    monkeypatch.setattr(service, "_increment_rate_limit", MagicMock())
+    monkeypatch.setattr(service, "check_rate_limit", lambda *a: True)
+    monkeypatch.setattr(service, "increment_rate_limit", MagicMock())
     monkeypatch.setattr(service, "_persist_outbound", MagicMock())
-    monkeypatch.setattr(service, "_audit_send", AsyncMock())
+    monkeypatch.setattr(service, "audit_send", AsyncMock())
     slack = AsyncMock(return_value=pm.DeliveryResult(success=True, channel="slack", message_id="s1"))
     monkeypatch.setattr(service, "_deliver_slack", slack)
     outcomes.extend([(200, {"ok": True, "result": {"message_id": 1}}), (403, {"ok": False})])
