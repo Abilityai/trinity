@@ -35,6 +35,7 @@ from dependencies import (
     require_interactive,
     require_person,
 )
+from services.tool_access_guard import assert_tool_allowed
 from models import User, VoipBindingResponse, VoipCallRequest, VoipConfigureRequest, VoipEnabledRequest
 from services import idempotency_service
 from services.settings_service import settings_service
@@ -190,6 +191,8 @@ async def place_voip_call(
     Accepts an optional Idempotency-Key (Invariant #18) so a retried trigger
     doesn't place two calls.
     """
+    # trinity-enterprise#341: refused when this agent's tool access removes call_user.
+    assert_tool_allowed(current_user, "call_user", as_agent=agent_name)
     _require_enabled()
     public_url = settings_service.get_public_chat_url_setting()
 

@@ -1,0 +1,82 @@
+{
+  "version": "1.2.3",
+  "date": "2026-11-04",
+  "mode": "diff",
+  "scope": "feature/584-capability-descriptions vs merge-base 11101139d",
+  "issue": "abilityai/trinity-enterprise#584",
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    12,
+    13,
+    14
+  ],
+  "stack_cve_quicklist": [
+    {
+      "component": "Starlette",
+      "verdict": "not reachable (no changed backend file reads request.url.path)"
+    },
+    {
+      "component": "Claude Code in the base image",
+      "verdict": "no overlap (pin 2.1.281 unchanged; no docker/ change)"
+    },
+    {
+      "component": "Vite / Vitest / axios / Redis / runc / Node CLIs",
+      "verdict": "no overlap (no dependency, image or compose change in the diff)"
+    }
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "new_mcp_tools": 0,
+    "new_ws_channels": 0,
+    "new_credentials": 0,
+    "schema_changes": 0,
+    "dependency_changes": 0,
+    "changed_payloads": [
+      "PortalPlaybook.kind (closed Literal)",
+      "PortalAgentPage.capabilities_state (closed Literal)",
+      "X-010/X-003 check messages now carry up to 5 clipped names"
+    ],
+    "agent_context_ingress": "unchanged: SKILL.md descriptions already reached the Workspace, Skills tab, Library, connector list_playbooks, the public link and the MCP skill tools; the diff normalises blank values and adds no new ingress"
+  },
+  "findings": [],
+  "hypotheses": [],
+  "observations": [
+    {
+      "title": "Descriptions keep zero-width, bidi and tag-block characters",
+      "detail": "clean_description strips whitespace only. Author-written SKILL.md descriptions reach other LLMs via list_playbooks and the MCP skill tools exactly as before this change. Pre-existing and not introduced or widened by the diff (hard exclusion 5: missing hardening without a concrete vulnerability); the one-rule seam makes stripping them a one-line follow-up if wanted.",
+      "severity": "none (below gate)"
+    }
+  ],
+  "coverage_gaps": [
+    "Phase 3 scanner not run: the diff changes no dependency, so there was nothing to scan.",
+    "Phases 10-11 (STRIDE, data classification) not run: diff mode, no new component or data class."
+  ],
+  "supply_chain_summary": {
+    "scanner": "not run (no dependency change in the diff)",
+    "note": "skill_packaging.py stays self-contained: the community skills library CI downloads it and utils/safe_yaml.py at a pinned commit; a test pins its imports"
+  },
+  "guards_run": [
+    "test_1965_agent_server_safe_yaml.py",
+    "test_2996_human_only_routes.py",
+    "test_agent_auth_header_guard.py",
+    "test_186_enumeration_uniformity.py",
+    "test_models_centralized.py",
+    "test_ent314_hardened_yaml.py (1 red: the mounted enterprise submodule's own test file, not this diff)"
+  ],
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "counts_as_full_run": false
+}

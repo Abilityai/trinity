@@ -322,7 +322,15 @@ exposable-skills config (ent#178) slots into this same seam. A chat holds one ag
 or, where the capability below is present, several — and the picker starts a new chat
 either way, so hints scope to the active agent by construction. ent#380 also fixed the
 briefing's metadata read — #138 called a nonexistent agent `/info` route, so descriptions
-were silently always `None`.
+were silently always `None`. **Each hint says which tier it is (trinity-enterprise#584):**
+`PortalPlaybook.kind` is `playbook` (a capability, described by its SKILL.md
+`description:`, `null` → "No description yet") or `use_case` (rendered as "What you can
+ask", never as a capability missing a description); the typeahead copy carries it too, and
+the default keeps an older payload reading as a playbook. Descriptions are cleaned once,
+where they enter (`connector_service.resolve_exposed_playbooks` →
+`services/skill_packaging.py::clean_description`), not in `_agent_briefing`. `/page` carries
+`capabilities_state` (the card's `briefing_state`), so the rail's empty arm can tell
+"never answered" from "published nothing".
 
 **Briefing hint grid is bounded (#2101):** with no connector allow-list configured every
 `user_invocable` skill becomes a "Things you can ask" card, so the hint set is belted
@@ -380,6 +388,13 @@ chat. It is bound to the **Workspace thread**: `POST
 `client_portal/voice.py::start_workspace_voice`, which builds the context from the thread's
 recent rows and creates the session with `portal_session_id` + `client_email`,
 `canvas_audience="operator"` and `max_duration=WORKSPACE_VOICE_MAX_DURATION` (1800 s).
+The start response also carries the audio socket's single-use ticket (trinity-enterprise#595),
+minted in the router for the platform user it resolved — which must be an interactive
+session, so a Workspace-only account gets a call and an MCP key does not — and the client
+sends it as the socket's first frame. The ticket comes from the same `portalHttp` request the
+store's credential decision authorized; the composable never reads a session token for the
+socket, and `startWith` resolves (the orb shows *listening*) only after the server's
+`auth_ok` and a live mic. Protocol: [integrations.md → WebSocket auth](integrations.md#real-time-delivery-reliability-003-306).
 The transcript is **written turn by turn on the worker holding the live socket**
 (`persist_voice_turn`, called from the bridge's `on_turn`) as `enterprise_portal_messages`
 rows carrying `source='voice'` + `voice_call_id`; the call closes with one `system` label
