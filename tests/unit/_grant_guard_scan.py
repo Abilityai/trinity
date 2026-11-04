@@ -144,6 +144,27 @@ ROOM_MODERATOR_DOOR = "shared_sessions/service.py::_require_moderator"
 # Agent-only checks that guard no grant, keyed by the function that holds the
 # check; a key the scan no longer finds as an agent-only site fails as stale.
 NOT_GRANT_GUARDS: Dict[str, Tuple[str, FrozenSet[str]]] = {
+    "services/tool_access_guard.py::assert_tool_allowed": (
+        "the send block (trinity-enterprise#341, GUARD-008): a per-agent tool "
+        "RESTRICTION, not a grant — it refuses an agent whose enforced tool "
+        "access removes the send tool, and a person, the system key and a "
+        "Workspace visitor are never refused there; each route keeps its own "
+        "access gate beside it. Listed by the merge train (2026-11-04) when "
+        "#4232 landed on dev ahead of this PR",
+        frozenset(
+            {
+                "routers/agent_files.py::share_agent_file",
+                "routers/agents.py::send_voice_reply_endpoint",
+                "routers/messages.py::send_proactive_message",
+                "routers/notifications.py::create_notification",
+                "routers/reports.py::create_report",
+                "routers/slack.py::send_agent_slack_channel_message",
+                "routers/telegram.py::send_telegram_group_message",
+                "routers/voip.py::place_voip_call",
+                "shared_sessions/router.py::post_message",
+            }
+        ),
+    ),
     "dependencies.py::enforce_agent_spawn_scope": (
         "lifecycle fence (trinity-enterprise#69 Part 2): it bounds which agents "
         "an agent key may start, stop or delete to the ones it spawned; it guards "
