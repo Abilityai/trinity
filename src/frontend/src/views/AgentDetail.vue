@@ -318,7 +318,6 @@
                     :auth-status="authStatus"
                     :subscriptions="availableSubscriptions"
                     :subscription-changing="subscriptionChanging"
-                    :read-only-loading="readOnlyLoading"
                     :tags="agentTags"
                     :all-tags="allTags"
                     :resource-limits="resourceLimits"
@@ -334,7 +333,6 @@
                     @add-tag="addTag"
                     @remove-tag="removeTag"
                     @change-subscription="changeSubscription"
-                    @toggle-read-only="toggleReadOnly"
                     @save-resources="saveResourceLimits"
                     @delete="deleteAgent"
                     @navigate-tab="handleOverviewNavigate"
@@ -351,7 +349,9 @@
                     :autonomy-enabled="!!agent.autonomy_enabled"
                     :is-system="!!agent.is_system"
                     :notify="showNotification"
+                    :tool-access-profile="agent.tool_access_profile || ''"
                     @navigate-tab="handleOverviewNavigate"
+                    @tool-access-saved="onToolAccessSaved"
                   />
                   <PeoplePane v-else-if="section === 'people'" :agent-name="agent.name" :agent-owner="agent.owner" />
                   <ChannelsPane
@@ -427,6 +427,7 @@ import { emotionCacheVersion, emotionAvatarUrl as buildEmotionUrl } from '../uti
 import { buildTabs, TAB_ALIASES } from '../utils/agentTabs'
 import { settingsSections, LEGACY_TAB_SECTIONS } from '../utils/agentSettings'
 import { useAgentRestartStore } from '../stores/agentRestart'
+import { isStrict, toggleMessage } from '../utils/toolAccess'
 import NavBar from '../components/NavBar.vue'
 
 // Component name for KeepAlive matching
@@ -799,44 +800,34 @@ async function toggleAutonomy() {
   }
 }
 
+// trinity-enterprise#341: the header's Read-only toggle is the shortcut to the
+// Strict read-only tool-access profile — ON selects it, OFF returns to the
+// profile the agent had before. Through the store (Invariant #7).
 async function toggleReadOnly() {
   if (!agent.value || readOnlyLoading.value) return
 
   readOnlyLoading.value = true
-  const newState = !agent.value.read_only_enabled
+  const name = agent.value.name
 
   try {
-    const response = await fetch(`/api/agents/${agent.value.name}/read-only`, {
-      method: 'PUT',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${readStoredToken()}`
-      },
-      body: JSON.stringify({ enabled: newState })
-    })
-
-    if (!response.ok) {
-      const error = await response.json()
-      throw new Error(error.detail || 'Failed to update read-only mode')
-    }
-
-    const result = await response.json()
-
-    // Update local state
-    agent.value.read_only_enabled = newState
-
-    showNotification(
-      newState
-        ? `Read-only mode enabled. Agent cannot modify source files.${result.hooks_injected ? '' : ' Hooks will be applied on next agent start.'}`
-        : 'Read-only mode disabled. Agent can modify all files.',
-      'success'
-    )
+    const result = await agentsStore.setReadOnly(name, !isStrict(agent.value))
+    if (agent.value?.name !== name) return
+    agent.value.tool_access_profile = result.profile
+    agent.value.read_only_enabled = result.read_only_layer
+    restartStore.report(name, 'tool-access', 'Tool access', !!result.restart_required)
+    showNotification(toggleMessage(result, agent.value.display_label || name), 'success')
   } catch (error) {
-    console.error('Failed to toggle read-only mode:', error)
-    showNotification(error.message || 'Failed to update read-only mode', 'error')
+    showNotification(error.response?.data?.detail || error.message || 'Failed to update read-only mode', 'error')
   } finally {
     readOnlyLoading.value = false
   }
+}
+
+// A Tool access save in Settings: the header's Read-only toggle follows it.
+function onToolAccessSaved(view) {
+  if (!agent.value || !view || view.agent_name !== agent.value.name) return
+  agent.value.tool_access_profile = view.profile
+  agent.value.read_only_enabled = view.read_only
 }
 
 // Toggle running state (start/stop)

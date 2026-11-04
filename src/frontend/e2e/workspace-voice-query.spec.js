@@ -118,6 +118,9 @@ async function stubWorkspaceVoice(page) {
     voice_session_id: 'e2e-voice-session',
     websocket_url: '/ws/voice/e2e-voice-session',
     portal_session_id: 'e2e-portal-session',
+    // trinity-enterprise#595: a start answers with the socket's single-use ticket.
+    websocket_ticket: 'e'.repeat(43),
+    websocket_ticket_expires_in: 30,
   })))
 }
 

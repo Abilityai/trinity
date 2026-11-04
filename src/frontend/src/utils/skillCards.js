@@ -23,6 +23,7 @@
  */
 import { DEPRECATED_TITLE } from '../components/skills/contract'
 import { isDeprecationCode } from './skillDelivery'
+import { describeSkill } from './skillDescription'
 
 // The backend's `skill_packaging.SKILL_NAME_RE`: what a gate can be keyed on.
 export const SKILL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
@@ -315,3 +316,21 @@ export function buildSkillCards({
 
 const cantCarry = "This skill's name can't carry a gate: use letters, digits, dots, dashes or underscores (up to 64)"
 const gatesUnread = "The approval settings couldn't be read: retry above"
+
+// trinity-enterprise#584 — the card's description slot, as segments so the
+// field name renders as code. A skill without a description tells its author
+// where to write one (the Skills tab is the author-facing surface); the hover
+// names the file. A gate that matches no skill keeps its own line.
+const AUTHOR_HINT = [{ text: 'No description yet. Add ' }, { code: 'description:' }, { text: ' to its SKILL.md.' }]
+
+export function descriptionLine(card) {
+  if (card?.missing) {
+    return { muted: true, segments: [{ text: 'This gate stays until someone clears it.' }], title: undefined }
+  }
+  const d = describeSkill(card?.description)
+  if (!d.missing) return { muted: false, segments: [{ text: d.text }], title: d.text }
+  const title = card?.section === 'shared'
+    ? "Add a description: line to this skill's SKILL.md in the skills library"
+    : `Add a description: line to the frontmatter of .claude/skills/${card?.dir || card?.name}/SKILL.md`
+  return { muted: true, segments: AUTHOR_HINT, title }
+}

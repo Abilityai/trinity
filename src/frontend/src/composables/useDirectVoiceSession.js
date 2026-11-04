@@ -9,10 +9,13 @@
  * Live call streams audio both ways to a model, this one exchanges whole utterances.
  */
 import { computed, getCurrentInstance, onBeforeUnmount, ref } from 'vue'
-import { useAuthStore } from '../stores/auth'
 import { createAudioPlayer, startMicCapture } from '../utils/audio'
 import { createEndpointer, rmsOf, samplesToPcm16Base64, VAD } from '../utils/voiceEndpointing'
 import { startFailureReason, VOICE_INSECURE_REASON, VOICE_NO_MIC_REASON } from '../components/portal/portalVoiceMode'
+import {
+  VOICE_BAD_START_REASON, VOICE_CONNECT_TIMEOUT_MS, VOICE_NOT_VERIFIED_REASON, VOICE_TIMEOUT_REASON,
+  VOICE_SESSION_ID_SHAPE as SESSION_ID_SHAPE, VOICE_TICKET_SHAPE as TICKET_SHAPE,
+} from './useVoiceSession'
 import { answersAsk, HOLD_UNFINISHED_MS, isEcho, isOwnSentence, isStopUtterance, looksUnfinished } from '../components/portal/portalDirectCall'
 
 const SAVED_TIMEOUT_MS = 5000
@@ -21,7 +24,6 @@ export const STOPPED_NOTICE = 'Stopped.'
 export const STOPPED_REPLY_IN_CHAT = 'Stopped. The full reply is in the chat.'
 
 export function useDirectVoiceSession({ onTranscript, onBargeIn, onStop, onAnswer, onTurnIdle, isBusy, now = () => Date.now() } = {}) {
-  const authStore = useAuthStore()
 
   const active = ref(false)
   const status = ref('idle')
@@ -301,40 +303,103 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onStop, onAnswe
       runtime.value = data.runtime || ''
       provider.value = data.provider || ''
       earlySpeech.value = data.early_speech !== false
-      const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-      ws = new WebSocket(`${scheme}//${window.location.host}${data.websocket_url}?token=${authStore.token}`)
-      const opened = new Promise((resolve) => {
-        ws.onopen = async () => {
-          try {
-            player = createAudioPlayer()
-            endpointer = createEndpointer({
-              onSpeechStart: ({ duringPlayback }) => {
-                if (duringPlayback) { pausedForSpeech.value = true; player?.pause() }
-              },
-              onUtterance: handleUtterance,
-              onDiscard: () => resumeIfPaused(),
-            })
-            mic = await startMicCapture((_b64, samples) => { if (samples) onFrames(samples) })
-            startPolling()
-            resting()
-            resolve(true)
-          } catch {
-            error.value = 'Microphone access denied. Please allow microphone access and try again.'
-            resolve(false)
-            await stop()
-          }
-        }
-        ws.onerror = () => {
-          if (!error.value) error.value = 'Voice connection error'
-          resolve(false)
-        }
-      })
-      ws.onmessage = (event) => {
-        try { handleFrame(JSON.parse(event.data)) } catch (e) { console.error('Direct call frame error:', e) }
+      // trinity-enterprise#595: the socket URL carries no credential. The start
+      // response's single-use ticket is the first frame, and the microphone
+      // starts only after the server's `auth_ok`.
+      const sid = data?.voice_session_id
+      const ticket = data?.websocket_ticket
+      const wsPath = typeof sid === 'string' && SESSION_ID_SHAPE.test(sid) ? `/ws/voice/${sid}` : null
+      if (!wsPath || data.websocket_url !== wsPath || typeof ticket !== 'string' || !TICKET_SHAPE.test(ticket)) {
+        error.value = VOICE_BAD_START_REASON
+        cleanup()
+        return false
       }
-      ws.onclose = () => { finishSaved(null); cleanup() }
+      const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+      const sock = new WebSocket(`${scheme}//${window.location.host}${wsPath}`)
+      ws = sock
+      let authed = false
+      let settle = null
+      const opened = new Promise((resolve) => { settle = resolve })
+      let settled = false
+      const finishOpen = (ok, reason = null) => {
+        if (settled) return
+        settled = true
+        clearTimeout(authTimer)
+        if (!ok && reason && !error.value) error.value = reason
+        settle(ok)
+      }
+      const authTimer = setTimeout(() => finishOpen(false, VOICE_TIMEOUT_REASON), VOICE_CONNECT_TIMEOUT_MS)
+      // After `auth_ok`: player and mic, then listening only if this start is still the
+      // live one. A mic grant that lands after the start failed (the socket closed while
+      // the permission prompt was open, or the call was cleaned up) is stopped at once.
+      const startMedia = async () => {
+        const stale = () => settled || ws !== sock
+        let ownPlayer = null
+        try {
+          ownPlayer = createAudioPlayer()
+          player = ownPlayer
+          endpointer = createEndpointer({
+            onSpeechStart: ({ duringPlayback }) => {
+              if (duringPlayback) { pausedForSpeech.value = true; player?.pause() }
+            },
+            onUtterance: handleUtterance,
+            onDiscard: () => resumeIfPaused(),
+          })
+          const ownMic = await startMicCapture((_b64, samples) => { if (samples) onFrames(samples) })
+          if (stale()) {
+            try { ownMic.stop() } catch { /* already stopped */ }
+            try { ownPlayer.stop() } catch { /* already stopped */ }
+            finishOpen(false)
+            return
+          }
+          mic = ownMic
+          startPolling()
+          resting()
+          finishOpen(true)
+        } catch {
+          if (stale()) {
+            try { ownPlayer?.stop() } catch { /* already stopped */ }
+            finishOpen(false)
+            return
+          }
+          finishOpen(false, 'Microphone access denied. Please allow microphone access and try again.')
+          await stop()
+        }
+      }
+      sock.onopen = () => {
+        if (ws !== sock) return
+        try {
+          sock.send(JSON.stringify({ type: 'auth', ticket }))
+        } catch {
+          finishOpen(false, VOICE_NOT_VERIFIED_REASON)
+        }
+      }
+      sock.onerror = () => {
+        if (!error.value) error.value = 'Voice connection error'
+        finishOpen(false)
+      }
+      sock.onmessage = (event) => {
+        if (ws !== sock) return
+        let frame
+        try { frame = JSON.parse(event.data) } catch (e) { console.error('Direct call frame error:', e); return }
+        // Before admission only the acknowledgement and a refusal with its words count.
+        if (!authed) {
+          // The timer covers admission only: time on the mic-permission prompt is the
+          // person's, not the connection's.
+          if (frame?.type === 'auth_ok') { authed = true; clearTimeout(authTimer); void startMedia() }
+          else if (frame?.type === 'status' && frame.state === 'ended') finishOpen(false, frame.message || VOICE_NOT_VERIFIED_REASON)
+          return
+        }
+        try { handleFrame(frame) } catch (e) { console.error('Direct call frame error:', e) }
+      }
+      sock.onclose = () => {
+        if (ws !== sock) return
+        finishOpen(false, authed ? null : VOICE_NOT_VERIFIED_REASON)
+        finishSaved(null); cleanup()
+      }
       const ok = await opened
-      if (!ok) cleanup()
+      // Only this start's own socket: a later call may already own `ws`.
+      if (!ok && ws === sock) cleanup()
       return ok
     } catch (err) {
       error.value = startFailureReason({ status: err?.response?.status, detail: err?.response?.data?.detail })

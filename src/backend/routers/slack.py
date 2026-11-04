@@ -27,6 +27,7 @@ from dependencies import (
     get_current_user,
     require_person,
 )
+from services.tool_access_guard import assert_tool_allowed
 from models import SlackChannelMessageRequest, SlackChannelProactiveRequest, SlackEventResponse, User
 from services import channel_history, idempotency_service, rate_limiter
 from services.slack_service import slack_service
@@ -733,6 +734,8 @@ async def send_agent_slack_channel_message(
     """
     assert_agent_owner(current_user, name, detail="Only owners can send channel messages")
 
+    # trinity-enterprise#341: refused when this agent's tool access removes send_group_message.
+    assert_tool_allowed(current_user, "send_group_message", as_agent=name)
     text = (request.message or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="Message cannot be empty")

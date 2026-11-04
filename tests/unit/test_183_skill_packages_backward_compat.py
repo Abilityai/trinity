@@ -67,7 +67,9 @@ def test_empty_contract_defaults_are_backward_compatible(pkg):
 
 def test_legacy_skill_md_lists_and_loads(pkg, tmp_path, monkeypatch):
     """A legacy no-frontmatter SKILL.md is parsed into a valid, invocable entry
-    with a first-paragraph description — the list/get surface is unchanged."""
+    — the list/get surface is unchanged. Since trinity-enterprise#584 it has
+    no description (no guess from the body): every surface reads "No
+    description yet" for it, as the agent server already did."""
     from services.skill_service import SkillService
 
     skill_md = tmp_path / "SKILL.md"
@@ -84,7 +86,7 @@ def test_legacy_skill_md_lists_and_loads(pkg, tmp_path, monkeypatch):
     info = svc._parse_skill_info(None, "legacy-skill", skill_md)
     assert info["name"] == "legacy-skill"
     assert info["user_invocable"] is True
-    assert info["description"] == "Runs the legacy thing."   # first-paragraph fallback
+    assert info["description"] is None   # ent#584: no first-paragraph guess
     assert info["contract_warnings"] == []
     assert info["requires"] == {"packages": [], "binaries": [], "env": []}
 

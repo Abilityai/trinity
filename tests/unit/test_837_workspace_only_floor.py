@@ -610,7 +610,7 @@ class TestWebSocketDoors:
             "main.py::websocket_events_endpoint": "refuses a Workspace-only owner (ent#837)",
             "routers/agents.py::agent_terminal": "refuses a Workspace-only role (ent#837)",
             "routers/system_agent.py::system_agent_terminal": "admin only",
-            "routers/voice.py::voice_websocket": "bound to the voice session's owner (#600)",
+            "routers/voice.py::voice_websocket": "first-frame single-use ticket from either voice start (the Workspace one admits a Workspace-only account); account re-read at attach, bound to the session's owner (#600, ent#595)",
             "routers/voip.py::voip_media_stream": "provider media stream, authenticated by the call binding",
         }
         assert set(dispositions) == set(rc.WEBSOCKET_ROUTES)

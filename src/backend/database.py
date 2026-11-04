@@ -1459,6 +1459,13 @@ class DatabaseManager:
     def set_guardrails_config(self, agent_name: str, config: dict = None) -> bool:
         return self._agent_ops.set_guardrails_config(agent_name, config)
 
+    # Tool access (GUARD-008, trinity-enterprise#341)
+    def get_tool_access_row(self, agent_name: str):
+        return self._agent_ops.get_tool_access_row(agent_name)
+
+    def write_tool_access_row(self, agent_name: str, **kwargs) -> bool:
+        return self._agent_ops.write_tool_access_row(agent_name, **kwargs)
+
     # =========================================================================
     # Parallel Capacity (delegated to db/agents.py) - CAPACITY-001
     # =========================================================================
@@ -4207,6 +4214,23 @@ class DatabaseManager:
     def set_operator_queue_discussion_link(self, item_id, key, chat_id):
         # trinity-enterprise#747: link a pending ask to its discussion chat, once.
         return self._operator_queue_ops.set_discussion_link(item_id, key, chat_id)
+
+    def read_operator_queue_address(self, item_id):
+        # trinity-enterprise#1095: one row's address columns as stored (raw).
+        return self._operator_queue_ops.read_address(item_id)
+
+    def list_pending_role_addressed_operator_queue_items(self, agent_name, to_role):
+        # trinity-enterprise#1095: the pending rows a role change moves — an
+        # allowlist (the agent's raises, gated-skill approvals), raw address.
+        return self._operator_queue_ops.list_pending_role_addressed(agent_name, to_role)
+
+    def readdress_operator_queue_item(self, item_id, people, single, *, expect_single,
+                                      expect_resolved_raw, context=None, expect_context_raw=None):
+        # trinity-enterprise#1095: rewrite a pending row's audience under CAS.
+        return self._operator_queue_ops.readdress(
+            item_id, people, single, expect_single=expect_single,
+            expect_resolved_raw=expect_resolved_raw, context=context,
+            expect_context_raw=expect_context_raw)
 
     def bulk_cancel_operator_queue_items(self, ids, accessible_agent_names=None, *,
                                          disposed_by_email, reason=None):
