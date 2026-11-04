@@ -23,7 +23,7 @@ _PACKER = _ROOT / "packer" / "digitalocean"
 _SCRIPTS = _PACKER / "scripts"
 _TOKEN = "dop_v1_testtoken"
 _TAG = "v1.0.0"
-_SNAPSHOT = "253014734"
+_SNAPSHOT = "1000001"
 _APP = "app123"
 _PAGE = "https://203.0.113.7/"
 
@@ -46,10 +46,21 @@ def finish(out="", rc=0):
     sys.stdout.flush()
     sys.exit(rc)
 joined = " ".join(args)
+def maybe_hang(text):
+    if world.get("hang_on") and world["hang_on"] in text:
+        import time
+        time.sleep(world.get("hang_secs", 30))
 if tool == "doctl":
+    maybe_hang(joined)
     if "snapshot get" in joined:
         finish(world["snapshot"] + "\n", 0 if world["snapshot"] else 1)
     if "droplet create" in joined:
+        if "PublicIPv4" in joined:
+            if world.get("prober_fails"):
+                finish("", 1)
+            world["droplets"].append("222")
+            save()
+            finish("198.51.100.9\n")
         world["droplets"].append("111")
         save()
         finish("111\n")
@@ -72,23 +83,21 @@ if tool == "doctl":
     finish()
 if tool == "ssh":
     command = " ".join(args[next(i for i, a in enumerate(args) if a.startswith("root@")) + 1:])
-    if world.get("hang_on") and world["hang_on"] in command:
-        import time
-        time.sleep(30)
+    maybe_hang(command)
+    probed = re.search(r"http://[0-9.]+:(\d+)", command)
+    if probed:
+        port = probed.group(1)
+        if port in world.get("silent_ports", []):
+            finish("0.012000 28\n")  # accepted the connection, then said nothing
+        if port in world.get("dropped_ports", []):
+            finish("0.000000 28\n")
+        finish("0.012000 0\n" if port in world["open_ports"] else "0.000000 7\n")
     for needle, out, rc in world["ssh"]:
         if needle in command:
             finish(out, rc)
     finish("", 0)
 if tool == "curl":
     url = next((a for a in reversed(args) if a.startswith("http")), "")
-    if url.startswith("http://") and re.search(r":\d+$", url):
-        port = url.rsplit(":", 1)[1]
-        if port in world.get("silent_ports", []):
-            finish("0.012000", 28)  # accepted the connection, then said nothing
-        if port in world.get("dropped_ports", []):
-            finish("0.000000", 28)
-        finish("0.012000" if port in world["open_ports"] else "0.000000",
-               0 if port in world["open_ports"] else 7)
     method = args[args.index("-X") + 1] if "-X" in args else "GET"
     def matches(needle):
         # A full URL means that URL only, so the page rule cannot answer for the API.
@@ -117,6 +126,10 @@ if tool == "curl":
     finish("", 7)
 if tool == "packer":
     if args[0] == "build":
+        if world.get("packer_hang"):
+            import time
+            open(base + ".pid", "w").write(str(os.getpid()))
+            time.sleep(20)
         if world["packer_rc"]:
             finish("", world["packer_rc"])
         json.dump({"builds": [{"artifact_id": f"sfo2:{world['built_id']}"}]}, open("manifest.json", "w"))
@@ -164,8 +177,10 @@ def _ssh_defaults() -> list:
         *[[f"Config.Image}}}}' trinity-{s}", pinned.format(s) + "\n", 0]
           for s in ("backend", "frontend", "scheduler", "mcp-server")],
         ["image inspect", "sha256:same\n", 0],
-        ["docker ps", "0.0.0.0:8000->8000/tcp\n0.0.0.0:8080->8080/tcp\n", 0],
+        ["docker ps", "0.0.0.0:8000->8000/tcp\n0.0.0.0:4317-4318->4317-4318/tcp, 0.0.0.0:8080->8080/tcp\n", 0],
         ["iptables", "", 0],
+        ["caddy version", "v2.11.8 h1:abc\n", 0],
+        ["State.Status", "running 0\n", 0],
     ]
 
 
@@ -267,7 +282,7 @@ class Rig:
     def pass_record(self, snapshot: str = _SNAPSHOT, tag: str = _TAG) -> Path:
         record = self.home / ".trinity-marketplace" / f"{snapshot}.pass"
         record.parent.mkdir(exist_ok=True)
-        record.write_text(f"tag={tag}\n")
+        record.write_text(f"tag={tag}\ncaddy=2.11.8\n")
         return record
 
 
@@ -362,12 +377,13 @@ class TestSubmit:
         assert len(patch) == 1 and patch[0]["args"][-1].endswith(f"/{_APP}")
         body = json.loads(patch[0]["sent"])
         assert body["imageId"] == int(_SNAPSHOT)
+        assert body["version"] == "1.0.0", "the listing's own version moves with the release"
         versions = {s["name"]: s["version"] for s in body["softwareIncluded"]}
-        assert versions == {"Trinity": "1.0.0", "Caddy": "2.11.4", "Redis": "7", "PostgreSQL": "16"}
+        assert versions == {"Trinity": "1.0.0", "Caddy": "2.11.8", "Redis": "7", "PostgreSQL": "16"}
         assert not record.exists(), "a consumed snapshot keeps no pass record"
         _assert_no_secret_in_argv(rig, _TOKEN)
 
-    def test_an_existing_postgresql_entry_is_kept_once(self, rig: Rig) -> None:
+    def test_an_existing_postgresql_entry_moves_and_stays_single(self, rig: Rig) -> None:
         data = json.loads(json.dumps(_LISTING))
         data["apps"][0]["current"]["customData"]["softwareIncluded"].append(
             {"name": "PostgreSQL", "version": "99", "website": "p", "licenseType": "PostgreSQL"}
@@ -377,7 +393,15 @@ class TestSubmit:
         rig.pass_record()
         assert rig.run("mp-submit.sh", _SNAPSHOT).returncode == 0
         body = json.loads(self._patches(rig)[0]["sent"])
-        assert [s["version"] for s in body["softwareIncluded"] if s["name"] == "PostgreSQL"] == ["99"]
+        assert [s["version"] for s in body["softwareIncluded"] if s["name"] == "PostgreSQL"] == ["16"]
+
+    def test_a_record_with_no_caddy_version_sends_nothing(self, rig: Rig) -> None:
+        record = rig.pass_record()
+        record.write_text(f"tag={_TAG}\n")
+        result = rig.run("mp-submit.sh", _SNAPSHOT)
+        assert result.returncode != 0
+        assert "no Caddy version" in result.stderr, result.stderr
+        assert self._patches(rig) == []
 
     def test_a_failed_listing_read_sends_nothing(self, rig: Rig) -> None:
         """mp-status reads the listing first, so only the second read fails here."""
@@ -428,14 +452,16 @@ class TestBootCheck:
     def test_pass_writes_the_record_and_destroys_the_droplet(self, rig: Rig) -> None:
         result = self._run(rig)
         assert result.returncode == 0, result.stdout + result.stderr
-        assert self._pass_file(rig).read_text().strip() == f"tag={_TAG}"
+        assert self._pass_file(rig).read_text().splitlines() == [f"tag={_TAG}", "caddy=2.11.8"]
         assert rig.state()["droplets"] == []
 
     def test_droplet_shuts_itself_down_and_uses_the_snapshot_region(self, rig: Rig) -> None:
         self._run(rig)
         create = next(c for c in rig.calls("doctl") if "create" in c["args"])
         args = create["args"]
-        assert "shutdown -P +45" in args[args.index("--user-data") + 1]
+        user_data = args[args.index("--user-data") + 1]
+        assert "shutdown -P +45" in user_data
+        assert "bootcmd" not in user_data, "systemd-run in bootcmd wedged a real boot"
         assert args[args.index("--region") + 1] == "sfo2"
         assert args[args.index("--size") + 1] == "s-4vcpu-8gb"
         assert args[args.index("--image") + 1] == _SNAPSHOT
@@ -447,6 +473,56 @@ class TestBootCheck:
         assert len(password) >= 20
         _assert_no_secret_in_argv(rig, password)
         _assert_no_secret_in_argv(rig, "jwt123")
+
+    def test_a_failed_recheck_removes_the_earlier_pass(self, rig: Rig) -> None:
+        """The newest result decides, so an old pass can't carry a snapshot through submit."""
+        record = rig.pass_record()
+        rig.set_ssh("tls-status", "failed\n")
+        assert self._run(rig).returncode != 0
+        assert not record.exists()
+        assert rig.run("mp-submit.sh", _SNAPSHOT).returncode != 0
+        assert [c for c in rig.calls("curl") if "PATCH" in c["args"]] == []
+
+    @pytest.mark.parametrize("service", ["backend", "frontend", "scheduler", "mcp-server"])
+    @pytest.mark.parametrize("state", ["exited 0", "running 3", "restarting 1"])
+    def test_a_container_that_stopped_or_restarted_fails(self, rig: Rig, service, state) -> None:
+        rig.world["ssh"].insert(0, [f"{{{{.RestartCount}}}}' trinity-{service}", f"{state}\n", 0])
+        rig.save()
+        result = self._run(rig)
+        assert result.returncode != 0
+        assert f"trinity-{service} is {state}" in result.stderr, result.stderr
+        assert not self._pass_file(rig).exists()
+
+    def test_remote_calls_that_can_hang_carry_a_time_limit(self, rig: Rig) -> None:
+        """DEADLINE covers only wait_for, so a hung backend must not stall the run."""
+        assert self._run(rig).returncode == 0
+        commands = [" ".join(c["args"]) for c in rig.calls("ssh")]
+        claim = next(c for c in commands if "setup/admin-password" in c)
+        assert " -m " in claim
+        docker = [c for c in commands if " docker " in c]
+        assert docker
+        assert all(" timeout 30 docker " in c for c in docker), docker
+
+    @pytest.mark.parametrize("sig", [signal.SIGTERM, signal.SIGINT, signal.SIGHUP])
+    def test_a_signal_during_cleanup_still_destroys_the_droplet(self, rig: Rig, sig) -> None:
+        """Cleanup holds the only copy of the job of deleting a billing droplet."""
+        rig.set_ssh("tls-status", "failed\n")
+        rig.world["hang_on"] = "trinity-firstboot.log"
+        rig.world["hang_secs"] = 3
+        rig.save()
+        proc = subprocess.Popen(
+            ["bash", str(_SCRIPTS / "boot-check.sh"), _SNAPSHOT, _TAG],
+            cwd=rig.work, env=rig.env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        deadline = time.time() + 20
+        while time.time() < deadline and not any(
+            "trinity-firstboot.log" in " ".join(c["args"]) for c in rig.calls("ssh")
+        ):
+            time.sleep(0.05)
+        proc.send_signal(sig)
+        assert proc.wait(timeout=30) == 1, "the check's own failure decides the exit code"
+        assert rig.state()["droplets"] == []
 
     def test_a_snapshot_for_another_tag_never_creates_a_droplet(self, rig: Rig) -> None:
         rig.world["snapshot"] = "trinity-v1-0-0-rc1-20261104-0954 [sfo2]"
@@ -510,6 +586,13 @@ class TestBootCheck:
         rig.save()
         assert self._run(rig).returncode != 0
 
+    def test_every_port_of_a_published_range_is_probed(self, rig: Rig) -> None:
+        rig.world["open_ports"] = ["4318"]
+        rig.save()
+        result = self._run(rig)
+        assert result.returncode != 0
+        assert "port 4318 is reachable" in result.stderr, result.stderr
+
     def test_8081_is_probed_when_docker_ps_does_not_list_it(self, rig: Rig) -> None:
         rig.world["open_ports"] = ["8081"]
         rig.save()
@@ -517,11 +600,45 @@ class TestBootCheck:
 
     def test_a_dead_network_never_reads_as_closed_ports(self, rig: Rig) -> None:
         """Closed ports and no network look alike, so 443 is the positive control."""
-        rig.world["then_fail"] = [[_PAGE, "GET", 1, 0, 7]]  # the page answers once, then the network dies
+        rig.set_ssh(f"--max-time 15 {_PAGE}", "", 7)
+        result = self._run(rig)
+        assert result.returncode != 0
+        assert "443 does not answer the prober" in result.stderr, result.stderr
+        assert not self._pass_file(rig).exists()
+
+    def test_a_network_that_answers_every_port_is_refused(self, rig: Rig) -> None:
+        rig.world["open_ports"] = ["19999"]
         rig.save()
         result = self._run(rig)
         assert result.returncode != 0
-        assert "443 stopped answering" in result.stderr, result.stderr
+        assert "no listener" in result.stderr, result.stderr
+        assert not self._pass_file(rig).exists()
+
+    def test_the_prober_is_destroyed_with_the_droplet(self, rig: Rig) -> None:
+        assert self._run(rig).returncode == 0
+        assert rig.state()["droplets"] == []
+        creates = [c["args"] for c in rig.calls("doctl") if "create" in c["args"]]
+        tags = {a[a.index("--tag-names") + 1] for a in creates}
+        assert len(creates) == 2 and len(tags) == 1, "one run tag reaps both droplets"
+        assert all("shutdown -P +45" in a[a.index("--user-data") + 1] for a in creates)
+
+    def test_a_failed_prober_create_fails(self, rig: Rig) -> None:
+        rig.world["prober_fails"] = True
+        rig.save()
+        result = self._run(rig)
+        assert result.returncode != 0
+        assert "prober create failed" in result.stderr, result.stderr
+        assert rig.state()["droplets"] == []
+
+    def test_the_pass_record_carries_the_images_caddy_version(self, rig: Rig) -> None:
+        assert self._run(rig).returncode == 0
+        assert "caddy=2.11.8" in self._pass_file(rig).read_text().splitlines()
+
+    def test_an_unreadable_caddy_version_fails(self, rig: Rig) -> None:
+        rig.set_ssh("caddy version", "", 127)
+        result = self._run(rig)
+        assert result.returncode != 0
+        assert "Caddy version" in result.stderr, result.stderr
         assert not self._pass_file(rig).exists()
 
     def test_a_port_that_accepts_and_stays_silent_fails(self, rig: Rig) -> None:
@@ -540,7 +657,10 @@ class TestBootCheck:
         assert result.returncode == 0, result.stderr
         assert self._pass_file(rig).exists()
 
-    def test_sigterm_mid_run_destroys_the_droplet(self, rig: Rig) -> None:
+    @pytest.mark.parametrize("sig,code", [
+        (signal.SIGTERM, 143), (signal.SIGINT, 130), (signal.SIGHUP, 129),
+    ])
+    def test_a_signal_mid_run_destroys_the_droplet(self, rig: Rig, sig, code) -> None:
         rig.world["hang_on"] = "cloud-init status"
         rig.save()
         proc = subprocess.Popen(
@@ -555,8 +675,8 @@ class TestBootCheck:
         ):
             time.sleep(0.1)
         assert rig.state()["droplets"], "droplet was never created"
-        os.killpg(proc.pid, signal.SIGTERM)
-        assert proc.wait(timeout=30) != 0
+        os.killpg(proc.pid, sig)
+        assert proc.wait(timeout=30) == code
         assert rig.state()["droplets"] == []
 
     def test_a_failed_delete_exits_nonzero_and_names_the_droplet(self, rig: Rig) -> None:
@@ -635,6 +755,58 @@ class TestBuild:
         result = self._run(rig)
         assert result.returncode != 0
         assert not rig.calls("packer")
+
+    @pytest.mark.parametrize("sig,code", [
+        (signal.SIGTERM, 143), (signal.SIGINT, 130), (signal.SIGHUP, 129),
+    ])
+    def test_a_signal_mid_build_stops_packer_and_reaps(self, rig: Rig, sig, code) -> None:
+        rig.world["packer_hang"] = True
+        rig.world["droplets"] = ["222"]
+        rig.save()
+        proc = subprocess.Popen(
+            ["bash", str(_SCRIPTS / "mp-build.sh"), _TAG],
+            cwd=rig.work, env=rig.env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        pid_file = Path(str(rig.world_path) + ".pid")
+        deadline = time.time() + 20
+        while time.time() < deadline and not pid_file.exists():
+            time.sleep(0.05)
+        time.sleep(0.2)
+        proc.send_signal(sig)
+        assert proc.wait(timeout=30) == code
+        assert rig.state()["droplets"] == []
+        packer = int(pid_file.read_text())
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            try:
+                os.kill(packer, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.05)
+        else:
+            os.kill(packer, signal.SIGKILL)
+            pytest.fail("packer outlived the script")
+
+    def test_a_signal_during_the_reap_does_not_stop_it(self, rig: Rig) -> None:
+        rig.world["packer_rc"] = 1
+        rig.world["droplets"] = ["222"]
+        rig.world["hang_on"] = "droplet list"
+        rig.world["hang_secs"] = 2
+        rig.save()
+        proc = subprocess.Popen(
+            ["bash", str(_SCRIPTS / "mp-build.sh"), _TAG],
+            cwd=rig.work, env=rig.env(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        deadline = time.time() + 20
+        while time.time() < deadline and not any(
+            "droplet list" in " ".join(c["args"]) for c in rig.calls("doctl")
+        ):
+            time.sleep(0.05)
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=30) == 1
+        assert rig.state()["droplets"] == []
 
     def test_a_failed_build_deletes_only_its_own_tag(self, rig: Rig) -> None:
         rig.world["packer_rc"] = 1

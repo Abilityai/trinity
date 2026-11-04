@@ -132,11 +132,12 @@ bash mp-submit.sh <snapshot-id>             # requires the pass record and mp-st
 While a submission is queued, build and test anyway, keep the snapshot, and run
 `mp-submit.sh <snapshot-id>` once `mp-status.sh` exits 0. No rebuild is needed.
 
-`mp-submit.sh` sends `imageId`, `reasonForUpdate`, `osVersion` and
+`mp-submit.sh` sends `imageId`, `version`, `reasonForUpdate`, `osVersion` and
 `softwareIncluded[]` in a `PATCH` to
 `https://api.digitalocean.com/api/v1/vendor-portal/apps/<app_id>`. It keeps the
-listing's other software entries, moves the Trinity version and adds PostgreSQL if
-the listing lacks it. A `null`
+listing's other software entries, moves the Trinity, Caddy and PostgreSQL versions
+and adds Caddy or PostgreSQL if the listing lacks it. The Caddy version comes from the
+boot check's pass record. A `null`
 field leaves the existing value alone; a blank string clears it.
 `.../apps/<app_id>/versions/<version>` is deprecated.
 

@@ -26,6 +26,8 @@ if [ ! -f "$RECORD" ]; then
 fi
 TAG="$(sed -n 's/^tag=//p' "$RECORD")"
 [ -n "$TAG" ] || { echo "[mp-submit] ${RECORD} names no tag" >&2; exit 1; }
+CADDY="$(sed -n 's/^caddy=//p' "$RECORD")"
+[ -n "$CADDY" ] || { echo "[mp-submit] ${RECORD} names no Caddy version. Run boot-check.sh on it again." >&2; exit 1; }
 
 bash "$HERE/mp-status.sh"
 status=$?
@@ -45,11 +47,14 @@ COMPOSE="$HERE/../../../docker-compose.hosted.yml"
 POSTGRES="$(sed -nE 's/^[[:space:]]*image:[[:space:]]*postgres:([0-9]+).*/\1/p' "$COMPOSE" | head -1)"
 [ -n "$POSTGRES" ] || { echo "[mp-submit] no postgres image in ${COMPOSE}" >&2; exit 1; }
 
-# Live entries are kept: the Trinity version moves and a missing PostgreSQL entry is added.
-jq --arg id "$TRINITY_DO_APP_ID" --arg version "${TAG#v}" --arg tag "$TAG" --arg postgres "$POSTGRES" --argjson image "$SNAPSHOT" '
+# Live entries are kept: the Trinity, Caddy and PostgreSQL versions move, and a missing
+# entry is added. The Caddy version is what boot-check.sh read off this image, because
+# the live entry is whatever the last release sent.
+jq --arg id "$TRINITY_DO_APP_ID" --arg version "${TAG#v}" --arg tag "$TAG" --arg postgres "$POSTGRES" --arg caddy "$CADDY" --argjson image "$SNAPSHOT" '
     .apps[] | select(.current.appId == $id) | (.current.customData.softwareIncluded // []) as $sw
     | {
         reasonForUpdate: "Trinity \($tag)",
+        version: $version,
         osVersion: "Ubuntu 24.04",
         imageId: $image,
         softwareIncluded: (
@@ -59,7 +64,14 @@ jq --arg id "$TRINITY_DO_APP_ID" --arg version "${TAG#v}" --arg tag "$TAG" --arg
                          website: "https://github.com/abilityai/trinity",
                          licenseType: "Apache-2.0"}]
             end
-            | if any(.[]; .name == "PostgreSQL") then .
+            | if any(.[]; .name == "Caddy")
+              then map(if .name == "Caddy" then .version = $caddy else . end)
+              else . + [{name: "Caddy", version: $caddy,
+                         website: "https://caddyserver.com",
+                         licenseType: "Apache-2.0"}]
+              end
+            | if any(.[]; .name == "PostgreSQL")
+              then map(if .name == "PostgreSQL" then .version = $postgres else . end)
               else . + [{name: "PostgreSQL", version: $postgres,
                          website: "https://www.postgresql.org",
                          licenseType: "PostgreSQL"}]

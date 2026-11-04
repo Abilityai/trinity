@@ -50,6 +50,9 @@ RUN_TAG="trinity-build-$(date +%s)-$$"
 BUILD_PID=""
 cleanup() {
     local rc=$?
+    # Signals are ignored from here: nothing else deletes a billing droplet.
+    trap - EXIT
+    trap '' INT TERM HUP
     [ -z "$BUILD_PID" ] || kill "$BUILD_PID" 2>/dev/null
     reap_tag "$RUN_TAG" || rc=1
     exit "$rc"
