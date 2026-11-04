@@ -221,7 +221,7 @@ REVIEWED_CREDITS: Dict[str, Tuple[str, FrozenSet[str]]] = {
 # stale, so it leaves when the ruling lands; a Workspace write whose arm comes
 # to refuse a non-person fails as stale too, since its other arm is then a use
 # to list in WORKSPACE_USES.
-_FOLLOW_UP = "ruled in a follow-up linked from trinity-enterprise#719"
+_FOLLOW_UP = "ruled in trinity-enterprise#985"
 _DELETE_DOCUMENT = "client_portal/router.py::portal_delete_document"
 DEFERRED: Dict[str, Tuple[str, FrozenSet[str]]] = {
     _DELETE_DOCUMENT: (
