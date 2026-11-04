@@ -25,8 +25,11 @@
  *    (#4026). A 2xx, including a dry-run `invalid` and a real-run `partial`,
  *    stays `success: true`. `teardown_system` is pinned the same way below,
  *    through the same registered server.
- * 5. **`deploy_system` is unchanged** (create mode is byte-identical, AC6): its
- *    request and its throw-on-500 are pinned through the same registered path.
+ * 5. **`deploy_system` returns its failure report** (#4027): its request and
+ *    every 2xx result are byte-identical to create mode as ent#695 froze it
+ *    (AC6), but a non-2xx answer (the 500 `failed` report above all) is a
+ *    RETURNED result stamped like apply's, never a thrown error. A missing key
+ *    and a dropped connection still throw.
  *
  * Harness: a real `createServer` in key mode, a real MCP client over the
  * streamable-HTTP transport presenting a person's USER-scoped key (apply's
@@ -601,7 +604,7 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
   });
 
   // -------------------------------------------------------------------------
-  describe("deploy_system is unchanged (create mode, AC6)", () => {
+  describe("deploy_system: the request is unchanged (create mode, AC6)", () => {
     it("still posts {manifest, dry_run: false, strict: false} to /api/systems/deploy on defaults", async () => {
       reset();
       const s = await session("deploy-defaults");
@@ -621,22 +624,193 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
       assert.deepEqual(requests[0].body, { manifest: MANIFEST, dry_run: true, strict: true });
       await s.client.close();
     });
+  });
 
-    it("still THROWS on a failed (500) deploy — the create-mode gap AC6 keeps", async () => {
-      const report = { status: "failed", system_name: "acme", agents_created: [], warnings: [], failed: [{ name: "acme-worker", reason: "boom" }] };
-      reset();
-      deployReply = jsonReply(500, report);
-      try {
-        const s = await session("deploy-500");
-        const { text, isError, row } = await s.call("deploy_system", { manifest: MANIFEST, dry_run: false });
-        assert.equal(isError, true, `deploy_system no longer throws on 500: ${text}`);
-        assert.match(text, /API error \(500\)/);
-        assert.match(text, /"status":"failed"/, "the thrown message still embeds the report (ent#125)");
+  // -------------------------------------------------------------------------
+  // #4027: a non-2xx deploy answer is a RETURNED result, not a thrown error.
+  describe("deploy_system returns its failure report (#4027)", () => {
+    const DEPLOY_DEFAULT = jsonReply(200, { status: "valid", system_name: "acme", agents_created: [], warnings: [] });
+    const resetDeploy = (reply: Reply) => {
+      requests.length = 0;
+      deployReply = reply;
+    };
+    afterEach(() => {
+      deployReply = DEPLOY_DEFAULT;
+    });
+    const FAILED_DEPLOY = {
+      status: "failed",
+      system_name: "acme",
+      agents_created: [],
+      prompt_updated: false,
+      warnings: [],
+      failed: [
+        { name: "acme-worker", short_name: "worker", template: "local:worker", reason: "Template not found", status_code: 404 },
+        { name: "acme-writer", short_name: "writer", template: "local:writer", reason: "Template not found", status_code: 404 },
+      ],
+    };
+
+    it("a failed (500) deploy comes back AS the report, with http_status and success: false, audited as a failure", async () => {
+      resetDeploy(jsonReply(500, FAILED_DEPLOY));
+      const s = await session("deploy-failed-500");
+      const { text, isError, row } = await s.call("deploy_system", { manifest: MANIFEST, dry_run: false });
+
+      assert.equal(isError, false, `a failed deploy is a result, not a thrown error: ${text}`);
+      assert.equal(text, JSON.stringify({ ...FAILED_DEPLOY, http_status: 500, success: false }, null, 2));
+      const out = parsed(text);
+      assert.equal(out.status, "failed");
+      assert.deepEqual(out.failed, FAILED_DEPLOY.failed, "every member's sanitized reason reaches the caller (ent#125)");
+
+      assert.equal(row.details.success, false, `a failed deploy was audited as a success: ${JSON.stringify(row.details)}`);
+      assert.equal(row.details.error, "HTTP 500: status 'failed'");
+      assert.equal(row.details.denied, undefined, "a failed deploy is not an authorization denial");
+      await s.client.close();
+    });
+
+    it("a 403 (the agents.manage capability fence) is returned, and audited as a denial", async () => {
+      const detail = {
+        code: "agent_management_not_permitted",
+        capability: "agents.manage",
+        message: "This agent does not hold the agent-management permission.",
+      };
+      resetDeploy(jsonReply(403, { detail }));
+      const s = await session("deploy-403");
+      const { text, isError, row } = await s.call("deploy_system", { manifest: MANIFEST, dry_run: false });
+
+      assert.equal(isError, false, `the registered tool threw: ${text}`);
+      assert.deepEqual(parsed(text), { detail, http_status: 403, success: false });
+      assert.equal(row.details.success, false);
+      assert.equal(row.details.denied, true, "a backend 403 stays a denial, as it was when it was thrown");
+      assert.equal(row.details.error, "HTTP 403", "a structured detail gets the bare status, as teardown's does (#4026)");
+      await s.client.close();
+    });
+
+    it("a 403 with a non-JSON body is still a returned object and still a denial", async () => {
+      resetDeploy({ status: 403, body: "Forbidden", contentType: "text/plain" });
+      const s = await session("deploy-403-text");
+      const { text, isError, row } = await s.call("deploy_system", { manifest: MANIFEST, dry_run: false });
+
+      assert.equal(isError, false);
+      assert.deepEqual(parsed(text), { success: false, http_status: 403, detail: "Forbidden" });
+      assert.equal(row.details.denied, true);
+      assert.equal(row.details.error, "HTTP 403");
+      await s.client.close();
+    });
+
+    const STRICT_ABORT = {
+      detail: { error: "Deployment failed", failed_at: "acme-writer", created: ["acme-worker"], reason: "Template not found" },
+    };
+    const VALIDATION_422 = { detail: [{ loc: ["body", "manifest"], msg: "Field required", type: "missing" }] };
+    for (const [label, status, body, reason] of [
+      ["a 400 manifest error", 400, { detail: "nothing_to_deploy: every member is deploy: false" }, "HTTP 400: nothing_to_deploy: every member is deploy: false"],
+      ["an exhausted 401 (key mode cannot re-authenticate)", 401, { detail: "Invalid or expired API key" }, "HTTP 401: Invalid or expired API key"],
+      ["a 422 validation error", 422, VALIDATION_422, "HTTP 422"],
+      ["a strict abort, with the members it created first", 404, STRICT_ABORT, "HTTP 404"],
+      ["an unexpected 500 that is not a report", 500, { detail: "Deployment failed: boom" }, "HTTP 500: Deployment failed: boom"],
+    ] as const) {
+      it(`${label}: the body comes back AS the result with http_status and success: false, not a denial`, async () => {
+        resetDeploy(jsonReply(status, body));
+        const s = await session(`deploy-${status}-${label.length}`);
+        const { text, isError, row } = await s.call("deploy_system", { manifest: MANIFEST, dry_run: false, strict: true });
+
+        assert.equal(isError, false, `the registered tool threw: ${text}`);
+        assert.deepEqual(parsed(text), { ...body, http_status: status, success: false });
         assert.equal(row.details.success, false);
+        assert.equal(row.details.error, reason);
+        assert.equal(row.details.denied, undefined);
         await s.client.close();
+      });
+    }
+
+    it("a strict abort names the members it created, as a structured field", async () => {
+      resetDeploy(jsonReply(500, STRICT_ABORT));
+      const s = await session("deploy-strict-created");
+      const { text } = await s.call("deploy_system", { manifest: MANIFEST, strict: true });
+      assert.deepEqual(parsed(text).detail.created, ["acme-worker"]);
+      await s.client.close();
+    });
+
+    const html = "<html><body><h1>502 Bad Gateway</h1></body></html>";
+    for (const [label, reply, detail] of [
+      ["a non-JSON body", { status: 502, body: html, contentType: "text/html" } as Reply, html],
+      ["a JSON string", jsonReply(502, "upstream unavailable"), "upstream unavailable"],
+      ["a JSON array", jsonReply(502, ["upstream", "unavailable"]), ["upstream", "unavailable"]],
+      ["JSON null", jsonReply(500, null), null],
+    ] as const) {
+      it(`${label}: {success: false, http_status, detail}, the raw value never on the audit row`, async () => {
+        resetDeploy(reply);
+        const s = await session(`deploy-detail-${label.replace(/\W+/g, "-")}`);
+        const { text, isError, row } = await s.call("deploy_system", { manifest: MANIFEST, dry_run: false });
+
+        assert.equal(isError, false);
+        assert.deepEqual(parsed(text), { success: false, http_status: reply.status, detail });
+        assert.equal(row.details.success, false);
+        assert.equal(row.details.error, `HTTP ${reply.status}`);
+        assert.equal(row.details.denied, undefined);
+        await s.client.close();
+      });
+    }
+
+    for (const [label, body] of [
+      ["deployed", { status: "deployed", system_name: "acme", agents_created: ["acme-worker"], prompt_updated: true, warnings: [] }],
+      ["partial", { ...FAILED_DEPLOY, status: "partial", agents_created: ["acme-worker"], failed: [FAILED_DEPLOY.failed[1]] }],
+      ["a dry-run valid", { status: "valid", system_name: "acme", agents_created: [], agents_to_create: [{ name: "acme-worker", short_name: "worker", template: "local:worker" }], prompt_updated: false, warnings: [] }],
+      ["a dry-run invalid", { status: "invalid", system_name: "acme", agents_created: [], prompt_updated: false, warnings: [], failed: [FAILED_DEPLOY.failed[0]] }],
+    ] as const) {
+      it(`a 200 ${label} report is returned byte-for-byte as before, audited as a success`, async () => {
+        resetDeploy(jsonReply(200, body));
+        const s = await session(`deploy-200-${label.replace(/\W+/g, "-")}`);
+        const { text, isError, row } = await s.call("deploy_system", { manifest: MANIFEST });
+
+        assert.equal(isError, false);
+        assert.equal(text, JSON.stringify(body, null, 2));
+        assert.equal(row.details.success, true, "the call worked; the report's own status carries the outcome");
+        assert.equal(row.details.error, undefined);
+        assert.equal(row.details.denied, undefined);
+        await s.client.close();
+      });
+    }
+
+    it("on ONE session: a failed 500, a 200, a 403, a 500: no stamp outlives its own call", async () => {
+      const s = await session("deploy-sequence");
+      resetDeploy(jsonReply(500, FAILED_DEPLOY));
+      const a = await s.call("deploy_system", { manifest: MANIFEST, dry_run: false });
+      resetDeploy(jsonReply(200, { status: "deployed", system_name: "acme", agents_created: ["acme-worker"], warnings: [] }));
+      const b = await s.call("deploy_system", { manifest: MANIFEST, dry_run: false });
+      resetDeploy(jsonReply(403, { detail: "creator role required" }));
+      const c = await s.call("deploy_system", { manifest: MANIFEST, dry_run: false });
+      resetDeploy(jsonReply(500, FAILED_DEPLOY));
+      const d = await s.call("deploy_system", { manifest: MANIFEST, dry_run: false });
+
+      assert.deepEqual(
+        [a, b, c, d].map(({ row }) => [row.details.success, row.details.denied]),
+        [[false, undefined], [true, undefined], [false, true], [false, undefined]]
+      );
+      await s.client.close();
+    });
+
+    it("a session with no API key still THROWS, and nothing reaches the backend (unchanged)", async () => {
+      resetDeploy(DEPLOY_DEFAULT);
+      const s = await inProcess({ scope: "user", userId: "owner", keyName: "keyless-4027" });
+      try {
+        const { text, isError, row } = await s.call("deploy_system", { manifest: MANIFEST, dry_run: false });
+        assert.equal(isError, true, `the keyless edge no longer throws: ${text}`);
+        assert.match(text, /MCP API key authentication required/);
+        assert.deepEqual(requests, []);
+        assert.equal(row.details.success, false);
       } finally {
-        deployReply = jsonReply(200, { status: "valid", system_name: "acme", agents_created: [], warnings: [] });
+        await s.close();
       }
+    });
+
+    it("a dropped connection (no HTTP status) still THROWS (unchanged)", async () => {
+      resetDeploy({ status: 0, body: "", disconnect: true });
+      const s = await session("deploy-dropped");
+      const { isError, row } = await s.call("deploy_system", { manifest: MANIFEST, dry_run: false });
+      assert.equal(isError, true);
+      assert.deepEqual(requests.map((r) => r.path), ["/api/systems/deploy"]);
+      assert.equal(row.details.success, false);
+      assert.equal(row.details.denied, undefined);
+      await s.client.close();
     });
   });
 
