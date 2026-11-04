@@ -12,6 +12,73 @@
       "description": "A whole-file .env writer never treats a file it could not read as empty: agent_env_read classifies the credentials-read answer (text / proven absent / not UTF-8 / unconfirmed, malformed bodies raise); the GitHub PAT write skips an unreadable .env (skipped_env_unreadable) and keeps every other line otherwise; Settings names the status; an AST-free guard requires every services module that reads .env and injects it to use the rule. The Nevermined bind/revoke cases are in test_ent966_delegation_routes.py::TestEnvReadFailsClosed."
     },
     {
+      "file": "unit/test_3007_update_command.py",
+      "feature": "#3007",
+      "added": "2026-10-15",
+      "categories": [
+        "deploy",
+        "unit",
+        "bash"
+      ],
+      "description": "#3007 scripts/deploy/update.sh, executed under bash with stub docker/curl against a real throwaway upstream repository (two release tags plus a pre-release, an enterprise gitlink into a second repository). Shape is read from the running backend's compose label and every compose call of a prod-enterprise update carries the overlay; a label without the overlay while the enterprise tree is present is put back on it; an ambiguous host is refused naming --shape. Preflight (missing CREDENTIAL_ENCRYPTION_KEY, dirty checkout, unreachable enterprise pin, missing enterprise tree) fails with no backup/build/up and the checkout unmoved. A published-port change is refused before any build with checkout and enterprise tree put back; an unrenderable comparison fails closed. The published URL must serve HTML, a hashed asset and JSON from /api/auth/mode; the enterprise registration line must be in the boot log. Failed backup stops the run; base image rebuilt only when the range touched docker/base-image; rollback restores code and enterprise pin; hosted pins TRINITY_IMAGE_TAG, checks out the matching tag, delegates to start.sh --hosted and restores both on failure. Also: the stdlib backup helper against a real SQLite file (pruned artifact name, no tmp residue, never creates a DB) and the CLI locator. Rollback across a migration: the update records a schema position (hash of applied migrations) and --rollback refuses code-only rollback when it moved, cannot be read, or was never recorded, naming the backup and printing stop/restore/--db-restored steps (the SQLite restore payload is executed against a temp /data); --db-restored skips the check. update-db.py: SQLite position moves on a migration row, not on ordinary writes; PostgreSQL takes a fresh pre-update-*.dump (in ARTIFACT_PATTERNS, password via PGPASSWORD never argv, driver suffix dropped, PGDMP-verified) and reads alembic_version + the enterprise table via psql. --rebuild-base forces the agent base image; hosted refuses a branch target. Review of #3767: an enterprise-only PostgreSQL revision moves the position and a failed probe fails the read; the published URL is polled to a deadline; a target older than the checkout is refused unless --allow-downgrade; bindings compare as HostIp:HostPort (removed or moved refuses, added warns); a 300 KB boot log; hosted rollback pins a concrete tag or refuses; the printed PostgreSQL restore empties the schema first and the SQLite safety copy keeps the WAL (real WAL file); rollback refuses local edits and a checkout that did not land; re-pointed tags; first update of an install older than update.sh via --dir."
+    },
+    {
+      "file": "unit/test_ent700_proactive_voice.py",
+      "feature": "abilityai/trinity-enterprise#700",
+      "added": "2026-10-15",
+      "categories": [
+        "backend",
+        "voice",
+        "channels",
+        "unit"
+      ],
+      "description": "send_voice_reply addressed by `to` (role, shared service resolver) or recipient_email + channel: proactive-text gates (consent, shared rate limit, audit), (recipient, channel) dedup with claim release on pre-send refusal and transient send failure, text_too_long cap reason, not_a_channel_turn guidance, in-session path unchanged."
+    },
+    {
+      "file": "unit/test_4151_schedule_model.py",
+      "feature": "#4151",
+      "added": "2026-11-02",
+      "categories": [
+        "unit",
+        "systems"
+      ],
+      "description": "#4151: a manifest schedule's `model` is never silently dropped. The shared `_build_schedule_create` mapping carries it; apply creates the row with it and the dry run and the result name it in `schedule_create`; a different declared model (or one on a row with none) is a `schedule_update` naming `model` current -> desired, written on the real run; an entry that declares no model leaves the row's model alone; the same model is in sync; export writes `model` only when set and export -> dry-run apply writes nothing."
+    },
+    {
+      "file": "unit/test_4055_platform_alert_followup_logged.py",
+      "feature": "#4055",
+      "added": "2026-10-29",
+      "categories": [
+        "unit",
+        "operator-queue",
+        "reliability"
+      ],
+      "description": "#4055: a follow-up the platform-alert seam spawns (alert-budget episode, operator_queue_sync broadcast) that raises is logged once at ERROR with kind and agent; a successful one logs nothing."
+    },
+    {
+      "file": "unit/test_ent737_request_identity.py",
+      "feature": "trinity-enterprise#737",
+      "added": "2026-11-03",
+      "categories": [
+        "backend",
+        "unit",
+        "channels",
+        "access-control"
+      ],
+      "description": "A channel access request names who asked: identity stored, replaced (never inherited) on refresh, kept on decision, blank/overlong values bounded; Telegram/WhatsApp/Slack requester_identity from real parsed messages; the router gate passes it and still records the request when extraction fails; the owner's list carries identity_captured and known_as limited to agents the viewer manages; the list route returns the person."
+    },
+    {
+      "file": "../src/frontend/tests/unit/sharingPanelRequestIdentity.mount.spec.js",
+      "feature": "trinity-enterprise#737",
+      "added": "2026-11-03",
+      "categories": [
+        "frontend",
+        "unit",
+        "channels"
+      ],
+      "description": "Sharing tab pending requests show the person: name, @handle, channel id, then email; seen-before chips capped at three with a counted rest; public-link requests read 'Email only', older rows 'Identity not captured'; Approve still decides by id."
+    },
+    {
       "file": "unit/test_ent701_room_people.py",
       "feature": "trinity-enterprise#701",
       "added": "2026-10-26",
@@ -8082,6 +8149,49 @@
         "unit"
       ],
       "description": "trinity-enterprise#1054 A2: EmailService.send_html renders on the one HTML shell with a plain-text twin, escapes every string, omits blank paragraphs and an absent call to action; the verification mail is byte-identical to its pre-refactor output (literal snapshot). No Docker."
+    },
+    {
+      "file": "unit/test_3894_account_has_no_email.py",
+      "feature": "#3894",
+      "added": "2026-11-03",
+      "categories": [
+        "backend",
+        "unit",
+        "client-portal"
+      ],
+      "description": "A platform account with no email (the built-in admin) is refused by the Workspace with a 403 whose string detail names the remedy (Settings → General) and X-Trinity-Error-Code: account_has_no_email; an account with an email reaches its owned roster, through the real route and get_current_user."
+    },
+    {
+      "file": "../src/frontend/tests/unit/workspaceAccountHasNoEmail.mount.spec.js",
+      "feature": "#3894",
+      "added": "2026-11-03",
+      "categories": [
+        "frontend",
+        "unit",
+        "client-portal"
+      ],
+      "description": "fetchRoster reads account_has_no_email from X-Trinity-Error-Code (not the message), other 403s are not mistaken for it and a later success clears it; Portal renders the add-an-email state instead of the dead-end shell, and its buttons open Settings › General and retry."
+    },
+    {
+      "file": "unit/test_ent1087_direct_call_interrupt.py",
+      "feature": "ent#1087",
+      "added": "2026-11-03",
+      "categories": [
+        "backend",
+        "workspace",
+        "voice"
+      ]
+    },
+    {
+      "file": "unit/test_ent660_skill_category.py",
+      "feature": "trinity-enterprise#660",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "skills",
+        "unit"
+      ],
+      "description": "trinity-enterprise#660: a library skill's `category:` frontmatter reaches the listing. extract_contract keeps it (a trinity: block wins), bounds it to one printable line, and reads garbage as no category with no warning; list_skills, get_skill and the REST listing's explicit SkillInfo(...) carry it."
     }
   ]
 }

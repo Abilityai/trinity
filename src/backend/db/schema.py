@@ -2069,6 +2069,11 @@ TABLES = {
             status TEXT NOT NULL DEFAULT 'pending',
             decided_by INTEGER,
             decided_at TEXT,
+            requester_channel_id TEXT,
+            requester_handle TEXT,
+            requester_name TEXT,
+            requester_chat_id TEXT,
+            requester_thread_id TEXT,
             UNIQUE(agent_name, email)
         )
     """,
