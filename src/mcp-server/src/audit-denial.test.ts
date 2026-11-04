@@ -358,6 +358,8 @@ describe("#4026 a returned operational failure is audited as a failure, never as
     assert.equal(reasonOf({ error: "from envelope" }, ""), "from envelope", "an empty auditReason falls through");
     assert.equal(reasonOf({ error: "" }), "Tool call failed", "an empty envelope.error falls through");
     assert.equal(reasonOf({ error: { nested: true } }), "Tool call failed", "a non-string error falls through");
+    assert.equal(reasonOf({ error: ["an", "array"] }), "Tool call failed", "an array error falls through");
+    assert.equal(reasonOf({}, ["x"] as unknown as string), "Tool call failed", "a non-string auditReason falls through");
     assert.equal(reasonOf({ reason: "a denial-style reason is not read" }), "Tool call failed");
   });
 
@@ -375,6 +377,7 @@ describe("#4026 a returned operational failure is audited as a failure, never as
     assert.equal(rows[1].details.success, true, `the next call inherited a stale failure: ${JSON.stringify(rows[1].details)}`);
     assert.equal(rows[1].details.error, undefined);
     assert.equal(session.outcome, undefined, "the stamp leaked onto the session object");
+    assert.deepEqual(session, { scope: "user", userId: "u1", keyName: "k" }, "the session object was written to");
   });
 
   it("no context is tolerated: the same string comes back and nothing throws", () => {

@@ -432,6 +432,8 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
       [422, VALIDATION_422, "HTTP 422"],
       [503, REFUSED_503, "HTTP 503: status 'refused'"],
       [500, FAILED_500, "HTTP 500: status 'failed'"],
+      // An empty report `status` is not a status: the reason falls through to the detail.
+      [409, { status: "", detail: "refused without a status" }, "HTTP 409: refused without a status"],
     ] as const) {
       it(`a ${status} body comes back AS the result, with http_status and success: false, and is audited as a failure, not a denial`, async () => {
         reset(jsonReply(status, body));
@@ -447,6 +449,20 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
         await s.client.close();
       });
     }
+  });
+
+  // -------------------------------------------------------------------------
+  describe("the audit reason stays short", () => {
+    it("a long string detail is capped on the row, never on the caller's result", async () => {
+      const long = "Invalid manifest: " + "x".repeat(500);
+      reset(jsonReply(400, { detail: long }));
+      const s = await session("long-detail");
+      const { text, row } = await s.call("apply_system", { manifest: MANIFEST, dry_run: false });
+
+      assert.equal(text, JSON.stringify({ detail: long, http_status: 400, success: false }, null, 2), "the caller still gets the full detail");
+      assert.equal(row.details.error, `HTTP 400: ${long.slice(0, 200)}…`);
+      await s.client.close();
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -663,12 +679,16 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
       s.call("teardown_system", { system_name: "acme", dry_run: false });
 
     for (const [label, reply, expectedText, reason] of [
-      ["404 (no teardown on this build)", jsonReply(404, { detail: "Not Found" }), envelope(404, '{"detail":"Not Found"}', TEARDOWN_404, { not_available: true }), "HTTP 404: not_available"],
-      ["503 (membership unverified)", jsonReply(503, { detail: "tags unreadable" }), envelope(503, '{"detail":"tags unreadable"}', TEARDOWN_503, { membership_unverified: true, retryable: true }), "HTTP 503: membership_unverified, retryable"],
-      ["400 (confirmed set names no member)", jsonReply(400, { detail: "no current member" }), envelope(400, '{"detail":"no current member"}', null, { bad_request: true }), "HTTP 400: bad_request"],
+      ["404 (no teardown on this build)", jsonReply(404, { detail: "Not Found" }), envelope(404, '{"detail":"Not Found"}', TEARDOWN_404, { not_available: true }), "HTTP 404: Not Found (not_available)"],
+      // A SERVING route's 404 (no such system): the caller's text is still the
+      // "not available" message (trinity-enterprise#1100), but the row carries
+      // the backend's own detail, so the two 404s read differently there.
+      ["404 from a serving route (no such system)", jsonReply(404, { detail: "System 'acme' not found" }), envelope(404, `{"detail":"System 'acme' not found"}`, TEARDOWN_404, { not_available: true }), "HTTP 404: System 'acme' not found (not_available)"],
+      ["503 (membership unverified)", jsonReply(503, { detail: "tags unreadable" }), envelope(503, '{"detail":"tags unreadable"}', TEARDOWN_503, { membership_unverified: true, retryable: true }), "HTTP 503: tags unreadable (membership_unverified, retryable)"],
+      ["400 (confirmed set names no member)", jsonReply(400, { detail: "no current member" }), envelope(400, '{"detail":"no current member"}', null, { bad_request: true }), "HTTP 400: no current member (bad_request)"],
       ["500 carrying a failed report", jsonReply(500, FAILED_REPORT), JSON.stringify(FAILED_REPORT, null, 2), "HTTP 500: status 'failed'"],
-      ["an unexpected status (502)", jsonReply(502, { detail: "bad gateway" }), envelope(502, '{"detail":"bad gateway"}', null), "HTTP 502"],
-      ["a 500 whose body is not a failed report", jsonReply(500, { detail: "boom" }), envelope(500, '{"detail":"boom"}', null), "HTTP 500"],
+      ["an unexpected status (502)", jsonReply(502, { detail: "bad gateway" }), envelope(502, '{"detail":"bad gateway"}', null), "HTTP 502: bad gateway"],
+      ["a 500 whose body is not a failed report", jsonReply(500, { detail: "boom" }), envelope(500, '{"detail":"boom"}', null), "HTTP 500: boom"],
       ["a 500 whose body is malformed JSON", { status: 500, body: "not json{", contentType: "text/plain" } as Reply, envelope(500, "not json{", null), "HTTP 500"],
     ] as const) {
       it(`${label}: the caller's text is unchanged, the row is a failure and not a denial`, async () => {
@@ -702,9 +722,13 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
       await s.client.close();
     });
 
-    for (const [label, body] of [
-      ["the licensing / human-only refusal", JSON.stringify({ detail: "Enterprise feature 'system_teardown' is not licensed" })],
-      ["a failed report where every member was not_authorized", JSON.stringify(NOT_AUTHORIZED_REPORT)],
+    // The row's reason names the backend's own cause, so the two 403s stay
+    // distinguishable on the row; the caller's paragraph is the same for both.
+    for (const [label, body, reason] of [
+      ["the licensing / human-only refusal", JSON.stringify({ detail: "Enterprise feature 'system_teardown' is not licensed" }), "HTTP 403: Enterprise feature 'system_teardown' is not licensed"],
+      ["a failed report where every member was not_authorized", JSON.stringify(NOT_AUTHORIZED_REPORT), "HTTP 403: status 'failed'"],
+      ["a structured detail", JSON.stringify({ detail: { code: "person_required" } }), "HTTP 403"],
+      ["a non-JSON body", "Forbidden", "HTTP 403"],
     ] as const) {
       it(`403, ${label}: the caller's text is unchanged, the row is a denial`, async () => {
         resetTeardown({ status: 403, body });
@@ -714,7 +738,7 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
         assert.equal(text, envelope(403, body, TEARDOWN_403, { not_permitted: true }));
         assert.equal(row.details.success, false, `a teardown 403 was audited as a success: ${JSON.stringify(row.details)}`);
         assert.equal(row.details.denied, true);
-        assert.equal(row.details.error, TEARDOWN_403);
+        assert.equal(row.details.error, reason);
         await s.client.close();
       });
     }

@@ -10,6 +10,39 @@ import { accessDenied, type DenyCallContext } from "../access.js";
 import { toolFailed } from "../audit.js";
 import type { McpAuthContext } from "../types.js";
 
+/** The longest backend `detail` an audit reason carries (#4026): a row reason is a label, not a transcript. */
+const AUDIT_DETAIL_MAX = 200;
+
+/**
+ * A SHORT audit-row reason for an HTTP failure (#4026): the status, then the
+ * body's own `status` (an apply / teardown report) or its string `detail`
+ * (capped), else the bare status. `body` is the PARSED body; anything that is
+ * not a JSON object yields the bare status, so a raw HTML page never reaches
+ * the row.
+ */
+function httpAuditReason(status: number, body: unknown): string {
+  const obj =
+    body !== null && typeof body === "object" && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : undefined;
+  if (typeof obj?.status === "string" && obj.status) return `HTTP ${status}: status '${obj.status}'`;
+  if (typeof obj?.detail === "string" && obj.detail) {
+    const d = obj.detail;
+    return `HTTP ${status}: ${d.length > AUDIT_DETAIL_MAX ? `${d.slice(0, AUDIT_DETAIL_MAX)}…` : d}`;
+  }
+  return `HTTP ${status}`;
+}
+
+/** `JSON.parse`, or `undefined` for a body that is not JSON. */
+function parseJsonOrUndefined(text: string | undefined): unknown {
+  if (!text) return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Collapse a teardown refusal into an honest, actionable shape (ent#454).
  *
@@ -31,7 +64,8 @@ import type { McpAuthContext } from "../types.js";
  * the call's outcome out-of-band, leaving the caller's JSON untouched. The 403
  * is an authorization refusal and goes through `accessDenied` (`denied`, the
  * #3435 precedent); every other branch, the `failed` report included, through
- * `toolFailed`, with a short reason naming the status and the flags.
+ * `toolFailed`. Each row's reason is short: the status, the backend's own
+ * `status` or `detail` (`httpAuditReason`), then the flags.
  */
 function teardownFailure(error: unknown, context: DenyCallContext | undefined): string {
   const status = error instanceof ApiError ? error.status : undefined;
@@ -49,7 +83,7 @@ function teardownFailure(error: unknown, context: DenyCallContext | undefined): 
     try {
       const report = JSON.parse(body);
       if (report && report.status === "failed") {
-        return toolFailed(context, report, "HTTP 500: status 'failed'");
+        return toolFailed(context, report, httpAuditReason(500, report));
       }
     } catch {
       // Not JSON — fall through to the flag shape below.
@@ -85,13 +119,21 @@ function teardownFailure(error: unknown, context: DenyCallContext | undefined): 
 
   const envelope = { success: false, error: message, detail: raw, ...flags };
   if (status === 403) {
-    return accessDenied(context, envelope);
+    // The row names the backend's own cause (a licensing / human-only detail,
+    // or a `failed` report whose members were all refused), so the 403s stay
+    // distinguishable there; the caller's paragraph is the same for all.
+    return accessDenied(context, envelope, httpAuditReason(403, parseJsonOrUndefined(body)));
   }
+  // The row carries the backend's own detail and then the flags the caller was
+  // given, so a route that is absent ("Not Found") and a serving route that
+  // found no such system read differently on the row even where the caller's
+  // message does not tell them apart.
   const flagNames = Object.keys(flags);
   const auditReason =
     status === undefined
       ? raw
-      : `HTTP ${status}` + (flagNames.length > 0 ? `: ${flagNames.join(", ")}` : "");
+      : httpAuditReason(status, parseJsonOrUndefined(body))
+        + (flagNames.length > 0 ? ` (${flagNames.join(", ")})` : "");
   return toolFailed(context, envelope, auditReason);
 }
 
@@ -127,8 +169,8 @@ export const applySystemAccess = (auth: any): boolean =>
  *
  * Audit (#4026): every branch but the 403 is a returned failure that is NOT an
  * authorization denial, so it is stamped through `toolFailed` (`success:
- * false`, no `denied`) with a short reason: the status, then the report's own
- * `status` or a string `detail`. A raw non-object body never reaches the row.
+ * false`, no `denied`) with a short reason (`httpAuditReason`). A raw
+ * non-object body never reaches the row.
  */
 function applyFailure(
   error: unknown,
@@ -200,17 +242,10 @@ function applyFailure(
   }
 
   if (isObject) {
-    const reportStatus = (body as Record<string, unknown>).status;
-    const auditReason =
-      typeof reportStatus === "string" && reportStatus
-        ? `HTTP ${status}: status '${reportStatus}'`
-        : typeof detail === "string" && detail
-          ? `HTTP ${status}: ${detail}`
-          : `HTTP ${status}`;
     return toolFailed(
       context,
       { ...(body as Record<string, unknown>), http_status: status, success: false },
-      auditReason
+      httpAuditReason(status, body)
     );
   }
   return toolFailed(context, { success: false, http_status: status, detail }, `HTTP ${status}`);

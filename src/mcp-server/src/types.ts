@@ -184,7 +184,11 @@ export interface AgentAccessCheckResult {
  */
 export interface ToolOutcome {
   kind: "denied" | "failed";
-  /** What the AUDIT row records. Never empty: an empty `error` is dropped from the row. */
+  /**
+   * What the AUDIT row records as `error`. `toolFailed` never stamps an empty
+   * `failed` reason (an empty `error` is dropped from the row); `accessDenied`
+   * records the reason it is given, as it always has.
+   */
   reason: string;
 }
 
