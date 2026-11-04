@@ -15,6 +15,7 @@ unchanged.
 import hashlib
 import json
 import logging
+import re
 import uuid
 from typing import Callable, Optional, List, Dict, Set, Tuple
 from datetime import datetime, timezone
@@ -73,6 +74,13 @@ _DB_BELT_TYPE_MAX_BYTES = 1024
 # native ask cap nor the file poller's #1632 depth cap. The gate caps its own
 # raises. NULL `raised_by` is a legacy or file row, so it counts.
 _NOT_A_GATE_ROW = or_(operator_queue.c.raised_by.is_(None), operator_queue.c.raised_by != "gate")
+
+# trinity-enterprise#1095: the id shape `skill_gate_service._request_id` mints
+# for a gated-skill approval — `gate-` + 40 hex. A re-address moves a gate row
+# only in this shape: every other `gate-*` family names its addressee
+# (a gate note, a project consent card, a reach row — ent#661), and a named
+# person was never the role's to move.
+_GATE_APPROVAL_ID = re.compile(r"gate-[0-9a-f]{40}")
 
 # trinity-enterprise#844: what the clock writes as `disposition_reason` when it
 # ends a pending ask. A gated-skill approval (`raised_by='gate'`) is the one
@@ -1853,6 +1861,100 @@ class OperatorQueueOperations:
                     .values(context=json.dumps(context))
                 )
         return self.get_item(item_id)
+
+    # trinity-enterprise#1095 — the platform re-addresses a pending row it
+    # addressed BY ROLE. The three address columns are read RAW (the stored
+    # text) so the compare-and-set below matches byte for byte what was read.
+    _ADDRESS_KEYS = ("id", "agent_name", "request_id", "status", "raised_by", "type",
+                     "to_role", "expires_at", "addressed_to_email", "resolved_to", "context")
+
+    @classmethod
+    def _address_cols(cls):
+        return [getattr(operator_queue.c, k) for k in cls._ADDRESS_KEYS]
+
+    @classmethod
+    def _address_row(cls, row) -> Dict:
+        return {k: row[k] for k in cls._ADDRESS_KEYS}
+
+    def read_address(self, item_id: str) -> Optional[Dict]:
+        """One row's address as stored (`resolved_to` and `context` as raw
+        text), with the columns a re-address decides on; None for no row."""
+        with get_engine().connect() as conn:
+            row = conn.execute(
+                select(*self._address_cols()).where(operator_queue.c.id == item_id)
+            ).mappings().first()
+        return self._address_row(row) if row else None
+
+    def list_pending_role_addressed(self, agent_name: str, to_role: str) -> List[Dict]:
+        """This agent's pending rows addressed to `to_role` BY ROLE — the rows
+        a change of who fills the role moves (trinity-enterprise#1095).
+
+        An ALLOWLIST, never a denylist: the agent's own raises (`raised_by =
+        'agent'`), and a gated-skill approval (`raised_by = 'gate'`, type
+        `approval`, id `gate-` + 40 hex). A row the platform addressed to a
+        named person defaults `to_role` to the same role but is never listed:
+        a new named family then stays where it was rather than moving with the
+        role silently. A row past its deadline the sweep has not ended yet is
+        left out too — a new holder is never handed an ask that ends a minute
+        later. Same raw shape as `read_address`.
+        """
+        now = utc_now_iso()
+        with get_engine().connect() as conn:
+            rows = conn.execute(
+                select(*self._address_cols())
+                .where(and_(
+                    operator_queue.c.agent_name == agent_name,
+                    operator_queue.c.status == "pending",
+                    operator_queue.c.to_role == to_role,
+                    or_(operator_queue.c.expires_at.is_(None), operator_queue.c.expires_at > now),
+                    or_(operator_queue.c.raised_by == "agent",
+                        and_(operator_queue.c.raised_by == "gate",
+                             operator_queue.c.type == "approval")),
+                ))
+                .order_by(operator_queue.c.created_at, operator_queue.c.id)
+            ).mappings().all()
+        return [self._address_row(r) for r in rows
+                if r["raised_by"] == "agent" or _GATE_APPROVAL_ID.fullmatch(r["request_id"] or "")]
+
+    def readdress(
+        self,
+        item_id: str,
+        people: List[str],
+        single: Optional[str],
+        *,
+        expect_single: Optional[str],
+        expect_resolved_raw: Optional[str],
+        context: Optional[Dict] = None,
+        expect_context_raw: Optional[str] = None,
+    ) -> bool:
+        """Rewrite a PENDING row's audience (trinity-enterprise#1095):
+        `resolved_to` becomes `people`, `addressed_to_email` becomes `single`,
+        and — when `context` is given — the stored context becomes it.
+
+        Compare-and-set on `status = 'pending'` and on each rewritten column as
+        the caller read it (`expect_*`, the `drop_addressee` shape), so a row
+        answered, cancelled, dropped or discussed between the read and this
+        write is never overwritten. Returns whether a row changed.
+        """
+        def _same(col, raw):
+            return col.is_(None) if raw is None else col == raw
+
+        conds = [
+            operator_queue.c.id == item_id,
+            operator_queue.c.status == "pending",
+            _same(operator_queue.c.addressed_to_email, expect_single),
+            _same(operator_queue.c.resolved_to, expect_resolved_raw),
+        ]
+        values = {
+            "addressed_to_email": single,
+            "resolved_to": json.dumps(list(people)) if people else None,
+        }
+        if context is not None:
+            conds.append(_same(operator_queue.c.context, expect_context_raw))
+            values["context"] = json.dumps(context) if context else None
+        with get_engine().begin() as conn:
+            result = conn.execute(update(operator_queue).where(and_(*conds)).values(**values))
+            return result.rowcount > 0
 
     def bulk_cancel_items(
         self,
