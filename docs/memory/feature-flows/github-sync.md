@@ -981,12 +981,23 @@ back the PAT save.
     "updated": ["agent-a"],
     "skipped": [
       {"agent_name": "agent-b", "status": "skipped_per_agent_pat", "error": null},
-      {"agent_name": "agent-c", "status": "skipped_no_pat", "error": null}
+      {"agent_name": "agent-c", "status": "skipped_no_pat", "error": null},
+      {"agent_name": "agent-d", "status": "skipped_env_unreadable", "error": null}
     ],
     "failed": []
   }
 }
 ```
+
+**`skipped_env_unreadable`** (trinity-enterprise#1073): the agent did not hand
+`.env` back as text (non-UTF-8 bytes, a read error, or an image too old to
+report the file absent), so step 3's whole-file write is skipped rather than
+treating the file as empty. The docker-exec path in `update_remote_pat` still
+runs: its script edits the `GITHUB_PAT` line in place and itself refuses a file
+with NUL bytes or invalid UTF-8 (exit 6) or a grep error (exit 7), never
+replacing it with a lone `GITHUB_PAT` line. An agent whose remote was
+re-templated that way counts as `updated` (the token landed); only one whose
+remote did not land is listed as skipped.
 
 **Delete does NOT propagate** — `DELETE /api/settings/api-keys/github` is
 intentionally unchanged; agents keep working with their existing injected PAT
