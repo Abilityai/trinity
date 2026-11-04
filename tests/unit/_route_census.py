@@ -1067,6 +1067,13 @@ AGENT_CALLABLE_ANY: Dict[str, Tuple[str, str, str]] = {
     "routers/agent_config.py::get_agent_timeout": ("GET /api/agents/{agent_name}/timeout", "a non-sensitive read of this agent's own setting (access-level)", _SIB_READ),
     "routers/agent_config.py::get_public_channel_model": ("GET /api/agents/{agent_name}/public-channel-model", "a non-sensitive read of this agent's own setting (access-level)", _SIB_READ),
     "routers/agent_config.py::get_agent_guardrails": ("GET /api/agents/{agent_name}/guardrails", "a non-sensitive read of this agent's own setting (access-level)", _SIB_READ),
+    "routers/agent_config.py::get_agent_tool_access": (
+        "GET /api/agents/{agent_name}/tool-access",
+        "trinity-enterprise#341: the tool-access profile behind the Settings cards; the same facts GET /guardrails "
+        "and GET /read-only already give the agent, plus Custom's remembered list (owner-level; the write is "
+        "person-or-grant and never the agent on itself)",
+        "owner tier (OwnedAgentByName): a sibling reads it only for an agent it spawned, never through an edge "
+        "(the ent#629 manage reach)"),
     "routers/agent_config.py::list_agent_capability_grants": (
         "GET /api/agents/{agent_name}/capability-grants",
         "trinity-enterprise#164: an agent reads which self-change permissions it holds, so it knows when to raise a "

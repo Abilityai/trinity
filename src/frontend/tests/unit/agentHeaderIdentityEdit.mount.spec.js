@@ -34,6 +34,10 @@ const backend = vi.hoisted(() => {
   const put = async (url, body) => {
     state.puts.push({ url: String(url), body })
     if (String(url).endsWith('/label')) return { data: { label: body.label } }
+    if (String(url).endsWith('/read-only')) {
+      return { data: { profile: 'strict_read_only', profile_label: 'Strict read-only', read_only_layer: true,
+        read_only_applied: true, restart_required: true } }
+    }
     return { data: {} }
   }
   const client = { get, post: get, put, patch: get, delete: get }
@@ -228,10 +232,22 @@ describe('the restored rows (pre-#3798 shape)', () => {
 
   it('the read-only toggle reaches the page; no gear and no uptime in the live cluster', async () => {
     render({ agentStats: STATS, resourceLimits: { current_cpu: '2', current_memory: '4g' } })
-    await wrapper.find('[aria-label^="Read-only mode"]').trigger('click')
+    await wrapper.find('[aria-label^="Strict read-only"]').trigger('click')
     expect(wrapper.emitted('toggle-read-only')).toHaveLength(1)
     expect(q('agent-header-resources').exists()).toBe(false)
     expect(q('agent-header-live').find('[title="Uptime"]').exists()).toBe(false)
+  })
+
+  // trinity-enterprise#341: the toggle is the shortcut to Strict read-only and
+  // reads ON for that profile only — never for the read-only layer alone.
+  it.each([
+    ['strict_read_only', true, 'true'],
+    ['read_only_report', true, 'false'],
+    ['custom', true, 'false'],
+    ['full', false, 'false'],
+  ])('the read-only toggle on %s reads %s→%s', (profile, layer, checked) => {
+    render({ agent: baseAgent({ tool_access_profile: profile, read_only_enabled: layer }) })
+    expect(wrapper.find('[aria-label^="Strict read-only"]').attributes('aria-checked')).toBe(checked)
   })
 
   it('a running agent shows live CPU / MEM / uptime against its limits', () => {
@@ -338,6 +354,39 @@ describe('the page wires the header to the same handlers as Settings › General
     await flushPromises()
     expect(backend.state.puts).toEqual([{ url: '/api/agents/alpha/label', body: { label: 'Alpha Prime' } }])
     expect(page.findComponent(AgentHeader).props('agent').display_label).toBe('Alpha Prime')
+  })
+
+  it('toggle-read-only from the header selects Strict read-only through the store (#341)', async () => {
+    await open()
+    page.findComponent(AgentHeader).vm.$emit('toggle-read-only')
+    await flushPromises()
+    expect(backend.state.puts).toEqual([{ url: '/api/agents/alpha/read-only', body: { enabled: true } }])
+    expect(page.findComponent(AgentHeader).props('agent').tool_access_profile).toBe('strict_read_only')
+    expect(page.findComponent(AgentHeader).props('agent').read_only_enabled).toBe(true)
+  })
+
+  it('a Tool access save in Settings moves the header toggle (#341)', async () => {
+    backend.state.agent = { name: 'alpha', status: 'running', can_share: true, can_delete: true, display_label: null }
+    const r = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/', name: 'Dashboard', component: Blank },
+        { path: '/agents/:name', name: 'AgentDetail', component: Blank },
+      ],
+    })
+    await r.push('/agents/alpha?tab=settings&section=guardrails')
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    // The settings home renders its pane slot for the Guardrails pane.
+    const Home = { setup: (_, { slots }) => () => h('div', slots.default?.({ section: 'guardrails' })) }
+    page = shallowMount(AgentDetail, { global: { plugins: [r, pinia], stubs: { AgentSettingsHome: Home } } })
+    await flushPromises()
+    page.findComponent({ name: 'GuardrailsPane' }).vm.$emit('tool-access-saved', {
+      agent_name: 'alpha', profile: 'strict_read_only', read_only: true,
+    })
+    await flushPromises()
+    expect(page.findComponent(AgentHeader).props('agent').tool_access_profile).toBe('strict_read_only')
+    expect(page.findComponent(AgentHeader).props('agent').read_only_enabled).toBe(true)
   })
 
   it('open-avatar-modal from the header shows the generate modal', async () => {

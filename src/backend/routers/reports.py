@@ -34,6 +34,7 @@ from dependencies import (
     OwnedAgent,
     is_interactive_principal,
 )
+from services.tool_access_guard import assert_tool_allowed
 from models import (
     FleetReportStats,
     Report,
@@ -187,6 +188,8 @@ async def create_report(
     """
     assert_own_agent(current_user, name, detail="Agent-scoped key may only report as itself")
 
+    # trinity-enterprise#341: refused when this agent's tool access removes report.
+    assert_tool_allowed(current_user, "report")
     # Cap report volume per agent so a runaway agent can't flood the table
     # between retention sweeps (review I3). Fail-open if Redis is down.
     rate_limiter.enforce(
