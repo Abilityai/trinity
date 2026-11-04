@@ -58,6 +58,7 @@
           :rename="rename"
           focus-on-mount="fine-pointer"
           focused
+          :as-note="noteLine"
           :inert="firstReplyPending || null"
           data-testid="build-chat"
           @first-message-sent="firstMessage = ''"
@@ -179,6 +180,7 @@
         data-tour="company"
       >
         <PortalBuildWorld
+          ref="worldPanel"
           :world="world"
           :intake="effectiveIntake"
           :roster="roster"
@@ -202,6 +204,9 @@
       </div>
     </div>
     <PortalBuildTour :open="tourOpen" :guide-name="guide?.display_label || BUILD_GUIDE_NAME" @close="closeTour" />
+    <!-- Level moments: the levels at the start of a first build, a new agent in the
+         sidebar, a level ticking. The same spotlight, one or two stops. -->
+    <PortalBuildTour :open="Boolean(moment)" :steps="moment?.steps || []" :min-steps="1" :skippable="false" testid="build-moment" @close="closeMoment" />
   </div>
 </template>
 
@@ -224,6 +229,7 @@ import { FLEET_CANVAS_ID, cardFor, proposalFrom } from './fleetChanges'
 import { changeHeld, fleetRefreshDue, outcomeMessage, readFleet, runChange, writeFleetFile } from './fleetActions'
 import { useBuildIntakeStore } from '@/stores/buildIntake'
 import { intakeWithBase, levelAgents, levelMessage, levelsFrom, levelsOf, markLevelsSeen, newlyReached, withLevels } from './levels'
+import { INTRO_STEPS, introDue, levelNote, markLevelsIntroSeen, reachedSteps } from './levelMoments'
 import { readLevelSignals } from './levelSignals'
 import {
   BUILD_CANVAS_ID,
@@ -744,15 +750,167 @@ function announceLevels() {
   if (phase.value !== 'chat' || !told || firstReplyPending.value || firstMessage.value || composerHasText()) return
   // What another tab already celebrated counts too.
   const seen = [...new Set([...savedLevels.value.levelsSeen, ...levelsOf(intakeStore.storedIntake()).levelsSeen, ...levelsAnnounced])]
+  showUntoldOnce()
   const fresh = newlyReached(levels.value, seen)
   if (!fresh.length) return
   fresh.forEach((id) => levelsAnnounced.add(id))
   const reachedNow = levels.value.filter((l) => fresh.includes(l.id))
   levelCelebrate.value = reachedNow[reachedNow.length - 1]
   const tell = reachedNow.filter((l) => !reachedOnArrival?.has(l.id))
-  if (tell.length) sendToGuide(levelMessage(tell, levels.value))
-  emit('update:intake', markLevelsSeen(withLevels(props.intake, { levelsSeen: seen, levelsBase: levelBase.value }), fresh, levels.value))
+  // The moment first, then the guide is told, so it moves on once they've seen the tick.
+  // Until then the levels wait on the saved answers (`levelsUntold`), so a reload or a
+  // closed tab during the moment shows it again rather than never telling the guide.
+  // Saved before the moment is queued: with the card on screen it tells the guide at once.
+  const tellIds = tell.map((l) => l.id)
+  const untold = [...new Set([...untoldOf(props.intake), ...tellIds])]
+  emit('update:intake', { ...markLevelsSeen(withLevels(props.intake, { levelsSeen: seen, levelsBase: levelBase.value }), fresh, levels.value), levelsUntold: untold })
+  if (tellIds.length) queueReached(tellIds)
 }
+// Level moments (core-agent AC-17). They wait until the guide has finished replying, the
+// tour and the setup window are closed and the first reply is in, one at a time. A stop on
+// the Levels card brings the right side to Your company first, and back after.
+const worldPanel = ref(null)
+const moment = ref(null)
+const momentQueue = []
+let momentRestore = null
+let introQueued = false
+// A short pause between two moments, so the right side has redrawn and finished moving
+// before the next one looks at whether the Levels card is on screen.
+const MOMENT_GAP_MS = 400
+const momentPause = ref(false)
+const guideLabel = computed(() => guide.value?.display_label || BUILD_GUIDE_NAME)
+const noteLine = (text) => levelNote(text, guideLabel.value)
+const momentFree = computed(() => phase.value === 'chat' && !working.value && !firstReplyPending.value
+  && !props.onboardingOpen && !tourOpen.value && !moment.value && !momentPause.value)
+
+// The agent a Level 1 moment lights in the sidebar: their only one, when it is.
+function firstAgent() {
+  if (levelOwn.value.length !== 1) return null
+  const name = levelOwn.value[0]
+  const row = props.roster.find((a) => a?.name === name)
+  return { name, label: row?.display_label || name }
+}
+
+function levelsCard() {
+  const el = document.querySelector('[data-tour="levels"]')
+  const r = el?.getBoundingClientRect?.()
+  return r && r.width > 0 && r.height > 0 ? r : null
+}
+// Already on screen, whole: the card's own tick says it, with no dimming.
+const levelsCardInView = () => {
+  const r = levelsCard()
+  return Boolean(r && r.top >= 0 && r.bottom <= window.innerHeight)
+}
+async function levelsCardShown(ms = 1500) {
+  const until = Date.now() + ms
+  while (!levelsCard() && Date.now() < until) await new Promise((done) => setTimeout(done, 50))
+}
+
+// `then` runs once the moment has been seen (or had nothing to show).
+function queueMoment(kind, steps, then = null) {
+  if (!steps?.length) { then?.(); return }
+  momentQueue.push({ kind, steps, then })
+  showMomentIfFree()
+}
+
+function untoldOf(intake) {
+  return Array.isArray(intake?.levelsUntold) ? intake.levelsUntold.filter(Number.isInteger) : []
+}
+function queueReached(ids) {
+  queueMoment('reached', reachedSteps({ reached: ids, levels: levels.value, agent: firstAgent() }), () => tellOnce(ids))
+}
+// The guide is told each level once: not again by a second tab, or after a reload, that
+// finds it already told on the saved answers.
+// The answers as last saved (by this tab or another), which may be newer than the prop.
+const latestIntake = () => intakeStore.intake || props.intake
+function tellOnce(ids) {
+  const stored = intakeStore.storedIntake()
+  const waiting = untoldOf(Array.isArray(stored?.levelsUntold) ? stored : latestIntake())
+  const pending = ids.filter((id) => waiting.includes(id))
+  if (pending.length) sendToGuide(levelMessage(levels.value.filter((l) => pending.includes(l.id)), levels.value))
+  const latest = latestIntake()
+  emit('update:intake', { ...latest, levelsUntold: untoldOf(latest).filter((id) => !ids.includes(id)) })
+}
+// On this visit's first look: a level still waiting from a moment that never closed (a
+// reload, a closed tab) gets its moment again, then the guide is told.
+let untoldChecked = false
+function showUntoldOnce() {
+  if (untoldChecked || !levels.value.length) return
+  untoldChecked = true
+  const waiting = untoldOf(props.intake).filter((id) => !levelsAnnounced.has(id))
+  const still = waiting.filter((id) => levels.value.some((l) => l.id === id && l.reached))
+  still.forEach((id) => levelsAnnounced.add(id))
+  if (still.length) queueReached(still)
+  if (still.length !== waiting.length) {
+    emit('update:intake', { ...props.intake, levelsUntold: untoldOf(props.intake).filter((id) => still.includes(id) || !waiting.includes(id)) })
+  }
+}
+
+let showing = false
+async function showMomentIfFree() {
+  if (showing || !momentFree.value || !momentQueue.length) return
+  showing = true
+  let shown = false
+  try {
+    const next = momentQueue.shift()
+    let steps = next.steps
+    // Level 1 reached before the intro could show: it has nothing left to say.
+    if (next.kind === 'intro' && !introDue({ levels: levels.value, stage: world.value.stage, intake: props.intake })) steps = []
+    if (steps.some((s) => s.company)) {
+      if (levelsCardInView()) {
+        // A tick alone needs no dimming with the card whole on screen. A moment that also
+        // lights the sidebar keeps its card stop, which is already in view.
+        if (next.kind === 'reached' && steps.every((s) => s.company)) steps = []
+      } else {
+        const restoreWorld = worldPanel.value?.showCompany?.() || null
+        const view = mobileView.value
+        mobileView.value = 'world'
+        momentRestore = () => { restoreWorld?.(); mobileView.value = view }
+        await nextTick()
+        await levelsCardShown()
+        // Something started meanwhile (a reply, the setup window): it waits for that to end.
+        if (phase.value !== 'chat' || working.value || firstReplyPending.value || props.onboardingOpen || tourOpen.value) {
+          momentRestore?.()
+          momentRestore = null
+          momentQueue.unshift(next)
+          return
+        }
+      }
+    }
+    if (steps.length) {
+      moment.value = { ...next, steps }
+      shown = true
+    } else {
+      if (next.kind === 'intro') emit('update:intake', markLevelsIntroSeen(props.intake))
+      momentRestore?.()
+      momentRestore = null
+      next.then?.()
+    }
+  } finally {
+    showing = false
+  }
+  if (!shown) showMomentIfFree()
+}
+
+function closeMoment() {
+  const done = moment.value
+  if (done?.kind === 'intro') emit('update:intake', markLevelsIntroSeen(props.intake))
+  moment.value = null
+  momentRestore?.()
+  momentRestore = null
+  momentPause.value = true
+  setTimeout(() => { momentPause.value = false }, MOMENT_GAP_MS)
+  done?.then?.()
+}
+watch(momentFree, (free) => { if (free) showMomentIfFree() })
+
+// The levels, once, when the first build starts.
+watch([levels, () => world.value.stage, () => props.intake.levelsIntroSeen], () => {
+  if (introQueued || !introDue({ levels: levels.value, stage: world.value.stage, intake: props.intake })) return
+  introQueued = true
+  queueMoment('intro', INTRO_STEPS)
+})
+
 function onChatFocusOut() {
   setTimeout(announceLevels)
 }

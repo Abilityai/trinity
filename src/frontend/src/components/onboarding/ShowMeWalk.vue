@@ -50,6 +50,7 @@
           <span class="flex-1"></span>
           <BaseButton v-if="lost && step.fallback" variant="secondary" size="sm" data-testid="show-me-walk-fallback" @click="takeMeThere">{{ step.fallback.label }}</BaseButton>
           <BaseButton v-if="step.next && !lost" size="sm" data-testid="show-me-walk-next" @click="go(index + 1)">Next</BaseButton>
+          <BaseButton v-if="step.press && hole && !lost" size="sm" data-testid="show-me-walk-press" @click="press">Next</BaseButton>
           <BaseButton v-if="finished" size="sm" data-testid="show-me-walk-done" @click="stop">Done</BaseButton>
         </div>
       </div>
@@ -288,6 +289,15 @@ function look() {
 }
 function tick() {
   for (let moves = 0; moves < 20 && look(); moves++) { /* moved on: look at the next step */ }
+}
+
+// Next on a step that only opens something: the lit part is clicked for them, so the page
+// moves the way it would have. A lit wrapper (the Settings tab) has its button pressed.
+function press() {
+  const el = current
+  if (!el) return
+  const clickable = el.matches?.('button, a, [role="tab"], [role="menuitem"]') ? el : (el.querySelector?.('button, a') || el)
+  clickable.click()
 }
 
 function takeMeThere() {

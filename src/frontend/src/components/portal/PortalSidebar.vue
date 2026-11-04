@@ -133,6 +133,7 @@
         <button
           v-for="a in shownAgents"
           :key="a.name"
+          :data-tour-agent="a.name"
           class="w-full flex items-center gap-2.5 rounded-lg px-2 py-2 transition hover:bg-gray-50 dark:hover:bg-gray-800"
           :class="a.name === activeAgentName ? ROW_ACTIVE : ''"
           :aria-current="a.name === activeAgentName ? 'true' : undefined"

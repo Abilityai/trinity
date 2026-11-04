@@ -9,6 +9,8 @@ user-invocable: true
 
 You find out what they want. How it's built is worked out by the create-agent wizard in `/build-agent`, with their answers. So don't design skills, integrations, variable names or schedules here, and don't tell them what those will be. Leave `skills`, `connections`, `variables` and `schedules` empty.
 
+If this is their first agent (`fleet-state.json` lists no agent of theirs yet), open with the short paragraph about their levels from the Levels section of your instructions, then carry on.
+
 Add the agent to `agents` with `status: "designing"` and `focus.agent` set, put the plan in plain words in `purpose`, set `stage: "plan"`, and update the world.
 
 First check whether this already exists: the agents named in their first message, `list_templates`, `list_skills`. If it does, say so and suggest extending or reusing it.

@@ -380,10 +380,29 @@ function partsLine(agent) {
 
 const capitalize = (s) => (s ? s[0].toUpperCase() + s.slice(1) : '')
 
+// A level moment lights the Levels card, which lives on Your company: the page brings the
+// right side there and puts it back afterwards with the function this returns.
+// While it is held there, a move of the guide's is kept for the restore rather than made.
+let held = null
+function showCompany() {
+  const hold = { tab: tab.value, selectedId: selectedId.value, followed: '' }
+  held = hold
+  tab.value = 'world'
+  selectedId.value = ''
+  return () => {
+    if (held === hold) held = null
+    const id = hold.followed || hold.selectedId
+    tab.value = hold.followed ? 'world' : hold.tab
+    selectedId.value = props.world.agents.some((a) => a.id === id) ? id : ''
+  }
+}
+defineExpose({ showCompany })
+
 // The view follows the guide only when it moves to something new, so someone who
 // stepped back to the map is not pulled away again by the next reread.
 watch(() => props.world.focus.agent, (id) => {
   if (id && props.world.agents.some((a) => a.id === id)) {
+    if (held) { held.followed = id; return }
     selectedId.value = id
     tab.value = 'world'
   }

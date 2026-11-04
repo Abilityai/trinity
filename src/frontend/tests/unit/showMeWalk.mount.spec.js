@@ -369,3 +369,32 @@ describe('final review, small issues', () => {
     expect(card()).toBe(null)
   })
 })
+
+// The first step asks for a click on the lit agent, and a first tester looked for a way on
+// instead. A step that only opens something has Next, which clicks the lit part for them.
+describe('Next on a step that only opens something', () => {
+  it('clicks the lit agent for them, and the walk moves on as if they had', async () => {
+    const agent = place({ 'data-walk-agent': 'game-promoter' })
+    agent.addEventListener('click', () => router.push('/agents/game-promoter'))
+    await start('/?walk=credentials&walk_agent=game-promoter&walk_keys=SUPABASE_URL')
+    expect(title()).toBe('Your agents live here')
+    const settings = place({ 'data-walk': 'settings-tab' })
+    const tabButton = document.createElement('button')
+    let opened = 0
+    tabButton.addEventListener('click', () => { opened += 1 })
+    settings.appendChild(tabButton)
+    await click('show-me-walk-press')
+    expect(router.currentRoute.value.path).toBe('/agents/game-promoter')
+    expect(title()).toBe('Its settings')
+    // A wrapper that isn't a button itself: the button inside it is the one pressed.
+    await click('show-me-walk-press')
+    expect(opened).toBe(1)
+  })
+
+  it('is not offered where the step changes something they choose', async () => {
+    place({ 'data-walk': 'people-form' })
+    await start('/agents/game-promoter?tab=settings&section=people&walk=people&walk_agent=game-promoter')
+    expect(title()).toBe('Their email')
+    expect(document.querySelector('[data-testid="show-me-walk-press"]')).toBeNull()
+  })
+})

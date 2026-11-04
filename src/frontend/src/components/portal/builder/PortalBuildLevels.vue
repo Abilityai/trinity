@@ -6,7 +6,7 @@
   gets a short celebration here; the page also tells the guide.
 -->
 <template>
-  <BaseCard data-testid="build-levels">
+  <BaseCard data-testid="build-levels" data-tour="levels">
     <div class="flex items-center justify-between gap-2">
       <p class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Your levels</p>
       <p class="text-xs font-medium tabular-nums text-gray-600 dark:text-gray-300" data-testid="build-levels-count">{{ reachedCount }} of {{ levels.length }}</p>

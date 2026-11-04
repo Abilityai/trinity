@@ -73,6 +73,15 @@ describe("Atlas's template: it builds the agent itself", () => {
 
   // The first build walks up the levels. The agent first, then its first
   // playbook, then the others one at a time; later agents all at once.
+  it('opens a first build by saying it will go step by step, where the levels are, and that Level 1 is asking for the agent', () => {
+    const levels = read('CLAUDE.md').slice(read('CLAUDE.md').indexOf('## Levels'))
+    expect(levels).toMatch(/When you start on a person's first agent/)
+    expect(levels).toMatch(/Since this is your first agent, I'll take you through it step by step/)
+    expect(levels).toMatch(/Level 1 is simply to have your agent/)
+    expect(levels).toMatch(/Don't repeat it for later agents/)
+    expect(read('.claude/skills/plan-agent/SKILL.md')).toMatch(/If this is their first agent .*the short paragraph about their levels/)
+  })
+
   it('builds a first agent one step at a time, its playbooks held back and added one by one', () => {
     const skill = read('.claude/skills/build-agent/SKILL.md')
     const section = skill.slice(skill.indexOf('## First agent: one step at a time'), skill.indexOf('\n## ', skill.indexOf('## First agent: one step at a time') + 1))

@@ -101,6 +101,18 @@ async function mockWorkspace(page, { agents, state = null, orchestration = false
   return sent
 }
 
+// Presses through a level moment if the layout shows one (a card not whole on screen does).
+async function passMomentIfShown(page) {
+  const moment = page.getByTestId('build-moment')
+  await page.waitForTimeout(800)
+  if (await moment.isVisible()) await passMoment(moment)
+}
+
+// Steps through a level moment (one or two stops) so it doesn't cover what a test clicks.
+async function passMoment(moment) {
+  for (let i = 0; i < 3 && await moment.isVisible(); i++) await moment.getByTestId('build-tour-next').click()
+}
+
 const GUIDE_CARD = { name: GUIDE, owned: true, display_label: 'Build Guide', description: 'e2e fixture', availability: 'ready', playbooks: [] }
 
 test.describe('Workspace Build @smoke', () => {
@@ -109,6 +121,10 @@ test.describe('Workspace Build @smoke', () => {
     if (!info.title.includes('tour')) {
       await page.addLocatorHandler(page.getByTestId('build-tour-skip'), (skip) => skip.click())
     }
+  })
+  // The level moments have their own tests. Everywhere else they are stepped through.
+  test.beforeEach(async ({ page }, info) => {
+    if (!info.title.includes('moment')) await page.addLocatorHandler(page.getByTestId('build-moment'), passMoment)
   })
 
   test.beforeEach(async ({ page }) => {
@@ -806,7 +822,7 @@ test.describe('Workspace Build @smoke', () => {
     await page.getByTestId('first-run-skip-audit').click()
     await panelUntil(page, 'done')
     await page.getByTestId('first-run-next-done').click()
-    await expect(page).toHaveURL(/localhost:\d+\/$/)
+    await expect(page).toHaveURL(/localhost(:\d+)?\/$/)
     await expect(page.locator('#build-tour-title')).toHaveText('Your agents')
   })
 
@@ -854,12 +870,17 @@ test.describe('Workspace Build @smoke', () => {
     return { opened, open }
   }
 
-  test('having an agent of their own reaches Level 1: celebrated once, and Atlas is told once', async ({ page }) => {
+  test('having an agent of their own reaches Level 1: celebrated once, and Atlas is told once, after its moment', async ({ page }) => {
     await seedAnswersOnce(page, { ...LEVEL_ANSWERS, sent: true })
     const sent = await mockWorkspace(page, { agents: [GUIDE_CARD, OWN_AGENT], state: STATE })
     await page.goto('/workspace/build')
     await expect(page.getByTestId('build-levels-count')).toHaveText('1 of 7')
     await expect(page.getByTestId('build-level-celebrate')).toContainText('Level 1 reached: First agent')
+    // Atlas is told once they've seen the moment, not over it.
+    await expect(page.getByTestId('build-moment')).toBeVisible()
+    await page.waitForTimeout(500)
+    expect(sent).toHaveLength(0)
+    await passMoment(page.getByTestId('build-moment'))
     await expect.poll(() => sent.length).toBe(1)
     expect(sent[0].message).toBe(`Level reached: Level 1, First agent.\n${NEXT_2}`)
     await page.reload()
@@ -869,7 +890,95 @@ test.describe('Workspace Build @smoke', () => {
     expect(sent).toHaveLength(1)
   })
 
-  test('the playbooks an agent came with reach nothing; one added later reaches Level 2, and the first look survives a reload', async ({ page }) => {
+  test('the levels moment: lit once when the first build starts, on Your company', async ({ page }) => {
+    await seedAnswersOnce(page, { ...LEVEL_ANSWERS, sent: true })
+    await mockWorkspace(page, { agents: [GUIDE_CARD], state: STATE })
+    await page.goto('/workspace/build')
+    const moment = page.getByTestId('build-moment')
+    await expect(moment.locator('#build-tour-title')).toHaveText('Your levels')
+    await expect(moment.getByTestId('build-tour-body')).toContainText("We'll take you through these steps to learn Trinity")
+    await expect(moment.getByTestId('build-tour-skip')).toHaveCount(0)
+    await expect(page.getByTestId('build-levels')).toBeInViewport()
+    await moment.getByTestId('build-tour-next').click()
+    await expect(moment).toHaveCount(0)
+    await page.reload()
+    await expect(page.getByTestId('build-levels-count')).toHaveText('0 of 7')
+    await page.waitForTimeout(1500)
+    await expect(moment).toHaveCount(0)
+  })
+
+  test('the Level 1 moment: their new agent lit in the sidebar, then Level 1 ticked on the card', async ({ page }) => {
+    await seedAnswersOnce(page, { ...LEVEL_ANSWERS, sent: true, levelsIntroSeen: true })
+    await mockWorkspace(page, { agents: [GUIDE_CARD, OWN_AGENT], state: { ...STATE, focus: { agent: '', skill: '' } } })
+    await page.goto('/workspace/build')
+    const moment = page.getByTestId('build-moment')
+    await expect(moment.locator('#build-tour-title')).toHaveText('Email triage is yours')
+    await expect(moment.getByTestId('build-tour-body')).toHaveText('Your agents live here: click one any time to talk to it.')
+    await moment.getByTestId('build-tour-next').click()
+    await expect(moment.locator('#build-tour-title')).toHaveText('Level 1 done: First agent')
+    await expect(moment.getByTestId('build-tour-body')).toHaveText('Next, Level 2: A new playbook.')
+    await expect(page.getByTestId('build-level-celebrate')).toContainText('Level 1 reached: First agent')
+    await moment.getByTestId('build-tour-next').click()
+    await expect(moment).toHaveCount(0)
+  })
+
+  test('a level reached while another moment is open gets its own moment after that one', async ({ page }) => {
+    await seedAnswersOnce(page, { ...LEVEL_ANSWERS, sent: true, levelsSeen: [1], levelsIntroSeen: true })
+    // The right side follows Atlas into the agent, so each moment brings it back to Your company.
+    const sent = await mockWorkspace(page, { agents: [GUIDE_CARD, OWN_AGENT], state: { ...STATE, focus: { agent: 'email-triage', skill: '' } } })
+    await levelRoute(page, 'credential-requirements', { state: 'ok', summary: { total: 2, set: 2, missing: 0, unknown: 0, blocking: 0 } })
+    let shared = false
+    await page.route(`**/api/agents/${OWN_AGENT.name}/shares`, (route) => route.fulfill(json(shared ? [{ shared_with_email: 'sam@example.com' }] : [])))
+    await page.goto('/workspace/build')
+    const moment = page.getByTestId('build-moment')
+    await expect(moment.locator('#build-tour-title')).toHaveText('Level 3 done: Connected')
+    shared = true
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+    await expect(page.getByTestId('build-levels-count')).toHaveText('3 of 7')
+    await moment.getByTestId('build-tour-next').click()
+    await expect(moment.locator('#build-tour-title')).toHaveText('Level 4 done: In control')
+    await expect(page.getByTestId('build-level-celebrate')).toContainText('Level 4 reached: In control')
+    await moment.getByTestId('build-tour-next').click()
+    await expect(moment).toHaveCount(0)
+    // And back to the agent Atlas was on.
+    await expect(page.getByTestId('build-world-map')).toHaveCount(0)
+    await expect.poll(() => sent.filter((m) => /Level reached: Level [34]/.test(m.message)).length).toBeGreaterThan(0)
+    const told = sent.map((m) => m.message).join('\n')
+    expect(told.match(/Level reached: Level 3/g)).toHaveLength(1)
+    expect(told.match(/Level reached: Level 4/g)).toHaveLength(1)
+  })
+
+  test('a reload during a level moment shows it again, and Atlas is told once, after it', async ({ page }) => {
+    await seedAnswersOnce(page, { ...LEVEL_ANSWERS, sent: true, levelsSeen: [1], levelsIntroSeen: true })
+    const sent = await mockWorkspace(page, { agents: [GUIDE_CARD, OWN_AGENT], state: STATE })
+    await levelRoute(page, 'credential-requirements', { state: 'ok', summary: { total: 2, set: 2, missing: 0, unknown: 0, blocking: 0 } })
+    await page.goto('/workspace/build')
+    const moment = page.getByTestId('build-moment')
+    await expect(moment.locator('#build-tour-title')).toHaveText('Level 3 done: Connected')
+    await page.reload()
+    await expect(moment.locator('#build-tour-title')).toHaveText('Level 3 done: Connected')
+    expect(sent).toHaveLength(0)
+    await moment.getByTestId('build-tour-next').click()
+    await expect.poll(() => sent.length).toBe(1)
+    expect(sent[0].message).toBe(`Level reached: Level 3, Connected.\n${NEXT_2}`)
+    await page.reload()
+    await expect(page.getByTestId('build-levels-count')).toHaveText('2 of 7')
+    await page.waitForTimeout(1500)
+    await expect(moment).toHaveCount(0)
+    expect(sent).toHaveLength(1)
+  })
+
+  test('the line that tells Atlas a level was reached shows as a note in the chat, not as their message', async ({ page }) => {
+    await seedAnswersOnce(page, { ...LEVEL_ANSWERS, sent: true, levelsIntroSeen: true })
+    await mockWorkspace(page, { agents: [GUIDE_CARD, OWN_AGENT], state: STATE })
+    // Atlas is still answering, so the line stays as sent.
+    await page.route(`${API}/agents/${GUIDE}/chat/stream`, () => new Promise(() => {}))
+    await page.goto('/workspace/build')
+    await expect(page.getByTestId('portal-note-line')).toHaveText('Level 1 reached. Build Guide was told.')
+    await expect(page.getByTestId('build-chat').getByText(/Level reached: Level 1/)).toHaveCount(0)
+  })
+
+  test('the playbooks an agent came with reach nothing; one added later reaches Level 2 with its moment, and the first look survives a reload', async ({ page }) => {
     await seedAnswersOnce(page, { ...LEVEL_ANSWERS, sent: true, levelsSeen: [1] })
     const sent = await mockWorkspace(page, { agents: [GUIDE_CARD, OWN_AGENT], state: STATE })
     let names = ['sort-inbox', 'onboarding']
@@ -883,6 +992,8 @@ test.describe('Workspace Build @smoke', () => {
     await page.reload()
     await expect(page.getByTestId('build-level-celebrate')).toContainText('Level 2 reached: A new playbook')
     await expect(page.getByTestId('build-levels-count')).toHaveText('2 of 7')
+    await expect(page.getByTestId('build-moment').locator('#build-tour-title')).toHaveText('Level 2 done: A new playbook')
+    await passMoment(page.getByTestId('build-moment'))
     await expect.poll(() => sent.length).toBe(1)
     expect(sent[0].message).toBe('Level reached: Level 2, A new playbook.\nNext: Level 3, Connected.')
   })
@@ -898,12 +1009,14 @@ test.describe('Workspace Build @smoke', () => {
     expect(sent).toHaveLength(0)
   })
 
-  test('every key their agent needs being set reaches Level 3; with none needed it is skipped', async ({ page }) => {
+  test('every key their agent needs being set reaches Level 3 with its moment; with none needed it is skipped', async ({ page }) => {
     await seedAnswers(page, { ...LEVEL_ANSWERS, sent: true, levelsSeen: [1] })
     const sent = await mockWorkspace(page, { agents: [GUIDE_CARD, OWN_AGENT], state: STATE })
     await levelRoute(page, 'credential-requirements', { state: 'ok', summary: { total: 2, set: 2, missing: 0, unknown: 0, blocking: 0 } })
     await page.goto('/workspace/build')
     await expect(page.getByTestId('build-level-celebrate')).toContainText('Level 3 reached: Connected')
+    await expect(page.getByTestId('build-moment').locator('#build-tour-title')).toHaveText('Level 3 done: Connected')
+    await passMoment(page.getByTestId('build-moment'))
     await expect.poll(() => sent.length).toBe(1)
     expect(sent[0].message).toBe(`Level reached: Level 3, Connected.\n${NEXT_2}`)
   })
@@ -919,7 +1032,7 @@ test.describe('Workspace Build @smoke', () => {
     expect(sent).toHaveLength(0)
   })
 
-  test("levels already reached when they arrive show on the card, but aren't told over Atlas's first question", async ({ page }) => {
+  test("levels already reached when they arrive show on the card, but aren't told over Atlas's first question; a later one is told (no moment: the card is on screen)", async ({ page }) => {
     await seedAnswersOnce(page, LEVEL_ANSWERS)
     const sent = await mockWorkspace(page, { agents: [GUIDE_CARD, OWN_AGENT] })
     let shared = false
@@ -933,7 +1046,9 @@ test.describe('Workspace Build @smoke', () => {
     // One reached later in the same visit is told as usual.
     shared = true
     await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+    // The Levels card is whole on screen here: its own tick, no moment, and Atlas is told.
     await expect.poll(() => sent.length).toBe(2)
+    await expect(page.getByTestId('build-moment')).toHaveCount(0)
     expect(sent[1].message).toBe(`Level reached: Level 4, In control.\n${NEXT_2}`)
     // And Level 1 was saved as seen, so it isn't celebrated again.
     await page.reload()
@@ -942,13 +1057,19 @@ test.describe('Workspace Build @smoke', () => {
     await expect(page.getByTestId('build-level-celebrate')).toHaveCount(0)
   })
 
-  test('two levels reached at once: one celebration for the higher, and one message with both', async ({ page }) => {
+  test('two levels reached at once: one celebration for the higher, one moment, and one message with both', async ({ page }) => {
     await seedAnswers(page, { ...LEVEL_ANSWERS, sent: true })
     const sent = await mockWorkspace(page, { agents: [GUIDE_CARD, OWN_AGENT], state: STATE })
     await levelRoute(page, 'shares', [{ shared_with_email: 'sam@example.com' }])
     await page.goto('/workspace/build')
     await expect(page.getByTestId('build-levels-count')).toHaveText('2 of 7')
     await expect(page.getByTestId('build-level-celebrate')).toContainText('Level 4 reached: In control')
+    // Their only agent lit first, as Level 1 is one of them, then both levels on the card.
+    const moment = page.getByTestId('build-moment')
+    await expect(moment.locator('#build-tour-title')).toHaveText('Email triage is yours')
+    await moment.getByTestId('build-tour-next').click()
+    await expect(moment.locator('#build-tour-title')).toHaveText('Levels 1 and 4 done')
+    await moment.getByTestId('build-tour-next').click()
     await expect.poll(() => sent.length).toBe(1)
     expect(sent[0].message).toBe(`Level reached: Level 1, First agent.\nLevel reached: Level 4, In control.\n${NEXT_2}`)
   })
@@ -982,7 +1103,7 @@ test.describe('Workspace Build @smoke', () => {
     expect(sent).toHaveLength(0)
   })
 
-  test('a level reached while they are typing waits, and never replaces what they wrote', async ({ page }) => {
+  test('a level reached while they are typing waits, and never replaces what they wrote (any moment pressed through)', async ({ page }) => {
     await seedAnswers(page, { ...LEVEL_ANSWERS, sent: true, levelsSeen: [1] })
     const sent = await mockWorkspace(page, { agents: [GUIDE_CARD, OWN_AGENT], state: STATE })
     let shared = false
@@ -999,11 +1120,12 @@ test.describe('Workspace Build @smoke', () => {
     await expect(composer).toHaveValue('Something I am still writing')
     await composer.fill('')
     await page.getByTestId('build-world').click({ position: { x: 5, y: 5 } })
+    await passMomentIfShown(page)
     await expect.poll(() => sent.length).toBe(1)
     expect(sent[0].message).toBe(`Level reached: Level 4, In control.\n${NEXT_2}`)
   })
 
-  test("a level reached while the guide replies waits, joins a card's outcome, and goes once", async ({ page }) => {
+  test("a level reached while the guide replies waits, joins a card's outcome, and goes once; with the card on screen, no moment", async ({ page }) => {
     const { sent } = await withProposal(page, { id: 'p9', action: 'allow-call', from: 'researcher', to: 'writer' })
     const reply = gate()
     await page.route(`${API}/agents/${GUIDE}/chat/stream`, async (route) => {
@@ -1027,12 +1149,14 @@ test.describe('Workspace Build @smoke', () => {
     expect(sent).toHaveLength(1)
     reply.open()
     await expect.poll(() => sent.length).toBeGreaterThan(1)
-    expect(sent[1].message).toBe(`Level reached: Level 4, In control.\n${NEXT_2}\nDone: Let Researcher call Writer.`)
+    expect(sent[1].message).toBe(`Done: Let Researcher call Writer.\nLevel reached: Level 4, In control.\n${NEXT_2}`)
+    // The Levels card was already whole on screen: its own tick says it, with no dimming.
+    await expect(page.getByTestId('build-moment')).toHaveCount(0)
     await page.waitForTimeout(1500)
     expect(sent.filter((m) => m.message.includes('Level reached: Level 4'))).toHaveLength(1)
   })
 
-  test('with the page open in two tabs, the guide is told once', async ({ page }) => {
+  test('with the page open in two tabs, the guide is told once (any moment pressed through)', async ({ page }) => {
     await seedAnswersOnce(page, { ...LEVEL_ANSWERS, sent: true, levelsSeen: [1] })
     const sent = await mockWorkspace(page, { agents: [GUIDE_CARD, OWN_AGENT], state: STATE })
     let shared = false
@@ -1048,6 +1172,7 @@ test.describe('Workspace Build @smoke', () => {
     await expect(other.getByTestId('build-levels-count')).toHaveText('1 of 7')
     shared = true
     await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+    await passMomentIfShown(page)
     await expect.poll(() => sent.length).toBe(1)
     await other.evaluate(() => window.dispatchEvent(new Event('focus')))
     await expect(other.getByTestId('build-levels-count')).toHaveText('2 of 7')

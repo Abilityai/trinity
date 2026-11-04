@@ -6,7 +6,7 @@
 -->
 <template>
   <Teleport to="body">
-    <div v-if="open && step" class="fixed inset-0 z-50" data-testid="build-tour" role="dialog" aria-modal="true" aria-labelledby="build-tour-title" @keydown.esc="$emit('close')">
+    <div v-if="open && step" class="fixed inset-0 z-50" :data-testid="testid" role="dialog" aria-modal="true" aria-labelledby="build-tour-title" @keydown.esc="$emit('close')">
       <!-- The light is the hole left by one huge shadow, so everything else stays dim. -->
       <div
         class="absolute rounded-xl ring-2 ring-action-primary-500 transition-all duration-200 motion-reduce:transition-none"
@@ -23,7 +23,7 @@
         <h2 id="build-tour-title" class="mt-1 text-base font-semibold text-gray-900 dark:text-gray-100">{{ step.title }}</h2>
         <p class="mt-1 text-sm text-gray-600 dark:text-gray-300" data-testid="build-tour-body">{{ step.body }}</p>
         <div class="mt-4 flex items-center gap-2">
-          <BaseButton v-if="index < steps.length - 1" variant="ghost" size="sm" data-testid="build-tour-skip" @click="$emit('close')">Skip the tour</BaseButton>
+          <BaseButton v-if="skippable && index < steps.length - 1" variant="ghost" size="sm" data-testid="build-tour-skip" @click="$emit('close')">Skip the tour</BaseButton>
           <span class="flex-1"></span>
           <BaseButton v-if="index > 0" variant="secondary" size="sm" data-testid="build-tour-back" @click="index -= 1">Back</BaseButton>
           <BaseButton size="sm" data-testid="build-tour-next" @click="next">{{ index < steps.length - 1 ? 'Next' : 'Got it' }}</BaseButton>
@@ -45,6 +45,9 @@ const props = defineProps({
   steps: { type: Array, default: null },
   // A tour needs two stops to be worth it; Show me lights up just one.
   minSteps: { type: Number, default: 2 },
+  // A level moment is one or two stops, with nothing to skip.
+  skippable: { type: Boolean, default: true },
+  testid: { type: String, default: 'build-tour' },
 })
 const emit = defineEmits(['close'])
 
@@ -55,7 +58,8 @@ const rect = ref(null)
 const steps = ref([])
 const step = computed(() => steps.value[index.value] || null)
 
-const target = (s) => document.querySelector(`[data-tour="${s.target}"]`)
+// A stop names its part by tour name, or by a selector (a level moment's sidebar agent row).
+const target = (s) => document.querySelector(s.selector || `[data-tour="${s.target}"]`)
 const visible = (el) => {
   const r = el?.getBoundingClientRect?.()
   return Boolean(r && r.width > 0 && r.height > 0)
@@ -108,7 +112,13 @@ async function begin() {
   card.value?.focus?.()
 }
 
-watch(() => props.open, (now) => { if (now) begin() }, { immediate: true })
+// Closed, it forgets its stops, so reopening for the next moment never shows the last one.
+watch(() => props.open, (now) => {
+  if (now) { begin(); return }
+  steps.value = []
+  index.value = 0
+  rect.value = null
+}, { immediate: true })
 watch(index, place)
 
 const onResize = () => { if (props.open) place() }

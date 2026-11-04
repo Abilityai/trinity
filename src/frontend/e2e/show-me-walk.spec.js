@@ -144,6 +144,10 @@ test.describe('Show me, walked @smoke', () => {
   test.beforeEach(async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 })
     await page.addLocatorHandler(page.getByTestId('build-tour-skip'), (skip) => skip.click())
+    // A level moment (the levels card lit) is stepped through, as in workspace-build.spec.js.
+    await page.addLocatorHandler(page.getByTestId('build-moment'), async (moment) => {
+      for (let i = 0; i < 3 && await moment.isVisible(); i++) await moment.getByTestId('build-tour-next').click()
+    })
   })
 
   test("from Atlas's card to saved keys, one lit-up click at a time", async ({ page, context }) => {
@@ -204,6 +208,24 @@ test.describe('Show me, walked @smoke', () => {
     await expect(title(tab)).toHaveText("That's it")
     await expect(tab.getByTestId('show-me-walk-body')).toContainText('They find it in their Workspace')
     expect(world.shares).toEqual(['colleague@example.com'])
+  })
+
+  test('Next on a step that only opens something does the click for them: agent, Settings, People', async ({ page, context }) => {
+    await mockAll(context, { id: 'w1n', action: 'show-me', key: 'people', agent: AGENT })
+    await page.goto('/workspace/build')
+    await expect(page.getByTestId('build-fleet-card')).toContainText('Show me how to share Game Promoter with someone')
+    const [tab] = await Promise.all([context.waitForEvent('page'), page.getByTestId('build-fleet-show-me').click()])
+    await tab.setViewportSize({ width: 1440, height: 900 })
+    await expect(title(tab)).toHaveText('Your agents live here')
+    await tab.getByTestId('show-me-walk-press').click()
+    await expect(tab).toHaveURL(new RegExp(`/agents/${AGENT}`))
+    await expect(title(tab)).toHaveText('Its settings')
+    await tab.getByTestId('show-me-walk-press').click()
+    await expect(title(tab)).toHaveText('People')
+    await tab.getByTestId('show-me-walk-press').click()
+    await expect(title(tab)).toHaveText('Their email')
+    // Typing the email is theirs: no Next here.
+    await expect(tab.getByTestId('show-me-walk-press')).toHaveCount(0)
   })
 
   test('calling: Permissions found under More on a narrower window, the agent ticked, then saved', async ({ page, context }) => {

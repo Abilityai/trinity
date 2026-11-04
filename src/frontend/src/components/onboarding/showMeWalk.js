@@ -89,8 +89,10 @@ export function withoutWalk(query = {}) {
 }
 
 // The first stop of every walk: the agent, on the Dashboard.
+// `press`: a step that only opens something offers Next, which clicks the lit part for them.
 const agentStep = (agent, name) => ({
   id: 'agent',
+  press: true,
   target: `[data-walk-agent="${agent}"]`,
   title: 'Your agents live here',
   body: `This is the Dashboard: every agent you have is on it. Click ${name} to open it.`,
@@ -101,6 +103,7 @@ const backToGuide = `Go back to your chat with ${BUILD_GUIDE_NAME} and tell it y
 // A tab on the agent's page. When it doesn't fit, the page shows it under More.
 const tabStep = (agent, tab, label, body) => ({
   id: 'tab',
+  press: true,
   target: `[data-testid="agent-tabs"] [data-tab="${tab}"]`,
   alt: { target: '[data-testid="agent-tabs"] [data-overflow-trigger]', body: `It's under More. Click More, then ${label}.` },
   at: { tab },
@@ -116,6 +119,7 @@ export function credentialsWalk({ agent, label }) {
     agentStep(agent, name),
     {
       id: 'settings',
+      press: true,
       target: '[data-walk="settings-tab"]',
       title: 'Its settings',
       body: `How ${name} is set up lives under Settings, at the end of these tabs. Click it.`,
@@ -123,6 +127,7 @@ export function credentialsWalk({ agent, label }) {
     },
     {
       id: 'credentials',
+      press: true,
       target: '[data-testid="settings-rail"] [data-section="credentials"]',
       title: 'Credentials',
       body: `The keys and addresses ${name} uses to reach your tools. They stay inside this agent. Click Credentials.`,
@@ -154,6 +159,7 @@ export function peopleWalk({ agent, label }) {
     agentStep(agent, name),
     {
       id: 'settings',
+      press: true,
       target: '[data-walk="settings-tab"]',
       at: { tab: 'settings' },
       title: 'Its settings',
@@ -162,6 +168,7 @@ export function peopleWalk({ agent, label }) {
     },
     {
       id: 'people',
+      press: true,
       target: '[data-testid="settings-rail"] [data-section="people"]',
       at: { tab: 'settings', section: 'people' },
       title: 'People',

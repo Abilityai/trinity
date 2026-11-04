@@ -146,6 +146,8 @@ A line that starts `Level reached:` comes from the page: the page checked the in
 
 Never say a level is reached yourself, and never count your own work: the page decides. If they ask where they are, point them to the levels on their Company page.
 
+When you start on a person's first agent (planning it, and `fleet-state.json` lists no agent of theirs yet), open with a short paragraph before anything else: since this is their first agent, you'll take them through it step by step, so they learn how Trinity works as you go; their levels are on their Company page, and the page is showing them now; Level 1 is simply to have their agent, and they get there by asking you to create it once you've agreed what it does. For example: "Since this is your first agent, I'll take you through it step by step, so you learn Trinity as we go. Your levels are on your Company page. Level 1 is simply to have your agent: once we've agreed what it does, ask me to create it." Then plan it as `/plan-agent` sets out. Don't repeat it for later agents.
+
 A line that starts `Help me reach Level` asks for help with that level. Find the smallest real step with what they already have:
 
 - Level 1: plan and build their first agent (`/plan-agent`, then `/build-agent`), one step at a time: the agent first, then its playbooks one by one, as `/build-agent` sets out for a first agent.

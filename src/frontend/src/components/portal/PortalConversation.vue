@@ -391,6 +391,13 @@
           :class="PLATFORM_LINE_CLASS"
           data-testid="portal-system-line"
         >{{ item.message.content }}</p>
+        <!-- Workspace Build: a line the page sent for the person (a level reached) is a
+             note, not something they said. A failed one keeps its bubble and Retry. -->
+        <p
+          v-else-if="noteFor(item.message)"
+          :class="PLATFORM_LINE_CLASS"
+          data-testid="portal-note-line"
+        >{{ noteFor(item.message) }}</p>
         <div v-else :class="item.message.role === 'user' ? 'flex justify-end' : 'flex items-start gap-2.5'">
           <PortalAvatar v-if="item.message.role !== 'user'" :name="agent.name" :avatar-url="agent.avatar_url" :size="28" class="mt-0.5" />
           <div v-if="item.message.role === 'user'" class="max-w-[85%] flex flex-col items-end gap-1">
@@ -1094,6 +1101,9 @@ const props = defineProps({
   // Workspace Build: this chat is one pane of a page rather than a stop among
   // chats, so what would leave the page or start another chat is not offered.
   focused: { type: Boolean, default: false },
+  // Workspace Build: turns a line the page sent for the person into a short note to show
+  // instead of their bubble (null for anything else).
+  asNote: { type: Function, default: null },
   // ent#610 round 8: `{ sessionId, messageId, excerpt }` from the Inbox arrow.
   // Shown only on the chat it belongs to; the shell clears it on `reply-done`.
   replyTarget: { type: Object, default: null },
@@ -1114,6 +1124,12 @@ const props = defineProps({
 // Declared emits are the component's contract, so a name left here after
 // its only `$emit` is deleted is a promise nothing keeps.
 const emit = defineEmits(['reply', 'reply-done', 'switch-agent', 'session-adopted', 'sessions-changed', 'thread-caught-up', 'open-menu', 'toggle-star', 'escalate-to-room', 'open-thread', 'work-state', 'open-work', 'new-chat', 'main-reset', 'voice-call', 'voice-panel', 'open-project', 'thread-missing', 'close-chat', 'dismiss-close-error', 'first-message-sent'])
+
+// A message the page sent for the person that reads better as a note (Workspace Build).
+function noteFor(message) {
+  if (!props.asNote || message?.role !== 'user' || message.failed) return null
+  return props.asNote(message.content) || null
+}
 
 // ent#451/#473: the active thread as the shell's list knows it. Null until the
 // list carries the thread (a just-adopted session lands on the next refresh),
@@ -1413,9 +1429,11 @@ function lastUserText() {
 // The feed's row for THIS turn, by id; until the feed has read it, a
 // synthetic item that says what is known (steps `undefined` = not read yet,
 // which the card renders as nothing — never as "could not be read").
+// Workspace Build: a card for a line the page sent says so, as the note in the thread does.
+const noted = (text) => (props.asNote && props.asNote(text)) || text
 const liveCardItem = computed(() => {
   const fromFeed = itemById(workStore.now, activeExecutionId.value)
-  if (fromFeed) return fromFeed
+  if (fromFeed) return props.asNote ? { ...fromFeed, title: noted(fromFeed.title) } : fromFeed
   return {
     id: activeExecutionId.value || 'pending',
     agent_name: props.agent.name,
@@ -1423,7 +1441,7 @@ const liveCardItem = computed(() => {
     outcome: pendingTurnOutcome(liveStreamActivity.value, props.agent.pulls_turns),
     kind: 'turn',
     // The feed's own title shape, so its row lands without re-wrapping it (#2964).
-    title: previewTitle(pendingUserText.value || lastUserText()),
+    title: previewTitle(noted(pendingUserText.value || lastUserText())),
     chat_id: currentSessionId.value,
     steps: undefined,
     can_stop: false,
@@ -1466,7 +1484,7 @@ const terminalCardItem = computed(() => {
     status: outcome === 'cancelled' ? 'cancelled' : 'failed',
     outcome,
     kind: 'turn',
-    title: previewTitle(lastUserText()),
+    title: previewTitle(noted(lastUserText())),
     chat_id: currentSessionId.value,
     error: outcome === 'cancelled' || outcome === 'lost' ? null : (msg || null),
     steps: null,
