@@ -1447,6 +1447,9 @@ async function guideAlreadyKnowsThem() {
 }
 
 async function openOnboardingIfNew() {
+  // Only someone who can build gets the window, and the setup state is an operator read
+  // a Workspace-only member is refused on, so it isn't asked for anyone else.
+  if (!buildAvailable.value) return false
   // A failed read leaves this empty, which treats sample agents as theirs and stays shut.
   await firstRunStore.fetchState()
   if (shouldOpenOnboarding({

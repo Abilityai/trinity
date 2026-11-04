@@ -316,6 +316,10 @@ def test_standing_work_routes_that_name_no_agent_are_live():
 CREATOR_UNNAMED_OPEN = {
     ("GET", "/api/systems/manifests"): "a read of the manifest list; creates and touches nothing",
     ("GET", "/api/systems/manifests/{manifest_id}"): "a read of one manifest; creates and touches nothing",
+    # Workspace Build's company profile (core-agent AC-14): both take require_person, which
+    # refuses an agent key, and neither creates or acts on an agent.
+    ("GET", "/api/workspace-build/company"): "a read of the instance's company profile; require_person refuses an agent key",
+    ("PUT", "/api/workspace-build/company"): "writes the instance's company name, website and research; touches no agent, and require_person refuses an agent key",
 }
 
 

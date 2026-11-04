@@ -21,7 +21,9 @@ capabilities:
   - agent-design
   - guided-build
 
-commands:
+# Its playbooks are skills (.claude/skills/<name>/SKILL.md), each started as /<name>.
+# Listed as playbooks, not `commands`: a command needs its own .claude/commands file.
+playbooks:
   - name: example-agent
     description: Build a tiny test agent that shows what an agent is, for someone who skipped the audit
     usage: /example-agent

@@ -219,10 +219,47 @@ _OTHER_AUTH = (
 _KNOWN = {
     ("stores/clientPortal.js", "/api/settings/portal-session-policy"):
         "title-generation health, fetched only for an admin (shouldFetchTitleHealth); the route is assert_admin",
+    ("components/portal/builder/PortalBuild.vue", "/api/agents/${encodeURIComponent(guide.value.name)}/files"):
+        "the guide's fleet file: Workspace Build, shown only to a platform session that is not Workspace-only (buildAvailableFor, core-agent AC-1)",
+    ("components/portal/builder/fleetActions.js", "/api/agents/${enc(name)}"):
+        "the person's own agents' settings, changed on their click: Workspace Build, shown only to a platform session that is not Workspace-only (buildAvailableFor, core-agent AC-1)",
+    ("components/portal/builder/levelSignals.js", "/api/agents/${enc(name)}"):
+        "the person's own agents, read for their levels: Workspace Build, shown only to a platform session that is not Workspace-only (buildAvailableFor, core-agent AC-1)",
+    ("components/portal/builder/levelSignals.js", "/api/activities/timeline"):
+        "calls between their agents, for their levels: Workspace Build, shown only to a platform session that is not Workspace-only (buildAvailableFor, core-agent AC-1)",
+    ("components/portal/builder/levelSignals.js", "/api/operator-queue"):
+        "approvals they answered, for their levels: Workspace Build, shown only to a platform session that is not Workspace-only (buildAvailableFor, core-agent AC-1)",
+    ("stores/clientPortal.js", "/api/systems/deploy"):
+        "deploying the person's own guide: Workspace Build, shown only to a platform session that is not Workspace-only (buildAvailableFor, core-agent AC-1)",
+    ("stores/clientPortal.js", "/api/agents/${created}/public-channel-model"):
+        "setting up the guide just deployed: Workspace Build, shown only to a platform session that is not Workspace-only (buildAvailableFor, core-agent AC-1)",
+    ("stores/clientPortal.js", "/api/agents/${created}/label"):
+        "labelling the guide just deployed: Workspace Build, shown only to a platform session that is not Workspace-only (buildAvailableFor, core-agent AC-1)",
+    ("stores/clientPortal.js", "/api/workspace-build/company"):
+        "the instance's company profile: Workspace Build, shown only to a platform session that is not Workspace-only (buildAvailableFor, core-agent AC-1)",
+    ("stores/clientPortal.js", "/api/agents/${agentName}/task"):
+        "starting the company research on their guide: Workspace Build, shown only to a platform session that is not Workspace-only (buildAvailableFor, core-agent AC-1)",
+    ("stores/clientPortal.js", "/api/agents/${agentName}/executions/${encodeURIComponent(executionId)}"):
+        "following the company research: Workspace Build, shown only to a platform session that is not Workspace-only (buildAvailableFor, core-agent AC-1)",
+    ("stores/clientPortal.js", "/api/agents/${agentName}/capability-grants"):
+        "whether their guide may create agents: Workspace Build, shown only to a platform session that is not Workspace-only (buildAvailableFor, core-agent AC-1)",
 }
 _ALLOWED_STORES = {
     "clientPortal", "projects", "portalDrafts", "portalWork", "portalRailFeeds", "portalLoops",
     "auth", "userPreferences", "theme",
+    # Workspace Build's saved answers: only the person's own preference (a marked route).
+    "buildIntake",
+}
+# Operator stores a Workspace file uses only for a principal the floor never applies to.
+_KNOWN_STORES = {
+    ("views/Portal.vue", "firstRun"):
+        "Trinity's samples, read only when the person can build (openOnboardingIfNew checks buildAvailable)",
+    ("components/portal/builder/PortalBuild.vue", "firstRun"):
+        "Trinity's samples, on the Build page, shown only to a platform session that is not Workspace-only",
+    ("components/portal/builder/PortalBuild.vue", "sessions"):
+        "whether Claude is connected, on the Build page, shown only to a platform session that is not Workspace-only",
+    ("components/portal/builder/PortalBuildOnboarding.vue", "sessions"):
+        "whether Claude is connected, in the Build setup window, shown only to a platform session that is not Workspace-only",
 }
 
 
@@ -296,7 +333,7 @@ class TestTheWorkspaceCalls:
                 name = m.group(1)
                 if rel.startswith("stores/") and "stores/" not in spec and not (FRONTEND / "stores" / f"{name}.js").exists():
                     continue
-                if name not in _ALLOWED_STORES:
+                if name not in _ALLOWED_STORES and (rel, name) not in _KNOWN_STORES:
                     offenders.append(f"{rel}: {name}")
         assert not offenders, (
             "A Workspace file imports an operator store; its calls 403 for a Workspace-only "

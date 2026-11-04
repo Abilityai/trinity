@@ -56,7 +56,7 @@ describe("Atlas's template: it builds the agent itself", () => {
   it('installs the create-agent wizard and offers /build-agent, not /build-it', () => {
     const template = read('template.yaml')
     expect(template).toMatch(/installed:[\s\S]*- create-agent@abilityai/)
-    expect(template).toMatch(/- name: build-agent\n/)
+    expect(template).toMatch(/playbooks:[\s\S]*- name: build-agent\n/)
     expect(template).not.toMatch(/- name: build-it\n/)
     expect(existsSync(join(ROOT, '.claude/skills/build-it'))).toBe(false)
   })
@@ -114,7 +114,7 @@ describe("Atlas's template: settings changes through the person's click", async 
   const { KNOWN_CHANGES, SHOW_ME_KEYS, FLEET_CANVAS_ID, FLEET_PROPOSAL_BLOCK, FLEET_STATE_FILE } = await import('../../src/components/portal/builder/fleetChanges')
 
   it('offers /fleet', () => {
-    expect(read('template.yaml')).toMatch(/- name: fleet\n/)
+    expect(read('template.yaml')).toMatch(/playbooks:[\s\S]*- name: fleet\n/)
   })
 
   it('proposes exactly the changes and places the page knows, one at a time', () => {
