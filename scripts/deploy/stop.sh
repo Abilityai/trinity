@@ -47,7 +47,8 @@ esac
 # back up.
 # Compose renders the whole file for any command, and an upgraded install may not
 # have POSTGRES_PASSWORD yet (#4175). `stop` never reads the value.
-POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-unused-by-stop}" docker compose "${COMPOSE_FILES[@]}" stop
+export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-unused-by-stop}"
+docker compose "${COMPOSE_FILES[@]}" stop
 
 echo ""
 echo "✅ All services stopped"
