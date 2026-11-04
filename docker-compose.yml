@@ -470,6 +470,13 @@ services:
     # believed in dev — Vite is not a trusted proxy, so requests are attributed
     # to their socket peer. Topology and trust are deliberately unchanged here.
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload --no-server-header --no-proxy-headers
+    healthcheck:
+      # The scheduler waits on this: on a fresh database the backend builds the schema (#4175).
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 30s
+      retries: 5
+      start_period: 120s
     mem_limit: 4g
     cpus: 4
 

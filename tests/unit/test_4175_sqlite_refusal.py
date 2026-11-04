@@ -231,6 +231,20 @@ def test_dev_scheduler_waits_for_a_healthy_backend() -> None:
     assert dep["condition"] == "service_healthy"
 
 
+@pytest.mark.parametrize("name", _COMPOSE_FILES)
+def test_every_healthy_dependency_has_a_healthcheck(name: str) -> None:
+    """Compose aborts `up` with "has no healthcheck configured" otherwise."""
+    services = _compose(name)["services"]
+    missing = [
+        f"{svc} waits on {dep}"
+        for svc, spec in services.items()
+        if isinstance(spec.get("depends_on"), dict)  # the short list form waits on nothing
+        for dep, cond in spec["depends_on"].items()
+        if cond.get("condition") == "service_healthy" and "healthcheck" not in services[dep]
+    ]
+    assert not missing, missing
+
+
 def test_dev_url_honours_the_configured_names() -> None:
     env = _compose("docker-compose.yml")["services"]["backend"]["environment"]
     url = next(e for e in env if e.startswith("DATABASE_URL="))
