@@ -17,7 +17,7 @@ coverage debt is queryable rather than rediscovered.
 | **J04** | My agents keep working when several things run at once, and nothing silently stalls. | operator | local | soak | **no** | — | S-01, S-02, S-03, E-01, E-02, B-01, B-02, R-01 | #2343 |
 | **J05** | I can schedule work, walk away, and find out what happened. | user | local | live-stack | **no** | — | E-01, E-05 | #2344 |
 | **J06** | I can give an agent a credential and it can use the tools that credential unlocks. | user | local | live-stack | **no** | — | L-06, G-04 | #2345 |
-| **J07** | A skill I add shows up in the agent's head and it uses it. | user | local | live-stack | **no** | — | SK-01, SK-02, SK-03 | #2346 |
+| **J07** | A skill I add shows up in the agent's head and it uses it. | user | local | live-stack | **no** | — | SK-01, SK-02, SK-03, SK-04 | #2346 |
 | **J08** | I can install a marketplace plugin and the agent can use it. | user | local | live-stack | **no** | — | PLG-01 | #2347 |
 | **J09** | I can point Trinity at my repo and get a working agent from it. | user | local | live-stack | **no** | — | RD-01, RD-02, RD-03 | #2348 |
 | **J10** | My agents can call each other, and I can see what they said. | user | local | journey-smoke | **no** | `tests/journeys/test_j10_agent_calls_agent_journey.py` | P-01, P-02, AC-01, L-03, IA-01, IA-02, IA-03, IA-04 | #2349 |

@@ -154,7 +154,8 @@ instead of a silently empty section (fix 6df68c96, 2026-06-10).
 `components/InfoPanel.vue` leads with the **About** narrative (display name,
 tagline, description) + "What You Can Ask" above the fold; the exhaustive
 `template.yaml` metadata (resources, sub-agents, commands, MCP servers, skills,
-capabilities, platforms, tools) is tucked behind a native collapsible
+template tags — `capabilities:`, shown raw since trinity-enterprise#584 —
+platforms, tools) is tucked behind a native collapsible
 `<details>` **"Technical details"** disclosure (gated on `hasTechnicalDetails`).
 
 ## AgentDetail wiring

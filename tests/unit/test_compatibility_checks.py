@@ -119,6 +119,7 @@ class TestSpecConsistency:
         # ent#479: +1 (D-010, metrics.json superseded) -> 91.
         # ent#730: +1 (X-009, dashboard metric:/dims: bindings) -> 92.
         # #4002: +1 (F-014, last setup.sh exit code) -> 93.
+        # ent#584: T-011 retired, X-010 added (capabilities: tags vs skills) -> 93.
         assert len(spec.CHECKS) == 93, f"expected 93 checks, found {len(spec.CHECKS)}"
 
     def test_retired_ids_are_never_reissued(self):
@@ -130,7 +131,7 @@ class TestSpecConsistency:
         retired = {
             "F-008", "F-012", "F-013", "T-012", "T-016", "T-017", "C-009",
             "K-002", "K-005", "G-002", "G-003", "G-004", "G-005", "D-006",
-            "I-003", "I-004", "I-005", "DP-005",
+            "I-003", "I-004", "I-005", "DP-005", "T-011",
         }
         clash = retired & set(spec.ALL_IDS)
         assert not clash, f"retired ids reissued: {sorted(clash)}"
