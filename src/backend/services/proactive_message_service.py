@@ -109,7 +109,7 @@ class ProactiveMessageService:
         """Build rate limit key including both agent and recipient."""
         return f"proactive_msg:{agent_name}:{recipient_email.lower()}"
 
-    def _check_rate_limit(self, agent_name: str, recipient_email: str) -> bool:
+    def check_rate_limit(self, agent_name: str, recipient_email: str) -> bool:
         """Check if sending is allowed under rate limits. Returns True if OK."""
         # #1609: admin-configurable per-recipient cap; 0 = unlimited.
         limit = get_proactive_rate_limit("proactive_dm_per_recipient")
@@ -132,7 +132,7 @@ class ProactiveMessageService:
             logger.warning(f"Rate limit check failed: {e}")
             return True
 
-    def _increment_rate_limit(self, agent_name: str, recipient_email: str) -> None:
+    def increment_rate_limit(self, agent_name: str, recipient_email: str) -> None:
         """Increment the rate limit counter for this agent-recipient pair."""
         redis = self._get_redis()
         if not redis:
@@ -147,7 +147,7 @@ class ProactiveMessageService:
         except Exception as e:
             logger.warning(f"Rate limit increment failed: {e}")
 
-    async def _audit_send(
+    async def audit_send(
         self,
         agent_name: str,
         recipient_email: str,
@@ -300,7 +300,7 @@ class ProactiveMessageService:
 
         # 1. Authorization check
         if not db.can_agent_message_email(agent_name, recipient_email):
-            await self._audit_send(agent_name, recipient_email, channel, False, "not_authorized")
+            await self.audit_send(agent_name, recipient_email, channel, False, "not_authorized")
             raise NotAuthorizedError(
                 f"Agent '{agent_name}' is not authorized to message '{recipient_email}'. "
                 "Recipient must opt in via allow_proactive flag."
@@ -319,7 +319,7 @@ class ProactiveMessageService:
         ) as intent:
             if intent.suppressed:
                 first_channel = intent.first.get("channel") or channel
-                await self._audit_send(
+                await self.audit_send(
                     agent_name, recipient_email, first_channel, False,
                     message_preview=message_preview, action="suppressed",
                     extra={
@@ -356,8 +356,8 @@ class ProactiveMessageService:
     ) -> DeliveryResult:
         """Rate limit, then try each channel; raises when none delivers."""
         # 2. Rate limit check
-        if not self._check_rate_limit(agent_name, recipient_email):
-            await self._audit_send(agent_name, recipient_email, channel, False, "rate_limited")
+        if not self.check_rate_limit(agent_name, recipient_email):
+            await self.audit_send(agent_name, recipient_email, channel, False, "rate_limited")
             raise RateLimitedError(
                 f"Rate limit exceeded: max {RATE_LIMIT_MAX_PER_HOUR} messages per hour to this recipient."
             )
@@ -375,7 +375,7 @@ class ProactiveMessageService:
                     agent_name, recipient_email, text, ch, reply_to_thread
                 )
                 if result.success:
-                    self._increment_rate_limit(agent_name, recipient_email)
+                    self.increment_rate_limit(agent_name, recipient_email)
                     # #1600: record the outbound turn in the recipient's channel
                     # session so the agent's next turn knows what it sent.
                     # Deliberately here and not in `_deliver_*`: those helpers are
@@ -384,7 +384,7 @@ class ProactiveMessageService:
                     # send_message path draws that line structurally rather than
                     # with a flag.
                     self._persist_outbound(agent_name, recipient_email, text, result)
-                    await self._audit_send(
+                    await self.audit_send(
                         agent_name, recipient_email, ch, True,
                         message_preview=message_preview
                     )
@@ -400,7 +400,7 @@ class ProactiveMessageService:
 
         # All channels failed
         error_msg = last_error or "No delivery channel available for recipient"
-        await self._audit_send(agent_name, recipient_email, channel, False, error_msg)
+        await self.audit_send(agent_name, recipient_email, channel, False, error_msg)
         raise RecipientNotFoundError(error_msg)
 
     async def send_access_grant_notification(
@@ -430,7 +430,7 @@ class ProactiveMessageService:
                 agent_name, recipient_email, text, channel, reply_to_thread=False
             )
         except RecipientNotFoundError as e:
-            await self._audit_send(
+            await self.audit_send(
                 agent_name, recipient_email, channel, False,
                 error=f"recipient_not_found: {e}",
                 message_preview=message_preview,
@@ -440,13 +440,13 @@ class ProactiveMessageService:
             logger.warning(
                 f"[#951] Access-grant notification to {channel} failed: {e}"
             )
-            await self._audit_send(
+            await self.audit_send(
                 agent_name, recipient_email, channel, False,
                 error=str(e), message_preview=message_preview,
             )
             return DeliveryResult(success=False, channel=channel, error=str(e))
 
-        await self._audit_send(
+        await self.audit_send(
             agent_name, recipient_email, channel,
             success=result.success,
             error=result.error,
