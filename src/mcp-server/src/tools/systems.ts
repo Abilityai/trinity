@@ -356,7 +356,7 @@ export function createSystemTools(
         "member is `deploy: false` is refused with a 400 `nothing_to_deploy` (use apply_system to report on them). " +
         "Pass strict: true to restore abort-on-first-error. " +
         "A `failed` deploy (no member created) comes back as that report with `http_status: 500` and " +
-        "`success: false`; a result without `status` (a 400 manifest error, a 403, a `strict` abort, a 422) " +
+        "`success: false`; any other result without `status` (e.g. a 400 manifest error, a 403, a `strict` abort) " +
         "has `success: false`, `http_status` and the backend's `detail`.",
       parameters: z.object({
         manifest: z
