@@ -114,26 +114,78 @@ def resolve(execution: Any) -> MemorySubject:
     return MemorySubject(SKIP, None, REASON_TRIGGER_NOT_ALLOWED, triggered_by)
 
 
-def keeps_shared_auto_memory(execution: Any, owner_email: Optional[str]) -> bool:
+# #4156: triggers with no person on the row that are the agent's own work, so
+# auto-memory stays on. The memory-subject allowlist plus the headless runs it
+# never needed to name: a schedule's retry, the resume after an operator
+# answer, and the user/chat/session/a2a doors when no person is stamped.
+_AUTO_MEMORY_HEADLESS_TRIGGERS = AGENT_SCOPE_TRIGGERS | frozenset({
+    "retry", "operator_response", "user", "chat", "session",
+})
+# Multi-party, anonymous, or carrying words from someone the row does not
+# identify (a caller's speech, an x402 payer, a room): never on. `session` is
+# not here — a session turn is judged by who drove it, like any other door.
+_AUTO_MEMORY_NEVER_TRIGGERS = NEVER_TRIGGERS - {"session"}
+
+
+def _norm(value: Optional[str]) -> str:
+    return (value or "").strip().lower()
+
+
+def keeps_shared_auto_memory(
+    execution: Any, owner_email: Optional[str], owner_id: Optional[int] = None,
+) -> bool:
     """Whether the runtime may keep Claude Code's auto-memory on for this turn
     (#4156). Accepts the row ``db.get_execution`` returns or a pull claim's dict.
 
     Auto-memory is ONE directory per agent, read and written by every turn, and
     its harness prompt says to save there when someone asks to be remembered.
-    So it stays on only for the agent's own scope — the scope
-    ``memory_service.scope_for`` folds the owner into: a headless run, or a turn
-    whose person is the owner. Everyone else (another person, an anonymous
-    visitor, a group, a trigger off the allowlist) gets it off, and their
-    "remember this" has one place to go: ``write_user_memory``.
+    So it stays on only for turns that serve the owner or nobody:
+
+    1. A Workspace destination on the row (a seat's schedule run, the resume
+       after an operator answer) names the person served: on only for the owner.
+    2. A channel turn: on only for the owner's one-to-one; groups are off.
+    3. Multi-party / anonymous triggers (voice, voip, paid, room, ...): off.
+    4. A schedule's own fire (cron, Run now, webhook, retry) is the schedule's
+       run, whoever pressed the button: on.
+    5. A person who drove the turn (``source_user_id``, else
+       ``source_user_email``) keeps it only when they ARE the owner, compared
+       by user id when both are known — a non-owner admin or a shared user's
+       ``/task`` / MCP turn is someone else, even under a headless trigger.
+    6. Nobody on the row: on for a known headless trigger, off otherwise.
+
+    Fail-closed everywhere else: a wrong "off" costs one turn the agent's own
+    notes, a wrong "on" is the cross-user leak.
     """
     if isinstance(execution, dict):
         from types import SimpleNamespace
 
         execution = SimpleNamespace(**execution)
-    subject = resolve(execution)
-    if subject.kind == AGENT:
+    triggered_by = _norm(getattr(execution, "triggered_by", None))
+    owner = _norm(owner_email)
+
+    served = _norm(getattr(execution, "source_channel_client", None))
+    if served and _norm(getattr(execution, "source_channel", None)) == schedule_seat_memory.PORTAL_SOURCE_CHANNEL:
+        return bool(owner) and served == owner
+
+    if triggered_by in CHANNEL_TRIGGERS:
+        return bool(owner) and looks_like_email(served) and served == owner
+
+    if triggered_by in _AUTO_MEMORY_NEVER_TRIGGERS:
+        return False
+
+    schedule_id = (getattr(execution, "schedule_id", None) or "").strip()
+    if (triggered_by in schedule_seat_memory.SCHEDULE_FIRE_TRIGGERS or triggered_by == "retry") \
+            and schedule_id and schedule_id != schedule_seat_memory.NO_SCHEDULE_ID:
         return True
-    if subject.kind == PERSON:
-        owner = (owner_email or "").strip().lower()
-        return bool(owner) and subject.user_email == owner
-    return False
+
+    user_id = getattr(execution, "source_user_id", None)
+    email = _norm(getattr(execution, "source_user_email", None))
+    if user_id is not None and owner_id is not None:
+        try:
+            return int(user_id) == int(owner_id)
+        except (TypeError, ValueError):
+            return False
+    if user_id is not None or email:
+        return bool(owner) and email == owner
+
+    return triggered_by in _AUTO_MEMORY_HEADLESS_TRIGGERS

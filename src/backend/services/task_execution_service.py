@@ -166,7 +166,8 @@ def auto_memory_off_for_row(agent_name: str, row: Any) -> bool:
     if row is None:
         return True
     try:
-        return not memory_subject.keeps_shared_auto_memory(row, memory_service.owner_email(agent_name))
+        return not memory_subject.keeps_shared_auto_memory(
+            row, memory_service.owner_email(agent_name), memory_service.owner_id(agent_name))
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[#4156] auto-memory rule failed for {agent_name}, turning it off: {type(e).__name__}")
         return True

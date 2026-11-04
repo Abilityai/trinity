@@ -203,3 +203,109 @@ def test_async_result_path_forwards_the_flag(monkeypatch):
     except Exception:
         pass   # delivery is not under test; the spawn call is
     assert runtime.calls and runtime.calls[0].get("disable_auto_memory") is True
+
+
+# ---------------------------------------------------------------------------
+# Review of #4172: the hand-offs, executed (a source grep stayed green with
+# either `routers/chat.py` line deleted, and with the cold-retry or isolated
+# forwarding in `claude_code.py` dropped)
+# ---------------------------------------------------------------------------
+
+class _Stop(Exception):
+    """Raised by the recording runtime once it has the call's kwargs."""
+
+
+class _StopRuntime:
+    supports_auth_override = False
+    supports_auto_memory_switch = True
+
+    def __init__(self):
+        self.calls = []
+
+    async def execute(self, **kw):
+        self.calls.append(kw)
+        raise _Stop()
+
+    async def execute_headless(self, **kw):
+        self.calls.append(kw)
+        raise _Stop()
+
+
+@pytest.fixture
+def chat_router(monkeypatch):
+    from agent_server.routers import chat as chat_mod
+
+    runtime = _StopRuntime()
+    monkeypatch.setattr(chat_mod, "get_runtime", lambda: runtime)
+    monkeypatch.setattr(chat_mod, "get_process_registry", lambda: MagicMock())
+    monkeypatch.setattr(chat_mod.result_callback, "try_spawn_async", lambda request: False)
+    monkeypatch.setattr(chat_mod.agent_state, "add_message", lambda *a, **k: None)
+    monkeypatch.setattr(chat_mod.agent_state, "record_task_start", lambda *a, **k: None)
+    monkeypatch.setattr(chat_mod.agent_state, "record_task_finish", lambda *a, **k: None)
+    return chat_mod, runtime
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_the_chat_route_hands_the_flag_to_the_runtime(chat_router, flag):
+    from agent_server.models import ChatRequest
+
+    chat_mod, runtime = chat_router
+    with pytest.raises(_Stop):
+        asyncio.run(chat_mod.chat(ChatRequest(message="m", execution_id="e1", disable_auto_memory=flag)))
+    assert runtime.calls[0].get("disable_auto_memory", False) is flag
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_the_task_route_hands_the_flag_to_the_runtime(chat_router, flag):
+    from agent_server.models import ParallelTaskRequest
+
+    chat_mod, runtime = chat_router
+    with pytest.raises(_Stop):
+        asyncio.run(chat_mod.execute_task(
+            ParallelTaskRequest(message="m", execution_id="e2", disable_auto_memory=flag)))
+    assert runtime.calls[0].get("disable_auto_memory", False) is flag
+
+
+@pytest.fixture
+def once_calls(monkeypatch):
+    """`execute_claude_code` with the one-subprocess step recorded, not run."""
+    calls = []
+    monkeypatch.setattr(cc.agent_state, "claude_code_available", True)
+    monkeypatch.setattr(cc, "_capture_chat_session", lambda *a, **k: None)
+    return calls
+
+
+def test_an_isolated_session_turn_keeps_the_flag(monkeypatch, once_calls):
+    async def once(*a, **kw):
+        once_calls.append(kw)
+        return "ok", [], SimpleNamespace(), []
+    monkeypatch.setattr(cc, "_execute_claude_code_once", once)
+    asyncio.run(cc.execute_claude_code("m", model="sonnet", execution_id="e3",
+                                       isolated_session=True, disable_auto_memory=True))
+    assert [c.get("disable_auto_memory") for c in once_calls] == [True]
+
+
+def test_the_cold_retry_keeps_the_flag(monkeypatch, once_calls):
+    """A resume whose JSONL is gone gets one cold retry; that second spawn is
+    the same person's turn and must keep auto-memory off."""
+    from fastapi import HTTPException
+
+    sid = "11111111-2222-3333-4444-555555555555"
+    monkeypatch.setattr(cc.agent_state, "chat_session_id", sid)
+    monkeypatch.setattr(cc.agent_state, "current_model", "sonnet")
+    monkeypatch.setattr(cc.agent_state, "chat_session_model", "sonnet")
+    monkeypatch.setattr(cc, "_valid_session_id", lambda s: s)
+    monkeypatch.setattr(cc, "_cold_retry_reason", lambda *a, **k: "resume_jsonl_missing")
+    registry = MagicMock()
+    registry.was_terminated.return_value = False
+    monkeypatch.setattr(cc, "get_process_registry", lambda: registry)
+    monkeypatch.setattr(cc.chat_session_marker, "clear", lambda: None)
+
+    async def once(*a, **kw):
+        once_calls.append(kw)
+        if len(once_calls) == 1:
+            raise HTTPException(status_code=500, detail="resume failed")
+        return "ok", [], SimpleNamespace(), []
+    monkeypatch.setattr(cc, "_execute_claude_code_once", once)
+    asyncio.run(cc.execute_claude_code("m", model="sonnet", execution_id="e4", disable_auto_memory=True))
+    assert [c.get("disable_auto_memory") for c in once_calls] == [True, True]
