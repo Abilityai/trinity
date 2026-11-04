@@ -135,7 +135,8 @@ While a submission is queued, build and test anyway, keep the snapshot, and run
 `mp-submit.sh` sends `imageId`, `reasonForUpdate`, `osVersion` and
 `softwareIncluded[]` in a `PATCH` to
 `https://api.digitalocean.com/api/v1/vendor-portal/apps/<app_id>`. It keeps the
-listing's other software entries and moves only the Trinity version. A `null`
+listing's other software entries, moves the Trinity version and adds PostgreSQL if
+the listing lacks it. A `null`
 field leaves the existing value alone; a blank string clears it.
 `.../apps/<app_id>/versions/<version>` is deprecated.
 

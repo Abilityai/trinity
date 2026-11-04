@@ -40,8 +40,13 @@ trap 'rm -rf "$WORK"' EXIT
 code="$(mp_api GET "$MP_API" "$WORK/listing.json")" || exit 1
 [ "$code" = "200" ] || { echo "[mp-submit] listing read returned ${code}" >&2; exit 1; }
 
-# The live entries are kept, so a release only moves the Trinity version.
-jq --arg id "$TRINITY_DO_APP_ID" --arg version "${TAG#v}" --arg tag "$TAG" --argjson image "$SNAPSHOT" '
+# The hosted stack bundles PostgreSQL, and its version comes from the compose file.
+COMPOSE="$HERE/../../../docker-compose.hosted.yml"
+POSTGRES="$(sed -nE 's/^[[:space:]]*image:[[:space:]]*postgres:([0-9]+).*/\1/p' "$COMPOSE" | head -1)"
+[ -n "$POSTGRES" ] || { echo "[mp-submit] no postgres image in ${COMPOSE}" >&2; exit 1; }
+
+# Live entries are kept: the Trinity version moves and a missing PostgreSQL entry is added.
+jq --arg id "$TRINITY_DO_APP_ID" --arg version "${TAG#v}" --arg tag "$TAG" --arg postgres "$POSTGRES" --argjson image "$SNAPSHOT" '
     .apps[] | select(.current.appId == $id) | (.current.customData.softwareIncluded // []) as $sw
     | {
         reasonForUpdate: "Trinity \($tag)",
@@ -53,7 +58,12 @@ jq --arg id "$TRINITY_DO_APP_ID" --arg version "${TAG#v}" --arg tag "$TAG" --arg
             else $sw + [{name: "Trinity", version: $version,
                          website: "https://github.com/abilityai/trinity",
                          licenseType: "Apache-2.0"}]
-            end)
+            end
+            | if any(.[]; .name == "PostgreSQL") then .
+              else . + [{name: "PostgreSQL", version: $postgres,
+                         website: "https://www.postgresql.org",
+                         licenseType: "PostgreSQL"}]
+              end)
       }' "$WORK/listing.json" > "$WORK/body.json" || exit 1
 
 echo "[mp-submit] submitting snapshot ${SNAPSHOT} (${TAG}) to app ${TRINITY_DO_APP_ID}"

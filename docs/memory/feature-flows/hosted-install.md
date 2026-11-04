@@ -187,7 +187,7 @@ A full `/release` runs these on the operator's machine, in order. Each takes `DI
 | `mp-status.sh` | Reads the Vendor Portal listing | Exit 0 clear, 3 queued, 4 rejected or unknown, 1 API failure |
 | `mp-build.sh <tag>` | Refuses when baked files differ from the tag; runs Packer with a fixed SSH key and a per-run droplet tag | Snapshot ID on the last line |
 | `boot-check.sh <id> <tag>` | Boots a throwaway droplet, claims `/setup`, checks first boot, TLS, images, database, firewall, sign-in and agent creation, then destroys it | `~/.trinity-marketplace/<id>.pass` |
-| `mp-submit.sh <id>` | Requires the pass record and `mp-status.sh` exit 0; PATCHes the listing, moving only the Trinity version in `softwareIncluded` | Listing status |
+| `mp-submit.sh <id>` | Requires the pass record and `mp-status.sh` exit 0; PATCHes the listing; in `softwareIncluded` it moves the Trinity version, adds PostgreSQL if missing and keeps the rest | Listing status |
 
 `/health` through Caddy is a static nginx 200, so backend health is checked over SSH on `localhost:8000`. `/data/trinity.db` is a path inside the backend container.
 

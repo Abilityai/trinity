@@ -339,9 +339,21 @@ class TestSubmit:
         body = json.loads(patch[0]["sent"])
         assert body["imageId"] == int(_SNAPSHOT)
         versions = {s["name"]: s["version"] for s in body["softwareIncluded"]}
-        assert versions == {"Trinity": "1.0.0", "Caddy": "2.11.4", "Redis": "7"}
+        assert versions == {"Trinity": "1.0.0", "Caddy": "2.11.4", "Redis": "7", "PostgreSQL": "16"}
         assert not record.exists(), "a consumed snapshot keeps no pass record"
         _assert_no_secret_in_argv(rig, _TOKEN)
+
+    def test_an_existing_postgresql_entry_is_kept_once(self, rig: Rig) -> None:
+        data = json.loads(json.dumps(_LISTING))
+        data["apps"][0]["current"]["customData"]["softwareIncluded"].append(
+            {"name": "PostgreSQL", "version": "99", "website": "p", "licenseType": "PostgreSQL"}
+        )
+        rig.world["curl"] = [c for c in rig.world["curl"] if c[0] != "vendor-portal"]
+        rig.set_curl("vendor-portal", json.dumps(data))
+        rig.pass_record()
+        assert rig.run("mp-submit.sh", _SNAPSHOT).returncode == 0
+        body = json.loads(self._patches(rig)[0]["sent"])
+        assert [s["version"] for s in body["softwareIncluded"] if s["name"] == "PostgreSQL"] == ["99"]
 
     def test_a_vendor_400_fails_and_keeps_the_pass_record(self, rig: Rig) -> None:
         record = rig.pass_record()
