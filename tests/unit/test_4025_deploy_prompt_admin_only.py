@@ -108,9 +108,9 @@ def _client(router, principal: User) -> TestClient:
     return TestClient(app, raise_server_exceptions=False)
 
 
-def _deploy(principal: User, *, dry_run: bool = False):
+def _deploy(principal: User, *, dry_run: bool = False, manifest: str = MANIFEST):
     return _client(systems.router, principal).post(
-        "/api/systems/deploy", json={"manifest": MANIFEST, "dry_run": dry_run})
+        "/api/systems/deploy", json={"manifest": manifest, "dry_run": dry_run})
 
 
 def _stored_prompt() -> str:
@@ -191,9 +191,7 @@ def test_an_admin_preview_still_flags_the_prompt(install):
 
 
 def test_a_manifest_without_a_prompt_names_no_prompt_warning(install):
-    no_prompt = MANIFEST.replace(f"prompt: {MANIFEST_PROMPT}\n", "")
-    resp = _client(systems.router, CREATOR_JWT).post(
-        "/api/systems/deploy", json={"manifest": no_prompt})
+    resp = _deploy(CREATOR_JWT, manifest=MANIFEST.replace(f"prompt: {MANIFEST_PROMPT}\n", ""))
 
     assert resp.status_code == 200, resp.text
     assert resp.json()["prompt_updated"] is False

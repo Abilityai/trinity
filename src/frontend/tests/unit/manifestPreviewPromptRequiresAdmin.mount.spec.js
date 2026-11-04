@@ -43,6 +43,12 @@ function render(preview) {
   return mount(ManifestPreview, { props: { preview } })
 }
 
+function needsAck(preview) {
+  const store = useSystemsStore()
+  store.preview = preview
+  return store.needsAcknowledgement
+}
+
 describe('ManifestPreview when the prompt requires an admin', () => {
   beforeEach(() => setActivePinia(createPinia()))
 
@@ -53,10 +59,7 @@ describe('ManifestPreview when the prompt requires an admin', () => {
     expect(w.text()).toContain(WARNING)
     expect(w.text()).not.toContain(PROMPT_CLAUSE)
     expect(w.text()).not.toContain(GATE_HEADING)
-
-    const store = useSystemsStore()
-    store.preview = preview
-    expect(store.needsAcknowledgement).toBe(false)
+    expect(needsAck(preview)).toBe(false)
   })
 
   it('still asks for an acknowledgement when a schedule is enabled, without the prompt clause', () => {
@@ -69,10 +72,7 @@ describe('ManifestPreview when the prompt requires an admin', () => {
     expect(w.text()).toContain('1 recurring schedule')
     expect(w.text()).not.toContain(PROMPT_CLAUSE)
     expect(w.text()).toContain(WARNING)
-
-    const store = useSystemsStore()
-    store.preview = preview
-    expect(store.needsAcknowledgement).toBe(true)
+    expect(needsAck(preview)).toBe(true)
   })
 
   it('keeps the prompt clause for a caller whose deploy will write the prompt', () => {
@@ -81,9 +81,6 @@ describe('ManifestPreview when the prompt requires an admin', () => {
 
     expect(w.text()).toContain(GATE_HEADING)
     expect(w.text()).toContain(PROMPT_CLAUSE)
-
-    const store = useSystemsStore()
-    store.preview = preview
-    expect(store.needsAcknowledgement).toBe(true)
+    expect(needsAck(preview)).toBe(true)
   })
 })
