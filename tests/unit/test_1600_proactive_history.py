@@ -255,8 +255,8 @@ def svc(monkeypatch):
     # swallowed by _send_message_inner's per-channel `except Exception` and
     # resurface as RecipientNotFoundError — making a test pass for the wrong
     # reason rather than fail loudly.
-    service._check_rate_limit = lambda *a, **kw: True
-    service._increment_rate_limit = lambda *a, **kw: None
+    service.check_rate_limit = lambda *a, **kw: True
+    service.increment_rate_limit = lambda *a, **kw: None
     service._get_redis = lambda: None
 
     return types.SimpleNamespace(
