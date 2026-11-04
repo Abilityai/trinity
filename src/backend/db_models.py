@@ -772,6 +772,12 @@ class EmailLoginVerify(BaseModel):
     code: str  # 6-digit code
 
 
+class EmailLoginHandoff(BaseModel):
+    """#4157 — redeem a one-time Workspace sign-in hand-off at `/login`."""
+    email: str
+    token: str = Field(..., min_length=1, max_length=256)
+
+
 class EmailLoginResponse(BaseModel):
     """Response after successful login."""
     access_token: str

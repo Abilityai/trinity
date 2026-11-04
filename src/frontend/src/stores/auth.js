@@ -30,6 +30,11 @@ export const useAuthStore = defineStore('auth', {
     // of a token. { token, enrolled, enrollmentRequired }. The Login view
     // switches to the second-factor step while this is non-null.
     mfaChallenge: null,
+    // #4157: the one-time hand-off the Workspace's code page got for a
+    // platform account ({ email, token }). Memory only: never the URL, never
+    // storage. `/login` redeems it once instead of asking for a second code;
+    // a reload drops it and the second-code form is the fallback.
+    workspaceHandoff: null,
     // Promise that resolves when initializeAuth() completes (PERF-269)
     _initResolve: null,
     _initPromise: null
@@ -450,6 +455,35 @@ export const useAuthStore = defineStore('auth', {
         let detail = error.response?.data?.detail || 'Invalid or expired verification code'
         if (detail === 'email_code_disabled') detail = await this._emailCodeTurnedOff()
         this.authError = detail
+        return false
+      }
+    },
+
+    // #4157: held by the Workspace's code page after a correct code for a
+    // platform account, redeemed by `/login`.
+    setWorkspaceHandoff(email, token) {
+      this.workspaceHandoff = email && token ? { email: email.trim().toLowerCase(), token } : null
+    },
+
+    // #4157: redeem the hand-off for `email` at the platform door, in place of
+    // a second code. Returns true when signed in, false otherwise (including a
+    // 2FA challenge, which the Login view then shows). The token is dropped
+    // before the request, so it is never sent twice. A failure leaves no error
+    // on screen: the ordinary code form is the fallback.
+    async redeemWorkspaceHandoff(email) {
+      const held = this.workspaceHandoff
+      this.workspaceHandoff = null
+      const addr = (email || '').trim().toLowerCase()
+      if (!held || !addr || held.email !== addr || !this.emailCodeLoginEnabled) return false
+      try {
+        const response = await axios.post('/api/auth/email/handoff', { email: addr, token: held.token })
+        if (response.data?.mfa_required) {
+          this._setMfaChallenge(response.data)
+          return false
+        }
+        await this._finalizeLogin(response.data.access_token, response.data.user)
+        return true
+      } catch {
         return false
       }
     },

@@ -173,14 +173,17 @@ def test_the_cap_is_per_email(env):
     assert _status(exc) == 401
 
 
-def test_portal_otp_failures_do_not_touch_the_platform_login_buckets(env):
-    """Regression guard for the cross-surface lockout (review of this PR).
+def test_portal_otp_failures_spend_the_platform_buckets_uniformly(env):
+    """The portal's OWN cap is portal-scoped, so a portal flood still trips
+    the portal first and never stands in for the platform's own check.
 
-    The OSS `check_otp_rate_limit`/`check_login_rate_limit` build their keys from
-    the identifier passed in; the platform email path passes the bare email. If
-    the portal reused the bare email, 5 wrong portal codes would lock the victim
-    out of PLATFORM sign-in. The portal must write only `portal:`-scoped keys and
-    leave `otp_attempts:{email}` / `login_attempts_acct:{email}` untouched.
+    #4157 changed the second half: a correct portal code for a platform account
+    now leads to a platform session (the hand-off), so a portal guess also
+    spends the platform `otp_attempts:{email}` / `login_attempts_acct:{email}`
+    buckets — for EVERY address, never only for accounts, since spending them
+    selectively made them an account oracle. That is no new lockout: the
+    platform route itself spends both buckets for any address an
+    unauthenticated caller names (`routers.auth._email_login_failed`).
     """
     from fastapi import HTTPException
 
@@ -188,20 +191,16 @@ def test_portal_otp_failures_do_not_touch_the_platform_login_buckets(env):
     r = oss_auth.get_redis_client()
     victim = "victim@example.com"
 
-    # Exhaust the portal OTP cap for the victim.
     for i in range(oss_auth.OTP_MAX_ATTEMPTS + 1):
         with pytest.raises(HTTPException):
             _verify(portal_router, f"{i:06d}", email=victim)
 
     # The portal bucket exists and is tripped...
     assert r.get(f"otp_attempts:portal:{victim}") is not None
-    # ...but the PLATFORM buckets the real email-login path reads are untouched.
-    assert r.get(f"otp_attempts:{victim}") is None, (
-        "portal OTP failures leaked into the platform OTP bucket — cross-surface lockout"
-    )
-    assert r.get(f"login_attempts_acct:{victim}") is None, (
-        "portal failures leaked into the platform per-account login bucket"
-    )
+    # ...and the platform buckets moved by the wrong codes the portal compared
+    # (the last attempt is refused by the portal cap before any comparison).
+    assert r.get(f"otp_attempts:{victim}") == str(oss_auth.OTP_MAX_ATTEMPTS)
+    assert r.get(f"login_attempts_acct:{victim}") == str(oss_auth.OTP_MAX_ATTEMPTS)
 
 
 # ---------------------------------------------------------------------------
