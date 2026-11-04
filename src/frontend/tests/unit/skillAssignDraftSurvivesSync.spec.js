@@ -94,6 +94,27 @@ describe('#2914 — the draft and a Sync', () => {
     expect(box(wrapper, 'alpha').element.checked).toBe(true)
   })
 
+  it('keeps a tick the filter is hiding, and the filter, across the same re-read (ent#660)', async () => {
+    const wrapper = await mountPanel()
+    const store = useSkillsStore()
+
+    await box(wrapper, 'beta').setValue(true)
+    await wrapper.find('[data-testid="skill-assign-filter"]').setValue('third')
+    await nextTick()
+    expect(box(wrapper, 'beta').exists()).toBe(false)              // hidden, not dropped
+
+    api.post.mockResolvedValue({ data: { results: {} } })
+    respond({ assigned: rows('conflict') })
+    await store.inject()
+    await flushPromises(); await nextTick()
+
+    expect(wrapper.find('[data-testid="skill-assign-filter"]').element.value).toBe('third')
+    expect(wrapper.find('[data-testid="skill-assign-pending"]').text()).toBe('1 to add')
+    await wrapper.find('[data-testid="skill-assign-filter"]').setValue('')
+    await nextTick()
+    expect(box(wrapper, 'beta').element.checked).toBe(true)
+  })
+
   it('still follows a real change to the assignment set', async () => {
     const wrapper = await mountPanel()
     const store = useSkillsStore()

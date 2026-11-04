@@ -795,6 +795,47 @@ but was never surfaced. This is the read surface; per-client controls
   join filters by `agent_name` through the channel binding, so a client of
   another agent never appears.
 
+### 46.3 An Access Request Names Who Asked (trinity-enterprise#737)
+
+**Description**: The owner approves a person, not a bare email. A channel access
+request records who asked, as the channel saw them, and the owner's pending list
+shows that person, plus where the same channel identity has been seen before.
+
+- **FR-1 — Capture**: `access_requests` gains `requester_channel_id` (the
+  channel's stable user id: Telegram id, Slack member id, WhatsApp number),
+  `requester_handle`, `requester_name`, `requester_chat_id` and
+  `requester_thread_id`. All nullable, and filled only from what the channel
+  exposes (`ChannelAdapter.requester_identity`):
+  - **Telegram:** id, @username and first/last name.
+  - **WhatsApp:** number and profile name.
+  - **Slack:** member id, handle, display name, channel and thread.
+
+  Nothing is guessed. Values are trimmed and bounded at 256 characters.
+- **FR-2 — Every path**: the per-message router gate and the Telegram and
+  WhatsApp `/login` flows pass the identity. Extraction is best-effort: a
+  failure records the request without identity rather than losing it. The
+  public link has no channel identity and records none.
+- **FR-3 — One request, one identity**: a refreshed request replaces the whole
+  identity, so a request from a channel that exposes less never inherits
+  another's. A decision keeps the identity on the decided row.
+- **FR-4 — The owner's view**: `GET /api/agents/{name}/access-requests` returns
+  the identity fields, `identity_captured` (False for the public link and for
+  rows older than this change), and `known_as`. `known_as` lists the same
+  channel identity seen before: an earlier request (approved / denied / asked)
+  or an email it verified on a Telegram/WhatsApp bot. It is limited to agents
+  the viewer may manage (`can_user_share_agent`: owner or admin), excludes the
+  request itself, and is capped at 10.
+- **FR-5 — UI**: the Sharing tab's pending list leads with the name (or
+  @handle, or the email), then the handle, the channel and its id, then the
+  email. Up to three "seen before" chips are shown, with a counted rest. A
+  public-link request reads "Email only — public link", and an older one reads
+  "Identity not captured".
+- **FR-6 — Personal data**: the list is owner/admin only, as before. The rows
+  are removed with the agent (`access_requests` is CASCADE in
+  `db/agent_cleanup.py`). Not done: the agent data export (#1169) carries the
+  container's `data/` only, with no platform records of any kind, so there is
+  no export these rows could join without a new export format.
+
 ---
 
 ## 47. Public & Channel Custom Instructions (#1205)
@@ -1134,6 +1175,24 @@ own reply. Live stays the default and is unchanged.
 - **FR-5 — Barge-in**: talking over the agent pauses playback; if it was real speech the
   running turn is cancelled through the terminate primitive and the new words run next.
   Echo of the agent's own voice resumes playback.
+- **FR-5a — Stopping the agent (trinity-enterprise#1087)**: the person can stop the agent
+  mid-reply without hanging up, by voice or by hand, and the call returns to listening.
+  - A whole short stop phrase ("stop", "wait", "hold on", "never mind", …) said while
+    there is something to stop silences the agent, cancels its turn, and is never sent
+    as a turn. With nothing to stop the same words go to the agent. While an approval
+    waits, "stop" and "cancel" answer it **no**.
+  - Over playback, the speech bar follows the agent's own output level (linear RMS), so a
+    normal voice is heard over a quiet passage and the agent's echo is not taken for speech.
+  - The call strip carries a Stop control, always present, disabled with "Nothing to
+    stop" when idle. The composer's Stop on a Direct call silences the voice too.
+  - Escape silences the agent while its voice is playing and never cancels a turn;
+    with nothing playing it ends the call (a running turn keeps going, as on hang-up).
+  - A stop reaches the run being spoken, including an approved run that is not the
+    composer's own turn. Words queued behind it, a transcript already in flight and audio
+    already on the wire are dropped. An approval prompt cut off by a stop is answered on
+    its card, never by a later spoken yes.
+  - The strip says "Stopped." or, when the reply had finished and only its audio was cut,
+    "Stopped. The full reply is in the chat."
 - **FR-6 — Approvals are Trinity's asks**: an ask raised in the turn appears as the
   normal chat card and is read aloud. A whole short yes or no answers it through the
   person's own answer route, so the Inbox is the record. Anything else runs as the next

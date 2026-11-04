@@ -60,6 +60,29 @@ describe('the rules editor and a stored profile', () => {
   })
 })
 
+describe('the visitor-shell toggle and a stored profile (ent#926 × #341)', () => {
+  async function flipVisitorShell(stored) {
+    store.getGuardrails.mockResolvedValue({ guardrails: stored })
+    wrapper = mount(GuardrailsPanel, { props: { agentName: 'scout', embedded: true }, attachTo: document.body })
+    await flushPromises()
+    await wrapper.find('[data-testid="guardrails-visitor-shell"] [role="switch"]').trigger('click')
+    await flushPromises()
+    return store.setGuardrails.mock.calls[0][1]
+  }
+
+  it('leaves the profile and its tool list out once a profile is stored', async () => {
+    const sent = await flipVisitorShell({
+      max_turns_chat: 5, disallowed_tools: SEND, tool_access: { profile: 'workspace_only' },
+    })
+    expect(sent).toEqual({ max_turns_chat: 5, visitor_shell: false })
+  })
+
+  it('an agent with no profile keeps its list, as before', async () => {
+    const sent = await flipVisitorShell({ disallowed_tools: ['Bash'] })
+    expect(sent).toEqual({ disallowed_tools: ['Bash'], visitor_shell: false })
+  })
+})
+
 describe('the Guardrails pane', () => {
   it('re-reads the rules after a Tool access save', async () => {
     store.getGuardrails.mockResolvedValue({ guardrails: {} })

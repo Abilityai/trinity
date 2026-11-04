@@ -926,7 +926,7 @@
     },
     "src/frontend/src/views/AgentDetail.vue": {
       "raw_nongray": 0,
-      "raw_gray": 20,
+      "raw_gray": 18,
       "hardcoded_colors": 1
     },
     "src/frontend/src/views/Dashboard.vue": {

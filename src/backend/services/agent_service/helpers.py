@@ -687,10 +687,12 @@ def check_guardrails_env_matches(container, agent_name: str) -> bool:
     env_dict = {e.split("=", 1)[0]: e.split("=", 1)[1] for e in env_list if "=" in e}
     current = env_dict.get("AGENT_GUARDRAILS", "")
 
+    # ent#926: `visitor_shell` is read live by the backend on every turn, so a
+    # change to it alone must not recreate the container.
     # trinity-enterprise#341: `tool_access` records the owner's profile choice;
     # what it enforces is already in `disallowed_tools` and the read-only layer
     # (live), so a change to the record alone must not recreate the container.
-    live = {"tool_access"}
+    live = {"visitor_shell", "tool_access"}
     desired = {k: v for k, v in (db.get_guardrails_config(agent_name) or {}).items() if k not in live}
 
     if not desired and not current:

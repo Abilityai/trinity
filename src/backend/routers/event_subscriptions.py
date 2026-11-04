@@ -443,11 +443,16 @@ async def emit_event_for_agent(
     Self-gated (trinity-enterprise#719): the event records `{name}` as its
     source, and each subscriber's delivery is authorised against that recorded
     source (trinity-enterprise#739), so an agent key emits only as its own agent
-    and the system key only as `trinity-system`. A person may still emit for an
-    agent they can access. Every other principal is refused.
+    and the system key only as `trinity-system`. A person may emit for an agent
+    they own (ent#926). Every other principal is refused.
     """
     assert_own_agent(current_user, name, detail=_OWN_EMIT)
     _assert_may_emit_for_agent(current_user)
+    # ent#926: owner tier for PEOPLE. Deliveries run as the platform (admin
+    # JWT), so a person the agent is merely shared with must not fire them in its
+    # name. An agent key in a restricted turn is refused by the standing-work fence.
+    if is_person_principal(current_user):
+        assert_agent_owner(current_user, name, detail="Only the agent's owner can emit events in its name")
 
     # Validate event_type format
     if not re.match(r"^[a-zA-Z0-9_]+(\.[a-zA-Z0-9_]+)*$", data.event_type):
