@@ -112,14 +112,15 @@ class TestRemoveAgentVolumes:
         return await self.du.remove_agent_volumes("ag1")
 
     @pytest.mark.asyncio
-    async def test_removes_all_three_volumes(self):
+    async def test_removes_all_four_volumes(self):
         vols = {
             "agent-ag1-workspace": _volume("agent-ag1-workspace", "ag1", "agent-workspace"),
             "agent-ag1-public": _volume("agent-ag1-public", "ag1", "agent-public"),
             "agent-ag1-shared": _volume("agent-ag1-shared", "ag1", "agent-shared"),
+            "agent-ag1-config": _volume("agent-ag1-config", "ag1", "agent-config"),
         }
         removed = await self._run(lambda n: vols[n])
-        assert removed == 3
+        assert removed == 4
         for v in vols.values():
             v.remove.assert_called_once()
 

@@ -412,22 +412,8 @@ def _create_agent_internal_fn():
     )
 
 
-def test_create_awaits_the_retry_wrapper_not_the_raw_create():
-    import ast
-
-    fn = _create_agent_internal_fn()
-    awaited = {
-        node.value.func.id
-        for node in ast.walk(fn)
-        if isinstance(node, ast.Await)
-        and isinstance(node.value, ast.Call)
-        and isinstance(node.value.func, ast.Name)
-    }
-    assert "_run_agent_container_with_port_retry" in awaited
-    assert "_create_agent_container" not in awaited, (
-        "create_agent_internal must go through the retry wrapper — a direct "
-        "_create_agent_container call bypasses the #2215 bind-conflict belt"
-    )
+# Retry-wrapper wiring is exercised for persistent and ephemeral create paths
+# in test_1484_create_agent_characterization.py (test_2215_create_awaits_retry_wrapper).
 
 
 def test_auto_allocated_port_is_captured_before_the_mutation():

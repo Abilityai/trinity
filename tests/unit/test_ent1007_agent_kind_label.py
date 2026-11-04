@@ -154,6 +154,7 @@ def test_rebuild_from_nothing_carries_no_kind_label(monkeypatch):
     fake_db.deactivate_agent_mcp_keys.return_value = 0
     fake_db.create_agent_mcp_api_key.return_value = Mock(api_key="trinity_mcp_x")
     fake_db.get_volume_base_name.side_effect = lambda n: n
+    fake_db.get_agent_config_storage_format.return_value = None  # Legacy recovery.
     monkeypatch.setattr(mod, "db", fake_db)
 
     asyncio.run(mod.recreate_missing_container("a1"))
