@@ -306,8 +306,8 @@ fails if the agent image calls a backend path the app does not register.
 // src/mcp-server/src/tools/agents.ts
 {
   name: "inject_credentials",
-  description: "Inject credential files into a running agent (a signed-in session only)",
-  canAccess: humanOnlyToolAccess("interactive"),  // listed to no key (trinity-enterprise#719)
+  description: "Inject credential files into a running agent (a person: a signed-in session or their own user key)",
+  canAccess: humanOnlyToolAccess("person"),  // listed to user keys only (trinity-enterprise#719)
   inputSchema: {
     type: "object",
     properties: {
