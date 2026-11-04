@@ -18,11 +18,13 @@
  *    null, or a non-JSON body, comes back as `{success: false, http_status,
  *    detail}`.
  * 4. **Audit honesty.** A 403 goes through `access.ts::accessDenied`, so its
- *    tool-call audit row says `denied: true` (#2807). Every other refusal
- *    (400, 401, 409, 422, 503, 500, 404/405) is NOT stamped as a denial. (Those
- *    rows read `success: true` today because `ToolOutcome` has only the
- *    `denied` kind — the registered follow-up in types.ts. These tests assert
- *    only that they are not denials, so the follow-up flips nothing here.)
+ *    tool-call audit row says `denied: true` (#2807). Every other returned
+ *    failure (400, 401, 409, 422, 503, 500, 404/405, a non-object body, a
+ *    missing key, a dropped connection) goes through `audit.ts::toolFailed`:
+ *    its row says `success: false` with a short `error` and NO `denied` key
+ *    (#4026). A 2xx, including a dry-run `invalid` and a real-run `partial`,
+ *    stays `success: true`. `teardown_system` is pinned the same way below,
+ *    through the same registered server.
  * 5. **`deploy_system` is unchanged** (create mode is byte-identical, AC6): its
  *    request and its throw-on-500 are pinned through the same registered path.
  *
@@ -136,6 +138,7 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
   let calls = 0;
   let applyReply: Reply = jsonReply(200, PLAN);
   let deployReply: Reply = jsonReply(200, { status: "valid", system_name: "acme", agents_created: [], warnings: [] });
+  let teardownReply: Reply = jsonReply(200, { status: "preview", system_name: "acme", members: [] });
 
   before(async () => {
     backend = createHttpServer((req, res) => {
@@ -182,6 +185,7 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
         });
         if (url === "/api/systems/apply") return answer(applyReply);
         if (url === "/api/systems/deploy") return answer(deployReply);
+        if (url.startsWith("/api/enterprise/system-teardown/")) return answer(teardownReply);
         return answer(jsonReply(200, {})); // health probe, anything else
       });
     });
@@ -233,6 +237,11 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
   const reset = (apply: Reply = jsonReply(200, PLAN)) => {
     requests.length = 0;
     applyReply = apply;
+  };
+  /** A clean slate for a teardown case. */
+  const resetTeardown = (teardown: Reply) => {
+    requests.length = 0;
+    teardownReply = teardown;
   };
 
   /** THIS call's audit row, awaited (fire-and-forget POST) and checked for tool and session (#2952). */
@@ -374,6 +383,28 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
           "exactly one request, and never to /api/systems/deploy"
         );
         assert.equal(row.details.denied, undefined, "an absent route is not an authorization denial");
+        assert.equal(row.details.success, false, `a not_available result was audited as a success: ${JSON.stringify(row.details)}`);
+        assert.equal(row.details.error, `HTTP ${status}: apply route absent (not_available)`);
+        // Byte-for-byte what the tool returned before #4026: the stamp is out-of-band.
+        assert.equal(
+          text,
+          JSON.stringify(
+            {
+              success: false,
+              not_available: true,
+              http_status: status,
+              error:
+                `System apply is not available on this Trinity build: POST /api/systems/apply answered ${status}, `
+                + "so the backend predates apply mode. Nothing was planned or written, and do NOT fall back to "
+                + "deploy_system: it is create-only and would create suffixed copies (`<name>_2`) of members "
+                + "that already exist. Upgrade the instance to a build with apply mode, or change existing "
+                + "members one at a time with the per-agent tools.",
+              detail,
+            },
+            null,
+            2
+          )
+        );
         await s.client.close();
       });
     }
@@ -394,22 +425,25 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
   // -------------------------------------------------------------------------
   describe("every other JSON object body is the result, and none of them is a denial", () => {
     const VALIDATION_422 = { detail: [{ loc: ["body", "mode"], msg: "Extra inputs are not permitted", type: "extra_forbidden" }] };
-    for (const [status, body] of [
-      [400, { detail: "Invalid manifest: agents must be a mapping" }],
-      [401, { detail: "Invalid or expired API key" }],
-      [409, REFUSED_409],
-      [422, VALIDATION_422],
-      [503, REFUSED_503],
-      [500, FAILED_500],
+    for (const [status, body, reason] of [
+      [400, { detail: "Invalid manifest: agents must be a mapping" }, "HTTP 400: Invalid manifest: agents must be a mapping"],
+      [401, { detail: "Invalid or expired API key" }, "HTTP 401: Invalid or expired API key"],
+      [409, REFUSED_409, "HTTP 409: status 'refused'"],
+      [422, VALIDATION_422, "HTTP 422"],
+      [503, REFUSED_503, "HTTP 503: status 'refused'"],
+      [500, FAILED_500, "HTTP 500: status 'failed'"],
     ] as const) {
-      it(`a ${status} body comes back AS the result, with http_status and success: false, and is not audited as a denial`, async () => {
+      it(`a ${status} body comes back AS the result, with http_status and success: false, and is audited as a failure, not a denial`, async () => {
         reset(jsonReply(status, body));
         const s = await session(`body-${status}`);
         const { text, isError, row } = await s.call("apply_system", { manifest: MANIFEST, dry_run: false });
 
         assert.equal(isError, false, "a refusal is a result, not a thrown error");
-        assert.deepEqual(parsed(text), { ...body, http_status: status, success: false });
+        // Byte-for-byte: the body's own keys first, then http_status, then success.
+        assert.equal(text, JSON.stringify({ ...body, http_status: status, success: false }, null, 2));
         assert.equal(row.details.denied, undefined, `a ${status} is not an authorization denial: only a 403 is`);
+        assert.equal(row.details.success, false, `a returned ${status} was audited as a success: ${JSON.stringify(row.details)}`);
+        assert.equal(row.details.error, reason);
         await s.client.close();
       });
     }
@@ -430,8 +464,10 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
         const { text, isError, row } = await s.call("apply_system", { manifest: MANIFEST, dry_run: false });
 
         assert.equal(isError, false);
-        assert.deepEqual(parsed(text), { success: false, http_status: reply.status, detail });
+        assert.equal(text, JSON.stringify({ success: false, http_status: reply.status, detail }, null, 2));
         assert.equal(row.details.denied, undefined);
+        assert.equal(row.details.success, false, `a returned ${reply.status} was audited as a success: ${JSON.stringify(row.details)}`);
+        assert.equal(row.details.error, `HTTP ${reply.status}`, "a raw body (HTML, say) never lands on the audit row");
         await s.client.close();
       });
     }
@@ -452,6 +488,24 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
       assert.equal(out.detail, "This action requires a person's credential");
       assert.match(out.error, /apply is human-only: run it with a person's credential/);
       assert.equal(out.not_available, undefined, "403 is not 404 — do not conflate");
+      assert.equal(
+        text,
+        JSON.stringify(
+          {
+            success: false,
+            not_permitted: true,
+            http_status: 403,
+            error:
+              "Refused (403): apply is human-only: run it with a person's credential (an interactive session "
+              + "or an operator's own user-scoped key) holding the 'creator' role. Agent, connector and system "
+              + "keys are refused, because apply writes to existing agents. `detail` names the gate that refused.",
+            detail: "This action requires a person's credential",
+          },
+          null,
+          2
+        ),
+        "the 403 envelope is byte-identical"
+      );
 
       assert.equal(row.details.success, false, `the denial was audited as a success: ${JSON.stringify(row.details)}`);
       assert.equal(row.details.denied, true);
@@ -471,6 +525,40 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
       assert.equal(parsed(second.text).status, "refused");
       await s.client.close();
     });
+
+    it("on ONE session, a 409 then a 200: the 200 is a success (no stale failure marker)", async () => {
+      const s = await session("fail-then-ok");
+      reset(jsonReply(409, REFUSED_409));
+      const first = await s.call("apply_system", { manifest: MANIFEST, dry_run: false });
+      reset(jsonReply(200, PLAN));
+      const second = await s.call("apply_system", { manifest: MANIFEST });
+
+      assert.equal(first.row.details.success, false);
+      assert.equal(second.row.details.success, true, `the 200 inherited the 409's failure: ${JSON.stringify(second.row.details)}`);
+      assert.equal(second.row.details.error, undefined);
+      await s.client.close();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  describe("a 2xx is a success, whatever the report's own status says", () => {
+    for (const [label, body] of [
+      ["a dry-run 'invalid' plan", { ...PLAN, status: "invalid" }],
+      ["a real-run 'partial' apply", { ...PLAN, dry_run: false, status: "partial", failed: [{ name: "acme-worker", step: "grant", reason: "x" }] }],
+    ] as const) {
+      it(`${label}: returned verbatim, audited success: true`, async () => {
+        reset(jsonReply(200, body));
+        const s = await session(`ok-${label.replace(/\W+/g, "-")}`);
+        const { text, isError, row } = await s.call("apply_system", { manifest: MANIFEST, dry_run: body.dry_run });
+
+        assert.equal(isError, false);
+        assert.equal(text, JSON.stringify(body, null, 2));
+        assert.equal(row.details.success, true, `a 2xx was audited as a failure: ${JSON.stringify(row.details)}`);
+        assert.equal(row.details.error, undefined);
+        assert.equal(row.details.denied, undefined);
+        await s.client.close();
+      });
+    }
   });
 
   // -------------------------------------------------------------------------
@@ -537,6 +625,119 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
   });
 
   // -------------------------------------------------------------------------
+  // #4026: teardown_system through the same registered server. Its caller
+  // JSON is pinned byte-for-byte as it was before the stamp existed; only the
+  // audit row changes.
+  describe("teardown_system's audit row (#4026)", () => {
+    const TEARDOWN_404 =
+      "System teardown is not available on this platform. Remove members "
+      + "individually with DELETE /api/agents/{name}.";
+    const TEARDOWN_403 =
+      "Refused. System teardown is licensed separately AND is human-only: a "
+      + "machine credential (agent, connector, system, ops) cannot remove a "
+      + "fleet, because that is the bulk form of an operation that is "
+      + "spawn-scoped one agent at a time. Ask a human operator with the "
+      + "creator role.";
+    const TEARDOWN_503 =
+      "Refused: the removal set could not be established — either the "
+      + "membership tags or the agent roster could not be read — and teardown "
+      + "will not derive a removal set from name prefixes alone. Nothing was "
+      + "removed. The detail says which read failed; retry once that dependency "
+      + "is reachable.";
+    /** The `{success: false, error, detail, ...flags}` envelope teardownFailure has always returned. */
+    const envelope = (status: number, body: string, message: string | null, flags: Record<string, unknown> = {}) => {
+      const raw = `API error (${status}): ${body}`;
+      return JSON.stringify({ success: false, error: message ?? raw, detail: raw, ...flags }, null, 2);
+    };
+    const FAILED_REPORT = {
+      status: "failed",
+      system_name: "acme",
+      dry_run: false,
+      members: [{ name: "acme-a", outcome: "failed", reason: "docker daemon gone" }],
+    };
+    const NOT_AUTHORIZED_REPORT = {
+      ...FAILED_REPORT,
+      members: [{ name: "acme-a", outcome: "skipped", reason: "not_authorized" }],
+    };
+    const call = (s: Awaited<ReturnType<typeof session>>) =>
+      s.call("teardown_system", { system_name: "acme", dry_run: false });
+
+    for (const [label, reply, expectedText, reason] of [
+      ["404 (no teardown on this build)", jsonReply(404, { detail: "Not Found" }), envelope(404, '{"detail":"Not Found"}', TEARDOWN_404, { not_available: true }), "HTTP 404: not_available"],
+      ["503 (membership unverified)", jsonReply(503, { detail: "tags unreadable" }), envelope(503, '{"detail":"tags unreadable"}', TEARDOWN_503, { membership_unverified: true, retryable: true }), "HTTP 503: membership_unverified, retryable"],
+      ["400 (confirmed set names no member)", jsonReply(400, { detail: "no current member" }), envelope(400, '{"detail":"no current member"}', null, { bad_request: true }), "HTTP 400: bad_request"],
+      ["500 carrying a failed report", jsonReply(500, FAILED_REPORT), JSON.stringify(FAILED_REPORT, null, 2), "HTTP 500: status 'failed'"],
+      ["an unexpected status (502)", jsonReply(502, { detail: "bad gateway" }), envelope(502, '{"detail":"bad gateway"}', null), "HTTP 502"],
+      ["a 500 whose body is not a failed report", jsonReply(500, { detail: "boom" }), envelope(500, '{"detail":"boom"}', null), "HTTP 500"],
+      ["a 500 whose body is malformed JSON", { status: 500, body: "not json{", contentType: "text/plain" } as Reply, envelope(500, "not json{", null), "HTTP 500"],
+    ] as const) {
+      it(`${label}: the caller's text is unchanged, the row is a failure and not a denial`, async () => {
+        resetTeardown(reply);
+        const s = await session(`td-${label.replace(/\W+/g, "-")}`);
+        const { text, isError, row } = await call(s);
+
+        assert.equal(isError, false, `teardown_system threw: ${text}`);
+        assert.equal(text, expectedText);
+        assert.equal(row.details.success, false, `a returned teardown failure was audited as a success: ${JSON.stringify(row.details)}`);
+        assert.equal(row.details.error, reason);
+        assert.equal(row.details.denied, undefined, "an operational refusal is not an authorization denial");
+        assert.deepEqual(requests.map((r) => r.method), ["DELETE"]);
+        await s.client.close();
+      });
+    }
+
+    it("a dropped connection: still an object, audited as a failure with the transport error", async () => {
+      resetTeardown({ status: 0, body: "", disconnect: true });
+      const s = await session("td-dropped");
+      const { text, isError, row } = await call(s);
+      const out = parsed(text);
+
+      assert.equal(isError, false);
+      assert.deepEqual(Object.keys(out), ["success", "error", "detail"]);
+      assert.equal(out.success, false);
+      assert.equal(out.error, out.detail);
+      assert.equal(row.details.success, false);
+      assert.equal(row.details.error, out.error);
+      assert.equal(row.details.denied, undefined);
+      await s.client.close();
+    });
+
+    for (const [label, body] of [
+      ["the licensing / human-only refusal", JSON.stringify({ detail: "Enterprise feature 'system_teardown' is not licensed" })],
+      ["a failed report where every member was not_authorized", JSON.stringify(NOT_AUTHORIZED_REPORT)],
+    ] as const) {
+      it(`403, ${label}: the caller's text is unchanged, the row is a denial`, async () => {
+        resetTeardown({ status: 403, body });
+        const s = await session(`td-403-${label.replace(/\W+/g, "-")}`);
+        const { text, row } = await call(s);
+
+        assert.equal(text, envelope(403, body, TEARDOWN_403, { not_permitted: true }));
+        assert.equal(row.details.success, false, `a teardown 403 was audited as a success: ${JSON.stringify(row.details)}`);
+        assert.equal(row.details.denied, true);
+        assert.equal(row.details.error, TEARDOWN_403);
+        await s.client.close();
+      });
+    }
+
+    for (const [label, body] of [
+      ["a preview", { status: "preview", system_name: "acme", members: [{ name: "acme-a" }] }],
+      ["a partial teardown", { status: "partial", system_name: "acme", members: [{ name: "acme-a", outcome: "removed" }, { name: "acme-b", outcome: "failed" }] }],
+    ] as const) {
+      it(`200 ${label}: returned verbatim, audited success: true`, async () => {
+        resetTeardown(jsonReply(200, body));
+        const s = await session(`td-ok-${label.replace(/\W+/g, "-")}`);
+        const { text, row } = await call(s);
+
+        assert.equal(text, JSON.stringify(body, null, 2));
+        assert.equal(row.details.success, true);
+        assert.equal(row.details.error, undefined);
+        assert.equal(row.details.denied, undefined);
+        await s.client.close();
+      });
+    }
+  });
+
+  // -------------------------------------------------------------------------
   describe("it never throws", () => {
     it("a session with no API key gets a RETURNED refusal from the registered tool, and nothing reaches the backend", async () => {
       reset();
@@ -552,6 +753,8 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
         assert.equal(out.note, undefined, "nothing was sent, so nothing can have been applied");
         assert.deepEqual(requests, [], "no backend request may be made without the caller's key");
         assert.equal(row.details.denied, undefined);
+        assert.equal(row.details.success, false, `a missing key was audited as a success: ${JSON.stringify(row.details)}`);
+        assert.equal(row.details.error, out.error);
       } finally {
         await s.close();
       }
@@ -569,6 +772,8 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
       assert.equal(out.http_status, undefined);
       assert.deepEqual(requests.map((r) => r.path), ["/api/systems/apply"], "the request reached the backend and was dropped there");
       assert.equal(row.details.denied, undefined);
+      assert.equal(row.details.success, false, `a dropped connection was audited as a success: ${JSON.stringify(row.details)}`);
+      assert.equal(row.details.error, `${out.error} (real run, outcome unknown)`);
       // A real run whose answer was lost may have applied writes: say so (fresh review #6).
       assert.match(out.note, /some writes may already have been applied/);
       assert.match(out.note, /dry_run: true/);
@@ -578,10 +783,12 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
     it("a dropped DRY run carries no may-have-applied note (a dry run writes nothing)", async () => {
       reset({ status: 0, body: "", disconnect: true });
       const s = await session("dropped-dry");
-      const { text } = await s.call("apply_system", { manifest: MANIFEST });
+      const { text, row } = await s.call("apply_system", { manifest: MANIFEST });
       const out = parsed(text);
       assert.equal(out.success, false);
       assert.equal(out.note, undefined);
+      assert.equal(row.details.success, false);
+      assert.equal(row.details.error, out.error, "a dry run cannot have applied anything, so no outcome-unknown suffix");
       await s.client.close();
     });
   });

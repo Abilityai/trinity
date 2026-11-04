@@ -7,6 +7,7 @@
 import { z } from "zod";
 import { TrinityClient, ApiError } from "../client.js";
 import { accessDenied, type DenyCallContext } from "../access.js";
+import { toolFailed } from "../audit.js";
 import type { McpAuthContext } from "../types.js";
 
 /**
@@ -25,8 +26,14 @@ import type { McpAuthContext } from "../types.js";
  * failure it cannot reason about. The `{success: false, …flags}` shape is the
  * `call_a2a_agent` / `fetch_credential` precedent, where the flags ARE the
  * structure.
+ *
+ * Audit (#4026): a returned result is not a thrown one, so each branch stamps
+ * the call's outcome out-of-band, leaving the caller's JSON untouched. The 403
+ * is an authorization refusal and goes through `accessDenied` (`denied`, the
+ * #3435 precedent); every other branch, the `failed` report included, through
+ * `toolFailed`, with a short reason naming the status and the flags.
  */
-function teardownFailure(error: unknown): string {
+function teardownFailure(error: unknown, context: DenyCallContext | undefined): string {
   const status = error instanceof ApiError ? error.status : undefined;
   const raw = error instanceof Error ? error.message : String(error);
   // `ApiError.body` is the raw response body, retained verbatim for exactly
@@ -42,7 +49,7 @@ function teardownFailure(error: unknown): string {
     try {
       const report = JSON.parse(body);
       if (report && report.status === "failed") {
-        return JSON.stringify(report, null, 2);
+        return toolFailed(context, report, "HTTP 500: status 'failed'");
       }
     } catch {
       // Not JSON — fall through to the flag shape below.
@@ -76,7 +83,16 @@ function teardownFailure(error: unknown): string {
     flags.bad_request = true;
   }
 
-  return JSON.stringify({ success: false, error: message, detail: raw, ...flags }, null, 2);
+  const envelope = { success: false, error: message, detail: raw, ...flags };
+  if (status === 403) {
+    return accessDenied(context, envelope);
+  }
+  const flagNames = Object.keys(flags);
+  const auditReason =
+    status === undefined
+      ? raw
+      : `HTTP ${status}` + (flagNames.length > 0 ? `: ${flagNames.join(", ")}` : "");
+  return toolFailed(context, envelope, auditReason);
 }
 
 /**
@@ -105,10 +121,14 @@ export const applySystemAccess = (auth: any): boolean =>
  * Every other non-2xx with a JSON OBJECT body (the 409 / 503 / 500 apply
  * reports, a 400, 401 or 422) IS the result: the body comes back with
  * `http_status` and `success: false` added, so `status`, `blockers[]` and
- * `failed[]` reach the caller intact. Those are not authorization denials and
- * are NOT stamped as such: `ToolOutcome` has no non-denial kind yet
- * (types.ts). Anything else (a JSON scalar, array or null, or a non-JSON body)
- * comes back as `{success: false, http_status, detail}`.
+ * `failed[]` reach the caller intact. Anything else (a JSON scalar, array or
+ * null, or a non-JSON body) comes back as `{success: false, http_status,
+ * detail}`.
+ *
+ * Audit (#4026): every branch but the 403 is a returned failure that is NOT an
+ * authorization denial, so it is stamped through `toolFailed` (`success:
+ * false`, no `denied`) with a short reason: the status, then the report's own
+ * `status` or a string `detail`. A raw non-object body never reaches the row.
  */
 function applyFailure(
   error: unknown,
@@ -128,7 +148,7 @@ function applyFailure(
         + "Apply is idempotent: run apply_system with dry_run: true to see where the "
         + "system stands, then re-apply.";
     }
-    return JSON.stringify(result, null, 2);
+    return toolFailed(context, result, sentRealRun ? `${message} (real run, outcome unknown)` : message);
   }
 
   const status = error.status;
@@ -148,7 +168,8 @@ function applyFailure(
       : body;
 
   if (status === 404 || status === 405) {
-    return JSON.stringify(
+    return toolFailed(
+      context,
       {
         success: false,
         not_available: true,
@@ -161,8 +182,7 @@ function applyFailure(
           + "members one at a time with the per-agent tools.",
         detail,
       },
-      null,
-      2
+      `HTTP ${status}: apply route absent (not_available)`
     );
   }
 
@@ -180,13 +200,20 @@ function applyFailure(
   }
 
   if (isObject) {
-    return JSON.stringify(
+    const reportStatus = (body as Record<string, unknown>).status;
+    const auditReason =
+      typeof reportStatus === "string" && reportStatus
+        ? `HTTP ${status}: status '${reportStatus}'`
+        : typeof detail === "string" && detail
+          ? `HTTP ${status}: ${detail}`
+          : `HTTP ${status}`;
+    return toolFailed(
+      context,
       { ...(body as Record<string, unknown>), http_status: status, success: false },
-      null,
-      2
+      auditReason
     );
   }
-  return JSON.stringify({ success: false, http_status: status, detail }, null, 2);
+  return toolFailed(context, { success: false, http_status: status, detail }, `HTTP ${status}`);
 }
 
 /**
@@ -521,7 +548,7 @@ export function createSystemTools(
           agents?: string[];
           strict?: boolean;
         },
-        context?: { session?: McpAuthContext }
+        context?: DenyCallContext
       ) => {
         const authContext = context?.session;
         const apiClient = getClient(authContext);
@@ -544,7 +571,7 @@ export function createSystemTools(
           );
           return JSON.stringify(response, null, 2);
         } catch (error) {
-          return teardownFailure(error);
+          return teardownFailure(error, context);
         }
       },
     },

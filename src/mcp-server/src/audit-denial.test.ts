@@ -27,7 +27,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { configureAudit, withAudit, type ToolCallContext } from "./audit.js";
+import { configureAudit, toolFailed, withAudit, type ToolCallContext } from "./audit.js";
 import { accessDenied, withAgentAccess } from "./access.js";
 import { ApiError, type TrinityClient } from "./client.js";
 import { createChatTools, runAgentChat } from "./tools/chat.js";
@@ -260,6 +260,126 @@ describe("#2807 a returned denial is audited as a refusal", () => {
     const c2: ToolCallContext = {};
     accessDenied(c2, { error: "Report not found" });
     assert.equal(c2.outcome?.reason, "Report not found");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #4026: a RETURNED failure that is not a denial
+// ---------------------------------------------------------------------------
+
+describe("#4026 a returned operational failure is audited as a failure, never as a denial", () => {
+  let rows: AuditRow[];
+
+  beforeEach(() => {
+    configureAudit({ apiUrl: "http://audit.test", secret: "test-secret" });
+    rows = stubFetch();
+  });
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  it("toolFailed: the row is exactly {tool, duration_ms, success: false, error}, and the caller's JSON is byte-identical", async () => {
+    const env = { success: false, http_status: 409, status: "refused", blockers: [{ code: "x" }] };
+    const wrapped = withAudit("t", async (_p, ctx) => toolFailed(ctx, env, "HTTP 409: status 'refused'"));
+    const out = await wrapped({} as any, {});
+
+    assert.equal(out, JSON.stringify(env, null, 2));
+    assert.equal(rows.length, 1);
+    assert.deepEqual(Object.keys(rows[0].details), ["tool", "duration_ms", "success", "error"]);
+    assert.equal(rows[0].details.success, false);
+    assert.equal(rows[0].details.error, "HTTP 409: status 'refused'");
+    assert.equal("denied" in rows[0].details, false, `a failure was labelled a denial: ${JSON.stringify(rows[0].details)}`);
+  });
+
+  it("the denied row shape is unchanged: exactly {tool, duration_ms, success: false, error, denied: true}", async () => {
+    const wrapped = withAudit("t", async (_p, ctx) => accessDenied(ctx, { error: "Access denied", reason: "nope" }));
+    await wrapped({} as any, {});
+
+    assert.deepEqual(Object.keys(rows[0].details), ["tool", "duration_ms", "success", "error", "denied"]);
+    assert.deepEqual(
+      { ...rows[0].details, duration_ms: 0 },
+      { tool: "t", duration_ms: 0, success: false, error: "nope", denied: true }
+    );
+  });
+
+  it("denied wins: a later failure stamp never replaces a denial, neither its kind nor its reason", async () => {
+    const ctx: ToolCallContext = {};
+    accessDenied(ctx, { error: "Access denied", reason: "the denial" });
+    toolFailed(ctx, { success: false, error: "an operational failure" });
+    assert.deepEqual(ctx.outcome, { kind: "denied", reason: "the denial" });
+
+    const wrapped = withAudit("t", async (_p, c) => {
+      accessDenied(c, { error: "Access denied", reason: "the denial" });
+      return toolFailed(c, { success: false }, "an operational failure");
+    });
+    await wrapped({} as any, {});
+    assert.equal(rows[0].details.denied, true);
+    assert.equal(rows[0].details.error, "the denial");
+  });
+
+  it("the reverse order: a denial after a failure stamp is a denial", async () => {
+    const wrapped = withAudit("t", async (_p, ctx) => {
+      toolFailed(ctx, { success: false }, "first a failure");
+      return accessDenied(ctx, { error: "Access denied", reason: "then a denial" });
+    });
+    await wrapped({} as any, {});
+    assert.equal(rows[0].details.denied, true);
+    assert.equal(rows[0].details.error, "then a denial");
+  });
+
+  it("the catch path: a failure stamp then a thrown 403 is a denial; then a thrown non-403 is a failure only", async () => {
+    const stamped403 = withAudit("t", async (_p, ctx) => {
+      toolFailed(ctx, { success: false }, "stamped");
+      throw new ApiError(403, "forbidden");
+    });
+    await assert.rejects(() => stamped403({} as any, {}), /403/);
+    assert.equal(rows[0].details.success, false);
+    assert.equal(rows[0].details.denied, true);
+
+    const stampedBoom = withAudit("t", async (_p, ctx) => {
+      toolFailed(ctx, { success: false }, "stamped");
+      throw new Error("boom");
+    });
+    await assert.rejects(() => stampedBoom({} as any, {}), /boom/);
+    assert.equal(rows[1].details.success, false);
+    assert.equal(rows[1].details.error, "boom");
+    assert.equal(rows[1].details.denied, undefined);
+  });
+
+  it("reason precedence: auditReason, then envelope.error, then a fixed fallback, never empty, never 'Access denied'", () => {
+    const reasonOf = (env: Record<string, unknown>, auditReason?: string) => {
+      const ctx: ToolCallContext = {};
+      toolFailed(ctx, env, auditReason);
+      assert.equal(ctx.outcome?.kind, "failed");
+      return ctx.outcome?.reason;
+    };
+    assert.equal(reasonOf({ error: "from envelope" }, "explicit"), "explicit");
+    assert.equal(reasonOf({ error: "from envelope" }), "from envelope");
+    assert.equal(reasonOf({ error: "from envelope" }, ""), "from envelope", "an empty auditReason falls through");
+    assert.equal(reasonOf({ error: "" }), "Tool call failed", "an empty envelope.error falls through");
+    assert.equal(reasonOf({ error: { nested: true } }), "Tool call failed", "a non-string error falls through");
+    assert.equal(reasonOf({ reason: "a denial-style reason is not read" }), "Tool call failed");
+  });
+
+  it("a failure stamp on one call does not leak into the next call on the same session, nor onto the session", async () => {
+    const session = { scope: "user", userId: "u1", keyName: "k" } as any;
+    let fail = true;
+    const wrapped = withAudit("t", async (_p, ctx) =>
+      fail ? toolFailed(ctx, { success: false }, "failed once") : JSON.stringify({ ok: true })
+    );
+    await wrapped({} as any, { session });
+    fail = false;
+    await wrapped({} as any, { session });
+
+    assert.equal(rows[0].details.success, false);
+    assert.equal(rows[1].details.success, true, `the next call inherited a stale failure: ${JSON.stringify(rows[1].details)}`);
+    assert.equal(rows[1].details.error, undefined);
+    assert.equal(session.outcome, undefined, "the stamp leaked onto the session object");
+  });
+
+  it("no context is tolerated: the same string comes back and nothing throws", () => {
+    const env = { success: false, error: "x" };
+    assert.equal(toolFailed(undefined, env), JSON.stringify(env, null, 2));
   });
 });
 
