@@ -3223,11 +3223,16 @@ class DatabaseManager:
     def get_public_user_memory_agent_notes(self, agent_name: str, user_email: str) -> str:
         return self._public_link_ops.get_user_memory_agent_notes(agent_name, user_email)
 
+    def get_public_user_memory(self, agent_name: str, user_email: str):
+        # ent#962: a read that never creates the row (the owner's view).
+        return self._public_link_ops.get_user_memory(agent_name, user_email)
+
     def update_public_user_memory_conversation_summary(
-        self, agent_name: str, user_email: str, conversation_summary: str
+        self, agent_name: str, user_email: str, conversation_summary: str,
+        *, expected_previous: str = None,
     ) -> bool:
         return self._public_link_ops.update_user_memory_conversation_summary(
-            agent_name, user_email, conversation_summary
+            agent_name, user_email, conversation_summary, expected_previous=expected_previous
         )
 
     # ent#637: the write boundary records history; the person reads + undoes it.
@@ -3286,15 +3291,23 @@ class DatabaseManager:
     def prune_memory_fact_events(self, agent_name: str, *, before_iso: str) -> int:
         return self._memory_fact_ops.prune_memory_fact_events(agent_name, before_iso=before_iso)
 
-    def list_public_user_memory_writes(self, agent_name: str, user_email: str, limit: int = 20) -> list:
-        return self._public_link_ops.list_user_memory_writes(agent_name, user_email, limit)
+    def list_public_user_memory_writes(self, agent_name: str, user_email: str, limit: int = 20, **kwargs) -> list:
+        # ent#962: `before=` (keyset cursor) and `section=` (default `notes`).
+        return self._public_link_ops.list_user_memory_writes(agent_name, user_email, limit, **kwargs)
+
+    def latest_open_public_user_memory_writes(self, agent_name: str, user_email: str) -> dict:
+        return self._public_link_ops.latest_open_user_memory_writes(agent_name, user_email)
 
     def undo_public_user_memory_write(
-        self, agent_name: str, user_email: str, write_id: str, *, undone_by: str
+        self, agent_name: str, user_email: str, write_id: str, *, undone_by: str, section: str = None
     ) -> str:
         return self._public_link_ops.undo_user_memory_write(
-            agent_name, user_email, write_id, undone_by=undone_by
+            agent_name, user_email, write_id, undone_by=undone_by, section=section
         )
+
+    def list_public_user_memory_people(self, agent_name: str, *, limit: int = 50, offset: int = 0) -> dict:
+        # ent#962: everyone with memory on the agent, for the owner's view.
+        return self._public_link_ops.list_user_memory_people(agent_name, limit=limit, offset=offset)
 
     # =========================================================================
     # Agent Tags (delegated to db/tags.py) - ORG-001

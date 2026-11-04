@@ -817,6 +817,8 @@ async def portal_agent_page(
 @router.get("/agents/{agent_name}/memory", response_model=PortalAgentMemory)
 def portal_agent_memory(
     agent_name: str,
+    before: Optional[str] = Query(default=None, max_length=200,
+                                  description="Cursor from the previous page's next_before (ent#962)"),
     principal: PortalPrincipal = Depends(get_portal_principal),
 ):
     """What this agent remembers about YOU, and what changed it (ent#637).
@@ -828,7 +830,11 @@ def portal_agent_memory(
     """
     email = principal.email
     _require_roster(agent_name, email, principal.is_platform)
-    return agent_page.memory(agent_name, email)
+    try:
+        return agent_page.memory(agent_name, email, before=before)
+    except agent_page.InvalidMemoryCursor:
+        raise HTTPException(status_code=422, detail={"code": "invalid_cursor",
+                                                     "message": "That page cursor is not valid. Reload the memory view."})
 
 
 @router.post("/agents/{agent_name}/memory/writes/{write_id}/undo",

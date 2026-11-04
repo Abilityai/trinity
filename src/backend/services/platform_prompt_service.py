@@ -821,7 +821,7 @@ async def summarize_user_memory_background(
             )
         if new_summary:
             db.update_public_user_memory_conversation_summary(
-                agent_name, user_email, new_summary
+                agent_name, user_email, new_summary, expected_previous=existing_summary  # ent#962: never over an undo
             )
             logger.info(
                 f"[MemSummarize] Updated conversation_summary for {user_email} "

@@ -966,7 +966,7 @@ public_user_memory = Table(
     Column("updated_at", Text),
 )
 
-# ent#637: write history for the agent_notes section — see the note in db/schema.py.
+# ent#637: write history for the memory blob (ent#962: both sections) — see the note in db/schema.py.
 public_user_memory_writes = Table(
     "public_user_memory_writes",
     metadata,
@@ -981,6 +981,8 @@ public_user_memory_writes = Table(
     Column("written_at", Text),
     Column("undone_at", Text),
     Column("undone_by", Text),
+    # trinity-enterprise#962: `notes` | `summary` — see the note in db/schema.py.
+    Column("section", Text, nullable=False, server_default="notes"),
 )
 
 # trinity-enterprise#1022 (MEM-002): retrieval memory facts — see the note in db/schema.py.

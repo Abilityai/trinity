@@ -6079,6 +6079,17 @@ def _migrate_access_requests_requester_identity(cursor, conn):
                          f"ALTER TABLE access_requests ADD COLUMN {column} TEXT")
 
 
+def _migrate_public_user_memory_writes_section(cursor, conn):
+    """trinity-enterprise#962 — the write history records which half of the
+    memory blob a row changed: `notes` (every row before this migration) or
+    `summary` (the background summarizer, now recorded). Schema is also in
+    db/schema.py for fresh installs; mirrored by Alembic revision
+    0116_public_user_memory_writes_section.
+    """
+    _safe_add_column(cursor, "public_user_memory_writes", "section",
+                     "ALTER TABLE public_user_memory_writes ADD COLUMN section TEXT NOT NULL DEFAULT 'notes'")
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -6264,4 +6275,5 @@ MIGRATIONS = [
     ("seat_ask_class_state_table", _migrate_seat_ask_class_state_table),
     ("room_participant_visible_from", _migrate_room_participant_visible_from),
     ("access_requests_requester_identity", _migrate_access_requests_requester_identity),
+    ("public_user_memory_writes_section", _migrate_public_user_memory_writes_section),
 ]

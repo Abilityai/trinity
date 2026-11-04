@@ -624,6 +624,9 @@ class PortalMemoryWrite(BaseModel):
     schedule_name: Optional[str] = None
     written_at: str
     undone_at: Optional[str] = None
+    # trinity-enterprise#962: someone other than the viewer undid it (the agent's
+    # owner or an admin). Never WHO — one line for both, no role disclosed.
+    undone_by_operator: bool = False
     undoable: bool = False
     notes: str = ""
     previous_notes: str = ""
@@ -638,6 +641,9 @@ class PortalAgentMemory(BaseModel):
     notes: str = ""
     updated_at: Optional[str] = None
     writes: list[PortalMemoryWrite] = Field(default_factory=list)
+    # trinity-enterprise#962: the keyset cursor for the next page (`?before=`),
+    # or None when this page is the last.
+    next_before: Optional[str] = None
 
 
 class PortalMemoryUndo(BaseModel):

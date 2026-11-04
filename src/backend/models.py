@@ -2346,6 +2346,87 @@ class MemorySearchResponse(BaseModel):
     hits: list[MemorySearchHit]
 
 
+class PersonMemoryPerson(BaseModel):
+    """One person with memory on an agent, as the owner's list shows them
+    (trinity-enterprise#962). `user_email` is the verified identity the memory
+    is keyed on; `channel*` is what an access request captured, as the channel
+    reported it (ent#737), or None. `fact_count` is None when the person's
+    scope is the agent scope (the current owner's own turns)."""
+    user_email: str
+    last_changed_at: Optional[str] = None
+    has_notes: bool = False
+    has_summary: bool = False
+    write_count: int = 0
+    fact_count: Optional[int] = 0
+    agent_scope: bool = False
+    channel: Optional[str] = None
+    channel_name: Optional[str] = None
+    channel_handle: Optional[str] = None
+
+
+class PersonMemoryPeople(BaseModel):
+    """A page of the people with memory on an agent, newest change first."""
+    agent_name: str
+    total: int
+    offset: int
+    limit: int
+    people: list[PersonMemoryPerson]
+
+
+class PersonMemoryWrite(BaseModel):
+    """One write to a person's memory (trinity-enterprise#962). `section` is
+    which half it changed; `text` is what it left and `previous_text` what
+    Undo restores. `undoable` is the latest open write of its section, decided
+    server-side. `undone_by` is who undid it — the owner's view only."""
+    id: str
+    section: Literal["notes", "summary"]
+    kind: Literal["scheduled_run", "conversation", "summarizer"]
+    execution_id: Optional[str] = None
+    schedule_name: Optional[str] = None
+    written_at: str
+    undone_at: Optional[str] = None
+    undone_by: Optional[str] = None
+    undone_by_operator: bool = False
+    undoable: bool = False
+    text: str = ""
+    previous_text: str = ""
+
+
+class PersonMemoryHistory(BaseModel):
+    """A page of a person's write history; `next_before` is the cursor for the
+    next page (None on the last)."""
+    writes: list[PersonMemoryWrite]
+    next_before: Optional[str] = None
+
+
+class PersonMemoryDetail(BaseModel):
+    """One person's memory on an agent, for the owner (trinity-enterprise#962)."""
+    agent_name: str
+    user_email: str
+    agent_scope: bool = False
+    notes: str = ""
+    summary: str = ""
+    updated_at: Optional[str] = None
+    channel: Optional[str] = None
+    channel_name: Optional[str] = None
+    channel_handle: Optional[str] = None
+    history: PersonMemoryHistory
+
+
+class PersonMemoryUndoRequest(BaseModel):
+    """Whose write it is. The write id alone would do, but the undo primitive is
+    keyed on (agent, person, write) — an id from another person is the uniform
+    404, never a cross-person revert."""
+    user_email: str = Field(..., min_length=1, max_length=320)
+
+
+class PersonMemoryUndoResult(BaseModel):
+    """What Undo did: both sections as they now stand."""
+    write_id: str
+    notes: str = ""
+    summary: str = ""
+
+
 class MemoryFactEventOut(BaseModel):
     """One row of the retrieval-memory journal (trinity-enterprise#1022).
 
