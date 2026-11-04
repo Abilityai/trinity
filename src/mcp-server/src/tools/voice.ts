@@ -21,6 +21,7 @@ import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
 import { resolveExecutionId } from "./execution_id.js";
+import { INTENT_KEY_TEACHING, intentKeyParams, intentResultFields, type IntentKeyParams } from "./intent_key.js";
 
 export function createVoiceReplyTools(
   client: TrinityClient,
@@ -63,7 +64,8 @@ export function createVoiceReplyTools(
         "Deliver a spoken voice note to the user you are currently talking with on a " +
         "messaging channel (Telegram, Slack, or WhatsApp), instead of plain text. " +
         "To speak to a specific person when you are NOT replying inside their chat — e.g. a " +
-        "scheduled brief — also pass `to` (a role: primary | approver | viewer) or recipient_email, " +
+        "scheduled brief — also pass `to` (a role: primary | approver | viewer; when nobody " +
+        "holds the primary seat, the agent's owner receives it) or recipient_email, " +
         "plus channel (telegram or whatsapp); the " +
         "person must be linked on that channel and have opted in to proactive messages from " +
         "you, and the same per-person hourly limit as send_message applies. " +
@@ -76,7 +78,10 @@ export function createVoiceReplyTools(
         "A refusal here is a limit on THIS TOOL, not proof the surface has no voice at all — " +
         "the Workspace, for one, reads your text aloud on the client's own speaker control. " +
         "Read the `guidance` field when present, act on it, and never quote a `reason` code " +
-        "back to a user (#2157).",
+        "back to a user (#2157). " +
+        "When you address a person:" +
+        INTENT_KEY_TEACHING +
+        " The key is per voice note: a text under the same name is a separate delivery.",
       parameters: z.object({
         text: z.string().min(1).max(4096)
           .describe("The text to speak as a voice note. Keep it short and natural to hear."),
@@ -106,13 +111,14 @@ export function createVoiceReplyTools(
         channel: z.enum(["telegram", "slack", "whatsapp"]).optional()
           .describe(
             "Channel to deliver an addressed voice note on — telegram or whatsapp " +
-            "(slack is not supported for addressed voice yet). Requires `recipient_email`."
+            "(slack is not supported for addressed voice yet). Requires `to` or `recipient_email`."
           ),
         agent_name: z.string().optional()
           .describe(
             "For a user-scoped key only. An agent-scoped key always speaks as its own agent; " +
             "naming another is refused."
           ),
+        ...intentKeyParams,
       }),
       execute: async (
         params: {
@@ -123,7 +129,7 @@ export function createVoiceReplyTools(
           recipient_email?: string;
           channel?: "telegram" | "slack" | "whatsapp";
           agent_name?: string;
-        },
+        } & IntentKeyParams,
         context?: { session?: McpAuthContext }
       ) => {
         const authContext = context?.session;
@@ -148,6 +154,17 @@ export function createVoiceReplyTools(
             2
           );
         }
+        if ((params.idempotency_key || params.idempotency_ttl !== undefined) && !hasAddress) {
+          return JSON.stringify(
+            {
+              delivered: false,
+              fallback_to_text: true,
+              error: "idempotency_key applies to an addressed voice note: pass `to` or recipient_email, plus channel.",
+            },
+            null,
+            2
+          );
+        }
 
         // #2392: header first, param fallback; the backend needs one to find the channel.
         const executionId = resolveExecutionId(authContext, params.execution_id);
@@ -165,6 +182,8 @@ export function createVoiceReplyTools(
             ...(params.recipient_email
               ? { recipient_email: params.recipient_email, channel: params.channel }
               : {}),
+            ...(params.idempotency_key ? { idempotency_key: params.idempotency_key } : {}),
+            ...(params.idempotency_ttl !== undefined ? { idempotency_ttl: params.idempotency_ttl } : {}),
           });
           return JSON.stringify(
             {
@@ -178,6 +197,8 @@ export function createVoiceReplyTools(
               ...(result.guidance ? { guidance: result.guidance } : {}),
               // ent#700 / trinity#2999: the cost cap, when the text was too long.
               ...(result.max_chars ? { max_chars: result.max_chars } : {}),
+              // ent#665: `sent: false` means an earlier run already said this.
+              ...intentResultFields(result),
               // Hint the agent to still send text when voice didn't go out.
               fallback_to_text: !result.delivered,
             },

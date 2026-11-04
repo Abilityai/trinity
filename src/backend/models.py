@@ -2595,34 +2595,6 @@ class VoiceRepliesUpdate(BaseModel):
         return v
 
 
-class VoiceReplyRequest(BaseModel):
-    """Body for POST /api/agents/{name}/voice-reply (send_voice_reply MCP tool, ent#117).
-
-    ``text`` is spoken as a voice note on the channel the ``execution_id`` came from.
-    ``dedup_label`` lets an agent intentionally send two voice notes in one turn.
-
-    An address — ``to`` (a role, ent#606) or, deprecated, ``recipient_email``,
-    never both — plus ``channel`` sends the note to a person instead: the
-    proactive path a scheduled run uses (abilityai/trinity-enterprise#700).
-    ``channel`` comes with an address or not at all. ``execution_id`` stays
-    required: it is the caller check and the #1084 dedup scope on both paths.
-    """
-    text: str = Field(min_length=1, max_length=4096)
-    execution_id: str = Field(min_length=1)
-    dedup_label: str = ""
-    recipient_email: Optional[EmailStr] = None
-    to: Optional[Literal["primary", "approver", "viewer"]] = None
-    channel: Optional[Literal["telegram", "slack", "whatsapp"]] = None
-
-    @model_validator(mode="after")
-    def _address_is_whole(self):
-        if self.to and self.recipient_email:
-            raise ValueError("address a voice note with `to` (a role) or recipient_email, not both")
-        if bool(self.to or self.recipient_email) != bool(self.channel):
-            raise ValueError("an addressed voice note needs a channel, and a channel needs an address")
-        return self
-
-
 class PublicChannelModelUpdate(BaseModel):
     """Body for PUT /api/agents/{name}/public-channel-model (#894).
 
@@ -4029,6 +4001,38 @@ class IntentKeyFields(BaseModel):
     def _ttl_needs_key(self):
         if self.idempotency_ttl is not None and not self.idempotency_key:
             raise ValueError("idempotency_ttl needs idempotency_key")
+        return self
+
+
+class VoiceReplyRequest(IntentKeyFields):
+    """Body for POST /api/agents/{name}/voice-reply (send_voice_reply MCP tool, ent#117).
+
+    ``text`` is spoken as a voice note on the channel the ``execution_id`` came from.
+    ``dedup_label`` lets an agent intentionally send two voice notes in one turn.
+
+    An address — ``to`` (a role, ent#606) or, deprecated, ``recipient_email``,
+    never both — plus ``channel`` sends the note to a person instead: the
+    proactive path a scheduled run uses (abilityai/trinity-enterprise#700).
+    ``channel`` comes with an address or not at all. ``execution_id`` stays
+    required: it is the caller check and the #1084 dedup scope on both paths.
+    ``idempotency_key`` / ``idempotency_ttl`` (ent#665) come with an address too:
+    the #1084 scope is one execution, and a scheduler retry is a new one.
+    """
+    text: str = Field(min_length=1, max_length=4096)
+    execution_id: str = Field(min_length=1)
+    dedup_label: str = ""
+    recipient_email: Optional[EmailStr] = None
+    to: Optional[Literal["primary", "approver", "viewer"]] = None
+    channel: Optional[Literal["telegram", "slack", "whatsapp"]] = None
+
+    @model_validator(mode="after")
+    def _address_is_whole(self):
+        if self.to and self.recipient_email:
+            raise ValueError("address a voice note with `to` (a role) or recipient_email, not both")
+        if bool(self.to or self.recipient_email) != bool(self.channel):
+            raise ValueError("an addressed voice note needs a channel, and a channel needs an address")
+        if self.idempotency_key and not (self.to or self.recipient_email):
+            raise ValueError("idempotency_key applies to an addressed voice note")
         return self
 
 

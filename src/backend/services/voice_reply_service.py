@@ -59,20 +59,58 @@ class VoiceReplyResult:
     guidance: Optional[str] = None
     # Set with reason="text_too_long" so the caller knows the bound to fit.
     max_chars: Optional[int] = None
+    # ent#665, set only when the caller supplied an idempotency_key. A suppressed
+    # note is delivered=True, sent=False: the person has it, and delivered=False
+    # would tell the agent to repeat it in text.
+    sent: Optional[bool] = None
+    suppressed_by: Optional[str] = None
+    first_sent_at: Optional[str] = None
+    first_execution_id: Optional[str] = None
 
 
-# Outcomes a retry of the same turn can fix: the provider blipped. Released
-# from the effect guard instead of recorded, so the retry sends again. A
-# configuration miss (no_binding, synthesis_failed on a bad key, hosting_failed)
-# stays recorded — retrying cannot help and would only re-spend synthesis.
-_TRANSIENT_REASONS = {"send_failed", "delivery_error"}
+# On the addressed path, the one outcome a retry of the same turn can fix: the
+# send blew up before the provider answered. Released from the effect guard
+# instead of recorded, so the retry sends again. ``send_failed`` is the provider
+# refusing (WhatsApp outside its 24-hour window, a Telegram user who blocked the
+# bot): every retry fails the same way and pays for a new synthesis and a hosted
+# file, so it stays recorded, like a configuration miss.
+_RETRYABLE_REASONS = {"delivery_error"}
+
+
+def _send_failed_guidance(channel: str) -> str:
+    """Why a provider refusal will not change on a retry. The adapters report a
+    refusal without its code, so this names the usual cause rather than claiming
+    the actual one."""
+    if channel == "whatsapp":
+        return (
+            "WhatsApp refused this voice note. The usual cause is that this person has "
+            "not written to you in the last 24 hours: outside that window WhatsApp accepts "
+            "only pre-approved templates, so a retry fails the same way. Nothing was sent; "
+            "do not retry it. Use send_message to reach them another way, or wait until "
+            "they write to you."
+        )
+    return (
+        "Telegram refused this voice note. The usual cause is that this person blocked "
+        "the bot or never started a chat with it, so a retry fails the same way. Nothing "
+        "was sent; do not retry it. Use send_message to reach them another way."
+    )
 
 
 class _ReleaseClaim(Exception):
     """Raised inside the effect guard for an outcome that must NOT be replayed —
     a refusal decided before anything was sent (rate limit, no chat link) or a
-    transient delivery failure — so the guard releases the claim and a retry of
-    the same turn can still deliver."""
+    send that blew up — so the guard releases the claim and a retry of the same
+    turn can still deliver."""
+
+    def __init__(self, result: VoiceReplyResult):
+        super().__init__(result.reason)
+        self.result = result
+
+
+class _KeyNotSpent(Exception):
+    """Raised inside the intent guard for a note that did not go out but stays
+    recorded for this turn (a refusal, a configuration miss), so a later run can
+    still deliver under the same idempotency key (ent#665)."""
 
     def __init__(self, result: VoiceReplyResult):
         super().__init__(result.reason)
@@ -146,18 +184,6 @@ async def send_voice_reply(
         return refused
 
     # --- Effect-scoped dedup (#1084) ------------------------------------------
-    try:
-        return await _guarded_in_session(
-            agent_name, channel, chat_id, thread_id, text, voice_id,
-            execution_id=execution_id, dedup_label=dedup_label,
-        )
-    except _ReleaseClaim as released:
-        return released.result
-
-
-async def _guarded_in_session(
-    agent_name, channel, chat_id, thread_id, text, voice_id, *, execution_id, dedup_label
-) -> VoiceReplyResult:
     async with idempotency_service.effect_guard(
         "voice_reply",
         {"recipient": str(chat_id), "channel": channel},
@@ -173,8 +199,6 @@ async def _guarded_in_session(
                 reason=snap.get("reason"),
             )
         result = await _deliver(agent_name, channel, chat_id, thread_id, text, voice_id)
-        if result.reason in _TRANSIENT_REASONS:
-            raise _ReleaseClaim(result)
         guard.snapshot = {
             "delivered": result.delivered,
             "channel": result.channel,
@@ -191,16 +215,25 @@ async def send_proactive_voice(
     *,
     execution_id: Optional[str] = None,
     dedup_label: str = "",
+    idempotency_key: Optional[str] = None,
+    idempotency_ttl: Optional[int] = None,
 ) -> VoiceReplyResult:
     """Speak ``text`` to ``recipient_email`` on ``channel`` — the addressed path
     (abilityai/trinity-enterprise#700). Never needs an inbound turn.
 
     Order mirrors ``proactive_message_service.send_message``: consent (refused
     before any claim, so it never occupies a key) → effect guard keyed on the
-    resolved ``(recipient email, channel)`` → rate limit → chat-link resolution →
-    delivery. The rate limit and the audit row are the proactive text path's own
-    (one per-recipient budget across text and voice). Raises
-    ``EffectInProgressError`` for an in-flight duplicate; otherwise never raises.
+    resolved ``(recipient email, channel)`` → intent key → rate limit → chat-link
+    resolution → delivery. The rate limit and the audit row are the proactive text
+    path's own (one per-recipient budget across text and voice).
+
+    The effect guard is per execution, and a scheduler retry is a new execution.
+    ``idempotency_key`` / ``idempotency_ttl`` (ent#665) make it one note per
+    (agent, recipient, key) across runs. The key's namespace is voice's own: a
+    brief is a voice note AND a text, and one name for what is being said must
+    not silence the second modality. Raises ``EffectInProgressError`` for an
+    in-flight duplicate (``IntentInProgressError`` under a key); otherwise never
+    raises.
     """
     from services.proactive_message_service import proactive_message_service as pms
     from services.settings_service import get_proactive_rate_limit
@@ -245,10 +278,82 @@ async def send_proactive_voice(
             ),
         )
 
+    async def _rate_limit_and_deliver() -> VoiceReplyResult:
+        # 2. Rate limit — shared with send_message (same Redis key).
+        if not pms.check_rate_limit(agent_name, recipient_email):
+            await _audit(False, "rate_limited")
+            limit = get_proactive_rate_limit("proactive_dm_per_recipient")
+            raise _ReleaseClaim(VoiceReplyResult(
+                False, channel, "rate_limited",
+                guidance=(
+                    f"You have reached the limit of {limit} proactive messages per hour "
+                    "to this person (text and voice share it). Nothing was sent; try "
+                    "again later rather than switching channel."
+                ),
+            ))
+
+        # 3. Destination — the recipient's verified chat link (send_message's lookup).
+        chat_id = _resolve_linked_chat(agent_name, channel, recipient_email)
+        if not chat_id:
+            await _audit(False, "recipient_not_linked")
+            raise _ReleaseClaim(VoiceReplyResult(
+                False, channel, "recipient_not_linked",
+                guidance=(
+                    f"This person has no verified {channel} chat with you, so a voice "
+                    "note cannot reach them there. Use send_message (channel auto) to "
+                    "reach them in text."
+                ),
+            ))
+
+        result = await _deliver(agent_name, channel, chat_id, None, text, voice_id)
+        if result.delivered:
+            pms.increment_rate_limit(agent_name, recipient_email)
+        await _audit(result.delivered, result.reason)
+        if result.reason in _RETRYABLE_REASONS:
+            raise _ReleaseClaim(result)
+        if result.reason == "send_failed":
+            result.guidance = _send_failed_guidance(channel)
+        return result
+
+    async def _under_intent_key() -> VoiceReplyResult:
+        async with idempotency_service.intent_guard(
+            "voice_reply",
+            agent_name=agent_name,
+            target=recipient_email,
+            idempotency_key=idempotency_key,
+            ttl_seconds=idempotency_ttl,
+            execution_id=execution_id,
+        ) as intent:
+            if intent.suppressed:
+                first_channel = intent.first.get("channel") or channel
+                await pms.audit_send(
+                    agent_name, recipient_email, first_channel, False,
+                    message_preview=preview, action="suppressed",
+                    extra={
+                        "modality": "voice",
+                        "suppressed_by": idempotency_service.SUPPRESSED_BY_IDEMPOTENCY_KEY,
+                        "idempotency_key": idempotency_key,
+                        "first_sent_at": intent.first_sent_at,
+                        "first_execution_id": intent.first_execution_id,
+                    },
+                )
+                return VoiceReplyResult(True, first_channel, **intent.result_fields())
+            result = await _rate_limit_and_deliver()
+            if not result.delivered:
+                raise _KeyNotSpent(result)
+            intent.record = {"channel": result.channel}
+            for k, v in intent.result_fields().items():
+                setattr(result, k, v)
+            return result
+
+    # Keyless → the dict (and so the key hash) is the plain (recipient, channel).
+    identity = {"recipient": recipient_email, "channel": channel}
+    if idempotency_key:
+        identity["intent"] = idempotency_key
     try:
         async with idempotency_service.effect_guard(
             "voice_reply",
-            {"recipient": recipient_email, "channel": channel},
+            identity,
             execution_id=execution_id,
             agent_name=agent_name,
             dedup_label=dedup_label,
@@ -259,44 +364,25 @@ async def send_proactive_voice(
                     delivered=snap.get("delivered", True),
                     channel=snap.get("channel", channel),
                     reason=snap.get("reason"),
+                    guidance=snap.get("guidance"),
+                    sent=snap.get("sent"),
+                    suppressed_by=snap.get("suppressed_by"),
+                    first_sent_at=snap.get("first_sent_at"),
+                    first_execution_id=snap.get("first_execution_id"),
                 )
-
-            # 2. Rate limit — shared with send_message (same Redis key).
-            if not pms.check_rate_limit(agent_name, recipient_email):
-                await _audit(False, "rate_limited")
-                limit = get_proactive_rate_limit("proactive_dm_per_recipient")
-                raise _ReleaseClaim(VoiceReplyResult(
-                    False, channel, "rate_limited",
-                    guidance=(
-                        f"You have reached the limit of {limit} proactive messages per hour "
-                        "to this person (text and voice share it). Nothing was sent; try "
-                        "again later rather than switching channel."
-                    ),
-                ))
-
-            # 3. Destination — the recipient's verified chat link (send_message's lookup).
-            chat_id = _resolve_linked_chat(agent_name, channel, recipient_email)
-            if not chat_id:
-                await _audit(False, "recipient_not_linked")
-                raise _ReleaseClaim(VoiceReplyResult(
-                    False, channel, "recipient_not_linked",
-                    guidance=(
-                        f"This person has no verified {channel} chat with you, so a voice "
-                        "note cannot reach them there. Use send_message (channel auto) to "
-                        "reach them in text."
-                    ),
-                ))
-
-            result = await _deliver(agent_name, channel, chat_id, None, text, voice_id)
-            if result.delivered:
-                pms.increment_rate_limit(agent_name, recipient_email)
-            await _audit(result.delivered, result.reason)
-            if result.reason in _TRANSIENT_REASONS:
-                raise _ReleaseClaim(result)
+            try:
+                result = await _under_intent_key()
+            except _KeyNotSpent as not_spent:
+                result = not_spent.result
             guard.snapshot = {
                 "delivered": result.delivered,
                 "channel": result.channel,
                 "reason": result.reason,
+                "guidance": result.guidance,
+                "sent": result.sent,
+                "suppressed_by": result.suppressed_by,
+                "first_sent_at": result.first_sent_at,
+                "first_execution_id": result.first_execution_id,
             }
             return result
     except _ReleaseClaim as refusal:

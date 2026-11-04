@@ -79,6 +79,38 @@ describe("ent#700 send_voice_reply addressing", () => {
     assert.equal(sent.length, 0);
   });
 
+  it("forwards an idempotency key with an address, and surfaces a suppression", async () => {
+    const { sent, tool } = fakeClient({
+      delivered: true, channel: "telegram", sent: false, suppressed_by: "idempotency_key",
+      first_sent_at: "2026-11-04T07:00:00Z", first_execution_id: "exec-1",
+    });
+    const out = JSON.parse(await tool.execute(
+      { text: "hi", to: "primary", channel: "telegram", idempotency_key: "brief", idempotency_ttl: 3600 } as any,
+      session("exec-2"),
+    ));
+    assert.equal(sent[0].idempotency_key, "brief");
+    assert.equal(sent[0].idempotency_ttl, 3600);
+    assert.equal(out.sent, false);
+    assert.equal(out.suppressed_by, "idempotency_key");
+    assert.equal(out.first_sent_at, "2026-11-04T07:00:00Z");
+    assert.equal(out.fallback_to_text, false, "a suppressed note must not be repeated in text");
+  });
+
+  it("refuses an idempotency key with no address without calling the backend", async () => {
+    const { sent, tool } = fakeClient();
+    const out = JSON.parse(await tool.execute(
+      { text: "hi", idempotency_key: "brief" } as any, session("exec-1"),
+    ));
+    assert.equal(sent.length, 0);
+    assert.equal(out.delivered, false);
+    assert.match(out.error, /addressed/);
+  });
+
+  it("names both address forms in the channel description", () => {
+    const { tool } = fakeClient();
+    assert.match((tool.parameters.shape.channel as any).description, /`to` or `recipient_email`/);
+  });
+
   it("passes the backend's guidance and max_chars through", async () => {
     const { tool } = fakeClient({
       delivered: false, channel: "telegram", reason: "text_too_long", guidance: "shorten", max_chars: 1500,

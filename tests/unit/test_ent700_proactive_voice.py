@@ -16,7 +16,9 @@ proactive-message gate primitives, and the channel provider are stubbed.
 from __future__ import annotations
 
 import contextlib
+import sys
 import types
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -24,6 +26,11 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from services.settings_service import settings_service
+
+_TESTS = Path(__file__).resolve().parents[1]
+if str(_TESTS) not in sys.path:
+    sys.path.insert(0, str(_TESTS))
+from db_harness import db_backend  # noqa: E402,F401
 
 pytestmark = pytest.mark.unit
 
@@ -67,6 +74,10 @@ class _Guard:
         return _cm()
 
 
+#: Pass as ``_world(guard=REAL_GUARD)`` for the real effect_guard over the store.
+REAL_GUARD = object()
+
+
 def _cfg(enabled=True, voice_id="v1", channels=None):
     return {
         "enabled": enabled,
@@ -96,6 +107,7 @@ def _world(
     # the rest of the session and leak into other files.
     import adapters.whatsapp_adapter  # noqa: F401
 
+    real_guard = svc.idempotency_service.effect_guard
     guard = guard or _Guard()
     m = types.SimpleNamespace(
         guard=guard,
@@ -110,7 +122,8 @@ def _world(
     with patch("services.tts_service.is_available", return_value=True), \
          patch.object(svc.db, "get_tts_config", return_value=cfg or _cfg()), \
          patch.object(settings_service, "get_default_voice_id", return_value=None), \
-         patch.object(svc.idempotency_service, "effect_guard", new=guard), \
+         patch.object(svc.idempotency_service, "effect_guard",
+                      new=real_guard if guard is REAL_GUARD else guard), \
          patch.object(svc.db, "can_agent_message_email", new=m.consent), \
          patch.object(pms, "check_rate_limit", new=m.rate_check), \
          patch.object(pms, "increment_rate_limit", new=m.rate_incr), \
@@ -132,11 +145,11 @@ def _world(
         yield m
 
 
-async def _proactive(channel="telegram", text="Good morning.", **kw):
+async def _proactive(channel="telegram", text="Good morning.", execution_id="exec-sched", **kw):
     import services.voice_reply_service as svc
 
     return await svc.send_proactive_voice(
-        AGENT, EMAIL, channel, text, execution_id="exec-sched", **kw
+        AGENT, EMAIL, channel, text, execution_id=execution_id, **kw
     )
 
 
@@ -354,6 +367,7 @@ async def test_a_scheduled_run_can_address_a_recipient():
     assert calls["proactive"] == [dict(
         agent_name=AGENT, recipient_email=EMAIL, channel="telegram",
         text="Morning brief.", execution_id="exec-sched", dedup_label="",
+        idempotency_key=None, idempotency_ttl=None,
     )]
 
 
@@ -366,7 +380,8 @@ async def test_an_unaddressed_scheduled_call_says_how_to_address():
     )
     assert res["delivered"] is False
     assert res["reason"] == "not_a_channel_turn"
-    assert "recipient_email" in res["guidance"]
+    assert res["guidance"].index("`to`") < res["guidance"].index("recipient_email")
+    assert "primary" in res["guidance"]
     assert calls == {"in_session": [], "proactive": []}
 
 
@@ -478,28 +493,63 @@ def test_unknown_channel_is_rejected():
 
 
 # ---------------------------------------------------------------------------
-# Q3: a transient delivery failure releases the dedup slot; config refusals don't
+# Q3: only a provider blip releases the dedup slot. A provider REFUSAL
+# (send_failed) is the same on every retry, and each retry would pay for a
+# fresh synthesis, so it stays recorded and says why.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_a_transient_send_failure_releases_the_claim_on_the_proactive_path():
+async def test_a_refused_send_stays_recorded_on_the_proactive_path():
     with _world(tg_send=AsyncMock(return_value=None)) as m:
         res = await _proactive()
     assert res.delivered is False
     assert res.reason == "send_failed"
+    assert m.guard.released is False, "a retry must not pay for another synthesis"
+    assert m.guard.completed_snapshot["reason"] == "send_failed"
+    m.rate_incr.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_delivery_error_releases_the_claim_on_the_proactive_path():
+    with _world(tg_send=AsyncMock(side_effect=RuntimeError("connection reset"))) as m:
+        res = await _proactive()
+    assert res.reason == "delivery_error"
     assert m.guard.released is True, "a retry in the same run must try the send again"
     m.rate_incr.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_a_transient_send_failure_releases_the_claim_in_session():
+async def test_the_whatsapp_refusal_names_the_24h_window():
+    with _world() as m:
+        m.wa_send.return_value = None
+        res = await _proactive(channel="whatsapp")
+    assert res.reason == "send_failed"
+    assert "24" in res.guidance and "retry" in res.guidance.lower()
+
+
+@pytest.mark.asyncio
+async def test_the_telegram_refusal_says_a_retry_will_not_help():
+    with _world(tg_send=AsyncMock(return_value=None)):
+        res = await _proactive()
+    assert "blocked" in res.guidance and "retry" in res.guidance.lower()
+
+
+@pytest.mark.parametrize("send", [
+    AsyncMock(return_value=None),
+    AsyncMock(side_effect=RuntimeError("connection reset")),
+], ids=["send_failed", "delivery_error"])
+@pytest.mark.asyncio
+async def test_the_in_session_path_records_every_outcome_as_it_always_did(send):
+    """ent#700 AC 4: the in-session call is unchanged, so neither failure
+    releases the claim there and neither gains guidance."""
     import services.voice_reply_service as svc
 
-    with _world(tg_send=AsyncMock(return_value=None)) as m:
+    with _world(tg_send=send) as m:
         res = await svc.send_voice_reply(AGENT, "telegram", "chat1", None, "hi", execution_id="e")
-    assert res.reason == "send_failed"
-    assert m.guard.released is True
+    assert res.delivered is False and res.guidance is None
+    assert m.guard.released is False
+    assert m.guard.completed_snapshot["reason"] == res.reason
 
 
 @pytest.mark.asyncio
@@ -620,3 +670,237 @@ def test_a_role_address_is_validated(fields):
 
     with pytest.raises(ValidationError):
         VoiceReplyRequest(text="x", execution_id="e", **fields)
+
+
+# ---------------------------------------------------------------------------
+# ent#904: the owner stands in for an unseated primary, by voice as in text
+# ---------------------------------------------------------------------------
+
+
+def test_an_unseated_primary_resolves_to_the_owner_for_voice(ra):
+    _provide({"primary": []})
+    assert ra.resolve_single_recipient(
+        AGENT, to="primary", recipient_email=None, noun="voice note") == OWNER
+
+
+def test_an_unseated_primary_with_no_owner_email_is_refused_with_the_remedy(ra, monkeypatch):
+    _provide({"primary": []})
+    monkeypatch.setattr(ra, "owner_email", lambda agent: None)
+    with pytest.raises(ra.RecipientRefused) as e:
+        ra.resolve_single_recipient(AGENT, to="primary", recipient_email=None, noun="voice note")
+    assert e.value.detail["code"] == "role_unassigned"
+    assert "Access" in e.value.detail["message"]
+
+
+def test_the_stand_in_stays_primary_only(ra):
+    _provide({"approver": []})
+    with pytest.raises(ra.RecipientRefused) as e:
+        ra.resolve_single_recipient(AGENT, to="approver", recipient_email=None)
+    assert e.value.detail["code"] == "role_unassigned"
+
+
+@pytest.mark.asyncio
+async def test_a_scheduled_brief_to_an_unseated_primary_reaches_the_owner(ra):
+    from models import VoiceReplyRequest
+
+    _provide({"primary": []})
+    res, calls = await _route(
+        _execution(),
+        VoiceReplyRequest(text="Morning.", execution_id="exec-sched", to="primary", channel="telegram"),
+    )
+    assert res["delivered"] is True, res
+    assert calls["proactive"][0]["recipient_email"] == OWNER
+
+
+# ---------------------------------------------------------------------------
+# The real effect_guard + idempotency store: what the fake _Guard cannot prove
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def store(db_backend, monkeypatch):
+    """A real idempotency store; every exec-* id belongs to AGENT."""
+    from database import db
+
+    monkeypatch.setattr(
+        db, "get_execution",
+        lambda eid: types.SimpleNamespace(agent_name=AGENT) if str(eid).startswith("exec-") else None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_real_guard_a_rate_limit_refusal_releases_the_claim(store):
+    with _world(guard=REAL_GUARD, rate_ok=False) as m:
+        first = await _proactive()
+        assert first.reason == "rate_limited"
+        m.tg_send.assert_not_awaited()
+        m.rate_check.return_value = True
+        second = await _proactive()
+    assert second.delivered is True, "the refusal must not have spent the turn's one send"
+    m.tg_send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_real_guard_a_delivered_note_replays_without_a_second_send(store):
+    with _world(guard=REAL_GUARD) as m:
+        first = await _proactive()
+        second = await _proactive()
+    assert first.delivered is True and second.delivered is True
+    m.tg_send.assert_awaited_once()
+    m.synth.assert_awaited_once()
+    m.rate_incr.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_real_guard_a_refused_send_does_not_pay_for_a_second_synthesis(store):
+    with _world(guard=REAL_GUARD, tg_send=AsyncMock(return_value=None)) as m:
+        first = await _proactive()
+        second = await _proactive()
+    assert first.reason == second.reason == "send_failed"
+    assert second.guidance == first.guidance, "the replay must still say why"
+    m.synth.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_real_guard_a_delivery_error_retries_in_the_same_run(store):
+    send = AsyncMock(side_effect=[RuntimeError("connection reset"), {"message_id": 9}])
+    with _world(guard=REAL_GUARD, tg_send=send):
+        first = await _proactive()
+        second = await _proactive()
+    assert first.reason == "delivery_error" and second.delivered is True
+    assert send.await_count == 2
+
+
+# ---------------------------------------------------------------------------
+# ent#665 on the addressed path: a scheduler retry is a NEW execution row
+# ---------------------------------------------------------------------------
+
+KEY = "daily-brief-2026-11-04"
+
+
+@pytest.mark.asyncio
+async def test_without_a_key_a_new_execution_speaks_again(store):
+    with _world(guard=REAL_GUARD) as m:
+        await _proactive(execution_id="exec-1")
+        await _proactive(execution_id="exec-2")
+    assert m.tg_send.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_a_key_stops_a_retried_run_speaking_twice(store):
+    with _world(guard=REAL_GUARD) as m:
+        first = await _proactive(execution_id="exec-1", idempotency_key=KEY)
+        retry = await _proactive(execution_id="exec-2", idempotency_key=KEY)
+    assert first.delivered is True and first.sent is True
+    assert retry.sent is False
+    assert retry.delivered is True, "fallback_to_text would make the agent repeat it in text"
+    assert retry.suppressed_by == "idempotency_key"
+    assert retry.first_execution_id == "exec-1" and retry.first_sent_at
+    m.tg_send.assert_awaited_once()
+    m.synth.assert_awaited_once()
+    m.rate_incr.assert_called_once()
+    suppressed = [c for c in m.audit.await_args_list if c.kwargs.get("action") == "suppressed"]
+    assert len(suppressed) == 1
+    assert suppressed[0].kwargs["extra"]["modality"] == "voice"
+    assert suppressed[0].kwargs["extra"]["idempotency_key"] == KEY
+
+
+@pytest.mark.parametrize("world,reason", [
+    (dict(rate_ok=False), "rate_limited"),
+    (dict(tg_link=None), "recipient_not_linked"),
+    (dict(tg_send=AsyncMock(return_value=None)), "send_failed"),
+    (dict(bot_token=None), "no_binding"),
+], ids=["rate_limited", "not_linked", "send_failed", "no_binding"])
+@pytest.mark.asyncio
+async def test_a_note_that_did_not_go_out_does_not_spend_the_key(store, world, reason):
+    with _world(guard=REAL_GUARD, **world):
+        res = await _proactive(execution_id="exec-1", idempotency_key=KEY)
+    assert res.reason == reason and res.sent is None
+    with _world(guard=REAL_GUARD) as m:
+        retry = await _proactive(execution_id="exec-2", idempotency_key=KEY)
+    assert retry.delivered is True and retry.sent is True
+    m.tg_send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_text_under_the_same_key_does_not_silence_the_voice_note(store):
+    """A brief is a voice note AND a text; one name for what is being said must
+    not make the second modality disappear."""
+    from services import idempotency_service
+
+    async with idempotency_service.intent_guard(
+        "message", agent_name=AGENT, target=EMAIL, idempotency_key=KEY,
+        ttl_seconds=None, execution_id="exec-1",
+    ) as intent:
+        intent.record = {"channel": "telegram"}
+    with _world(guard=REAL_GUARD) as m:
+        res = await _proactive(execution_id="exec-2", idempotency_key=KEY)
+    assert res.sent is True
+    m.tg_send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_two_keys_in_one_turn_are_two_notes(store):
+    with _world(guard=REAL_GUARD) as m:
+        await _proactive(idempotency_key="brief-a")
+        await _proactive(idempotency_key="brief-b")
+    assert m.tg_send.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_the_route_forwards_the_key_and_reports_a_suppression():
+    import routers.agents as ar
+    from models import VoiceReplyRequest
+    from services import voice_reply_service as svc
+
+    seen = {}
+
+    async def _send(agent_name, recipient_email, channel, text, **kw):
+        seen.update(kw)
+        return svc.VoiceReplyResult(
+            True, channel, sent=False, suppressed_by="idempotency_key",
+            first_sent_at="2026-11-04T07:00:00Z", first_execution_id="exec-1",
+        )
+
+    db_mock = MagicMock()
+    db_mock.get_execution.return_value = _execution()
+    user = types.SimpleNamespace(agent_name=AGENT, id=1, username="u", role="user")
+    with patch("routers.agents.db", db_mock), patch.object(svc, "send_proactive_voice", _send):
+        res = await ar.send_voice_reply_endpoint(AGENT, VoiceReplyRequest(
+            text="hi", execution_id="exec-2", recipient_email=EMAIL, channel="telegram",
+            idempotency_key=KEY, idempotency_ttl=3600,
+        ), user)
+    assert seen["idempotency_key"] == KEY and seen["idempotency_ttl"] == 3600
+    assert res["delivered"] is True and res["sent"] is False
+    assert res["suppressed_by"] == "idempotency_key"
+    assert res["first_sent_at"] == "2026-11-04T07:00:00Z"
+    assert res["first_execution_id"] == "exec-1"
+
+
+def test_an_unkeyed_reply_has_no_intent_fields_on_the_wire():
+    import routers.agents as ar
+    from services import voice_reply_service as svc
+
+    assert set(ar._voice_result(svc.VoiceReplyResult(True, "telegram"))) == {
+        "delivered", "channel", "reason"}
+
+
+@pytest.mark.parametrize("fields", [
+    dict(idempotency_key=KEY),
+    dict(idempotency_key=KEY, idempotency_ttl=3600),
+], ids=["key", "key+ttl"])
+def test_a_key_needs_an_address(fields):
+    """The in-session reply is unchanged (AC 4): a key there would be ignored."""
+    from models import VoiceReplyRequest
+
+    with pytest.raises(ValidationError):
+        VoiceReplyRequest(text="hi", execution_id="e", **fields)
+    VoiceReplyRequest(text="hi", execution_id="e", to="primary", channel="telegram", **fields)
+
+
+def test_a_ttl_needs_a_key():
+    from models import VoiceReplyRequest
+
+    with pytest.raises(ValidationError):
+        VoiceReplyRequest(text="hi", execution_id="e", to="primary", channel="telegram",
+                          idempotency_ttl=3600)

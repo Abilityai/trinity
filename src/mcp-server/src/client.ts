@@ -2965,11 +2965,19 @@ export class TrinityClient {
       to?: "primary" | "approver" | "viewer";
       recipient_email?: string;
       channel?: "telegram" | "slack" | "whatsapp";
+      /** ent#665: one note per recipient and key across runs. Needs an address. */
+      idempotency_key?: string;
+      idempotency_ttl?: number;
     }
   ): Promise<{
     delivered: boolean;
     channel?: string;
     reason?: string;
+    /** ent#665: present only when an idempotency_key was sent. */
+    sent?: boolean;
+    suppressed_by?: string;
+    first_sent_at?: string;
+    first_execution_id?: string;
     /** Set with reason "text_too_long" (TTS_MAX_CHARS). */
     max_chars?: number;
     /** #2157: plain-language explanation of a refusal, for surfaces where the

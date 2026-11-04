@@ -265,7 +265,7 @@ async def test_non_channel_non_portal_turn_keeps_the_old_reason():
     speaker control (no such control exists off the portal)."""
     res = await _call_voice_reply(_execution(triggered_by="schedule"))
     assert res["reason"] == "not_a_channel_turn"
-    assert "recipient_email" in res["guidance"]
+    assert "`to`" in res["guidance"] and "primary" in res["guidance"]
     assert "speaker" not in res["guidance"].lower()
 
 

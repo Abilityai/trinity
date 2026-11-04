@@ -1606,6 +1606,8 @@ async def send_voice_reply_endpoint(
                 body.text,
                 execution_id=body.execution_id,
                 dedup_label=body.dedup_label or "",
+                idempotency_key=body.idempotency_key,
+                idempotency_ttl=body.idempotency_ttl,
             )
         except idempotency_service.EffectInProgressError:
             raise HTTPException(status_code=409, detail="A voice note to this recipient is already being sent")
@@ -1670,10 +1672,11 @@ async def send_voice_reply_endpoint(
             "reason": "not_a_channel_turn",
             "guidance": (
                 "This turn has no Telegram, Slack or WhatsApp conversation to reply into, "
-                "so the voice note has nowhere to go. To speak to a specific person, call "
-                "send_voice_reply again "
-                "with recipient_email and channel (telegram or whatsapp); they must have "
-                "opted in to proactive messages from you. Otherwise reply with text."
+                "so the voice note has nowhere to go. To speak to a person, call "
+                "send_voice_reply again with `to` (a role, usually `primary`, the person "
+                "you serve) and channel (telegram or whatsapp), or with recipient_email in "
+                "place of `to`; they must have opted in to proactive messages from you. "
+                "Otherwise reply with text."
             ),
         }
     if not execution.source_channel_chat_id:
@@ -1697,12 +1700,16 @@ async def send_voice_reply_endpoint(
 
 def _voice_result(result) -> dict:
     """The voice-reply wire shape: ``{delivered, channel, reason}`` plus
-    ``guidance`` / ``max_chars`` only when the service set them."""
+    ``guidance`` / ``max_chars`` and the ent#665 fields only when the service set them."""
     out = {"delivered": result.delivered, "channel": result.channel, "reason": result.reason}
     if getattr(result, "guidance", None):
         out["guidance"] = result.guidance
     if getattr(result, "max_chars", None):
         out["max_chars"] = result.max_chars
+    # ent#665: present only when the request carried an idempotency_key.
+    for k in ("sent", "suppressed_by", "first_sent_at", "first_execution_id"):
+        if getattr(result, k, None) is not None:
+            out[k] = getattr(result, k)
     return out
 
 
