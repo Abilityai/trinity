@@ -8,7 +8,7 @@
 
 export const VAD = Object.freeze({
   startMs: 220,
-  startMsPlayback: 380,
+  startMsPlayback: 250,
   endMs: 850,
   prerollMs: 400,
   minVoicedMs: 300,
@@ -25,8 +25,25 @@ export function rmsOf(frame) {
   return frame.length ? Math.sqrt(sum / frame.length) : 0
 }
 
-function threshold(playing, floor) {
-  return playing ? Math.max(0.045, floor * 6) : Math.max(0.013, floor * 3)
+// trinity-enterprise#1087: over playback the bar follows what is actually playing, not a
+// fixed multiple. The mic runs with echo cancellation, so what leaks back tracks the
+// output level: a quiet passage or the gap between two sentences must not demand a shout,
+// and a loud one must not stop itself. ECHO_K is the fraction of the output level allowed
+// to come back; PLAY_MIN the least the bar ever is while playing. Both are starting values
+// to be tuned from measurement on speakers and headphones (the issue's AC 1 and 2).
+export const ECHO_K = 0.6
+export const PLAY_MIN = 0.02
+// A caller that does not pass the playback level gets the bar the endpointer had before.
+export const PLAY_FALLBACK = 0.045
+
+function idleLimit(floor) {
+  return Math.max(0.013, floor * 3)
+}
+
+function threshold(playing, floor, playbackLevel) {
+  if (!playing) return idleLimit(floor)
+  if (typeof playbackLevel !== 'number') return Math.max(PLAY_FALLBACK, floor * 6)
+  return Math.max(idleLimit(floor), PLAY_MIN, ECHO_K * playbackLevel)
 }
 
 function joinFrames(frames) {
@@ -54,15 +71,18 @@ export function createEndpointer({ sampleRate = 16000, onSpeechStart, onUtteranc
   function finish() {
     const { frames, voiced, duringPlayback } = s
     s.inSpeech = false; s.frames = []; s.above = 0; s.below = 0; s.total = 0; s.voiced = 0
-    if (voiced < vad.minVoicedMs) { onDiscard?.({ duringPlayback }); return }
+    // Over playback the onset already demanded `startMsPlayback` of voice, so a crisp
+    // "stop" that got that far is speech, even if shorter than an idle utterance must be.
+    const least = duringPlayback ? Math.min(vad.minVoicedMs, vad.startMsPlayback) : vad.minVoicedMs
+    if (voiced < least) { onDiscard?.({ duringPlayback }); return }
     onUtterance?.({ samples: joinFrames(frames), duringPlayback, voicedMs: voiced })
   }
 
   return {
-    push(frame, { playing = false } = {}) {
+    push(frame, { playing = false, playbackLevel } = {}) {
       const ms = (frame.length / sampleRate) * 1000
       const rms = rmsOf(frame)
-      const limit = threshold(playing, s.floor)
+      const limit = threshold(playing, s.floor, playbackLevel)
 
       if (!s.inSpeech) {
         if (rms < limit) s.floor += (rms - s.floor) * FLOOR_RISE
