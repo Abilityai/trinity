@@ -286,6 +286,13 @@ outcomes ARE audit-logged (`AuditEventType.AUTHENTICATION`, `login_success`/`log
   extended card with internal endpoint URLs + full skill schemas; MCP
   `get_agent_card` tool. (The host-root well-known route and the
   JSON-RPC server this card addresses shipped in §32.2.)
+- **Known limit (trinity-enterprise#584)**: everywhere else in the
+  platform `capabilities:` are template tags and a capability is
+  described once, by its skill's SKILL.md `description:`
+  ([skills.md §23](skills.md)). The card still builds `skills[]` from
+  the tags (id = name = the tag, each carrying the agent's
+  description). Moving it to the agent's skills, and remapping curated
+  tag lists (§32.4), is trinity-enterprise#178.
 
 ### 32.2 A2A Inbound Server — public card + JSON-RPC/SSE (ent#157)
 - **Status**: 🚧 In Progress

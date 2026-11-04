@@ -188,6 +188,8 @@ class TestTheRoutesThisChangeGates:
         "routers/agent_config.py::set_agent_timeout",
         "routers/agent_config.py::set_public_channel_model",
         "routers/agent_config.py::set_agent_guardrails",
+        # trinity-enterprise#341: the profile composes read-only + guardrails, same gate.
+        "routers/agent_config.py::set_agent_tool_access",
     ]
     INTERACTIVE = [
         "routers/agent_config.py::set_agent_capability_grant",

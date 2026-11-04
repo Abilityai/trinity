@@ -165,6 +165,46 @@ def test_agent_server_and_backend_agree_on_approval(tmp_path, frontmatter):
     assert only.approval == backend_contract["approval"], frontmatter
 
 
+# trinity-enterprise#584 — the two parsers agree on whether a skill HAS a
+# description, and on its text, after the one blank rule
+# (`services/skill_packaging.clean_description`). Whole files, so the
+# framing differences (byte-order mark, CRLF, a `---` inside a value) are in
+# the table too: those are where the two parsers used to disagree.
+_DESCRIPTION_PARITY_FILES = [
+    "---\nname: s\ndescription: Writes the weekly report.\n---\n\n# s\n",
+    "---\nname: s\n---\n\n# s\n\nThe first paragraph is not a description.\n",
+    "---\nname: s\ndescription: ''\n---\n",
+    "---\nname: s\ndescription: '   '\n---\n",
+    "---\nname: s\ndescription: 42\n---\n",
+    "---\nname: s\ndescription: yes\n---\n",
+    "---\nname: s\ndescription: 2026-01-02\n---\n",
+    "---\nname: s\ndescription: [a, b]\n---\n",
+    "---\nname: s\ndescription: {x: 1}\n---\n",
+    "---\nname: s\ndescription: >\n  Folded\n  text.\n---\n",
+    "---\nname: s\ndescription: before --- after\n---\n",
+    "\ufeff---\nname: s\ndescription: After a byte-order mark.\n---\n",
+    "---\r\nname: s\r\ndescription: CRLF line ends.\r\n---\r\n",
+    "# s\n\nNo frontmatter at all.\n",
+    "---\nname: s\ndescription: [unclosed\n---\n",
+]
+
+
+@pytest.mark.parametrize("text", _DESCRIPTION_PARITY_FILES)
+def test_agent_server_and_backend_agree_on_description(tmp_path, text):
+    from services import skill_packaging
+    from services.skill_packaging import clean_description
+
+    parsed, _warn = skill_packaging.parse_frontmatter(text)
+    backend_contract, _warnings = skill_packaging.extract_contract(parsed)
+
+    skill_dir = tmp_path / "s"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_bytes(text.encode("utf-8"))
+    (only,) = scan_skills_directory(tmp_path)
+
+    assert backend_contract["description"] == clean_description(only.description), repr(text)
+
+
 def test_vendored_constants_match_the_backend():
     """The agent server cannot import `src/backend`; the marker name and the
     approval value set are duplicated, and this keeps the copies equal."""

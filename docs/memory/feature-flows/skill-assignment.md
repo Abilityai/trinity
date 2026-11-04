@@ -57,7 +57,7 @@ Since trinity-enterprise#754 the assignment surface is the **Shared skills** sec
 | **Manage sets** | `components/skills/AgentSkillSets.vue` in a `BaseModal` (`SkillsTab.vue:271-276`) | `store.assignSet` / `unassignSet` → `POST` / `DELETE /api/agents/{name}/skill-sets/{set}` |
 | **Sync now** | `SkillsTab.vue:138-147,586-594` | `store.inject()` → `POST /api/agents/{name}/skills/inject` |
 
-The picker keeps its ent#235 / ent#530 / ent#672 / #2914 behaviour: the draft is the INDIVIDUAL list, a set-only member is ticked and locked, a deprecated skill is marked before it is ticked, and a draft survives a sync that re-reads the same assignment set. Package fact chips render through the shared seam `components/skills/{SkillContractChips.vue, contract.js}` (ent#263, shared with the Library page).
+The picker keeps its ent#235 / ent#530 / ent#672 / #2914 behaviour: the draft is the INDIVIDUAL list, a set-only member is ticked and locked, a deprecated skill is marked before it is ticked, and a draft survives a sync that re-reads the same assignment set. Package fact chips render through the shared seam `components/skills/{SkillContractChips.vue, contract.js}` (ent#263, shared with the Library page). A row whose skill has no description reads "No description yet" (muted italic, `utils/skillDescription.js`; trinity-enterprise#584), the same words as the Library card and the Skills tab.
 
 ### State Management
 

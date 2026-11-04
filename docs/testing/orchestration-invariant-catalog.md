@@ -472,6 +472,10 @@ Signal: file predicate per running agent — for each `SELECT skill_name FROM ag
 `skill_sources.enabled = 1 AND last_sync_at IS NOT NULL` ⇒ `last_sync_status = 'success' OR last_error IS NOT NULL` — either the last sync worked, or the row says why it did not.
 Signal: `SELECT count(*) FROM skill_sources WHERE enabled = 1 AND last_sync_at IS NOT NULL AND last_sync_status <> 'success' AND last_error IS NULL` → must be 0.
 
+**SK-04** A skill's description is one fact on every surface *(Tier A, 🟡)* — trinity-enterprise#584.
+A capability is described once, in its `SKILL.md` frontmatter `description:`. For every running agent and every user-invocable skill it lists, the description the agent's own listing serves (`GET /api/agents/{name}/playbooks`), the Workspace hint for it (`/briefings`, when exposed) and the connector's `list_playbooks` entry are the same string, and are `null` exactly when the frontmatter `description:` is missing, empty or whitespace. The `/` typeahead carrying no descriptions (#2213) is the one permitted difference.
+Signal: per running agent, for each skill in `/playbooks` → `{name: description}`; the same map from the agent's `/briefings` hints (playbook tier, by name) and from `list_playbooks` must be equal on the shared keys, and no value may be `""` or whitespace. Journey-only.
+
 ---
 
 ## 17. Repo-bound deployment (`agent_git_config` / `agent_sync_state`)
