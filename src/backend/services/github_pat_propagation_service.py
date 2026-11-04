@@ -181,8 +181,9 @@ async def _apply_pat_to_env(
     # text or a file the agent PROVED absent may be patched. An unreadable or
     # non-UTF-8 `.env` used to read as "" and, with add_if_missing, was replaced
     # by a single GITHUB_PAT line — every other credential gone. It is skipped
-    # here; `update_remote_pat` still places the token with a one-line in-place
-    # edit over docker exec (ent#615), which never rewrites the rest of the file.
+    # here; `update_remote_pat` still places the token over docker exec (ent#615),
+    # whose script keeps every other line and itself refuses a file that is not
+    # UTF-8 text or that grep cannot read (exit 6/7), rather than emptying it.
     try:
         state, env_content = agent_env_read.classify_env_read(read_resp.json())
     except ValueError:
@@ -405,7 +406,15 @@ async def propagate_github_pat(new_pat: str) -> GithubPatPropagationResult:
                 )
                 continue
 
-            if result.status == "updated":
+            # trinity-enterprise#1073: an agent whose `.env` the HTTP write
+            # skipped (not readable as text) can still have the token LAND —
+            # `update_remote_pat` places it over docker exec, in place, and
+            # re-templates the remote. That agent is reached; dropping it into
+            # `skipped` reported "0 of N, keep the previous token" for a
+            # rotation that worked.
+            if result.status == "updated" or (
+                result.status == "skipped_env_unreadable" and result.remote_updated
+            ):
                 updated.append(result.agent_name)
                 if result.remote_updated:
                     remotes_updated += 1

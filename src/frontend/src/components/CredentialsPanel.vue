@@ -538,6 +538,22 @@ const formatEnvContent = (credentials) => {
   return lines.join('\n') + '\n'
 }
 
+// trinity-enterprise#1073: the files route decodes with errors="replace", so a
+// file that is not UTF-8 text reads "successfully" as U+FFFD (and NULs, for
+// UTF-16). Every writer here replaces the WHOLE file, so such a read is never
+// a base to write from.
+const isNotText = (content) => typeof content === 'string' && /[\uFFFD\u0000]/.test(content)
+
+class EnvNotTextError extends Error {
+  constructor() {
+    super(
+      "This agent's credential file isn't plain UTF-8 text, so nothing was written " +
+      '(writing now would replace every credential already in it). ' +
+      'Ask whoever runs the agent to check its .env file.'
+    )
+  }
+}
+
 /**
  * The CURRENT `.env`, parsed. Throws unless the file is genuinely absent.
  *
@@ -549,8 +565,12 @@ const formatEnvContent = (credentials) => {
 const readExistingEnv = async () => {
   try {
     const content = await agentsStore.downloadAgentFile(props.agentName, '/home/developer/.env')
+    if (isNotText(content)) {
+      throw new EnvNotTextError()
+    }
     return parseEnvText(content)
   } catch (err) {
+    if (err instanceof EnvNotTextError) throw err
     if (err.response?.status === 404) return {}
     // ent#819: a refusal names its cause (e.g. owner-tier); say that, not "unreachable"
     if (err.response?.status === 403 && err.response?.data?.code) {
@@ -757,6 +777,11 @@ const editFile = async (filename) => {
       return
     }
     content = ''
+  }
+  if (isNotText(content)) {
+    fileReadError.value = `${filename} isn't plain UTF-8 text, so it can't be edited here ` +
+      '(saving would replace it with the garbled text). Ask whoever runs the agent to check it.'
+    return
   }
   editingFile.value = filename
   editingContent.value = content

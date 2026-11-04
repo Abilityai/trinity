@@ -116,7 +116,8 @@ Owner (ent#967 panel)
     ├─ delegation_slot() → ONE Nevermined GET /api/v1/delegation/{id}/transactions
     │     404 → 422 delegation_not_found · non-active status → 422 delegation_inactive
     │     absent status → bind proceeds (live.status "unknown") · timeout → 503 nevermined_unreachable
-    ├─ agent GET /api/credentials/read (.env) → any NVM_API_KEY value in it that is not the
+    ├─ agent GET /api/credentials/read (.env) — not text (non-UTF-8, read error, image too old
+    │     to report absence) → 409 env_unreadable, no row, no write (ent#1073) — → any NVM_API_KEY value in it that is not the
     │     organization's agent key (every line, parsed as the agent's reader parses it,
     │     constant-time) → 409 agent_key_present — no row, no write (R9: Trinity never
     │     overwrites a key it did not write; its own left-behind key passes)
@@ -139,7 +140,8 @@ Owner, shared user, or the agent itself (self only)
     ├─ delegation_slot() → Nevermined DELETE /api/v1/delegation/{id}  (2xx/404 = revoked;
     │     else 503/502 and nothing local changes)
     ├─ row revoked_at/by → best-effort env: remove NVM_DELEGATION_ID (+ NVM_API_KEY,
-    │     NVM_ENVIRONMENT only if a bind introduced them); agent down → env_removed:false + env_note
+    │     NVM_ENVIRONMENT only if a bind introduced them); agent down → env_removed:false + env_note;
+    │     .env not text → env_removed:false, file untouched, env_note "env_unreadable — …" (ent#1073)
     │     (the delegation id left behind is inert; the organization's agent key is live until the
     │     next bind rewrites it or a person removes it)
     └─ audit nevermined_delegation_revoke → 200 {revoked, delegation_id, env_removed, env_note}

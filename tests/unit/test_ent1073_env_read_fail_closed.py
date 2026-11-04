@@ -111,11 +111,104 @@ def test_a_proven_absent_env_gets_the_line_only_when_adding_is_allowed(monkeypat
     assert status == "skipped_no_pat" and injects == []
 
 
-def test_the_global_rotation_reports_it_as_skipped(monkeypatch):
-    """A skipped status lands in `skipped`, never `updated` or `failed`, and the
-    Settings page names it rather than reading it as "no GITHUB_PAT"."""
+def _rotate(monkeypatch, *, remote_updated):
+    """`propagate_github_pat` over one running agent whose `.env` the HTTP write
+    skipped as unreadable; `remote_updated` is what `update_remote_pat` (the
+    docker-exec path) reported."""
+    from types import SimpleNamespace
+    from models import AgentPropagationStatus
+    from services import github_pat_propagation_service as svc
+    monkeypatch.setattr(svc, "list_all_agents_fast",
+                        lambda: [SimpleNamespace(name=AGENT, status="running")])
+    monkeypatch.setattr(svc.db, "has_agent_github_pat", lambda name: False)
+
+    async def propagate(name, pat, client):
+        return AgentPropagationStatus(agent_name=name, status="skipped_env_unreadable",
+                                      remote_updated=remote_updated)
+    monkeypatch.setattr(svc, "_propagate_to_agent", propagate)
+    return asyncio.run(svc.propagate_github_pat("ghp_new"))
+
+
+def test_a_rotation_whose_token_landed_over_exec_counts_the_agent_as_reached(monkeypatch, caplog):
+    """The `.env` HTTP write was skipped, but `update_remote_pat` placed the
+    token and re-templated the remote: the agent is reached. Reporting it as
+    skipped said "0 of N — keep the previous token until restarted" for a
+    rotation that worked."""
+    import logging
+    with caplog.at_level(logging.WARNING):
+        result = _rotate(monkeypatch, remote_updated=True)
+    assert result.updated == [AGENT]
+    assert result.remotes_updated == 1
+    assert result.skipped == []
+    assert not any("reached 0 of" in r.getMessage() for r in caplog.records)
+
+
+def test_a_rotation_that_reached_nothing_reports_it_as_skipped(monkeypatch):
+    result = _rotate(monkeypatch, remote_updated=False)
+    assert result.updated == [] and result.remotes_updated == 0
+    assert [a.status for a in result.skipped] == ["skipped_env_unreadable"]
+
+
+def test_the_settings_page_names_the_skipped_state():
+    """Settings names the state rather than reading it as "no GITHUB_PAT"."""
     vue = (_BACKEND.parent / "frontend" / "src" / "views" / "Settings.vue").read_text()
     assert "skipped_env_unreadable" in vue
+
+
+# ----------------------------------------------- the docker-exec `.env` write
+
+def _upsert(home: Path, *, mode=None):
+    """Run the real `_ENV_PAT_UPSERT_SCRIPT` under bash against `home/.env`."""
+    import os
+    import subprocess
+    from services.git_service import token_scrub
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+           "TRINITY_AGENT_HOME": str(home), "TRINITY_NEW_GITHUB_PAT": "ghp_new"}
+    if mode is not None:
+        (home / ".env").chmod(mode)
+    try:
+        return subprocess.run(["bash", "-c", token_scrub._ENV_PAT_UPSERT_SCRIPT], env=env,
+                              capture_output=True, timeout=30).returncode
+    finally:
+        if mode is not None:
+            (home / ".env").chmod(0o600)
+
+
+@pytest.mark.parametrize("raw", [
+    ENV.encode("utf-16"),                     # NUL bytes: grep used to print nothing
+    b"OTHER_KEY=caf\xe9\nSOME_SECRET=s3cr3t\n",  # Latin-1, not UTF-8
+    b"OTHER_KEY=a\x00b\nSOME_SECRET=s3cr3t\n",  # a stray NUL in otherwise ASCII text
+])
+def test_the_exec_write_refuses_a_file_that_is_not_text(tmp_path, raw):
+    (tmp_path / ".env").write_bytes(raw)
+    assert _upsert(tmp_path) == 6
+    assert (tmp_path / ".env").read_bytes() == raw
+    assert not list(tmp_path.glob(".env.trinity-ent615.*"))
+
+
+def test_the_exec_write_never_turns_a_read_error_into_an_empty_file(tmp_path):
+    import os
+    if os.geteuid() == 0:
+        pytest.skip("root reads a 0000 file; the error path needs an unprivileged user")
+    (tmp_path / ".env").write_text(ENV)
+    assert _upsert(tmp_path, mode=0o000) != 0
+    assert (tmp_path / ".env").read_text() == ENV
+    assert not list(tmp_path.glob(".env.trinity-ent615.*"))
+
+
+def test_the_exec_write_keeps_every_other_line(tmp_path):
+    (tmp_path / ".env").write_text("GITHUB_PAT=ghp_old\n" + ENV)
+    assert _upsert(tmp_path) == 0
+    lines = (tmp_path / ".env").read_text().splitlines()
+    assert "OTHER_KEY=keep-me" in lines and "SOME_SECRET=s3cr3t" in lines
+    assert [l for l in lines if l.startswith("GITHUB_PAT=")] == ["GITHUB_PAT=ghp_new"]
+
+
+def test_the_exec_write_replaces_a_file_holding_only_the_token(tmp_path):
+    """grep's exit 1 (no line kept) is not an error."""
+    (tmp_path / ".env").write_text("GITHUB_PAT=ghp_old\n")
+    assert _upsert(tmp_path) == 0
+    assert (tmp_path / ".env").read_text() == "GITHUB_PAT=ghp_new\n"
 
 
 # ------------------------------------------------------------------- the guard

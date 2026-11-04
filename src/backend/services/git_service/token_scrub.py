@@ -49,10 +49,24 @@ ENV_FILE="${TRINITY_AGENT_HOME:-/home/developer}/.env"
 [ -n "${TRINITY_NEW_GITHUB_PAT:-}" ] || exit 2
 TMP="${ENV_FILE}.trinity-ent615.$$"
 if [ -f "${ENV_FILE}" ]; then
+    # trinity-enterprise#1073: the `mv` below replaces the whole file, so a file
+    # this cannot filter line by line is refused, never treated as empty. NUL
+    # bytes (UTF-16, binary) and invalid UTF-8 are what the agent's read route
+    # reports as `files_b64`; on those, grep printed nothing and the file came
+    # back as a single GITHUB_PAT line.
+    [ "$(tr -d '\000' < "${ENV_FILE}" | wc -c)" = "$(wc -c < "${ENV_FILE}")" ] || exit 6
+    if command -v iconv >/dev/null 2>&1; then
+        iconv -f UTF-8 -t UTF-8 "${ENV_FILE}" > /dev/null 2>&1 || exit 6
+    fi
     # `[[:space:]]`, not `[ \t]`: a POSIX bracket expression takes backslash
     # literally, so `[ \t]` is "space, backslash or t" and a TAB-indented line
-    # would survive as a duplicate.
-    grep -v '^[[:space:]]*GITHUB_PAT=' "${ENV_FILE}" > "${TMP}" 2>/dev/null || : > "${TMP}"
+    # would survive as a duplicate. `-a` and the C locale: every byte is text,
+    # so grep never switches to "binary file matches" and prints nothing.
+    LC_ALL=C grep -a -v '^[[:space:]]*GITHUB_PAT=' "${ENV_FILE}" > "${TMP}" 2>/dev/null
+    rc=$?
+    # 0: lines kept; 1: none kept (only GITHUB_PAT lines, or an empty file).
+    # Anything else is an error, and an error never becomes an empty file.
+    if [ "${rc}" -gt 1 ]; then rm -f "${TMP}"; exit 7; fi
 else
     : > "${TMP}" || exit 3
 fi
