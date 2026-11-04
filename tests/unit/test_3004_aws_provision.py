@@ -95,6 +95,7 @@ def _run(tmp_path: Path, body: str, funcs: list[str], env: dict[str, str] | None
         _extract("env_value"),
         'provision_die() { echo "DIE: $1" >&2; exit 1; }',
         'provision_caddyfile() { echo "caddyfile $1 $2" >> "$CALL_LOG"; }',
+        'provision_caddyfile_writable() { return 0; }',
         src,
         body,
     ])
@@ -559,6 +560,23 @@ def test_the_refresh_skips_the_banner() -> None:
 # Clients that send no SNI get the IP certificate
 # ---------------------------------------------------------------------------
 
+# The apt package's own /etc/caddy/Caddyfile, as a first boot finds it (#4149).
+_PACKAGED_DEFAULT = """# The Caddyfile is an easy way to configure your Caddy web server.
+#
+# Unless the file starts with a global options block, the first
+# uncommented line is always the address of your site.
+:80 {
+	# Set this path to your site's directory.
+	root * /usr/share/caddy
+
+	# Enable the static file server.
+	file_server
+
+	# Another common task is to set up a reverse proxy:
+	# reverse_proxy localhost:8080
+}
+"""
+
 _DOMAIN_SITE = "https://*.*, https://*.*.*, https://*.*.*.*, https://*.*.*.*.*, https://*.*.*.*.*.* {"
 
 
@@ -583,15 +601,15 @@ def _render_twice(tmp_path, active_rc: int) -> list[str]:
     cidr_fn = _extract("provision_private_cidrs")
     caddy_fn = src[src.index("provision_caddyfile() {"): src.index("\nprovision_site() {")]
     out = tmp_path / "Caddyfile"
-    out.write_text("package default\n")
+    out.write_text(_PACKAGED_DEFAULT)
     log = tmp_path / "sys.log"
     harness = (
         (cidr_fn + "\n" + caddy_fn).replace("/etc/caddy/Caddyfile", str(out))
         + "\nenv_value() { :; }\ncaddy() { :; }\n"
         + f'systemctl() {{ echo "$*" >> "{log}"; [ "$1" = is-active ] && return {active_rc}; return 0; }}\n'
-        # First boot over the package default (`fresh`, as provision_apply_ip
-        # passes it), then a re-render of the file it wrote (#4149).
-        + 'provision_caddyfile "203.0.113.10" "aws-marketplace" fresh\necho ---- >> "' + str(log) + '"\n'
+        # First boot over the apt package's default, then a re-render of the
+        # file it wrote (#4149: both read as replaceable off the file itself).
+        + 'provision_caddyfile "203.0.113.10" "aws-marketplace"\necho ---- >> "' + str(log) + '"\n'
         + 'provision_caddyfile "203.0.113.10" "aws-marketplace"\n'
     )
     r = subprocess.run(["bash", "-c", harness], capture_output=True, text=True, env={"PATH": _SYS_PATH})

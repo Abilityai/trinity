@@ -168,6 +168,13 @@ while [ "$_pi" -lt "${#_pargs[@]}" ]; do
     esac
     _pi=$((_pi + 1))
 done
+# #4149 review: only the Caddy-only render honours --dry-run. Anywhere else it
+# would be silently ignored and the run would pull, `compose up` or rewrite .env
+# for real, so it is refused instead.
+if [ "$CADDY_DRY_RUN" = "1" ] && { [ "$PROVISION" != "1" ] || [ "$PROVISION_PHASE" != "caddy" ]; }; then
+    echo "❌ --dry-run is supported only with --provision --caddy-only (it previews the Caddyfile; nothing else is simulated)." >&2
+    exit 1
+fi
 
 # Caddy is PINNED and the floor is load-bearing rather than hygiene: the whole
 # no-domain HTTPS story rests on a Let's Encrypt certificate for a BARE IP, and
@@ -391,10 +398,11 @@ provision_private_cidrs() {
 # The file is Trinity's, rewritten on every upgrade (#4149). An operator's own
 # sites go in /etc/caddy/Caddyfile.d/*.caddy, which the render imports and never
 # touches. A live Caddyfile someone else edited is never replaced without
-# --caddy-overwrite (provision_caddyfile_is_ours). With a third argument
-# `fresh` (first boot: the packaged default is still in place) it is replaced.
+# --caddy-overwrite (provision_caddyfile_is_ours, which also recognises the
+# apt package's unedited default, so first boot replaces it). Whether a file is
+# replaceable is read off the FILE, never off which caller is rendering.
 provision_caddyfile() {
-    local ip="$1" provenance="$2" fresh="${3:-}" _do_header="" _private="" _private_block="" _auto_https=""
+    local ip="$1" provenance="$2" _do_header="" _private="" _private_block="" _auto_https=""
     local _target _t_port _t_proxy=0 _rp_site _rp_private
 
     # Which web listener Caddy proxies to (trinity-enterprise#873). Chosen by a
@@ -520,32 +528,33 @@ CADDY
         echo "--- /etc/caddy/Caddyfile as it would be written (dry run, nothing changed) ---"
         cat /etc/caddy/Caddyfile.new
         echo "--- end ---"
-        if [ "$fresh" != "fresh" ] && ! provision_caddyfile_is_ours; then
+        if ! provision_caddyfile_is_ours; then
             echo "Would REFUSE: the live /etc/caddy/Caddyfile has been edited since Trinity wrote it. Move your own"
             echo "sites to /etc/caddy/Caddyfile.d/<name>.caddy, then re-run with --caddy-overwrite."
         fi
+        provision_caddy_dropins_readable || echo "Would REFUSE: see the unreadable Caddyfile.d entries above."
         rm -f /etc/caddy/Caddyfile.new
         return 0
     fi
     # Someone else's file: say so and keep it serving (#4149). An upgrade that
     # silently dropped an operator's site took their hostname down.
-    if [ "$fresh" != "fresh" ] && ! provision_caddyfile_is_ours; then
-        if [ "$CADDY_OVERWRITE" != "1" ]; then
+    if ! provision_caddyfile_writable; then
+        rm -f /etc/caddy/Caddyfile.new
+        return 1
+    fi
+    if ! provision_caddyfile_is_ours; then
+        # --caddy-overwrite (provision_caddyfile_writable refused without it).
+        if ! cp -p /etc/caddy/Caddyfile "/etc/caddy/Caddyfile.bak-$(date +%Y%m%d-%H%M%S)"; then
             rm -f /etc/caddy/Caddyfile.new
-            {
-                echo "❌ /etc/caddy/Caddyfile has been edited since Trinity wrote it, so it was NOT replaced:"
-                echo "   replacing it would drop whatever was added. The running config is untouched."
-                echo "   Move your own site blocks to /etc/caddy/Caddyfile.d/<name>.caddy (imported, never"
-                echo "   rewritten), then re-run with --caddy-overwrite; the current file is kept as a backup."
-                echo "   Preview the new file first: ./scripts/deploy/start.sh --provision --cloud <cloud> --caddy-only --dry-run"
-            } >&2
+            echo "❌ Could not back up the edited /etc/caddy/Caddyfile, so it was NOT replaced." >&2
             return 1
         fi
-        cp -p /etc/caddy/Caddyfile "/etc/caddy/Caddyfile.bak-$(date +%Y%m%d-%H%M%S)"
         echo "→ Caddy: replacing an edited Caddyfile (--caddy-overwrite); the old one is kept beside it as Caddyfile.bak-*."
     fi
-    # The operators' directory: an empty glob is valid, but its home should exist.
-    mkdir -p /etc/caddy/Caddyfile.d
+    # The operators' directory: an empty glob is valid, but its home should
+    # exist — explicitly 0755, since a first boot under umask 077 would make a
+    # directory the `caddy` user cannot traverse.
+    [ -d /etc/caddy/Caddyfile.d ] || install -d -m 0755 /etc/caddy/Caddyfile.d
     # Unchanged and already running: leave Caddy alone. A refresh that keeps
     # failing at the backend step re-renders the same file every five minutes,
     # and a restart drops every live connection, SSE streams included. A
@@ -553,12 +562,78 @@ CADDY
     if cmp -s /etc/caddy/Caddyfile.new /etc/caddy/Caddyfile && systemctl is-active --quiet caddy; then
         rm -f /etc/caddy/Caddyfile.new
         provision_caddyfile_record
+        # The file is the same, but an operator's drop-in may be new or edited:
+        # the import is read only when Caddy loads its config, so reload (no
+        # dropped connections) rather than leave it unloaded (#4149 review).
+        if [ "$(provision_caddy_dropins_digest)" != "$(cat /etc/caddy/Caddyfile.d.trinity-sha256 2>/dev/null)" ]; then
+            systemctl reload caddy
+            echo "→ Caddy: reloaded for a changed /etc/caddy/Caddyfile.d."
+        fi
+        provision_caddy_dropins_record
         return 0
     fi
     mv -f /etc/caddy/Caddyfile.new /etc/caddy/Caddyfile
     provision_caddyfile_record
+    provision_caddy_dropins_record
     systemctl enable caddy
     systemctl restart caddy
+}
+
+# May this render replace the live Caddyfile? Says why on stderr when not.
+# Checked by provision_caddyfile before it writes, and by provision_apply_ip
+# BEFORE it touches .env, so a refusal never half-applies a new address.
+provision_caddyfile_writable() {
+    if ! provision_caddyfile_is_ours && [ "$CADDY_OVERWRITE" != "1" ]; then
+        {
+            echo "❌ /etc/caddy/Caddyfile has been edited since Trinity wrote it, so it was NOT replaced:"
+            echo "   replacing it would drop whatever was added. The running config is untouched."
+            echo "   Move your own site blocks to /etc/caddy/Caddyfile.d/<name>.caddy (imported, never"
+            echo "   rewritten), then re-run with --caddy-overwrite; the current file is kept as a backup."
+            echo "   Preview the new file first: ./scripts/deploy/start.sh --provision --cloud <cloud> --caddy-only --dry-run"
+        } >&2
+        return 1
+    fi
+    provision_caddy_dropins_readable
+}
+
+# The operators' directory, and whether the `caddy` service user can read what
+# is in it. root's `caddy validate` reads anything, so an unreadable drop-in
+# passes validation and then fails the restart as `caddy` — the site down. The
+# 1-Click first boot runs under umask 077, which made a `mkdir`ed directory 0700.
+provision_caddy_dropins_readable() {
+    local d=/etc/caddy/Caddyfile.d f bad=""
+    [ -d "$d" ] || return 0   # created 0755 by provision_caddyfile, after this check
+    for f in "$d" "$d"/*.caddy; do
+        [ -e "$f" ] || continue
+        if [ "$(id -u)" = "0" ] && id caddy >/dev/null 2>&1 && command -v runuser >/dev/null 2>&1; then
+            if [ -d "$f" ]; then runuser -u caddy -- test -x "$f" -a -r "$f"; else runuser -u caddy -- test -r "$f"; fi \
+                || bad="${bad} ${f}"
+        elif [ -d "$f" ]; then
+            [ -n "$(find "$f" -maxdepth 0 -perm -0005)" ] || bad="${bad} ${f}"
+        else
+            [ -n "$(find "$f" -maxdepth 0 -perm -0004)" ] || bad="${bad} ${f}"
+        fi
+    done
+    [ -z "$bad" ] && return 0
+    {
+        echo "❌ The caddy service user cannot read:${bad}"
+        echo "   Caddy would fail to start with them, so nothing was changed. Fix with:"
+        echo "   chmod 0755 ${d}; chmod 0644 ${d}/*.caddy"
+    } >&2
+    return 1
+}
+
+provision_caddy_dropins_digest() {
+    local d=/etc/caddy/Caddyfile.d f
+    for f in "$d"/*.caddy; do
+        [ -e "$f" ] || continue
+        printf '%s\n' "$f"
+        cat "$f"
+    done | sha256sum | cut -d' ' -f1
+}
+
+provision_caddy_dropins_record() {
+    provision_caddy_dropins_digest > /etc/caddy/Caddyfile.d.trinity-sha256
 }
 
 # The checksum of the Caddyfile this script last wrote, so the next render can
@@ -567,12 +642,13 @@ provision_caddyfile_record() {
     sha256sum /etc/caddy/Caddyfile | cut -d' ' -f1 > /etc/caddy/Caddyfile.trinity-sha256
 }
 
-# Is the live Caddyfile one this script wrote, unedited? No file: yes. A
-# recorded checksum: it must match. No record (written before #4149): it may
-# hold only the top-level blocks Trinity has ever rendered — the global options,
-# `http://`, `https://` or `https://<IPv4>`, the on-demand wildcard list and the
-# Caddyfile.d import. Anything else (a hostname site, a snippet, an import) is
-# an operator's, and replacing the file would drop it.
+# Is the live Caddyfile replaceable? No file: yes. A recorded checksum (written
+# since #4149): it must match. No record: it must be either the apt package's
+# unedited default (first boot) or a file made ONLY of lines Trinity has ever
+# rendered (every pre-#4149 install), in Trinity's top-level shape. Any other
+# line — a hostname site, an `http://<ip>` block, a matcher inside Trinity's
+# own `http://` block, a global option such as `email` — is an operator's, and
+# replacing the file would drop it.
 provision_caddyfile_is_ours() {
     local live=/etc/caddy/Caddyfile record=/etc/caddy/Caddyfile.trinity-sha256
     [ -e "$live" ] || return 0
@@ -580,15 +656,55 @@ provision_caddyfile_is_ours() {
         [ "$(sha256sum "$live" | cut -d' ' -f1)" = "$(cat "$record")" ]
         return
     fi
+    provision_caddyfile_is_packaged_default "$live" && return 0
     awk '
+        BEGIN {
+            ip   = "[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+"
+            cidr = "[0-9.:/a-fA-F]+"
+            n = 0
+            # Every line the render (and its reverse-proxy and private blocks)
+            # has produced, comments and indentation stripped.
+            ok[n++] = "\\{"; ok[n++] = "\\}"
+            ok[n++] = "acme_ca https://acme-v02\\.api\\.letsencrypt\\.org/directory"
+            ok[n++] = "default_sni " ip
+            ok[n++] = "on_demand_tls \\{"
+            ok[n++] = "ask http://127\\.0\\.0\\.1:8000/api/public/tls-allowed"
+            ok[n++] = "auto_https disable_redirects"
+            ok[n++] = "https://" ip " \\{"
+            ok[n++] = "https:// \\{"
+            ok[n++] = "http:// \\{"
+            ok[n++] = "https://\\*\\.\\*(, https://(\\*\\.)+\\*)* \\{"
+            ok[n++] = "tls \\{"; ok[n++] = "issuer acme \\{"; ok[n++] = "profile shortlived"
+            ok[n++] = "on_demand"; ok[n++] = "encode gzip"
+            ok[n++] = "reverse_proxy 127\\.0\\.0\\.1:[0-9]+ \\{"; ok[n++] = "flush_interval -1"
+            ok[n++] = "transport http \\{"; ok[n++] = "proxy_protocol v2"
+            ok[n++] = "keepalive off"; ok[n++] = "versions 1\\.1"
+            ok[n++] = "header X-DO-MARKETPLACE \"trinity\""
+            ok[n++] = "@private remote_ip " cidr "( " cidr ")*"
+            ok[n++] = "handle @private \\{"; ok[n++] = "handle \\{"
+            ok[n++] = "redir https://\\{host\\}\\{uri\\} (permanent|308)"
+            ok[n++] = "import [^ ]*Caddyfile\\.d/\\*\\.caddy"
+        }
         { line = $0; sub(/#.*/, "", line); gsub(/^[ \t]+|[ \t]+$/, "", line) }
         line == "" { next }
+        {
+            known = 0
+            for (i = 0; i < n; i++) if (line ~ ("^" ok[i] "$")) { known = 1; break }
+            if (!known) foreign = 1
+        }
         depth == 0 && line != "}" {
-            if (line !~ /^(\{|https?:\/\/([0-9.]+)? \{|https:\/\/\*\.\*(, https:\/\/[*.]+)* \{|import [^ ]*Caddyfile\.d\/\*\.caddy)$/) foreign = 1
+            if (line !~ ("^(\\{|https://(" ip ")? \\{|http:// \\{|https://\\*\\.\\*(, https://(\\*\\.)+\\*)* \\{|import [^ ]*Caddyfile\\.d/\\*\\.caddy)$")) foreign = 1
         }
         { o = gsub(/\{/, "{", line); c = gsub(/\}/, "}", line); depth += o - c }
         END { exit foreign }
     ' "$live"
+}
+
+# The apt package's own /etc/caddy/Caddyfile, unedited: a `:80` file_server of
+# /usr/share/caddy and nothing else (its comments aside). First boot replaces it.
+provision_caddyfile_is_packaged_default() {
+    [ "$(sed -e 's/#.*//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' "$1" | tr '\n' '|')" \
+        = ':80 {|root * /usr/share/caddy|file_server|}|' ]
 }
 
 # The protected web listener's loopback port (trinity-enterprise#873): shell
@@ -699,6 +815,10 @@ provision_site() {
 # not name the IP, and PRIVATE_NETWORK_CIDRS is re-read from .env on every render.
 provision_apply_ip() {
     local ip="$1" provenance="$2" old="${3:-}" _tls
+    # Before .env: a refused Caddyfile must leave the whole address change
+    # unapplied, never FRONTEND_URL on the new IP with Caddy on the old one. The
+    # address is not recorded, so the refresh says so again on its next tick.
+    provision_caddyfile_writable || provision_die "the new address ${ip} was NOT applied (.env and Caddy are unchanged)."
     if [ -z "$old" ] || [ "$(env_value FRONTEND_URL)" = "https://${old}" ]; then
         set_env_key FRONTEND_URL "https://${ip}"
     else
@@ -707,10 +827,7 @@ provision_apply_ip() {
     chmod 0600 .env
     echo "→ .env: FRONTEND_URL=$(env_value FRONTEND_URL), TRINITY_INSTALL_SOURCE=${provenance}"
 
-    # First boot (no previous address) replaces the packaged default Caddyfile.
-    local _fresh=""
-    [ -z "$old" ] && _fresh=fresh
-    provision_caddyfile "$ip" "$provenance" "$_fresh" \
+    provision_caddyfile "$ip" "$provenance" \
         || provision_die "could not write the Caddy configuration."
 
     # Verify the certificate was actually ISSUED. Without this the failure is
@@ -948,7 +1065,7 @@ if [ "$PROVISION" = "1" ]; then
         [ -f .env ] || provision_die "no .env here — run this from the Trinity install directory."
         provision_caddyfile "$_caddy_ip" "$(env_value TRINITY_INSTALL_SOURCE)" \
             || provision_die "could not write the Caddy configuration."
-        [ "$CADDY_DRY_RUN" = "1" ] || echo "Caddy reconfigured."
+        [ "$CADDY_DRY_RUN" = "1" ] || echo "Caddy configuration applied (restarted or reloaded only if it changed)."
         exit 0
     fi
     [ "$PROVISION_PHASE" = "site" ]    || provision_machine

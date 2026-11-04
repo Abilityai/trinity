@@ -249,6 +249,24 @@ def test_the_generated_config_is_validated_before_caddy_is_restarted() -> None:
     assert "leaving the running config alone" in renderer
 
 
+# The apt package's own /etc/caddy/Caddyfile, as a first boot finds it (#4149).
+_PACKAGED_DEFAULT = """# The Caddyfile is an easy way to configure your Caddy web server.
+#
+# Unless the file starts with a global options block, the first
+# uncommented line is always the address of your site.
+:80 {
+	# Set this path to your site's directory.
+	root * /usr/share/caddy
+
+	# Enable the static file server.
+	file_server
+
+	# Another common task is to set up a reverse proxy:
+	# reverse_proxy localhost:8080
+}
+"""
+
+
 def test_a_failed_validate_leaves_the_previous_caddyfile_on_disk() -> None:
     """Caddy keeps a rejected config only in memory. If the invalid file has
     already replaced the live one, the next reboot takes the site down — so the
@@ -260,7 +278,7 @@ def test_a_failed_validate_leaves_the_previous_caddyfile_on_disk() -> None:
     caddy_fn = src[src.index("provision_caddyfile() {") : src.index("\nprovision_site() {")]
     with tempfile.TemporaryDirectory() as tmp:
         live = Path(tmp) / "Caddyfile"
-        live.write_text("previous working config\n")
+        live.write_text(_PACKAGED_DEFAULT)
         for validate_rc, expect_rc in ((1, 1), (0, 0)):
             harness = (
                 (cidr_fn + "\n" + caddy_fn).replace("/etc/caddy/Caddyfile", str(live))
@@ -268,8 +286,8 @@ def test_a_failed_validate_leaves_the_previous_caddyfile_on_disk() -> None:
                 + "env_value() { printf '%s' \"$CIDRS\"; }\n"
                 + "systemctl() { :; }\n"
                 + f"caddy() {{ return {validate_rc}; }}\n"
-                # A file Trinity never wrote, replaced as first boot does (#4149).
-                + 'provision_caddyfile "203.0.113.10" "do-marketplace" fresh\n'
+                # The apt package's default, replaced as first boot does (#4149).
+                + 'provision_caddyfile "203.0.113.10" "do-marketplace"\n'
             )
             proc = subprocess.run(
                 ["bash", "-c", harness],
@@ -280,7 +298,7 @@ def test_a_failed_validate_leaves_the_previous_caddyfile_on_disk() -> None:
             assert proc.returncode == expect_rc, proc.stderr
             assert not Path(f"{live}.new").exists(), "the rejected render was left behind"
             if validate_rc:
-                assert live.read_text() == "previous working config\n", "an invalid render replaced the live file"
+                assert live.read_text() == _PACKAGED_DEFAULT, "an invalid render replaced the live file"
             else:
                 assert "remote_ip 1.2.3.4/99" in live.read_text(), "a valid render was not installed"
 
@@ -297,7 +315,7 @@ def test_the_installed_caddyfile_is_readable_by_the_caddy_user_under_a_strict_um
     caddy_fn = src[src.index("provision_caddyfile() {") : src.index("\nprovision_site() {")]
     with tempfile.TemporaryDirectory() as tmp:
         live = Path(tmp) / "Caddyfile"
-        live.write_text("previous working config\n")
+        live.write_text(_PACKAGED_DEFAULT)
         live.chmod(0o644)
         harness = (
             "umask 077\n"
@@ -306,8 +324,8 @@ def test_the_installed_caddyfile_is_readable_by_the_caddy_user_under_a_strict_um
             + "env_value() { printf '%s' \"$CIDRS\"; }\n"
             + "systemctl() { :; }\n"
             + "caddy() { :; }\n"
-                # A file Trinity never wrote, replaced as first boot does (#4149).
-                + 'provision_caddyfile "203.0.113.10" "do-marketplace" fresh\n'
+                # The apt package's default, replaced as first boot does (#4149).
+                + 'provision_caddyfile "203.0.113.10" "do-marketplace"\n'
         )
         proc = subprocess.run(
             ["bash", "-c", harness],
