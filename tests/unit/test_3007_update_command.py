@@ -1100,7 +1100,7 @@ def test_published_url_that_never_answers_fails_after_the_deadline(tmp_path):
     proc = inst.run("--yes", env=_ent_env(inst, TRINITY_UPDATE_PUBLISHED_TIMEOUT="3"))
     assert proc.returncode != 0
     assert proc.stderr.count("did not answer 200") == 1, proc.stderr
-    tries = [c for c in inst.calls_list() if c.startswith("curl") and c.endswith("https://trinity.example.com/")]
+    tries = [c for c in inst.calls_list() if c.startswith("curl") and c.split()[-1] == "https://trinity.example.com/"]
     assert len(tries) >= 2, "the deadline must buy more than one attempt"
 
 
