@@ -168,7 +168,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       description:
         "List a project's tasks. By default only open ones (not done, not awaiting verification); " +
         "pass status 'all', 'done' or a single status to see others. Each task has an id like T-003, " +
-        "a title, status, owner, the executing agent and priority.",
+        "a title, status, owner, the executing agent, priority, and when its owner was last reached.",
       parameters: z.object({
         project_id: projectId,
         status: z.string().max(32).optional().describe("open (default), all, or one task status."),
@@ -326,8 +326,9 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       description:
         "What needs you on the projects you steward: for each, its health and whether an update is " +
         "due, tasks awaiting verification (verify or reopen them), tasks blocked or waiting on a " +
-        "decision, tasks untouched for a week, open asks, and whether it has gone quiet. Start a " +
-        "stewarding run here, then record health with set_project_health.",
+        "decision, tasks untouched for a week, open asks, and whether it has gone quiet. Each task " +
+        "names its owner and when they were last reached. Start a stewarding run here, then record " +
+        "health with set_project_health.",
       parameters: z.object({}),
       execute: async (_params: unknown, context?: { session?: McpAuthContext }) => {
         try {
@@ -380,6 +381,55 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       execute: async (p: { path: string }, context?: { session?: McpAuthContext }) => {
         try {
           return ok({ project: await getClient(context?.session).importProjectAsAgent(p.path, turnOf(context)) });
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    },
+
+    // ================================================================ ent#980
+    propose_project_changes: {
+      name: "propose_project_changes",
+      description:
+        "Request the people part of a project you are on but can't change yourself: members to add " +
+        "or remove, agents to add or remove (yourself included), a new steward, who can open it, and an " +
+        "owner per task. People are work emails or canon roles written role:<id> (the people who hold " +
+        "the role when it is approved); removals take emails only. " +
+        "It goes to YOUR primary contact (Agent › Access) as one Inbox decision — not to the project's creator. " +
+        "Approve applies it as them, once; anything they couldn't do on the project themselves is reported as not applied, by name. " +
+        "Decline applies nothing (their reason appears in the project log and as last_proposal on " +
+        "get_project). The receipt says waiting_on: \"primary\" — the role, never the person. One " +
+        "request waits per project: check pending_proposal on get_project or get_steward_digest first; " +
+        "the same change again is `already_pending`, a different one while one waits is " +
+        "`proposal_pending`. Refused by name, with nothing sent: `primary_unassigned` (nobody is your " +
+        "primary contact), `primary_cannot_open_agent`, `primary_cannot_open_project`, " +
+        "`primary_cannot_apply` (they couldn't make any of these changes) — relay the message to a " +
+        "person. Adding an agent someone else owns still needs its owner's yes. Needs the " +
+        "project-management permission (`project_management_not_permitted` otherwise).",
+      parameters: z.object({
+        project_id: projectId,
+        members: z.array(z.string().min(1).max(320)).max(20).optional()
+          .describe("Work emails or role:<id>, e.g. ['alex@example.com', 'role:compliance-lead']."),
+        agents: z.array(z.string().min(1).max(128)).max(10).optional().describe("Agent names to add to the project."),
+        remove_members: z.array(z.string().min(1).max(320)).max(20).optional()
+          .describe("Work emails of members to remove. The creator can't be removed."),
+        remove_agents: z.array(z.string().min(1).max(128)).max(10).optional()
+          .describe("Agent names to remove from the project; yours is applied last."),
+        steward: z.object({ kind: z.enum(["person", "agent"]), ref: z.string().min(1).max(320) }).optional()
+          .describe("A new steward: a person's work email, or an agent name."),
+        visibility: z.enum(["members", "company"]).optional()
+          .describe("members: only members can open it; company: everyone at the company can."),
+        task_owners: z.array(z.object({
+          task_id: taskId,
+          owner: z.string().min(1).max(320).describe("A work email or role:<id>."),
+        })).max(25).optional(),
+        note: z.string().max(500).optional().describe("One or two lines on why, shown to whoever decides."),
+      }),
+      execute: async (p: { project_id: string } & Record<string, unknown>, context?: { session?: McpAuthContext }) => {
+        try {
+          const { project_id, ...rest } = p;
+          const body = Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined));
+          return ok(await getClient(context?.session).proposeProjectChanges(project_id, body, turnOf(context)));
         } catch (e) {
           return fail(e);
         }

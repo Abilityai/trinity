@@ -45,6 +45,12 @@ one of them (`container-security.yml` → `verify-compose-file-sets`):
 | Production (source build) | `docker compose -f docker-compose.prod.yml up -d` (+ `-f docker-compose.prod.enterprise.yml` with the enterprise submodule) | bind mount `${TRINITY_DATA_PATH:-./trinity-data}` |
 | Hosted (prebuilt GHCR images) | `./scripts/deploy/start.sh --hosted` — day-two: `docker compose -f docker-compose.hosted.yml …` | bind mount `${TRINITY_DATA_PATH:-./trinity-data}` |
 
+**Updating any of these: `./scripts/deploy/update.sh`** (#3007). It reads which
+file set the host runs from the running backend's compose labels — including the
+enterprise overlay — so an update never recreates the backend from the wrong set.
+`--check` previews it and changes nothing; see
+[Upgrading](user-docs/guides/deploying/upgrading.md).
+
 **Never stack the dev file under prod or hosted** (`-f docker-compose.yml -f
 docker-compose.prod.yml`). Compose merges list-type keys by concatenation, so the
 combination either fails validation on the duplicated hardening entries (Compose
@@ -183,8 +189,8 @@ is gated on install provenance and never appears on an install like this one. A
 Marketplace droplet also boots with **no admin account**: the first person to
 open it in a browser creates one at `/setup` (ent#580) — see Security
 Recommendations below for what that means before you open it. A
-`trinity-do-create.sh` droplet does not: the installer asks for the admin
-password before it creates the droplet.
+`trinity-do-create.sh` droplet does the same: the installer asks for no
+password, so none reaches the droplet's user-data.
 
 Provenance is written by whatever provisions the box (in this repo,
 `start.sh --provision`) — `TRINITY_INSTALL_SOURCE` in
@@ -423,8 +429,9 @@ If you frequently pull `dev`, alias this to a single command in your
 shell — Trinity does not currently auto-detect the staleness on
 `start.sh` because the cost of doing so on every cold start is too high
 relative to how rarely the failure occurs (see #557 for the discussion).
-A future `scripts/deploy/upgrade.sh` will wrap backup + rebuild + start
-+ verify for the explicit upgrade path.
+For the explicit upgrade path, `./scripts/deploy/update.sh` wraps preflight +
+backup + checkout + rebuild + restart + published-URL verification, and
+rebuilds whichever platform images the update needs (#3007).
 
 **Redis connection errors**
 - Ensure Redis is running: `docker compose ps redis`
@@ -499,9 +506,12 @@ See `docs/drafts/OTEL_INTEGRATION.md` for full collector configuration and Grafa
    a trusted LAN this is a non-issue. After setup, login is fully authenticated
    and the window is closed.
 
-   **Marketplace one-click droplets are claimed in the browser — an accepted
-   risk.** DigitalOcean's 1-Click create page has no input form, so a droplet
-   created without a password boots with **no admin account**, and the first
+   **DigitalOcean droplets are claimed in the browser — an accepted risk.**
+   This covers the Marketplace 1-Click and the `trinity-do-create.sh` script
+   install (`TRINITY_INSTALL_SOURCE=do-script`), and the Vultr Marketplace
+   server. DigitalOcean's 1-Click create page has no input form, and the script
+   install puts no password in user-data (#3799), so the droplet boots with
+   **no admin account**, and the first
    person to open `https://<droplet-ip>` creates it — email, password,
    product-updates consent — without ever opening a terminal (ent#580). Between
    creating the droplet and that first visit, **anyone who finds its IP can claim
@@ -518,7 +528,8 @@ See `docs/drafts/OTEL_INTEGRATION.md` for full collector configuration and Grafa
      to `/etc/trinity/admin-password`, see
      [`packer/digitalocean/README.md`](../packer/digitalocean/README.md). That
      droplet boots with the admin already provisioned and never shows the
-     wizard.
+     wizard. The password stays in the droplet's user-data for the droplet's
+     life ([#3942](https://github.com/abilityai/trinity/issues/3942)).
 
    If a droplet you have never opened sends you to the login page rather than
    the "create your admin account" screen, someone else got there first:

@@ -107,7 +107,10 @@ SUBPROCESS_TIMEOUT_S = 600
 # How many first-parent ancestors of the merge-base are tried, newest first,
 # when the merge-base itself cannot build its install (a broken base branch).
 # Past this bound the guard exits 2. A PR that has to go further raises it here,
-# in review, rather than by editing branch protection.
+# in review, rather than by editing branch protection. Only the PR that repairs
+# the base can need that: any other PR branched inside the broken range clears
+# exit 2 by merging the repaired base branch in, which moves its merge-base past
+# the break.
 MAX_BASE_WALKBACK = 20
 
 EXIT_PASS = 0
@@ -335,8 +338,10 @@ def check_trees(
             "old code imports is gone, or the base branch has been broken for longer than the "
             "bound), not schema drift; it fails closed rather than pass. If this PR removes or "
             "major-bumps a dependency the old code imports, first land a PR that stops "
-            "importing it (or works with both versions), then the bump; if the base branch is "
-            "broken past the bound, raise MAX_BASE_WALKBACK in the fix PR."
+            "importing it (or works with both versions), then the bump. If the base branch was "
+            "broken past the bound and this PR is the fix, raise MAX_BASE_WALKBACK in it; if the "
+            "fix has already landed, merge the base branch into this PR, which moves the "
+            "merge-base past the break."
             f"\n--- {base_label} lifecycle output (tail) ---\n{failures[0][1]}",
             file=sys.stderr,
         )

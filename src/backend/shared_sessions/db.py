@@ -98,13 +98,18 @@ def get_room(room_id: str) -> Optional[dict]:
 
 
 def list_rooms_for_participant(kind: str, identity: str) -> list[dict]:
-    """Rooms this participant is (or was) in — membership IS the visibility rule."""
+    """Rooms this participant is ACTIVELY in — membership IS the visibility rule.
+
+    A participant who left (`left_at` set — today only a removed agent) is not a
+    member: it no longer lists the room (trinity-enterprise#959 fix round 1).
+    Their row stays (`remove_participant` is soft) so the transcript's sender
+    label still resolves; `get_participant` reads it unfiltered for that."""
     stmt = text(
         "SELECT r.id, r.name, r.topic, r.status, r.stop_reason, r.created_at, "
         "       r.expires_at, r.max_messages, r.max_cost_usd "
         "FROM enterprise_rooms r "
         "JOIN enterprise_room_participants p ON p.room_id = r.id "
-        "WHERE p.kind = :kind AND p.identity = :identity "
+        "WHERE p.kind = :kind AND p.identity = :identity AND p.left_at IS NULL "
         "ORDER BY r.created_at DESC"
     )
     with get_engine().connect() as conn:
@@ -143,26 +148,81 @@ def close_room(room_id: str, stop_reason: str, now: str) -> bool:
 
 # --- participants ------------------------------------------------------------
 
-def add_participant(room_id: str, kind: str, identity: str, role: str, now: str) -> None:
-    """Idempotent — re-adding an existing participant is a no-op (the UNIQUE
-    triple is the claim), so a retried create doesn't 500."""
+def add_participant(room_id: str, kind: str, identity: str, role: str, now: str,
+                    *, rejoin: bool = False) -> None:
+    """Idempotent — re-adding an ACTIVE participant is a no-op (the UNIQUE
+    triple is the claim), so a retried create doesn't 500.
+
+    A participant who LEFT holds that triple too. ``rejoin=True`` (the
+    moderator's explicit add only) clears `left_at` and takes the new role and
+    join time, keeping the row; without it they stay out, so an @mention cannot
+    undo a moderator's removal (ent#959)."""
     from sqlalchemy.exc import IntegrityError
     stmt = text(
         "INSERT INTO enterprise_room_participants "
         "(room_id, kind, identity, role, joined_at, last_read_seq) "
         "VALUES (:room, :kind, :identity, :role, :now, 0)"
     )
+    reactivate = text(
+        "UPDATE enterprise_room_participants "
+        "SET left_at = NULL, role = :role, joined_at = :now "
+        "WHERE room_id = :room AND kind = :kind AND identity = :identity "
+        "AND left_at IS NOT NULL"
+    )
+    params = {"room": room_id, "kind": kind, "identity": identity,
+              "role": role, "now": now}
     try:
         with get_engine().begin() as conn:
-            conn.execute(stmt, {"room": room_id, "kind": kind, "identity": identity,
-                                "role": role, "now": now})
+            conn.execute(stmt, params)
     except IntegrityError:
-        pass
+        if rejoin:
+            with get_engine().begin() as conn:
+                conn.execute(reactivate, params)
+
+
+def seat_person(room_id: str, kind: str, identity: str, role: str,
+                visible_from_seq: int, now: str) -> None:
+    """Seat a PERSON in a room, or seat them again (trinity-enterprise#701).
+
+    Unlike ``add_participant`` this is an upsert that clears ``left_at``: a
+    person who left can be seated again, and the new seat sets their role and
+    their read floor afresh. People only — agents keep ``add_participant``'s
+    no-op-on-conflict, which ``list_active_claude_session_ids`` relies on
+    ("nothing clears ``left_at``" for an agent).
+    """
+    if kind == "agent":
+        raise ValueError("seat_person seats people, not agents")
+    params = {"room": room_id, "kind": kind, "identity": identity, "role": role,
+              "floor": int(visible_from_seq), "now": now}
+    # One statement, so two concurrent seats of the same person can't both miss
+    # the UPDATE and race the INSERT into the UNIQUE(room_id, kind, identity).
+    with get_engine().begin() as conn:
+        conn.execute(text(
+            "INSERT INTO enterprise_room_participants "
+            "(room_id, kind, identity, role, joined_at, last_read_seq, visible_from_seq) "
+            "VALUES (:room, :kind, :identity, :role, :now, 0, :floor) "
+            "ON CONFLICT (room_id, kind, identity) DO UPDATE SET "
+            "role = excluded.role, visible_from_seq = excluded.visible_from_seq, "
+            "joined_at = excluded.joined_at, left_at = NULL"
+        ), params)
+
+
+def set_visible_from(room_id: str, kind: str, identity: str, visible_from_seq: int) -> bool:
+    """Move a person's read floor (trinity-enterprise#701: a backscroll grant
+    sets it to 0). True iff an active seat was updated."""
+    stmt = text(
+        "UPDATE enterprise_room_participants SET visible_from_seq = :floor "
+        "WHERE room_id = :room AND kind = :kind AND identity = :identity AND left_at IS NULL"
+    )
+    with get_engine().begin() as conn:
+        return (conn.execute(stmt, {"room": room_id, "kind": kind, "identity": identity,
+                                    "floor": int(visible_from_seq)}).rowcount or 0) > 0
 
 
 def list_participants(room_id: str) -> list[dict]:
     stmt = text(
-        "SELECT kind, identity, role, joined_at, left_at, last_read_seq, cached_session_id "
+        "SELECT kind, identity, role, joined_at, left_at, last_read_seq, cached_session_id, "
+        "       visible_from_seq "
         "FROM enterprise_room_participants WHERE room_id = :room "
         "ORDER BY kind, identity"
     )
@@ -184,7 +244,7 @@ def list_participants_for_rooms(room_ids: list[str]) -> dict[str, list[dict]]:
     keys = [f"r{i}" for i in range(len(room_ids))]
     stmt = text(
         "SELECT room_id, kind, identity, role, joined_at, left_at, last_read_seq, "
-        "       cached_session_id "
+        "       cached_session_id, visible_from_seq "
         "FROM enterprise_room_participants "
         "WHERE room_id IN (%s) ORDER BY room_id, kind, identity"
         % ",".join(f":{k}" for k in keys)
@@ -252,7 +312,7 @@ def last_message_for_rooms(room_ids: list[str]) -> dict[str, str]:
 def get_participant(room_id: str, kind: str, identity: str) -> Optional[dict]:
     stmt = text(
         "SELECT kind, identity, role, joined_at, left_at, last_read_seq, "
-        "       cached_session_id, consecutive_resume_failures "
+        "       cached_session_id, consecutive_resume_failures, visible_from_seq "
         "FROM enterprise_room_participants "
         "WHERE room_id = :room AND kind = :kind AND identity = :identity"
     )
@@ -458,6 +518,14 @@ def gate_held_seqs(room_id: str, agent_name: str) -> set[int]:
     stmt = text("SELECT seq FROM room_gate_holds WHERE room_id = :room AND agent_name = :agent")
     with get_engine().connect() as conn:
         return {int(r[0]) for r in conn.execute(stmt, {"room": room_id, "agent": agent_name})}
+
+
+def max_seq(room_id: str) -> int:
+    """The room's newest message seq (0 for an empty room)."""
+    stmt = text("SELECT COALESCE(MAX(seq), 0) FROM enterprise_room_messages WHERE room_id = :room")
+    with get_engine().connect() as conn:
+        row = conn.execute(stmt, {"room": room_id}).first()
+        return int(row[0]) if row else 0
 
 
 def count_messages(room_id: str) -> int:

@@ -686,3 +686,53 @@ def test_main_registers_only_the_checked_http_middleware():
     assert src.count('@app.middleware("http")') == 2
     # CORSMiddleware, ClientAddressMiddleware (ent#873), HostHeaderGuard
     assert src.count("app.add_middleware(") == 3
+
+
+# ---------------------------------------------------------------------------
+# #3380: a row adopted after the wait ran out may be the watchdog's claim
+# ---------------------------------------------------------------------------
+
+
+def _terminal_row(env, response):
+    from db.write_params import ExecutionResult
+
+    env.db.set_execution_chat_session(env.row.id, env.session.id)
+    env.db.update_execution_status(
+        execution_id=env.row.id, status="success",
+        result=ExecutionResult(response=response, cost=0.01),
+    )
+
+
+def _timed_out(env):
+    from services.execution_envelope import TaskExecutionErrorCode
+
+    env.dispatch.return_value = _result(
+        "failed", eid=env.row.id, error="Execution timed out after 1020s waiting",
+        error_code=TaskExecutionErrorCode.TIMEOUT,
+    )
+
+
+def test_adopting_a_watchdog_claimed_row_does_not_write_the_reply_twice(turn_env):
+    from services.cleanup_service import _RECOVERED_NOTICE
+
+    env = turn_env
+    recovered = f"{_RECOVERED_NOTICE}\n\nhi back"
+    _terminal_row(env, recovered)
+    # The watchdog wrote the reply when it won the terminal.
+    env.db.add_chat_message(
+        session_id=env.session.id, agent_name=AGENT, user_id=1,
+        user_email="u1@example.com", role="assistant", content=recovered,
+    )
+    _timed_out(env)
+    env.run()
+    msgs = [m for m in env.db.get_chat_messages(env.session.id) if m.role == "assistant"]
+    assert [m.content for m in msgs] == [recovered]
+
+
+def test_adopting_a_row_the_pull_sink_finished_still_writes_the_reply(turn_env):
+    env = turn_env
+    _terminal_row(env, "hi back")
+    _timed_out(env)
+    env.run()
+    msgs = [m for m in env.db.get_chat_messages(env.session.id) if m.role == "assistant"]
+    assert [m.content for m in msgs] == ["hi back"]

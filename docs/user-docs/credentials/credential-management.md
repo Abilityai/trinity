@@ -74,6 +74,16 @@ Add credentials using one of four methods in the **Credentials** section of **Se
 
 MCP server configuration is different. An `.env` injection does not rewrite `.mcp.json`; to change an MCP server's credential on a running agent, inject an updated `.mcp.json` directly (it is structurally validated first).
 
+### A credential an agent asks for in the chat
+
+Someone who works with an agent only in the Workspace has no Credentials section. When the agent needs a key, it asks for it **by name** with `ask_for_credential`, and the ask appears in the conversation (and in the Inbox) as a **secret field**: the variable's name, a masked input with **Show**/**Hide**, and **Send**.
+
+- Type or paste the value and press **Send**. The field empties at once; the value is stored in the agent's `.env` under that name and the agent's next turn reads it from its environment. No restart is needed.
+- The conversation then shows **NAME provided**. The value does not appear in the chat, in the ask's answer, in the agent's wake or in the audit log, which records only the name.
+- If the agent is stopped, nothing is stored: start it, then send again. Other refusals say what happened in the card.
+- A credential ask can only be answered through this field. The Operations page shows it without a reply box, and **Dismiss** still ends it without giving the value.
+- **Do not paste a secret into the chat as a message.** The Workspace refuses a message that looks like a key or token (*That looks like a secret. Nothing was stored.*), keeps no copy of it — not in the conversation, not as a draft — and points you to the secret field. Ask the agent to request the credential so the field opens.
+
 ### Who can read credential files
 
 Reading an agent's credential files — `.env`, `.mcp.json`, key and certificate files, SSH and cloud credentials, the runtimes' login files — is for the agent's **owner** or an **admin**, signed in or with their own `user` key. Someone the agent is shared with keeps chatting with it, and the agent keeps using its credentials, but opening one of these files shows a message saying who to ask. Agent, system and connector keys cannot read them. When the Credentials section cannot read a file it shows the server's message beside the file list and does not open the editor. The full list of files and the Files tab's behaviour are in [Agent Files → Reading credential files](../agents/agent-files.md#reading-credential-files).
@@ -114,7 +124,7 @@ Injection accepts a curated set of credential file types, not just `.env`. Anyth
 
 - **Export** creates an encrypted `.credentials.enc` file for backup. It captures the **full injected credential set** — every allow-listed credential file present in the agent (discovered live), text and binary alike — not just `.env` and `.mcp.json`.
 - **Import** decrypts and injects credentials from an encrypted file. The archive is re-validated against the same path policy on the way in.
-- **A committed `.credentials.enc` is imported by the platform, not by the agent's startup script.** The platform decrypts it once the agent is ready. It does not do so on installs with no encryption key; then the startup log says "Found .credentials.enc but no .env: this script does not decrypt it." and the owner imports it once with **Import from Git** under Settings › Storage (or the `import_credentials` MCP tool). The credentials persist from then on.
+- **A committed `.credentials.enc` is imported by the platform, not by the agent's startup script.** The platform decrypts it once the agent is ready. It does not do so on installs with no encryption key; then the startup log says "Found .credentials.enc but no .env: this script does not decrypt it." An operator first sets `CREDENTIAL_ENCRYPTION_KEY` to the key the archive was written with and restarts the backend; the platform then imports it at the agent's next start, or the owner, signed in, imports it at once with **Import from Git** under Settings › Credentials. The credentials persist from then on.
 
 ### Rotating the Encryption Key
 
@@ -175,11 +185,12 @@ The inject, export, import, checklist, and drift routes are owner-only **and hum
 ### MCP Tools
 
 - `get_credential_status(name)` -- Check credential file status.
-- `inject_credentials(name, credentials)` -- Inject credentials into the agent.
-- `export_credentials(name)` -- Export credentials to encrypted file. The agent's owner or an admin only, with a user-scoped or system-scoped key.
-- `import_credentials(name)` -- Import credentials from encrypted file. The agent's owner or an admin only, with a user-scoped or system-scoped key.
+- `inject_credentials(name, credentials)` -- Inject credentials into the agent. The agent's owner or an admin only, signed in or with their own user-scoped key; an agent's own key and the system key are refused.
+- `export_credentials(name)` -- Export credentials to encrypted file. The agent's owner or an admin only, signed in or with their own user-scoped key.
+- `import_credentials(name)` -- Import credentials from encrypted file. Importing takes a signed-in session, so an MCP API key is refused: use **Import from Git** under Settings › Credentials.
 - `get_credential_encryption_key()` -- Retrieve the encryption key. An administrator only, with a user-scoped or system-scoped key.
 - `list_available_credentials()` / `fetch_credential(name)` -- Read a granted vault credential at runtime (see [Credential Vault](#credential-vault)).
+- `ask_for_credential(name, why)` -- The calling agent asks the person it is chatting with for a secret by name; they fill a masked field in their Workspace (see [A credential an agent asks for in the chat](#a-credential-an-agent-asks-for-in-the-chat)).
 
 The credential tools are human-only, and each is listed only to the key scopes its route admits: `export_credentials` to your own user-scoped key, `get_credential_encryption_key` to a user-scoped or system-scoped key (the backend then admits an administrator only), and `inject_credentials` and `import_credentials` to no key, because they take a signed-in session. An agent-scoped key is shown none of them. If one of them is refused, the tool returns `{"success": false, "error": "…"}` with `human_only`, `admin_only` or `not_authorized` set, rather than an error string.
 

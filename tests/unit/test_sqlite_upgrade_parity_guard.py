@@ -26,7 +26,9 @@ base/head, no repository, an unresolvable merge-base), fail closed with exit 2.
 One test runs `main()` end to end over a throwaway git repository. A broken
 merge-base (a broken `dev`) is walked back over first-parent ancestors, bounded,
 to the newest that builds, so the PR that repairs `dev` is not blocked; a gap
-over that longer range is still a gap, and an exhausted walk exits 2.
+over that longer range is still a gap, and an exhausted walk exits 2. A PR
+branched inside the broken range is told to merge the repaired base branch in,
+and passes once it has.
 """
 from __future__ import annotations
 
@@ -462,6 +464,41 @@ def test_walk_back_is_bounded_and_fails_closed_when_exhausted(tmp_path, monkeypa
 
     monkeypatch.setattr(guard, "MAX_BASE_WALKBACK", 2)
     assert guard.main(["x", broken2, fix]) == guard.EXIT_PASS
+
+
+def test_exhausted_walk_clears_once_the_repaired_base_is_merged_in(tmp_path, monkeypatch, capsys):
+    # Only the PR that repairs the base can need a larger bound. A PR branched
+    # inside the broken range, checked after the fix landed, is told to merge the
+    # base branch in, and doing so moves its merge-base past the break.
+    repo = _new_repo(tmp_path)
+    _commit_tree(repo, "good", tables=[T_A])
+    _commit_tree(repo, "dev breaks", **_BROKEN_TREE)
+    broken2 = _commit_tree(repo, "dev stays broken", **_BROKEN_TREE)
+    _git(repo, "checkout", "-q", "-b", "feature")
+    (repo / "README").write_text("unrelated\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "a PR branched while dev is broken")
+    feature = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "main")
+    fix = _commit_tree(repo, "the fix PR lands", tables=[T_A])
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(guard, "MAX_BASE_WALKBACK", 1)
+
+    # CI checks the PR merged into the base tip: the fix plus the PR's change.
+    _git(repo, "checkout", "-q", "--detach", fix)
+    _git(repo, "merge", "-q", "--no-ff", "-m", "the PR's merge ref", feature)
+    assert guard.main(["x", fix, feature]) == guard.EXIT_CANNOT_RUN
+    err = capsys.readouterr().err
+    assert broken2[:12] in err
+    assert "merge the base branch into this PR" in err
+
+    _git(repo, "checkout", "-q", "feature")
+    _git(repo, "merge", "-q", "--no-ff", "-m", "merge main into the PR", "main")
+    updated = _git(repo, "rev-parse", "HEAD")
+    assert guard.main(["x", fix, updated]) == guard.EXIT_PASS
+    captured = capsys.readouterr()
+    assert "WARNING" not in captured.err
+    assert f"merge-base {fix[:12]}" in captured.out
 
 
 def test_broken_root_with_no_ancestor_fails_closed(tmp_path, monkeypatch, capsys):

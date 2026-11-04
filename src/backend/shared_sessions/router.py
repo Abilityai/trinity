@@ -227,6 +227,16 @@ async def post_message(room_id: str, body: RoomMessageCreate,
     Idempotency-Key so a retried post creates one message, not two)."""
     from services import idempotency_service
 
+    # Membership comes BEFORE the idempotency claim (trinity-enterprise#719). A
+    # stored replay and the in-flight 409 are answers this route gives too, so
+    # a non-member gets the same uniform 404 on every one of them as on a first
+    # post (Invariant #8), and never claims a key in the room. The service
+    # checks membership again on the post itself.
+    try:
+        service._require_membership(room_id, current_user)
+    except RoomError as e:
+        _raise(e)
+
     decision = idempotency_service.begin(f"room:{room_id}", idempotency_key)
     # begin() reports an in-flight claim as replay=True too, so this check
     # must come first or it never runs (#3320). Same detail shape as /chat.
@@ -307,5 +317,15 @@ async def remove_participant(room_id: str, agent_name: str,
                              current_user=Depends(get_room_principal)):
     try:
         return service.remove_participant(current_user, room_id, agent_name)
+    except RoomError as e:
+        _raise(e)
+
+
+@router.post("/{room_id}/leave")
+async def leave_room(room_id: str, current_user=Depends(get_room_principal)):
+    """A person leaves a room (trinity-enterprise#701). People only: an agent
+    is removed by the moderator, never by itself."""
+    try:
+        return service.leave_room(current_user, room_id)
     except RoomError as e:
         _raise(e)

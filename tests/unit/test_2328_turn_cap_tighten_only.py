@@ -9,10 +9,10 @@ and resolves the cap as the lower of a valid per-task value and the guardrail;
 a non-positive or non-integer value is ignored. The turn-limit 422 then names
 the cap that actually stopped the turn.
 
-What this slice does NOT deliver: a turn-limit 422 at a cap of 401 or 403 is
-still read as an auth failure by the backend's push classifier, because the
-CLI's own error text carries the turn count. The tests below pin that as the
-current behaviour, by name, rather than claim the opposite.
+A turn-limit 422 at a cap of 401 or 403 carries that number in the CLI's own
+error text. #2328 left it reading as an auth failure on push; #3984 fixed that
+in the backend classifier (``failure_classifier.is_turn_limit``), and the last
+test below pins the fix through the per-task and the guardrail wording alike.
 
 Driven through the REAL ``_setup_headless_command`` (argv after ``--max-turns``)
 and the REAL ``_finalize_headless_result`` (the 422). The "other shape" is the
@@ -221,19 +221,18 @@ def test_the_per_task_422_wording_adds_no_number_the_auth_classifier_reads(
     [(500, 401), (500, 403), (401, None), (403, None)],
     ids=["per-task-401", "per-task-403", "guardrail-401", "guardrail-403"],
 )
-def test_known_exposure_a_turn_limit_422_at_401_or_403_reads_as_auth_on_push(
+def test_a_turn_limit_422_at_401_or_403_is_not_auth_on_push(
     monkeypatch, guardrail, per_task
 ):
-    """CURRENT behaviour, not a guarantee: when the cap that stopped the turn
-    is 401 or 403, the CLI's own error text carries that number, and the
-    backend's push classifier reads the 422 as a credential failure (a SUB-003
-    switch plus a retry). True on the guardrail-bound path before #2328 too;
-    the per-task rows become reachable on push once the backend forwards a
-    per-task value. The fix is a backend follow-up — a turn-limit 422 is never
-    a credential failure — and when it lands this test goes red and is
-    replaced by its inverse."""
+    """#3984: when the cap that stopped the turn is 401 or 403, the CLI's own
+    error text carries that number, and the bare "401"/"403" auth indicators
+    used to read the 422 as a credential failure (a SUB-003 switch plus a
+    retry). A turn-limit 422 is never a credential failure: the backend
+    classifier recognises the agent's turn-limit prefix first. This is the
+    inverse of #2328's known-exposure pin, and the only test that drives the
+    per-task remedy wording (#3970) through the classifier."""
     from services.execution_classification import classify_switch_failure
-    from services.failure_classifier import is_auth_failure
+    from services.failure_classifier import is_auth_failure, is_turn_limit
 
     _with_guardrail(monkeypatch, guardrail)
     detail = _turn_limit_422(_setup(per_task))
@@ -243,5 +242,6 @@ def test_known_exposure_a_turn_limit_422_at_401_or_403_reads_as_auth_on_push(
         request=httpx.Request("POST", "http://localhost/api/task"),
     )
 
-    assert is_auth_failure(detail)
-    assert classify_switch_failure(response) == "auth"
+    assert is_turn_limit(detail)
+    assert not is_auth_failure(detail)
+    assert classify_switch_failure(response) is None

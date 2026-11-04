@@ -385,6 +385,14 @@ TTS_MAX_CHARS = int(os.getenv("TTS_MAX_CHARS", "1500"))
 # (Telegram voice messages). Both default to the same model today.
 GEMINI_TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL") or "gemini-3.5-flash"
 GEMINI_TRANSCRIPTION_MODEL = os.getenv("GEMINI_TRANSCRIPTION_MODEL") or "gemini-3.5-flash"
+# Workspace Direct calls (trinity-enterprise#1046). The speech model transcribes only:
+# on a silent clip it returns nothing, where a general model has been seen to invent
+# text. TTS tries the models in order.
+GEMINI_STT_MODEL = os.getenv("GEMINI_STT_MODEL") or "gemini-3.5-transcribe"
+GEMINI_TTS_MODELS = tuple(
+    m.strip() for m in (os.getenv("GEMINI_TTS_MODELS") or "gemini-3.8-flash-lite-tts,gemini-3.8-flash-tts").split(",")
+    if m.strip()
+)
 
 # VoIP Telephony Configuration (VOIP-001, #1056 — Phase 1, outbound)
 # Default OFF. The feature also requires a per-agent voip_bindings row to
@@ -530,8 +538,10 @@ COMMUNITY_RETENTION_FLOOR_DAYS = 5
 # v0.1.0, 2026-08): a default naming a tag that does not exist leaves every
 # fresh install seeded with a source that can never sync — and the failure is
 # quiet (a failed row in Settings), not loud. Bump this in lockstep with the
-# catalog's releases — the seed is fresh-install only, so a bump reaches new
-# installs and nothing else (#2545 moved it to v0.2.0, the release that added
+# catalog's releases. A bump reaches new installs through the seed, and existing
+# installs whose default source still points where the seed put it through the
+# boot follow (trinity-enterprise#529, forward only); a source an admin
+# retargeted stays where they put it (#2545 moved it to v0.2.0, the release that added
 # the project-management category; #3123 to v0.3.0, the release that added
 # `update-dashboard`, which the metrics tiles point users at; #3430 to v0.5.0,
 # the release whose `project-status` and `add-pipeline` match the platform's
@@ -542,8 +552,11 @@ COMMUNITY_RETENTION_FLOOR_DAYS = 5
 #
 # TRINITY_DEFAULT_SKILL_SOURCE="" disables the seed entirely for an operator who
 # wants no community catalog (mirrors TRINITY_DEFAULT_SYSTEM_MANIFEST).
+# The built-in catalog. Only a default seeded from THIS url follows the bundled
+# pin on upgrade (trinity-enterprise#529): a fork may not carry the next tag.
+BUNDLED_SKILL_SOURCE_URL = "github.com/abilityai/trinity-skills"
 DEFAULT_SKILL_SOURCE_URL = os.getenv(
-    "TRINITY_DEFAULT_SKILL_SOURCE", "github.com/abilityai/trinity-skills"
+    "TRINITY_DEFAULT_SKILL_SOURCE", BUNDLED_SKILL_SOURCE_URL
 )
 DEFAULT_SKILL_SOURCE_REF = os.getenv("TRINITY_DEFAULT_SKILL_SOURCE_REF", "v0.5.0")
 DEFAULT_SKILL_SOURCE_NAME = "Trinity Community Skills"
@@ -747,6 +760,9 @@ OPS_SETTINGS_DEFAULTS = {
     "ops_log_retention_days": "7",  # Days to keep container logs
     "ops_health_check_interval": "60",  # Seconds between health checks
     "ssh_access_enabled": "false",  # Enable SSH access via MCP tool
+    # trinity-enterprise#1068: a system apply unassigns a skill the member
+    # already holds when the gate the manifest declares on it fails to write.
+    "apply_unassign_on_failed_gate": "true",
     # RETENTION DEFAULTS — READ THIS BEFORE CHANGING A NUMBER BELOW (#1638).
     #
     # These are the fallback used at PRUNE time for an install with no
@@ -852,6 +868,7 @@ OPS_SETTINGS_VALIDATION = {
     "ops_log_retention_days": ("int", 0, _DAYS_MAX),
     "ops_health_check_interval": ("int", 1, 86400),
     "ssh_access_enabled": ("bool", None, None),
+    "apply_unassign_on_failed_gate": ("bool", None, None),
     # The row-retention windows (RETENTION_OPS_KEYS, minus #2216's backup key
     # below). `0` is a documented, meaningful value on every one of THESE —
     # "disable this sweep" — so the lower bound is 0 and NOT the community floor. Clamping to the floor here would be

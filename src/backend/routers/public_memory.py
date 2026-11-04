@@ -13,6 +13,12 @@ Security model:
   — or, since ent#637, is a scheduled run that ent#498 addressed to one
   person (the seat is read off the row's Workspace destination, never sent).
 - This prevents an agent from writing memory for an arbitrary user.
+- It is the agent's own door (#4121): a human is refused `agent_only`, because
+  the row the caller names decides whose notes are replaced, so anyone the agent
+  is shared with could otherwise name any person's run.
+- It serves the turn the agent is in (#4121, the ent#926 ledger rule, as
+  `search_memory` holds it): the named run must be live, and no other live turn
+  on the agent may resolve to a different scope.
 
 This is the ONE write boundary for agent_notes: every write records a
 `public_user_memory_writes` row (ent#419 layer 3, built for ent#637's undo), and
@@ -21,16 +27,17 @@ the ent#419 screen runs here, before the write, on every trigger
 the line, and nothing is stored.
 """
 
+import asyncio
 import logging
 import re
 
 from fastapi import APIRouter, Depends, HTTPException
-from models import WriteUserMemoryRequest
+from models import TaskExecutionStatus, WriteUserMemoryRequest
 
 from database import db
 from dependencies import get_current_user, assert_agent_access, assert_own_agent
 from db_models import User
-from services import schedule_seat_memory, user_memory_guard
+from services import memory_service, memory_subject, schedule_seat_memory, user_memory_guard
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +77,15 @@ async def write_user_memory(
     # agent key outside its reach gets this same refusal (trinity-enterprise#840).
     assert_own_agent(current_user, agent_name,
                      detail="Agent-scoped key may only write its own agent's user memory")
+    # #4121: the agent's own door. The row named below decides whose notes are
+    # replaced, so a human the agent is merely shared with could name any
+    # person's run. Same shape as the search door's refusal.
+    if not current_user.agent_name:
+        raise HTTPException(status_code=403, detail={
+            "code": "agent_only",
+            "message": "This door is for the agent's own key. An agent writes a person's notes during "
+                       "that person's turn.",
+        })
     assert_agent_access(current_user, agent_name, detail="Not authorized")
 
     execution = db.get_execution(body.execution_id)
@@ -79,34 +95,42 @@ async def write_user_memory(
     if execution.agent_name != agent_name:
         raise HTTPException(status_code=403, detail="Execution does not belong to this agent")
 
+    # The door serves the turn the agent is IN. Nothing proves which turn a
+    # request comes from (ent#926: the ledger is the fact), so a run that is not
+    # running, whoever it served, is refused here; the other half of the rule
+    # needs the person, and runs once they are decided below (#4121).
+    if (getattr(execution, "status", None) or "").lower() != TaskExecutionStatus.RUNNING.value:
+        logger.info(f"[UserMemory] Refused write on {agent_name} (memory_turn_not_live, execution={body.execution_id})")
+        raise HTTPException(status_code=422, detail={
+            "code": "memory_turn_not_live",
+            "message": "That run is not running, so nothing was saved. Memory is written during the turn "
+                       "it serves. Tell the person the note was not saved.",
+        })
+
+    # trinity-enterprise#1022: the ONE "whose memory" rule, shared with the
+    # retrieval memory's capture seam — `services/memory_subject.resolve`. The
+    # seat (ent#637), the one-to-one channel speaker (ent#419 AC 4 / ent#549)
+    # and the signed-in person of a public turn resolve here; this endpoint
+    # keeps its own refusals for everything else.
     triggered_by = (execution.triggered_by or "").lower()
-    # ent#637: a scheduled run addressed to one person (ent#498) serves that
-    # seat. The seat comes off the row's Workspace destination — stamped
-    # backend-side after the roster/block checks — never from the caller, so
-    # MEM-001's "the agent never names the user" holds for this trigger too.
-    seat = schedule_seat_memory.seat_for_execution(execution)
-    if seat:
-        user_email = seat
-    elif triggered_by in _CHANNEL_TRIGGERS:
-        # ent#419 AC 4: a channel turn writes only for the verified speaker of a
-        # one-to-one conversation — the router stamps `source_channel_client`
-        # for exactly that (ent#549, the rule `turn_audience` already reads). A
-        # group turn carries the UNLOCKER's address in `source_user_email`, is
-        # never shown that person's memory, and has other members' text in its
-        # prompt, so it writes no one's memory.
-        user_email = (getattr(execution, "source_channel_client", None) or "").strip().lower()
-        if not user_email:
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "code": "memory_not_one_to_one",
-                    "message": (
-                        "Memory is written only in a one-to-one conversation with a verified "
-                        "person. This channel turn is a group conversation or an unverified "
-                        "sender, so no one's memory can be written from it."
-                    ),
-                },
-            )
+    subject = memory_subject.resolve(execution)
+    seat = subject.user_email if subject.reason == memory_subject.REASON_SEAT else None
+    if subject.is_person and subject.reason in (
+        memory_subject.REASON_SEAT, memory_subject.REASON_CHANNEL_ONE_TO_ONE,
+    ):
+        user_email = subject.user_email
+    elif subject.reason == memory_subject.REASON_CHANNEL_NOT_ONE_TO_ONE:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "memory_not_one_to_one",
+                "message": (
+                    "Memory is written only in a one-to-one conversation with a verified "
+                    "person. This channel turn is a group conversation or an unverified "
+                    "sender, so no one's memory can be written from it."
+                ),
+            },
+        )
     elif triggered_by in _USER_FACING_TRIGGERS:
         user_email = execution.source_user_email
     else:
@@ -127,6 +151,20 @@ async def write_user_memory(
             status_code=422,
             detail="No verified user email associated with this execution.",
         )
+
+    # #4121: no other live turn on this agent may resolve to a different scope;
+    # while one does, nothing tells the two turns apart, so the door fails closed.
+    # A scope, not a person: `scope_for` folds the owner into the agent scope a
+    # headless run also resolves to, so those two do not refuse each other.
+    scope = await asyncio.to_thread(memory_service.scope_for, agent_name, user_email)
+    if await asyncio.to_thread(memory_service.another_live_scope, agent_name, execution.id, scope):
+        logger.info(f"[UserMemory] Refused write on {agent_name} (memory_turn_ambiguous, execution={body.execution_id})")
+        raise HTTPException(status_code=422, detail={
+            "code": "memory_turn_ambiguous",
+            "message": ("Another turn that does not serve this person is running on this agent right now, so "
+                        "whose notes this write is for cannot be told apart. Nothing was saved. Tell the person "
+                        "the note was not saved; it can be written on a later turn."),
+        })
 
     # ent#419: keep only the agent-notes part of a copy-back (the platform's
     # margin, headings and envelope lines go; a copied summary or decisions

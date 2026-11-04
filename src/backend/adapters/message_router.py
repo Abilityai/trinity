@@ -21,6 +21,7 @@ from collections import defaultdict
 
 from database import db
 from services.docker_service import get_agent_container
+from services import memory_service
 from services.platform_prompt_service import (
     build_public_channel_caller_prompt,
     build_voice_capability_prompt,
@@ -173,6 +174,17 @@ def _format_group_sender(message: NormalizedMessage) -> str:
         parts.append(quote)
 
     return "\n".join(parts)
+
+
+def _requester_identity(adapter: ChannelAdapter, message: NormalizedMessage) -> Optional[dict]:
+    """Who asked, for the access request (trinity-enterprise#737). Best-effort:
+    a failure to read it records the request without identity rather than
+    losing the request."""
+    try:
+        return adapter.requester_identity(message)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[ROUTER] requester_identity failed: {type(e).__name__}")
+        return None
 
 
 def _format_channel_identity(message: NormalizedMessage) -> str:
@@ -795,7 +807,10 @@ class ChannelMessageRouter:
                 user_memory = db.get_or_create_public_user_memory(
                     agent_name, verified_email
                 )
-                memory_system_prompt = format_user_memory_block(user_memory)
+                # trinity-enterprise#1022: retrieval memory for this message —
+                # same gate as the block (verified + one-to-one), fail-open.
+                retrieved = await memory_service.recall(agent_name, verified_email, message.text)
+                memory_system_prompt = format_user_memory_block(user_memory, retrieved=retrieved)
             except Exception as e:  # noqa: BLE001
                 logger.warning(
                     f"[ROUTER:{channel}] memory fetch failed for {verified_email}: {e}"
@@ -1296,7 +1311,8 @@ class ChannelMessageRouter:
             elif verified_email:
                 # Verified email + restrictive policy → record access request
                 try:
-                    db.upsert_access_request(agent_name, verified_email, channel)
+                    db.upsert_access_request(agent_name, verified_email, channel,
+                                             identity=_requester_identity(adapter, message))
                 except Exception as e:
                     logger.error(f"[ROUTER:{channel}] Failed to upsert access_request: {e}")
                 logger.info(

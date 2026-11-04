@@ -217,6 +217,22 @@ WORKSPACE_KIND = "workspace_user"
 # person than a machine.
 FLEET_INTERNAL_PARTICIPANT_KINDS = frozenset({"agent", "system", "user"})
 
+# trinity-enterprise#701: the participant kinds that are PEOPLE. A person's seat
+# is personal: once they leave (or are removed) the room is gone for them, and a
+# person seated mid-conversation reads it from their join point
+# (`visible_from_seq`). Agents keep their own rules (see `db.seat_person`).
+PEOPLE_KINDS = frozenset({"user", WORKSPACE_KIND})
+
+# trinity-enterprise#701: the role of a person seated by a moderator. Reads and
+# talks; cannot approve, spend or reassign — approvals keep routing to the
+# agent's primary (#606). The creator stays `moderator`.
+COLLABORATOR_ROLE = "collaborator"
+
+# trinity-enterprise#701: seating a second person is an entitlement. The OSS
+# side is the edition-agnostic primitives (a person's read floor, leaving,
+# attribution); the module registering this id owns who may be seated.
+ROOM_SEATS_FEATURE_ID = "room_seats"
+
 
 def room_is_user_facing(participants: list[dict]) -> bool:
     """Is a CLIENT — someone outside the operator's own organisation — in this room?
@@ -317,11 +333,24 @@ def _can_still_reach(current_user, agent_name: str) -> bool:
     return True
 
 
-def _require_membership(room_id: str, current_user) -> dict:
+def _require_membership(room_id: str, current_user, *, allow_departed: bool = False) -> dict:
     """Load a room the caller may see, else a UNIFORM 404.
 
     Never 403 on a room the caller isn't in — that would confirm the room exists
     (Invariant #8, enumeration-safety). Admins can see any room.
+
+    A participant who LEFT is not in the room (trinity-enterprise#959 fix round
+    1): a removed agent's own key could otherwise keep reading — and posting
+    into — the room it was removed from. Same uniform 404. Only agents can be
+    removed today.
+
+    `allow_departed` is for ONE caller: the engine posting a reply that was
+    already dispatched (`post_message` with `_sender_override`, never set by a
+    route). A wake runs under the WAKER's principal, and the waker may be an
+    agent that posted `@B` with its own key; if a moderator removes it while B
+    is still running, B's reply — already paid for — must still land (Codex
+    re-review, round 2). The participant row must still exist: only the
+    `left_at` check is relaxed, never membership itself.
     """
     kind, identity = _caller(current_user)
     is_admin = getattr(current_user, "role", None) == "admin" and kind == "user"
@@ -339,9 +368,32 @@ def _require_membership(room_id: str, current_user) -> dict:
         raise RoomError(404, "room_not_found", "Room not found")
     if is_admin:
         return room
-    if not participant:
+    if not participant or (participant.get("left_at") and not allow_departed):
+        raise RoomError(404, "room_not_found", "Room not found")
+    # trinity-enterprise#701: a person who left, or was removed, no longer sees
+    # the room — the same uniform 404 as never having been in it. Agents keep
+    # their own rules (a removed agent is simply never woken).
+    if kind in PEOPLE_KINDS and participant.get("left_at"):
         raise RoomError(404, "room_not_found", "Room not found")
     return room
+
+
+def _is_room_person(current_user) -> bool:
+    """May this caller change who is in a room? Only a PERSON may
+    (trinity-enterprise#719) — by moderating it or by recruiting with a mention.
+
+    A Workspace client is a verified email, a person by construction. A
+    platform principal is one only as `is_person_principal` says: a JWT session
+    or the person's own `user` key. A key resolves to its owner's account, role
+    and participant identity alike, so the participant kind alone cannot say.
+    An agent never is.
+    """
+    from dependencies import is_person_principal
+
+    kind, _identity = _caller(current_user)
+    if kind == WORKSPACE_KIND:
+        return True
+    return kind == "user" and is_person_principal(current_user)
 
 
 def _require_moderator(room_id: str, current_user) -> dict:
@@ -354,20 +406,34 @@ def _require_moderator(room_id: str, current_user) -> dict:
     managing the room (ent#220). Membership is checked first, so a non-member
     still gets the uniform 404; a non-moderator *member* (an agent) gets a 403,
     which discloses nothing it can't already see (access-first, Invariant #8).
+
+    trinity-enterprise#719: both branches below ask `_is_room_person` — the
+    admin bypass and the moderator row alike — so a platform principal
+    moderates only as a person. A caller that acts as a platform account
+    (participant kind `user`) but is not a person (the system key, an unknown
+    key scope, the event loopback) gets 403 `not_a_person`, the rename's
+    shape: it may resolve to the very account that holds the moderator row, so
+    `not_moderator` would name the wrong rule. Past membership, that code
+    depends only on the principal, never on the roster. An agent key acts as
+    its agent, not as the account, and keeps `not_moderator`. The admin
+    account sees every room, so its kind-`user` non-person keys get the 403 on
+    any room that exists and the uniform 404 on one that does not.
     """
     room = _require_membership(room_id, current_user)
     kind, identity = _caller(current_user)
-    if getattr(current_user, "role", None) == "admin" and kind == "user":
+    person = _is_room_person(current_user)
+    if person and kind == "user" and getattr(current_user, "role", None) == "admin":
         return room
     participant = db.get_participant(room_id, kind, identity)
     # ent#362: a workspace client moderates the room it created — otherwise it
     # could not add an agent mid-chat (ent#361 AC#3) or close its own room.
-    # The kind check still excludes AGENTS, which is what this gate is for: an
+    # The person check still excludes AGENTS, which is what this gate is for: an
     # agent is reachable via its own MCP key and is a prompt-injection surface,
     # so it must never rewrite a roster (ent#220).
-    if (kind in ("user", WORKSPACE_KIND) and participant
-            and participant.get("role") == "moderator"):
+    if person and participant and participant.get("role") == "moderator":
         return room
+    if kind == "user" and not person:
+        raise RoomError(403, "not_a_person", "Only a person can manage this room")
     raise RoomError(403, "not_moderator", "Only a room moderator can manage this room")
 
 
@@ -584,11 +650,20 @@ def create_room(current_user, name: str, agents: list[str], topic: Optional[str]
 def get_room(current_user, room_id: str, since_seq: int = 0) -> dict:
     room = _require_membership(room_id, current_user)
     participants = db.list_participants(room_id)
-    messages = db.get_messages(room_id, since_seq)
+    kind, identity = _caller(current_user)
+    # trinity-enterprise#701: a person seated mid-conversation reads from their
+    # join point. The floor is on THEIR participant row (an admin who is not a
+    # participant reads everything, as before). It bounds the READ, not a filter
+    # over its page: the page holds at most 500 rows and the room cap doesn't
+    # count system lines, so filtering after the limit could hand a person seated
+    # past row 500 an empty page on every poll.
+    me = next((p for p in participants
+               if p.get("kind") == kind and p.get("identity") == identity), None)
+    history_from = int((me or {}).get("visible_from_seq") or 0) if kind in PEOPLE_KINDS else 0
+    messages = db.get_messages(room_id, max(since_seq, history_from - 1))
     # trinity#3402: an agent reading the room (MCP `read_room`) is not handed
     # what its own skill gate stopped — the rule its wakes follow. People see
     # everything. Fails closed: this read is not scanned by any gate.
-    kind, identity = _caller(current_user)
     if kind == "agent":
         try:
             held = db.gate_held_seqs(room_id, identity)
@@ -600,6 +675,13 @@ def get_room(current_user, room_id: str, since_seq: int = 0) -> dict:
     return {
         **room,
         "participants": participants,
+        # trinity-enterprise#701: who is reading — so the Workspace can tell the
+        # caller's own messages from another person's — and the people in the
+        # room, departed ones included (the roster keeps who left).
+        "you": {"kind": kind, "identity": identity},
+        "people": _people(participants),
+        "history_from_seq": history_from,
+        "can_seat_people": _can_seat_people(room, current_user),
         "messages": messages,
         # trinity-enterprise#631: the caller's tags across the WHOLE room, so a
         # tag on an older message turns `read` without a full reload.
@@ -633,6 +715,15 @@ def list_rooms(current_user) -> dict:
 
     for r in rooms:
         participants = participants_by_room.get(r["id"], [])
+        # trinity-enterprise#959: is the CALLER actively in this room? Off the
+        # admin path the list is ACTIVE membership (`list_rooms_for_participant`
+        # drops a room the caller left), so it is true there; an admin lists
+        # every room, and the Workspace Inbox shows only the rooms its reader
+        # is in, so it needs the bit rather than inferring it from a count.
+        r["member"] = any(
+            p.get("kind") == kind and p.get("identity") == identity and not p.get("left_at")
+            for p in participants
+        )
         r["message_count"] = counts_by_room.get(r["id"], 0)
         # Absent for an empty room; the client already falls back to `created_at`,
         # which for a room nobody has spoken in is the honest answer.
@@ -701,7 +792,7 @@ def add_participant(current_user, room_id: str, agent_name: str,
         if active_agents >= MAX_PARTICIPANTS:
             raise RoomError(422, "participant_cap",
                             f"At most {MAX_PARTICIPANTS} agent participants")
-    db.add_participant(room_id, "agent", agent_name, role, utc_now_iso())
+    db.add_participant(room_id, "agent", agent_name, role, utc_now_iso(), rejoin=True)
     _post_system(room_id, f"{agent_name} joined the room.")
     return {"room_id": room_id, "agent": agent_name, "added": True}
 
@@ -712,6 +803,85 @@ def remove_participant(current_user, room_id: str, agent_name: str) -> dict:
     if removed:
         _post_system(room_id, f"{agent_name} left the room.")
     return {"room_id": room_id, "agent": agent_name, "removed": removed}
+
+
+# --- people (trinity-enterprise#701) ------------------------------------------
+
+def _people(participants: list[dict]) -> list[dict]:
+    """The people in a room for its roster: present first, then who left."""
+    rows = [{"kind": p.get("kind"), "identity": p.get("identity"), "role": p.get("role"),
+             "joined_at": p.get("joined_at"), "left_at": p.get("left_at"),
+             "sees_history": not int(p.get("visible_from_seq") or 0)}
+            for p in participants if p.get("kind") in PEOPLE_KINDS]
+    rows.sort(key=lambda r: (bool(r["left_at"]), r["joined_at"] or "", r["identity"] or ""))
+    return rows
+
+
+def is_room_moderator(room_id: str, current_user) -> bool:
+    """`_require_moderator` as a predicate (no membership error leaks)."""
+    try:
+        _require_moderator(room_id, current_user)
+    except RoomError:
+        return False
+    return True
+
+
+def room_seats_entitled() -> bool:
+    try:
+        from services.entitlement_service import entitlement_service
+        return bool(entitlement_service.is_entitled(ROOM_SEATS_FEATURE_ID))
+    except Exception:  # noqa: BLE001 — a capability fails closed
+        return False
+
+
+def _can_seat_people(room: dict, current_user) -> bool:
+    """Whether to OFFER seating in this room to this caller. A capability for
+    the UI, never the authorization: the seating route checks again."""
+    # A platform person only: an outside client who moderates their own room
+    # does not seat the operator's colleagues into it.
+    if room.get("status") != "open" or _caller(current_user)[0] != "user":
+        return False
+    return room_seats_entitled() and is_room_moderator(room["id"], current_user)
+
+
+def leave_room(current_user, room_id: str) -> dict:
+    """A person leaves a room (trinity-enterprise#701 AC5).
+
+    Soft: the row keeps `left_at`, so the roster shows who left and their
+    messages stay attributed. The room is gone for them afterwards
+    (`_require_membership`). A moderator with other people still seated cannot
+    leave — they would strand the room without anyone who can manage it; they
+    close the room, or remove the others, first.
+    """
+    _require_membership(room_id, current_user)
+    kind, identity = _caller(current_user)
+    if kind not in PEOPLE_KINDS:
+        raise RoomError(403, "not_a_person", "Only a person can leave a room")
+    me = db.get_participant(room_id, kind, identity)
+    if not me or me.get("left_at"):
+        raise RoomError(409, "not_a_participant", "You are not in this room")
+    if me.get("role") == "moderator":
+        others = [p for p in db.list_participants(room_id)
+                  if p.get("kind") in PEOPLE_KINDS and not p.get("left_at")
+                  and (p.get("kind"), p.get("identity")) != (kind, identity)]
+        if others and not any(p.get("role") == "moderator" for p in others):
+            raise RoomError(409, "last_moderator",
+                            "You manage this room and others are still in it. Remove them "
+                            "or close the room before you leave.")
+    left = db.remove_participant(room_id, kind, identity, utc_now_iso())
+    if left:
+        _post_system(room_id, f"{identity} left the room.")
+        _broadcast("room_participants_changed", {"room_id": room_id})
+    return {"room_id": room_id, "left": left}
+
+
+def post_system_line(room_id: str, content: str) -> int:
+    """A system line in a room, for modules that manage its roster."""
+    return _post_system(room_id, content)
+
+
+def broadcast_participants_changed(room_id: str) -> None:
+    _broadcast("room_participants_changed", {"room_id": room_id})
 
 
 # --- budgets -----------------------------------------------------------------
@@ -926,6 +1096,67 @@ def resolve_mentions(content: str, participants: list[dict]) -> list[str]:
     return found
 
 
+def seated_people_mentioned(content: str, participants: list[dict],
+                            sender_identity: Optional[str] = None) -> list[str]:
+    """Usernames of people seated in this room (platform accounts, still
+    present) that `content` @mentions, in order, the sender excluded.
+
+    An account made by email login has the email as its username, which an
+    @mention cannot spell, so `@bob` also names `bob@example.com` — by the
+    local part, case-insensitively, and only when exactly one seated person
+    has it (an ambiguous `@carol` names no one)."""
+    seated = [p["identity"] for p in participants
+              if p.get("kind") == "user" and not p.get("left_at")]
+    by_name: dict[str, str] = {u.lower(): u for u in seated}
+    local_counts: dict[str, int] = {}
+    for u in seated:
+        if "@" in u:
+            local = u.split("@", 1)[0].lower()
+            local_counts[local] = local_counts.get(local, 0) + 1
+    for u in seated:
+        if "@" in u:
+            local = u.split("@", 1)[0].lower()
+            if local_counts[local] == 1 and local not in by_name:
+                by_name[local] = u
+    found, seen = [], set()
+    for raw in _MENTION_RE.findall(content or ""):
+        who = by_name.get(raw.lower())
+        if who and who != sender_identity and who not in seen:
+            seen.add(who)
+            found.append(who)
+    return found
+
+
+def _with_seated_mentions(current_user, content: str, participants: list[dict],
+                          sender_identity: Optional[str], tagger, tagged: list):
+    """Add a tag for each seated person the text @mentions (AC7).
+
+    Best-effort and per person, unlike the explicit tags: a mention is text, so
+    one that cannot be delivered stays plain text rather than refusing a
+    message the person meant to send. Returns `(tagger, tagged)`.
+    """
+    names = seated_people_mentioned(content, participants, sender_identity)
+    if not names:
+        return tagger, tagged
+    try:
+        tagger = tagger or person_mention_service.tagger_for(current_user)
+    except person_mention_service.TagError:
+        return tagger, tagged            # someone who cannot tag reaches no one
+    from database import db as platform_db
+    have = {p.email for p in tagged}
+    agents = _room_agents(participants)
+    for name in names:
+        try:
+            email = ((platform_db.get_user_by_username(name) or {}).get("email") or "").strip().lower()
+            if not email or email in have:
+                continue
+            tagged = tagged + person_mention_service.resolve_tags([email], agents, tagger)
+            have.add(email)
+        except Exception:  # noqa: BLE001 — a mention that cannot land stays text
+            logger.info("room: @%s is seated but could not be tagged", name, exc_info=True)
+    return tagger, tagged
+
+
 def _join_mentioned_newcomers(current_user, room_id: str, room: dict,
                               content: str, participants: list[dict]) -> list[str]:
     """Add @mentioned agents that are not yet in this room, and return them.
@@ -1113,8 +1344,31 @@ def _fit_transcript(messages: list[dict], agent_name: str) -> list[dict]:
     return fitted
 
 
+def _people_line(participants: Optional[list[dict]]) -> str:
+    """trinity-enterprise#701 AC4: when more than one person is in the room, say
+    so — who they are, and what each may decide. Empty with one person or none."""
+    people = [p for p in (participants or [])
+              if p.get("kind") in PEOPLE_KINDS and not p.get("left_at")]
+    if len(people) < 2:
+        return ""
+    parts = []
+    for p in people:
+        role = p.get("role")
+        if role == COLLABORATOR_ROLE:
+            parts.append(f"{p['identity']} (collaborator: can read and talk here, but "
+                         "cannot approve, spend or reassign)")
+        elif role == "moderator":
+            parts.append(f"{p['identity']} (started this room)")
+        else:
+            parts.append(str(p["identity"]))
+    return (f" {len(people)} people are in this room: " + "; ".join(parts) + ". Every "
+            "message below names who wrote it — answer the person who asked. Approvals "
+            "and spending still go to your primary, whoever asks for them.")
+
+
 def _build_turn_prompt(room: dict, agent_name: str, delta: list[dict], cold: bool,
-                       user_facing: bool = False) -> str:
+                       user_facing: bool = False,
+                       participants: Optional[list[dict]] = None) -> str:
     # The old header claimed "Other agents and people are in this room"
     # UNCONDITIONALLY — false in an agent-only room, and far too weak in front of
     # a customer to count as a disclosure (trinity-enterprise#363). It now says
@@ -1129,6 +1383,7 @@ def _build_turn_prompt(room: dict, agent_name: str, delta: list[dict], cold: boo
         + (f" — topic: {room['topic']}" if room.get("topic") else "")
         + ".\n\n"
         + who
+        + _people_line(participants)
         + " You were @mentioned, so it is "
         "your turn to reply. Reply with your message only — it will be posted to "
         "the room as you. To bring in another participant, @mention them by name. "
@@ -1222,7 +1477,9 @@ async def post_message(current_user, room_id: str, content: str,
         raise RoomError(413, "message_too_large",
                         f"Message exceeds {MAX_CONTENT_CHARS} characters")
 
-    room = _require_membership(room_id, current_user)
+    # An engine reply (`_sender_override`) was dispatched while its waker was a
+    # member; it lands even if the waker has since been removed (ent#959 r2).
+    room = _require_membership(room_id, current_user, allow_departed=is_agent_reply)
 
     # A human/external post is INBOUND — reject it if the room is closed, expired
     # or already at budget. An agent reply (``_sender_override`` set) is an
@@ -1267,11 +1524,20 @@ async def post_message(current_user, room_id: str, content: str,
     # every agent its operator can reach. A human's mention is a decision; an
     # agent's is text it generated.
     if not is_agent_reply:
-        joined = _join_mentioned_newcomers(current_user, room_id, room, content, participants)
-        if joined:
-            participants = db.list_participants(room_id)
+        # trinity-enterprise#719: `is_agent_reply` covers only the engine's own
+        # post of a turn. An agent posting through the API, or any other
+        # platform principal that is not a person, recruits nobody either.
+        if _is_room_person(current_user):
+            joined = _join_mentioned_newcomers(current_user, room_id, room, content, participants)
+            if joined:
+                participants = db.list_participants(room_id)
 
     mentions = resolve_mentions(content, participants)
+    # trinity-enterprise#701 AC7: an @mention of a person SEATED here reaches
+    # them — as a tag (one Unread item in their Inbox), never as a wake.
+    if not is_agent_reply:
+        tagger, tagged = _with_seated_mentions(current_user, content, participants,
+                                               sender_identity, tagger, tagged)
 
     message_id = uuid.uuid4().hex
     seq = db.append_message(message_id, room_id, sender_kind, sender_identity,
@@ -1651,8 +1917,10 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
     # unreadable roster means we do not know who is watching, and a needless
     # caution in an agent-only room costs a slightly more careful answer while a
     # missed signal in front of a customer is the disclosure this prevents.
+    roster = None
     try:
-        user_facing = room_is_user_facing(db.list_participants(room_id))
+        roster = db.list_participants(room_id)
+        user_facing = room_is_user_facing(roster)
     except Exception as e:  # noqa: BLE001
         logger.warning("room %s: participant read for the user-facing signal "
                        "failed (%s) — assuming a person is reading", room_id, e)
@@ -1680,7 +1948,7 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
         # awaited here.
         result = await dispatch_and_await_terminal(
             agent_name=agent_name,
-            message=turn_prefix + manifest_prefix + _build_turn_prompt(room, agent_name, shown, cold, user_facing),
+            message=turn_prefix + manifest_prefix + _build_turn_prompt(room, agent_name, shown, cold, user_facing, roster),
             # trinity-enterprise#751: the skill gate reads what the participants
             # wrote that this agent is SHOWN (the #3210 budget-fitted delta),
             # never the transcript scaffolding.

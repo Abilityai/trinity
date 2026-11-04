@@ -37,6 +37,18 @@ from agent_server.services.codex_runtime import (  # noqa: E402
 from agent_server.services.runtime_adapter import RuntimeCapabilities  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _owner_turn(monkeypatch):
+    """These tests are about the CLI, not about whose turn it is: every turn here
+    is the owner's, so the ent#926 tier check (test_ent926_runtime_turn_scope.py)
+    passes without a platform to ask."""
+    from agent_server.services import turn_scope
+
+    async def owner(agent, run):
+        return "owner", True, None
+    monkeypatch.setattr(turn_scope, "fetch_turn", owner)
+
+
 # ---------------------------------------------------------------------------
 # calculate_codex_cost
 # ---------------------------------------------------------------------------
@@ -1930,7 +1942,7 @@ async def test_a_large_prompt_goes_on_stdin_never_in_argv(available_runtime, mon
                                                          tmp_path, resume):
     import subprocess as sp
 
-    spawned, written, unregistered = {}, [], []
+    spawned, written, events = {}, [], []
 
     class _Stdin:
         def write(self, data):
@@ -1943,16 +1955,24 @@ async def test_a_large_prompt_goes_on_stdin_never_in_argv(available_runtime, mon
         spawned["cmd"], spawned["stdin"] = cmd, kwargs.get("stdin")
         if kwargs.get("stdin") is not sp.PIPE:
             raise _StopAfterStdin()
-        return type("P", (), {"stdin": _Stdin(), "pid": 1})()
+        return type("P", (), {
+            "stdin": _Stdin(), "stdout": io.StringIO(), "stderr": io.StringIO(), "pid": 1,
+        })()
 
     registry = type("R", (), {
         "register": lambda self, *a, **k: None,
-        "unregister": lambda self, eid: unregistered.append(eid),
+        "unregister": lambda self, eid: events.append(("unregister", eid)),
     })()
     monkeypatch.setattr(codex_runtime, "_load_openai_api_key", lambda: None)
     monkeypatch.setattr(codex_runtime, "_ensure_codex_home", lambda: str(tmp_path))
     monkeypatch.setattr(codex_runtime, "_has_subscription_auth", lambda _home: True)
     monkeypatch.setattr(codex_runtime, "_capture_pgid", lambda _p: None)
+    # #3408: the failed handoff kills the child before releasing it. Stubbed:
+    # with pgid=None the real helper would look up the fake's pid=1 group.
+    monkeypatch.setattr(
+        codex_runtime, "_terminate_process_group",
+        lambda _p, **kw: events.append(("kill", kw["graceful_timeout"], kw["pgid"])),
+    )
     monkeypatch.setattr(codex_runtime, "get_process_registry", lambda: registry)
     monkeypatch.setattr(codex_runtime.subprocess, "Popen", _popen)
 
@@ -1968,5 +1988,6 @@ async def test_a_large_prompt_goes_on_stdin_never_in_argv(available_runtime, mon
     assert cmd[-2:] == ["--", "-"], "stdin is read for `-` after the separator"
     assert spawned["stdin"] is sp.PIPE
     assert prompt in "".join(written)
-    # A failed stdin write must not leak the registry entry (#2433).
-    assert unregistered == ["ex_1"]
+    # A failed stdin write must not leak the registry entry (#2433), and the
+    # child is killed before it is released (#3408).
+    assert events == [("kill", 0, None), ("unregister", "ex_1")]

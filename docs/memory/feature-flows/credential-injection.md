@@ -122,7 +122,7 @@ async injectCredentials(name, files) {
 
 ### Backend (`src/backend/routers/credentials.py`)
 ```python
-@router.post("/agents/{agent_name}/credentials/inject", response_model=CredentialInjectResponse)
+@router.post("/agents/{agent_name}/credentials/inject", dependencies=[Depends(require_person)])  # a session or the person's own user key (trinity-enterprise#719)
 async def inject_credentials(
     agent_name: str,
     request_body: CredentialInjectRequest,
@@ -182,13 +182,13 @@ const exportToGit = async () => {
 
 ### Backend (`src/backend/routers/credentials.py`)
 ```python
-@router.post("/agents/{agent_name}/credentials/export")
+@router.post("/agents/{agent_name}/credentials/export", dependencies=[Depends(require_person)])  # a session or the person's own user key (trinity-enterprise#719)
 async def export_credentials(
     request: Request,
     agent_name: str = Depends(get_owned_agent_by_name),   # owner or admin, else uniform 404 (#186); connector -> 403
     current_user: User = Depends(get_current_user)
 ):
-    reject_agent_principal(current_user)                  # agent-scoped key -> 403 "human-only" (ent#69 Part 2)
+    reject_agent_principal(current_user)                  # second layer behind the decorator's PERSON rule
     # container missing -> 404; not running -> 400
     encrypted_file, files_exported = await get_credential_encryption_service().export_to_agent(agent_name)
     # audited (SEC-001); agent server unreachable -> 503
@@ -249,13 +249,13 @@ const importFromGit = async () => {
 
 ### Backend (`src/backend/routers/credentials.py`)
 ```python
-@router.post("/agents/{agent_name}/credentials/import")
+@router.post("/agents/{agent_name}/credentials/import", dependencies=[Depends(require_interactive)])  # a signed-in session only (trinity-enterprise#719)
 async def import_credentials(
     request: Request,
     agent_name: str = Depends(get_owned_agent_by_name),   # owner or admin, else uniform 404 (#186); connector -> 403
     current_user: User = Depends(get_current_user)
 ):
-    reject_agent_principal(current_user)                  # agent-scoped key -> 403 "human-only" (ent#69 Part 2)
+    reject_agent_principal(current_user)                  # second layer behind the decorator's INTERACTIVE rule
     # container missing -> 404; not running -> 400
     files = await get_credential_encryption_service().import_to_agent(agent_name)
     # missing .credentials.enc / wrong key -> 400; agent server unreachable -> 503; audited (SEC-001)
@@ -270,8 +270,10 @@ the platform key never reaches the container. The **backend** imports it once
 the agent is ready — `lifecycle.inject_assigned_credentials()` →
 `credential_encryption.import_to_agent()`. That import is skipped for
 ephemeral agents, installs with no encryption key, and already-running
-containers; in those cases the owner imports it with **Import from Git** on the
-Credentials tab or the `import_credentials` MCP tool (Flow 3). Subscription-mode
+containers; in those cases the owner, signed in, imports it with **Import from
+Git** under the agent's Settings › Credentials (Flow 3), and on an install with no encryption key an
+operator first sets `CREDENTIAL_ENCRYPTION_KEY` to the key the archive was written
+with and restarts the backend. Subscription-mode
 agents import it too (#3510, ruled 2026-10-19): their MCP keys live there, and
 the agent server force-unsets Anthropic API-key variables at every spawn under
 subscription (#2114), so an imported `ANTHROPIC_API_KEY` cannot shadow the
@@ -282,7 +284,7 @@ if [ -f ".credentials.enc" ] && [ ! -f ".env" ]; then
     echo "Found .credentials.enc but no .env: this script does not decrypt it."
     echo "  The platform imports it once the agent is ready (not when no encryption"
     echo "  key is configured). If .env is still missing,"
-    echo "  the owner imports it: Credentials tab > Import from Git (or the import_credentials MCP tool)."
+    echo "  the owner imports it, signed in, once a key is set: Settings > Credentials > Import from Git."
 fi
 ```
 
@@ -297,7 +299,7 @@ fails if the agent image calls a backend path the app does not register.
 
 ## MCP Tools
 
-**Who sees which tool (#3435, trinity-enterprise#719).** Each credential tool carries a per-tool `canAccess` allow-list equal to the key scopes its backend route admits, built by one shared predicate (`access.ts::humanOnlyToolAccess`): `export_credentials` is listed to a person's own `user` key only (its route takes a signed-in session or that key), `inject_credentials` and `import_credentials` to no key (their routes take a signed-in session only), and `get_credential_encryption_key` to `user` and `system` keys (an admin read). No key is shown a tool that its scope can never call; naming one anyway gets FastMCP's "not found" before any backend request. Visibility is decided by scope alone, so within a listed scope the route still decides who passes: a user key that is not the owner's or an admin's is shown `export_credentials`, and a non-admin's user key is shown `get_credential_encryption_key`, and the backend refuses each. Each description carries the caller sentence for its rule (owner or admin; administrator for the key). On export, import and the key, a backend 403 comes back as `{success:false, error, human_only|admin_only|not_authorized}` through `accessDenied`, so the audit row reads `denied` (#2807); 400/404/503 are still thrown. With `MCP_REQUIRE_API_KEY=false` (no auth context) FastMCP lists every tool and the backend decides.
+**Who sees which tool (#3435, trinity-enterprise#719).** Each credential tool carries a per-tool `canAccess` allow-list equal to the key scopes its backend route admits, built by one shared predicate (`access.ts::humanOnlyToolAccess`): `inject_credentials` and `export_credentials` are listed to a person's own `user` key only (their routes take a signed-in session or that key; inject is the ruled exception of `requirements/auth.md` §2.8, a credential the caller supplies), `import_credentials` to no key (its route takes a signed-in session only), and `get_credential_encryption_key` to `user` and `system` keys (an admin read). No key is shown a tool that its scope can never call; naming one anyway gets FastMCP's "not found" before any backend request. Visibility is decided by scope alone, so within a listed scope the route still decides who passes: a user key that is not the owner's or an admin's is shown `export_credentials`, and a non-admin's user key is shown `get_credential_encryption_key`, and the backend refuses each. Each description carries the caller sentence for its rule (owner or admin; administrator for the key). On export, import and the key, a backend 403 comes back as `{success:false, error, human_only|admin_only|not_authorized}` through `accessDenied`, so the audit row reads `denied` (#2807); 400/404/503 are still thrown. With `MCP_REQUIRE_API_KEY=false` (no auth context) FastMCP lists every tool and the backend decides.
 
 ### inject_credentials
 ```typescript
@@ -464,6 +466,19 @@ fails if the agent image calls a backend path the app does not register.
    agent-writable and is re-read at every spawn, and `GIT_CONFIG_NOSYSTEM`
    would disable `/etc/gitconfig`, which is where the credential helper and the
    #1595 gc guards are registered.
+10. **`.env` may not set where a runtime sends its traffic** (trinity-enterprise#1001,
+   `execution_env.ROUTING_KEYS` + `RUNTIME_ENDPOINT_KEYS`): proxy names in both
+   cases, `NODE_EXTRA_CA_CERTS`, `NODE_TLS_REJECT_UNAUTHORIZED`, `SSL_CERT_FILE` on
+   every runtime, plus the runtime's own endpoint names on that runtime only
+   (`ANTHROPIC_BASE_URL`, its fallback `CLAUDE_CODE_API_BASE_URL` and the other
+   `ANTHROPIC_*` base URLs on Claude Code, the
+   `CODEX_*` URL overrides on Codex, `GOOGLE_GEMINI_BASE_URL` and friends on
+   Gemini). A Claude agent's `.env` keeps `OPENAI_BASE_URL`. A value in the
+   container baseline still applies. The WARN names the key and says it decides
+   where traffic and credentials go. `AGENT_RUNTIME` is refused too (it would
+   change which runtime's names are open). The settings-file routes are closed
+   per runtime: see [agent-guardrails.md](agent-guardrails.md),
+   [codex-runtime.md](codex-runtime.md), [gemini-runtime.md](gemini-runtime.md).
 
 ---
 
@@ -511,10 +526,11 @@ fails if the agent image calls a backend path the app does not register.
 
 ### MCP Test
 ```bash
-# Via MCP
-inject_credentials("my-agent", {".env": "KEY=value\n"})
+# Via MCP, with the person's own user-scoped key
 export_credentials("my-agent")
-import_credentials("my-agent")
+inject_credentials("my-agent", {".env": "KEY=value"})
+# import_credentials takes a signed-in session: the backend refuses every MCP API
+# key, so run it from the agent's Settings > Credentials (Import from Git)
 ```
 
 ---
@@ -598,7 +614,6 @@ During the CRED-002 refactor (commit `6821f0d`), an orphaned code block was left
 **The fix**: The orphaned loop was removed. Per CRED-002 design, credentials are NOT injected during agent creation. They are injected after creation via:
 - `inject_credentials` endpoint (Quick Inject in Credentials tab)
 - `.credentials.enc` auto-import on agent startup
-- `inject_credentials` MCP tool
 
 **Location**: `src/backend/services/agent_service/crud.py:312-315` now contains a comment explaining the design decision.
 

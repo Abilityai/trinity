@@ -186,7 +186,7 @@ class _Ledger:
             return self.queued
         return self.recent
 
-    def get_fleet_execution_stats(self, agent_names, hours=24):
+    def get_fleet_execution_stats(self, agent_names, hours=24, **_):
         return {"total": self.total}
 
     def get_running_for_chat(self, chat_id):
@@ -198,6 +198,9 @@ def wired(svc, monkeypatch):
     ledger = _Ledger()
     monkeypatch.setattr(svc, "core_db", ledger)
     monkeypatch.setattr(svc, "roster_agent_names", lambda email, include_owned: {AGENT, OTHER})
+    # ent#875: the viewer OWNS both agents here, so no row is narrowed away.
+    monkeypatch.setattr(svc.portal_db, "get_owned_roster",
+                        lambda email: [{"agent_name": AGENT}, {"agent_name": OTHER}])
     monkeypatch.setattr(svc.portal_db, "get_portal_session",
                         lambda sid, agent, email: {"id": sid} if sid == SESSION and agent == AGENT else None)
     monkeypatch.setattr(svc, "_resolve_timeout", lambda agent: 3600)

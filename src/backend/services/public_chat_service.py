@@ -27,6 +27,7 @@ from database import db
 # the response model is shared through the same home the router uses.
 from database import PublicChatResponse
 from services.docker_service import get_agent_container
+from services import memory_service
 from services.platform_prompt_service import (
     build_public_channel_caller_prompt,
     format_user_memory_block,
@@ -49,6 +50,51 @@ MAX_CHAT_MESSAGES_PER_IP = 30  # per minute
 MAX_CHAT_MESSAGES_PER_TOKEN = 60  # per minute, per public link token
 
 logger = logging.getLogger(__name__)
+
+
+# ent#926: what a visitor is told when the agent's runtime refused their turn
+# (Gemini CLI / Codex, visitor switch off). A refusal, not a fault: no "try
+# again", and no internal setting named to an anonymous visitor.
+PUBLIC_TURN_REFUSED_MESSAGE = (
+    "This agent isn't taking conversations from public links right now. "
+    "Please contact its owner."
+)
+# The agent server's refusal sentences (agent_server/services/turn_scope.py
+# REFUSED / REFUSED_VISITOR). A push terminal stores only this text, so the
+# async status read recognises it; a parity test pins both.
+_TURN_REFUSED_MARKERS = ("cannot limit what such a turn may do", "has not allowed those to run on")
+
+
+def is_turn_refused(error_code, error_text) -> bool:
+    """Did the agent refuse this turn for who it is for (ent#926)?"""
+    if getattr(error_code, "value", error_code) == "turn_refused":
+        return True
+    text = error_text or ""
+    if text.startswith("[turn_refused]"):
+        return True
+    return any(m in text for m in _TURN_REFUSED_MARKERS)
+
+
+def raise_for_failed_public_result(agent_name: str, result) -> None:
+    """Map a failed or cancelled public turn to the visitor's answer. Raises."""
+    error = result.error or ""
+    if is_turn_refused(getattr(result, "error_code", None), error):
+        raise PublicChatError(status_code=403, detail=PUBLIC_TURN_REFUSED_MESSAGE)
+    if "at capacity" in error:
+        raise PublicChatError(
+            status_code=429,
+            detail="Agent is busy. Please try again later."
+        )
+    if "timed out" in error:
+        raise PublicChatError(
+            status_code=504,
+            detail="Request timed out. Please try again with a simpler question."
+        )
+    logger.error(f"Public chat task failed for {agent_name}: {error}")
+    raise PublicChatError(
+        status_code=502,
+        detail="Failed to process your request. Please try again."
+    )
 
 
 class PublicChatError(Exception):
@@ -345,7 +391,10 @@ async def run_public_chat(link: dict, chat_request, client_ip: str):
     memory_system_prompt = None
     if identifier_type == "email" and verified_email:
         user_memory = db.get_or_create_public_user_memory(agent_name, verified_email)
-        memory_system_prompt = format_user_memory_block(user_memory)
+        # trinity-enterprise#1022: the facts most relevant to this message, off
+        # the event loop; [] when memory is off or anything fails.
+        retrieved = await memory_service.recall(agent_name, verified_email, chat_request.message)
+        memory_system_prompt = format_user_memory_block(user_memory, retrieved=retrieved)
 
     # EXEC-024: Execute via TaskExecutionService (unified execution path)
     # Public executions now get full tracking: execution records, activity stream,
@@ -421,25 +470,9 @@ async def run_public_chat(link: dict, chat_request, client_ip: str):
 
     if result.status in ("failed", "cancelled"):
         # #679: a CANCELLED turn is non-delivery, not a success-like empty
-        # response. It falls through to the generic 502 below (its error text
+        # response. It falls through to the generic 502 (its error text
         # matches no capacity/timeout branch) — the operator stopped the work.
-        error = result.error or ""
-        if "at capacity" in error:
-            raise PublicChatError(
-                status_code=429,
-                detail="Agent is busy. Please try again later."
-            )
-        elif "timed out" in error:
-            raise PublicChatError(
-                status_code=504,
-                detail="Request timed out. Please try again with a simpler question."
-            )
-        else:
-            logger.error(f"Public chat task failed for {agent_name}: {error}")
-            raise PublicChatError(
-                status_code=502,
-                detail="Failed to process your request. Please try again."
-            )
+        raise_for_failed_public_result(agent_name, result)
 
     assistant_response = result.response
 

@@ -41,7 +41,8 @@ me a platform account.
 
 ```
 get_current_user(request, token)                    dependencies.py
-  └─ resolve_platform_user_unfloored(request, token)   every scope fence, unchanged
+  └─ resolve_platform_user_unfloored(request, token)   every scope fence, the suspension check,
+                                                       then the terms gate (ent#1054, auth.md §2.13)
   └─ enforce_operator_floor(request, user)
         is_workspace_only_role(user.role)?  no  → return     (operator, creator, admin)
         user.connector_agent set → return     (the ent#46 fence already confined it)
@@ -221,7 +222,7 @@ self-signup and SSO first sign-in keep writing.
 
 | File | Change |
 |---|---|
-| `utils/workspaceOnly.js` | `isWorkspaceOnlyRole` (exactly `'user'`; an unknown role is not), `landingAfterSignIn`, `operatorRouteRedirect`, `isWorkspaceOnlyRefusal`, `reactToWorkspaceOnly`, `setWorkspaceOnlyHandler` / `notifyWorkspaceOnly` (one reaction per 2 s burst), `WORKSPACE_ONLY_ROLE_LABEL` |
+| `utils/workspaceOnly.js` | `isWorkspaceOnlyRole` (exactly `'user'`; an unknown role is not), `landingAfterSignIn`, `operatorRouteRedirect` (leaves `/terms` alone, `isTermsPath`, ent#1054), `isWorkspaceOnlyRefusal`, `reactToWorkspaceOnly`, `setWorkspaceOnlyHandler` / `notifyWorkspaceOnly` (one reaction per 2 s burst), `WORKSPACE_ONLY_ROLE_LABEL` |
 | `router/index.js` | on a `requiresAuth` route a `user` goes to `/workspace` (`/agents/:name/*` → `/workspace?agent=:name`), before the entitlement branch; a cached `user` role is confirmed with `GET /api/users/me` first, so an account raised since its last sign-in is not bounced; authenticated `/login` → role landing |
 | `views/Login.vue` | `afterLogin` and the SSO callback use `landingAfterSignIn`; a pointer "Was an agent shared with you? Sign in to the Workspace" |
 | `main.js`, `api.js` | response interceptors report a 403 `workspace_only` to the handler: re-read the profile, `router.replace('/workspace')` unless already on a Workspace / canvas / chat / sign-in page (path via `pathForVerdict`, #3406) |
@@ -242,7 +243,7 @@ self-signup and SSO first sign-in keep writing.
 /login → POST /api/auth/email/verify → _finalizeLogin (ends any Workspace client sign-in)
       → GET /api/users/me (marked) → role "user"
       → landingAfterSignIn(redirect, "user") → /workspace
-/workspace → App.vue connect() → POST /api/ws/ticket (marked) → /ws
+/workspace → App.vue token watch → followToken → POST /api/ws/ticket (marked) → /ws (#3445)
            → GET /api/enterprise/client-portal/my-agents (portal door) → roster
 operator URL → router guard → /workspace          any operator route → 403 workspace_only
 ```

@@ -260,8 +260,10 @@ def saved_token_needs_a_session():
     but only with a token the request carries itself."""
     return _http_error(
         400, "FORK_PAT_REQUIRED",
-        "Your saved GitHub token is used only from a signed-in session. "
-        "Pass fork_to_own.github_pat explicitly.",
+        "Your saved GitHub token is used only from a signed-in session, "
+        "and MCP tools never carry a token. Ask the owner to create this "
+        "fork from a signed-in session. A direct API call may send its own "
+        "fork_to_own.github_pat.",
     )
 
 

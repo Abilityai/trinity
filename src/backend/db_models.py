@@ -831,6 +831,12 @@ class SkillSource(BaseModel):
     created_by: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+    # trinity-enterprise#529: True while the seeded default still points where
+    # the platform put it, so a newer bundled pin moves it at boot. The latest
+    # move is recorded in the two fields after it (Settings → Library line).
+    follows_bundled_pin: bool = False
+    followed_from_ref: Optional[str] = None
+    followed_at: Optional[datetime] = None
 
 
 class SkillInfo(BaseModel):
@@ -873,6 +879,10 @@ class SkillInfo(BaseModel):
     # trinity-enterprise#753: `recommended` — the skill is gated by default on
     # every agent it is assigned to (the owner can clear it). None otherwise.
     approval: Optional[str] = None
+    # trinity-enterprise#660: the author's `category:` (one line, <= 64 chars).
+    # It narrows the Skills lists and nothing else reads it. URL-free, like
+    # `source_name`.
+    category: Optional[str] = None
 
 
 class AgentSkillsUpdate(BaseModel):

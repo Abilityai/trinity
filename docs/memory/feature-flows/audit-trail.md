@@ -361,6 +361,8 @@ Failed logins have no `actor_user` — the service falls back to
 | `decide_access_request_endpoint` (approve) | `access_request_approved` | `{email, access_request_id}` |
 | `decide_access_request_endpoint` (reject) | `access_request_rejected` | `{email, access_request_id}` |
 
+Capability grants write `capability_used`, `capability_refused`, `capability_grant` and `capability_revoke`; [self-change-grants.md](self-change-grants.md) has the row-by-row table.
+
 ### Refused person-only and session-only attempts (`error_handlers.py`, trinity-enterprise#719)
 
 A route behind the #2996 rules, which only a person (PERSON) or only a

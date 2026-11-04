@@ -387,10 +387,13 @@ both directions, and the addition is the worse half (a removal is recoverable
 from the working tree; a newly un-ignored path is already in the remote's
 history and may need a credential rotated). `shadowed` is not in the gate — it
 is standing advice about the file, not a change this Push made. The entry is
-filed through the #1677 **budget seam** (`create_bounded_alert`), not as a
-direct create like its `git_bloat`/`sync_failing` siblings, because those fire
+filed through the #1677 **budget** (`platform_alerts.observe`, kind
+`gitignore_untracked`), unlike its unbudgeted `git_bloat`/`sync_failing` siblings, because those fire
 on the 60-second platform poller's cadence while this one fires from
 `sync_to_github`, which the `git_sync` MCP tool lets an agent drive on itself.
+Each Push's entry carries its own `push_id` (a material key): a repeat of the
+same change set collapses onto a pending row, and after a person ends the row
+the next untracking Push, the same set included, files a new row at once.
 The last surface is the point: both field incidents were unattended
 15-minute cycles and surfaced two months late, and every other surface is read
 only by whoever ran the Push. The commit-message half is explicitly
@@ -484,7 +487,7 @@ the clone will succeed), and immune to the anonymous REST 60/hr cap that makes
 
 | Probe outcome | Meaning | Create result |
 |---------------|---------|---------------|
-| `ok` | Remote answered; public and reachable | Proceed; the source branch is then verified anonymously via `check_remote_branch_exists` — missing branch → 400 "Branch '…' not found in public repository '…'" |
+| `ok` | Remote answered; public and reachable | Proceed; the source ref (a branch or a tag, trinity#4165) is then verified anonymously via `check_remote_branch_exists` — missing → 400 "Branch or tag '…' not found in public repository '…'" |
 | `unavailable` | Remote answered with auth-challenge / not-found (anonymous GitHub deliberately cannot distinguish private from nonexistent) | 400 combined message: "was not found or is private. If it is private, add your GitHub token…" |
 | `transient` | GitHub itself unreachable (timeout / DNS / no git binary) | **502 — FAIL-CLOSED.** The clone would fail too, and with monitoring default-off (#1121) a fail-open would produce a silently empty agent |
 

@@ -26,7 +26,7 @@ import httpx
 
 from config import CORS_ORIGINS, VOICE_ENABLED
 from models import User
-from dependencies import get_current_user, owner_is_suspended, owner_is_workspace_only, scope_may_open_event_stream, workspace_route
+from dependencies import get_current_user, owner_is_suspended, owner_is_workspace_only, scope_may_open_event_stream, terms_route, workspace_route
 from services.docker_service import docker_client, list_all_agents_fast
 from utils.helpers import utc_now_iso
 
@@ -123,6 +123,7 @@ from routers.aauth_resource import router as aauth_resource_router  # ent#879 AA
 from routers.admin_recovery import router as admin_recovery_router  # #834 Phase 1c
 from routers.messages import router as messages_router  # Proactive Messaging (#321)
 from routers.public_memory import router as public_memory_router  # MEM-001 write path (#888)
+from routers.agent_memory import router as agent_memory_router  # MEM-002 retrieval memory (trinity-enterprise#1022)
 from routers.seat_decisions import router as seat_decisions_router  # ent#638 seat decision record
 from routers.loops import (
     agent_router as loops_agent_router,
@@ -577,6 +578,15 @@ async def _start_maintenance_services() -> None:
     except Exception as e:
         logger.error(f"Error starting log archive service: {e}")
 
+    # trinity-enterprise#1022: warm the retrieval-memory embedding model on a
+    # daemon thread when the platform switch is on, so the first turn never
+    # pays the load. A no-op (and no import of the model) while it is off.
+    try:
+        from services import memory_service
+        memory_service.on_startup()
+    except Exception as e:
+        logger.debug(f"Retrieval memory warm skipped: {e}")
+
     # Initialize audit retention service (#552)
     try:
         audit_retention_service.start()
@@ -675,7 +685,10 @@ async def _schedule_staggered_services() -> None:
     async def _start_skills_sync_delayed():
         await asyncio.sleep(11)
         try:
+            from services import skill_service as _skill_service_boot
             from services.skills_sync_service import skills_sync_service
+            # ent#529: before the first cycle, so it fetches the new pin. Never raises.
+            await _skill_service_boot.follow_bundled_pin()
             skills_sync_service.start()
             logger.info("Skills library sync service started (staggered +11s)")
         except Exception as e:
@@ -1426,6 +1439,7 @@ app.include_router(mcp_auth_router)  # MCP inline email auth (#848) — internal
 app.include_router(agent_mcp_key_router)  # Per-agent Trinity MCP key: read/verify/rotate (#1854)
 app.include_router(messages_router)  # Proactive Messaging (#321)
 app.include_router(public_memory_router)  # MEM-001 write path (#888)
+app.include_router(agent_memory_router)  # MEM-002 retrieval memory (trinity-enterprise#1022)
 app.include_router(seat_decisions_router)  # ent#638 seat decision record
 app.include_router(subscriptions_router)  # Subscription Management (SUB-001)
 app.include_router(monitoring_router)  # Agent Monitoring (MON-001)
@@ -1969,6 +1983,7 @@ async def get_version(current_user: User = Depends(get_current_user)):
 # User info endpoint
 @app.get("/api/users/me")
 @workspace_route("the SPA reads the role to decide where a signed-in person lands")
+@terms_route("the SPA reads the role before it can land a person on the terms screen")
 async def get_current_user_info(current_user: User = Depends(get_current_user)):
     """Get current user information."""
     from database import db
