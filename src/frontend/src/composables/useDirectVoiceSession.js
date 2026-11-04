@@ -329,9 +329,15 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onStop, onAnswe
         settle(ok)
       }
       const authTimer = setTimeout(() => finishOpen(false, VOICE_TIMEOUT_REASON), VOICE_CONNECT_TIMEOUT_MS)
+      // After `auth_ok`: player and mic, then listening only if this start is still the
+      // live one. A mic grant that lands after the start failed (the socket closed while
+      // the permission prompt was open, or the call was cleaned up) is stopped at once.
       const startMedia = async () => {
+        const stale = () => settled || ws !== sock
+        let ownPlayer = null
         try {
-          player = createAudioPlayer()
+          ownPlayer = createAudioPlayer()
+          player = ownPlayer
           endpointer = createEndpointer({
             onSpeechStart: ({ duringPlayback }) => {
               if (duringPlayback) { pausedForSpeech.value = true; player?.pause() }
@@ -339,11 +345,23 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onStop, onAnswe
             onUtterance: handleUtterance,
             onDiscard: () => resumeIfPaused(),
           })
-          mic = await startMicCapture((_b64, samples) => { if (samples) onFrames(samples) })
+          const ownMic = await startMicCapture((_b64, samples) => { if (samples) onFrames(samples) })
+          if (stale()) {
+            try { ownMic.stop() } catch { /* already stopped */ }
+            try { ownPlayer.stop() } catch { /* already stopped */ }
+            finishOpen(false)
+            return
+          }
+          mic = ownMic
           startPolling()
           resting()
           finishOpen(true)
         } catch {
+          if (stale()) {
+            try { ownPlayer?.stop() } catch { /* already stopped */ }
+            finishOpen(false)
+            return
+          }
           finishOpen(false, 'Microphone access denied. Please allow microphone access and try again.')
           await stop()
         }
@@ -366,7 +384,9 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onStop, onAnswe
         try { frame = JSON.parse(event.data) } catch (e) { console.error('Direct call frame error:', e); return }
         // Before admission only the acknowledgement and a refusal with its words count.
         if (!authed) {
-          if (frame?.type === 'auth_ok') { authed = true; void startMedia() }
+          // The timer covers admission only: time on the mic-permission prompt is the
+          // person's, not the connection's.
+          if (frame?.type === 'auth_ok') { authed = true; clearTimeout(authTimer); void startMedia() }
           else if (frame?.type === 'status' && frame.state === 'ended') finishOpen(false, frame.message || VOICE_NOT_VERIFIED_REASON)
           return
         }
@@ -378,7 +398,8 @@ export function useDirectVoiceSession({ onTranscript, onBargeIn, onStop, onAnswe
         finishSaved(null); cleanup()
       }
       const ok = await opened
-      if (!ok) cleanup()
+      // Only this start's own socket: a later call may already own `ws`.
+      if (!ok && ws === sock) cleanup()
       return ok
     } catch (err) {
       error.value = startFailureReason({ status: err?.response?.status, detail: err?.response?.data?.detail })
