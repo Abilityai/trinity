@@ -1,27 +1,17 @@
 {
   "test_files": [
     {
-      "file": "unit/test_4157_workspace_login_handoff.py",
-      "feature": "#4157",
-      "added": "2026-11-02",
+      "file": "unit/test_ent584_capability_descriptions.py",
+      "feature": "trinity-enterprise#584",
+      "added": "2026-11-03",
       "categories": [
-        "unit",
-        "auth",
-        "security",
-        "workspace"
+        "backend",
+        "skills",
+        "workspace",
+        "compatibility",
+        "unit"
       ],
-      "description": "#4157: a platform account that starts at the Workspace sign-in enters ONE code. The portal 409 carries a one-time hand-off (Redis, SHA-256 at rest, email-bound, 5-min TTL, single-use) only after a correct code; POST /api/auth/email/handoff redeems it through the platform email login's gates, buckets, allow-list, audit and 2FA. Real-flow test pins one minted code used once, and no code or token in logs."
-    },
-    {
-      "file": "../src/frontend/tests/unit/workspaceLoginHandoff.mount.spec.js",
-      "feature": "#4157",
-      "added": "2026-11-02",
-      "categories": [
-        "frontend",
-        "auth",
-        "workspace"
-      ],
-      "description": "#4157: Portal.vue holds the 409 hand-off in the auth store only (never URL or storage); Login.vue redeems it once at /api/auth/email/handoff and lands on the redirect, still shows 2FA, and falls back to the filled code form when refused or after a reload."
+      "description": "trinity-enterprise#584: a capability is described once, in its SKILL.md. skill_packaging.clean_description is the one blank rule (missing/empty/whitespace/collection -> None, YAML scalar -> its string form); it runs at the chokepoints (resolve_exposed_playbooks, the live listing, recall of its kept copy, the public view); the Workspace briefing marks use cases kind=use_case in cards and typeahead and a non-text description no longer empties the briefing; the agent page projects capabilities_state; T-011 retired, X-010 (info) notes capabilities: tags with no described skill (dir or frontmatter name, snake/kebab, brain-orb exempt exactly, unread/capped content skipped, nested SKILL.md and commands ignored, detail bounded); P-002 treats whitespace as missing; the library parse never guesses a description from the body; skill_packaging.py imports only what the community library CI downloads. No Docker."
     },
     {
       "file": "unit/test_3007_update_command.py",
@@ -1332,7 +1322,7 @@
         "operator-queue",
         "unit"
       ],
-      "description": "/edge-cases sweep 2026-10-06 — parametrized boundary/edge cases for services/operator_queue_service.py + services/operator_queue_choices.py (#3313, #3314, #3315). Real bugs are strict-xfail and name their issue. No Docker, no network."
+      "description": "/edge-cases sweep 2026-10-06 — parametrized boundary/edge cases for services/operator_queue_service/ + services/operator_queue_choices.py (#3313, #3314, #3315). Real bugs are strict-xfail and name their issue. No Docker, no network."
     },
     {
       "file": "unit/test_ec_operator_queue_properties.py",
@@ -1343,7 +1333,7 @@
         "operator-queue",
         "unit"
       ],
-      "description": "/edge-cases sweep 2026-10-06 — Hypothesis property tests for services/operator_queue_service.py + services/operator_queue_choices.py (#3313, #3314, #3315). Real bugs are strict-xfail and name their issue. No Docker, no network."
+      "description": "/edge-cases sweep 2026-10-06 — Hypothesis property tests for services/operator_queue_service/ + services/operator_queue_choices.py (#3313, #3314, #3315). Real bugs are strict-xfail and name their issue. No Docker, no network."
     },
     {
       "file": "unit/test_ec_pull_coordination_edges.py",
@@ -8163,6 +8153,44 @@
       "description": "trinity-enterprise#1054 A2: EmailService.send_html renders on the one HTML shell with a plain-text twin, escapes every string, omits blank paragraphs and an absent call to action; the verification mail is byte-identical to its pre-refactor output (literal snapshot). No Docker."
     },
     {
+      "file": "unit/test_ent341_tool_access_profiles.py",
+      "feature": "trinity-enterprise#341",
+      "added": "2026-11-03",
+      "categories": [
+        "backend",
+        "security",
+        "guardrails",
+        "unit"
+      ],
+      "description": "trinity-enterprise#341: the pure tool-access policy (services/tool_access_profiles.py) — the approved bundle table, legacy derivation (read-only with no list reads Strict 'not applied', a list reads Custom, else Full), the applied check, plan_selection / plan_shortcut round trips, the guardrails-PUT merge that never forges or wipes a stored profile, denies_tool on the enforced list only, per-runtime coverage copy, and the send-tool names pinned against the MCP server registry and the 'trinity' server key. No Docker."
+    },
+    {
+      "file": "unit/test_ent341_tool_access_routes.py",
+      "feature": "trinity-enterprise#341",
+      "added": "2026-11-03",
+      "categories": [
+        "backend",
+        "security",
+        "guardrails",
+        "api",
+        "unit"
+      ],
+      "description": "trinity-enterprise#341: GET/PUT /tool-access, the PUT /read-only Strict shortcut and PUT /guardrails through the real router over the real schema — one compare-and-set (a lost race is a 409, mutation-proved), live read-only apply and an honest restart_required, pattern preservation, the gates (owner or agents.manage holder, never the agent on itself, never the system agent), the audit row, the drift check ignoring the bookkeeping key, and tool_access_profile resolved identically on the detail and fleet payloads. Container and live apply stubbed; no Docker."
+    },
+    {
+      "file": "unit/test_ent341_send_block.py",
+      "feature": "trinity-enterprise#341",
+      "added": "2026-11-03",
+      "categories": [
+        "backend",
+        "security",
+        "guardrails",
+        "api",
+        "unit"
+      ],
+      "description": "trinity-enterprise#341: the send block refused by Trinity — assert_tool_allowed (agent keys only, enforced list only, named 403) and every one of the nine routes behind the send tools and report refusing a denied agent through its real router, plus an AST pin that each call names the right tool and is the handler's first action after its own-agent / owner gate. No Docker."
+    },
+    {
       "file": "unit/test_3894_account_has_no_email.py",
       "feature": "#3894",
       "added": "2026-11-03",
@@ -8215,6 +8243,40 @@
         "unit"
       ],
       "description": "trinity-enterprise#1094: runs packer/digitalocean/scripts (mp-status, mp-build, boot-check, mp-submit) against fake doctl, curl, ssh, packer and git. Status exit codes, submit refusals and software merge, each boot-check failure destroying the droplet, signal handling, secrets outside argv."
+    },
+    {
+      "file": "unit/test_ent1095_readdress_role.py",
+      "feature": "abilityai/trinity-enterprise#1095",
+      "added": "2026-11-04",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1095: a role-addressed pending ask follows the role when the assignment changes — ask_service.readdress_role / readdress_item over the real SQLite sink. A replaced primary moves the agent's ask and the gate approval and every ending door agrees; a first primary addresses an unaddressed row; a primary removed falls to the operators; the real delete-then-create replace; named-addressee, other-role, decided, expired and unchanged rows untouched; the ent#1053 approver fence and the ent#1066 one-reader rule kept; chat keys follow the single addressee; compare-and-set against a concurrent answer; the /ws literal discovered by the ent#467 guard."
+    },
+    {
+      "file": "unit/test_4157_workspace_login_handoff.py",
+      "feature": "#4157",
+      "added": "2026-11-02",
+      "categories": [
+        "unit",
+        "auth",
+        "security",
+        "workspace"
+      ],
+      "description": "#4157: a platform account that starts at the Workspace sign-in enters ONE code. The portal 409 carries a one-time hand-off (Redis, SHA-256 at rest, email-bound, 5-min TTL, single-use) only after a correct code; POST /api/auth/email/handoff redeems it through the platform email login's gates, buckets, allow-list, audit and 2FA. Real-flow test pins one minted code used once, and no code or token in logs."
+    },
+    {
+      "file": "../src/frontend/tests/unit/workspaceLoginHandoff.mount.spec.js",
+      "feature": "#4157",
+      "added": "2026-11-02",
+      "categories": [
+        "frontend",
+        "auth",
+        "workspace"
+      ],
+      "description": "#4157: Portal.vue holds the 409 hand-off in the auth store only (never URL or storage); Login.vue redeems it once at /api/auth/email/handoff and lands on the redirect, still shows 2FA, and falls back to the filled code form when refused or after a reload."
     }
   ]
 }

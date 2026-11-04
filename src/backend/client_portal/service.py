@@ -1395,7 +1395,7 @@ def _use_case_hints(use_cases) -> list[PortalPlaybook]:
         text = uc.strip()[:_MAX_USE_CASE_CHARS]
         if not text:
             continue
-        hints.append(PortalPlaybook(title=text, description=None, starter_prompt=text))
+        hints.append(PortalPlaybook(title=text, description=None, starter_prompt=text, kind="use_case"))
         if len(hints) >= _MAX_USE_CASE_HINTS:
             break
     return hints
@@ -1564,6 +1564,7 @@ async def _agent_briefing(agent_name: str, availability: str = "ready"):
             PortalPlaybook(
                 title=(p.title or "")[:_MAX_HINT_TITLE_CHARS],
                 starter_prompt=(p.starter_prompt or "")[:_MAX_HINT_STARTER_CHARS],
+                kind=p.kind,   # ent#584: a use case stays one on the wire
             )
             for p in playbooks[:_MAX_SEARCHABLE_PLAYBOOKS]
         ]

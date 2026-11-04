@@ -31,6 +31,7 @@ from dependencies import (
     require_admin,
     resolve_platform_user_unfloored,
 )
+from services.tool_access_guard import assert_tool_allowed
 from models import TaggablePerson, User
 
 from . import service
@@ -227,6 +228,8 @@ async def post_message(room_id: str, body: RoomMessageCreate,
     Idempotency-Key so a retried post creates one message, not two)."""
     from services import idempotency_service
 
+    # trinity-enterprise#341: refused when this agent's tool access removes post_to_room.
+    assert_tool_allowed(current_user, "post_to_room")
     # Membership comes BEFORE the idempotency claim (trinity-enterprise#719). A
     # stored replay and the in-flight 409 are answers this route gives too, so
     # a non-member gets the same uniform 404 on every one of them as on a first

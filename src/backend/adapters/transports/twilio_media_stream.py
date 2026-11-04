@@ -239,7 +239,9 @@ async def handle_media_stream(websocket: WebSocket, call_id: str, ticket: Option
             return
         ticket, prelude_stream_sid = _parse_start_frame(start_data)
 
-    info = consume_ticket(ticket) if ticket else None
+    # trinity-enterprise#595: the consumer names its call-bound scope; the
+    # explicit comparison below stays as a second layer.
+    info = consume_ticket(ticket, scope=f"voip:{call_id}") if ticket else None
     if not info or info.get("scope") != f"voip:{call_id}":
         await websocket.close(code=4001, reason="Invalid or missing ticket")
         return

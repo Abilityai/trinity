@@ -166,7 +166,8 @@ def test_every_schedule_write_takes_the_schedules_fence_and_trigger_does_not():
 def test_every_reconfigure_route_admits_only_a_person_or_a_holder():
     from routers import agent_config
     table = _routes(agent_config)
-    for path in ("/read-only", "/resources", "/timeout", "/public-channel-model", "/guardrails"):
+    for path in ("/read-only", "/resources", "/timeout", "/public-channel-model", "/guardrails",
+                 "/tool-access"):  # trinity-enterprise#341
         route = table[(f"/api/agents/{{agent_name}}{path}", "PUT")]
         calls = _calls(route)
         assert "require_person_or_agents_manage" in calls, path
