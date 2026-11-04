@@ -114,6 +114,39 @@ def test_missing_source_is_named(tool, tmp_path: Path, monkeypatch) -> None:
 
 # --- Real PostgreSQL --------------------------------------------------------
 
+def test_nul_byte_names_the_table_and_row(tool) -> None:
+    """PostgreSQL text cannot hold NUL, and psycopg2's ValueError names nothing."""
+    with pytest.raises(tool.CopyError, match=r"agents\.name \(row ~3\)"):
+        tool.coerce("a\x00b", "text", "agents.name (row ~3)")
+    with pytest.raises(tool.CopyError, match="NUL"):
+        tool.coerce(b"a\x00b", "text", "t.c")
+    with pytest.raises(tool.CopyError, match="NUL"):
+        tool.coerce("a\x00b", "jsonb", "t.c")
+    assert tool.coerce(b"a\x00b", "bytea", "t.c").adapted == b"a\x00b"
+
+
+def test_source_without_users_is_named_before_postgres_is_touched(tool, tmp_path: Path, monkeypatch, capsys) -> None:
+    """A copy of it would stay refused at boot, and a re-run would exit 4."""
+    source = tmp_path / "trinity.db"
+    _build_head(source)
+    monkeypatch.setenv("TRINITY_DB_PATH", str(source))
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@nothing-listens-here:5432/t")
+    with pytest.raises(SystemExit) as exc:
+        tool.main()
+    assert exc.value.code == tool.EXIT_USAGE
+    assert "no users" in capsys.readouterr().err
+
+
+def test_env_py_survives_percent_in_password(monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    """Executes migrations/env.py through Alembic's offline mode."""
+    from alembic import command
+    from db import alembic_runner
+
+    monkeypatch.setenv("DATABASE_URL", "postgresql://trinity:p%40ss@postgres:5432/trinity")
+    command.stamp(alembic_runner._config(), "head", sql=True)
+    assert "alembic_version" in capsys.readouterr().out
+
+
 @pytest.fixture
 def pg(monkeypatch: pytest.MonkeyPatch):
     url = os.getenv("TEST_POSTGRES_URL")
@@ -153,6 +186,7 @@ class TestEndToEnd:
 
         tool.main()
 
+        assert (tmp_path / "trinity.db.copied-to-postgres").exists(), "start.sh reads this"
         expected = sqlite3.connect(source).execute("SELECT COUNT(*) FROM users").fetchone()[0]
         with pg.connect() as conn:
             assert conn.execute(text("SELECT COUNT(*) FROM users")).scalar() == expected
@@ -176,3 +210,23 @@ class TestEndToEnd:
         with pytest.raises(SystemExit) as exc:
             tool.main()
         assert exc.value.code == tool.EXIT_LOAD
+        assert (tmp_path / "trinity.db.copied-to-postgres").exists()
+
+    def test_rowcount_mismatch_commits_nothing(self, tool, pg, tmp_path: Path, monkeypatch) -> None:
+        source = tmp_path / "trinity.db"
+        self._seed(source)
+        monkeypatch.setenv("TRINITY_DB_PATH", str(source))
+        real = tool._reset_sequences
+
+        def lose_a_row(cur) -> None:
+            cur.execute("DELETE FROM users WHERE username='alice'")
+            real(cur)
+
+        monkeypatch.setattr(tool, "_reset_sequences", lose_a_row)
+        with pytest.raises(SystemExit) as exc:
+            tool.main()
+        assert exc.value.code == tool.EXIT_MISMATCH
+        assert not (tmp_path / "trinity.db.copied-to-postgres").exists()
+
+        monkeypatch.setattr(tool, "_reset_sequences", real)
+        tool.main()  # nothing was committed, so a re-run succeeds

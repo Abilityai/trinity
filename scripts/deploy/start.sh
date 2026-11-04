@@ -1304,6 +1304,15 @@ dev_volume_has_db() {
     docker run --rm -v "${volume}:/v:ro" alpine test -s /v/trinity.db >/dev/null 2>&1
 }
 
+# db.sqlite_to_postgres leaves the marker beside the file it copied.
+dev_volume_needs_copy() {
+    local volume
+    volume="$(compose_project_name)_trinity-data"
+    docker volume inspect "$volume" >/dev/null 2>&1 || return 1
+    docker run --rm -v "${volume}:/v:ro" alpine \
+        sh -c 'test -s /v/trinity.db && test ! -e /v/trinity.db.copied-to-postgres' >/dev/null 2>&1
+}
+
 if [ "$HOSTED" = "1" ] && [ "$_hosted_db" = "0" ] && [ "$_dev_volume" = "1" ] && dev_volume_has_db; then
     echo "❌ Refusing to start: this checkout has a dev-stack database that --hosted cannot see." >&2
     echo "" >&2
@@ -1534,9 +1543,9 @@ ensure_database() {
 
     allow="${TRINITY_ALLOW_SQLITE:-$(env_value TRINITY_ALLOW_SQLITE)}"
     if [ "$HOSTED" = "1" ]; then
-        [ -s "${data_path}/trinity.db" ] && has_sqlite=1
+        [ -s "${data_path}/trinity.db" ] && [ ! -e "${data_path}/trinity.db.copied-to-postgres" ] && has_sqlite=1
     else
-        dev_volume_has_db && has_sqlite=1
+        dev_volume_needs_copy && has_sqlite=1
     fi
 
     if [ "$url_set" = "1" ] && [ "$allow" = "1" ]; then
@@ -1548,7 +1557,12 @@ ensure_database() {
         echo "❌ Refusing to start: SQLite reached end-of-support on 2026-09-01." >&2
         if [ "$has_sqlite" = "1" ]; then
             echo "" >&2
-            echo "   This install has a SQLite database. Copy it to PostgreSQL:" >&2
+            echo "   This install has a SQLite database. Get this release's image, then copy it to PostgreSQL:" >&2
+            if [ "$HOSTED" = "1" ]; then
+                echo "       docker compose ${COMPOSE_FILES[*]:-} pull backend" >&2
+            else
+                echo "       docker compose ${COMPOSE_FILES[*]:-} build backend" >&2
+            fi
             echo "       docker compose ${COMPOSE_FILES[*]:-} run --rm backend python -m db.sqlite_to_postgres" >&2
             echo "   then re-run this script. Details: docs/migrations/SQLITE_TO_POSTGRES.md" >&2
             echo "" >&2
@@ -1567,7 +1581,7 @@ ensure_database() {
         db="$(env_value POSTGRES_DB)"; db="${db:-trinity}"
     fi
     set_env_key DATABASE_URL "postgresql://${user}:$(env_value POSTGRES_PASSWORD)@postgres:5432/${db}"
-    echo "Fresh install: database is the bundled PostgreSQL (DATABASE_URL written to .env)."
+    echo "Database is the bundled PostgreSQL (DATABASE_URL written to .env)."
 }
 
 ensure_database

@@ -9,6 +9,7 @@ Runs from the state the backend refuses to boot in, so it must not import
 2. Bring the snapshot to this release's schema with the SQLite runner.
 3. Build the PostgreSQL schema with Alembic (OSS and enterprise version-lines).
 4. Copy the data in one transaction, reset sequences, verify rowcounts.
+5. Write a marker beside the SQLite file, which tells start.sh the copy is done.
 
 Exit codes: 0 ok | 1 usage | 2 rowcount mismatch | 3 schema drift | 4 load error
 """
@@ -33,6 +34,8 @@ EXIT_USAGE = 1
 EXIT_MISMATCH = 2
 EXIT_SCHEMA = 3
 EXIT_LOAD = 4
+
+COPIED_SUFFIX = ".copied-to-postgres"  # also read by scripts/deploy/start.sh
 
 BATCH = 1000
 
@@ -63,6 +66,13 @@ def coerce(value, pg_type: str, ctx: str):
     """
     if value is None:
         return None
+    if pg_type != "bytea":
+        if isinstance(value, (bytes, memoryview)):
+            has_nul = b"\x00" in bytes(value)
+        else:
+            has_nul = isinstance(value, str) and "\x00" in value
+        if has_nul:
+            raise CopyError(f"{ctx}: NUL byte, which PostgreSQL cannot store in {pg_type}")
     if pg_type in INT_TYPES:
         if isinstance(value, bool):
             return int(value)
@@ -240,7 +250,6 @@ def copy_data(snapshot: str, url: str) -> None:
         plan, copy_tables, empty_orphans = _build_plan(lite, cur)
         _load(lite, cur, plan)
         _reset_sequences(cur)
-        pg.commit()
 
         mismatches = []
         for table in copy_tables:
@@ -251,12 +260,21 @@ def copy_data(snapshot: str, url: str) -> None:
                 mismatches.append(f"{table}: {source_rows} -> {target_rows}")
         if mismatches:
             _fail(EXIT_MISMATCH, f"rowcounts differ: {mismatches}")
+        pg.commit()
         if empty_orphans:
             print(f"Skipped empty tables absent from PostgreSQL: {empty_orphans}")
         print(f"Copied and verified {len(copy_tables)} tables")
     finally:
         pg.close()
         lite.close()
+
+
+def _has_users(snapshot: str) -> bool:
+    conn = sqlite3.connect(f"file:{snapshot}?mode=ro", uri=True)
+    try:
+        return conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] > 0
+    finally:
+        conn.close()
 
 
 def main() -> None:
@@ -268,6 +286,9 @@ def main() -> None:
         _fail(EXIT_USAGE, f"no SQLite database at {source}")
 
     snapshot = prepare_snapshot(source)
+    if not _has_users(snapshot):
+        _fail(EXIT_USAGE, f"{source} has no users, so there is nothing to copy. "
+                          "Move it aside and start the stack.")
     build_postgres_schema()
     try:
         copy_data(snapshot, url)
@@ -277,6 +298,7 @@ def main() -> None:
         # pgerror only: str(e) on a connection failure can carry the DSN.
         _fail(EXIT_LOAD, f"PostgreSQL error: {e.pgerror or type(e).__name__}")
 
+    Path(f"{source}{COPIED_SUFFIX}").write_text(f"{datetime.now(timezone.utc).isoformat()}\n")
     print(f"Done. Start the stack. Keep {source} and {snapshot} until you have checked the result.")
 
 

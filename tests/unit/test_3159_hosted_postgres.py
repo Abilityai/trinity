@@ -95,7 +95,7 @@ def _extract(func: str) -> str:
 
 
 def _run(tmp_path: Path, *, hosted: str = "1", db_file: bool = False, pg_volume: bool = False,
-         dev_db: bool = False, env_lines: str = "", extra_env: dict | None = None) -> subprocess.CompletedProcess:
+         dev_db: bool = False, copied: bool = False, env_lines: str = "", extra_env: dict | None = None) -> subprocess.CompletedProcess:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     docker = bin_dir / "docker"
@@ -105,7 +105,10 @@ def _run(tmp_path: Path, *, hosted: str = "1", db_file: bool = False, pg_volume:
         '    case "$3" in *_trinity-data) exit "${SHIM_DEV_VOLUME_RC:-1}" ;; esac\n'
         '    exit "${SHIM_VOLUME_RC:-1}"\n'
         'fi\n'
-        'if [ "$1" = "run" ]; then exit "${SHIM_DEV_DB_RC:-1}"; fi\n'
+        'if [ "$1" = "run" ]; then\n'
+        '    case "$*" in *copied-to-postgres*) exit "${SHIM_NEEDS_COPY_RC:-1}" ;; esac\n'
+        '    exit "${SHIM_DEV_DB_RC:-1}"\n'
+        'fi\n'
         "exit 1\n"
     )
     docker.chmod(0o755)
@@ -113,6 +116,8 @@ def _run(tmp_path: Path, *, hosted: str = "1", db_file: bool = False, pg_volume:
     data.mkdir(exist_ok=True)
     if db_file:
         (data / "trinity.db").write_bytes(b"SQLite format 3\x00")
+    if copied:
+        (data / "trinity.db.copied-to-postgres").write_text("x")
     env_file = tmp_path / ".env"
     if not env_file.exists():
         env_file.write_text(env_lines)
@@ -122,6 +127,7 @@ def _run(tmp_path: Path, *, hosted: str = "1", db_file: bool = False, pg_volume:
         _extract("env_value"),
         _extract("compose_project_name"),
         _extract("dev_volume_has_db"),
+        _extract("dev_volume_needs_copy"),
         _extract("ensure_database"),
         f"HOSTED={hosted}",
         "ensure_database",
@@ -131,6 +137,7 @@ def _run(tmp_path: Path, *, hosted: str = "1", db_file: bool = False, pg_volume:
         "SHIM_VOLUME_RC": "0" if pg_volume else "1",
         "SHIM_DEV_VOLUME_RC": "0" if dev_db else "1",
         "SHIM_DEV_DB_RC": "0" if dev_db else "1",
+        "SHIM_NEEDS_COPY_RC": "0" if dev_db and not copied else "1",
     }
     env.update(extra_env or {})
     return subprocess.run(["bash", "-c", script], cwd=tmp_path, capture_output=True, text=True, env=env)
@@ -248,6 +255,33 @@ def test_dev_sqlite_in_the_named_volume_is_refused(tmp_path: Path) -> None:
     assert proc.returncode != 0
     assert "db.sqlite_to_postgres" in proc.stderr
     assert "DATABASE_URL" not in _env(tmp_path)
+
+
+@_BASH
+def test_hosted_refusal_pulls_the_image_that_has_the_tool(tmp_path: Path) -> None:
+    proc = _run(tmp_path, db_file=True)
+    assert proc.stderr.index(" pull backend") < proc.stderr.index("db.sqlite_to_postgres")
+
+
+@_BASH
+def test_dev_refusal_builds_the_image_that_has_the_tool(tmp_path: Path) -> None:
+    proc = _run(tmp_path, hosted="0", dev_db=True)
+    assert proc.stderr.index(" build backend") < proc.stderr.index("db.sqlite_to_postgres")
+
+
+@_BASH
+def test_copied_install_starts_on_postgres(tmp_path: Path) -> None:
+    """The guide keeps trinity.db after the copy, so the file alone cannot mean "refuse"."""
+    proc = _run(tmp_path, db_file=True, copied=True)
+    assert proc.returncode == 0, proc.stderr
+    assert _env(tmp_path)["DATABASE_URL"].startswith("postgresql://")
+
+
+@_BASH
+def test_copied_dev_install_starts_on_postgres(tmp_path: Path) -> None:
+    proc = _run(tmp_path, hosted="0", dev_db=True, copied=True)
+    assert proc.returncode == 0, proc.stderr
+    assert _env(tmp_path)["DATABASE_URL"].startswith("postgresql://")
 
 
 @_BASH

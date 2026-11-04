@@ -28,39 +28,51 @@ directly without it stops at a render error that names this page.
 
 ## Migrating an existing deployment
 
-**Minimum version:** the last release that ships the SQLite runner. Upgrade to it before going
-further, because the copy command brings your data to that release's schema. Later releases
-cannot read a SQLite database at all.
+**Minimum version:** the first release after v1.0.0 carries the copy command. v1.0.0 and earlier do
+not have it. Later releases drop the SQLite runner and cannot read a SQLite database, so pass through
+a release that has both. The release notes name the last one.
 
-1. Stop the stack and back up:
+1. Check out the target release. On a hosted install, also set `TRINITY_IMAGE_TAG` to it in `.env`.
+   Do this by hand: `update.sh` restores the old checkout and tag when it hits the refusal, and the old
+   release has no copy command.
+2. Make sure `.env` has `POSTGRES_PASSWORD` and no `DATABASE_URL=` line. `start.sh` writes the password,
+   even when it refuses. Otherwise generate one with `openssl rand -hex 24`. Every compose command stops
+   at a render error until it is set.
+3. Get the image for that release. Without this, `run` uses the old local image, which has no copy command
+   and no refusal.
+   ```bash
+   docker compose -f docker-compose.hosted.yml pull backend     # hosted
+   docker compose <your -f files> build backend                 # prod and dev
+   ```
+4. Stop the stack and back up:
    ```bash
    docker compose <your -f files> stop backend scheduler
    cp trinity-data/trinity.db ~/trinity-before-postgres.db
    ```
    On the dev stack the file is in the `trinity-data` volume.
-2. Make sure `.env` has `POSTGRES_PASSWORD` (`start.sh` writes it, even when it refuses) and no
-   `DATABASE_URL=` line, then copy:
+5. Copy:
    ```bash
    docker compose <your -f files> run --rm backend python -m db.sqlite_to_postgres
    ```
    This takes a snapshot beside `trinity.db`, brings the snapshot to this release's schema, builds
    the PostgreSQL schema with Alembic, copies every table in one transaction, resets sequences and
-   verifies rowcounts. If it fails, nothing is committed and you can run it again.
-3. Start the stack (`./scripts/deploy/start.sh`, or your usual `docker compose up -d`) and check it
+   verifies rowcounts. If it fails, no rows are committed and you can run it again. On success it writes
+   `trinity.db.copied-to-postgres` beside the file, which tells `start.sh` the copy is done.
+6. Start the stack (`./scripts/deploy/start.sh`, or your usual `docker compose up -d`) and check it
    as described under [Verifying the cutover](#verifying-the-cutover).
 
 Keep `trinity.db` and the snapshot until you have checked the result. Writes made after the copy
 exist only in PostgreSQL.
 
-**Rolling back:** check out the previous release, set `DATABASE_URL=` (empty), and start the stack.
-`trinity.db` is unchanged.
+**Rolling back:** check out the previous release, set `DATABASE_URL=` (empty), delete
+`trinity.db.copied-to-postgres`, and start the stack. `trinity.db` is unchanged.
 
 | Exit code | Meaning | Action |
 |---|---|---|
-| 1 | No source file, or `DATABASE_URL` is not PostgreSQL | Fix `.env` |
+| 1 | No source file, `DATABASE_URL` is not PostgreSQL, or the SQLite database has no users | Fix `.env`. With no users there is nothing to copy: move `trinity.db` aside and start the stack |
 | 2 | Rowcounts differ | Investigate before starting the stack |
 | 3 | SQLite holds data PostgreSQL has no place for, or its schema stopped short | Investigate; a table or column left over from an old release is the usual cause |
-| 4 | Load error, or the target already holds data | The message names the table and row |
+| 4 | Load error, a NUL byte in a text value, or the target already holds data | The message names the table and row. Remove the NUL byte from `trinity.db` and run it again |
 
 **Starting fresh instead:** move `trinity.db` aside and start the stack.
 
@@ -103,7 +115,7 @@ Nightly backups (#2216) on PostgreSQL are `pg_dump -Fc` files
 
 ## See also
 
-- `.env.example` — `DATABASE_URL` and the optional bundled `postgres` profile.
+- `.env.example` — `DATABASE_URL` and the bundled PostgreSQL settings.
 - `docs/memory/architecture.md` — Invariant #3 (dual-track migration policy).
 - `docs/planning/TARGET_ARCHITECTURE.md` — backend direction.
 - Related issues: #300 (configurable backend), #1183 (Alembic for Postgres),

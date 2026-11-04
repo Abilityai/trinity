@@ -172,6 +172,8 @@ log_info "Configuring environment..."
 if [ -f ".env" ]; then
     log_warn ".env file already exists, backing up to .env.backup"
     cp .env .env.backup
+    # The postgres image applies its password only to an empty volume.
+    POSTGRES_PASSWORD=$(sed -n 's/^POSTGRES_PASSWORD=//p' .env | tail -1)
 fi
 
 if [ ! -f ".env.example" ]; then
@@ -187,7 +189,7 @@ SECRET_KEY=$(generate_secret_key)
 ADMIN_PASSWORD=$(generate_password)
 
 # Update .env with generated values
-printf 'POSTGRES_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> .env
+printf 'POSTGRES_PASSWORD=%s\n' "${POSTGRES_PASSWORD:-$(openssl rand -hex 24)}" >> .env
 if [[ "$OSTYPE" == "darwin"* ]]; then
     # macOS sed syntax
     sed -i '' "s/^SECRET_KEY=.*/SECRET_KEY=$SECRET_KEY/" .env

@@ -264,3 +264,48 @@ def test_images_require_postgres(image: str) -> None:
     tests above, whose live consumer is the image build."""
     text = (_ROOT / "docker" / image / "Dockerfile").read_text(encoding="utf-8")
     assert "ENV TRINITY_REQUIRE_POSTGRES=1" in text
+
+
+# --- Scripts an upgraded install runs before it has POSTGRES_PASSWORD ---------
+
+
+def test_stop_script_works_without_the_password(tmp_path: Path) -> None:
+    """`docker compose stop` renders the file, so a missing password stops the stop."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    docker = bin_dir / "docker"
+    docker.write_text(
+        '#!/bin/bash\n[ "$1" = "compose" ] || exit 1\n'
+        '[ -n "$POSTGRES_PASSWORD" ] || { echo "POSTGRES_PASSWORD must be set" >&2; exit 1; }\n'
+    )
+    docker.chmod(0o755)
+    repo = tmp_path / "repo"
+    (repo / "scripts/deploy").mkdir(parents=True)
+    script = repo / "scripts/deploy/stop.sh"
+    script.write_text((_ROOT / "scripts/deploy/stop.sh").read_text(encoding="utf-8"))
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin"}
+    proc = subprocess.run(["bash", str(script)], capture_output=True, text=True, env=env)
+    assert proc.returncode == 0, proc.stderr
+
+
+def _install_env_step(tmp_path: Path, existing: str | None) -> str:
+    text = (_ROOT / "install.sh").read_text(encoding="utf-8")
+    start = text.index('if [ -f ".env" ]; then')
+    end = text.index('if [[ "$OSTYPE"', start)
+    (tmp_path / ".env.example").write_text("SECRET_KEY=\n")
+    if existing is not None:
+        (tmp_path / ".env").write_text(existing)
+    stubs = "log_warn() { :; }; log_error() { :; }; generate_secret_key() { echo k; }; generate_password() { echo p; }\n"
+    subprocess.run(["bash", "-c", "set -e\n" + stubs + text[start:end]], cwd=tmp_path, check=True)
+    lines = [l for l in (tmp_path / ".env").read_text().splitlines() if l.startswith("POSTGRES_PASSWORD=")]
+    assert len(lines) == 1
+    return lines[0].split("=", 1)[1]
+
+
+def test_install_rerun_keeps_the_postgres_password(tmp_path: Path) -> None:
+    """The image applies the password only to an empty volume; a new one locks the data out."""
+    assert _install_env_step(tmp_path, "POSTGRES_PASSWORD=keepme\n") == "keepme"
+
+
+def test_install_generates_a_password_on_a_fresh_host(tmp_path: Path) -> None:
+    assert len(_install_env_step(tmp_path, None)) == 48
