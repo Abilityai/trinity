@@ -9,6 +9,7 @@ Usage:
     trinity logs my-agent           # View agent logs
     trinity profile list            # Show all profiles
     trinity profile use prod        # Switch to a profile
+    trinity update --check          # Preflight an update of this host's install
 """
 
 import click
@@ -23,6 +24,7 @@ from .commands.profiles import profile
 from .commands.schedules import schedules
 from .commands.skills import skills
 from .commands.tags import tags
+from .commands.update import update
 
 
 @click.group()
@@ -74,6 +76,9 @@ cli.add_command(tags)
 cli.add_command(chat_with_agent)
 cli.add_command(chat_history, name="history")
 cli.add_command(logs)
+
+# Host-side: update the Trinity install in a local checkout (#3007)
+cli.add_command(update)
 
 
 def main():

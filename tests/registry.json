@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_3007_update_command.py",
+      "feature": "#3007",
+      "added": "2026-10-15",
+      "categories": [
+        "deploy",
+        "unit",
+        "bash"
+      ],
+      "description": "#3007 scripts/deploy/update.sh, executed under bash with stub docker/curl against a real throwaway upstream repository (two release tags plus a pre-release, an enterprise gitlink into a second repository). Shape is read from the running backend's compose label and every compose call of a prod-enterprise update carries the overlay; a label without the overlay while the enterprise tree is present is put back on it; an ambiguous host is refused naming --shape. Preflight (missing CREDENTIAL_ENCRYPTION_KEY, dirty checkout, unreachable enterprise pin, missing enterprise tree) fails with no backup/build/up and the checkout unmoved. A published-port change is refused before any build with checkout and enterprise tree put back; an unrenderable comparison fails closed. The published URL must serve HTML, a hashed asset and JSON from /api/auth/mode; the enterprise registration line must be in the boot log. Failed backup stops the run; base image rebuilt only when the range touched docker/base-image; rollback restores code and enterprise pin; hosted pins TRINITY_IMAGE_TAG, checks out the matching tag, delegates to start.sh --hosted and restores both on failure. Also: the stdlib backup helper against a real SQLite file (pruned artifact name, no tmp residue, never creates a DB) and the CLI locator. Rollback across a migration: the update records a schema position (hash of applied migrations) and --rollback refuses code-only rollback when it moved, cannot be read, or was never recorded, naming the backup and printing stop/restore/--db-restored steps (the SQLite restore payload is executed against a temp /data); --db-restored skips the check. update-db.py: SQLite position moves on a migration row, not on ordinary writes; PostgreSQL takes a fresh pre-update-*.dump (in ARTIFACT_PATTERNS, password via PGPASSWORD never argv, driver suffix dropped, PGDMP-verified) and reads alembic_version + the enterprise table via psql. --rebuild-base forces the agent base image; hosted refuses a branch target. Review of #3767: an enterprise-only PostgreSQL revision moves the position and a failed probe fails the read; the published URL is polled to a deadline; a target older than the checkout is refused unless --allow-downgrade; bindings compare as HostIp:HostPort (removed or moved refuses, added warns); a 300 KB boot log; hosted rollback pins a concrete tag or refuses; the printed PostgreSQL restore empties the schema first and the SQLite safety copy keeps the WAL (real WAL file); rollback refuses local edits and a checkout that did not land; re-pointed tags; first update of an install older than update.sh via --dir."
+    },
+    {
       "file": "unit/test_ent700_proactive_voice.py",
       "feature": "abilityai/trinity-enterprise#700",
       "added": "2026-10-15",

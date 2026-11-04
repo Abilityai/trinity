@@ -91,6 +91,18 @@ Environment variables take precedence over the config file.
 
 On first deploy, writes `.trinity-remote.yaml` for tracking. Subsequent deploys update the same agent.
 
+### Update (host-side)
+
+| Command | Description |
+|---------|-------------|
+| `trinity update --check` | Preflight an update of the Trinity install in this checkout; changes nothing |
+| `trinity update` | Update to the newest release (detects the install shape, backs up, verifies the published URL) |
+| `trinity update --to v1.0.0` | Update to a specific release |
+| `trinity update --rollback` | Return to the version recorded before the last update |
+| `trinity update --dir /opt/trinity ...` | Run against a checkout elsewhere (or set `TRINITY_HOME`) |
+
+Unlike the other commands this one runs **on the Trinity host**, against a local checkout: it executes that checkout's `scripts/deploy/update.sh` with the arguments you pass (`trinity update --help` shows them).
+
 ### Agents
 
 | Command | Description |
