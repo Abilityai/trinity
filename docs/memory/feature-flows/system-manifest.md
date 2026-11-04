@@ -679,11 +679,15 @@ and schedule key (reconciled / report-only / create-only / inert), pinned by a c
   through `_created_schedule_changes`, the function `_apply_created_schedules` runs over its
   post-create read: `schedule_create`, `schedule_update` (validated over the merged cron/timezone;
   an error is a blocker in the dry run), `enabled_differs` (the template row keeps its state) and
-  `schedule_undeclared`. `github:` keeps `pending_template_resolution`. The `created_schedules` op
+  `schedule_undeclared`, over the rows sorted by name so both runs list them in one order.
+  `github:` keeps `pending_template_resolution`, plus one `schedules` line (the template's own rows
+  are known only after create). The `created_schedules` op
   is emitted, with `entries: []`, whenever the template's rows are non-empty or unknown, so the
   real run re-reads and reports template-only rows too; a failed re-read is a `failed[]` line, and
   a failed create skips it silently (no write was planned). `_apply_report` drops every plan-side
-  `schedule:*` change of a created member the executor reported on, so each is listed once.
+  schedule change of a created member: the executor's own lines replace them when it read the
+  schedules back (`ApplyOutcome.schedules_reported`); otherwise the plan's pending form
+  (`ApplyMemberPlan.pending_schedule_changes`) is shown, never the prediction.
   Residual: materialization is non-fatal, so an expected template row can be missing and the run
   then reports `schedule_create` where the preview said `schedule_update`.
 - *Create mode.* `deploy_manifest`'s dry run adds one `warnings[]` line per `local:` member whose

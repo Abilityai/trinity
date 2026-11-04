@@ -384,3 +384,158 @@ class TestTheCreatePathKeepsItsPolicy:
         monkeypatch.setattr(crud, "docker_client", None)
         with pytest.raises(RuntimeError):
             asyncio.run(crud.workspace_volume_exists("acme-a"))
+
+
+# ===========================================================================
+# Review follow-ups: order, an unprobed template, a run that never read back
+# ===========================================================================
+
+TWO_ROWS = ("name: tworows\nschedules:\n"
+            "  - {name: beta, cron: '0 9 * * *', message: /b, enabled: true}\n"
+            "  - {name: alpha, cron: '0 8 * * *', message: /a}\n")
+
+
+def _write_template(world, name, body):
+    (world.templates_root / name).mkdir()
+    (world.templates_root / name / "template.yaml").write_text(body)
+
+
+class TestFollowUps:
+    @pytest.mark.parametrize("schedules", ["", WEEKLY])
+    def test_several_template_rows_list_in_one_order_with_their_own_state(self, ew, schedules):
+        """The post-create read is newest first; the prediction is in template
+        order. Both runs list the rows in one fixed order, and a template row
+        that is armed is shown armed."""
+        _write_template(ew, "tworows", TWO_ROWS)
+        mf = _one("local:tworows", schedules)
+        dry = W.apply(ew, mf, dry_run=True)
+        undeclared = {f: cur["enabled"] for f, _a, code, cur, _d, _n in _schedule_changes(dry)
+                      if code == "schedule_undeclared"}
+        assert undeclared == {"schedule:alpha": False, "schedule:beta": True}
+        real = W.apply(ew, mf, dry_run=False)
+        assert real.status == "applied", real.failed
+        assert _schedule_changes(real) == _schedule_changes(dry)
+
+    def test_an_unprobed_template_says_its_schedules_are_pending(self, ew, monkeypatch):
+        """`github:` with no manifest schedules: the preview says the template's
+        own schedules are known only after create; the run reports the rows."""
+        real_create = ew.create
+
+        async def create(config, current_user, request=None, skip_name_sanitization=False):
+            agent = await real_create(config, current_user, request, skip_name_sanitization)
+            crud.reconcile_declared_schedules(config.name, [{
+                "name": "nightly", "cron": "0 2 * * *", "message": "/n", "enabled": True,
+                "timezone": "UTC", "description": None}], current_user.username)
+            return agent
+
+        ew.create = create
+        mf = _one("github:org/repo")
+        dry = W.apply(ew, mf, dry_run=True)
+        member = next(m for m in dry.members if m.short_name == "a")
+        assert [(c.field, c.code) for c in member.changes if c.field == "schedules"] == [
+            ("schedules", "pending_template_resolution")]
+        real = W.apply(ew, mf, dry_run=False)
+        assert real.status == "applied", real.failed
+        member = next(m for m in real.members if m.short_name == "a")
+        assert [(c.field, c.code) for c in member.changes
+                if system_service._is_schedule_field(c.field)] == [
+            ("schedule:nightly", "schedule_undeclared")]
+
+    def _pending_only(self, result):
+        member = next(m for m in result.members if m.short_name == "a")
+        return [(c.field, c.code) for c in member.changes
+                if system_service._is_schedule_field(c.field)]
+
+    def test_a_failed_create_reports_the_schedules_pending_not_predicted(self, ew):
+        ew.fail_create.add("acme-a")
+        result = W.apply(ew, _one("local:sched", DAILY_OTHER_CRON), dry_run=False)
+        assert self._pending_only(result) == [
+            ("schedule:daily", "pending_template_resolution"),
+            ("schedules", "pending_template_resolution")]
+
+    @pytest.mark.parametrize("resources", ["", "    resources: {cpu: '2'}\n"])
+    def test_a_failed_re_read_reports_the_schedules_pending(self, ew, monkeypatch, resources):
+        """Whatever else the executor reported for the member (its resources)."""
+        real_list = db.list_agent_schedules
+        calls = {"n": 0}
+
+        def flaky(agent_name):
+            if agent_name == "acme-a":
+                calls["n"] += 1
+                if calls["n"] >= 2:
+                    raise RuntimeError("read failed")
+            return real_list(agent_name)
+
+        monkeypatch.setattr(db, "list_agent_schedules", flaky)
+        result = W.apply(ew, _one("local:sched", resources + DAILY_OTHER_CRON), dry_run=False)
+        monkeypatch.setattr(db, "list_agent_schedules", real_list)
+        assert result.status == "partial"
+        assert self._pending_only(result) == [
+            ("schedule:daily", "pending_template_resolution"),
+            ("schedules", "pending_template_resolution")]
+
+    def test_the_planner_refuses_a_name_the_template_repeats(self, world):
+        manifest = system_service.parse_manifest(_one("local:sched", DAILY_OTHER_CRON))
+        mp = system_service.ApplyMemberPlan(name="acme-a", short_name="a", verdict="create",
+                                            config=manifest.agents["a"])
+        row = {"name": "daily", "cron": "0 9 * * *", "message": "/d", "enabled": False,
+               "timezone": "UTC", "description": None}
+        blockers: list = []
+        system_service._plan_created_member(mp, manifest, {}, {}, blockers, [row, dict(row)])
+        assert [b.code for b in blockers] == ["schedule_name_ambiguous"]
+
+    def test_the_create_mode_warning_names_a_schedule_once(self, world):
+        twice = ("    schedules:\n      - {name: daily, cron: '0 7 * * *', message: /a}\n"
+                 "      - {name: daily, cron: '0 8 * * *', message: /b}\n")
+        (line,) = _template_warnings(_deploy_preview(world, _one("local:sched", twice)))
+        assert line.count("'daily'") == 1
+
+    def test_the_create_409_text_is_unchanged(self):
+        assert crud.leftover_workspace_volume_detail("acme-a") == (
+            "Data volume 'agent-acme-a-workspace' already exists and no agent claims it, "
+            "so its contents would silently become this agent's home directory. Refusing "
+            "to adopt another agent's leftover data. Remove it (docker volume rm "
+            "agent-acme-a-workspace) or choose a different name — unclaimed agent volumes "
+            "are also reclaimed automatically.")
+
+
+class TestTheExecutorRefusesWhatItCannotWrite:
+    """The post-create read can differ from the prediction; the executor then
+    refuses an invalid row or an ambiguous name itself, and writes nothing."""
+
+    def _run(self, world, entries):
+        out = system_service.ApplyOutcome()
+        attempts = []
+
+        async def attempt(*a, **k):
+            attempts.append(a)
+            return True
+
+        op = system_service.ApplyOp("created_schedules", "acme-a", "a", {"entries": entries})
+        asyncio.run(system_service._apply_created_schedules(op, world.user(W.ALICE), out, attempt))
+        return out, attempts
+
+    def _seed_row(self, name="daily"):
+        db.create_schedule("acme-a", W.ALICE, system_service._build_schedule_create(
+            {"name": name, "cron": "0 9 * * *", "message": "/d"}))
+
+    @pytest.mark.parametrize("existing", [False, True])
+    def test_an_invalid_create_or_update_is_a_failure(self, world, monkeypatch, existing):
+        world.seed_agent("acme-a")
+        if existing:
+            self._seed_row()
+        monkeypatch.setattr(system_service, "_schedule_entry_error",
+                            lambda entry, **k: ("schedule_cron_invalid", "bad"))
+        out, attempts = self._run(world, [{"name": "daily", "cron": "0 7 * * *", "message": "/m"}])
+        assert attempts == []
+        assert [f.reason for f in out.failed] == [
+            "schedule_cron_invalid: schedule 'daily': bad"]
+
+    def test_an_ambiguous_name_is_a_failure(self, world):
+        world.seed_agent("acme-a")
+        self._seed_row()
+        self._seed_row()
+        out, attempts = self._run(world, [{"name": "daily", "cron": "0 7 * * *", "message": "/m"}])
+        assert attempts == []
+        assert [f.reason for f in out.failed] == [
+            "schedule_name_ambiguous: more than one schedule named 'daily'"]

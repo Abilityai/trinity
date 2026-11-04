@@ -3658,6 +3658,10 @@ class ApplyMemberPlan:
     restart_required: bool = False
     # trinity-enterprise#1030 CP6: config groups the platform could not observe.
     unobserved: List[str] = field(default_factory=list)
+    # trinity-enterprise#984: a created member's schedules as a real run shows
+    # them when the executor never read them back (the create or the re-read
+    # failed): pending, never a prediction presented as done.
+    pending_schedule_changes: List["SystemApplyChange"] = field(default_factory=list)
 
 
 @dataclass
@@ -3845,6 +3849,9 @@ def _created_schedule_changes(entries, rows) -> List[Tuple[ScheduleAction, Optio
     refusing one means.
     """
     out = []
+    # A fixed order: the post-create read is newest first, the stand-ins are
+    # in template order, and the undeclared rows are listed in row order.
+    rows = sorted(rows, key=lambda r: r.name)
     for action in resolve_declared_schedule_actions(entries, rows):
         field_name = f"schedule:{action.name}"
         change = error = None
@@ -4105,18 +4112,24 @@ def _plan_created_member(mp: ApplyMemberPlan, manifest: SystemManifest,
         elif error:
             blockers.append(_apply_blocker(error[0], name, f"Schedule '{action.name}': {error[1]}",
                                            "Fix the schedule in the manifest."))
-        elif change is not None:
-            if template_schedules is None:
-                # Not probed (`github:`): the template's rows are known only after create.
-                change = _apply_change(
-                    change.field, "write", "pending_template_resolution", desired=change.desired,
-                    note="created, or a same-named schedule from the template updated to these "
-                         "fields, after the member is created")
+        elif change is not None and template_schedules is not None:
             mp.changes.append(change)
     # D6: the executor re-reads whenever the template brings rows (or may), so
     # a template-only row is reported by both runs even with no manifest entry.
-    if entries or template_schedules is None or template_schedules:
+    re_read = template_schedules is None or bool(template_schedules)
+    if entries or re_read:
         mp.ops.append(ApplyOp("created_schedules", name, short, {"entries": entries}))
+    mp.pending_schedule_changes = [_apply_change(
+        f"schedule:{entry['name']}", "write", "pending_template_resolution",
+        desired=_schedule_view(entry),
+        note="created, or a same-named schedule from the template updated to these "
+             "fields, after the member is created") for entry in entries]
+    if re_read:
+        mp.pending_schedule_changes.append(_apply_change(
+            "schedules", "report", "pending_template_resolution",
+            note="the template's own schedules are known once the member is created"))
+    if template_schedules is None:  # not probed (`github:`): pending is the preview
+        mp.changes.extend(mp.pending_schedule_changes)
 
 
 def _plan_skills(mp: ApplyMemberPlan, state: Optional[ApplyMemberState],
@@ -4531,6 +4544,9 @@ class ApplyOutcome:
     # with all of them, so a skipped or lost write holds its skill back too.
     gates_unlanded: set = field(default_factory=set)
     extra_changes: Dict[str, List] = field(default_factory=dict)
+    # trinity-enterprise#984: created members whose schedules were read back
+    # after create, so `extra_changes` carries their schedule changes.
+    schedules_reported: set = field(default_factory=set)
     restart_required: Dict[str, bool] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
 
@@ -4821,6 +4837,7 @@ async def _apply_created_schedules(op: ApplyOp, current_user: User, out: ApplyOu
                 reason=f"the template's schedules: the post-create read failed ({reason})"))
         out.member_failed.add(name)
         return
+    out.schedules_reported.add(name)
     changes = out.extra_changes.setdefault(name, [])
     for action, change, error in _created_schedule_changes(op.args["entries"], rows):
         if error:
@@ -4847,6 +4864,10 @@ async def _apply_created_schedules(op: ApplyOp, current_user: User, out: ApplyOu
                 a.row.id, current_user.username, dict(a.fields)))
 
 
+def _is_schedule_field(field_name: str) -> bool:
+    return field_name == "schedules" or field_name.startswith("schedule:")
+
+
 def _apply_report(plan: ApplyPlan, warnings: List[str], *, dry_run: bool, status: str,
                   outcome: Optional[ApplyOutcome] = None,
                   extra_blockers: Tuple = ()) -> "SystemApplyResponse":
@@ -4856,13 +4877,18 @@ def _apply_report(plan: ApplyPlan, warnings: List[str], *, dry_run: bool, status
         restart = mp.restart_required
         applied = None
         if outcome is not None:
+            if mp.creating:
+                # trinity-enterprise#984: the plan's schedule lines are a
+                # prediction. The executor's own lines replace them when it read
+                # the schedules back; otherwise they go back to pending.
+                changes = [c for c in changes if not _is_schedule_field(c.field)]
+                if mp.name not in outcome.schedules_reported:
+                    changes.extend(mp.pending_schedule_changes)
             if mp.name in outcome.extra_changes:
                 # The real run reports what it actually did for a created
                 # member's template-resolved fields (P-D).
-                # Every plan-side schedule change too (trinity-enterprise#984:
-                # the plan predicts them), so each schedule is listed once.
                 changes = [c for c in changes if c.code != "pending_template_resolution"
-                           and not (mp.creating and c.field.startswith("schedule:"))]
+                           or _is_schedule_field(c.field)]
                 changes.extend(outcome.extra_changes[mp.name])
             restart = outcome.restart_required.get(mp.name, restart)
             # #4130: nothing is planned or attempted for a declared-only member.
