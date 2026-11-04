@@ -28,6 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from dependencies import get_current_user
 from models import User
+from services.agent_service.helpers import visible_agent_names
 from services.docker_service import docker_client, list_all_agents_fast
 from utils.helpers import utc_now_iso
 
@@ -226,6 +227,9 @@ async def _compute_container_stats() -> Dict[str, Any]:
         "total_memory_mb": round(total_memory_mb, 1),
         "containers": sorted(processed_stats, key=lambda x: x.get('cpu', 0), reverse=True),
         "timestamp": utc_now_iso(),
+        # Internal: lets a scoped view count running agents whose stats fetch
+        # failed, as `running_count` does. `_scoped` strips it from responses.
+        "_running_names": [a.name for a in running_agents],
     }
 
 
@@ -256,6 +260,24 @@ def _schedule_refresh() -> None:
     _refresh_task = loop.create_task(_refresh_cache())
 
 
+def _scoped(payload: Dict[str, Any], visible: Optional[set]) -> Dict[str, Any]:
+    """The payload cut to the containers the caller may see, totals recomputed
+    (trinity-enterprise#872). `visible is None` (sees every agent) gets the
+    payload unchanged; a cold payload (`running_count is None`) has no
+    containers to cut. `running_count` counts the visible RUNNING agents, the
+    same as the unscoped count, including ones whose stats fetch failed."""
+    running = payload.get("_running_names", [])
+    out = {k: v for k, v in payload.items() if k != "_running_names"}
+    if visible is None or out.get("running_count") is None:
+        return out
+    containers = [c for c in out.get("containers", []) if c.get("name") in visible]
+    ok = [c for c in containers if "error" not in c]
+    return {**out, "containers": containers,
+            "running_count": sum(1 for n in running if n in visible),
+            "total_cpu_percent": round(sum(c.get("cpu", 0) for c in ok), 1),
+            "total_memory_mb": round(sum(c.get("memory_mb", 0) for c in ok), 1)}
+
+
 @router.get("/containers")
 async def get_container_stats(current_user: User = Depends(get_current_user)):
     """
@@ -279,9 +301,13 @@ async def get_container_stats(current_user: User = Depends(get_current_user)):
       indistinguishable from a healthy "zero containers running" and misled
       diagnostics. `no_data: True` / `running_count: None` lets consumers tell
       "not yet measured" from a real zero.
+
+    Scoped to the containers the caller may see (trinity-enterprise#872): an
+    admin person gets the whole payload unchanged.
     """
     if not docker_client:
         raise HTTPException(status_code=503, detail="Docker not available")
+    visible = visible_agent_names(current_user)
 
     now = time.monotonic()
     cached = _stats_cache["data"]
@@ -289,7 +315,7 @@ async def get_container_stats(current_user: User = Depends(get_current_user)):
 
     # Fresh cache hit — return instantly, no refresh needed.
     if cached is not None and age is not None and age < _CACHE_TTL:
-        return {**cached, "cached": True, "stale": False,
+        return {**_scoped(cached, visible), "cached": True, "stale": False,
                 "cache_age_seconds": round(age, 1), "no_data": False}
 
     # Cache is stale or cold: kick off an out-of-band refresh and return now.
@@ -297,7 +323,7 @@ async def get_container_stats(current_user: User = Depends(get_current_user)):
 
     if cached is not None:
         # Serve stale data while the refresh runs (stale-while-revalidate).
-        return {**cached, "cached": True, "stale": True,
+        return {**_scoped(cached, visible), "cached": True, "stale": True,
                 "cache_age_seconds": round(age, 1), "no_data": False}
 
     # Cold start (no data computed yet): NO measurement has happened on this

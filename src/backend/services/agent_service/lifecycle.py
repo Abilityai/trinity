@@ -31,7 +31,7 @@ from services.agent_service.helpers import validate_base_image
 from services.agent_runtime_state import clear_agent_breakers
 from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, get_agent_default_resources
 from services.skill_service import skill_service
-from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches, check_agent_auth_token_env_matches, check_pull_mode_env_matches, check_agent_mcp_key_matches, check_base_image_matches, is_claude_runtime, is_system_agent_name
+from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches, check_agent_auth_token_env_matches, check_agent_name_env_matches, check_pull_mode_env_matches, check_agent_mcp_key_matches, check_base_image_matches, is_claude_runtime, is_system_agent_name
 from services.agent_auth import derive_agent_token
 from utils.helpers import utc_now_iso
 from .file_sharing import check_public_folder_mount_matches
@@ -134,25 +134,13 @@ async def inject_assigned_credentials(agent_name: str, max_retries: int = 3, ret
         get_credential_encryption_service,
     )
 
-    # #612: subscription-mode agents authenticate via CLAUDE_CODE_OAUTH_TOKEN
-    # env var set at container creation (SUB-002). They do not need (and
-    # typically do not have) a .credentials.enc file. Attempting the import
-    # would either silently succeed-noop or surface a misleading "failed"
-    # status that prompts operators to take corrective action (re-assigning
-    # the subscription, recreating the container) — when nothing is wrong.
-    # Short-circuit to a clear skipped status before the import path runs.
-    if db.get_agent_subscription_id(agent_name):
-        logger.debug(
-            f"Skipping .credentials.enc import for {agent_name}: "
-            f"subscription mode (auth via CLAUDE_CODE_OAUTH_TOKEN env var)"
-        )
-        return {
-            "status": "skipped",
-            "reason": "subscription_mode",
-            "detail": "agent authenticates via CLAUDE_CODE_OAUTH_TOKEN; "
-                      "file-based credential injection is not used",
-        }
-
+    # #3510 (ruled 2026-10-19): subscription-mode agents import a committed
+    # .credentials.enc too. Their MCP keys and other non-Anthropic credentials
+    # live there, and the #612 skip dropped them silently. Safe for auth: under
+    # subscription the agent server force-unsets Anthropic API-key variables at
+    # every spawn (#2114), so an imported ANTHROPIC_API_KEY cannot shadow the
+    # subscription. The #606/#612 harm was a MISSING file read as a failure;
+    # that is the clean `no_credentials_enc_file` skip below, with no retries.
     try:
         encryption_service = get_credential_encryption_service()
     except ValueError as e:
@@ -374,7 +362,24 @@ def public_skills_result(raw) -> dict:
     return out
 
 
-async def start_agent_internal(agent_name: str) -> dict:
+# #3180: a start that would mint the agent a platform key, refused for a caller
+# that may not do that (an `ops_write` key). A person revoking or deleting the
+# agent's key is how it is contained, so only a person may undo that.
+_WOULD_MINT_KEY_MESSAGE = (
+    "Starting this agent would issue it a new platform key: its key is revoked, "
+    "deleted, missing or not its own, or its container must be rebuilt. An "
+    "ops-write key never does that, so a person has to start this agent."
+)
+
+
+def _refuse_key_mint(reason: str) -> None:
+    raise HTTPException(
+        status_code=409,
+        detail={"code": "ops_write_would_mint_key", "reason": reason, "message": _WOULD_MINT_KEY_MESSAGE},
+    )
+
+
+async def start_agent_internal(agent_name: str, *, allow_key_mint: bool = True) -> dict:
     """
     Internal function to start an agent.
 
@@ -383,6 +388,11 @@ async def start_agent_internal(agent_name: str) -> dict:
 
     Args:
         agent_name: Name of the agent to start
+        allow_key_mint: False refuses (409 ``ops_write_would_mint_key``, before
+            any side effect) a start that would mint the agent a platform key:
+            the #1559 rebuild of a missing container (``reason:
+            container_missing``) and the #1854 drift heal (``reason:
+            key_drift``). #3180: an ``ops_write`` start passes False.
 
     Returns:
         dict with start status and trinity_injection result
@@ -400,6 +410,8 @@ async def start_agent_internal(agent_name: str) -> dict:
         owner = db.get_agent_owner(agent_name)
         if not owner:
             raise HTTPException(status_code=404, detail="Agent not found")
+        if not allow_key_mint:
+            _refuse_key_mint("container_missing")
         container = await recreate_missing_container(agent_name)
 
     # Check if container needs recreation for shared folders, API key, resource limits, or capabilities
@@ -412,6 +424,13 @@ async def start_agent_internal(agent_name: str) -> dict:
     # other predicates are satisfied by the recreate's own derived-env rules; a
     # missing/stale MCP key is not, because the plaintext is unrecoverable.
     mcp_key_match = check_agent_mcp_key_matches(container, agent_name)
+    # #3180: an unsatisfied key predicate is exactly when the heal below mints.
+    # The verdict does not ask WHY the key is unrecognized: a person's revoke
+    # leaves an inactive row, but a person's delete leaves no row, which is
+    # also what the platform's own prune leaves, so the two cannot be told
+    # apart and neither is healed for a caller that may not mint.
+    if not mcp_key_match and not allow_key_mint:
+        _refuse_key_mint("key_drift")
     needs_recreation = (
         not shared_folder_match or
         not check_public_folder_mount_matches(container, agent_name) or
@@ -424,6 +443,12 @@ async def start_agent_internal(agent_name: str) -> dict:
         not check_pull_mode_env_matches(container, agent_name) or
         not mcp_key_match
     )
+
+    # #3813: name drift is cold-start only. Start-on-running is the idempotent
+    # ensure-running path (MCP chat), and a recreate there would kill a live
+    # execution of an agent that has been running under its old name for weeks.
+    if not needs_recreation and not was_already_running:
+        needs_recreation = not check_agent_name_env_matches(container, agent_name)
 
     # #1809: a rebuilt base image is picked up on COLD start only. Evaluated
     # lazily — the Docker round-trip runs only when no other predicate already
@@ -672,11 +697,14 @@ async def start_agent_internal(agent_name: str) -> dict:
     # trinity-enterprise#752: the skill-gate marker tells the in-container hook
     # to refuse skills while the platform cannot be reached — only on an agent
     # that has gates. It lives on the writable layer, so a fresh container has
-    # none. Fire-and-forget like the spawns above, and for gated agents only:
-    # the common agent with no gates costs no exec.
+    # none, and a stop and start keeps it: clearing the last gate on a stopped
+    # agent cannot exec, so the start has to remove it. The Bash guardrail reads
+    # it too (trinity-enterprise#1002), so a leftover marker would refuse nested
+    # CLIs on an agent with no gates. Every start syncs, at the cost of one exec.
+    # Fire-and-forget like the spawns above.
     try:
         from services import skill_gate_service
-        skill_gate_service.spawn_gate_marker_sync(agent_name)
+        skill_gate_service.spawn_gate_marker_sync(agent_name, only_if_gated=False)
     except Exception as e:
         logger.warning(
             "[ent#752] failed to spawn the skill-gate marker sync for %s on "
@@ -1151,6 +1179,12 @@ async def recreate_container_with_updated_config(
     # once enforcement is on). check_agent_auth_token_env_matches forces this
     # recreate whenever the running token is missing or stale.
     env_vars['TRINITY_AGENT_AUTH_TOKEN'] = derive_agent_token(agent_name)
+    # #3813: the agent's own identity follows the same rule. Replaying the old
+    # AGENT_NAME left a renamed agent's /health, heartbeat, pull workers and
+    # result callback calling in under the dead name (403).
+    # check_agent_name_env_matches repairs agents recreated before this.
+    env_vars['AGENT_NAME'] = agent_name
+    labels['trinity.agent-name'] = agent_name
 
     # #3106: this path replays the OLD Config.Env, so an agent created before
     # OTEL_SDK_DISABLED was injected at create would never gain it on restart,
@@ -1170,16 +1204,12 @@ async def recreate_container_with_updated_config(
     # #1098 TMPDIR idiom above).
     #
     # #1816: EXCEPT for the system agent. This env var is the agent-side
-    # heartbeat loop's gate, and heartbeat_service.authorize_heartbeat accepts
-    # ONLY `scope == "agent"` keys — trinity-system's key is `scope == "system"`,
-    # so arming it buys nothing and costs a permanent 5-second 403 loop
-    # (swallowed agent-side, ~17k backend log lines/day). Matters now because
-    # #1816 makes this recreate a ROUTINE path for the system agent (boot with
-    # the container stopped → base-image adoption), where before it was
-    # incidental. The system agent also has no #1083 result callback and no
-    # #1081 pull worker, so the other two consumers are moot too. Whether the
-    # orchestrator SHOULD be visible to fleet health is a separate design
-    # question (#1816 §10).
+    # heartbeat loop's gate, and #1816 makes this recreate a ROUTINE path for
+    # the system agent (boot with the container stopped → base-image
+    # adoption). Whether the orchestrator SHOULD be visible to fleet health is
+    # a separate design question (#1816 §10). A piloted system agent is the
+    # exception: its pull worker needs the URL, so apply_pull_mode_env below
+    # sets it then and removes it otherwise (#3814).
     if not is_system_agent_name(agent_name):
         env_vars.setdefault(
             'TRINITY_BACKEND_URL',
@@ -1783,6 +1813,9 @@ async def recreate_missing_container(agent_name: str):
             agent_name,
         )
 
+    # trinity-enterprise#1007: no `trinity.kind` here — the create-time kind
+    # lived only on the vanished container, so the rebuilt agent reads as
+    # unknown (AgentStatus.kind None) rather than a fabricated default.
     labels = {
         "trinity.platform": "agent",
         "trinity.agent-name": agent_name,

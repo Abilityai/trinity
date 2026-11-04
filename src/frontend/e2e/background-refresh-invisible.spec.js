@@ -484,14 +484,19 @@ test.describe('Agent Info tab (#1927)', () => {
       return route.fulfill({ json: templateInfo })
     })
 
-    await page.goto(`/agents/${agent}?tab=info`)
+    // trinity-enterprise#887: the Info tab became Settings › General, and the
+    // template's metadata sits behind the row's "Technical details" dialog.
+    await page.goto(`/agents/${agent}?tab=settings&section=general`)
+    await page.getByTestId('general-technical-details').click()
     const content = page.getByTestId('info-content')
     await expect(content).toBeVisible({ timeout: 20000 })
     await expect(content).toContainText('E2E Template 1927')
     const before = await content.elementHandle()
 
     // The watcher fires on stopped → running; the refetch is held open.
-    await page.getByRole('switch', { name: /click to start/i }).click()
+    // The dialog's overlay sits over the header, so the switch is reached by
+    // event, not by pointer — the watcher under test is the same either way.
+    await page.getByRole('switch', { name: /click to start/i }).dispatchEvent('click')
     await expect.poll(() => n, { timeout: 10000 }).toBe(2)
     await expect(page.getByTestId('info-loading')).toHaveCount(0)
     await expect(content).toContainText('E2E Template 1927')
@@ -511,11 +516,16 @@ test.describe('Agent Info tab (#1927)', () => {
       return route.abort('failed')
     })
 
-    await page.goto(`/agents/${agent}?tab=info`)
+    // trinity-enterprise#887: the Info tab became Settings › General, and the
+    // template's metadata sits behind the row's "Technical details" dialog.
+    await page.goto(`/agents/${agent}?tab=settings&section=general`)
+    await page.getByTestId('general-technical-details').click()
     const content = page.getByTestId('info-content')
     await expect(content).toContainText('E2E Template 1927', { timeout: 20000 })
 
-    await page.getByRole('switch', { name: /click to start/i }).click()
+    // The dialog's overlay sits over the header, so the switch is reached by
+    // event, not by pointer — the watcher under test is the same either way.
+    await page.getByRole('switch', { name: /click to start/i }).dispatchEvent('click')
     await expect.poll(() => n, { timeout: 10000 }).toBe(2)
 
     const banner = page.getByTestId('inline-error')

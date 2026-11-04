@@ -39,6 +39,10 @@ from dependencies import (
 logger = logging.getLogger(__name__)
 
 
+
+# trinity#3894: the refusal code for a platform account with no email.
+ACCOUNT_HAS_NO_EMAIL = "account_has_no_email"
+
 def _reject_if_blocked(email: str) -> None:
     """403 a blocked client. Fail-closed — a lookup failure denies.
 
@@ -116,6 +120,12 @@ class PortalPrincipal(NamedTuple):
     #: an authorization input): `portal_session:<minted_by>`, `platform_session`
     #: or `mcp_key:<scope>`.
     credential: str = "unknown"
+    #: trinity-enterprise#959 — the platform USERNAME, for one decision: which
+    #: room participant this credential reads as. Rooms seat a platform account
+    #: as `user`+username and a Workspace session as `workspace_user`+email
+    #: (ent#362) — two identity spaces — so the email alone cannot say which
+    #: rooms are the caller's. None for a portal token, which has no username.
+    username: str | None = None
 
 
 #: Response header carrying a rotated Workspace session token (ent#375). The
@@ -218,7 +228,19 @@ async def get_portal_principal(
     row = db.get_user_by_username(user.username)
     email = (row or {}).get("email") if row else None
     if not email:
-        raise HTTPException(status_code=403, detail="No email is associated with this account")
+        # trinity#3894: the Workspace identifies a person by email (rosters,
+        # messages, shares), so an account without one — the built-in `admin`
+        # on a default install — cannot be seated. Say how to fix it, and name
+        # the case with a code the Workspace renders as that remedy instead of
+        # a "Try again" that can never succeed.
+        from services.chat_execution_service import ERROR_CODE_HEADER
+        raise HTTPException(
+            status_code=403,
+            detail=("This Trinity account has no email address, and the Workspace identifies people "
+                    "by email. Add one under Settings → General (Admin sign-in email), then reload "
+                    "the Workspace."),
+            headers={ERROR_CODE_HEADER: ACCOUNT_HAS_NO_EMAIL},
+        )
     email = email.lower()
     # The operator-preview path is gated too: previewing as a blocked client must
     # show what that client sees, and an operator whose OWN email is blocked has
@@ -230,6 +252,7 @@ async def get_portal_principal(
         email, True, is_person, _is_admin_principal(user),
         self_approves=is_person,
         credential="platform_session" if scope is None else f"mcp_key:{scope}",
+        username=user.username,
     )
 
 

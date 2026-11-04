@@ -221,7 +221,9 @@ export function createA2ATools(client: TrinityClient, requireApiKey: boolean) {
       name: "set_a2a_inbound_allowlist",
       description:
         "Manage which external identities may task an agent over A2A inbound. Provide `add` and/or " +
-        "`remove` (identity strings — e.g. a caller URL, client id, or key id). Owner/admin and human-only. " +
+        "`remove` (identity strings). Two formats: an email or username for a Trinity account on this " +
+        "instance, or `aauth:<agent>@<peer-host>` for an agent on a peer Trinity instance over AAuth " +
+        "(e.g. `aauth:my-agent@peer.example.com`). Owner/admin and human-only. " +
         "Enterprise feature; returns { not_entitled: true } if A2A is not licensed.",
       parameters: z.object({
         agent_name: z.string().describe("The agent whose inbound allow-list to modify."),

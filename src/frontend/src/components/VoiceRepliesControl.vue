@@ -5,7 +5,7 @@
     (VoiceChannelToggle). When enabled, the agent gains the send_voice_reply tool and
     chooses voice per message — replies are text by default.
   -->
-  <div class="pt-4 border-t border-gray-200 dark:border-gray-700">
+  <div :class="embedded ? '' : 'pt-4 border-t border-gray-200 dark:border-gray-700'">
     <div class="flex items-start gap-3">
       <label class="relative inline-flex items-center cursor-pointer mt-0.5" :class="{ 'opacity-50 cursor-not-allowed': !voice.available }">
         <input
@@ -61,6 +61,8 @@ import api from '../api'
 
 const props = defineProps({
   agentName: { type: String, required: true },
+  // trinity-enterprise#887: a row of Settings › Channels, inside its card.
+  embedded: { type: Boolean, default: false },
 })
 
 const voice = ref({ enabled: false, available: false })

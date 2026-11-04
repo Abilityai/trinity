@@ -22,13 +22,30 @@ from agent_server.services import gemini_runtime  # noqa: E402
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _owner_turn(monkeypatch):
+    """Every turn here is the owner's, so the ent#926 tier check passes without a
+    platform to ask (the check itself: test_ent926_runtime_turn_scope.py)."""
+    from agent_server.services import turn_scope
+
+    async def owner(agent, run):
+        return "owner", True, None
+    monkeypatch.setattr(turn_scope, "fetch_turn", owner)
+
+
 @pytest.fixture
 def runtime(monkeypatch):
     rt = gemini_runtime.GeminiRuntime()
     monkeypatch.setattr(rt, "is_available", lambda: True)
     monkeypatch.setenv("GEMINI_API_KEY", "fake-key-for-test")
     monkeypatch.setattr(gemini_runtime, "kill_cgroup_orphans", lambda **k: 0)
+    # #4064: the fake process's pid is not a real child; a real getpgid on it
+    # would read whatever host process owns that pid.
+    monkeypatch.setattr(gemini_runtime, "_capture_pgid", lambda process: _SPAWN_PGID)
     return rt
+
+
+_SPAWN_PGID = 4064
 
 
 def _fake_process(*, wait_raises=None):
@@ -86,3 +103,29 @@ async def test_chat_registers_under_execution_id_and_unregisters(runtime, monkey
 
     assert registry.register.call_args.args[0] == "exec-chat"
     registry.unregister.assert_called_once_with("exec-chat")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["chat", "headless"])
+async def test_the_child_leads_its_own_group_and_registers_its_pgid(runtime, monkeypatch, path):
+    """#4064: a Gemini child shared the agent server's process group and was
+    registered without a pgid, so `terminate()` resolved the server's own group.
+    Both spawn sites now match Claude/Codex: own session, spawn-captured pgid."""
+    proc = _fake_process()
+    popen_kwargs = {}
+
+    def popen(*_a, **k):
+        popen_kwargs.update(k)
+        return proc
+
+    monkeypatch.setattr(gemini_runtime.subprocess, "Popen", popen)
+    registry = MagicMock()
+    monkeypatch.setattr(gemini_runtime, "get_process_registry", lambda: registry)
+
+    if path == "chat":
+        await runtime.execute(prompt="hi", execution_id="exec-4064")
+    else:
+        await runtime.execute_headless(prompt="hello", execution_id="exec-4064")
+
+    assert popen_kwargs.get("start_new_session") is True
+    assert registry.register.call_args.kwargs["metadata"]["pgid"] == _SPAWN_PGID

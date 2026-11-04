@@ -357,7 +357,9 @@ class TestDedupRing:
 
 
 class TestUrlReconstruction:
-    """Ensures uvicorn --proxy-headers + nginx X-Forwarded-Proto handling."""
+    """Ensures the nginx X-Forwarded-Proto handling (uvicorn runs with
+    --no-proxy-headers since trinity-enterprise#873, so the header is the only
+    source of the client's scheme)."""
 
     @pytest.mark.unit
     def test_upgrades_http_to_https_when_forwarded_proto_set(self):
@@ -934,8 +936,11 @@ class TestAccessGate:
 
             reply = _run(WhatsAppAdapter().handle_command(_msg_with_text("/login 123456")))
             assert "pending approval" in reply
+            # trinity-enterprise#737: the request names who asked — the number
+            # is the stable id; no handle, and a DM's chat is the sender.
             mock_db.upsert_access_request.assert_called_once_with(
-                "my-agent", "user@example.com", "whatsapp"
+                "my-agent", "user@example.com", "whatsapp",
+                identity={"requester_channel_id": "whatsapp:+14155551234"},
             )
 
 

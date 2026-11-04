@@ -43,8 +43,8 @@ from fastapi.routing import APIRoute
 
 from database import db
 from db.write_params import TaskExecutionFields
-from dependencies import AuthorizedAgentByName, get_current_user, get_user_or_anonymous, agent_may_reach
-from models import A2ACallRequest, A2ACallResponse, A2ATaskRequest, User
+from dependencies import AuthorizedAgentByName, assert_own_agent, get_current_user, get_user_or_anonymous, agent_may_reach
+from models import A2ACallRequest, A2ACallResponse, A2ATaskRequest, TaskExecutionStatus, User
 from routers.public import _get_client_ip
 from services import (
     a2a_gate,
@@ -78,6 +78,7 @@ from services.platform_prompt_service import build_public_channel_caller_prompt
 from services.platform_audit_service import AuditEventType, platform_audit_service
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
 from services.task_execution_service import (
+    _close_unclaimed_turn,
     dispatch_and_await_terminal,
     get_task_execution_service,
     terminate_execution_on_agent,
@@ -438,6 +439,37 @@ def _exec_field(row: Any, name: str) -> Any:
     return getattr(row, name, None)
 
 
+def _bearer_started_by(row: Any, current_user: Optional[User]) -> bool:
+    """Did THIS bearer credential start this task through A2A? (#3751)
+
+    The bearer twin of AAuth's `execution_owned_by` and the payer binding: a
+    task handle answers only for the credential that sent it. All three must
+    match what `_mint_a2a_execution` / `_run_a2a_task` stamped:
+
+    * `triggered_by == "a2a"` — the same person's UI chat, `/task` or MCP
+      `chat_with_agent` rows on this agent are not A2A tasks, and `tasks/cancel`
+      must never reach them;
+    * `source_user_id` — set, and the caller's (AAuth and paid rows carry none);
+    * `source_mcp_key_id` — the caller's key, or None on both sides for a
+      signed-in person. The key, not the user, is the identity: every agent key
+      of one owner resolves to that owner's user id and role, so the user id
+      alone would let a sibling agent poll another agent's task. A re-minted key
+      therefore loses its in-flight tasks, as it loses its `messageId`
+      namespace (`_a2a_idem_scope`, which keys on the same credential).
+
+    No owner/admin override: an agent key carries its owner's role. Who may see
+    every run of an agent is the execution REST surface's question, not the
+    A2A task handle's."""
+    if current_user is None or _exec_field(row, "triggered_by") != "a2a":
+        return False
+    started_by = _exec_field(row, "source_user_id")
+    return (
+        started_by is not None
+        and started_by == getattr(current_user, "id", None)
+        and _exec_field(row, "source_mcp_key_id") == getattr(current_user, "mcp_key_id", None)
+    )
+
+
 def _text_from_message(message: Dict[str, Any]) -> str:
     """Concatenate the text parts of an A2A message (v0.3 part kind='text')."""
     parts = message.get("parts") if isinstance(message, dict) else None
@@ -567,7 +599,8 @@ def _task_from_row(exec_id: str, row: Any) -> Dict[str, Any]:
 
 
 def _mint_a2a_execution(agent_name: str, text: str, current_user: Optional[User],
-                        *, model: Optional[str] = None) -> str:
+                        *, model: Optional[str] = None,
+                        aauth_identity: Optional[str] = None) -> str:
     """Create the execution row BEFORE dispatch, so the router holds the id while
     the turn runs (#3749). `execute_task(execution_id=...)` then skips its own row
     creation — the pre-created-row contract `/chat` has used since #96.
@@ -598,6 +631,8 @@ def _mint_a2a_execution(agent_name: str, text: str, current_user: Optional[User]
             source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
             model_used=model,
             subscription_id=subscription_id,
+            # ent#862: the AAuth peer identity that triggered this execution.
+            a2a_caller_identity=aauth_identity,
         ),
     )
     if execution is None or not getattr(execution, "id", None):
@@ -1333,6 +1368,10 @@ async def _bound_task_rpc(agent_name: str, method: str, exec_id: str,
     if status == "queued":
         cancelled = bool(db.cancel_queued_execution(
             exec_id, reason="Cancelled by A2A caller"))
+        if cancelled:
+            # #3651: the cancel CAS winner owes the #1804 close + terminal event.
+            _close_unclaimed_turn(agent_name, exec_id, TaskExecutionStatus.CANCELLED,
+                                  "Cancelled by A2A caller")
     else:
         cancelled = bool(await terminate_execution_on_agent(agent_name, exec_id))
     if not cancelled:
@@ -1654,7 +1693,10 @@ async def _dispatch_jsonrpc(
         # runs; the claim names it at once (a concurrent duplicate inside the
         # budget then gets a pollable `working` instead of "retry").
         try:
-            exec_id = _mint_a2a_execution(agent_name, text, current_user)
+            exec_id = _mint_a2a_execution(
+                agent_name, text, current_user,
+                aauth_identity=getattr(aauth, "identity", None),
+            )
         except Exception as exc:  # noqa: BLE001
             idempotency_service.fail(decision)
             logger.warning("a2a message/send could not mint a row for %s: %s", agent_name, exc)
@@ -1688,6 +1730,10 @@ async def _dispatch_jsonrpc(
         # read via _exec_field so both the model and a dict work.
         if not row or _exec_field(row, "agent_name") != agent_name:
             return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
+        # #3751: a bearer caller reads only a task it started; anyone else gets
+        # the unknown-id answer, byte for byte (no existence oracle).
+        if aauth is None and not _bearer_started_by(row, current_user):
+            return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
         return _rpc_result(rpc_id, _task_from_row(exec_id, row))
 
     # ---- tasks/cancel -----------------------------------------------------
@@ -1699,6 +1745,9 @@ async def _dispatch_jsonrpc(
             return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
         row = db.get_execution(exec_id)
         if not row or _exec_field(row, "agent_name") != agent_name:
+            return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
+        # #3751: and cancels only its own, before anything is signalled.
+        if aauth is None and not _bearer_started_by(row, current_user):
             return _rpc_error(rpc_id, _A2A_TASK_NOT_FOUND, "Task not found")
 
         # Report what actually happened. Telling a caller "canceled" while the
@@ -1715,6 +1764,10 @@ async def _dispatch_jsonrpc(
             # CAS inside cancel_queued_execution is what makes a lost race honest.
             cancelled = bool(db.cancel_queued_execution(
                 exec_id, reason="Cancelled by A2A caller"))
+            if cancelled:
+                # #3651: same close + terminal event as _bound_task_rpc.
+                _close_unclaimed_turn(agent_name, exec_id, TaskExecutionStatus.CANCELLED,
+                                      "Cancelled by A2A caller")
         else:
             cancelled = bool(await terminate_execution_on_agent(agent_name, exec_id))
 
@@ -1869,33 +1922,25 @@ def _map_call_error(exc: A2ACallError) -> HTTPException:
     return HTTPException(status_code=status_code, detail=detail)
 
 
-def _assert_outbound_self(current_user: User, agent_name: str) -> None:
-    """An agent-scoped key may place outbound calls only AS ITSELF.
-
-    `AuthorizedAgentByName` resolves an agent key to its OWNER and checks owner
-    access, so without this a permitted sibling could place calls under a
-    neighbour's name.
-
-    Be precise about what that buys, because the obvious reading is wrong under
-    the shipped OSS provider: endpoints there are **platform-scope**, so there
-    is no "own" versus "neighbour" credential — every agent may name every
-    registered endpoint. What this check protects is **attribution**: the
-    rate-limit key, the audit row and the `agent_activities` row all name the
-    agent that actually spent the call, so a sibling cannot launder its egress
-    through a neighbour. It also holds the line for a future per-agent provider,
-    where the obvious reading becomes the literal one — which is why it is here
-    now rather than added later, after the surface has callers.
-
-    `reject_agent_principal` is deliberately NOT used. This is a *use* of a
-    capability an admin already granted by registering the endpoint, not a
-    *grant* of one (the Invariant #8 line) — refusing agent principals here
-    would make the feature unreachable by the only callers it exists for.
-    """
-    if current_user.agent_name and current_user.agent_name != agent_name:
-        raise HTTPException(
-            status_code=403,
-            detail="An agent may only place outbound A2A calls as itself",
-        )
+# An agent-scoped key may place outbound calls only AS ITSELF: both routes call
+# `assert_own_agent` as their first statement (trinity-enterprise#840).
+#
+# `AuthorizedAgentByName` resolves an agent key to its OWNER and checks owner
+# access, so without this a permitted sibling could place calls under a
+# neighbour's name. Be precise about what that buys, because the obvious reading
+# is wrong under the shipped OSS provider: endpoints there are **platform-scope**,
+# so there is no "own" versus "neighbour" credential — every agent may name every
+# registered endpoint. What this check protects is **attribution**: the
+# rate-limit key, the audit row and the `agent_activities` row all name the agent
+# that actually spent the call, so a sibling cannot launder its egress through a
+# neighbour. It also holds the line for a future per-agent provider, where the
+# obvious reading becomes the literal one.
+#
+# `reject_agent_principal` is deliberately NOT used. This is a *use* of a
+# capability an admin already granted by registering the endpoint, not a *grant*
+# of one (the Invariant #8 line) — refusing agent principals here would make the
+# feature unreachable by the only callers it exists for.
+_OWN_OUTBOUND = "An agent may only place outbound A2A calls as itself"
 
 
 def _require_outbound_enabled() -> None:
@@ -1904,6 +1949,13 @@ def _require_outbound_enabled() -> None:
     404, not 403: "this capability is not present" is answered with a 404
     everywhere else in Trinity, and it keeps a disabled deployment from
     advertising a surface it will not serve.
+
+    A DEPENDENCY, declared after the access dependency and the principal, so it
+    runs before the body is validated: with the switch off a body that fails
+    schema validation, or none, answers the same 404 as a good one (the
+    `aauth_person.require_live` shape), and the handler's first statement can be
+    the self-gate. JSON that does not parse is still a 422: FastAPI decodes the
+    body before it solves dependencies.
     """
     if not a2a_outbound_service.is_outbound_enabled():
         raise HTTPException(status_code=404, detail="Not found")
@@ -1915,6 +1967,7 @@ async def call_a2a_agent(
     body: A2ACallRequest,
     request: Request,
     current_user: User = Depends(get_current_user),
+    _enabled: None = Depends(_require_outbound_enabled),
 ):
     """Task an external A2A agent from `agent_name` and return its answer (#736).
 
@@ -1934,8 +1987,7 @@ async def call_a2a_agent(
       agent running untrusted work is the last principal that should be able to
       spend a stored credential.
     """
-    _require_outbound_enabled()
-    _assert_outbound_self(current_user, agent_name)
+    assert_own_agent(current_user, agent_name, detail=_OWN_OUTBOUND)
 
     try:
         outcome = await a2a_outbound_service.call_agent(
@@ -2005,6 +2057,7 @@ async def get_a2a_task(
     body: A2ATaskRequest,
     request: Request,
     current_user: User = Depends(get_current_user),
+    _enabled: None = Depends(_require_outbound_enabled),
 ):
     """Poll a remote A2A task by id on a registered endpoint (#736).
 
@@ -2016,8 +2069,7 @@ async def get_a2a_task(
     would answer "has it finished yet?" from a cached snapshot of the last time
     it had not.
     """
-    _require_outbound_enabled()
-    _assert_outbound_self(current_user, agent_name)
+    assert_own_agent(current_user, agent_name, detail=_OWN_OUTBOUND)
 
     try:
         outcome = await a2a_outbound_service.poll_task(

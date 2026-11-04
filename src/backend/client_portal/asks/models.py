@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class WorkspaceAsk(BaseModel):
@@ -17,7 +17,7 @@ class WorkspaceAsk(BaseModel):
     """
     id: str
     agent_name: str
-    kind: str                       # question | approval | alert
+    kind: str                       # question | approval | alert | credential
     priority: str
     title: str
     question: str
@@ -68,6 +68,11 @@ class WorkspaceAsk(BaseModel):
     # when they did. Platform-written; Discuss on an ask that has one continues
     # it instead of opening a second.
     discussion_chat_id: Optional[str] = None
+    # trinity-enterprise#981: the project a row the platform raised about this
+    # person is attached to — `{id, task_id, event}` — from the platform-written
+    # context keys only (stripped from agent content at both ingestion
+    # boundaries); None when the row carries no project.
+    project: Optional[Dict[str, Any]] = None
     # #2915: what the platform last established about the agent's own copy of
     # this ask, COARSE on purpose — `confirmed | changed | closed | unconfirmed`.
     # A client never sees the reason (it names the operator's infrastructure)
@@ -105,6 +110,12 @@ class WorkspaceAsk(BaseModel):
     # cross.
     agent_ending: Optional[str] = None
     ending_reason: Optional[str] = None
+    # trinity-enterprise#1066: for a `credential` ask, the NAME of the
+    # environment variable the person is filling — the one context key this
+    # projection forwards, because it is what the secret field is labelled
+    # with. Never a value: the value goes to the agent's environment and to
+    # nothing a reader sees.
+    credential_name: Optional[str] = None
 
 
 class WorkspaceAskAnswer(BaseModel):
@@ -124,6 +135,17 @@ class WorkspaceAskAnswer(BaseModel):
     response_text: Optional[str] = Field(default=None, max_length=4000)
     # #2915: see `OperatorResponse.acknowledge_divergence`.
     acknowledge_divergence: bool = False
+
+
+class WorkspaceCredentialValue(BaseModel):
+    """The secret field's body (trinity-enterprise#1066): the value the person
+    typed for a `credential` ask. TYPES ONLY — no `max_length`, no pattern:
+    every bound is the sink's (`credential_sink._check_value`), so the one
+    refusal a value gets is a named 422 that never echoes it, and no validator
+    path ever handles the value a second time. Unknown fields are refused."""
+    model_config = ConfigDict(extra="forbid")
+
+    value: str
 
 
 # --- trinity-enterprise#610 PR A2, §3g L7 (E1): an ask's context ---------------

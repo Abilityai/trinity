@@ -18,7 +18,7 @@ API endpoints for agent chat, voice, streaming, and public chat access.
 | `/api/agents/{name}/chat/history` | GET | The agent's current `/chat` conversation |
 | `/api/agents/{name}/chat/history` | DELETE | Reset the `/chat` conversation so the next turn starts fresh (owner or admin) |
 | `/api/agents/{name}/chat/session` | GET | Current `/chat` session info, including context usage |
-| `/api/agents/{name}/model` | GET / PUT | Read or set the model the agent uses for subsequent messages |
+| `/api/agents/{name}/model` | GET / PUT | Read or set the model the agent uses for subsequent messages. An agent's own refusal (for example `400` for an invalid model, naming the valid ones) reaches you with its status and detail; an unreachable agent or an agent error answers `503` |
 | `/api/agents/{name}/activity` | GET / DELETE | Session activity summary; clear it |
 | `/api/agents/{name}/activity/{tool_id}` | GET | Full detail of one tool call |
 
@@ -33,6 +33,7 @@ A turn whose run ends in an error is a failed execution, recorded with the run's
 Pull mode is an experimental, operator-only setting: agents named in `PULL_MODE_PILOT_AGENTS` take their work from Trinity's durable queue instead of having it pushed to them (see [Agent Network](../collaboration/agent-network.md)). On those agents only:
 
 - `POST /chat`, the Workspace, the session API, public links, Slack/Telegram/WhatsApp, rooms and paid chat all enqueue the turn and wait for a worker to claim it. A turn no worker claims within the agent's timeout fails as a capacity error (the session API answers `429`). A caller that disconnects while its turn is still queued cancels it.
+- An async `/task` always answers `queued`, idle or not; its `message` says the task is queued for the agent's worker pool.
 - `/chat` memory is per caller: each person (or key owner) gets their own conversation with the agent, resumed turn to turn, instead of the one conversation every caller shares. A second turn on the same conversation waits up to 30 seconds, then gets `429`; other callers' turns run in parallel.
 - `GET /chat/history` returns *your* conversation from the database. `DELETE /chat/history` makes every caller's next turn start fresh and closes the conversations `/chat` was using.
 

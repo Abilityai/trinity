@@ -54,7 +54,7 @@ onMounted(async () => {
 })
 ```
 
-**MCP URL**: `fetchMcpUrl()` calls `GET /api/settings/mcp-url` to get the admin-configured URL. If set, `mcpServerUrl` computed uses it; otherwise falls back to auto-detect from `window.location.hostname`. (#76)
+**MCP URL**: `fetchMcpUrl()` calls `GET /api/settings/mcp-url` to get the admin-configured URL. If set, `mcpServerUrl` computed uses it; otherwise it uses the response's server-detected `default_url` (`https://<host>/mcp` behind an HTTPS proxy, else `http://<host>:8080/mcp`, #2907), and falls back to `window.location.hostname` only before the fetch returns. (#76)
 
 ### Step 1: Fetch User Role
 ```javascript
@@ -327,7 +327,7 @@ const revokeKey = (keyId) => {
 
 ### Backend: `POST /api/mcp/keys/{key_id}/revoke` (`mcp_keys.py:114-126`)
 ```python
-@router.post("/keys/{key_id}/revoke")
+@router.post("/keys/{key_id}/revoke", dependencies=[Depends(require_person)])  # a session or the person's own user key (trinity-enterprise#719)
 async def revoke_mcp_api_key_endpoint(key_id: str, ...):
     success = db.revoke_mcp_api_key(key_id, current_user.username)
     if not success:

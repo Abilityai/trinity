@@ -5,11 +5,13 @@
 
 3 tests/git_sync/test_s5_conflict_classifier.py
 9 tests/git_sync/test_s7_reserve_instance_id.py
-7 tests/test_cb_probe_execution_close.py
+3 tests/test_audit_log_unit.py
+8 tests/test_cb_probe_execution_close.py
 6 tests/test_github_pat_propagation_unit.py
+1 tests/test_ip_rate_limit_fix.py
 2 tests/unit/test_agent_server_auto_sync.py
 1 tests/unit/test_agent_shared_files_migration.py
-3 tests/unit/test_audit_retention_prune.py
+2 tests/unit/test_audit_retention_prune.py
 1 tests/unit/test_backlog.py
 1 tests/unit/test_cancelled_not_overwritten.py
 3 tests/unit/test_channel_image_vision.py
@@ -20,7 +22,6 @@
 1 tests/unit/test_empty_result_classification.py
 1 tests/unit/test_event_bus.py
 1 tests/unit/test_execution_retention_prune.py
-8 tests/unit/test_fleet_status_resilience.py
 2 tests/unit/test_fork_to_own.py
 2 tests/unit/test_git_status_dual_ahead_behind.py
 1 tests/unit/test_github_init_gitignore.py
@@ -30,12 +31,12 @@
 1 tests/unit/test_jsonl_recovery.py
 1 tests/unit/test_login_rate_limit_split.py
 2 tests/unit/test_monitoring_dormant_skip.py
-5 tests/unit/test_monitoring_router_signatures.py
+4 tests/unit/test_monitoring_router_signatures.py
 1 tests/unit/test_persistent_state_allowlist.py
 1 tests/unit/test_public_chat_context.py
 1 tests/unit/test_public_folder_mount_match.py
 1 tests/unit/test_schedule_status_observability.py
-3 tests/unit/test_session_operations.py
+2 tests/unit/test_session_operations.py
 1 tests/unit/test_signal_exit_classification.py
 2 tests/unit/test_skill_service_user_agent.py
 1 tests/unit/test_slack_dm_default.py

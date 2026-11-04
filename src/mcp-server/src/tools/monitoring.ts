@@ -42,8 +42,11 @@ export function createMonitoringTools(
       name: "get_fleet_health",
       description:
         "Get fleet-wide agent health summary. " +
-        "Returns overall health status including counts of healthy, degraded, unhealthy, and critical agents. " +
+        "Returns overall health status including counts of healthy, degraded, unhealthy, critical and unknown agents; " +
+        "the counts always total total_agents, and an agent with no health check is counted unknown. " +
         "Also returns a list of all agents with their current health status and issues. " +
+        "A reading older than stale_after_seconds (3x the check interval) reads unknown, and its first issue " +
+        "says how old it is, what it last reported, and whether monitoring is off. " +
         "Each agent carries a `sync` block — git sync health read from the platform's poller: " +
         "binding (agent/deployment), auto_sync_enabled, ahead/behind (origin on the agent's own branch), " +
         "dirty_files, last_successful_push_at, divergence_age_s, state (green/yellow/red/unknown), " +
@@ -67,6 +70,7 @@ export function createMonitoringTools(
             success: true,
             enabled: result.enabled,
             last_check_at: result.last_check_at,
+            stale_after_seconds: result.stale_after_seconds ?? null,
             summary: result.summary,
             agents: result.agents.map((a: {
               name: string;
@@ -153,7 +157,9 @@ export function createMonitoringTools(
         "Get detailed health information for a specific agent. " +
         "Returns multi-layer health check results including Docker container status, " +
         "network reachability, and business logic health (runtime availability, context usage). " +
-        "Also includes recent issues and 24-hour uptime percentage.",
+        "Also includes recent issues and 24-hour uptime percentage. " +
+        "A stored reading older than stale_after_seconds reads aggregate_status unknown, " +
+        "with an issue saying how old it is.",
       parameters: z.object({
         agent_name: z.string()
           .describe("Name of the agent to check health for"),
@@ -175,6 +181,7 @@ export function createMonitoringTools(
             agent_name: result.agent_name,
             aggregate_status: result.aggregate_status,
             last_check_at: result.last_check_at,
+            stale_after_seconds: result.stale_after_seconds ?? null,
             docker: result.docker ? {
               container_status: result.docker.container_status,
               cpu_percent: result.docker.cpu_percent,

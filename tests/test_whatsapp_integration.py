@@ -193,8 +193,8 @@ def _post_webhook(binding: dict, body: str, from_phone: str = _TEST_USER_PHONE) 
         data=payload,
         headers={
             "X-Twilio-Signature": signature,
-            # Uvicorn runs with --proxy-headers; tests hit localhost directly
-            # so no X-Forwarded-Proto is required.
+            # Tests hit localhost directly over http, so no X-Forwarded-Proto
+            # is required (uvicorn itself runs with --no-proxy-headers).
         },
         timeout=10,
     )

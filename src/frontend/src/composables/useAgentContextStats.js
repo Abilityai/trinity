@@ -1,0 +1,88 @@
+import { computed, watch } from 'vue'
+
+/**
+ * trinity-enterprise#950 — keep this agent's context-window reading fresh for
+ * the agent header chart while the agent page is shown.
+ *
+ * Reuses the fleet store the dashboard already fills
+ * (`stores/network.js::fetchContextStats`, `GET /api/agents/context-stats`),
+ * so the header and the fleet tile read one number. It does NOT call the
+ * store's `startContextPolling` / `stopContextPolling`: that pair is the
+ * Dashboard's, also polls execution and slot stats, and a stop from here would
+ * end the Dashboard's poll too.
+ *
+ * Lifecycle is the caller's. AgentDetail is KeepAlive-cached, so `onUnmounted`
+ * does not fire on navigation — start/stop ride the page's
+ * startAllPolling/stopAllPolling (onActivated / onDeactivated / agent switch)
+ * and its status watcher (running only).
+ *
+ * A failed fetch keeps the previous reading: the store only logs on error and
+ * never overwrites the map with an empty one (design-system: a failed refresh
+ * keeps the data).
+ */
+export const CONTEXT_POLL_MS = 15000
+
+export function useAgentContextStats(agentRef, networkStore) {
+  let timer = null
+  let inFlight = false
+
+  const stats = computed(() => {
+    const name = agentRef.value?.name
+    return (name && networkStore.contextStats?.[name]) || null
+  })
+
+  // ent#955: the header's capacity indicator reads the same per-agent slot
+  // map the dashboard meters do (`fetchSlotStats`, `GET /api/agents/slots`),
+  // refreshed on the same tick, so the header and the tile agree.
+  const slots = computed(() => {
+    const name = agentRef.value?.name
+    return (name && networkStore.slotStats?.[name]) || null
+  })
+
+  // ent#955: a short task finishes between two 15 s polls and never reaches
+  // the slot map — the WS activity event (`chat_start` / `schedule_start`,
+  // `stores/network.js::workingState`) lands the moment it starts AND the
+  // moment it ends. The header fills a bar on the start at once, and the map
+  // is re-read on BOTH edges: measured, re-reading only on the start left the
+  // bar lit for up to 15 s after a 5 s turn, until the next tick found the
+  // slot free.
+  const working = computed(() => {
+    const name = agentRef.value?.name
+    return (name && networkStore.workingState?.[name]) || null
+  })
+  watch(working, () => { refresh() })
+
+  async function refresh() {
+    // The endpoints are fleet-wide; on a slow backend a new tick must not
+    // stack a second request behind the first.
+    if (inFlight) return
+    inFlight = true
+    try {
+      await Promise.all([networkStore.fetchContextStats(), networkStore.fetchSlotStats()])
+    } finally {
+      inFlight = false
+    }
+  }
+
+  function start() {
+    // Idempotent while running: the page starts its polls from onMounted,
+    // onActivated (both fire on a KeepAlive view's first mount) and the
+    // running-status watcher, and a restart here would re-fetch for each —
+    // the duplicate `e2e/agent-detail-request-dedupe.spec.js` forbids.
+    if (timer) return
+    refresh()
+    timer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return // PERF-269
+      refresh()
+    }, CONTEXT_POLL_MS)
+  }
+
+  function stop() {
+    if (timer) {
+      clearInterval(timer)
+      timer = null
+    }
+  }
+
+  return { stats, slots, working, start, stop, refresh }
+}

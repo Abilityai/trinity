@@ -1,0 +1,134 @@
+{
+  "version": "1.2.3",
+  "date": "2026-10-23",
+  "mode": "daily",
+  "scope": "diff",
+  "branch": "feature/840-agent-self-gate",
+  "base": "dev (66a860094)",
+  "issue": "abilityai/trinity-enterprise#840",
+  "phases_run": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "phases_note": "Diff mode: each phase constrained to the changed files. Phases 3, 4 and 5 found no changed dependency, workflow, Dockerfile or compose file and so had nothing in scope.",
+  "stack_cve_quicklist": [
+    {
+      "component": "Starlette (fastapi)",
+      "verdict": "not reachable (diff)",
+      "note": "The diff adds no request.url.path comparison; assert_own_agent reads only the principal."
+    },
+    {
+      "component": "Vite / Vitest",
+      "verdict": "not reachable (diff)",
+      "note": "No frontend change."
+    },
+    {
+      "component": "axios",
+      "verdict": "not reachable (diff)",
+      "note": "No lockfile change."
+    },
+    {
+      "component": "Redis image",
+      "verdict": "not reachable (diff)",
+      "note": "No compose or Redis change."
+    },
+    {
+      "component": "Claude Code in the base image",
+      "verdict": "not reachable (diff)",
+      "note": "No base-image change."
+    },
+    {
+      "component": "runc / Docker host",
+      "verdict": "not reachable (diff)",
+      "note": "No docker exec path changed."
+    },
+    {
+      "component": "Node CLIs in the base image",
+      "verdict": "not reachable (diff)",
+      "note": "No base-image change."
+    }
+  ],
+  "attack_surface": {
+    "new_endpoints": 0,
+    "changed_endpoints": [
+      "18 agent-callable routes now refuse a sibling agent's key through dependencies.assert_own_agent as the handler's first statement (same status and message as the hand copies): reminders x3, seat decisions x2, user memory, metric points, reports, canvas writes/deletes x4, canon roles, objectives, shared files, voice reply, outbound A2A call + poll",
+      "POST /api/agents/{agent_name}/user-memory: self-gate now precedes assert_agent_access (an out-of-reach agent key gets the self message instead of 'Not authorized'; both 403)",
+      "POST /api/agents/{agent_name}/a2a/call and /a2a/task: kill switch is a route dependency (switch off + schema-invalid or missing body -> 404, was 422; unparseable JSON still 422)"
+    ],
+    "agent_context_ingress": [
+      "MCP tool descriptions (write_user_memory, set_reminder, list_reminders, cancel_reminder, send_voice_reply, get_a2a_task): static strings, now stating agent_name is user-key-only / an agent key may only name itself"
+    ],
+    "census": "AGENT_CALLABLE split into AGENT_CALLABLE_SELF (recognised AND listed, 21) and AGENT_CALLABLE_ANY (listed with a sibling answer, 34); baseline 348 -> 331"
+  },
+  "findings": [],
+  "hypotheses": [],
+  "coverage_gaps": [
+    {
+      "phase": 6,
+      "item": "Live probe of the converted routes on a running stack",
+      "reason": "The operator asked for no live tests against localhost in this session; /verify-local --skip-agent runs the integration suite on a sibling stack."
+    },
+    {
+      "phase": 3,
+      "item": "Dependency scanner",
+      "reason": "No pin, lockfile, image install, workflow, Dockerfile or compose change in the diff."
+    }
+  ],
+  "verification": {
+    "behaviour_preservation": "Independent reviewer AST-dumped all 18 converted handlers base vs head: assert_own_agent is the first statement, details byte-identical; a census-driven test calls every AGENT_CALLABLE_SELF handler with a sibling key (21 cases) with the caller's own name in every other argument.",
+    "recognition_false_positives": "Refused (planted self-tests, mutation-proven): non-get_current_user principal, agent argument not the name/agent_name in every literal path, both agent parameters in the path, a second add_api_route registration, aliased or redefined name, gate not first / nested / keyword-called.",
+    "ratchet": "19 spellings found, 9 benign shapes spared, live tree clean (allowlist: aauth_person.assert_own_key); stated limit: comparison must be against name/agent_name or a local alias.",
+    "guards": "test_293, test_2996, test_1310, test_186, test_ent629, test_ent614, test_2094, test_736*, test_ent840: 806 passed.",
+    "mutations": "27 call-site mutants killed (18 before the code-review round, 9 after).",
+    "enterprise_docs_guard": "Clean over changed public docs; PCRE pattern evaluated with Python re (host grep cannot parse it and reports a false clean).",
+    "invisible_unicode": "None in 42 changed files.",
+    "secrets_pii": "None (one example.com test placeholder).",
+    "runtime_route_census": "Closed after the audit: test_2996_route_census_runtime.py 3/3 in the /verify-local venv (real `import main`); /verify-local --skip-agent PASS (integration 69 passed, 13 gated skips, 2 known false-fails deselected)."
+  },
+  "supply_chain_summary": {
+    "scanner": "none needed (no dependency change in the diff)",
+    "new_install_scripts": 0
+  },
+  "filter_stats": {
+    "candidates_considered": 10,
+    "below_gate": 10,
+    "hard_excluded": 0,
+    "reported": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0
+  },
+  "trend": {
+    "prior_reports_checked": [
+      "cso-2026-09-29",
+      "cso-2026-09-30"
+    ],
+    "resolved": [],
+    "persistent": [],
+    "new": [],
+    "note": "No prior finding on the agent-key self-gate class; the full runs' ASI03 rows rested on the #2996 census, which had no self-fencing vocabulary. The next full run should record the class as code-recognised + ratcheted."
+  },
+  "residual_limits": [
+    "system-scoped key and event loopback carry no agent name and pass every self-gate (unchanged; trinity-enterprise#719)",
+    "agent_principal_name reads an absent agent_name attribute as not-an-agent; unreachable on these routes (census pins the principal to get_current_user/CurrentUser; models.User always declares the field)",
+    "ratchet does not match a comparison against a parameter not named name/agent_name (or an alias of one)",
+    "canvas list/get/context, report list and the metrics cross-read admit an agent inside its reach by the owner-breadth model",
+    "share_agent_file listed as today's behaviour (a use, FILES-001); whether a public link is a grant is open in trinity-enterprise#719"
+  ]
+}

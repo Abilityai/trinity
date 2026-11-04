@@ -12,6 +12,7 @@ Passwordless email-based authentication with verification codes. Users enter the
 ## Revision History
 | Date | Changes |
 |------|---------|
+| 2026-10-21 | **trinity-enterprise#717** — adding a whitelist entry (`POST /api/settings/email-whitelist`) takes a signed-in admin session for **every** role, the default `user` included: authentication → `require_interactive` → `assert_admin` → body parsing → DB. A key — an admin's own user-scoped key and the system key included — gets 403 before the body is read (never a 422) and no row is written or replaced. Signed-in admins are unchanged. See [POST /api/settings/email-whitelist](#post-apisettingsemail-whitelist-add_email_to_whitelist). |
 | 2026-10-09 | **trinity-enterprise#837** — sharing and access-request approval stop writing the whitelist; the Settings whitelist form gains a role picker (default `user`) and a Role column; a `user` signing in at `/login` lands in `/workspace`. See [workspace-only-role.md](workspace-only-role.md). |
 | 2026-09-29 | **Binding a sign-in email needs mailbox proof (trinity-enterprise#720)**: new `POST /api/users/me/email/code` sends a bind code; `PUT /api/users/me/email` now requires it (console-provider admin bypass, audited unverified), caps wrong guesses at 5 per 10 min under `otp_attempts:bind:{user_id}:{email}`, and `users.email` is unique (case-insensitive). See [Binding a Sign-In Email](#binding-a-sign-in-email-trinity-enterprise720). |
 | 2026-07-04 | **Enumeration hardening (#186)**: `request_email_login_code()` now returns a **byte-identical** body + status for whitelisted, non-whitelisted, and rate-limited emails — the generic `{"success": true, "message": "If your email is registered, you'll receive a code shortly"}` (dropped the distinct `"Verification code sent…"` message and `expires_in_seconds`). Over-limit returns the same generic 200 (WARN-logged `"email-code suppressed: rate limit"`, **no 429**). The verification email is dispatched **fire-and-forget** (`asyncio.create_task`, strong-ref set) so the whitelisted path's latency matches the immediate-return paths — closing the body/status/timing membership oracle (pentest 3.3.3). Frontend safe: `stores/auth.js` falls back to `|| 600` when `expires_in_seconds` is absent. |
@@ -34,8 +35,8 @@ As an admin, I want to control who can access the platform via an email whitelis
 - **API**: `POST /api/auth/email/request` - Request verification code (lines 140-198 in auth.py)
 - **API**: `POST /api/auth/email/verify` - Verify code and login (lines 201-268 in auth.py)
 - **API**: `POST /api/users/me/email/code` + `PUT /api/users/me/email` - Bind a sign-in email to the signed-in account (routers/users.py, trinity-enterprise#720)
-- **API**: `GET /api/settings/email-whitelist` - List whitelisted emails (lines 429-443 in settings.py)
-- **API**: `POST /api/settings/email-whitelist` - Add email to whitelist (lines 446-478 in settings.py)
+- **API**: `GET /api/settings/email-whitelist` - List whitelisted emails (`routers/settings/whitelist.py::list_email_whitelist`)
+- **API**: `POST /api/settings/email-whitelist` - Add email to whitelist, signed-in admin session only (`routers/settings/whitelist.py::add_email_to_whitelist`, trinity-enterprise#717)
 - **API**: `DELETE /api/settings/email-whitelist/{email:path}` - Remove from whitelist (`routers/settings/whitelist.py`; `:path` so a stored value containing `/` is removable, #3456)
 
 ---
@@ -572,16 +573,16 @@ async def verify_email_login_code(request: Request):
 **Business Logic:**
 1. Check if setup is completed (lines 210-215)
 2. Check if email auth is enabled (lines 217-223)
-3. Parse request, extract `client_ip` from request
-4. Call `check_login_rate_limit(client_ip)` — IP-based rate limit (raises 429 if exceeded)
+3. Read `client_ip = request.client.host` — the canonical client address `utils/client_ip.ClientAddressMiddleware` already resolved (trusted-proxy forwarding only; ent#873), then parse the body (a malformed body still records a per-IP failure)
+4. Call `check_login_rate_limit(client_ip, account=email)` — per-IP `login_attempts_ip:{ip}` and per-account `login_attempts_acct:{email}` buckets (#591; raises 429 if either is exhausted)
 5. Parse and lowercase email
 6. Call `check_otp_rate_limit(email)` — per-email OTP rate limit (raises 429 after 5 failures)
 7. Verify code
    - `db.verify_login_code(email, code)`
    - Checks: code exists, not already used, not expired
-8. If invalid: call `record_login_attempt(client_ip, False)` and `record_otp_attempt(email, False)`, return 401
-9. On success: call `record_login_attempt(client_ip, True)` and `record_otp_attempt(email, True)`
-   - Clears both the IP and per-email attempt counters
+8. If invalid: call `record_login_attempt(client_ip, False, account=email)` and `record_otp_attempt(email, False)`, return 401
+9. On success: call `record_login_attempt(client_ip, True, account=email)` and `record_otp_attempt(email, True)`
+   - Clears the IP, account and per-email OTP counters
 10. Mark code as verified with `used_at` timestamp
 11. Get or create user
     - `db.get_or_create_email_user(email)`
@@ -616,8 +617,8 @@ async def verify_email_login_code(request: Request):
 Used by the public-facing verification flow (separate from the main email login). As of 2026-03-26 this endpoint also enforces IP-based rate limiting.
 
 **Business Logic:**
-1. Extract `client_ip` from request
-2. Call `check_login_rate_limit(client_ip)` — raises 429 if IP is locked out
+1. `client_ip = _get_client_ip(request)` — the canonical client address (a wrapper over `request.client.host` since ent#873)
+2. Call `check_login_rate_limit(client_ip)` — raises 429 if that address's bucket is exhausted
 3. Parse and verify the code
 4. On failure: call `record_login_attempt(client_ip, False)`
 5. On success: call `record_login_attempt(client_ip, True)`
@@ -731,11 +732,11 @@ that address until they bind another.
 **Tests**: `tests/unit/test_ent720_email_binding.py`;
 `src/frontend/tests/unit/emailBindProof.spec.js`.
 
-### Whitelist Management Endpoints (`src/backend/routers/settings.py`)
+### Whitelist Management Endpoints (`src/backend/routers/settings/whitelist.py`)
 
-All whitelist endpoints are **admin-only** (require `role="admin"`).
+All whitelist endpoints are **admin-only** (`assert_admin`). Adding an entry additionally takes a **signed-in session** (trinity-enterprise#717).
 
-#### GET /api/settings/email-whitelist (Lines 429-443)
+#### GET /api/settings/email-whitelist (`list_email_whitelist`)
 
 List all whitelisted emails.
 
@@ -763,26 +764,28 @@ List all whitelisted emails.
 }
 ```
 
-#### POST /api/settings/email-whitelist (Lines 446-478)
+#### POST /api/settings/email-whitelist (`add_email_to_whitelist`)
 
-Add email to whitelist.
+Add email to whitelist. `default_role` is the role the person's account gets at its **first** sign-in (`user` when omitted); it does not change an existing account, which only User Management does.
 
 **Request Body:**
 ```json
 {
   "email": "newuser@example.com",
-  "source": "manual"
+  "source": "manual",
+  "default_role": "operator"
 }
 ```
 
 **Business Logic:**
+0. Authorize, before the body is read (trinity-enterprise#717). `get_current_user` authenticates; its entry fence refuses **every** event-loopback JWT here (403), with or without a source agent. The route dependency `require_interactive` then refuses every key-authenticated caller — an admin's own user-scoped key and the system key included, which `assert_admin` alone admits (#2323) — and a loopback JWT carrying a vouched source agent (403). The handler's `assert_admin` then refuses a signed-in non-admin (403). The rule holds for **every** role, the default `user` included: each whitelist role yields an interactive session at first sign-in, and a minter must be at least as strict as the session it produces. A refused caller never sees a validation 422 and no row is written or replaced. An unauthenticated request stays 401.
 1. Parse and validate the request (#3455). `db_models.EmailWhitelistAdd` trims and lower-cases `email` and refuses anything that is not one address — empty, longer than 254 characters, containing whitespace or control characters, or not exactly one `@` with text on both sides. An entry is always a single address: the whitelist is matched by exact lower-cased address, with no domain or wildcard form. A refusal — or a body that is not a JSON object — is **422** with a one-sentence string `detail` naming the reason (never the echoed value).
-2. Add to whitelist (lines 466-467)
+2. Add to whitelist
    - `db.add_to_whitelist(email, current_user.username, source, default_role=add_request.default_role)`
    - `default_role` is a required keyword-only kwarg (defaults to `"user"` on the Pydantic request model); see #314.
    - Returns `False` if already exists; raises `ValueError` if `default_role` is unknown.
-3. If duplicate: return 409 Conflict (lines 469-472)
-4. Return success (line 475)
+3. If duplicate: return 409 Conflict, naming the stored row's first-sign-in role. A deliberate grant replaces a row that sharing or an access-request approval wrote instead (trinity-enterprise#837).
+4. Return success; when the address already has an account, the response adds `existing_account_role`.
 
 **Response:**
 ```json
@@ -898,6 +901,10 @@ class EmailLoginResponse(BaseModel):
 
 The address an account signs in with is its sign-in identity, so changing it is a human, signed-in act. `PUT /api/users/me/email` (`routers/users.py`) therefore takes `Depends(require_interactive)`: a signed-in (JWT) session only; every MCP key, the person's own `user` key included, gets 403 and the column does not move. `PUT` / `DELETE /api/users/me/github-pat` take the same rule. See requirements `auth.md` §2.8.
 
+### Adding a whitelist entry is session-only (trinity-enterprise#717)
+
+A whitelist row pre-authorises a sign-in that yields an interactive session at the row's role, so writing one is a minting act and must be at least as strict as what it mints. `POST /api/settings/email-whitelist` (`routers/settings/whitelist.py`) therefore takes `Depends(require_interactive)` before its `assert_admin`: a signed-in admin session only, at every role including `user`; every MCP key (an admin's own `user` key and the `system` key included) and a loopback token carrying a source agent get 403 before the body is read, and no row is written. The role-change route has the same rule since #3634. See requirements `auth.md` §2.8.
+
 ### Email Enumeration Prevention
 
 The system prevents attackers from discovering which emails are registered:
@@ -1003,6 +1010,7 @@ All operations are logged to audit service:
 | Email already whitelisted | 409 | `Email {email} is already whitelisted` | Duplicate email in POST whitelist |
 | Email not in whitelist | 404 | `Email {email} not found in whitelist` | DELETE non-existent email |
 | User not found (whitelist add) | 400 | `User not found: {username}` | Invalid `added_by` user |
+| Whitelist add by a non-session caller | 403 | `This operation requires an interactive session; MCP API keys cannot perform it` (a loopback token carrying a source agent gets `person_required`) | An MCP key of any scope, or a vouched loopback token, is refused before the body is read; use a signed-in admin session (trinity-enterprise#717) |
 
 ---
 
@@ -1274,6 +1282,10 @@ curl -X GET http://localhost:8000/api/settings/email-whitelist \
   -H "Authorization: Bearer $TOKEN"
 ```
 
+**A key cannot add an entry (trinity-enterprise#717):** repeat the add with an MCP API key (`trinity_mcp_...`) as the bearer, at any `default_role`, including `user` and a malformed body. **Expected:** 403 every time (never 200 or 422), and the entry does not appear in the list.
+
+**Automated:** `tests/unit/test_ent717_whitelist_session_only.py` drives the real settings router: every key scope, an unknown scope and a principal without `mcp_scope` are refused at every role and before the body is read; a loopback JWT carrying a vouched source agent is refused by the route gate; a real, signed loopback JWT without a source agent is refused by the entry fence; a signed-in admin still adds at every role; a signed-in non-admin is still refused; no credentials stays 401.
+
 #### 8. Backend: User Requests Login Code (API)
 
 **Action:**
@@ -1484,8 +1496,9 @@ curl -X GET "http://localhost:8001/api/audit/events?event_type=authentication&ac
 2. `email_login_code_sent` - Email sent
 3. `email_login_verify` - Code verification attempt
 4. `email_login` - Successful login
-5. `email_whitelist/add` - Email added to whitelist
-6. `agent_sharing/share` - Agent shared (if testing auto-whitelist)
+5. `agent_sharing/share` - Agent shared (if testing auto-whitelist)
+
+Adding a whitelist entry writes no audit event.
 
 ### Edge Cases
 

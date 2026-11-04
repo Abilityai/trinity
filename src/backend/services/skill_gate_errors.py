@@ -108,3 +108,12 @@ class SkillGateRefused(SkillGateError):
 
     def detail(self) -> Dict[str, Any]:
         return {"status": "refused", "code": self.code, "message": str(self), **self.extra}
+
+
+def hold_marker(exc: SkillGateError) -> str:
+    """trinity#3402: what a stored row the gate stopped carries in `gate_hold` —
+    the request id an approval was raised under, or `refused:<code>`. Such a row,
+    and the notice answering it, is never replayed to the agent."""
+    if isinstance(exc, SkillApprovalRequired):
+        return exc.request_id
+    return f"refused:{getattr(exc, 'code', 'unknown')}"

@@ -92,6 +92,10 @@ class _ClientSlot:
     # ...and the fields each delivered event is cut to (None = the whole payload).
     allowed_fields: Optional[FrozenSet[str]] = None
     refreshing: bool = False
+    # trinity-enterprise#872: an agent key's /ws/events slot re-reads its reach
+    # through this zero-arg callable on an access-changing event (injected by
+    # main.py, like the email resolver). None = no per-slot refresh.
+    roster_resolver: Optional[Callable[[], Iterable[str]]] = None
     queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=CLIENT_QUEUE_MAXSIZE))
     last_delivered_id: str = "0-0"
     failure_count: int = 0
@@ -484,6 +488,7 @@ class StreamDispatcher:
         allowed_types: Optional[Iterable[str]] = None,
         allowed_fields: Optional[Iterable[str]] = None,
         last_event_id: Optional[str] = None,
+        roster_resolver: Optional[Callable[[], Iterable[str]]] = None,
     ) -> str:
         """Register a WebSocket client. Returns the client_id used for lookups.
 
@@ -500,6 +505,7 @@ class StreamDispatcher:
             email=email or "",
             allowed_types=frozenset(allowed_types) if allowed_types is not None else None,
             allowed_fields=frozenset(allowed_fields) if allowed_fields is not None else None,
+            roster_resolver=roster_resolver,
         )
         client_id = str(uuid.uuid4())
         slot.consumer_task = asyncio.create_task(
@@ -555,6 +561,16 @@ class StreamDispatcher:
         event = payload.get("event") or payload.get("type")
         if event not in _ACCESS_CHANGING_EVENTS:
             return
+        # An agent key's slot (trinity-enterprise#872): its roster is its reach,
+        # which a create (spawn) or delete changes; each slot re-reads its own.
+        for slot in list(self._clients.values()):
+            if slot.roster_resolver is None or slot.is_admin or slot.refreshing:
+                continue
+            slot.refreshing = True
+            task = asyncio.create_task(self._refresh_slots(
+                "", [slot], lambda _email, read=slot.roster_resolver: read()))
+            self._refresh_tasks.add(task)
+            task.add_done_callback(self._refresh_tasks.discard)
         resolver = getattr(self, "_accessible_resolver", None)
         if resolver is None:
             return

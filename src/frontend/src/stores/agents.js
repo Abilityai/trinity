@@ -576,6 +576,36 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
+    // abilityai/trinity-enterprise#662: what each edge of this agent exposes —
+    // the library skills on its permitted targets and which it may run.
+    async getAgentPeerSkills(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/peer-skills`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    // The honest upgrade (admin): agent-to-agent calls that used a library
+    // skill in the last 30 days and are now refused for want of a grant.
+    async getPeerSkillDrift() {
+      const authStore = useAuthStore()
+      const response = await axios.get('/api/skills/peer-grants/drift', {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    // Grant (or revoke) one library skill on `target` to caller `name` (admin).
+    async setAgentPeerSkillGrant(name, target, skill, granted) {
+      const authStore = useAuthStore()
+      const url = `/api/agents/${name}/peer-skills/${encodeURIComponent(target)}/${encodeURIComponent(skill)}`
+      const response = granted
+        ? await axios.put(url, {}, { headers: authStore.authHeader })
+        : await axios.delete(url, { headers: authStore.authHeader })
+      return response.data
+    },
+
     // ent#84: one gated read for the fleet permissions matrix — returns both
     // axes (accessible, non-system agents) and every caller→target grant edge
     // among them with provenance (granted_by / granted_at). Entitlement-gated
@@ -874,6 +904,59 @@ export const useAgentsStore = defineStore('agents', {
       })
     },
 
+    // Declaring metrics from the UI (trinity-enterprise#1006). Every write
+    // edits the agent's template.yaml `metrics:` block and carries the
+    // template hash the read returned; the backend refuses a stale one with
+    // `template_changed`. Errors are rethrown for the form to show inline.
+    async getMetricDeclarations(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/metrics/declarations`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    async declareMetric(name, fields, baseHash) {
+      const authStore = useAuthStore()
+      const response = await axios.post(
+        `/api/agents/${name}/metrics/declarations`,
+        { ...fields, base_hash: baseHash },
+        { headers: authStore.authHeader }
+      )
+      return response.data
+    },
+
+    async updateMetricDeclaration(name, metric, fields, baseHash) {
+      const authStore = useAuthStore()
+      const response = await axios.put(
+        `/api/agents/${name}/metrics/declarations/${encodeURIComponent(metric)}`,
+        { ...fields, base_hash: baseHash },
+        { headers: authStore.authHeader }
+      )
+      return response.data
+    },
+
+    async getMetricReferences(name, metric) {
+      const authStore = useAuthStore()
+      const response = await axios.get(
+        `/api/agents/${name}/metrics/declarations/${encodeURIComponent(metric)}/references`,
+        { headers: authStore.authHeader }
+      )
+      return response.data
+    },
+
+    async retireMetricDeclaration(name, metric, baseHash, { acknowledgeReferences = false } = {}) {
+      const authStore = useAuthStore()
+      const response = await axios.delete(
+        `/api/agents/${name}/metrics/declarations/${encodeURIComponent(metric)}`,
+        {
+          headers: authStore.authHeader,
+          params: { base_hash: baseHash, acknowledge_references: acknowledgeReferences }
+        }
+      )
+      return response.data
+    },
+
     // Agent Dashboard Actions
     async getAgentDashboard(name) {
       return dedupe(`agentDashboard:${name}`, async () => {
@@ -1166,6 +1249,36 @@ export const useAgentsStore = defineStore('agents', {
       const response = await axios.put(`/api/agents/${name}/capacity`, {
         max_parallel_tasks: maxParallelTasks
       }, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    // Execution timeout (TIMEOUT-001 / #665) — the per-agent cap every run
+    // inherits. Surfaced in Settings › General (trinity-enterprise#353).
+    async getAgentTimeout(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/timeout`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    async setAgentTimeout(name, seconds) {
+      const authStore = useAuthStore()
+      const response = await axios.put(`/api/agents/${name}/timeout`, {
+        execution_timeout_seconds: seconds
+      }, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    // S3 (#384) — adopt origin/main as the new baseline, keeping instance
+    // state. Settings › General › Danger zone (trinity-enterprise#887).
+    async resetToMainPreserveState(name) {
+      const authStore = useAuthStore()
+      const response = await axios.post(`/api/agents/${name}/git/reset-to-main-preserve-state`, {}, {
         headers: authStore.authHeader
       })
       return response.data

@@ -224,6 +224,111 @@ describe('assigning someone shares the agent with them', () => {
   })
 })
 
+// #3664: the note is a confirmation of a fact, so it must not outlive the fact.
+// AccessPanel re-reads its people list after every share and unshare; these
+// tests re-read it the same way, through the prop.
+describe('the "Shared with …" note says only what is still true (#3664)', () => {
+  function renderLive() {
+    let access = PEOPLE()
+    const ctx = {}
+    // The share route adds the person to the list the panel re-reads.
+    ax.post.mockImplementation(async (url, body) => {
+      access = [...access, { email: body.email, username: body.email, role: 'user', status: 'active' }]
+      return { data: {} }
+    })
+    const reloadPeople = vi.fn(async () => { await ctx.w.setProps({ people: access.map((p) => ({ ...p })) }) })
+    ctx.w = render({ reloadPeople }).w
+    ctx.unshare = async (email) => {
+      access = access.filter((p) => p.email !== email)
+      await reloadPeople()
+    }
+    return ctx
+  }
+  beforeEach(() => {
+    api.delete.mockImplementation(async (url) => {
+      const id = decodeURIComponent(url.split('/').pop())
+      roster = { ...roster, assignments: roster.assignments.filter((a) => a.id !== id) }
+      return { data: {} }
+    })
+  })
+
+  it('goes when that person\'s row is removed', async () => {
+    const { w } = renderLive()
+    await flushPromises()
+    await add(w, 3)
+    expect(q(w, 'assignments-share-note').text()).toBe('Shared with Cat Moe so they can use it in the Workspace.')
+    expect(rowFor(w, 'Cat Moe').find('[data-testid="assignment-not-shared"]').exists()).toBe(false)
+    await rowFor(w, 'Cat Moe').find('[data-testid="assignment-remove"]').trigger('click')
+    await flushPromises()
+    expect(rowFor(w, 'Cat Moe')).toBeUndefined()
+    expect(q(w, 'assignments-share-note').exists()).toBe(false)
+  })
+
+  it('goes when the agent is unshared from them in the list below', async () => {
+    const ctx = renderLive()
+    await flushPromises()
+    await add(ctx.w, 3)
+    expect(q(ctx.w, 'assignments-share-note').exists()).toBe(true)
+    await ctx.unshare('cat@example.com')
+    await flushPromises()
+    expect(q(ctx.w, 'assignments-share-note').exists()).toBe(false)
+  })
+
+  it('stays while it is still true: another row removed, the list re-read with them on it', async () => {
+    const ctx = renderLive()
+    await flushPromises()
+    await add(ctx.w, 3)
+    await rowFor(ctx.w, 'Bob Ray').find('[data-testid="assignment-remove"]').trigger('click')
+    await flushPromises()
+    await ctx.unshare('lee@example.com')
+    await flushPromises()
+    expect(q(ctx.w, 'assignments-share-note').text()).toBe('Shared with Cat Moe so they can use it in the Workspace.')
+  })
+
+  it('a share from the row\'s own button goes the same way', async () => {
+    const ctx = renderLive()
+    await flushPromises()
+    await rowFor(ctx.w, 'Bob Ray').find('[data-testid="assignment-share"]').trigger('click')
+    await flushPromises()
+    expect(q(ctx.w, 'assignments-share-note').text()).toBe('Shared with Bob Ray so they can use it in the Workspace.')
+    await rowFor(ctx.w, 'Bob Ray').find('[data-testid="assignment-remove"]').trigger('click')
+    await flushPromises()
+    expect(q(ctx.w, 'assignments-share-note').exists()).toBe(false)
+  })
+})
+
+// #3664: the badge read the users list (loaded once per session) before the
+// people list (re-read on every visit and after every change), so a role
+// changed in Settings showed in the list below but not on the row.
+describe('the platform-role badge shows the current role (#3664)', () => {
+  const badge = (w, name) => rowFor(w, name).find('[data-testid="assignment-platform-role"]').text()
+
+  it('a shared person: from the people list once it is re-read, over an older users list', async () => {
+    const bobShared = (role) => [...PEOPLE(), { email: 'bob@example.com', username: 'bob', role, status: 'active' }]
+    const { w } = render({ people: bobShared('operator') })
+    await flushPromises()
+    expect(badge(w, 'Bob Ray')).toBe('operator')
+    await w.setProps({ people: bobShared('user') })   // the users list still says operator
+    expect(badge(w, 'Bob Ray')).toBe('user — Workspace only')
+  })
+
+  it('a person it is not shared with: the users list is re-read each time the tab opens', async () => {
+    const first = render().w
+    await flushPromises()
+    expect(badge(first, 'Bob Ray')).toBe('operator')
+    first.unmount()
+    // Their role changes in Settings → User Management while the tab is closed.
+    USERS[1] = { ...USERS[1], role: 'user' }
+    try {
+      const { w } = render()
+      await flushPromises()
+      expect(badge(w, 'Bob Ray')).toBe('user — Workspace only')
+    } finally {
+      USERS[1] = { ...USERS[1], role: 'operator' }
+    }
+  })
+})
+
 describe('an assignment the agent is not shared for', () => {
   it('warns on the row and offers the share', async () => {
     const { w, reloadPeople } = render()

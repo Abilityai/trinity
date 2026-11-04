@@ -100,6 +100,28 @@ def _load_monitoring_router():
     return mod
 
 
+# The loader installs stand-ins with `setdefault`. `_restore_sys_modules` drops
+# the ones it put in after this module, so a later test's
+# `import services.agent_service.helpers` (or any real module named here) is not
+# handed a SimpleNamespace (the #762 snapshot/restore pattern).
+_STUBBED_MODULE_NAMES = ["database", "services", "services.monitoring_service",
+                         "services.agent_service", "services.agent_client",
+                         "dependencies", "routers", "routers.monitoring"]
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _restore_sys_modules():
+    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
+
+
 @pytest.fixture(scope="module")
 def fleet_helpers():
     return _load_monitoring_router()

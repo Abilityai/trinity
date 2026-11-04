@@ -13,6 +13,7 @@
 
 import type { McpAuthContext, ToolOutcome } from "./types.js";
 import { ApiError } from "./client.js";
+import { runInTurn } from "./turn-context.js";
 
 /**
  * Where audit rows go. Injected by `createServer` (#2807) so the server's
@@ -121,6 +122,26 @@ async function postAudit(entry: AuditEntry): Promise<void> {
 }
 
 /**
+ * #4060: a keyed MCP session was revived after the server lost it (restart or
+ * idle reap). Carries the key identity `authenticate` resolved and only the
+ * 8-character prefix of the outer session id — never the full id.
+ */
+export function logSessionRevival(auth: McpAuthContext, sessionPrefix: string): void {
+  void postAudit({
+    event_type: "mcp_operation",
+    event_action: "session_revived",
+    source: "mcp",
+    mcp_key_id: auth.keyId,
+    mcp_key_name: auth.keyName,
+    mcp_scope: auth.scope,
+    actor_agent_name: auth.agentName,
+    target_type: "mcp_session",
+    target_id: sessionPrefix,
+    details: { session_id_prefix: sessionPrefix, outcome: "revived" },
+  });
+}
+
+/**
  * Log an MCP tool call. Called by the audit wrapper in server.ts.
  */
 export function logToolCall(
@@ -199,7 +220,8 @@ export function withAudit<T>(
     const targetId = resolveTargetId(params) ?? boundTargetId;
 
     try {
-      const result = await execute(params, ctx);
+      // ent#926: every backend call the tool makes carries this request's turn.
+      const result = await runInTurn(authContext?.executionId, () => execute(params, ctx));
       // Read requestId AND outcome AFTER execute: a tool (e.g. git.ts) stamps
       // the former on the shared context object so this row carries the same
       // id it forwarded; a deny site stamps the latter (access.ts::accessDenied)

@@ -32,10 +32,19 @@ def _normalise(path: str) -> str:
     return os.path.normpath("/" + expanded.lstrip("/"))
 
 
-def _matches_glob(path: str, patterns: list) -> str:
-    """Return matching pattern or empty string."""
+def _matches_glob(path: str, patterns: list, allow: list = ()) -> str:
+    """Return matching pattern or empty string.
+
+    A basename in `allow` (`.env.example`, #3868: names only, required by the
+    compatibility check) skips the slash-free patterns, which are the basename
+    credential rules such as `.env.*`. Absolute patterns still apply, and a
+    symlink never gets the exception (it could point at a real `.env`).
+    """
     basename = os.path.basename(path)
+    allowed = basename in allow and not os.path.islink(path)
     for pattern in patterns:
+        if allowed and "/" not in pattern:
+            continue
         if fnmatch.fnmatch(path, pattern) or fnmatch.fnmatch(basename, pattern):
             return pattern
     return ""
@@ -53,8 +62,9 @@ def main() -> None:
     config = load_config()
     baseline = config.get("path_deny", []) or []
     extras = config.get("extra_path_deny", []) or []
+    path_allow = config.get("path_allow", []) or []
 
-    match = _matches_glob(path, baseline)
+    match = _matches_glob(path, baseline, path_allow)
     if match:
         deny(
             f"protected path ({match})",

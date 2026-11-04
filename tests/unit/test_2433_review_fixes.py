@@ -611,10 +611,11 @@ async def execute(ctx):
 
 
 def test_a_registry_module_with_no_stdin_write_is_vacuously_clean():
-    """`codex_runtime` registers but uses `stdin=DEVNULL`. The old helper
+    """A registry module with no stdin write is clean. The old helper
     returned `total > 0 and guarded == total`, so a discovered file with no
     write would have read as a FAILURE the moment the guard stopped
-    enumerating."""
+    enumerating. `codex_runtime` writes its prompt to stdin (#3838) and is
+    held to the guard like the other runtimes."""
     src = """
 from ..services.process_registry import get_process_registry
 

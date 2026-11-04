@@ -304,4 +304,4 @@ def test_every_route_is_classified_in_the_census():
     for key in ("routers/skill_gate.py::list_agent_skill_gates",
                 "routers/skill_gate.py::set_agent_skill_gate",
                 "routers/skill_gate.py::clear_agent_skill_gate"):
-        assert key in census.AGENT_CALLABLE, key
+        assert key in census.AGENT_CALLABLE_ANY, key

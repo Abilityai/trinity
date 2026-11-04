@@ -132,16 +132,16 @@ def test_a_busy_fleet_does_not_crowd_out_one_client_ask(asks_db, client_email):
     the queue with nobody else permitted to answer it.
 
     The noise is operator asks (`addressed=None`), the majority case on any real
-    instance, and it is raised AFTER the client's ask: within one priority the
-    ordering is newest-first, so every noise row sorts ahead of it and the whole
-    `limit` is spent before the client's row is reached.
+    instance, and it is raised BEFORE the client's ask: within one priority
+    pending asks sort oldest first (#3679), so every noise row sorts ahead of it
+    and the whole `limit` is spent before the client's row is reached.
     """
     from database import db
     from client_portal.asks import service
 
-    mine = _raise_ask(addressed=client_email, req_id="req-quiet")
     for n in range(220):
         _raise_ask(req_id=f"req-noise-{n}", kind="approval")
+    mine = _raise_ask(addressed=client_email, req_id="req-quiet")
 
     # The fixture has to actually reproduce the crowd-out, or this test passes
     # for the wrong reason — filtering the result of a window the ask is still

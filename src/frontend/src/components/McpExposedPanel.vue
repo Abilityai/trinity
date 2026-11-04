@@ -1,15 +1,17 @@
 <template>
   <div>
-    <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Expose via MCP</h3>
-    <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
-      Publish this agent as a dedicated MCP tool. When enabled, connected MCP
-      clients get a first-class
-      <code class="font-mono text-xs bg-gray-100 dark:bg-gray-800 px-1 py-0.5 rounded">{{ status.tool_name || 'chat_with_…' }}</code>
-      tool — functionally identical to
-      <code class="font-mono text-xs bg-gray-100 dark:bg-gray-800 px-1 py-0.5 rounded">chat_with_agent</code>
-      with this agent pre-filled. Access is unchanged: callers still need
-      ownership or a share to actually chat.
-    </p>
+    <template v-if="!embedded">
+      <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Expose via MCP</h3>
+      <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+        Publish this agent as a dedicated MCP tool. When enabled, connected MCP
+        clients get a first-class
+        <code class="font-mono text-xs bg-gray-100 dark:bg-gray-800 px-1 py-0.5 rounded">{{ status.tool_name || 'chat_with_…' }}</code>
+        tool — functionally identical to
+        <code class="font-mono text-xs bg-gray-100 dark:bg-gray-800 px-1 py-0.5 rounded">chat_with_agent</code>
+        with this agent pre-filled. Access is unchanged: callers still need
+        ownership or a share to actually chat.
+      </p>
+    </template>
 
     <!-- Toggle -->
     <div class="flex items-start gap-3 mb-4">
@@ -202,6 +204,9 @@ const props = defineProps({
   // Notification host passed down from SettingsPanel — positional (message, type),
   // same contract as GuardrailsPanel. null when rendered standalone.
   notify: { type: Function, default: null },
+  // trinity-enterprise#887: inside an agent Settings pane the row supplies
+  // the title and description, so the panel drops its own.
+  embedded: { type: Boolean, default: false },
 })
 
 const agentsStore = useAgentsStore()

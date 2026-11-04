@@ -12,6 +12,18 @@ if [ -f /opt/trinity/hooks/write-runtime-config.py ]; then
         echo "Warning: failed to render guardrails-runtime.json (hooks will fall back to baseline)"
 fi
 
+# === Routing env: pin it to this container's own values (trinity-enterprise#1001) ===
+# Claude Code applies `env` from the agent-writable user and workspace settings,
+# so the endpoint, proxy and TLS-trust names are pinned in a root-owned policy
+# drop-in. Written here, before the agent server starts and before anything
+# below exports a variable, so the values are the container baseline. On
+# failure the image's all-empty pins stay: a proxy set on the container then
+# stops applying to Claude Code, which this line names.
+if [ -f /opt/trinity/hooks/write-routing-env.py ]; then
+    sudo -E /usr/local/bin/python3 -I -S /opt/trinity/hooks/write-routing-env.py || \
+        echo "GUARDRAILS: ERROR — could not pin the routing env to this container's values; Claude Code keeps the image's empty pins (trinity-enterprise#1001)"
+fi
+
 # === Guardrails: assert the registration is where the agent cannot reach (ent#345) ===
 # The hooks are registered in root-owned /etc/claude-code/managed-settings.json,
 # outside the agent's HOME and outside the git-synced tree. This checks the two
@@ -71,6 +83,24 @@ fi
 AGENT_TMPDIR="${TMPDIR:-/home/developer/.tmp}"
 mkdir -p "${AGENT_TMPDIR}" 2>/dev/null && chmod 700 "${AGENT_TMPDIR}" 2>/dev/null || \
     echo "Warning: could not create TMPDIR ${AGENT_TMPDIR}; scratch will fall back to /tmp"
+# #4002: the default TMPDIR is platform scratch on the persistent volume; build
+# leftovers (pip/npm/CUDA wheels) would otherwise pile up across restarts. Empty
+# it here, before the agent server or setup.sh can use it. A custom TMPDIR is
+# operator-chosen and may hold data, so it is left alone. `codex` is kept: it is
+# the default CODEX_HOME, which holds a ChatGPT-plan `codex login` and the
+# thread store `codex exec resume` reads.
+if [ "${AGENT_TMPDIR}" = "/home/developer/.tmp" ]; then
+    _tmp_n=$(find "${AGENT_TMPDIR}" -mindepth 1 -maxdepth 1 ! -name codex 2>/dev/null | wc -l | tr -d ' ')
+    if [ "${_tmp_n:-0}" -gt 0 ]; then
+        _tmp_size=$(find "${AGENT_TMPDIR}" -mindepth 1 -maxdepth 1 ! -name codex -exec du -sk {} + 2>/dev/null \
+            | awk '{s += $1} END {print s "K"}')
+        find "${AGENT_TMPDIR}" -mindepth 1 -maxdepth 1 ! -name codex -exec rm -rf {} + 2>/dev/null || true
+        echo "TMPDIR: cleared ${_tmp_n} entries (${_tmp_size:-?}) from ${AGENT_TMPDIR}"
+    fi
+    unset _tmp_n _tmp_size
+else
+    echo "TMPDIR: custom ${AGENT_TMPDIR} not cleared"
+fi
 
 # ent#123: a per-agent PAT configured AFTER creation is live-injected into the
 # workspace .env (#1264) while the baked env stays tokenless until the next
@@ -161,6 +191,31 @@ if [ -d /home/developer/.git ]; then
         echo "[startup] recorded git lock recovery: ${TRINITY_REAPED_LOCKS}"
     fi
 fi
+
+# === npx cache vs the image's Node major (#3886) ===
+# The Node runtime is in the image, but the npx cache (~/.npm/_npx) is on the
+# persistent home volume. A recreate onto a new Node major keeps every package
+# npx cached under the old one, and npx reuses a cached tree without
+# rebuilding it — so an MCP server with a native addon (better-sqlite3 and the
+# like) dies with "compiled against a different Node.js version
+# (NODE_MODULE_VERSION ...)" on its first launch. The cache is re-fetchable by
+# definition, so on a major change it is dropped and npx rebuilds for this
+# runtime. A volume with a cache but no stamp predates the stamp, i.e. it was
+# populated under an unknown (pre-#3886: Node 20) major, and is treated as a
+# change. Project node_modules are the agent's own files and are left alone.
+# >>> node-major-npx-cache
+_node_major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)"
+if [ -n "${_node_major}" ]; then
+    _node_stamp=/home/developer/.trinity/node-major
+    _prev_major="$(cat "${_node_stamp}" 2>/dev/null || true)"
+    if [ "${_prev_major}" != "${_node_major}" ] && [ -d /home/developer/.npm/_npx ]; then
+        rm -rf /home/developer/.npm/_npx 2>/dev/null || true
+        echo "[startup] Node major changed (${_prev_major:-unknown} -> ${_node_major}): cleared the npx cache so npx-launched MCP servers rebuild native addons; run 'npm rebuild' in any project node_modules that has them"
+    fi
+    mkdir -p /home/developer/.trinity 2>/dev/null || true
+    printf '%s\n' "${_node_major}" > "${_node_stamp}" 2>/dev/null || true
+fi
+# <<< node-major-npx-cache
 
 # Initialize from GitHub repository if specified.
 # ent#123: the gate is REPO-only — a tokenless agent (anonymous public
@@ -677,32 +732,36 @@ fi
 if [ -f "/home/developer/.trinity/setup.sh" ]; then
     echo "Running persistent setup script to restore packages..."
     chmod +x /home/developer/.trinity/setup.sh
-    bash /home/developer/.trinity/setup.sh 2>&1 || echo "Warning: setup.sh had errors (continuing startup)"
+    _setup_started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    # #4002: keep this exact invocation — the orphan-sweep allowlist
+    # (_PLATFORM_TREE_PATTERNS) protects it and its children by cmdline.
+    bash /home/developer/.trinity/setup.sh 2>&1
+    _setup_rc=$?
+    [ "$_setup_rc" -ne 0 ] && echo "Warning: setup.sh had errors (continuing startup)"
+    # #4002: record the outcome for the compatibility report (F-014). Atomic.
+    if printf '{"exit_code": %d, "started_at": "%s", "finished_at": "%s"}\n' \
+        "$_setup_rc" "$_setup_started" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        > /home/developer/.trinity/setup-status.json.tmp 2>/dev/null; then
+        mv -f /home/developer/.trinity/setup-status.json.tmp /home/developer/.trinity/setup-status.json 2>/dev/null || true
+    fi
+    unset _setup_started _setup_rc
+else
+    # #4002: no hook, no run — drop a stale status so the report does not show an old one.
+    rm -f /home/developer/.trinity/setup-status.json 2>/dev/null || true
 fi
 
-# === Auto-Import Encrypted Credentials ===
-# If .credentials.enc exists but .env doesn't, decrypt and inject credentials
-# This enables portable credential storage via git-committed encrypted files
+# === Encrypted credentials without a .env (#3510) ===
+# This script never decrypts a committed .credentials.enc: the platform key never
+# reaches this container. The BACKEND imports it once the agent is ready
+# (lifecycle.inject_assigned_credentials), except for ephemeral agents,
+# installs with no encryption key, and agents that were already running. Earlier builds called a backend route that never
+# existed and blamed a missing key; say what actually happens instead.
 cd /home/developer || exit 1
 if [ -f ".credentials.enc" ] && [ ! -f ".env" ]; then
-    echo "Found .credentials.enc without .env - attempting auto-import..."
-
-    # Wait for agent server to be ready (started above)
-    sleep 2
-
-    # Call internal backend endpoint to decrypt and inject
-    # Note: This requires CREDENTIAL_ENCRYPTION_KEY to be set on the backend
-    IMPORT_RESULT=$(curl -s -X POST "http://backend:8000/api/internal/decrypt-and-inject" \
-         -H "Content-Type: application/json" \
-         -d "{\"agent_name\": \"$AGENT_NAME\"}" 2>/dev/null || echo '{"status":"error"}')
-
-    if echo "$IMPORT_RESULT" | grep -q '"status":"success"'; then
-        echo "Auto-imported credentials from .credentials.enc"
-    elif echo "$IMPORT_RESULT" | grep -q '"status":"skipped"'; then
-        echo "Credential import skipped: $(echo "$IMPORT_RESULT" | grep -o '"reason":"[^"]*"' | cut -d'"' -f4)"
-    else
-        echo "Warning: Could not auto-import credentials (key may not be configured)"
-    fi
+    echo "Found .credentials.enc but no .env: this script does not decrypt it."
+    echo "  The platform imports it once the agent is ready (not when no encryption"
+    echo "  key is configured). If .env is still missing,"
+    echo "  the owner imports it, signed in, once a key is set: Settings > Credentials > Import from Git."
 fi
 
 # === Render .mcp.json.template (#2007) ===
@@ -712,8 +771,9 @@ fi
 # exist after the clone above — in here. So declared MCP servers were silently
 # absent (a freshly-seeded Cornelius shipped three and ran with none).
 #
-# Runs AFTER both `.env` sources (the /generated-creds copy and the
-# decrypt-and-inject fallback above) so credentials are present either way, and
+# Runs AFTER the `.env` source (the /generated-creds copy above) so credentials
+# are present (a committed .credentials.enc is imported by the backend after
+# the agent is ready, which can land after this renderer runs — #3510), and
 # merges rather than overwrites — the agent server's own `trinity` entry may be
 # written before or after this point. Substitution is confined to `env` blocks,
 # each rendered server is validated individually, and an unresolvable

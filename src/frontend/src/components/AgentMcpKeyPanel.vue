@@ -1,13 +1,15 @@
 <template>
   <div>
-    <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Trinity access key</h3>
-    <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
-      The agent-scoped key this agent uses to call Trinity's own MCP tools. It is
-      what makes the
-      <span class="font-medium">Permissions</span> matrix apply — a container
-      configured with somebody's personal key acts as that person instead, and
-      the matrix is silently bypassed.
-    </p>
+    <template v-if="!embedded">
+      <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Trinity access key</h3>
+      <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+        The agent-scoped key this agent uses to call Trinity's own MCP tools. It is
+        what makes the
+        <span class="font-medium">Permissions</span> matrix apply — a container
+        configured with somebody's personal key acts as that person instead, and
+        the matrix is silently bypassed.
+      </p>
+    </template>
 
     <div v-if="loading" class="text-sm text-gray-400">Loading…</div>
 
@@ -108,6 +110,9 @@ const props = defineProps({
   agentName: { type: String, required: true },
   // Positional (message, type) — same contract as the other settings panels.
   notify: { type: Function, default: null },
+  // trinity-enterprise#887: inside an agent Settings pane the row supplies
+  // the title and description, so the panel drops its own.
+  embedded: { type: Boolean, default: false },
 })
 
 function notifyUser(message, type = 'success') {
@@ -160,6 +165,8 @@ const VERIFY_LABELS = {
   // #2323 — a bounded read-only ops key belongs to a monitoring integration;
   // it is not a person's key and must not be described as one.
   foreign_ops_key: 'The container authenticates with a read-only ops key, not as this agent',
+  // #3180 — likewise its write sibling, which belongs to an ops automation.
+  foreign_ops_write_key: 'The container authenticates with an ops-write key, not as this agent',
   foreign_agent_key: 'The container uses another agent’s key',
   unknown_key: 'The container’s key is not known to Trinity',
   not_configured: 'The container has no Trinity MCP entry',

@@ -71,7 +71,6 @@ const COMPOSABLE = read('../../src/composables/useVoiceSession.js')
 const CANVAS_COLUMN = read('../../src/components/portal/PortalVoiceCanvas.vue')
 const TABS = read('../../src/components/portal/PortalChatTabs.vue')
 const STORE = read('../../src/stores/clientPortal.js')
-const HEADER = read('../../src/components/AgentHeader.vue')
 const CODE = stripComments(CONVERSATION)
 const SHELL_CODE = stripComments(SHELL)
 
@@ -323,7 +322,7 @@ describe('the call is the shared platform orb, reused — not forked (and since 
     expect(COMPOSABLE).toContain('async function startWith(requestFn, { restStop = true } = {})')
   })
   it('a brand-new chat gets its thread BEFORE the call starts, and adopts it', () => {
-    const start = CODE.slice(CODE.indexOf('async function startVoiceCall()'), CODE.indexOf('async function endVoiceCall()'))
+    const start = CODE.slice(CODE.indexOf("async function startVoiceCall(mode = 'live')"), CODE.indexOf('async function endVoiceCall()'))
     expect(start.indexOf('store.createSession(props.agent.name)')).toBeGreaterThan(-1)
     expect(start.indexOf('store.createSession(props.agent.name)')).toBeLessThan(start.indexOf('voice.startWith('))
     // #2579: adoption runs through the one `adoptSession` seam now — this site
@@ -350,10 +349,10 @@ describe('modal: while the call is on, the chat is visible but inert', () => {
       expect.arrayContaining(['new-chat', 'agent-picker', 'star', 'reset-main', 'chat-tabs', 'composer', 'mic', 'attach', 'send']),
     )
     expect(CODE).toMatch(/data-testid="new-chat-header"[\s\S]{0,40}|:disabled="voiceCallActive"[\s\S]{0,80}data-testid="new-chat-header"/)
-    expect(CODE).toMatch(/:disabled="voiceCallActive"\s+data-testid="portal-agent-picker"/)
+    expect(CODE).toMatch(/:disabled="anyCallActive"\s+data-testid="portal-agent-picker"/)
     expect(CODE).toMatch(/<PortalStarButton[\s\S]{0,120}voiceCallActive \? 'opacity-40 pointer-events-none'/)
-    expect(CODE).toContain(':disabled="sending || resetting || voiceCallActive"')
-    expect(CODE).toMatch(/<PortalChatTabs[\s\S]{0,200}:disabled="voiceCallActive"/)
+    expect(CODE).toContain(':disabled="sending || resetting || anyCallActive"')
+    expect(CODE).toMatch(/<PortalChatTabs[\s\S]{0,200}:disabled="anyCallActive"/)
     // ent#547: the inert class moved OFF the <form> and onto a wrapper inside
     // it, around every control except the voice-call toggle. The rule this
     // asserts is unchanged — the composer goes inert for the call's duration —
@@ -375,7 +374,7 @@ describe('modal: while the call is on, the chat is visible but inert', () => {
     expect(inertAt).toBeGreaterThan(-1)
     expect(callAt).toBeGreaterThan(-1)
     expect(callAt, 'the call toggle must precede the inert wrapper').toBeLessThan(inertAt)
-    expect(CODE).toContain(':disabled="transcribing || voiceCallActive"')
+    expect(CODE).toContain(':disabled="transcribing || anyCallActive"')
   })
 
   it('takes the shell chrome OFF for the call, because the shell cannot join the inert regions', () => {
@@ -405,7 +404,7 @@ describe('modal: while the call is on, the chat is visible but inert', () => {
   })
   it('hides the speaker toggle for the duration and never narrates over the call', () => {
     expect(CODE).toContain('v-if="ttsEnabled && !voiceCallActive"')
-    expect(CODE).toMatch(/voiceMode\.value && ttsEnabled\.value && data\.response[\s\S]{0,120}!voiceCallActive\.value\) speak\(data\.response\)/)
+    expect(CODE).toMatch(/voiceMode\.value && ttsEnabled\.value && data\.response[\s\S]{0,120}!anyCallActive\.value\) speak\(data\.response\)/)
   })
   it('Escape ends the call before the turn-cancel rule runs', () => {
     // #2598 changed the SPELLING, not this property: the call is still asked
@@ -416,8 +415,8 @@ describe('modal: while the call is on, the chat is visible but inert', () => {
     // call. It now dispatches on the shared `shouldEndCallOnEscape` rule; the
     // ORDERING assertion below is what ent#534 actually cares about and is
     // unchanged.
-    const esc = CODE.slice(CODE.indexOf('function onEscapeKeydown(event)'), CODE.indexOf('async function cancelTurn()'))
-    const call = esc.indexOf('shouldEndCallOnEscape(event, { callActive: voiceCallActive.value })')
+    const esc = CODE.slice(CODE.indexOf('function onEscapeKeydown(event)'), CODE.indexOf('async function cancelTurn('))
+    const call = esc.indexOf('shouldEndCallOnEscape(event, { callActive: anyCallActive.value })')
     expect(call).toBeGreaterThan(-1)
     expect(call).toBeLessThan(esc.indexOf('shouldCancelOnEscape(event'))
     expect(esc).toContain('void endVoiceCall()')
@@ -432,16 +431,16 @@ describe('modal: while the call is on, the chat is visible but inert', () => {
 describe('leaving mid-call ends it gracefully — the transcript is kept', () => {
   it('unmount, agent switch and a route-driven thread change all stop the call', () => {
     expect(CODE).toMatch(/function cleanupVoice\(\) \{[\s\S]{0,200}if \(voice\.isActive\.value\) void voice\.stop\(\)/)
-    expect(CODE).toMatch(/watch\(\(\) => props\.agent\?\.name, \(\) => \{[\s\S]{0,400}if \(voiceCallActive\.value\) void voice\.stop\(\)/)
+    expect(CODE).toMatch(/watch\(\(\) => props\.agent\?\.name, \(\) => \{[\s\S]{0,400}if \(anyCallActive\.value\) void endVoiceCall\(\)/)
     // ent#551: the thread-change watcher asks the RULE, so a call's own new
     // thread being adopted (route replace → sessionId null → id) does not end it.
-    expect(CODE).toMatch(/watch\(\(\) => \[props\.agent\.name, props\.sessionId\][\s\S]{0,700}if \(threadChangeEndsCall\(\{[\s\S]{0,400}\}\)\) await voice\.stop\(\)/)
-    expect(CODE).toContain('boundSessionId: voice.portalSessionId.value || currentSessionId.value,')
+    expect(CODE).toMatch(/watch\(\(\) => \[props\.agent\.name, props\.sessionId\][\s\S]{0,700}if \(threadChangeEndsCall\(\{[\s\S]{0,400}\}\)\) await endVoiceCall\(\)/)
+    expect(CODE).toContain('boundSessionId: (directCallActive.value ? direct.portalSessionId.value : voice.portalSessionId.value) || currentSessionId.value,')
   })
   it('reloads the thread on the falling edge of the call, so the persisted block is the truth', () => {
     expect(CODE).toMatch(/watch\(voiceCallActive, async \(on, was\) => \{\s*if \(!was \|\| on\) return[\s\S]{0,500}await loadThread\(currentSessionId\.value\)/)
     expect(CODE).toContain('source: m.source || null, voiceCallId: m.voice_call_id || null')
-    expect(CODE).toContain('const threadItems = computed(() => groupVoiceBlocks(messages.value))')
+    expect(CODE).toContain('const threadItems = computed(() => groupVoiceBlocks(messages.value, { liveCallId: directCallActive.value ? direct.voiceSessionId.value : null }))')
     expect(CODE).toMatch(/data-testid="portal-voice-call-block"/)
   })
 })
@@ -458,7 +457,7 @@ describe('the shell: the canvas takes the right column, and navigation waits', (
     expect(SHELL_CODE).toMatch(
       /const voiceCanvasHasColumn = computed\(\(\) => Boolean\(\s*voiceCall\.value\.active && voiceCall\.value\.voiceSessionId && activeAgent\.value/
     )
-    expect(CODE).toMatch(/watch\(\[voiceCallActive, \(\) => voice\.voiceSessionId\.value\]/)
+    expect(CODE).toMatch(/watch\(\[anyCallActive, voiceCallActive, \(\) => voice\.voiceSessionId\.value\]/)
     expect(CANVAS_COLUMN).toContain('if (inFlight || !props.voiceSessionId) return')
     // ent#547: there is no details SIBLING to swap out any more — it is the
     // rail's Info tab, so the voice canvas now displaces the rail itself and the
@@ -590,15 +589,11 @@ describe('the auto-start intent is ARMED IN THE APP, never by the URL alone', ()
   })
 })
 
-describe('the door and the hand-off are wired (source, since there is no mount harness)', () => {
-  it('the Talk button arms the one-shot BEFORE it navigates', () => {
-    const header = stripComments(HEADER)
-    expect(header).toContain("import { armVoiceAutoStart } from './portal/portalVoiceMode'")
-    const fn = header.slice(header.indexOf('function goToTalk()'), header.indexOf('function goToBrain()'))
-    expect(fn).toContain('armVoiceAutoStart()')
-    expect(fn).toMatch(/router\.push\(\{ path: '\/workspace', query: \{ agent: props\.agent\.name, voice: '1' \} \}\)/)
-    expect(fn.indexOf('armVoiceAutoStart()')).toBeLessThan(fn.indexOf('router.push'))
-  })
+describe('the hand-off is wired (source, since there is no mount harness)', () => {
+  // The Agent Detail Talk door that armed the one-shot was removed by
+  // trinity-enterprise#950 (absence pinned in agentDetailTalkDoor.spec.js).
+  // `armVoiceAutoStart` keeps its rule tests above; the shell's strip-and-
+  // disarm wiring below is what keeps a pasted `?voice=1` inert.
 
   it('the shell records the intent, and strips NOTHING, inside resolveAgentQuery', () => {
     const fn = SHELL_CODE.slice(SHELL_CODE.indexOf('function resolveAgentQuery()'), SHELL_CODE.indexOf('const ASKS_POLL_MS'))
@@ -648,7 +643,7 @@ describe('the door and the hand-off are wired (source, since there is no mount h
   })
 
   it('does NOT use `navigator.userActivation` — it is a heuristic, not a provenance check', () => {
-    for (const src of [SHELL, HEADER, read('../../src/components/portal/portalVoiceMode.js')]) {
+    for (const src of [SHELL, read('../../src/components/portal/portalVoiceMode.js')]) {
       // The rationale lives in comments; no CODE path may consult it.
       expect(stripComments(src)).not.toContain('userActivation')
     }
@@ -795,9 +790,9 @@ describe('the status line never sits on the buttons, and M mutes', () => {
   })
 
   it('the keydown handler mutes on the rule, after Escape and before the turn-cancel rule', () => {
-    const esc = CODE.slice(CODE.indexOf('function onEscapeKeydown(event)'), CODE.indexOf('async function cancelTurn()'))
-    const end = esc.indexOf('shouldEndCallOnEscape(event, { callActive: voiceCallActive.value })')
-    const mute = esc.indexOf('isMuteHotkey(event, { callActive: voiceCallActive.value })')
+    const esc = CODE.slice(CODE.indexOf('function onEscapeKeydown(event)'), CODE.indexOf('async function cancelTurn('))
+    const end = esc.indexOf('shouldEndCallOnEscape(event, { callActive: anyCallActive.value })')
+    const mute = esc.indexOf('isMuteHotkey(event, { callActive: anyCallActive.value })')
     expect(mute).toBeGreaterThan(end)
     expect(mute).toBeLessThan(esc.indexOf('shouldCancelOnEscape(event'))
     expect(esc.slice(mute, mute + 200)).toContain('voice.toggleMute()')
@@ -868,5 +863,17 @@ describe('background tasks are separate items, queued behind one another', () =>
     expect(taskItemLabel({ label: 'Research OpenAI', status: 'running' })).toBe('Research OpenAI')
     expect(taskItemLabel({ label: '' })).toBe('task')
     expect(taskItemLabel({ label: 'x'.repeat(100), status: 'queued' }).length).toBeLessThanOrEqual(48 + ' · queued'.length)
+  })
+})
+
+describe('useVoiceSession uses the single API client (#2720)', () => {
+  it('imports the shared client and never a bare axios', () => {
+    expect(COMPOSABLE).toContain("import api from '@/api'")
+    expect(COMPOSABLE).not.toMatch(/from 'axios'/)
+    expect(COMPOSABLE).not.toContain('authStore.authHeader')
+  })
+
+  it('still authenticates the WebSocket with the store token', () => {
+    expect(COMPOSABLE).toContain('?token=${authStore.token}')
   })
 })

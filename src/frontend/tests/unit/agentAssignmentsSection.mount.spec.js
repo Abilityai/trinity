@@ -163,6 +163,43 @@ describe('writes', () => {
   })
 })
 
+// #3663: at phone width the kind select (min 9.5rem) and Remove sat in a strip
+// that could not wrap, so Remove was clipped at the card's edge ("Remov"). The
+// decided layout (2026-10-14) is "wrap when needed": below `sm` the select gives
+// way from 9.5rem to an 8.5rem floor — still wider than its longest label,
+// "Collaborator" (~7rem) — and only then does Remove wrap under it. In the app
+// the row is one line from about 392px; narrower (375px included), Remove wraps
+// under the select. `sm` and up keeps today's desktop row exactly. jsdom cannot
+// lay out, so this pins the classes that produce it; the narrow-width look was
+// checked by eye.
+describe('a row\'s kind select and Remove at phone width (#3663)', () => {
+  function strip(w) {
+    const row = w.find('[data-testid="assignment-row"]')
+    const select = row.find('[data-testid="assignment-kind"]').element
+    const field = select.closest('.relative').parentElement   // BaseSelect's root: it carries our class
+    return { field, actions: field.parentElement, remove: row.find('[data-testid="assignment-remove"]').element }
+  }
+
+  it('keeps both controls in one strip that wraps below sm and never from sm up', async () => {
+    const w = render()
+    await flushPromises()
+    const { actions, remove } = strip(w)
+    expect(remove.parentElement).toBe(actions)
+    expect([...actions.classList]).toEqual(expect.arrayContaining(['flex', 'flex-wrap', 'sm:flex-nowrap', 'sm:self-start']))
+    // Below sm the strip spans the row so the select can take its 9.5rem.
+    expect(actions.classList.contains('self-start')).toBe(false)
+  })
+
+  it('lets the select give way to a floor before Remove wraps, and keeps it as today from sm up', async () => {
+    const w = render()
+    await flushPromises()
+    const { field } = strip(w)
+    expect([...field.classList]).toEqual(expect.arrayContaining(['flex-1', 'min-w-[8.5rem]', 'max-w-[9.5rem]']))
+    expect([...field.classList]).toEqual(expect.arrayContaining(['sm:flex-none', 'sm:min-w-[9.5rem]', 'sm:max-w-none']))
+    expect(field.classList.contains('min-w-[9.5rem]')).toBe(false)
+  })
+})
+
 describe('replacing the primary', () => {
   async function replaceWith(w, userId, oldBecomes) {
     await q(w, 'assignment-replace').trigger('click')

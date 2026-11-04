@@ -16,10 +16,10 @@ import hashlib
 import json
 import logging
 import uuid
-from typing import Optional, List, Dict, Set, Tuple
+from typing import Callable, Optional, List, Dict, Set, Tuple
 from datetime import datetime, timezone
 
-from sqlalchemy import select, update, func, and_, or_, case, delete
+from sqlalchemy import select, update, func, and_, or_, case, delete, false
 from sqlalchemy.exc import IntegrityError
 
 from .engine import get_engine, make_insert
@@ -802,7 +802,12 @@ class OperatorQueueOperations:
         """The newest row for `(agent, subject)` a PERSON ended at or after
         `since` (ISO-Z text, Invariant #16), any terminal status — the seam's
         snooze read (#3246). Served by `idx_operator_queue_agent_subject`."""
-        stmt = (
+        with get_engine().connect() as conn:
+            row = self._find_person_ended_by_subject(conn, agent_name, subject, since)
+        return self._row_to_item(row) if row else None
+
+    def _find_person_ended_by_subject(self, conn, agent_name: str, subject: str, since: str):
+        return conn.execute(
             select(*self._SELECT_COLS)
             .where(and_(
                 operator_queue.c.agent_name == agent_name,
@@ -814,10 +819,7 @@ class OperatorQueueOperations:
             ))
             .order_by(operator_queue.c.disposed_at.desc(), operator_queue.c.id.desc())
             .limit(1)
-        )
-        with get_engine().connect() as conn:
-            row = conn.execute(stmt).mappings().first()
-        return self._row_to_item(row) if row else None
+        ).mappings().first()
 
     def create_platform_item(
         self,
@@ -826,6 +828,9 @@ class OperatorQueueOperations:
         *,
         subject: Optional[str],
         max_pending_for_type: Optional[int] = None,
+        keep_text: bool = False,
+        snooze_since: Optional[str] = None,
+        snoozed: Optional[Callable[[Dict], bool]] = None,
     ) -> Dict:
         """Record a platform reading: find → touch → count → insert, in ONE
         locked transaction (#3246).
@@ -839,9 +844,22 @@ class OperatorQueueOperations:
         a lost CAS falls through to a fresh row. The find runs BEFORE the
         #1677 per-type count, so a would-be update is never refused at budget;
         `max_pending_for_type` is the cap for a budgeted kind (None: unbudgeted).
+        With `keep_text` a pending row is only counted (`_touch`); with no
+        pending row the reading files as usual (#3254). The choice is made here,
+        under the lock, so two readings that race (a Workspace thumbs-down and its
+        comment) end the same way in either order.
 
-        Returns `{"outcome": "created" | "updated" | "refused_at_budget",
-        "row", "changed"}`; `changed` is whether a RENDERED field (title /
+        The snooze is decided here too (#3254): when the find misses or the
+        touch's compare-and-set loses, the newest row a person ended for the
+        subject at or after `snooze_since` is read through THIS transaction's
+        connection, and if `snoozed(ended)` says so nothing is inserted
+        (`{"outcome": "snoozed"}`). The caller's own check runs before the lock,
+        so without this a person's ending that lands after that check — before
+        the locked find, or between the find and the compare-and-set — let a
+        fresh row through at once.
+
+        Returns `{"outcome": "created" | "updated" | "snoozed" |
+        "refused_at_budget", "row", "changed"}`; `changed` is whether a RENDERED field (title /
         question / priority / context minus `seen_count`) moved, so a bare
         repeat reading sends no broadcast. The partial unique index
         `uq_operator_queue_pending_subject` is the backstop for a lock that
@@ -856,13 +874,19 @@ class OperatorQueueOperations:
                     if subject is not None:
                         current = self._find_pending_by_subject(conn, agent_name, subject)
                         if current is not None:
-                            touched = self._touch(conn, current, item, now=now)
+                            touched = self._touch(conn, current, item, now=now,
+                                                  keep_text=keep_text)
                             if touched is not None:
                                 return touched
                     if attempt == 2:
                         # The index said a pending row existed and it is gone
                         # (ended between the two transactions): fall through.
                         pass
+                    if subject is not None and snoozed is not None and snooze_since:
+                        ended = self._find_person_ended_by_subject(
+                            conn, agent_name, subject, snooze_since)
+                        if ended is not None and snoozed(self._row_to_item(ended)):
+                            return {"outcome": "snoozed", "row": None, "changed": False}
                     if max_pending_for_type is not None:
                         pending = conn.execute(
                             select(func.count()).where(and_(
@@ -877,14 +901,28 @@ class OperatorQueueOperations:
                     if subject is not None:
                         context["seen_count"] = 1
                     values_item = {**item, "context": context or None}
-                    request_id, values = self._insert_values(
-                        agent_name, values_item, channel=None, raised_by=None,
-                        subject=subject, last_seen_at=now,
-                    )
-                    conn.execute(
-                        make_insert(operator_queue).values(**values).on_conflict_do_nothing(
-                            index_elements=["agent_name", "request_id"])
-                    )
+                    # #4050: the caller's id is `<prefix><key>-<timestamp>`, and
+                    # two kinds can share a prefix and key (and an event repeats
+                    # its id) in one instant. `DO NOTHING` then wrote nothing and
+                    # the re-select returned the OTHER reading's row as
+                    # `created`. A conflict re-mints this reading's id instead,
+                    # so `created` always names the row this call inserted.
+                    for _ in range(3):
+                        request_id, values = self._insert_values(
+                            agent_name, values_item, channel=None, raised_by=None,
+                            subject=subject, last_seen_at=now,
+                        )
+                        inserted = conn.execute(
+                            make_insert(operator_queue).values(**values).on_conflict_do_nothing(
+                                index_elements=["agent_name", "request_id"])
+                        ).rowcount
+                        if inserted:
+                            break
+                        values_item = {**values_item,
+                                       "id": f"{item['id']}-{uuid.uuid4().hex[:8]}"}
+                    else:
+                        raise RuntimeError(
+                            f"operator-queue id {item['id']!r} for {agent_name} kept colliding")
                     row = conn.execute(select(*self._SELECT_COLS).where(and_(
                         operator_queue.c.agent_name == agent_name,
                         operator_queue.c.request_id == request_id,
@@ -897,11 +935,19 @@ class OperatorQueueOperations:
                 # a pending row for the subject now exists — re-find and touch it.
                 continue
 
-    def _touch(self, conn, current, item: Dict, *, now: str) -> Optional[Dict]:
-        """Update the pending row `current` in place; None when the CAS lost."""
+    def _touch(self, conn, current, item: Dict, *, now: str,
+               keep_text: bool = False) -> Optional[Dict]:
+        """Update the pending row `current` in place; None when the CAS lost.
+
+        With `keep_text` (#3254) the reading is counted — `last_seen_at`,
+        `context.seen_count`, `expires_at` — and the title, question, priority
+        and context stand as they are: a reading that carries no words of its
+        own never rewrites one that did (trinity#3521's words-only rule)."""
         old_context = json.loads(current["context"]) if current["context"] else {}
         if not isinstance(old_context, dict):
             old_context = {}
+        if keep_text:
+            item = {"context": old_context, "expires_at": item.get("expires_at")}
         new_context = item.get("context")
         new_context = dict(new_context) if isinstance(new_context, dict) else {}
         seen = old_context.get("seen_count")
@@ -1001,41 +1047,6 @@ class OperatorQueueOperations:
         with get_engine().connect() as conn:
             row = conn.execute(stmt).mappings().first()
         return self._row_to_item(row) if row else None
-
-    def update_pending_problem_report(
-        self, agent_name: str, request_id: str, *, question: str, context: Dict,
-        now: Optional[str] = None,
-    ) -> bool:
-        """Rewrite a still-pending Workspace problem report's text (trinity#3521).
-
-        The Workspace records a thumbs-down on the click and sends the comment
-        as a second request with the same per-person / target / day id, which
-        `create_item`'s ON CONFLICT DO NOTHING turned into a no-op — the alert
-        kept saying there was no comment. This is the narrow update path that
-        `_problem_report_id`'s docstring placed at the sink.
-
-        Scoped by `(agent_name, request_id)` AND `type` AND `status='pending'`:
-        an item a person already ended is never rewritten or reopened, and a
-        row of another kind under the same id is never touched. Same db-sink
-        belts as an insert. Returns whether a row changed.
-        """
-        if question and len(str(question).encode("utf-8")) > _DB_BELT_QUESTION_MAX_BYTES:
-            raise ValueError(f"operator-queue 'question' exceeds {_DB_BELT_QUESTION_MAX_BYTES} bytes")
-        context_json = json.dumps(context) if context else None
-        if context_json and len(context_json.encode("utf-8")) > _DB_BELT_CONTEXT_MAX_BYTES:
-            raise ValueError(f"operator-queue 'context' exceeds {_DB_BELT_CONTEXT_MAX_BYTES} bytes")
-        stmt = (
-            update(operator_queue)
-            .where(and_(
-                operator_queue.c.agent_name == agent_name,
-                operator_queue.c.request_id == request_id,
-                operator_queue.c.type == "workspace_problem_report",
-                operator_queue.c.status == "pending",
-            ))
-            .values(question=question, context=context_json, last_seen_at=now or utc_now_iso())
-        )
-        with get_engine().begin() as conn:
-            return bool(conn.execute(stmt).rowcount)
 
     def list_pending_proposals_for_agent(
         self, agent_name: str, limit: int, raised_by: Optional[str] = None,
@@ -1194,6 +1205,9 @@ class OperatorQueueOperations:
         exclude_request_id_prefixes: Optional[Tuple[str, ...]] = None,
         owner_only_request_id_prefixes: Optional[Tuple[str, ...]] = None,
         owner_agent_names: Optional[Set[str]] = None,
+        addressee_only_request_id_prefixes: Optional[Tuple[str, ...]] = None,
+        addressee_email: Optional[str] = None,
+        addressee_reach_request_id_prefixes: Optional[Tuple[str, ...]] = None,
     ) -> Optional[list]:
         """The WHERE conditions `list_items`, `count_items` and
         `list_item_agent_names` share (#3059) — ONE definition, so a page, its
@@ -1201,7 +1215,15 @@ class OperatorQueueOperations:
         filters. `None` means "matches nothing" (an empty access set); see
         `list_items` for what each filter means.
         """
-        if accessible_agent_names is not None and len(accessible_agent_names) == 0:
+        # trinity-enterprise#981: the reach is a second way INTO the access set
+        # (below), so an empty set matches nothing only when there is no reach
+        # to widen it — a viewer on no roster at all may still be the addressee
+        # of a platform row about them.
+        reach = tuple(addressee_reach_request_id_prefixes or ())
+        viewer_for_reach = (addressed_to_email or "").strip().lower()
+        if not viewer_for_reach:
+            reach = ()
+        if accessible_agent_names is not None and len(accessible_agent_names) == 0 and not reach:
             return None
 
         conds = []
@@ -1217,7 +1239,29 @@ class OperatorQueueOperations:
         conds.append(_NOT_A_MENTION)
 
         if accessible_agent_names is not None:
-            conds.append(operator_queue.c.agent_name.in_(sorted(accessible_agent_names)))
+            access = operator_queue.c.agent_name.in_(sorted(accessible_agent_names))
+            if reach:
+                # trinity-enterprise#981: a row the platform raised about the
+                # viewer reaches them BY ADDRESS — the platform chose this
+                # row's addressee; the roster was never its fence. Three
+                # conditions, all in SQL so the page and its count agree: the
+                # reserved sub-prefix (`ADDRESSEE_REACH_ID_PREFIXES`, inside
+                # the addressee-only family), the row's own `raised_by`
+                # column saying `gate` (the prefix alone is never the key),
+                # and the viewer as its single addressee or one of its
+                # `resolved_to` — stated here, not left to the filter below,
+                # so the branch is a complete rule on its own. OR'd beside the
+                # access set, never in place of it: everything the viewer
+                # could already see, they still see.
+                access = or_(access, and_(
+                    self._request_id_prefixed_ci(reach),
+                    operator_queue.c.raised_by == "gate",
+                    or_(
+                        func.lower(operator_queue.c.addressed_to_email) == viewer_for_reach,
+                        self._resolved_to_contains(viewer_for_reach),
+                    ),
+                ))
+            conds.append(access)
         if status:
             conds.append(operator_queue.c.status == status)
         if type:
@@ -1273,6 +1317,19 @@ class OperatorQueueOperations:
             for not_prefixed in self._request_id_not_prefixed_ci(owner_only_request_id_prefixes):
                 conds.append(or_(not_prefixed, operator_queue.c.agent_name.in_(owners))
                              if owners else not_prefixed)
+        # trinity-enterprise#980: an addressee-only row (a steward's proposal) is
+        # listed only to the person it is addressed to — its single addressee or
+        # one of its `resolved_to`, the same match as `addressed_to_email` above.
+        # Keyed on the addressee, NOT the agent's owner: the addressee need not
+        # own the agent, and its owner need not be able to open what it names.
+        if addressee_only_request_id_prefixes:
+            viewer = (addressee_email or "").strip().lower()
+            for not_prefixed in self._request_id_not_prefixed_ci(addressee_only_request_id_prefixes):
+                conds.append(or_(
+                    not_prefixed,
+                    func.lower(operator_queue.c.addressed_to_email) == viewer,
+                    self._resolved_to_contains(viewer),
+                ) if viewer else not_prefixed)
         return conds
 
     def count_items(self, **filters) -> int:
@@ -1317,8 +1374,16 @@ class OperatorQueueOperations:
         exclude_request_id_prefixes: Optional[Tuple[str, ...]] = None,
         owner_only_request_id_prefixes: Optional[Tuple[str, ...]] = None,
         owner_agent_names: Optional[Set[str]] = None,
+        addressee_only_request_id_prefixes: Optional[Tuple[str, ...]] = None,
+        addressee_email: Optional[str] = None,
+        addressee_reach_request_id_prefixes: Optional[Tuple[str, ...]] = None,
     ) -> List[Dict]:
         """List queue items with optional filters.
+
+        addressee_reach_request_id_prefixes (trinity-enterprise#981): rows
+        under one of these prefixes, raised by the gate and addressed to
+        `addressed_to_email`, are listed even when their agent is outside
+        `accessible_agent_names` — see `_list_conditions`.
 
         exclude_request_id_prefixes (trinity-enterprise#815): leave out rows
         whose `request_id` starts with one of these prefixes — the platform's
@@ -1373,15 +1438,21 @@ class OperatorQueueOperations:
             exclude_request_id_prefixes=exclude_request_id_prefixes,
             owner_only_request_id_prefixes=owner_only_request_id_prefixes,
             owner_agent_names=owner_agent_names,
+            addressee_only_request_id_prefixes=addressee_only_request_id_prefixes,
+            addressee_email=addressee_email,
+            addressee_reach_request_id_prefixes=addressee_reach_request_id_prefixes,
         )
         if conds is None:
             return []
 
-        # Sort: pending items by priority then age; ended items by WHEN THEY
-        # ENDED, newest first (trinity-enterprise#611, #627 AC6) — sorting a
-        # cancellation made this morning by the day the ask was filed buried it.
-        # A row that ended before the ledger falls back to its answer time, then
-        # to its filing time (no other timestamp exists for it).
+        # Sort: pending items by priority, then OLDEST FIRST (#3679): both
+        # clients read one capped page and show it oldest first, so a newest-
+        # first page dropped the asks that had waited longest the moment the
+        # queue outgrew the cap. Ended items by WHEN THEY ENDED, newest first
+        # (trinity-enterprise#611, #627 AC6) — sorting a cancellation made this
+        # morning by the day the ask was filed buried it. A row that ended
+        # before the ledger falls back to its answer time, then to its filing
+        # time (no other timestamp exists for it).
         is_pending = operator_queue.c.status == "pending"
         status_order = case((is_pending, 0), else_=1)
         priority_order = case(
@@ -1408,7 +1479,12 @@ class OperatorQueueOperations:
             stmt.order_by(
                 status_order,
                 pending_priority,
-                sort_time.desc(),
+                # Two age keys, one per group: `status_order` already separates
+                # pending from ended, so each key is NULL across the whole other
+                # group and NULL placement never decides an order (SQLite and
+                # PostgreSQL put NULLs at opposite ends).
+                case((is_pending, operator_queue.c.created_at), else_=None).asc(),
+                case((is_pending, None), else_=sort_time).desc(),
                 # #3059: the last key, so rows that tie on everything above
                 # (raised in the same instant) still order the same way on every
                 # read — which is what lets an offset page without overlapping
@@ -1696,6 +1772,51 @@ class OperatorQueueOperations:
 
         _note_commit_lag(now)
         return self.get_item(item_id)
+
+    def drop_addressee(self, item_id: str, email: str) -> bool:
+        """Take ONE person off a row's address (trinity-enterprise#981): removed
+        from `resolved_to`, and `addressed_to_email` cleared when it named
+        them. The row itself is untouched — its status, its other addressees —
+        so a shared row stays for the people it was also delivered to. Returns
+        whether anything changed; a row that never named them, or no row, is
+        False. Compare-and-set on the two columns as they were read, so a
+        concurrent drop of another person is never overwritten."""
+        viewer = (email or "").strip().lower()
+        if not viewer:
+            return False
+        with get_engine().begin() as conn:
+            row = conn.execute(
+                select(operator_queue.c.addressed_to_email, operator_queue.c.resolved_to)
+                .where(operator_queue.c.id == item_id)
+            ).mappings().first()
+            if not row:
+                return False
+            raw_single, raw_resolved = row["addressed_to_email"], row["resolved_to"]
+            try:
+                resolved = json.loads(raw_resolved) if raw_resolved else []
+            except ValueError:
+                resolved = []
+            if not isinstance(resolved, list):
+                resolved = []
+            kept = [p for p in resolved if str(p or "").strip().lower() != viewer]
+            single = raw_single
+            if (raw_single or "").strip().lower() == viewer:
+                single = None
+            if single == raw_single and len(kept) == len(resolved):
+                return False
+            result = conn.execute(
+                update(operator_queue)
+                .where(and_(
+                    operator_queue.c.id == item_id,
+                    (operator_queue.c.addressed_to_email.is_(None) if raw_single is None
+                     else operator_queue.c.addressed_to_email == raw_single),
+                    (operator_queue.c.resolved_to.is_(None) if raw_resolved is None
+                     else operator_queue.c.resolved_to == raw_resolved),
+                ))
+                .values(addressed_to_email=single,
+                        resolved_to=json.dumps(kept) if kept else None)
+            )
+            return result.rowcount > 0
 
     def set_discussion_link(self, item_id: str, key: str, chat_id: str) -> Optional[Dict]:
         """Link a PENDING ask to the chat a person opened to discuss it
@@ -2386,16 +2507,35 @@ class OperatorQueueOperations:
         Deliberately not `_not_prefixed` below: that one is the sweeps' and the
         own-budget predicate's (case-sensitive, NULL-dropping), and is left
         exactly as it is."""
-        normalised = func.lower(func.replace(func.replace(
+        normalised = OperatorQueueOperations._request_id_normalised_ci()
+        return [
+            func.substr(normalised, 1, len(p)) != p.lower()
+            for p in (prefixes or ())
+        ]
+
+    @staticmethod
+    def _request_id_normalised_ci():
+        """`request_id` as `_request_id_not_prefixed_ci` compares it (above):
+        NULL kept, leading whitespace trimmed, lower-cased, the two code
+        points whose lowering differs rewritten first. One expression for the
+        negative and the positive prefix match, so they cannot drift."""
+        return func.lower(func.replace(func.replace(
             func.ltrim(
                 func.coalesce(operator_queue.c.request_id, ""),
                 OperatorQueueOperations._PY_WHITESPACE,
             ),
             "\u212a", "k"), "\u0130", "i\u0307"))
-        return [
-            func.substr(normalised, 1, len(p)) != p.lower()
+
+    @staticmethod
+    def _request_id_prefixed_ci(prefixes):
+        """`request_id` starts with ONE of `prefixes` — the positive twin of
+        `_request_id_not_prefixed_ci`, compared identically
+        (trinity-enterprise#981). An empty `prefixes` matches nothing."""
+        normalised = OperatorQueueOperations._request_id_normalised_ci()
+        return or_(*[
+            func.substr(normalised, 1, len(p)) == p.lower()
             for p in (prefixes or ())
-        ]
+        ]) if prefixes else false()
 
     @staticmethod
     def _not_prefixed(prefixes):

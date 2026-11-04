@@ -48,30 +48,30 @@ login page, which drops the `?onboarding=1` parameter).
 
 1. Open http://localhost and log in as admin.
 2. Click **Create Agent** in the Dashboard header (it is there in every Dashboard view — Timeline, Grid and List; there is no separate Agents page).
-3. Choose a template:
-   - **Blank Agent (Claude Code)** -- A minimal agent with a default CLAUDE.md that you shape yourself.
+3. Pick a source from the list on the left of the dialog (type in **Search templates** to narrow it):
+   - **Blank agent** -- A minimal agent with a default CLAUDE.md that you shape yourself.
    - **Local Templates** -- The templates bundled with your install (the scout / sage / scribe starters, and more).
    - **GitHub Templates** -- Repositories your admin has registered under **Settings → Agents → GitHub Templates**.
-   - **GitHub Repository** -- Any repo, as `owner/repo` or a full GitHub URL, with a **Clone / Copy / Fork** choice for how the agent relates to that repo. A clone also asks **What is this repository?** — **An agent** (the repo is the agent's memory, skills and state, saved to its own branch; it needs a repo you own and your own GitHub token, or it is created pull-only) or **A deployment of a codebase** (the agent only pulls updates); Trinity sets up the git binding from your answer. (A specific branch, `github:Org/repo@branch`, is available through the API and MCP.)
+   - **Import a GitHub repository** -- Any repo, as `owner/repo` or a full GitHub URL, with a **Clone / Copy / Fork** choice for how the agent relates to that repo. A clone also asks **What is this repository?** — **An agent** (the repo is the agent's memory, skills and state, saved to its own branch; it needs a repo you own and your own GitHub token, or it is created pull-only) or **A deployment of a codebase** (the agent only pulls updates); Trinity sets up the git binding from your answer. (A specific branch, `github:Org/repo@branch`, is available through the API and MCP.)
    - Featured **fork-to-own** templates, when your install offers them, ask for a destination repo and a token so the agent gets a repository of its own.
-4. Enter a **Slug / Identifier** (lowercase, no spaces — it becomes the agent's permanent name in URLs, containers and keys) and, optionally, a display name.
-5. Click **Create Agent** -- Trinity clones the template, builds the container, and starts it.
+4. Enter a **Name**, for example `Research Assistant`. It is the name shown in the UI. The permanent **ID** is derived from it and previewed underneath (`research-assistant`); it is used in URLs, containers and keys, and **Edit** lets you choose a different one. The read-only **Runtime** row says what the agent will run on — Claude Code for a blank agent, otherwise whatever the template declares.
+5. Click **Create agent** -- Trinity clones the template, builds the container, and starts it.
 6. The form closes and the agent appears on the Dashboard right away (a GitHub-sourced create first shows an import check — **Close** is always available). Click the agent to open its detail page and start with **Chat**, **Tasks**, or the **Workspace**.
 
 ### What Happens After Creation
 
 - A Docker container is built from the `trinity-agent-base` image.
 - Template files are copied into the agent's workspace at `/home/developer/`.
-- Credentials the template declares show as missing on the **Credentials** tab until you add them.
+- Credentials the template declares show as missing under **Settings › Storage › Credentials** until you add them.
 - The agent starts automatically and appears on the Dashboard.
 
 Details: [Creating Agents](../agents/creating-agents.md).
 
 ### Interacting With Your Agent
 
-The agent detail page has tabs for **Overview**, **Tasks**, **Chat**, **Reports**, **Canvas**, **Schedules**, **Loops**, **Skills**, **Credentials**, **Payments**, **Files** and **Info**. Owners and admins also see **Access / Sharing / Permissions**, **Folders** and **Settings**; **Git** appears when the agent has a repository binding, and **Dashboard**, **Brain** and **A2A** when the agent or your install enables them.
+The agent detail page has tabs for **Overview**, **Tasks**, **Chat**, **Reports**, **Canvas**, **Schedules**, **Loops**, **Skills**, **Payments** and **Files**. Owners and admins also see **Sharing / Permissions** and, pinned at the end of the strip, **Settings** — one home with a rail of panes (**General**, **Guardrails**, **People**, **Channels**, **Integrations**, **Storage**) for the agent's identity, limits, people, credentials, repository and folders. **Git** appears when the agent has a repository binding, and **Dashboard**, **Brain** and **A2A** when the agent or your install enables them.
 
-- **Chat tab** -- Each message runs as a new agent session; the last 20 messages are included for context. **Continue in Workspace →** (top of the tab) or the **Workspace** button in the agent header opens the continuous conversation, where memory, tool results and reasoning carry across turns. Opening an agent there starts a new chat — on a desktop, with the cursor already in the message field — or returns you to a chat holding an unsent draft; earlier chats stay in the chat list. The header's **Talk** button starts a voice call there.
+- **Chat tab** -- Each message runs as a new agent session; the last 20 messages are included for context. **Continue in Workspace →** (top of the tab) opens the continuous conversation, where memory, tool results and reasoning carry across turns. Opening an agent there starts a new chat — on a desktop, with the cursor already in the message field — or returns you to a chat holding an unsent draft; earlier chats stay in the chat list. The composer's call button starts a voice call there.
 - **Tasks tab** -- Send one-off tasks and view execution history.
 - **Files tab** -- Browse and edit agent workspace files.
 - **Schedules tab** -- Make the agent autonomous. The empty state has a **Create a schedule** button.
@@ -79,7 +79,7 @@ The agent detail page has tabs for **Overview**, **Tasks**, **Chat**, **Reports*
 
 ### Next Steps
 
-- Add credentials in the agent's **Credentials** tab.
+- Add credentials under the agent's **Settings › Storage › Credentials**.
 - Send a task via the **Tasks** tab or chat via the **Chat** tab.
 - Set up schedules for autonomous operation.
 - Configure permissions if building multi-agent systems.

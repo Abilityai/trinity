@@ -93,6 +93,10 @@ blank the chat list the caller asked for.
    the index refuses the insert until the old row's flag is cleared. A
    concurrent Reset that won first yields a named 409 `reset_raced`.
 6. one `role = 'system'` message in the **new** Main naming the archive.
+   It is a signpost, not a turn: it does not bump `message_count`, and the
+   renderer gates the new-chat state (briefing + suggestions) on
+   `portalUtils.isNewChatTranscript` — "no non-system messages" — so the fresh
+   Main shows the notice above the briefing rather than the notice alone (#3795).
 
 **There is no second reset primitive.** A fresh row carries no
 `cached_claude_session_id` and `session_turn_service` resumes only on a cached
@@ -442,6 +446,22 @@ decisions, none obvious from the diff:
   *"@sidekick can you look at the screenshot the client sent?"* is an ordinary
   room move, and scoping the test to human text would make exactly that relay
   arrive image-less — this bug, one hop along.
+
+**The sentence describes standing files, not this turn's upload (#4072).** The
+inbox is per person per agent, not per chat, so every file the person ever shared
+with the agent is listed on every turn, in the 1:1 chat and in every room. The
+old wording announced them as the client's fresh upload and told the agent to
+read whichever looked relevant, so agents opened a file from three
+conversations ago to answer an unrelated question. Every branch now hedges
+provenance (*"not necessarily with this message, and possibly from other
+conversations"*) and makes use conditional on *"the latest request"*, a referent
+that reads correctly for a 1:1 message and for a room delta alike. Each document
+also carries its age (*"shared 3 days ago"*, from the `uploaded_at` it already
+had, via `_age_phrase`), so *"summarise this"* still resolves to the file shared
+just now. The listing itself is unchanged: the agent can still find a file to
+offer help with. The true split between "attached to this message" and "already
+in your inbox" needs the per-turn attachment set, which only 1:1 chat records
+(#3265). It is a follow-up. Pinned by `tests/unit/test_4072_inbox_notice_wording.py`.
 
 Fail-safe throughout: no client email, an unreadable inbox or a raising collector
 each yield `("", [])` and the turn runs unchanged. `images` is `None` rather than

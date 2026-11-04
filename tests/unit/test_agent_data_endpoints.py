@@ -52,7 +52,7 @@ def client(tmp_path, monkeypatch):
     app.include_router(ad.router)
     app.dependency_overrides[get_owned_agent_by_name] = lambda: _AGENT
     app.dependency_overrides[get_current_user] = lambda: types.SimpleNamespace(
-        username="admin", email="admin@example.com"
+        id=1, username="admin", email="admin@example.com"  # id: ent#830 caller scope
     )
     # Stage temp tars in a writable dir, not the container path /data.
     monkeypatch.setattr(ad, "_TMP_DIR", str(tmp_path / "agent-data-tmp"))

@@ -659,3 +659,167 @@ describe("trinity-enterprise#901 withdraw_ask", () => {
     assert.ok(tools.respondToOperatorQueue.description.includes("withdraw_ask"));
   });
 });
+
+// ---------------------------------------------------------------------------
+// trinity-enterprise#1007 — ask_operator may address a canon role by id:
+// `to: role:<id>`. The schema admits the four kinds or a well-formed role id
+// (the backend's ROLE_ID_RE, `role:` prefix lower-case); the parameter's
+// description teaches the three named refusals a role id can earn; the tool
+// description keeps its headroom and the declared field set is unchanged.
+// ---------------------------------------------------------------------------
+
+describe("trinity-enterprise#1007 ask_operator to a canon role", () => {
+  const tool = makeAskOperator(raisingClient().fake);
+  const schema = tool.parameters as any;
+
+  for (const to of ["role:a", "role:head-of-sales", "role:Head_Of.Sales-1", "role:" + "x".repeat(64),
+                    "primary", "approver", "viewer", "operator"]) {
+    it(`accepts to=${JSON.stringify(to)}`, () => {
+      assert.equal(schema.safeParse({ ...ASK, to }).success, true);
+    });
+  }
+
+  for (const to of ["role:", "role:-x", "Role:x", "role:x\n", "role:" + "x".repeat(65), "role:x y", "boss", ""]) {
+    it(`rejects to=${JSON.stringify(to)}`, () => {
+      assert.equal(schema.safeParse({ ...ASK, to }).success, false);
+    });
+  }
+
+  it("forwards the role id to the backend unchanged — the backend canonicalises and resolves", async () => {
+    const { fake, calls } = raisingClient({ status: "created", request_id: "deploy-1", to_role: "role:head-of-sales" });
+    const body: OperatorAskCreate = { ...(ASK as any), to: "role:Head-of-sales" };
+    const out = JSON.parse(await makeAskOperator(fake).execute(body, agentCtx("self")));
+    assert.deepEqual(calls, [["self", body]]);
+    assert.equal(out.to_role, "role:head-of-sales");
+  });
+
+  for (const [status, detail] of [
+    [422, { code: "role_unavailable", message: "Canon roles cannot be addressed here.", role: "role:head-of-sales" }],
+    [422, { code: "role_unassigned", message: "Nobody fills Head of sales.", role: "role:head-of-sales" }],
+    [422, { code: "role_cannot_open_agent", message: "They cannot open self.", role: "role:head-of-sales" }],
+  ] as const) {
+    it(`a ${detail.code} refusal reaches the agent with the role, never a person`, async () => {
+      const fake = {
+        raiseAsk: async () => { throw new ApiError(status, JSON.stringify({ detail })); },
+      } as Partial<TrinityClient>;
+      const out = JSON.parse(await makeAskOperator(fake).execute({ ...ASK, to: "role:head-of-sales" } as any, agentCtx("self")));
+      assert.deepEqual(out, { success: false, status, ...detail });
+    });
+  }
+
+  it("the `to` parameter teaches the role-id form, its three refusals and whose roster answers", () => {
+    const d = schema.shape.to.description as string;
+    assert.ok(d.includes("role:<id>"), d);
+    for (const code of ["role_unavailable", "role_unassigned", "role_cannot_open_agent"]) {
+      assert.ok(d.includes(code), code);
+    }
+    assert.match(d, /your own roster/);
+  });
+
+  it("the tool description keeps its headroom and the field set is unchanged", () => {
+    assert.ok(tool.description.length <= 1800, `ask_operator description is ${tool.description.length} characters`);
+    assert.deepEqual(Object.keys(schema.shape).sort(), [
+      "context", "expires_at", "options", "priority", "proposal", "question",
+      "replaces", "request_id", "supersedes_expired", "title", "to", "type",
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// trinity-enterprise#1066 — ask_for_credential: an agent asks the person of the
+// conversation for a secret BY NAME. The ask is a `credential` ask addressed to
+// primary; the value is typed into the masked field in the person's Workspace
+// and never travels through this tool, its arguments or its receipt.
+// ---------------------------------------------------------------------------
+
+describe("trinity-enterprise#1066 ask_for_credential", () => {
+  const makeTool = (fake: Partial<TrinityClient>) =>
+    (createOperatorQueueTools(fake as unknown as TrinityClient, false) as any).askForCredential;
+
+  it("raises a credential ask by name, as the calling agent, addressed to the person", async () => {
+    const { fake, calls } = raisingClient({ status: "created", request_id: "x" });
+    const out = JSON.parse(await makeTool(fake).execute(
+      { name: "OP_SERVICE_ACCOUNT_TOKEN", why: "To open your vault.", request_id: "cred-1" },
+      agentCtx("self"),
+    ));
+    assert.equal(out.status, "created");
+    assert.deepEqual(calls, [["self", {
+      request_id: "cred-1",
+      type: "credential",
+      title: "Needs OP_SERVICE_ACCOUNT_TOKEN",
+      question: "To open your vault.",
+      context: { credential_name: "OP_SERVICE_ACCOUNT_TOKEN" },
+      to: "primary",
+    }]]);
+  });
+
+  it("without a request_id, a retry in the same turn is the same ask; another turn is a new one", async () => {
+    const { fake, calls } = raisingClient();
+    const tool = makeTool(fake);
+    const inTurn = (id: string) => ({ session: { scope: "agent", agentName: "self", executionId: id } as any });
+    await tool.execute({ name: "API_KEY", why: "w" }, inTurn("exec-1"));
+    await tool.execute({ name: "API_KEY", why: "w" }, inTurn("exec-1"));
+    await tool.execute({ name: "API_KEY", why: "w" }, inTurn("exec-2"));
+    const ids = calls.map((c) => c[1].request_id);
+    assert.equal(ids[0], ids[1]);
+    assert.notEqual(ids[0], ids[2]);
+    for (const id of ids) assert.match(id, /^[A-Za-z0-9._:-]{1,256}$/);
+  });
+
+  it("forwards the turn id so the ask reaches the person of the conversation", async () => {
+    const turns: unknown[] = [];
+    const fake = {
+      raiseAsk: async (_a: string, _b: OperatorAskCreate, turn?: string) => { turns.push(turn); return {}; },
+    } as Partial<TrinityClient>;
+    await makeTool(fake).execute(
+      { name: "API_KEY", why: "w" },
+      { session: { scope: "agent", agentName: "self", executionId: "exec-9" } as any },
+    );
+    assert.deepEqual(turns, ["exec-9"]);
+  });
+
+  it("declares name, why, request_id and expires_at only — no value, no agent, no options", () => {
+    const keys = Object.keys(makeTool(raisingClient().fake).parameters.shape).sort();
+    assert.deepEqual(keys, ["expires_at", "name", "request_id", "why"]);
+  });
+
+  it("stray arguments never travel — a value smuggled in is dropped", async () => {
+    const { fake, calls } = raisingClient();
+    await makeTool(fake).execute(
+      { name: "API_KEY", why: "w", request_id: "r", value: "sk-secret", agent_name: "sibling", options: ["a"] } as any,
+      agentCtx("self"),
+    );
+    const sent = JSON.stringify(calls);
+    assert.doesNotMatch(sent, /sk-secret|sibling|options/);
+  });
+
+  it("a non-agent key is refused before any backend call", async () => {
+    const { fake, calls } = raisingClient();
+    const out = JSON.parse(await makeTool(fake).execute({ name: "API_KEY", why: "w" }, { session: { scope: "user" } as any }));
+    assert.equal(out.success, false);
+    assert.deepEqual(calls, []);
+  });
+
+  for (const detail of [
+    { code: "no_person", message: "A credential ask must reach exactly one person." },
+    { code: "invalid_credential_name", message: "bad name", reason: "reserved" },
+  ]) {
+    it(`a ${detail.code} refusal comes back named, not as a throw`, async () => {
+      const fake = { raiseAsk: async () => { throw new ApiError(422, JSON.stringify({ detail })); } } as Partial<TrinityClient>;
+      const out = JSON.parse(await makeTool(fake).execute({ name: "API_KEY", why: "w" }, agentCtx("self")));
+      assert.deepEqual(out, { success: false, status: 422, ...detail });
+    });
+  }
+
+  it("the description says: only in a conversation with the person, never in a plain message, by name only", () => {
+    const d: string = makeTool(raisingClient().fake).description;
+    assert.ok(d.length <= 2048, `ask_for_credential description is ${d.length} characters`);
+    assert.match(d, /only in a conversation with the person/i);
+    assert.match(d, /masked/i);
+    assert.match(d, /never ask for (a|the) (secret|value) in a (plain )?message/i);
+    assert.match(d, /never repeat/i);
+    assert.match(d, /no_person/);
+    assert.match(d, /get_my_ask/);
+    assert.doesNotMatch(d, /mcp__trinity__/);
+  });
+});

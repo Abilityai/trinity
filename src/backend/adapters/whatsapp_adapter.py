@@ -596,6 +596,17 @@ class WhatsAppAdapter(ChannelAdapter):
             return None
         return db.get_whatsapp_verified_email(binding["id"], message.sender_id)
 
+    def requester_identity(self, message: NormalizedMessage) -> dict:
+        """trinity-enterprise#737: the sender's WhatsApp number is the stable
+        id, and the profile name Twilio forwards is the display name. WhatsApp
+        has no handle, and a DM's chat is the sender, so neither is recorded."""
+        identity = super().requester_identity(message)
+        identity.pop("requester_thread_id", None)  # the message SID, not a thread
+        name = (message.metadata or {}).get("wa_user_name")
+        if name and not identity.get("requester_name"):
+            identity["requester_name"] = name
+        return identity
+
     async def record_inbound_activity(
         self, message: NormalizedMessage, agent_name: str
     ) -> None:
@@ -712,7 +723,13 @@ class WhatsAppAdapter(ChannelAdapter):
                 )
 
             try:
-                db.upsert_access_request(agent_name, pending_email, "whatsapp")
+                # trinity-enterprise#737: who asked, from the same /login message.
+                identity = None
+                try:
+                    identity = self.requester_identity(message)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"requester_identity failed: {type(e).__name__}")
+                db.upsert_access_request(agent_name, pending_email, "whatsapp", identity=identity)
             except Exception as e:
                 logger.error(
                     f"Failed to upsert access_request for {pending_email} on agent={agent_name}: {e}"

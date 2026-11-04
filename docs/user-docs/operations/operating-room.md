@@ -31,11 +31,13 @@ Each card carries a type pill — **Needs approval**, **Question**, or **Heads u
 
 | Type | What you do |
 |------|-------------|
-| Needs approval | Pick one of the options the agent offered, optionally add a note, and send. When none of them is right, choose **Something else** (or just start typing) and write what the agent should do instead — the agent carries out none of its options and re-plans from your instruction. The text is required then, and the button reads **Send instruction**. Any other free-text decision is refused. Approvals raised by the platform itself (skill gates) are decided by their options only and show no **Something else**. |
+| Needs approval | Pick one of the options the agent offered, optionally add a note, and send. When none of them is right, choose **Something else** (or just start typing) and write what the agent should do instead — the agent carries out none of its options and re-plans from your instruction. The text is required then, and the button reads **Send instruction**. Any other free-text decision is refused. Approvals raised by the platform itself (skill gates) are decided by their options only and show no **Something else**; they draw the platform's own card — the agent, the skills, the exact input Approve runs, who asked, the deadline, who it is waiting on — and only a person the approval is addressed to gets the controls. Beside a picked **Reject** the note is the reason the requester is told. See [Approvals → Gated-skill approvals](../automation/approvals.md#gated-skill-approvals). |
 | Question | Type an answer and send. |
 | Heads up | Click **Got it** to acknowledge. |
 
 An ask an agent addressed to a role that several people fill goes to every one of them: the first answer ends it, and the others' Workspace shows who answered.
+
+The page reads one capped page of 200 items; pending items come by priority and, within a priority, the longest-waiting first, so a queue past the cap drops the newest asks rather than the ones that have waited longest.
 
 If the item stopped being pending while you were answering — another operator's response or Clear All landed first, or it expired — your response is **not recorded** and the page says so.
 
@@ -51,18 +53,20 @@ Besides agent-authored items, the platform files its own alerts into this tab:
 
 #### Platform alerts are conditions, not messages
 
-Some platform alerts describe a *condition* — a subscription near its weekly limit, a refused skills-library address, the system agent's stale base image, a long-open circuit breaker. For these, Trinity keeps **at most one pending card per subject**:
+Platform alerts describe a *condition* — for example a subscription near its weekly limit, a failing git sync, a stale database backup, a refused retention prune, the system agent's stale base image, a long-open circuit breaker. For each, Trinity keeps **at most one pending card per subject**:
 
 - A repeat reading updates the existing card in place rather than filing a new one. A card seen more than once shows **seen N times · last seen 5m ago**. A worse reading (higher priority, or a subscription moving from warning to critical) escalates the same card.
 - When the condition clears, the platform ends the card itself. It moves to Resolved reading **Ended by the platform — the condition cleared**.
 - If nothing clears it, the card expires 14 days after its **last** reading (`OPERATOR_PLATFORM_ALERT_LIFETIME_DAYS`) and reads **Expired — nobody acted on it**. Some edge-triggered alerts use a fixed 30-day lifetime instead.
-- After a person ends one (Got it, cancel, or Clear All), the same reading files nothing for 7 days (`OPERATOR_PLATFORM_ALERT_SNOOZE_DAYS`), unless it gets worse.
+- After a person ends one (Got it, cancel, or Clear All), the same reading files nothing for 7 days (`OPERATOR_PLATFORM_ALERT_SNOOZE_DAYS`), unless it gets worse. For alerts that come in episodes, only the episode you ended stays quiet: a flood that cleared and came back, a budget filled again by new alerts, any later Push that changes what git tracks, a backup failure after a newer successful backup, or an unwritable log archive after a writable check files at once. Stale-backup alerts still come at most once a week. A failing git sync is the exception: it has no episode marker, so after you end its card, failures that start again within those 7 days file no new card, even if the agent synced successfully in between. The agent's sync-health dot still turns red.
 
-The upgrade that introduced this collapses an existing backlog: for each subject it keeps the newest pending card and ends the older duplicates as superseded. Other platform alerts still file one card per event and keep their own rules (described above and in the linked pages).
+Four alerts need a person and never expire: a poisoned execution, a collided Workspace inbox, a gitignore change notice and a Workspace problem report. The platform never ends them; only a person does. A person's ending of an inbox collision is final: only a new claimant (or a higher priority) brings it back. A collision someone ended before this upgrade comes back once, and its new card's ending is then final.
+
+The upgrades that introduced this collapse an existing backlog: for each subject they keep the newest pending card and end the older duplicates as superseded.
 
 #### Flood guard
 
-Each agent may hold at most 25 pending items of its own (`OPERATOR_QUEUE_MAX_PENDING_PER_AGENT`), and creates are rate-limited per agent and fleet-wide. Platform alerts filed *about* an agent do not count toward its own budget. When an agent goes over the cap, Trinity files one **Heads up** flood alert per episode — not one per cooldown window while the condition lasts — and files the next only after the agent has dropped back under the cap (`OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS`, default 300, is the minimum spacing between episodes). Requests the agent wrote to its queue file but that were held are not lost silently: the agent's file gets a `platform.ingestion` note saying why (`queue_full`, `rate_limited`, `invalid_id`, or `invalid_options` / `invalid_title` for an ask over the option or title limits — see [Approvals](../automation/approvals.md)), and the note is removed once nothing is held.
+Each agent may hold at most 25 pending items of its own (`OPERATOR_QUEUE_MAX_PENDING_PER_AGENT`), and creates are rate-limited per agent and fleet-wide. Platform alerts filed *about* an agent do not count toward its own budget. When an agent goes over the cap, Trinity files one **Heads up** flood alert per episode — not one per cooldown window while the condition lasts — and files the next only after the agent has dropped back under the cap (`OPERATOR_QUEUE_FLOOD_ALERT_COOLDOWN_SECONDS`, default 300, is the minimum spacing between episodes). Acknowledging a flood alert quiets that episode only: if the flood clears and starts again, the new episode files a new alert. Requests the agent wrote to its queue file but that were held are not lost silently: the agent's file gets a `platform.ingestion` note saying why (`queue_full`, `rate_limited`, `invalid_id`, or `invalid_options` / `invalid_title` for an ask over the option or title limits — see [Approvals](../automation/approvals.md)), and the note is removed once nothing is held.
 
 ### Notifications Tab
 
@@ -78,6 +82,8 @@ Consolidated view of agent notifications (replaces the former standalone Events 
 Terminal operator-queue items. Responded items stay visible until the agent confirms delivery of the response. A platform alert has no agent to deliver to, so answering one — **Got it** included — ends it as acknowledged straight away.
 
 When an agent asks again after one of its asks expired, the two cards name each other: **Re-ask of …** on the new ask and **Re-asked as …** on the expired one, with the other ask's id in full on hover.
+
+An ask the agent ended itself reads **Replaced by the agent** (naming its successor) or **Withdrawn by the agent**, with the agent's one-line reason shown as text under a withdrawn one — the only agent ending whose reason is shown. See [Approvals](../automation/approvals.md#concepts).
 
 ### Clear All
 
@@ -103,9 +109,9 @@ All clear operations are scoped to agents you can access, affect all operators o
 
 ### Sync Health Alerts
 
-For agents with GitHub sync enabled, the Sync Health Service polls every 60 seconds by default (`SYNC_HEALTH_POLL_INTERVAL_SECONDS`) and writes `sync_failing` queue entries when an agent's `consecutive_failures` hits 3. These appear in the Needs Response tab alongside agent-emitted items, so a broken git remote, expired PAT, or upstream divergence surfaces in the same place operators already watch.
+For agents with GitHub sync enabled, the Sync Health Service polls every 60 seconds by default (`SYNC_HEALTH_POLL_INTERVAL_SECONDS`) and keeps one `sync_failing` queue entry per agent while its `consecutive_failures` stays at 3 or more; the platform ends it once the agent syncs again. These appear in the Needs Response tab alongside agent-emitted items, so a broken git remote, expired PAT, or upstream divergence surfaces in the same place operators already watch.
 
-When an agent's schedules are paused because it has been out of step with its repository for more than 24 hours, one **Agent diverged from GitHub — schedules paused** (`sync_diverged`) entry appears per episode, with the ahead/behind counts and a suggested fix. It stays until you clear it; if the agent drifts out of step again later, that is a new entry. See [GitHub Sync → Pausing schedules](../integrations/github-sync.md#pausing-schedules-when-sync-is-unhealthy).
+When an agent's schedules are paused because it has been out of step with its repository for more than 24 hours, one **Agent diverged from GitHub — schedules paused** (`sync_diverged`) entry appears per episode, with the ahead/behind counts and a suggested fix. It ends on its own once the agent is back in step with its repository. If the agent drifts out of step again later, that is a new entry, even if you dismissed the last one: dismissing quiets only that episode. See [GitHub Sync → Pausing schedules](../integrations/github-sync.md#pausing-schedules-when-sync-is-unhealthy).
 
 Per-agent sync state (last sync at, last error, ahead/behind counts on `main` and the working branch, uncommitted-file count, last successful push, and the computed state with its reason) is also visible on the agent header dot and at `GET /api/agents/{name}/git/sync-state`.
 
@@ -123,6 +129,7 @@ Per-agent sync state (last sync at, last error, ahead/behind counts on `main` an
 | `/api/operator-queue/{id}/respond` | POST | Submit response — body `{"response": "<decision>", "response_text": "<optional note>"}`. For an approval, `response` must be one of the item's own `options` (exact match) or the reserved `"(something else)"` with the instruction in `response_text`; anything else fails with 422 `response_not_an_offered_option` carrying `offered_options`, and the reserved value fails with 422 `instruction_required` (blank `response_text`), `reserved_value` (not an approval) or `not_off_menu` (a platform-minted gate approval). `response_text` is at most 4000 characters; 409 if the item is no longer pending; 403 `person_required` for agent-, system- and connector-scoped keys (only a person ends an ask), and 403 `not_addressee` for a skill-gate approval addressed to someone else |
 | `/api/operator-queue/{id}/cancel` | POST | Cancel item (person-only, like respond; a skill-gate approval only by its addressee or an admin) |
 | `/api/operator-queue/agents/{name}` | GET | Items for a specific agent |
+| `/api/agents/{name}/operator-queue/{request_id}/withdraw` | POST | The agent withdraws one of its OWN pending asks — `{reason}` (1–500 characters); agent key only. `409 ask_ended` once a person answered or ended it, `404 ask_not_found` for any ask that is not its own (a gate's or the platform's included) — see [Approvals](../automation/approvals.md#for-agents) |
 | `/api/notifications/dismiss-all` | POST | Dismiss all pending + acknowledged notifications (optional `agent_name`) |
 
 Full API reference: http://localhost:8000/docs
@@ -146,6 +153,7 @@ A walk's guarantee has one stated bound: a change that ends an item (an answer, 
 | `list_operator_queue` / `get_operator_queue_item` | Read queue items you can access |
 | `respond_to_operator_queue` | Answer an item — works only with a person's user-scoped key; agent- and system-scoped keys are refused (403 `person_required`) |
 | `get_my_ask` | From inside an agent: how one of its own asks ended |
+| `withdraw_ask` | From inside an agent: end one of its own pending asks that no longer needs an answer, with a one-line reason (see [Approvals](../automation/approvals.md)) |
 | `send_notification` | Send a notification to the Notifications tab from within an agent |
 
 ## See Also

@@ -15,12 +15,14 @@ Module under test:
 from __future__ import annotations
 
 import asyncio
+import signal
+import subprocess
 import sys
 import threading
 import time
 import types
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 
@@ -46,7 +48,10 @@ if "agent_server.routers" not in sys.modules:
     _routers_stub.__path__ = [str(_AGENT_SERVER_DIR / "routers")]
     sys.modules["agent_server.routers"] = _routers_stub
 
+from agent_server.routers import chat as chat_router  # noqa: E402
 from agent_server.routers.chat import terminate_execution  # noqa: E402
+from agent_server.services import process_registry as registry_module  # noqa: E402
+from agent_server.utils import subprocess_pgroup  # noqa: E402
 
 
 @pytest.mark.unit
@@ -144,3 +149,163 @@ async def test_terminate_passes_through_already_finished():
         "execution_id": "already-done",
         "returncode": 0,
     }
+
+
+# ---------------------------------------------------------------------------
+# #3408: the router's failure replies, driven through a REAL ProcessRegistry.
+#
+# The backend reads a 2xx as stopped (the watchdog and the user-facing stop
+# then free the execution's capacity) and a 404 as already gone (the task
+# service returns True, so an A2A cancel answers "canceled"). Every other
+# status reads as "not terminated". The
+# tests below run the real registry.terminate() behind the real route, with a
+# real disposable child, in the style of test_runtime_process_ownership.py.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def real_registry(monkeypatch):
+    """A fresh ProcessRegistry behind the route, as on an agent server that has
+    just booted. The test owns only its own child, never the surrounding
+    cgroup, so the orphan sweep is stubbed in both modules that call it."""
+    value = registry_module.ProcessRegistry()
+    monkeypatch.setattr(chat_router, "get_process_registry", lambda: value)
+    monkeypatch.setattr(registry_module, "kill_cgroup_orphans", lambda **kw: 0)
+    monkeypatch.setattr(subprocess_pgroup, "kill_cgroup_orphans", lambda **kw: 0)
+    return value
+
+
+@pytest.fixture
+def live_child():
+    """A real disposable child in its own session (so its group is never the
+    test's). Each test replaces the registry's signal helper, so no signal is
+    ever sent to a process group. The child restores SIGINT's default action
+    before it reports ready, so a delivered SIGINT ends it even when the test
+    runner was started with SIGINT ignored (an ignored signal stays ignored
+    across exec)."""
+    process = subprocess.Popen(
+        [sys.executable, "-c",
+         "import signal,sys,time; signal.signal(signal.SIGINT, signal.SIG_DFL); "
+         "print('ready', flush=True); sys.stdin.read(); time.sleep(60)"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        assert process.stdout.readline() == b"ready\n", "control: the child set its SIGINT action"
+        yield process
+    finally:
+        if process.poll() is None:
+            process.kill()
+        # The class method, not the instance attribute a test may have capped.
+        subprocess.Popen.wait(process, timeout=5)
+        process.stdin.close()
+        process.stdout.close()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_signal_error_keeps_the_generic_500_with_its_text(
+    real_registry, live_child, monkeypatch
+):
+    """reason "error" (the stop could not even be sent) keeps the existing
+    generic 500 whose detail is the error text, and the child stays owned."""
+    from fastapi import HTTPException
+
+    real_registry.register("signal-error-exec", live_child)
+    monkeypatch.setattr(
+        registry_module,
+        "_signal_process_tree",
+        Mock(side_effect=PermissionError("denied")),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await terminate_execution("signal-error-exec")
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "denied"
+    assert live_child.poll() is None, "control: nothing stopped the child"
+    assert real_registry.is_execution_running("signal-error-exec")
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_unconfirmed_stop_is_named_and_never_reads_as_gone(
+    real_registry, live_child, monkeypatch
+):
+    """#3408 AC 4: a child that outlives SIGINT and SIGKILL is reported by name.
+
+    The status stays outside 2xx (read as stopped, which frees capacity) and is
+    never 404 (read as already gone); only the detail changes, to a string that
+    starts with the reason. The entry stays registered, so termination can be
+    retried, and a retry the child does respond to succeeds."""
+    from fastapi import HTTPException
+
+    real_registry.register("unconfirmed-exec", live_child)
+    sent = []
+    deliver = False
+
+    def signal_tree(process, sig, pgid=None):
+        sent.append(sig)
+        assert process is live_child, "only this test's own child is ever signalled"
+        if deliver:
+            process.send_signal(sig)  # pid only, never a process group
+
+    monkeypatch.setattr(registry_module, "_signal_process_tree", signal_tree)
+    # Both of the registry's waits really run and really time out (the signals
+    # are not delivered); cap them so the test does not sit out 5 s + 2 s.
+    real_wait = live_child.wait
+    monkeypatch.setattr(
+        live_child, "wait", lambda timeout=None: real_wait(timeout=0.05)
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await terminate_execution("unconfirmed-exec")
+
+    assert sent == [signal.SIGINT, signal.SIGKILL], "control: both stops were tried"
+    assert live_child.poll() is None, "control: the child survived both waits"
+    status = exc_info.value.status_code
+    assert not 200 <= status < 300, "an unconfirmed stop must never read as stopped"
+    assert status != 404, "404 reads as already gone while the child is alive"
+    assert status == 500
+    detail = exc_info.value.detail
+    assert isinstance(detail, str), "the UI renders the detail as text"
+    assert detail.startswith("termination_unconfirmed"), detail
+    assert "unconfirmed-exec" in detail
+    assert real_registry.is_execution_running("unconfirmed-exec")
+    assert live_child.pid in real_registry.active_execution_pids()
+    assert "unconfirmed-exec" not in real_registry.list_recently_completed_ids()
+
+    # The kept entry can be stopped again once the child does respond.
+    monkeypatch.setattr(live_child, "wait", real_wait)
+    deliver = True
+    result = await terminate_execution("unconfirmed-exec")
+
+    assert result == {"status": "terminated", "execution_id": "unconfirmed-exec"}
+    assert live_child.poll() is not None
+    assert sent == [signal.SIGINT, signal.SIGKILL, signal.SIGINT], "the retry's SIGINT sufficed"
+    assert live_child.returncode == -signal.SIGINT, "the retry's SIGINT, not a SIGKILL, ended the child"
+    assert not real_registry.is_execution_running("unconfirmed-exec")
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_fresh_install_empty_registry_still_answers_404(
+    real_registry, monkeypatch
+):
+    """Other shape, fresh install: the agent server has just booted and its
+    registry holds nothing. An unknown id still answers 404, the one reply the
+    backend reads as "gone", and no signal is sent."""
+    from fastapi import HTTPException
+
+    signal_tree = Mock()
+    monkeypatch.setattr(registry_module, "_signal_process_tree", signal_tree)
+    assert real_registry.list_running() == [], "control: a just-booted registry"
+
+    with pytest.raises(HTTPException) as exc_info:
+        await terminate_execution("never-registered")
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == "Execution not found"
+    signal_tree.assert_not_called()

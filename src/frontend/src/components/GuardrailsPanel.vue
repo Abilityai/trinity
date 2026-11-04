@@ -1,11 +1,15 @@
 <template>
-  <div class="p-6">
-    <div class="mb-6">
-      <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Guardrails</h3>
-      <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
-        Per-agent execution caps. Leave a field blank to inherit the platform default.
-        Changes require an agent restart to take effect.
-      </p>
+  <!-- `embedded` (trinity-enterprise#890): inside Settings › Guardrails the
+       row supplies the title and the restart note goes to the page banner. -->
+  <div :class="embedded ? '' : 'p-6'">
+    <div :class="embedded ? '' : 'mb-6'">
+      <template v-if="!embedded">
+        <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Guardrails</h3>
+        <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+          Per-agent execution caps. Leave a field blank to inherit the platform default.
+          Changes require an agent restart to take effect.
+        </p>
+      </template>
 
       <!-- Loading State -->
       <div v-if="loading" class="text-center py-4">
@@ -65,6 +69,25 @@
             {{ saving ? 'Saving...' : 'Save' }}
           </button>
         </div>
+
+        <!-- ent#926: channel and public-link visitors (Slack, Telegram, WhatsApp,
+             a public link, voice). Saved on change and read live per turn, so
+             no restart. People the agent is shared with never get the shell. -->
+        <div class="space-y-1" data-testid="guardrails-visitor-shell">
+          <BaseToggle
+            :model-value="visitorShell"
+            label="Channel and public visitors may run commands"
+            aria-label="Channel and public visitors may run commands"
+            :disabled="savingVisitor || saving"
+            @update:model-value="setVisitorShell"
+          />
+          <p :class="HELP_CLASS">
+            On: conversations from channels and public links can use the shell, and a Gemini or
+            Codex agent answers them. The shell reaches everything the agent can, so turn this
+            off if those visitors should not. Off: they get answers without running commands.
+            People you share the agent with never run commands. Applies to the next message.
+          </p>
+        </div>
       </form>
     </div>
   </div>
@@ -73,6 +96,8 @@
 <script setup>
 import { ref, onMounted, watch } from 'vue'
 import { useAgentsStore } from '../stores/agents'
+import BaseToggle from './base/BaseToggle.vue'
+import { HELP_CLASS } from './base/fieldClasses'
 
 const props = defineProps({
   agentName: {
@@ -83,12 +108,20 @@ const props = defineProps({
   notify: {
     type: Function,
     default: null
+  },
+  embedded: {
+    type: Boolean,
+    default: false
   }
 })
 
+// trinity-enterprise#890: a save needs a restart to apply, so the pane hears
+// about it and reports it to the one restart banner.
+const emit = defineEmits(['saved'])
+
 const MIN_TURNS = 1
 const MAX_TURNS = 500
-const DEFAULT_TURNS = 50
+const DEFAULT_TURNS = 200
 
 const agentsStore = useAgentsStore()
 
@@ -99,6 +132,12 @@ const maxTurnsChat = ref(null)
 const maxTurnsTask = ref(null)
 // Preserve out-of-scope overrides (execution_timeout_sec, *_deny lists) set via API
 const otherKeys = ref({})
+// What is stored now, so the visitor toggle saves exactly that plus its own key
+// and never an unsaved edit in the fields above.
+const stored = ref({})
+// ent#926: absent means on (the default keeps channel agents working).
+const visitorShell = ref(true)
+const savingVisitor = ref(false)
 
 function showToast(message, type = 'success') {
   if (props.notify) props.notify(message, type)
@@ -115,6 +154,8 @@ async function load() {
     maxTurnsTask.value = g.max_turns_task ?? null
     const { max_turns_chat, max_turns_task, ...rest } = g
     otherKeys.value = rest
+    stored.value = { ...g }
+    visitorShell.value = g.visitor_shell !== false
   } catch (err) {
     console.error('Failed to load guardrails:', err)
     errorMessage.value = err.response?.data?.detail || 'Failed to load guardrails'
@@ -157,12 +198,37 @@ async function save() {
     await agentsStore.setGuardrails(props.agentName, payload)
     showToast('Guardrails saved — restart agent to apply', 'success')
     await load()
+    emit('saved', payload)
   } catch (err) {
     const detail = err.response?.data?.detail || 'Failed to save guardrails'
     errorMessage.value = detail
     showToast(detail, 'error')
   } finally {
     saving.value = false
+  }
+}
+
+async function setVisitorShell(value) {
+  if (savingVisitor.value) return
+  const previous = visitorShell.value
+  visitorShell.value = value
+  savingVisitor.value = true
+  errorMessage.value = ''
+  try {
+    const payload = { ...stored.value, visitor_shell: value }
+    await agentsStore.setGuardrails(props.agentName, payload)
+    stored.value = payload
+    otherKeys.value = { ...otherKeys.value, visitor_shell: value }
+    showToast(value
+      ? 'Channel and public visitors may run commands again'
+      : 'Channel and public visitors can no longer run commands', 'success')
+  } catch (err) {
+    visitorShell.value = previous
+    const detail = err.response?.data?.detail || 'Failed to save the visitor setting'
+    errorMessage.value = detail
+    showToast(detail, 'error')
+  } finally {
+    savingVisitor.value = false
   }
 }
 

@@ -24,7 +24,13 @@
 - **GitHub Issue**: #147
 - **Description**: Email-verified public chat sessions maintain persistent per-user memory (text blob) scoped to `(agent_name, user_email)`, injected into every agent call. Memory is updated via background summarization every 5 messages (auto) or explicitly via the `write_user_memory` MCP tool (agent-initiated, #888). The tool resolves the user email server-side from the execution record — agents never handle email addresses directly.
 - **Database Tables**: `public_user_memory`
-- **API**: `POST /api/agents/{name}/user-memory` (agent-scoped key + execution_id; user-facing triggers, plus a `schedule` run that names a seat — §10.19 of `scheduling.md`, ent#637). Every agent-notes write records a `public_user_memory_writes` row; the person reads and undoes them through the Workspace (`GET/POST /api/enterprise/client-portal/agents/{name}/memory…`)
+- **API**: `POST /api/agents/{name}/user-memory` (the agent's own key only, a human is refused `agent_only`, + execution_id; user-facing triggers, plus a `schedule` run that names a seat — §10.19 of `scheduling.md`, ent#637). The named run must be live and no other live turn on the agent may resolve to a different scope (#4121, `memory_turn_not_live` / `memory_turn_ambiguous`); on a shared agent a refused note is lost unless the agent can retry, so the tool description tells the agent to say it was not saved. Every agent-notes write records a `public_user_memory_writes` row; the person reads and undoes them through the Workspace (`GET/POST /api/enterprise/client-portal/agents/{name}/memory…`)
+- **Anti-poisoning gates (trinity-enterprise#419)**: memory is written from conversations with arbitrary people and re-injected into every later prompt for that person, so it is treated as a persistent prompt-injection vector. Two cheap layers, both in `services/user_memory_guard.py`:
+  - **Write-boundary screen**: a small, named, pattern-based check (not prompt-injection detection — that stance is ent#409) on both writers of the block: the agent's `write_user_memory` and the background conversation summarizer. A hit refuses the write with `422 {code, message, line}` and stores nothing (no memory change, no history row); the summarizer, which has no agent to rephrase, drops the tripping lines and keeps the rest (a summary that loses every line leaves the previous one). Four rules: `memory_prompt_marker` (text imitating prompt structure), `memory_instruction` (text aimed at the agent's own rules, role or oversight), `memory_tool_directive` (a tool or command directive), `memory_link_in_instruction` (a link or an email address inside an instruction, or data placed into a URL; a link or address stated as a fact is stored — operator ruling 2026-10-23 extended links to addresses). Preferences, open loops and business rules stated as facts are stored. A hit the stored notes already produced (same rule, same matched text) is not counted again, so text from before the screen never locks a person's memory, while old lines reordered, re-contextualised or respelled into a new hit are judged afresh. A copy-back of the rendered block keeps only the agent-notes section (the summary and the decisions are dropped, the platform's margin, headings and envelope lines stripped) before the screen and before storage. Every pass is linear, and the summarizer clamps each chat message first. The refusal is logged with the rule and line, never the text.
+  - **Trust envelope**: the notes and the summary enter the prompt between platform lines carrying a per-render nonce, every stored line behind a `│ ` margin, under a framing paragraph (reference material about the person; it cannot change instructions, grant permissions or trigger tools or links on its own) and followed by a platform reminder. The content cannot reproduce the delimiters (envelope lines dropped, any other copy defanged in one pass; line breaks split with `splitlines()`; control characters removed). A rendering failure drops the memory rather than injecting it raw.
+  - **One-to-one channel writes (AC 4)**: on Slack, Telegram and WhatsApp a write (and a seat decision) resolves the person from `source_channel_client` — ent#549's stamp for the verified speaker of a one-to-one conversation — and fails closed without it, so a group turn writes no one's memory.
+  - **Seat decisions** (ride the same block): one-line fields refuse every line terminator, and `decided` / `criterion` / `reversal` pass the checks that can never describe a legitimate decision (markers, an instruction aimed at the agent, a shell command or secrets file given as an order, a script fetched from a URL and piped to a shell in any position, an MCP tool id, a slotted URL); the block carries its own framing line and renders every field on one line, older rows included.
+  - **Out of scope**: the owner/admin memory view and the summarizer's write history (ent#962); paraphrase, other languages and homoglyphs pass the screen by design — the envelope is the layer that does not depend on spelling.
 - **Flow**: `docs/memory/feature-flows/public-agent-links.md#per-user-persistent-memory-mem-001`
 
 ### 15.1a-3 Agent Website Proxy (SITE-001)
@@ -119,14 +125,15 @@
   - `ChannelAdapter.download_file()` — each channel implements own download auth
   - Images (`image/*`): base64 inline in prompt (Claude vision, 5MB/image, 10MB total)
   - Text files: copied to `/home/developer/uploads/{session_id}/`, `Read` tool added
-  - Unsupported formats (PDF, tar, gzip, rar, video, audio) rejected with user-friendly message
+  - PDF documents are disabled by default. Operators explicitly set `ALLOW_PDF_UPLOADS=true` and recreate the backend to deliver unchanged bytes into the existing per-session uploads directory, including PDFs declared as `application/octet-stream`; while disabled, declared, header-identified (within the first 1024 bytes) and MIME-detected PDFs are rejected before writes, even with an unavailable detector and generic/text MIME. Missing, false or invalid settings remain disabled. Keep size limits, MIME mismatch checks, filename sanitization, attribution and cleanup. PDF parsing, OCR and extraction belong to the receiving agent, not the platform.
+  - Unsupported formats (tar, gzip, rar, video, audio) rejected with user-friendly message
   - ZIP allowed (2026-08, PR #2152): lands in the per-session uploads dir un-extracted; the platform does NOT unpack it, so zip-slip/decompression-bomb exposure is deferred to the agent container (isolated, per-file size cap still enforced)
   - Filename sanitization (path traversal, hidden files, special chars)
   - File upload rate limit: 5 files/min per user
   - Per-session upload dirs cleaned after execution
   - `files:read` OAuth scope (requires Slack app reinstall)
   - Max 10 files per message
-- **Future**: PDF support (text extraction), agent→Slack outbound file attachments (Phase 2)
+- **Future**: Agent-owned PDF text extraction, agent→Slack outbound file attachments (Phase 2)
 - **Flow**: `docs/memory/feature-flows/slack-file-sharing.md`
 
 ### 15.1c Telegram Bot Integration (TGRAM-001)
@@ -139,6 +146,7 @@
   - Per-agent bots (one bot per agent, token encrypted via AES-256-GCM)
   - Bidirectional text chat (users message bot → agent responds via HTML formatting)
   - Photo and document support (download, text extraction for plain text files)
+  - Albums arrive as one turn (ent#934): items sharing a `media_group_id` are buffered in Redis (cross-worker) and merged — every file in `message_id` order, the caption from whichever item had it, one media-context line; flush 1.5 s after the last item or at 10 items; trigger rules decided once on the merged message; a mention in a caption counts as a mention. A restart inside the window delivers albums under 60 s old and drops older ones with a WARN
   - Webhook mode (production) — returns 200 immediately, processes async
   - Webhook reconciliation on backend startup (re-registers all active bots)
   - Bot commands: `/start`, `/help`, `/reset` (clear conversation)
@@ -162,7 +170,7 @@
   - Webhook auth via `X-Telegram-Bot-Api-Secret-Token` header (set during setWebhook)
   - SSRF prevention: media downloads restricted to `api.telegram.org` domain
   - Restricted tools for Telegram users (WebSearch, WebFetch — same as Slack)
-  - Update dedup via `last_update_id` tracking
+  - Update dedup per `update_id` (Redis `SET NX`, 24 h), with the forward-only `last_update_id` watermark as the Redis-down fallback (ent#934 — the watermark alone dropped out-of-order deliveries)
   - Bot token values never logged
 - **Flow**: `docs/memory/feature-flows/telegram-integration.md`
 - **Future Phases**:
@@ -249,21 +257,21 @@
   - **Self-task with `inject_result=true` is excluded from the default**: the agent already named a destination (its own chat session). A typed id still opts it in, and both deliveries happen.
   - **Sync stays opt-in.** A `parallel=true` sync call carries a parent only when the agent passes `execution_id`; the caller answers inline, so a default would double-post. A sync call that falls through to `queued_timeout` still reports at its end.
   - **Which id goes out:** the header turn wins over a typed id (a resumed session can copy a stale one); with no header the typed id is sent only if it passes the header's own format check (`isWellFormedExecutionId`). A typed `manual` or a malformed typed id is never forwarded.
-  - **Sequential `/chat` carries nothing**: `ChatMessageRequest` has no parent field and the `/chat` terminals never spawn a report. A typed id there answers `report_back: off`, reason `sequential_chat`.
-  - **Result fields:** when a parent is sent, the tool result carries `report_back: "requested"` (plus an informational `report_back_note` on default-armed calls); an opted-in call that cannot carry one says `report_back: "off"` with `report_back_reason` (`disabled` > `manual_session` > `invalid_execution_id` > `sequential_chat`) and a future-only note, left off `queued_timeout` / `agent_busy` results. Gate results, depth refusals and thrown errors are never touched. `requested` means a parent was sent, not that a note will land.
+  - **Sequential `/chat` is armed after the fact (#3295)**: `ChatMessageRequest` still has no parent field and the row is still created without `source_channel*`. The MCP server defaults the route on like the async ones, but sends the parent only when the call ends in a `queued_timeout` receipt (its own abort, a 409 in-flight replay, or the backend's 504 recovered through the same execution lookup) — `POST /api/agents/{name}/executions/{execution_id}/report-back` `{parent_execution_id}`, own 2 s deadline (`MCP_REPORT_BACK_ARM_TIMEOUT_MS`), never throws. `chat_execution_service.arm_chat_report_back` admits only the row's own dispatcher (agent key = `source_agent_name`, person = `source_user_id`; connector 403; a missing, foreign or not-dispatched row is one uniform 404), only a `/chat` row (`triggered_by` ∈ agent/mcp/chat), inherits through the unchanged `_inherited_channel_context`, stamps with ent#498's add-only `stamp_execution_channel_context`, re-reads and spawns the report itself if the row is already terminal. The push `/chat` terminals spawn `spawn_completion_report` on a CAS-won write (no-op unless armed). An inline reply is never armed: default-armed → no fields; typed → `off`/`answered_inline`. A receipt the backend refused to arm → `off`/`not_armed` (also `agent_busy` with a typed id). `report_completion` reads the row fresh + `effect_guard` ⇒ exactly once in either order of stamp vs terminal.
+  - **Result fields:** when a parent is sent, the tool result carries `report_back: "requested"` (plus an informational `report_back_note` on default-armed calls); an opted-in call that cannot carry one says `report_back: "off"` with `report_back_reason` (`disabled` > `manual_session` > `invalid_execution_id`; on the sequential route the outcome adds `answered_inline` / `not_armed`, #3295) and a future-only note, left off `queued_timeout` / `agent_busy` results. Gate results, depth refusals and thrown errors are never touched. `requested` means a parent was sent, not that a note will land.
   - **Kill switch:** `MCP_REPORT_BACK_ENABLED=false` (mcp-server env, default `true`) stops every parent, default and typed; default-armed results then carry no fields, so receipts are byte-identical to the pre-#3232 shape.
   - The parent is **not** part of the idempotency key (Invariant #18). The ent#265 provenance guard stays the only gate on inheritance; the header is not a trust boundary.
   - **Chains post once per async hop**: A (channel turn) → B async inherits; B → C async inherits from B's row; the thread gets B's note and later C's. B can pass `execution_id="manual"`.
   - Delivery stays best-effort: per-channel consent, a missing binding or token, or a failed send suppresses the note.
 - **Per-channel consent units**:
   - **Slack**: channel-binding `allow_proactive` (ent#223); no binding / no consent → suppress.
-  - **Telegram group**: `telegram_group_configs.allow_proactive` (INTEGER DEFAULT 1 — allow for existing AND new groups; opt-out mute via the "Completion reports" toggle in TelegramChannelPanel; human-only PUT arm — `reject_agent_principal`). Requires `is_active` too.
+  - **Telegram group**: `telegram_group_configs.allow_proactive` (INTEGER DEFAULT 1 — allow for existing AND new groups; opt-out mute via the "Completion reports" toggle in TelegramChannelPanel; human-only PUT arm — `assert_person`: only a signed-in session or the person's own `user` key passes, and every machine principal is refused; trigger mode and welcome on the same route stay agent-callable). Requires `is_active` too.
   - **Telegram DM**: **consent-by-construction** — a chat link exists only because the user personally cold-started the bot (Telegram's own cold-DM prohibition is the transport guarantee); a block surfaces as a 403 the send handles as a logged no-op.
   - Unknown Telegram destination (no group config, no chat link) → suppress with log — never fire a send destined to fail.
   - **Two DM consent regimes (deliberate)**: reporting on *user-initiated work* is the deferred sibling of the inline reply and needs no flag; *agent-initiated outreach* (#321 proactive messaging) keeps its own `agent_sharing.allow_proactive` per-recipient consent. The #321 flag is NOT honored as DM report revocation — it cannot distinguish "explicitly revoked" from "never opted in" (default 0), so honoring it would kill the flagship delegated-DM case for every verified shared user. A future unified consent model inherits this rationale.
 - **Rendering (Telegram)**: pre-escape `&`/`<`/`>` → `_markdown_to_html` → re-cap at 4096 (entity expansion; "message too long" is a 400 the parse-fallback doesn't catch); thread = the triggering `message_id`, passed as `reply_parameters` when numeric, DMs anchored too, `allow_sending_without_reply` makes a deleted original safe.
 - **Database**: `schedule_executions.source_channel_agent TEXT` (nullable; `AgentRef` KEEP — rename cascades, #772 90-day sweep is retention); `telegram_group_configs.allow_proactive INTEGER DEFAULT 1`. Dual-track migration (SQLite `channel_report_back_columns` + Alembic `0031_channel_report_back`).
-- **Known limits (v1)**: lease-reaper/bulk-sweep and operator-terminate (Path B) terminals don't report; a child closed by backend shutdown (the `task_execution_service.py` CancelledError terminal) or by the cleanup service's stale-execution and stale-slot sweeps writes `failed` with no report, so a hung or orphaned child fails silently; a plain sequential `/chat` delegation never reports (#3232, follow-up #3295); a delegated `/task` whose message needs a skill-gate approval never reports: the gate fires before the row is created, so nothing is inherited, and the approved run is re-created from the frozen dispatch, which carries no `source_channel*` (#3232, follow-up); an MCP delegation that repeats a byte-identical earlier one within 24 h is an idempotent replay of the first run (the backend returns before inheritance), so no new child is created and any report goes to the first call's thread — under the async default the replayed receipt still says `requested` (#3296; fix belongs to ent#566's intent key); a restart mid-inline-turn loses the inline reply and reports nothing (F7); a late token-gated FAILED→SUCCESS resurrection replays the guard — no corrective ✅ (correct at-most-once); MCP and REST `fan_out` send no parent (`FanOutRequest` has no parent field), so fan-out children never inherit a conversation and never report (#3232, follow-up) — were they to, fan-out = one report per child execution (per-execution identity — no persisted parent key); pre-migration rows with NULL chat context suppress; Telegram forum topics not threaded (inbound never captures `message_thread_id`); no channel-history persistence of the report.
+- **Known limits (v1)**: lease-reaper/bulk-sweep and operator-terminate (Path B) terminals don't report; a child closed by backend shutdown (the `task_execution_service.py` CancelledError terminal) or by the cleanup service's stale-execution and stale-slot sweeps writes `failed` with no report, so a hung or orphaned child fails silently; a sequential `/chat` delegation reports only when its caller got a receipt (#3295) — an arm request lost between the MCP server and the backend leaves the receipt saying `requested` with nothing posted; a delegated `/task` whose message needs a skill-gate approval never reports: the gate fires before the row is created, so nothing is inherited, and the approved run is re-created from the frozen dispatch, which carries no `source_channel*` (#3232, follow-up); an MCP delegation that repeats a byte-identical earlier one within 24 h is an idempotent replay of the first run (the backend returns before inheritance), so no new child is created and any report goes to the first call's thread — under the async default the replayed receipt still says `requested` (#3296; fix belongs to ent#566's intent key); a restart mid-inline-turn loses the inline reply and reports nothing (F7); a late token-gated FAILED→SUCCESS resurrection replays the guard — no corrective ✅ (correct at-most-once); MCP and REST `fan_out` send no parent (`FanOutRequest` has no parent field), so fan-out children never inherit a conversation and never report (#3232, follow-up) — were they to, fan-out = one report per child execution (per-execution identity — no persisted parent key); pre-migration rows with NULL chat context suppress; Telegram forum topics not threaded (inbound never captures `message_thread_id`); no channel-history persistence of the report.
 - **Deliberate scope cut**: the proactive group-send endpoint (`POST …/telegram/groups/{chat_id}/messages`) is NOT gated on `allow_proactive` here (ent#223 did gate Slack's) — with default 1 the eventual coherence gate is a no-op for un-toggled groups; follow-up issue filed at ship time.
 - **Flow**: `docs/memory/feature-flows/channel-completion-report.md`
 
@@ -288,7 +296,7 @@
 - **Database Changes**:
   - `telegram_bindings.progress_indicator_enabled INTEGER DEFAULT 1` — dual-track migration (SQLite `telegram_progress_indicator` in `db/migrations.py` + Alembic `0031_telegram_progress_indicator`), plus `db/schema.py` / `db/tables.py` DDL parity
 - **API Endpoints**:
-  - `PUT /api/agents/{name}/telegram/progress-indicator` — owner-only (`OwnedAgentByName`) **+ `reject_agent_principal`** (human-only: an agent-scoped key resolves to the owner and could otherwise flip its own toggle — ent#223 lesson); body `{enabled: bool}`; 404 when no binding exists (mirrors `PUT /voip/enabled` — toggling never requires re-entering the bot token)
+  - `PUT /api/agents/{name}/telegram/progress-indicator` — **`Depends(require_person)`** (human-only: only a signed-in session or the person's own `user` key passes, and every machine principal is refused before the ownership lookup — ent#223 lesson) + owner-only (`OwnedAgentByName`); body `{enabled: bool}`; 404 when no binding exists (mirrors `PUT /voip/enabled` — toggling never requires re-entering the bot token)
   - `GET /api/agents/{name}/telegram` — response gains `progress_indicator_enabled` (null when unconfigured); endpoint hardened to `AuthorizedAgentByName` (see §15.1c Security)
 - **Frontend**: `TelegramChannelPanel.vue` — "In-progress status indicator" switch in the configured-state block (optimistic flip, revert on error, dark-mode aware)
 - **Known residuals**:
@@ -342,7 +350,7 @@
   - Credentials: AuthToken encrypted AES-256-GCM via `CredentialEncryptionService`; AccountSid plaintext (public identifier)
   - Webhook: dual-factor auth — URL `webhook_secret` routes to binding, `X-Twilio-Signature` HMAC-SHA1 validated via `twilio.request_validator.RequestValidator` (handles Twilio's empty-param inclusion gotcha)
   - Dedup by `MessageSid` (2048-entry in-memory ring) to absorb Twilio retries
-  - Media inbound via Twilio-hosted URLs with HTTP Basic auth. Any type is **fetched**, but only **images** (plus text/CSV/JSON) reach the workspace — `upload_service.UNSUPPORTED_MIMES` rejects `application/pdf`, `audio/`, `video/` and archives channel-agnostically, so a PDF or voice note surfaces as `"— unsupported format"` (a deliberate policy gate, not a download failure). SSRF-gated two-tier — the credentialed source hop stays `*.twilio.com`, validated redirect targets also allow `*.twiliocdn.com` (Twilio's media CDN, #1932); `follow_redirects=False` with every hop re-validated against the allowlist before it is issued (bounded follow budget)
+  - Media inbound via Twilio-hosted URLs with HTTP Basic auth. Any type is **fetched**, but **images** (vision blocks) and text/CSV/JSON documents (plus PDFs only with `ALLOW_PDF_UPLOADS=true`) reach the agent — `upload_service.UNSUPPORTED_MIMES` rejects `audio/`, `video/` and non-ZIP archives channel-agnostically, so a voice note surfaces as `"— unsupported format"` (a deliberate policy gate, not a download failure). SSRF-gated two-tier — the credentialed source hop stays `*.twilio.com`, validated redirect targets also allow `*.twiliocdn.com` (Twilio's media CDN, #1932); `follow_redirects=False` with every hop re-validated against the allowlist before it is issued (bounded follow budget)
   - Message splitting at 1600-char Twilio WhatsApp limit (paragraph → sentence → word boundaries)
   - Sandbox auto-detection from well-known number `whatsapp:+14155238886`
   - Empty TwiML (`<Response/>`) returned to Twilio ack; response delivered asynchronously via REST (no TwiML body response path)
@@ -603,6 +611,82 @@
   **0** for a Nevermined *duration* plan (charged by time, not per call); a
   negative is still a named 422 (§32.6 FR-11).
 
+### 23.8 Card delegation binding (ent#965/#966)
+- **Status**: 🚧 In Progress
+- **Requirement ID**: NVM-DELEG-001
+- **Description**: The **buyer** side of Nevermined, beside the provider-side
+  paywall above. A person funds one agent with a card **mandate held by
+  Nevermined**: Nevermined stores the card, holds the mandate and settles every
+  purchase. Trinity stores only the delegation id it was handed, injects it into
+  the agent, reads the remaining budget back **live from Nevermined** and
+  revokes the mandate **at Nevermined** on request. No string, response or
+  document may say Trinity holds a card or settles money (ent#932).
+- **FR-1 Organization (admin)** — one Nevermined organization per instance
+  (singleton `nevermined_organization` row): `org_id`, `environment`
+  (`sandbox` | `live`), and two **write-only** secrets (widget secret, agent
+  API key) in one AES-256-GCM envelope (Invariant #12).
+  `GET/PUT/DELETE /api/nevermined/organization`, `require_admin`.
+  GET is always 200 with `configured: true|false` and never returns a secret.
+  PUT: first create needs both secrets (422 `secret_required`); an absent
+  secret on update keeps the stored one; a key carrying a `sandbox:`/`live:`
+  prefix that contradicts `environment` → 422 `environment_mismatch`; changing
+  `environment` or rotating the agent API key while any live agent holds an
+  active binding → 409 `delegations_active`. DELETE with active bindings →
+  409 `delegations_active`. Every write leaves a `configuration` audit row
+  naming which secrets changed, never their values.
+- **FR-2 Widget session** — `POST /api/nevermined/agents/{agent_name}/widget-session`
+  (`require_person` + owner tier, uniform 404). Mints a Nevermined widget
+  session for the **signed-in person's email** server-to-server and returns it
+  with `Cache-Control: no-store`. Its own concurrency gate, never the
+  paid-chat verify/settle gate. Errors: 409 `nevermined_not_configured`, 422
+  `email_required`, 503 `nevermined_busy` (+`Retry-After`), 503
+  `nevermined_unreachable`, 502 `nevermined_rejected` (upstream status only,
+  never the upstream body), 429 rate limit.
+- **FR-3 Binding** — `POST/GET/DELETE /api/nevermined/agents/{agent_name}/delegation`.
+  One active binding per agent, enforced by a partial unique index. A **second
+  bind while one is active is refused** (409 `delegation_active` — revoke the
+  current mandate first), so an explicit revoke is the only way a mandate
+  ends. Bind on a stopped agent → 409 `agent_not_running`. Rows are kept on
+  agent delete (stamped `agent_deleted_at`) as a financial record and never
+  block the organization or a later agent of the same name. Trinity never
+  overwrites or removes an `NVM_API_KEY` it did not write: a bind that finds
+  one in the agent's `.env` that is not the organization's agent key (any
+  line, parsed as the agent's reader parses it) is refused with 409
+  `agent_key_present` and writes nothing; the organization's own key left
+  behind by a revoke with the agent down passes, so `api_key_injected` is
+  always true on a real bind (the column stays as the record of older rows,
+  and revoke removes `NVM_API_KEY` only when it is set). After a key
+  rotation a stale organization key is refused the same way until removed.
+  If the agent is down at revoke, the delegation id left in `.env` is inert
+  but the organization's agent key stays live until the next bind rewrites
+  it or a person removes it — the `env_note` says so.
+  - **POST** (`require_person` + owner tier, 201): order is org configured
+    (409 `nevermined_not_configured`) → rate limit → active row (409
+    `delegation_active`, nothing upstream, no env read/write) → agent running
+    (409 `agent_not_running`) → ONE Nevermined verify (404 → 422
+    `delegation_not_found`; a present non-active status → 422
+    `delegation_inactive`; an absent status binds) → `.env` read → a
+    hand-set `NVM_API_KEY` (409 `agent_key_present`, no row, no write) → row insert
+    (a concurrent bind tripping the partial unique index → 409
+    `bind_in_progress`) → inject `NVM_DELEGATION_ID`/`NVM_API_KEY`/`NVM_ENVIRONMENT`
+    (failure deletes only the inserted row → 503 `agent_unreachable`). Response
+    is the GET shape plus `effective: "next_execution"` and `api_key_injected`.
+  - **GET** (read tier, uniform 404; an agent key reads only itself — a
+    sibling is the same 404): always 200 with `agent_name`, `configured`,
+    `funded`, `delegation`, `live`, `history` — `agent_name` is present in
+    every shape, including not-configured and unbound. `live` numbers are
+    copied from Nevermined, `null` when absent (never derived); Nevermined
+    unreachable/busy → `source: "unavailable"`, `status: "unknown"`.
+  - **DELETE** (`require_person` + owner tier): 404 `no_active_delegation`;
+    revokes at Nevermined first (2xx/404 = revoked; else 503/502, nothing local
+    changes), then the row, then best-effort env removal — agent down → 200
+    with `env_removed: false` and an `env_note`.
+  - **MCP**: `get_agent_spending` (GET pass-through) and
+    `revoke_agent_delegation` (DELETE; advertised to `user`/`system` keys only).
+- **FR-4 Errors** are `{"detail": {"code", "message"}}` so the panel (ent#967)
+  branches on `code`. Secrets, the session token, the agent's `.env` and any
+  upstream body never appear in a response or a log line.
+
 ---
 
 ## 27. Mobile Admin PWA (MOB-001)
@@ -710,6 +794,47 @@ but was never surfaced. This is the read surface; per-client controls
 - **FR-4 — Tenant boundary**: the endpoint is scoped to the path agent; the DB
   join filters by `agent_name` through the channel binding, so a client of
   another agent never appears.
+
+### 46.3 An Access Request Names Who Asked (trinity-enterprise#737)
+
+**Description**: The owner approves a person, not a bare email. A channel access
+request records who asked, as the channel saw them, and the owner's pending list
+shows that person, plus where the same channel identity has been seen before.
+
+- **FR-1 — Capture**: `access_requests` gains `requester_channel_id` (the
+  channel's stable user id: Telegram id, Slack member id, WhatsApp number),
+  `requester_handle`, `requester_name`, `requester_chat_id` and
+  `requester_thread_id`. All nullable, and filled only from what the channel
+  exposes (`ChannelAdapter.requester_identity`):
+  - **Telegram:** id, @username and first/last name.
+  - **WhatsApp:** number and profile name.
+  - **Slack:** member id, handle, display name, channel and thread.
+
+  Nothing is guessed. Values are trimmed and bounded at 256 characters.
+- **FR-2 — Every path**: the per-message router gate and the Telegram and
+  WhatsApp `/login` flows pass the identity. Extraction is best-effort: a
+  failure records the request without identity rather than losing it. The
+  public link has no channel identity and records none.
+- **FR-3 — One request, one identity**: a refreshed request replaces the whole
+  identity, so a request from a channel that exposes less never inherits
+  another's. A decision keeps the identity on the decided row.
+- **FR-4 — The owner's view**: `GET /api/agents/{name}/access-requests` returns
+  the identity fields, `identity_captured` (False for the public link and for
+  rows older than this change), and `known_as`. `known_as` lists the same
+  channel identity seen before: an earlier request (approved / denied / asked)
+  or an email it verified on a Telegram/WhatsApp bot. It is limited to agents
+  the viewer may manage (`can_user_share_agent`: owner or admin), excludes the
+  request itself, and is capped at 10.
+- **FR-5 — UI**: the Sharing tab's pending list leads with the name (or
+  @handle, or the email), then the handle, the channel and its id, then the
+  email. Up to three "seen before" chips are shown, with a counted rest. A
+  public-link request reads "Email only — public link", and an older one reads
+  "Identity not captured".
+- **FR-6 — Personal data**: the list is owner/admin only, as before. The rows
+  are removed with the agent (`access_requests` is CASCADE in
+  `db/agent_cleanup.py`). Not done: the agent data export (#1169) carries the
+  container's `data/` only, with no platform records of any kind, so there is
+  no export these rows could join without a new export format.
 
 ---
 
@@ -949,11 +1074,12 @@ spoken replies (#2157) stay as composer affordances.
   second provider). Disabled WITH the reason when the instance cannot ("voice is
   turned off" / "no voice provider key"), never a dead button. Portal-token
   clients never see it. Distinct from the per-agent `voice_available` (TTS).
-- **FR-1b — The Talk door (#2559)**: `/workspace?agent=<name>&voice=1` starts the
+- **FR-1b — The `?voice=1` one-shot (#2559)**: `/workspace?agent=<name>&voice=1` starts the
   call on landing. The param alone is **not** authority: it is honoured only when
   the intent was **armed in the app** (`armVoiceAutoStart()` in
-  `portalVoiceMode.js`, called by `AgentHeader`'s Talk button before the
-  `router.push`), the agent actually landed, and the principal is a platform
+  `portalVoiceMode.js`; its only caller was `AgentHeader`'s Talk door, removed by
+  trinity-enterprise#950, so today nothing in the app arms it and the param is
+  always inert — the call starts from the composer's Call control), the agent actually landed, and the principal is a platform
   session. The armed flag is a module-scoped `let`, so it lives exactly as long
   as the document — a pasted, bookmarked or mailed link arrives on a fresh
   document and can never be armed, including the signed-out case where the
@@ -1021,6 +1147,65 @@ spoken replies (#2157) stay as composer affordances.
   frame after persistence tells the client when to reload; End always works.
 - **FR-9 — Out of scope**: rooms; acting as the agent (#535); the external
   projection (#285/#446); provider choice (#354, seam kept provider-neutral).
+
+### 48.5 Workspace Direct calls — every spoken turn goes to the agent (trinity-enterprise#1046)
+
+A second way to take a Workspace call. Today's call (§48.3) has a realtime model
+answering and consulting the agent; a **Direct** call has no model in the path:
+speech-to-text, the agent's ordinary Workspace turn, text-to-speech of the agent's
+own reply. Live stays the default and is unchanged.
+
+- **FR-1 — Entry**: two buttons in the composer, one per call: Live (waveform) and
+  Direct (handset). An unavailable one is disabled with its reason; while one call is
+  on, its button ends it and the other says so. During a Direct call, one fixed-height
+  strip shows four bars (the state), one short word, one detail line (a notice, what was
+  heard, the tool at work, or the slow-runtime wait), a mute icon and a red hang-up.
+- **FR-2 — Same turn as typing**: a spoken turn goes through the route a typed message
+  uses (`POST …/chat/stream`), so its limits, idempotency, gates, attachments and
+  attribution are the typed path's. The call's socket only hears and speaks.
+- **FR-3 — Harness-agnostic speech**: every reply is spoken from the finished turn on
+  every runtime. Where a runtime streams its messages, speech starts earlier and the
+  persisted reply is reconciled so nothing is said twice and no tail is lost. A runtime
+  without a stream says so in the strip's detail line. A reply with nothing to read
+  aloud (only code, a table or links) says "The reply is in the chat." rather than
+  nothing.
+- **FR-4 — The live thread stays live**: during a Direct call the thread and composer
+  work. A typed message is sent normally and spoken back. Rows land as they happen;
+  after the call they fold into one call block.
+- **FR-5 — Barge-in**: talking over the agent pauses playback; if it was real speech the
+  running turn is cancelled through the terminate primitive and the new words run next.
+  Echo of the agent's own voice resumes playback.
+- **FR-5a — Stopping the agent (trinity-enterprise#1087)**: the person can stop the agent
+  mid-reply without hanging up, by voice or by hand, and the call returns to listening.
+  - A whole short stop phrase ("stop", "wait", "hold on", "never mind", …) said while
+    there is something to stop silences the agent, cancels its turn, and is never sent
+    as a turn. With nothing to stop the same words go to the agent. While an approval
+    waits, "stop" and "cancel" answer it **no**.
+  - Over playback, the speech bar follows the agent's own output level (linear RMS), so a
+    normal voice is heard over a quiet passage and the agent's echo is not taken for speech.
+  - The call strip carries a Stop control, always present, disabled with "Nothing to
+    stop" when idle. The composer's Stop on a Direct call silences the voice too.
+  - Escape silences the agent while its voice is playing and never cancels a turn;
+    with nothing playing it ends the call (a running turn keeps going, as on hang-up).
+  - A stop reaches the run being spoken, including an approved run that is not the
+    composer's own turn. Words queued behind it, a transcript already in flight and audio
+    already on the wire are dropped. An approval prompt cut off by a stop is answered on
+    its card, never by a later spoken yes.
+  - The strip says "Stopped." or, when the reply had finished and only its audio was cut,
+    "Stopped. The full reply is in the chat."
+- **FR-6 — Approvals are Trinity's asks**: an ask raised in the turn appears as the
+  normal chat card and is read aloud. A whole short yes or no answers it through the
+  person's own answer route, so the Inbox is the record. Anything else runs as the next
+  turn and the ask stays open. Per-tool prompts are out of scope.
+- **FR-7 — Words on failure**: no speech key, speech-to-text failure, speech failure and
+  turn failure each have a fixed line. Nothing spoken is a paraphrase of the agent.
+- **FR-8 — One call per thread**: a Live call and a Direct call cannot overlap on a thread.
+- **FR-9 — Settings**: admin toggle (default on) and provider (`auto`, `gemini`,
+  `elevenlabs`) under Settings → Voice, resolved at call time, with a readiness line
+  and a disclosure that audio and transcripts go to the chosen provider.
+- **FR-10 — Timing**: each turn reports transcription time and time to first audio.
+- **FR-11 — Out of scope**: portal-token clients (no platform JWT, same as §48.3), mobile
+  layout, rooms, and a hosted speech path, for which `SpeechProvider` instances are the seam.
 
 ### 48.4 Workspace Projects — the open-core surface (trinity-enterprise#661)
 

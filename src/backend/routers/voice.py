@@ -296,9 +296,39 @@ async def voice_websocket(
         await websocket.close(code=4001, reason="Invalid token claims")
         return
 
+    # #3825: a token signed out by logout (#187) or by a password change is
+    # refused here as on every other platform door.
+    from dependencies import is_token_revoked, session_predates_user_revoke
+    if is_token_revoked(payload.get("jti")) or session_predates_user_revoke(payload):
+        await websocket.close(code=4001, reason="Session signed out")
+        return
+
     user = db.get_user_by_username(username)
     if not user:
         await websocket.close(code=4001, reason="Unknown user")
+        return
+
+    # trinity-enterprise#1046: a Direct call shares this door and everything above it.
+    # Its session is the person's alone, with no admin attach: the socket speaks a
+    # person's private turns, and their thread is theirs.
+    from services import direct_voice_service
+    if voice_session_id.startswith(direct_voice_service.DIRECT_PREFIX):
+        direct = direct_voice_service.get_session(voice_session_id)
+        if not direct:
+            await websocket.close(code=4004, reason="Voice session not found")
+            return
+        if user["id"] != direct.user_id:
+            logger.warning("voice_ws: user_id=%s refused on a Direct call owned by user_id=%s",
+                           user["id"], direct.user_id)
+            await websocket.close(code=4003, reason="Not authorized for this voice session")
+            return
+        await websocket.accept()
+        from client_portal.router import direct_call_stream
+        from services.docker_service import get_agent_runtime
+        await direct_voice_service.run_bridge(
+            websocket, direct, stream_attach=direct_call_stream,
+            runtime=get_agent_runtime(direct.agent_name),
+        )
         return
 
     session = await voice_service.get_session(voice_session_id)

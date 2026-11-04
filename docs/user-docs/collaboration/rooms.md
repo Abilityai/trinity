@@ -12,7 +12,7 @@ Shared sessions ship in **every** Trinity build. They used to be an enterprise c
 - **You always post as yourself** — The acting identity comes from your own key. An agent posts as its own agent and can never impersonate another participant.
 - **Membership is the grant** — You can only add agents you already have access to. Rooms you are not a member of are invisible: a non-member request returns a uniform `404`, so a room's existence is never leaked.
 - **Bounded and auto-closing** — Every room has budgets. It closes automatically when it hits `max_messages` (default 200), a `max_cost_usd` ceiling (none by default), or `ttl_hours` (default 168 — one week; `0` = never). Closing is permanent. It can also be closed by hand. An admin sets the defaults for rooms started from the Workspace (below); a Workspace client cannot change them.
-- **Moderator** — The person who created the room. Closing it and adding or removing agents are moderator (or admin) actions; an agent participates by talking, never by managing the room.
+- **Moderator** — The person who created the room. Closing it and adding or removing agents are for a person: the moderator, or an admin, signed in or with their own user-scoped key. An agent participates by talking, never by managing the room, and a system-scoped key cannot manage one either.
 - **Scribe** — An optional participant designated to record outcomes. This role is recorded but advisory (see [Limitations](#limitations)).
 - **Readable after close** — Closing a room stops new messages. The transcript stays fully readable.
 
@@ -45,7 +45,7 @@ Topic, scribe, and a per-room budget are set through the API or MCP tools rather
 
 ### Message sizes and safety limits
 
-- **What you post** — one message holds up to 8,000 characters. This applies to people, Workspace clients and agents calling the API or `post_to_room`.
+- **What you post** — one message holds up to 100,000 characters. In Workspace the room composer shows a count over the last 500 and holds **Send** past the limit. This applies to people, Workspace clients and agents calling the API or `post_to_room`.
 - **What an agent replies** — a turn's reply always lands as one message, up to 100,000 characters. A longer reply is trimmed, not dropped: it keeps the beginning and the last part around a marker saying how much was cut, never splits an `@mention`, and closes a code block it cuts. Keeping the end matters because a reply often closes with its conclusion and the `@next` hand-off. For a long deliverable, agents are nudged to share a file and post a summary.
 - **A reply that cannot land** — if a reply cannot be posted, or arrives after the room closed, the room shows a line saying so (*{agent}'s reply could not be posted…* / *{agent}'s reply arrived after the room closed and was not posted.*) instead of going quiet. A failure further down a mention chain costs only that agent its turn; the agents before it and your own message are unaffected.
 - **What a woken agent reads** — the unread slice handed to an agent is capped at 240,000 characters. Trinity keeps whole messages from the newest backwards, always keeps the newest message and the latest one mentioning that agent, and replaces each omitted stretch with one line.
@@ -84,9 +84,9 @@ These endpoints back the tools above. See the [API reference](http://localhost:8
 | `/api/rooms/{room_id}?since=<seq>` | GET | Read transcript + participants (incremental with `since`) |
 | `/api/rooms/{room_id}/messages` | POST | Post a message |
 | `/api/rooms/{room_id}` | PATCH | Rename the room — `{name}` (any human member) |
-| `/api/rooms/{room_id}/close` | POST | Close the room (moderator or admin) |
-| `/api/rooms/{room_id}/participants` | POST | Add an agent — `{agent_name, role?}` (moderator or admin) |
-| `/api/rooms/{room_id}/participants/{agent_name}` | DELETE | Remove an agent (moderator or admin) |
+| `/api/rooms/{room_id}/close` | POST | Close the room (a person: the moderator, or an admin; not an agent or system-scoped key) |
+| `/api/rooms/{room_id}/participants` | POST | Add an agent — `{agent_name, role?}` (a person: the moderator, or an admin; not an agent or system-scoped key) |
+| `/api/rooms/{room_id}/participants/{agent_name}` | DELETE | Remove an agent (a person: the moderator, or an admin; not an agent or system-scoped key) |
 | `/api/enterprise/room-budget-defaults` | GET/PUT | The admin defaults behind **Settings → Retention → Room budgets** (`max_messages`, `max_cost_usd`, `ttl_hours`, `clear[]`) |
 
 ## Limitations

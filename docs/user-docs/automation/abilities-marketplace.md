@@ -77,7 +77,7 @@ The eight pre-built domain wizards (prospector, chief-of-staff, webmaster, recon
 
 `custom` also has a **headless mode** for builder agents — a deployed Trinity agent that creates other agents. The brief carries every answer, real gaps go out as one `ask_operator` question, a single approval ask comes before anything is pushed or created, and the new agent is created on the builder's own instance (from a private repo when a GitHub token is available, otherwise from local files with a warning that it has no reproducible source). Creating or deploying an agent from inside an agent needs the **Manage other agents** permission, which an instance admin grants in the builder agent's Settings; without it the create is refused and the wizard says which permission is missing. See the [create-agent plugin page](../abilities/create-agent-plugin.md#headless-mode-inside-a-deployed-agent).
 
-### agent-dev — 31 skills (v1.22.2)
+### agent-dev — 31 skills (v1.22.3)
 
 Extend and develop existing agents: playbooks, memory, git-backed state, a full GitHub Issues dev cycle, long-running pipelines, cross-actor project management, a shared canonical-data layer, and multi-agent orchestration — plus tooling to assess and migrate an existing fleet.
 

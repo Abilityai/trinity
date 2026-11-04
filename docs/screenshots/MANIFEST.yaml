@@ -360,7 +360,6 @@ screenshots:
     shows: Platform settings including agent defaults and feature toggles.
     sources:
       - src/frontend/src/views/Settings.vue
-      - src/frontend/src/components/settings/SettingsPanel.vue
     captured_at: 2026-08-09
     captured_commit: ef3b0ebfb7a2f6a2f9b982556b495f6ed29a298b
 
@@ -481,16 +480,6 @@ screenshots:
       - src/frontend/src/components/portal/PortalChatTabs.vue
       - src/frontend/src/components/portal/PortalRail.vue
       - src/frontend/src/components/portal/PortalRailCanvas.vue
-    captured_at: 2026-10-14
-    captured_commit: f6a998f6993bd85a33a77f2d335db33357c5b70d
-
-  - file: workspace-files-rail.webp
-    title: "Workspace — the Files rail"
-    route: /workspace/a/{name}
-    shows: "The rail on Files: the drop zone, files you sent, files the agent sent back."
-    sources:
-      - src/frontend/src/components/portal/PortalRail.vue
-      - src/frontend/src/components/portal/PortalRailFiles.vue
     captured_at: 2026-10-14
     captured_commit: f6a998f6993bd85a33a77f2d335db33357c5b70d
 

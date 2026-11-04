@@ -14,6 +14,7 @@ public API of ``PublicLinkOperations`` is unchanged.
 """
 
 import json
+import logging
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List
@@ -73,12 +74,35 @@ def _encode_memory_blob(agent_notes: str, conversation_summary: str) -> str:
     )
 
 
+logger = logging.getLogger(__name__)
+
+
 def _parse_aware(dt_str: str) -> datetime:
     """Parse an ISO datetime string, ensuring the result is timezone-aware (UTC)."""
     dt = datetime.fromisoformat(dt_str)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return dt
+
+
+# A stored expiry that does not parse reads as this instant: already expired.
+UNREADABLE_EXPIRY = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def parse_link_expiry(value: Optional[str]) -> Optional[datetime]:
+    """A link's `expires_at` as an aware datetime, None for no expiry (#3583).
+
+    Fails closed: an unparseable stored value returns UNREADABLE_EXPIRY, so
+    the public check treats the link as expired and the owner list shows it
+    as expired.
+    """
+    if not value:
+        return None
+    try:
+        return _parse_aware(value)
+    except ValueError:
+        logger.warning("public link has unparseable expires_at; treating as expired")
+        return UNREADABLE_EXPIRY
 
 
 class PublicLinkOperations:
@@ -198,11 +222,14 @@ class PublicLinkOperations:
         link_id: str,
         name: Optional[str] = None,
         enabled: Optional[bool] = None,
-        expires_at: Optional[str] = None
+        expires_at: Optional[str] = None,
+        clear_expiry: bool = False,
     ) -> Optional[dict]:
         """Update a public link.
 
         Email verification is agent-level (agent_ownership.require_email).
+        `expires_at=None` means "unchanged"; `clear_expiry=True` removes the
+        expiry (#3584 — the Edit dialog had no way to).
         """
         values = {}
 
@@ -210,7 +237,9 @@ class PublicLinkOperations:
             values["name"] = name
         if enabled is not None:
             values["enabled"] = 1 if enabled else 0
-        if expires_at is not None:
+        if clear_expiry:
+            values["expires_at"] = None
+        elif expires_at is not None:
             values["expires_at"] = expires_at
 
         if not values:
@@ -298,10 +327,9 @@ class PublicLinkOperations:
         if not link["enabled"]:
             return False, "disabled", None
 
-        if link["expires_at"]:
-            expires = _parse_aware(link["expires_at"])
-            if _utcnow() > expires:
-                return False, "expired", None
+        expires = parse_link_expiry(link["expires_at"])
+        if expires and _utcnow() > expires:
+            return False, "expired", None
 
         return True, None, link
 
@@ -810,13 +838,24 @@ class PublicLinkOperations:
 
         return True
 
-    def update_user_memory_agent_notes(
-        self, agent_name: str, user_email: str, agent_notes: str
-    ) -> bool:
-        """Update only the agent_notes section (written by the write_user_memory MCP tool)."""
-        return self._update_user_memory_section(
-            agent_name, user_email, agent_notes=agent_notes or ""
-        )
+    def get_user_memory_agent_notes(self, agent_name: str, user_email: str) -> str:
+        """The stored agent_notes, or ``""`` — a read that never creates the row.
+
+        The ent#419 screen compares a write against what is already stored (so
+        old lines are not re-checked) BEFORE deciding whether anything may be
+        stored at all; a create-on-read here would leave a row behind a refusal.
+        """
+        email = user_email.lower()
+        with get_engine().connect() as conn:
+            row = conn.execute(
+                select(public_user_memory.c.memory_text).where(
+                    and_(
+                        public_user_memory.c.agent_name == agent_name,
+                        public_user_memory.c.user_email == email,
+                    )
+                )
+            ).first()
+        return _parse_memory_blob(row[0])["agent_notes"] if row else ""
 
     def update_user_memory_conversation_summary(
         self, agent_name: str, user_email: str, conversation_summary: str

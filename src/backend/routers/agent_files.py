@@ -1,4 +1,4 @@
-# mcp: files.ts (share_file → /shared-files) + pipelines.ts (list_agent_pipelines, get_agent_pipeline_state → /files) + metrics.ts (refresh_metric_definitions → /metrics/definitions/refresh, ent#478; get_metrics → /metrics — ent#479, and another agent's with `agent` through a permission grant, ent#727; get_objectives → /objectives, ent#666; the definitions READ is deliberately unexposed — get_metrics carries each definition — not forgotten)
+# mcp: files.ts (share_file → /shared-files) + permissions.ts (get_agent_permissions → /permissions?strict=true, ent#991; the permission writes are deliberately unexposed — granting an edge is human-only) + pipelines.ts (list_agent_pipelines, get_agent_pipeline_state → /files) + metrics.ts (refresh_metric_definitions → /metrics/definitions/refresh, ent#478; get_metrics → /metrics — ent#479, and another agent's with `agent` through a permission grant, ent#727; get_objectives → /objectives, ent#666; the metric declaration routes (/metrics/declarations, ent#1006) are deliberately unexposed — an agent edits its own template.yaml in-container and calls refresh_metric_definitions; the definitions READ is deliberately unexposed — get_metrics carries each definition — not forgotten; the peer-skill grant routes, ent#662, are deliberately unexposed — granting is admin + interactive, human-only)
 """Agent file management, info, and folder endpoints."""
 import logging
 import os
@@ -9,7 +9,7 @@ from sqlalchemy.exc import DBAPIError, OperationalError
 
 from models import User
 from database import db
-from dependencies import get_current_user, AuthorizedAgentByName, reject_agent_principal, assert_agent_owner, is_interactive_principal
+from dependencies import get_current_user, AuthorizedAgentByName, OwnedAgentByName, require_person_or_capability, reject_agent_principal, assert_agent_owner, assert_own_agent, is_interactive_principal, require_admin, reject_non_interactive_principal, require_person
 from services.agent_auth import agent_httpx_client
 from services import (
     agent_skills_listing,
@@ -18,9 +18,10 @@ from services import (
     metric_read_service,
     objective_join_service,
     objectives_read_budget,
+    peer_skill_policy,
     rate_limiter,
 )
-from services.docker_service import get_agent_container
+from services.docker_service import get_agent_container, kind_from_labels
 from services.docker_utils import container_reload
 from services.agent_service import (
     agent_reach_logic,
@@ -45,6 +46,7 @@ from models import (
     CanonRolesRead,
     CreateFolderRequest,
     FileUpdateRequest,
+    MetricDeclarationRequest,
     ObjectiveJoinRead,
     ShareFileMcpRequest,
     ShareFileResponse,
@@ -129,6 +131,7 @@ async def get_agent_info_endpoint(
                 "cpu": labels.get("trinity.cpu", ""),
                 "memory": labels.get("trinity.memory", "")
             },
+            "kind": kind_from_labels(labels),
             "status": "stopped",
             "message": "Agent is stopped. Start the agent to see full template info."
         }
@@ -144,6 +147,8 @@ async def get_agent_info_endpoint(
                 # `type` read from template.yaml — strip it here so the retired
                 # field never reaches the UI/MCP without forcing image rebuilds.
                 data.pop("type", None)
+                # trinity-enterprise#1007: the label is the record, not the template.
+                data["kind"] = kind_from_labels(container.labels)
                 return data
             else:
                 labels = container.labels
@@ -155,6 +160,7 @@ async def get_agent_info_endpoint(
                         "cpu": labels.get("trinity.cpu", ""),
                         "memory": labels.get("trinity.memory", "")
                     },
+                    "kind": kind_from_labels(labels),
                     "status": "running",
                     "message": "Template info endpoint not available in this agent version"
                 }
@@ -170,6 +176,7 @@ async def get_agent_info_endpoint(
                 "cpu": labels.get("trinity.cpu", ""),
                 "memory": labels.get("trinity.memory", "")
             },
+            "kind": kind_from_labels(labels),
             "status": "running",
             "message": f"Could not fetch template info: {str(e)}"
         }
@@ -294,7 +301,7 @@ async def get_agent_reach(
     return agent_reach_logic(agent_name, target, current_user)
 
 
-@router.put("/{agent_name}/permissions")
+@router.put("/{agent_name}/permissions", dependencies=[Depends(require_person)])
 async def set_agent_permissions(
     agent_name: str,
     request: Request,
@@ -316,12 +323,12 @@ async def set_agent_permissions(
         target_id=agent_name,
         endpoint=request.scope["path"],
         request_id=getattr(request.state, "request_id", None),
-        details={"targets": body.get("permissions") or body.get("targets")},
+        details={"targets": body.get("permitted_agents", [])},
     )
     return result
 
 
-@router.post("/{agent_name}/permissions/{target_agent}")
+@router.post("/{agent_name}/permissions/{target_agent}", dependencies=[Depends(require_person)])
 async def add_agent_permission(
     agent_name: str,
     target_agent: str,
@@ -347,7 +354,7 @@ async def add_agent_permission(
     return result
 
 
-@router.delete("/{agent_name}/permissions/{target_agent}")
+@router.delete("/{agent_name}/permissions/{target_agent}", dependencies=[Depends(require_person)])
 async def remove_agent_permission(
     agent_name: str,
     target_agent: str,
@@ -371,6 +378,75 @@ async def remove_agent_permission(
         details={"target_agent": target_agent},
     )
     return result
+
+
+# ============================================================================
+# Per-skill grants over an edge (abilityai/trinity-enterprise#662)
+# ============================================================================
+
+@router.get("/{agent_name}/peer-skills")
+async def get_agent_peer_skills(
+    agent_name: AuthorizedAgentByName,
+    current_user: User = Depends(get_current_user),
+):
+    """Per permitted target the viewer may open: the library-assigned skills on
+    it and whether this agent may run each. A peer may run what an agent
+    declares; what an admin assigned needs a grant — `not_granted` counts what
+    the edge does not reach."""
+    return peer_skill_policy.peer_skills_view(agent_name, viewer=current_user)
+
+
+async def _set_peer_skill_grant(agent_name: str, target: str, skill: str, granted: bool,
+                                request: Request, admin_user: User) -> dict:
+    # The GRANT half of grant-vs-use: an admin, signed in as a person. An MCP
+    # key — any scope — is refused (require_admin already refuses agent keys).
+    reject_non_interactive_principal(admin_user)
+    try:
+        result = peer_skill_policy.set_grant(agent_name, target, skill, granted, admin_user.username)
+    except peer_skill_policy.PeerSkillGrantRefused as e:
+        raise HTTPException(status_code=e.status_code, detail=e.as_detail())
+    if result["changed"]:
+        try:  # best-effort: the grant has already committed
+            await platform_audit_service.log(
+                event_type=AuditEventType.AUTHORIZATION,
+                event_action="peer_skill_grant" if granted else "peer_skill_revoke",
+                source="api",
+                actor_user=admin_user,
+                actor_ip=request.client.host if request.client else None,
+                endpoint=request.scope["path"],
+                request_id=getattr(request.state, "request_id", None),
+                target_type="agent",
+                target_id=target,
+                details={"caller": agent_name, "skill": skill, "granted": granted},
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("peer-skill audit failed for %s -> %s", agent_name, target)
+    return result
+
+
+@router.put("/{agent_name}/peer-skills/{target}/{skill}")
+async def grant_agent_peer_skill(
+    agent_name: str,
+    target: str,
+    skill: str,
+    request: Request,
+    admin_user: User = Depends(require_admin),
+):
+    """Let `agent_name` run the library skill `skill` on `target` over their
+    edge. Idempotent; the answer carries the consent line."""
+    return await _set_peer_skill_grant(agent_name, target, skill, True, request, admin_user)
+
+
+@router.delete("/{agent_name}/peer-skills/{target}/{skill}")
+async def revoke_agent_peer_skill(
+    agent_name: str,
+    target: str,
+    skill: str,
+    request: Request,
+    admin_user: User = Depends(require_admin),
+):
+    """Take the grant back. Idempotent."""
+    return await _set_peer_skill_grant(agent_name, target, skill, False, request, admin_user)
 
 
 # ============================================================================
@@ -475,11 +551,7 @@ async def get_agent_canon_roles(
     it is the same kind of fan-out against the same container. An agent key reads
     only its own canon. OSS-core (operator ruling 2026-10-06).
     """
-    if current_user.agent_name and current_user.agent_name != agent_name:
-        raise HTTPException(
-            status_code=403,
-            detail="Agent-scoped key may only read its own canon",
-        )
+    assert_own_agent(current_user, agent_name, detail="Agent-scoped key may only read its own canon")
     objectives_read_budget.enforce(
         agent_name,
         detail="Canon read rate limit exceeded for this agent.",
@@ -517,13 +589,12 @@ async def get_agent_objectives(
     `source.*`, and `findings[]` sentences an operator can act on. An objective
     naming an undeclared metric comes back with that finding, never a blank.
     """
-    # --- self-gate (after access, before any read: the `/metrics` spelling,
-    # so the two reads agree on who "itself" is) ----------------------------
-    if current_user.agent_name and current_user.agent_name != agent_name:
-        raise HTTPException(
-            status_code=403,
-            detail="Agent-scoped key may only read its own objectives",
-        )
+    # --- self-gate (after access, before any read) --------------------------
+    # For an agent key this is the `/metrics` spelling, so the two reads agree
+    # on who "itself" is. The system key is held to `trinity-system` here
+    # (trinity-enterprise#719); `/metrics` reads it as it reads any principal
+    # that is not an agent key, through the access dependency alone.
+    assert_own_agent(current_user, agent_name, detail="Agent-scoped key may only read its own objectives")
 
     objectives_read_budget.enforce(
         agent_name,
@@ -683,22 +754,18 @@ def _metric_policy() -> dict:
     and `GET /api/settings/retention` cannot disagree about what is in force.
     """
     from services.settings_service import settings_service
+    from routers import metric_points as _metric_points
 
-    retention, retention_source = settings_service.resolve_ops_setting(
-        "metrics_retention_days")
-    cap, cap_source = settings_service.resolve_ops_setting(
-        "metrics_daily_point_cap")
+    _, retention_source = settings_service.resolve_ops_setting("metrics_retention_days")
+    _, cap_source = settings_service.resolve_ops_setting("metrics_daily_point_cap")
 
-    def _int(raw, fallback):
-        try:
-            return max(int(raw), 0)
-        except (TypeError, ValueError):
-            return fallback
-
+    # #3089: values come from the enforcing reader, so an unusable row reports
+    # what the record route applies: the default cap, never "unlimited", and a
+    # disabled window (0) for garbage, matching the sweep.
     return {
-        "retention_days": _int(retention, 365),
+        "retention_days": _metric_points._ops_int("metrics_retention_days", 0),
         "retention_days_source": retention_source,
-        "daily_point_cap": _int(cap, 100000),
+        "daily_point_cap": _metric_points._ops_int("metrics_daily_point_cap", 100000),
         "daily_point_cap_source": cap_source,
         "enforced": True,
         "enforced_by": "abilityai/trinity-enterprise#478",
@@ -747,6 +814,113 @@ async def refresh_agent_metric_definitions(
 
 
 # ============================================================================
+# Declaring metrics from the UI (trinity-enterprise#1006)
+# ============================================================================
+# The form edits the agent's `template.yaml` `metrics:` block — the template
+# stays the single source of truth — and the registry is refreshed from the
+# file it wrote. Owner tier: a person who owns the agent (or an admin), or an
+# agent key holding `instructions.manage` bounded to its owner's agents. The
+# write itself goes through the Files write, which applies the same tier to
+# `template.yaml` (an instruction file, ent#820) and writes the audit row.
+
+def _declaration_error(e) -> HTTPException:
+    return HTTPException(
+        status_code=e.status,
+        detail={"code": e.code, "message": e.message, **e.extra},
+    )
+
+
+@router.get("/{agent_name}/metrics/declarations",
+            dependencies=[Depends(require_person_or_capability("instructions.manage"))])
+async def get_metric_declarations(agent_name: OwnedAgentByName):
+    """What `template.yaml` declares, as written, for the declaration form.
+
+    Unlike `/metrics/definitions` (the reconciled registry), this reads the
+    live file, because the form edits the file. Carries `template_hash`, the
+    compare-and-swap token every write must send back, and `editable` — a
+    `metrics:` block in a layout the form cannot change safely says so here,
+    before anyone fills in a form that could never be saved.
+    """
+    from services import metric_declaration_service as svc
+    try:
+        return await svc.read_editor(agent_name)
+    except svc.DeclarationRefused as e:
+        raise _declaration_error(e)
+
+
+@router.post("/{agent_name}/metrics/declarations",
+             dependencies=[Depends(require_person_or_capability("instructions.manage"))])
+async def declare_metric(
+    agent_name: OwnedAgentByName,
+    body: MetricDeclarationRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Declare a metric: append one entry to `template.yaml metrics:`."""
+    from services import metric_declaration_service as svc
+    fields = body.model_dump(exclude={"base_hash"})
+    try:
+        return await svc.declare(agent_name, fields, body.base_hash,
+                                 current_user=current_user, request=request)
+    except svc.DeclarationRefused as e:
+        raise _declaration_error(e)
+
+
+@router.put("/{agent_name}/metrics/declarations/{metric_name}",
+            dependencies=[Depends(require_person_or_capability("instructions.manage"))])
+async def update_metric_declaration(
+    agent_name: OwnedAgentByName,
+    metric_name: str,
+    body: MetricDeclarationRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Edit one declared metric. Name and type cannot change."""
+    from services import metric_declaration_service as svc
+    fields = body.model_dump(exclude={"base_hash"})
+    try:
+        return await svc.update(agent_name, metric_name, fields, body.base_hash,
+                                current_user=current_user, request=request)
+    except svc.DeclarationRefused as e:
+        raise _declaration_error(e)
+
+
+@router.get("/{agent_name}/metrics/declarations/{metric_name}/references",
+            dependencies=[Depends(require_person_or_capability("instructions.manage"))])
+async def get_metric_references(agent_name: OwnedAgentByName, metric_name: str):
+    """What still uses this metric: recorded points, objectives, dashboard
+    widgets and anything a registered provider reports. `unchecked` names
+    the sources that could not be read — not evidence of no use."""
+    from services import metric_declaration_service as svc
+    return await svc.references(agent_name, metric_name)
+
+
+@router.delete("/{agent_name}/metrics/declarations/{metric_name}",
+               dependencies=[Depends(require_person_or_capability("instructions.manage"))])
+async def retire_metric_declaration(
+    agent_name: OwnedAgentByName,
+    metric_name: str,
+    request: Request,
+    base_hash: str = Query(..., min_length=64, max_length=64),
+    acknowledge_references: bool = Query(False),
+    current_user: User = Depends(get_current_user),
+):
+    """Retire a metric: remove its entry from `template.yaml metrics:`.
+
+    Recorded points are kept. A metric still in use (or whose use could not be
+    checked) is refused as `metric_in_use` with the list, unless
+    `acknowledge_references=true`.
+    """
+    from services import metric_declaration_service as svc
+    try:
+        return await svc.retire(agent_name, metric_name, base_hash,
+                                acknowledge_references=acknowledge_references,
+                                current_user=current_user, request=request)
+    except svc.DeclarationRefused as e:
+        raise _declaration_error(e)
+
+
+# ============================================================================
 # Shared Folders Endpoints
 # ============================================================================
 
@@ -760,7 +934,7 @@ async def get_agent_folders(
     return await get_agent_folders_logic(agent_name, current_user)
 
 
-@router.put("/{agent_name}/folders")
+@router.put("/{agent_name}/folders", dependencies=[Depends(require_person)])
 async def update_agent_folders(
     agent_name: str,
     request: Request,
@@ -815,7 +989,7 @@ async def get_agent_file_sharing(
     return await get_file_sharing_status_logic(agent_name, current_user)
 
 
-@router.put("/{agent_name}/file-sharing")
+@router.put("/{agent_name}/file-sharing", dependencies=[Depends(require_person)])
 async def set_agent_file_sharing(
     agent_name: str,
     body: dict,
@@ -857,12 +1031,9 @@ async def share_agent_file(
     # An agent-scoped key may share only from its OWN volume. Checked first so
     # the refusal names the rule; the owner gate below (narrowed to the agent's
     # reach since ent#629) would refuse a sibling too, less specifically.
+    assert_own_agent(current_user, agent_name,
+                     detail="Agent-scoped MCP key cannot share files for a different agent.")
     actor_agent = getattr(current_user, "agent_name", None)
-    if actor_agent and actor_agent != agent_name:
-        raise HTTPException(
-            status_code=403,
-            detail="Agent-scoped MCP key cannot share files for a different agent.",
-        )
 
     # Owner gate (the agent's owner always passes)
     assert_agent_owner(current_user, agent_name, detail="Only the owner or admin can share files from this agent.")

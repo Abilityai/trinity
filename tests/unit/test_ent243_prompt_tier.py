@@ -146,7 +146,10 @@ class TestMinimalRender:
 
     def test_minimal_keeps_the_user_memory_leak_warning(self, minimal):
         # The shared-memory-directory warning is a privacy guard, not tool docs.
-        assert "~/.claude/projects/memory/" in minimal
+        # Re-pinned by trinity-enterprise#945: Claude Code's auto-memory lives
+        # under a per-cwd slug, so the old `~/.claude/projects/memory/` literal
+        # named a directory that does not exist.
+        assert "Claude Code's auto-memory (under `~/.claude/projects/`)" in minimal
         assert "shared across all users" in minimal
 
     def test_minimal_keeps_package_persistence(self, minimal):

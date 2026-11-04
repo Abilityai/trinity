@@ -104,7 +104,9 @@ directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{
 - **List = metadata, detail = payload**: list endpoints return `ReportSummary` (no payload);
   `GET /api/reports/{id}` returns the full payload, lazy-loaded when a card expands.
 - **Fleet access**: `GET /api/reports` + `GET /api/reports/stats` filter via
-  `accessible_agent_names` + `_narrow_to_agent` (admin = all). Renderers (`components/reports/`)
+  `accessible_agent_names` + `_narrow_to_agent` (admin = all). `GET /api/reports` also takes a
+  narrowing-only, repeated `agent_names` (≤500, no blanks → named 422; #3300,
+  `agent_service.helpers.narrow_to_names`) applied in SQL before `limit`. Renderers (`components/reports/`)
   pick by `display_hint` → `report_type` prefix → fallback, with a shape check per hint.
 - **Three renderer surfaces, a per-surface fallback** (#2162): Agent Detail, the Operations fleet tab,
   and the **Workspace agent page** all mount the same `ReportRenderer`. The third was added
@@ -126,7 +128,9 @@ directly). Agents call the MCP `report` tool, which POSTs to `POST /api/agents/{
 - **Agent read-back** (#1538): `list_reports` / `get_report` MCP tools over the existing
   access-controlled REST endpoints — no new endpoint, no new tenant-boundary logic. The
   MCP layer adds the narrowing the backend cannot do (agent key → owner scope → `{self} ∪
-  permitted`, the #1104 rule), and a denied `get_report` returns "Report not found" so the
+  permitted`, the #1104 rule) — on a broad read by reading the permits first (strict) and
+  sending them as `agent_names`, so the page is cut over the rows the tool keeps (#3300; the
+  post-filter is a belt whose drops come back as `withheld` + a warning), and a denied `get_report` returns "Report not found" so the
   backend's deliberate 404-not-403 id-privacy choice isn't widened for agent keys. Closes
   the write-only loop: an agent can continue a series instead of duplicating it.
 - **Retention**: `cleanup_service` `_sweep_retention_772` prunes rows past
@@ -178,8 +182,9 @@ canvas under the new name while the old one stayed visible.
   it unreachable would be dead code wearing a fix's name. Since #2559 that caller
   is the **Workspace** call (`client_portal/voice.py::start_workspace_voice`,
   `workspace_mode=True` + `canvas_audience="operator"`), not `ChatPanel`'s
-  retired overlay — so a call started through Agent Detail's Talk door still
-  draws on the same durable canvas the Canvas tab renders.
+  retired overlay — so a Workspace call draws on the same durable canvas the
+  Canvas tab renders. (`AgentHeader`'s Workspace and Talk doors were later removed
+  by trinity-enterprise#950.)
 - **Audience is how "never widens" is made structural.** `audience` ∈ `operator`
   (default) | `roster`, a validated COLUMN and never a key inside `blocks` (the
   ent#364 rule — `blocks` is agent-authored, so an audience buried there lets a
@@ -325,6 +330,30 @@ process exit). Router `routers/evaluations.py` → `db/evaluations.py` → table
   agent may optimise for, and client free text handed verbatim to the agent being
   criticised is a prompt-injection path into it. See
   [workspace-ratings.md](../feature-flows/workspace-ratings.md).
+- **Grader identity is an allowlist projection (ent#781)**: every read — the three GETs
+  and the POST echo — goes through one router projection, `_to_response` →
+  `_redact_for_agent_principal`, which serves the row as stored only to a **human who
+  operates the row's agent** (`_is_machine_principal` is false AND the agent is in
+  `_operator_for`: owner or admin per `can_user_share_agent`, ANDed with
+  `agent_may_reach(manage=True)`). Everyone else gets `evaluator` from
+  `services/evaluation_read_service.redact_evaluator`, a pure function (no SQL, no
+  HTTP): the exact names `platform:tier0` / `platform:tier0:pair` pass,
+  `platform:tier1:<model>` reads `platform:tier1`, any other `kind:rest` reads `kind`
+  when the kind is an identity-free token (`[a-z0-9_-]+`), and a value with no kind or
+  a malformed kind (`grader@example.com:admin`) reads `unknown`. That kind-grammar check
+  is a deliberate dev-only addition to the function copied from the evaluation
+  integration branch; a merge of that branch must keep it. It replaced a two-prefix denylist
+  (`workspace:` / `operator:`) that let the admin route's `admin:<username>` — an email
+  for an email-login admin — reach the graded agent, other machine keys and shared
+  non-owners verbatim. Fail-closed both ways: an unrecognised scope is a machine, a
+  failed operator lookup is "not an operator", and the projection's default operator set
+  is empty. The SQL and the stored rows are unchanged (no migration); the policy lives
+  above persistence. Scope is the `evaluator` field — the free-form `judge`/`checks`
+  an admin submits are returned as before. Tests: `test_937_projection.py` (the issue's
+  regression, adopted verbatim), `test_937_ent781_census.py` (an AST census of every
+  statically named call to the three writer APIs, each driven through the real writer
+  and read back as a machine) and `test_ent781_read_routes.py` (the output contract,
+  operator/non-operator/machine readers, all three GETs over HTTP).
 - **OSS-core by decision** (strategy gate ent#206 §10): the enforcement primitive and
   the deterministic tier are edition-agnostic; the managed grading experience is the
   paid layer, mirroring #668.

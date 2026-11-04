@@ -5,6 +5,10 @@ Per agent A: the set of execution_ids in `agent:slots:A` (Redis ZSET) must
 equal the set of execution_ids in `schedule_executions` with status='running'
 and agent_name=A.
 
+An admitted /chat turn's slot member and row id are the same admission id
+(#3989). A turn admitted as `queued_in_memory` holds no slot and still lands in
+`in_sql_only` after `SQL_GRACE_SECONDS` (#3999).
+
 Drain sentinels (members starting with `drain-`) are filtered out — see
 services/backlog_service.py for why they exist.
 
@@ -13,6 +17,16 @@ from the SQL side of the bijection: they are `running` but never enter the slot
 ZSET (a claim is a pure SQL UPDATE, no ZADD), so counting them would be a
 guaranteed false `in_sql_only`. Same `lease_expires_at IS NULL` exclusion the
 cleanup sweeps in db/schedules.py apply. NON-leased (push) rows are unaffected.
+
+The two sides get different graces (#3952). A slot with no running row is
+flagged after `GRACE_SECONDS` (the stop-path ZREM lags the terminal flip by
+~5ms). A running row with no slot is flagged only after `SQL_GRACE_SECONDS`:
+the scheduler creates its row `running` and unslotted, then POSTs
+`/api/internal/execute-task`, and the row gets its slot (push) or leaves
+`running` for `queued` (pull pilot) only at the end of that call, after the
+skill-gate backstop and admission. That window measured ~7.4s in the field.
+No admission timestamp is persisted, so the grace counts from `started_at`.
+Release-before-terminal gaps shorter than `SQL_GRACE_SECONDS` go undetected.
 
 Tier A, severity major. A bijection violation indicates either leaked Redis
 slots (capacity is wrong) or phantom SQL running rows (cleanup service is
@@ -50,6 +64,22 @@ DRAIN_PREFIX = "drain-"
 # on start (~30ms typ), and SQL terminal flip precedes ZREM on stop (~5ms).
 # Real leaks (PR #378/#403 class) survive multiple cycles, so 3s is generous.
 GRACE_SECONDS = 3.0
+# #3952: SQL side only. Covers the scheduler's create → execute-task admission
+# window (~7.4s observed). Must stay below the canary cycle
+# (CANARY_INTERVAL_SECONDS = 300) so a real orphan row is reported on its
+# first cycle past the grace; pinned by test_sql_grace_shorter_than_canary_cycle.
+SQL_GRACE_SECONDS = 60.0
+
+
+def _older_than(ts, cutoff: float) -> bool:
+    """A missing or unparseable `started_at` counts as old, so the row fires
+    instead of raising out of check() for every agent."""
+    if ts is None:
+        return True
+    try:
+        return datetime.fromisoformat(ts).timestamp() < cutoff
+    except (TypeError, ValueError):
+        return True
 
 
 def check(snapshot: Snapshot) -> List[ViolationReport]:
@@ -81,15 +111,14 @@ def check(snapshot: Snapshot) -> List[ViolationReport]:
         if slot_ids == running_ids:
             continue
 
-        cutoff = time.time() - GRACE_SECONDS
+        now = time.time()
         in_redis_only = sorted(
             sid for sid in slot_ids - running_ids
-            if agent.slot_scores.get(sid, 0) < cutoff
+            if agent.slot_scores.get(sid, 0) < now - GRACE_SECONDS
         )
         in_sql_only = sorted(
             eid for eid in running_ids - slot_ids
-            if (ts := agent.running_started_at.get(eid)) is None
-            or datetime.fromisoformat(ts).timestamp() < cutoff
+            if _older_than(agent.running_started_at.get(eid), now - SQL_GRACE_SECONDS)
         )
         if not in_redis_only and not in_sql_only:
             continue
@@ -110,8 +139,11 @@ def check(snapshot: Snapshot) -> List[ViolationReport]:
                 signal_query=(
                     "set(ZRANGE agent:slots:{name}) - drain sentinels "
                     "vs set(SELECT id FROM schedule_executions "
-                    "WHERE agent_name = '{name}' AND status = 'running')"
-                ).format(name=agent.name),
+                    "WHERE agent_name = '{name}' AND status = 'running' "
+                    "AND lease_expires_at IS NULL); "
+                    "in_sql_only skips rows started < {sql_grace:.0f}s ago, "
+                    "in_redis_only skips slots acquired < {grace:.0f}s ago"
+                ).format(name=agent.name, sql_grace=SQL_GRACE_SECONDS, grace=GRACE_SECONDS),
             )
         )
 

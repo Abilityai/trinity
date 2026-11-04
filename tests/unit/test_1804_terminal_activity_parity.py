@@ -44,6 +44,7 @@ TERMINAL_WRITERS = {
     "update_execution_status",
     "mark_execution_failed_by_watchdog",
     "fail_stale_slot_execution",
+    "cancel_queued_execution",  # #3651: the queued-cancel CAS is a terminal too
 }
 
 # Any of these discharges the obligation.
@@ -58,6 +59,7 @@ ACTIVITY_CLOSERS = {
     "_close_requeued_activity",
     "_close_bulk_swept_activities",
     "_close_dispatch_activity_cancelled",
+    "_close_unclaimed_turn",
 }
 
 # (module path relative to src/backend, enclosing function) -> why it is exempt.
@@ -155,7 +157,8 @@ _SCAN_DIRS = ("services", "routers", "client_portal")
 # this, so an unlisted newcomer fails rather than being skipped.
 _UNSCANNED_JUSTIFIED = {
     "database.py": (
-        "The db facade DELEGATES update_execution_status to ScheduleOperations "
+        "The db facade DELEGATES update_execution_status / cancel_queued_execution "
+        "to ScheduleOperations "
         "(Invariant #2). It is the persistence layer the contract is defined "
         "against, not a caller with an activity obligation — scanning it would "
         "flag the plumbing that every legitimate closer runs through."

@@ -321,6 +321,10 @@ class AgentStatus(BaseModel):
     base_image_version: Optional[str] = None  # Version of trinity-agent-base image
     ephemeral: Optional[bool] = False  # trinity-enterprise#69: ghost agent (budgeted, hard-discarded)
     display_label: Optional[str] = None  # ent#181: human-facing name; None = render `name` (the slug)
+    # #3872: a persisted git config exists (the repo is bound) — set by the
+    # detail endpoint only; the header reserves its GitHub row on it at first
+    # paint. None = not resolved (the list path never reads it).
+    git_configured: Optional[bool] = None
     # trinity-enterprise#15: copy-intent provenance — {source_repo, source_branch,
     # head_sha, file_count}; set only on the create response of a snapshot import.
     import_snapshot: Optional[Dict[str, Any]] = None
@@ -329,6 +333,10 @@ class AgentStatus(BaseModel):
     # answer. `pushes` (ent#704) is whether it auto-pushes; fork-to-own is
     # source_mode AND pushes, so the UI must never infer it from source_mode.
     git_mode: Optional[dict] = None
+    # trinity-enterprise#1007: the create-time kind, read from the `trinity.kind`
+    # label. None = unknown (created before the label, rebuilt by
+    # recreate_missing_container, or the system agent) — never a default.
+    kind: Optional[Literal["agent", "deployment"]] = None
 
     class Config:
         json_encoders = {
@@ -492,10 +500,21 @@ class User(BaseModel):
     # trinity-enterprise#629 + #164: the agents a capability fence admitted an
     # agent key to on THIS request (`dependencies._admit_capability_reach`).
     # Private, so it is never serialized and never set from a token: the only
-    # writers are the two fences, after the grant check and the owner bound.
+    # writer is `enforce_agent_capability`, after the grant check and the owner bound.
     # One principal object per request (FastAPI caches `get_current_user`), so
     # it cannot outlive the request that earned it.
     _capability_reach: set = PrivateAttr(default_factory=set)
+    # trinity-enterprise#926: the raw `X-Trinity-Execution-Id` an AGENT-scoped
+    # key's request carried (#2392) — the turn the agent is acting in. Private
+    # like the reach set: written only by `dependencies.record_acting_turn`, from
+    # the request, never from a token, and never serialized. Read by the viewer
+    # helpers, which narrow a shared person's turn to that person's rows.
+    _acting_execution_id: Optional[str] = PrivateAttr(default=None)
+    # The turn_tier_service answer for it, computed once per request.
+    _acting_turn_cache: Optional[tuple] = PrivateAttr(default=None)
+    # trinity-enterprise#872: `dependencies.principal_reach`'s per-request memo of
+    # an agent key's fleet reach. Private, never serialized; None until read.
+    _fleet_reach: Optional[set] = PrivateAttr(default=None)
 
 
 class Token(BaseModel):
@@ -537,6 +556,16 @@ class ChatMessageRequest(BaseModel):
     model: Optional[str] = None  # Model alias: sonnet, opus, haiku, or full model name
 
 
+class ReportBackRequest(BaseModel):
+    """#3295: ask that a sequential ``/chat`` execution report its terminal into
+    the caller's conversation. Sent by the MCP server when a sequential call
+    ends in a receipt instead of the reply, naming the CALLER's own turn; the
+    row inherits that turn's channel context through the same provenance
+    guard a ``/task`` child uses (``_inherited_channel_context``)."""
+    model_config = ConfigDict(extra="forbid")
+    parent_execution_id: str = Field(min_length=1, max_length=128)
+
+
 class ModelChangeRequest(BaseModel):
     """Request model for changing agent's model."""
     model: str  # Model alias: sonnet, opus, haiku, or full model name
@@ -549,7 +578,12 @@ class ParallelTaskRequest(BaseModel):
     allowed_tools: Optional[List[str]] = None  # Tool restrictions (--allowedTools)
     system_prompt: Optional[str] = None  # Additional instructions (--append-system-prompt)
     timeout_seconds: Optional[int] = None  # DEPRECATED (#1068, demotion PR 1): per-task override. Agent execution_timeout_seconds (#665) / schedule cap (#913) is authoritative; honored-but-clamped to the agent cap for now, to be removed after one release of soak. None = use agent's config.
-    max_turns: Optional[int] = None  # Maximum agentic turns (--max-turns) for runaway prevention
+    # Maximum agentic turns (--max-turns) for runaway prevention. #2328: bounded to the
+    # owner guardrail's own legal range (routers/agent_config.py
+    # `_GUARDRAILS_NUMBER_BOUNDS["max_turns_task"]`, parity-tested), so 0, a negative
+    # or an unbounded value is a 422 here whatever image the agent runs; the /task
+    # route then clamps it to the owner's configured `max_turns_task`.
+    max_turns: Optional[int] = Field(None, ge=1, le=500)
     async_mode: Optional[bool] = False  # If true, return immediately with execution_id (fire-and-forget)
     save_to_session: Optional[bool] = False  # If true, persist messages to chat_sessions (for authenticated Chat tab)
     user_message: Optional[str] = None  # Original user message (without context), used when save_to_session=True
@@ -1278,6 +1312,30 @@ class SystemAgentConfig(BaseModel):
     # the agent) or "deployment" (a deployment of a codebase). Omitted → the
     # platform default (AgentConfig.kind, ent#705).
     kind: Optional[Literal["agent", "deployment"]] = None
+    # trinity-enterprise#1030: library skills and skill sets (ent#530) this
+    # member holds. Additive: what is missing is assigned, an extra is
+    # reported, nothing is ever unassigned.
+    skills: Optional[List[str]] = None
+    skill_sets: Optional[List[str]] = None
+    # trinity-enterprise#1030 CP2: admin capabilities (`db.capability_grants.
+    # CAPABILITIES`) this member holds. Written only by an admin in a signed-in
+    # session — the grant route's own gate; otherwise reported as held back.
+    # An extra is reported, never revoked.
+    grants: Optional[List[str]] = None
+    # trinity-enterprise#1030 CP3: the approval map — `{<skill>: {approver,
+    # deadline_hours}}`. Written through the gate map's own `set_gate`, so its
+    # admission is the route's; a stored gate the manifest does not name is
+    # reported, never cleared.
+    gates: Optional[Dict[str, Dict[str, Any]]] = None
+    # trinity-enterprise#1030 CP4: the canon seat the AGENT holds, written
+    # only through an assignment module's optional writer; and the seats a
+    # PERSON must fill, by role and kind — never a person, reported only.
+    seat: Optional[str] = None
+    person_seats: Optional[List[Dict[str, str]]] = None
+    # trinity-enterprise#1030 CP5: `deploy: false` names a member the system
+    # has without running it (verdict `declared_only`): never created, never
+    # reconciled, never deleted, and not stored platform-side.
+    deploy: bool = True
 
 
 class SystemPermissions(BaseModel):
@@ -1304,6 +1362,11 @@ class SystemManifest(BaseModel):
     # ORG-001 Phase 4: Tags and System View support
     default_tags: Optional[List[str]] = None  # Applied to all agents in manifest
     system_view: Optional[SystemViewConfig] = None  # Auto-create System View on deploy
+    # trinity-enterprise#1030: how a manifest key maps to a member name.
+    # `prefixed` (today) names member `x` of system `s` `s-x`; `bare` names it
+    # `x`. A plain `str`, not a Literal, so `validate_manifest` can refuse any
+    # other value with a NAMED 400 rather than a raw Pydantic dump.
+    naming: str = "prefixed"
     # ent#126: top-level keys the parser does not recognise, recorded so
     # `validate_manifest` can WARN about them. Silently dropping them is how
     # `trinity_prompt:` (a typo for `prompt:`) sat in a shipped manifest doing
@@ -1395,6 +1458,9 @@ class SystemDeployResponse(BaseModel):
     system_name: str
     agents_created: List[str]  # Final agent names created
     agents_to_create: Optional[List[dict]] = None  # For dry_run: [{name, template}]
+    # #4130: final names of the `deploy: false` members, skipped and never
+    # created (the `warnings` line stays beside it). Every branch sets it.
+    agents_declared_only: List[str] = []
     prompt_updated: bool
     permissions_configured: int = 0
     schedules_created: int = 0
@@ -1419,6 +1485,162 @@ class SystemDeployResponse(BaseModel):
     # frontend needs it to choose its post-deploy navigation, and a requested view
     # that failed also appends a warning.
     system_view_requested: bool = False
+
+
+# ============================================================================
+# System apply (trinity-enterprise#695): reconcile a live system to its manifest
+# ============================================================================
+
+
+class SystemApplyRequest(BaseModel):
+    """Request to reconcile a live system to a manifest (`POST /api/systems/apply`).
+
+    `extra="forbid"`: a stray `mode` or `strict` is a 422, never silently
+    dropped. Silently dropping an unknown key is exactly how a `mode: "apply"`
+    sent to `/deploy` on an older build would run CREATE and suffix the fleet.
+
+    `dry_run` defaults to TRUE (unlike `SystemDeployRequest`): a verb that
+    changes live agents previews unless the caller says otherwise, the teardown
+    precedent.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    manifest: str  # Raw YAML string, parsed by `system_service.parse_manifest`
+    dry_run: bool = True
+
+
+class SystemApplyChange(BaseModel):
+    """One difference apply found on a member.
+
+    `action` is `write` (apply changes it on a real run) or `report` (apply
+    tells you and leaves it). A member whose changes are all `report` is
+    `unchanged`: AC1 counts writes, not notices.
+    """
+    field: str
+    action: Literal["write", "report"]
+    code: str
+    current: Optional[Any] = None
+    desired: Optional[Any] = None
+    note: Optional[str] = None
+
+
+class SystemApplyMember(BaseModel):
+    """One declared member and what apply does to it."""
+    name: str
+    short_name: str
+    verdict: Literal["create", "update", "unchanged", "blocked", "declared_only"]
+    changes: List[SystemApplyChange] = []
+    # A stored configuration the running container does not have yet, from the
+    # platform's own drift predicates; independent of this run's writes. Apply
+    # never restarts an existing member.
+    restart_required: bool = False
+    # None on a dry run or a refused run, and for a declared-only member (nothing
+    # is planned or attempted for it, #4130); otherwise whether every write
+    # planned for this member succeeded.
+    applied: Optional[bool] = None
+    # trinity-enterprise#1030: the config groups the platform could not
+    # observe for this member (no hook answers them on this install) — never
+    # "in sync" and never a blocker. A READ ERROR is not unobserved: it is the
+    # retryable `member_reads_unavailable` blocker.
+    unobserved: List[str] = []
+
+
+class SystemApplyDrift(BaseModel):
+    """A tagged member of the system that the manifest does not declare.
+
+    Reported, never deleted, stopped or renamed (AC3)."""
+    name: str
+    evidence: str  # "tag" | "both" (a prefix-only member blocks instead)
+    note: Optional[str] = None
+
+
+class SystemApplyBlocker(BaseModel):
+    """A reason the whole run is refused before any write."""
+    code: str
+    member: Optional[str] = None
+    detail: str
+    remedy: str
+    retryable: bool = False
+
+
+class SystemApplyPromptVerdict(BaseModel):
+    """The platform-wide `trinity_prompt` (written only by an admin)."""
+    verdict: Literal["unchanged", "update", "not_declared", "requires_admin"]
+    note: Optional[str] = None
+
+
+class SystemApplyViewVerdict(BaseModel):
+    """The auto-created system view."""
+    verdict: Literal["unchanged", "create", "not_requested", "ambiguous"]
+    id: Optional[str] = None
+    changes: List[SystemApplyChange] = []
+
+
+class SystemApplyFailure(BaseModel):
+    """One write that did not land on a real run."""
+    name: str
+    short_name: str
+    step: str
+    reason: str  # Sanitized, truncated (`system_service._failure_reason`)
+    # What the write was for when a step writes more than one thing on a
+    # member — the skill(s), set, gate's skill, capability, seat, edge target
+    # or tag (#4130); None for a member-wide write.
+    key: Optional[str] = None
+
+
+class SystemApplyAdoption(BaseModel):
+    """A live agent a `naming: bare` manifest adopts (trinity-enterprise#1030).
+
+    `tags` are the agent's tags before adoption: the platform keeps no registry
+    of system names, so it SHOWS them rather than guessing whether one is
+    another system's (in which case the agent will belong to two systems).
+    """
+    name: str
+    tags: List[str] = []
+
+
+class SystemApplyResponse(BaseModel):
+    """Response from `POST /api/systems/apply` (trinity-enterprise#695).
+
+    `status`: `valid` (dry run, no blockers) | `invalid` (dry run, blockers) |
+    `refused` (real run, blockers, nothing written) | `applied` (every
+    attempted write succeeded, including none planned) | `partial` (some
+    failed) | `failed` (every attempted write failed). A separate model from
+    `SystemDeployResponse`, whose five-valued `status` stays untouched (AC6).
+    """
+    mode: Literal["apply"] = "apply"
+    dry_run: bool
+    system_name: str
+    status: Literal["valid", "invalid", "refused", "applied", "partial", "failed"]
+    members: List[SystemApplyMember] = []
+    drift: List[SystemApplyDrift] = []
+    blockers: List[SystemApplyBlocker] = []
+    prompt: SystemApplyPromptVerdict
+    system_view: SystemApplyViewVerdict
+    failed: List[SystemApplyFailure] = []
+    warnings: List[str] = []
+    # trinity-enterprise#1030: agents this run adopts (dry run) or adopted
+    # into the system by tagging it, kept apart from `members` because adoption
+    # is when an agent joins `restart_system` / teardown's reach.
+    # #4130: a dry run lists the plan; a refused run lists nobody; a real run
+    # lists only the members whose system tag landed.
+    adopted: List[SystemApplyAdoption] = []
+    # trinity-enterprise#1030: per config group — `skills`, `grants`, `gates`,
+    # `roles` — and `members`, each `{"write": n, "report": n, "unobserved": n}`
+    # (services/system_apply/summary.py). `grants` also carries `held_back:
+    # [{"name", "grants": [...]}]` and `roles` `held_back: [{"name", "seat"}]`,
+    # so a grant or seat the CALLER's credential could not write is loud
+    # (theme 3). Blocked members are counted nowhere. #4130: `write` is the
+    # plan on a dry run ("would make") and only the LANDED writes on a real
+    # run, each by its own key (two sets on one member, one held: 1), none on
+    # a refused run; `report` / `unobserved` are plan counts.
+    summary: Dict[str, Dict[str, Any]] = {}
+    # What a real run actually did, for the router's audit row and its thin
+    # `agent_tags_changed` triggers (never the plan: a create that failed is
+    # not a create). Private: never serialized.
+    _tags_written: List[str] = PrivateAttr(default_factory=list)
+    _created: List[str] = PrivateAttr(default_factory=list)
+    _writes_ok: Dict[str, int] = PrivateAttr(default_factory=dict)
 
 
 # ============================================================================
@@ -1521,10 +1743,6 @@ class CredentialImportResponse(BaseModel):
     files_imported: List[str]
     message: str
 
-
-class InternalDecryptInjectRequest(BaseModel):
-    """Request for internal decrypt-and-inject (startup.sh)."""
-    agent_name: str
 
 # ============================================================================
 # Guided Credential Setup (trinity-enterprise#127)
@@ -1813,6 +2031,12 @@ class AgentCapacityUpdate(BaseModel):
     max_parallel_tasks: int
 
 
+class DirectVoiceSettingsUpdate(BaseModel):
+    """Body for PUT /api/settings/direct-voice (trinity-enterprise#1046). Partial."""
+    enabled: Optional[bool] = None
+    provider: Optional[Literal["auto", "gemini", "elevenlabs"]] = None
+
+
 class BrainOrbSettingsUpdate(BaseModel):
     """Body for PUT /api/settings/brain-orb (trinity-enterprise#85).
 
@@ -2038,6 +2262,111 @@ class OperatorResumeUpdate(BaseModel):
     enabled: bool
 
 
+class MemoryOptOutUpdate(BaseModel):
+    """Body for PUT /api/agents/{name}/retrieval-memory (trinity-enterprise#1022).
+
+    Per-agent opt-OUT of retrieval memory. The platform switch
+    (``trinity_memory_enabled``, default off) is the deliberate act; this lets
+    an owner keep one agent out once the platform is on.
+    """
+    opt_out: bool
+
+
+class MemoryFactOut(BaseModel):
+    """One retrieval-memory fact as the owner view sees it (trinity-enterprise#1022).
+
+    Never carries the embedding — the owner reads text, provenance and usage.
+    """
+    id: str
+    agent_name: str
+    user_email: str
+    text: str
+    source: str
+    execution_id: Optional[str] = None
+    updated_by_execution_id: Optional[str] = None
+    recall_count: int = 0
+    last_recalled_at: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+class MemoryExtractPreviewRequest(BaseModel):
+    """Body for POST /api/agents/{name}/retrieval-memory/extract-preview
+    (trinity-enterprise#1027): one exchange, run through the real transcript →
+    extract → screen path on whatever would answer for this agent, nothing
+    stored. The owner's prompt-tuning tool, and the eval's way to score the
+    prompt on the runtime it will actually use."""
+    message: str = Field(..., min_length=1, max_length=20000)
+    response: Optional[str] = Field(default=None, max_length=20000)
+    error: Optional[str] = Field(default=None, max_length=4000)
+    status: str = Field(default="success", max_length=32)
+    triggered_by: str = Field(default="schedule", max_length=32)
+    source_user_email: Optional[str] = Field(default=None, max_length=320)
+
+
+class MemoryExtractPreviewOut(BaseModel):
+    agent_name: str
+    subject: str                      # "agent" | "person"
+    extractor: str                    # "subscription" | "api_key" — the credential that answered
+    model: Optional[str] = None
+    subscription: Optional[str] = None
+    facts: list[str]
+    screened: list[str]
+    transcript_chars: int
+
+class MemorySearchRequest(BaseModel):
+    """Body for POST /api/agents/{name}/retrieval-memory/search — the agent door
+    (trinity-enterprise#1028). The scope is resolved from the execution row by
+    the whose-memory rule; the caller never names a person."""
+    execution_id: str = Field(..., min_length=1, max_length=200)
+    query: str = Field(..., min_length=1, max_length=500)
+    k: int = Field(default=10, ge=1, le=50)
+
+
+class MemorySearchHit(BaseModel):
+    """One ranked fact from a search (trinity-enterprise#1028): the text, the
+    rendered ``(date, kind of run) text`` line the prompt would carry,
+    provenance, and both numbers — ``relevance`` (the cosine the gate saw) and
+    ``score`` (relevance × recency, what the order used)."""
+    id: str
+    text: str
+    line: str
+    source: str
+    execution_id: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    relevance: float
+    score: float
+
+
+class MemorySearchResponse(BaseModel):
+    """What the agent door returns: which scope answered and the hits."""
+    agent_name: str
+    scope: str            # "agent" | "person"
+    hits: list[MemorySearchHit]
+
+
+class MemoryFactEventOut(BaseModel):
+    """One row of the retrieval-memory journal (trinity-enterprise#1022).
+
+    What happened to a fact — or to a candidate that never became one — and
+    which execution did it: the lineage behind every live fact, and the corpus
+    the extraction prompt is tuned against.
+    """
+    id: str
+    agent_name: str
+    user_email: str
+    fact_id: Optional[str] = None
+    op: str
+    execution_id: Optional[str] = None
+    candidate_text: Optional[str] = None
+    previous_text: Optional[str] = None
+    neighbour_ids: Optional[str] = None
+    score: Optional[float] = None
+    actor: Optional[str] = None
+    created_at: str
+
+
 class McpExposedUpdate(BaseModel):
     """Body for PUT /api/agents/{name}/mcp-exposed (#846).
 
@@ -2198,7 +2527,7 @@ class AgentMcpKeyVerifyEntry(BaseModel):
     here.
     """
     server_name: str
-    # ok | foreign_user_key | foreign_ops_key | foreign_agent_key | unknown_key
+    # ok | foreign_user_key | foreign_ops_key | foreign_ops_write_key | foreign_agent_key | unknown_key
     verdict: str
     key_scope: Optional[str] = None
     key_prefix: Optional[str] = None
@@ -2208,7 +2537,7 @@ class AgentMcpKeyVerifyEntry(BaseModel):
 class AgentMcpKeyVerifyResult(BaseModel):
     """Response for POST /api/agents/{name}/mcp-key/verify — container truth."""
     agent_name: str
-    # ok | foreign_user_key | foreign_ops_key | foreign_agent_key | unknown_key | not_configured
+    # ok | foreign_user_key | foreign_ops_key | foreign_ops_write_key | foreign_agent_key | unknown_key | not_configured
     # | shadow_entry | unavailable
     verdict: str
     message: Optional[str] = None
@@ -2347,6 +2676,7 @@ _PULL_ERROR_CODES = frozenset({
     "timeout", "capacity", "auth", "billing", "agent_error", "network",
     "circuit_open", "reconciled", "lease_expired", "oom", "max_turns",
     "model_unsupported",  # #3012 — the agent's model-rejection 400
+    "turn_refused",  # ent#926 — a runtime that cannot scope the turn refused it
 })
 # reply.status value set (MESSAGE_ENVELOPE_SCHEMA §2.4/§4; `cancelled` per the
 # live #1083 3-way map — OPEN-1).
@@ -2692,6 +3022,39 @@ class FileUpdateRequest(BaseModel):
     content: str
 
 
+class MetricStatusValueInput(BaseModel):
+    """One allowed value of a `status` metric, as the declaration form sends it."""
+    model_config = ConfigDict(extra="forbid")
+    value: Optional[str] = Field(None, max_length=200)
+    color: Optional[str] = Field(None, max_length=32)
+    label: Optional[str] = Field(None, max_length=400)
+
+
+class MetricDeclarationRequest(BaseModel):
+    """A metric declared or edited from the UI (trinity-enterprise#1006).
+
+    Becomes one `template.yaml` `metrics:` entry. Bounds here only stop absurd
+    payloads; the real rules are `template_metrics`' and come back as named,
+    per-field errors. `base_hash` is the template hash the editor read
+    returned: a write against a file that has changed since is refused.
+    """
+    model_config = ConfigDict(extra="forbid")
+    base_hash: str = Field(..., min_length=64, max_length=64)
+    name: str = Field(..., max_length=200)
+    type: str = Field(..., max_length=64)
+    label: Optional[str] = Field(None, max_length=400)
+    description: Optional[str] = Field(None, max_length=2000)
+    unit: Optional[str] = Field(None, max_length=100)
+    cadence: Optional[str] = Field(None, max_length=64)
+    direction: Optional[str] = Field(None, max_length=32)
+    aggregation: Optional[str] = Field(None, max_length=32)
+    values: Optional[List[MetricStatusValueInput]] = Field(None, max_length=100)
+    dimensions: Optional[List[str]] = Field(None, max_length=50)
+    warning_threshold: Optional[float] = None
+    critical_threshold: Optional[float] = None
+    recorded_by: Optional[str] = Field(None, max_length=200)
+
+
 class CreateFolderRequest(BaseModel):
     """Request body for folder creation."""
     path: str
@@ -2985,7 +3348,7 @@ class CanaryStatusResponse(BaseModel):
 
     enabled: bool = Field(
         ...,
-        description="CANARY_ENABLED == '1'. Answers the disabled case; "
+        description="CANARY_ENABLED is 1/true/yes/on (any case). Answers the disabled case; "
         "default-OFF is the normal state for most installs.",
     )
     status: str = Field(
@@ -3311,6 +3674,14 @@ class InternalTaskExecutionRequest(BaseModel):
     # (#2426). `execute_task_internal` resolves and stamps the pre-created row
     # before dispatch.
     deliver_to_workspace_email: Optional[str] = None
+
+
+class InternalPreCheckRequest(BaseModel):
+    """The schedule a pre-check is gating (#3966). Every field is optional: a
+    bodyless request (an older scheduler) runs the hook exactly as before."""
+    schedule_id: Optional[str] = None
+    schedule_name: Optional[str] = None
+    schedule_message: Optional[str] = None
 
 
 class ValidateExecutionRequest(BaseModel):
@@ -4094,6 +4465,14 @@ class ScheduleResponse(BaseModel):
     # it the field is silently dropped from every response — `ScheduleResponse`
     # is built with `**schedule.model_dump()`, and pydantic ignores extra keys.
     deliver_to_workspace_email: Optional[str] = None
+    # ent#875: whether THIS caller may mint, rotate, revoke or read the schedule's
+    # webhook (its creator, the agent owner, an admin). Computed server-side by
+    # both checks the webhook routes enforce — the principal rule (a person, or an
+    # agent key holding `schedules.manage`, trinity-enterprise#719) and the share
+    # tier — the client has no numeric user id to compare an owner id against,
+    # and the creator's id is not exposed.
+    # Defaults False: a response built without the predicate claims nothing.
+    can_manage_webhook: bool = False
 
     class Config:
         from_attributes = True
@@ -4181,6 +4560,10 @@ class ExecutionResponse(BaseModel):
     source_agent_name: Optional[str] = None
     source_mcp_key_id: Optional[str] = None
     source_mcp_key_name: Optional[str] = None
+    # RETRY-001: a scheduler retry links to its chain's original execution.
+    # The MCP server scopes a delegation's idempotency key to it (#3296), so a
+    # retried scheduled run replays attempt 1's children instead of re-running.
+    retry_of_execution_id: Optional[str] = None
     # Session resume - EXEC-023
     claude_session_id: Optional[str] = None
     # Model selection - MODEL-001
@@ -4196,6 +4579,8 @@ class ExecutionResponse(BaseModel):
     compact_metadata: Optional[str] = None
     # Turn-integrity flags (#2467) - small JSON object; NULL = no evidence
     turn_integrity: Optional[str] = None
+    # ent#862: AAuth peer identity that triggered this execution (NULL for non-AAuth callers)
+    a2a_caller_identity: Optional[str] = None
     # trinity-enterprise#754 — as on ExecutionSummary.
     gate_self_approved: bool = False
     gate_self_approved_by_viewer: bool = False
@@ -4289,6 +4674,16 @@ class SubscriptionRegistration(SubscriptionCredential):
 class OpsSettingsUpdate(BaseModel):
     """Request body for updating ops settings."""
     settings: Dict[str, str]
+
+
+class AutonomyDialUpdate(BaseModel):
+    """The instance autonomy level (trinity-enterprise#641, P12).
+
+    A closed vocabulary — L0/L1/L2/L3, canon `tandem-06-operations.md` §2.3 —
+    validated at the boundary AND at the sink (`autonomy_dial_service.set_level`),
+    because the generic `PUT /api/settings/{key}` would otherwise accept any
+    string for a value whose whole meaning is its range (#1525, #506)."""
+    level: str = Field(..., max_length=8)
 
 
 class RetentionAcknowledge(BaseModel):
@@ -4423,6 +4818,15 @@ class AccessPolicyUpdate(BaseModel):
     group_auth_mode: str = "none"  # 'none' or 'any_verified'
 
 
+class AccessRequestPriorContact(BaseModel):
+    """The same channel identity seen before (trinity-enterprise#737), on an
+    agent the viewer owns or administers: an earlier request (`approved` /
+    `denied` / `pending`) or a verified chat link (`verified`)."""
+    agent_name: str
+    status: str
+    email: Optional[str] = None
+
+
 class AccessRequest(BaseModel):
     id: str
     agent_name: str
@@ -4430,6 +4834,17 @@ class AccessRequest(BaseModel):
     channel: str | None = None
     requested_at: str
     status: str
+    # trinity-enterprise#737 — who asked, as the channel saw them. A field the
+    # channel does not expose was never captured. `identity_captured` is False
+    # for the public link (no channel identity) and for rows older than #737, so
+    # the UI says so instead of showing a blank.
+    requester_channel_id: Optional[str] = None
+    requester_handle: Optional[str] = None
+    requester_name: Optional[str] = None
+    requester_chat_id: Optional[str] = None
+    requester_thread_id: Optional[str] = None
+    identity_captured: bool = False
+    known_as: List[AccessRequestPriorContact] = []
 
 
 class AccessRequestDecision(BaseModel):
@@ -4503,7 +4918,7 @@ class TelegramGroupConfigUpdateRequest(BaseModel):
     trigger_mode: Optional[str] = None
     welcome_enabled: Optional[bool] = None
     welcome_text: Optional[str] = None
-    # ent#265: human-only arm — the router calls reject_agent_principal when set.
+    # ent#265: human-only arm — the router calls assert_person when set.
     allow_proactive: Optional[bool] = None
     # ent#600: human-only arm too — recording a group's conversation is a
     # privacy decision the owner makes, not one an agent grants itself.
@@ -4542,6 +4957,31 @@ class SlackChannelMessageRequest(IntentKeyFields):
 
 class UserRoleUpdate(BaseModel):
     role: str
+
+
+class ChangePasswordRequest(BaseModel):
+    """`PUT /api/users/me/password` (#3825). Complexity is checked by the
+    service with the rule first-run setup uses, so the reasons come back named."""
+    current_password: str = Field(..., max_length=1024)
+    new_password: str = Field(..., max_length=1024)
+    # Also revoke the MCP API keys this person minted (user / ops / ops_write /
+    # portal delegate scopes; never an agent's own key). Opt-in: keys drive integrations.
+    revoke_api_keys: bool = False
+
+
+class ChangePasswordResponse(BaseModel):
+    """A fresh session token for the caller: every OTHER session of the account
+    is signed out by the change; MCP API keys are not sessions (see below). `other_sessions_signed_out` is False when the
+    cutoff could not be written (Redis down) — reported, never assumed.
+    `admin_env_stale` means `.env` still holds the old `ADMIN_PASSWORD`."""
+    access_token: str
+    token_type: str = "bearer"
+    other_sessions_signed_out: bool
+    admin_env_stale: bool
+    # Person-minted API keys revoked by this change, and how many still work
+    # (the cutoff does not reach keys — Settings → MCP Keys lists them).
+    api_keys_revoked: int = 0
+    api_keys_active: int = 0
 
 
 class UpdateMyEmailRequest(BaseModel):
@@ -5769,3 +6209,73 @@ class AAuthResourceCallResponse(BaseModel):
     detail: Optional[str] = None
     do_not_retry: Optional[bool] = None
     next_step: str
+
+
+# ---------------------------------------------------------------------------
+# Nevermined card delegation (trinity-enterprise#966). Nevermined holds the
+# card and the mandate; these models carry the organization config and never
+# echo a secret back.
+# ---------------------------------------------------------------------------
+
+def _nevermined_secret(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    if value.splitlines() not in ([], [value]):  # the agent .env splitter's boundary set
+        raise ValueError("a Nevermined secret cannot contain a newline")
+    value = value.strip()
+    return value or None
+
+
+class NeverminedOrganizationUpdate(BaseModel):
+    """PUT /api/nevermined/organization. Secrets are write-only: an absent one
+    keeps the stored value."""
+    org_id: str = Field(..., min_length=1, max_length=256)
+    environment: Literal["sandbox", "live"] = "sandbox"
+    widget_secret: Optional[str] = Field(default=None, max_length=4096)
+    agent_api_key: Optional[str] = Field(default=None, max_length=4096)
+
+    @field_validator("org_id")
+    @classmethod
+    def _org_id(cls, v: str) -> str:
+        v = v.strip()
+        if not v or any(c in v for c in "\r\n"):
+            raise ValueError("org_id must be a non-empty single line")
+        return v
+
+    @field_validator("widget_secret", "agent_api_key")
+    @classmethod
+    def _secret(cls, v: Optional[str]) -> Optional[str]:
+        return _nevermined_secret(v)
+
+
+class NeverminedOrganizationState(BaseModel):
+    """The organization as any route returns it — no secret field exists here."""
+    configured: bool
+    org_id: Optional[str] = None
+    environment: Optional[Literal["sandbox", "live"]] = None
+    updated_at: Optional[str] = None
+    updated_by: Optional[str] = None
+    active_delegations: int = 0
+
+
+NEVERMINED_ID_PATTERN = r"^[A-Za-z0-9_-]{8,128}$"
+
+
+class NeverminedDelegationBind(BaseModel):
+    """POST /api/nevermined/agents/{agent_name}/delegation — the ids the
+    Nevermined widget handed the browser. Both spellings are accepted."""
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    delegation_id: str = Field(..., alias="delegationId", pattern=NEVERMINED_ID_PATTERN)
+    payment_method_id: Optional[str] = Field(default=None, alias="paymentMethodId", pattern=NEVERMINED_ID_PATTERN)
+    provider: Optional[str] = Field(default=None, max_length=64)
+
+    @field_validator("provider")
+    @classmethod
+    def _provider(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v = v.strip()
+        if any(c in v for c in "\r\n"):
+            raise ValueError("provider must be a single line")
+        return v or None

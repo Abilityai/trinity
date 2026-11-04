@@ -96,7 +96,7 @@ describe("ent#628 TOOL_ACCESS_POLICY is total over the registered tools", () => 
 
   it("every baselined row names an owner — an issue or a backend gate, never free text", () => {
     const OWNER =
-      /#\d+|reject_agent_principal|require_admin|assert_admin|_self_gate|_enforce_connector_scope|agent_permissions|rooms service/;
+      /#\d+|reject_agent_principal|require_admin|assert_admin|assert_own_agent|_enforce_connector_scope|agent_permissions|rooms service/;
     for (const [name, policy] of Object.entries(TOOL_ACCESS_POLICY)) {
       if (policy.kind === "baselined") {
         assert.match(policy.owner, OWNER, `${name}: baselined owner does not name an issue or a backend gate`);

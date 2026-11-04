@@ -110,7 +110,7 @@ AGENT_TMPFS_MOUNT: dict[str, str] = {
 
 # Default TMPDIR redirects scratch onto the disk-backed, exec-capable agent
 # home volume. pip / npm / most build tooling honor TMPDIR, so this dodges both
-# the 100 MB cap and noexec in one move while keeping /tmp's hardened posture.
+# the tmpfs size cap and noexec in one move while keeping /tmp's hardened posture.
 # The directory is created (writable by UID 1000) at container start by
 # docker/base-image/startup.sh, so existing agents pick it up on restart.
 AGENT_DEFAULT_TMPDIR: str = '/home/developer/.tmp'

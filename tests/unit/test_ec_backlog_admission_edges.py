@@ -867,7 +867,8 @@ def test_a1_max_chain_depth_clamps_int_rows(stored, effective):
 
 @pytest.mark.parametrize("key", [None, ""], ids=["A13-none", "A13-empty"])
 def test_a13_begin_task_idempotency_no_key_is_no_replay(key):
-    idem, replay = _DISPATCH.begin_task_idempotency(name="agent1", idempotency_key=key)
+    idem, replay = _DISPATCH.begin_task_idempotency(
+        name="agent1", idempotency_key=key, current_user=types.SimpleNamespace(id=1, agent_name=None))
     assert replay is None and idem.enabled is False
 
 
@@ -875,7 +876,8 @@ def test_a13b_begin_task_idempotency_replay_carries_snapshot():
     isvc = MagicMock()
     isvc.begin.return_value = _idem(replay=True, in_flight=False)
     with patch.object(_DISPATCH, "idempotency_service", isvc):
-        idem, replay = _DISPATCH.begin_task_idempotency(name="agent1", idempotency_key="k")
+        idem, replay = _DISPATCH.begin_task_idempotency(
+            name="agent1", idempotency_key="k", current_user=types.SimpleNamespace(id=1, agent_name=None))
     assert replay.execution_id == "prior" and replay.snapshot == {"x": 1}
     assert replay.in_flight is False
 

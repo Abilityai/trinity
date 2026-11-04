@@ -63,7 +63,7 @@ def snapshot_of(outcome: rc.Outcome) -> Dict[str, Any]:
     if isinstance(outcome, rc.ResourceResult):
         base.update(status=outcome.status, body=outcome.body, truncated=outcome.truncated,
                     token_kind=outcome.token_kind, method=outcome.method, path=outcome.path,
-                    content_type=outcome.content_type)
+                    content_type=outcome.content_type, access_server=outcome.access_server)
     else:  # Denied
         base.update(reason=outcome.reason, detail=outcome.detail)
     return base
@@ -83,7 +83,8 @@ def from_snapshot(snapshot: Any, *, resource: str, method: str, path: str) -> rc
                              truncated=bool(snap.get("truncated")), token_kind=str(snap.get("token_kind") or "agent"),
                              challenges=challenges, resource=str(snap.get("resource") or resource),
                              method=str(snap.get("method") or method), path=str(snap.get("path") or path),
-                             budget=budget_obj, content_type=snap.get("content_type"))
+                             budget=budget_obj, content_type=snap.get("content_type"),
+                             access_server=snap.get("access_server") or None)
 
 
 async def guarded_call(
@@ -146,6 +147,12 @@ def audit_details(agent_name: str, outcome: rc.Outcome, *, method: Optional[str]
     }
     if isinstance(outcome, rc.ResourceResult):
         details.update(method=outcome.method, path=outcome.path, token_kind=outcome.token_kind, status=outcome.status)
+        if outcome.token_kind == "auth":
+            # ent#928: which server minted the auth token — our PS (three-party)
+            # or the access server the resource named (four-party). A URL, never a token.
+            details["auth_mode"] = "four-party" if outcome.access_server else "three-party"
+            if outcome.access_server:
+                details["access_server"] = outcome.access_server
     else:
         if method:
             details["method"] = method

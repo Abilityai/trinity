@@ -77,9 +77,10 @@ def test_the_handler_calls_the_helpers_it_documents():
     src = (_REPO_ROOT / "docker/base-image/agent_server/routers/files.py").read_text()
     handler = src[src.index("async def update_file("):]
     handler = handler[:handler.index("@router.")] if "@router." in handler else handler
-    assert "if not if_match_holds(requested_path, if_match):" in handler
+    # ent#820: both run on the directory the no-follow walk opened.
+    assert "if not _if_match_holds_at(parent_fd, requested_path.name, if_match):" in handler
     assert "status_code=412" in handler
-    assert "write_text_atomic(requested_path, request.content)" in handler
+    assert "_write_text_atomic_at(parent_fd, requested_path.name, request.content)" in handler
     assert "requested_path.write_text(" not in handler
 
 

@@ -18,7 +18,7 @@ from sqlalchemy import select, insert, delete, and_
 from sqlalchemy.exc import IntegrityError
 
 from .engine import get_engine
-from .tables import agent_permissions
+from .tables import agent_permissions, agent_peer_skill_grants
 from db_models import AgentPermission
 from utils.helpers import utc_now_iso
 
@@ -66,8 +66,9 @@ class PermissionOperations:
 
         Args:
             accessible_agents: Optional set of agent names to filter by.
-                              If provided, only returns edges where BOTH
-                              source and target are in the set.
+                              If provided (even empty), only returns edges
+                              where BOTH source and target are in the set;
+                              None returns every edge.
 
         Returns list of {"source": str, "target": str} dicts.
         """
@@ -76,7 +77,7 @@ class PermissionOperations:
             agent_permissions.c.target_agent,
         )
 
-        if accessible_agents:
+        if accessible_agents is not None:
             # Filter at SQL level to avoid info leakage
             agent_list = list(accessible_agents)
             stmt = stmt.where(
@@ -177,6 +178,11 @@ class PermissionOperations:
         )
         with get_engine().begin() as conn:
             result = conn.execute(stmt)
+            # ent#662: a per-skill grant rides on its edge — it goes with it.
+            conn.execute(delete(agent_peer_skill_grants).where(and_(
+                agent_peer_skill_grants.c.caller_agent == source_agent,
+                agent_peer_skill_grants.c.target_agent == target_agent,
+            )))
             return result.rowcount > 0
 
     def set_permissions(self, source_agent: str, target_agents: List[str], created_by: str) -> int:
@@ -195,6 +201,11 @@ class PermissionOperations:
                     agent_permissions.c.source_agent == source_agent
                 )
             )
+            # ent#662: grants on the edges this replace drops go with them.
+            conn.execute(delete(agent_peer_skill_grants).where(and_(
+                agent_peer_skill_grants.c.caller_agent == source_agent,
+                agent_peer_skill_grants.c.target_agent.not_in(list(target_agents)),
+            )))
 
             # Add new permissions
             for target in target_agents:

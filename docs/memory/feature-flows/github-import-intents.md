@@ -17,7 +17,7 @@ behavior exactly (clone semantics; fork when a `fork_to_own` block is present).
 
 ## Fork token (#3164)
 
-**The token (#3164).** `github_pat` is optional on both fork-to-own (`ForkToOwnRequest`) and the repo binding (`BindAgentRepoRequest`); a supplied token wins. Omitted, the write identity is the user's **saved personal** GitHub token (Settings → GitHub token): at create the resolver's `per_user` tier (`crud._apply_fork_to_own`), at bind the caller's own row read by user id (`db.get_user_github_pat` — never the agent's current per-agent token). It is persisted as the agent's per-agent PAT with tier `fork` exactly as a typed one. The **platform/global token is never a fork or bind identity**: with no personal token the request is a named 400 `FORK_PAT_REQUIRED` pointing at Settings — the destination would otherwise belong to the platform account, and the per-agent row would bake in the global PAT (ent#162 Decision 2). A token refusal raised while using the saved token says so (`token_source: "saved"`, message naming Settings). The UI reads presence only (`GET /api/users/me/github-pat` → `configured`) and shows "Using your saved GitHub token" with an explicit "Use a different token" override (`SavedGithubTokenField.vue`).
+**The token (#3164).** `github_pat` is optional on both fork-to-own (`ForkToOwnRequest`) and the repo binding (`BindAgentRepoRequest`); a supplied token wins. Omitted, the write identity is the user's **saved personal** GitHub token (Settings → MCP Keys → Personal GitHub Token): at create the resolver's `per_user` tier (`crud._apply_fork_to_own`), at bind the caller's own row read by user id (`db.get_user_github_pat` — never the agent's current per-agent token). It is persisted as the agent's per-agent PAT with tier `fork` exactly as a typed one. The **platform/global token is never a fork or bind identity**: with no personal token the request is a named 400 `FORK_PAT_REQUIRED` pointing at Settings — the destination would otherwise belong to the platform account, and the per-agent row would bake in the global PAT (ent#162 Decision 2). A token refusal raised while using the saved token says so (`token_source: "saved"`, message naming Settings). The UI reads presence only (`GET /api/users/me/github-pat` → `configured`) and shows "Using your saved GitHub token" with an explicit "Use a different token" override (`SavedGithubTokenField.vue`).
 
 ## Copy flow (the new path)
 
@@ -159,9 +159,14 @@ one. Losing the re-claim race to a concurrent retry yields 409
 - **UI**: `CreateAgentModal.vue` — 3-way intent radio on the free-form GitHub
   path (default clone; fork reveals the existing destination/PAT/visibility
   fieldset; copy names the own-it-later path) + `ImportValidationStep.vue`.
-- **MCP**: `create_agent` gains `import_intent: "copy" | "clone"` only — fork
-  stays UI-only (tool args are audit-logged; a PAT arg would persist in
-  plaintext). Fork-scope failures (`FORK_PAT_INVALID`,
+- **MCP**: `create_agent` takes `import_intent: "copy" | "clone" | "fork"`;
+  fork adds a `fork_to_own: {destination_repo, private?}` block and never a
+  token argument (tool args land in the caller's transcript, so a PAT arg
+  would persist there in plaintext; the `mcp_operation` audit row records the
+  tool, outcome, target agent and request id, never the arguments
+  themselves). The backend spends the caller's saved personal token; an agent
+  key, or a caller with no saved token, is refused `FORK_PAT_REQUIRED`
+  (#4126). Fork-scope failures (`FORK_PAT_INVALID`,
   `FORK_REPO_CREATE_FAILED`) name the copy/clone alternatives — never silent
   auto-degrade.
 - **Backend**: `services/agent_service/snapshot_import.py` (new),

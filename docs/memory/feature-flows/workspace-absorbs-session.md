@@ -345,7 +345,9 @@ non-`system` role to the agent **as its own words** (a `system` row is a bracket
 platform marker since trinity#2694 — still not a message), and `_persist_user_turn`'s dedupe reads
 `recent[-1].role == "user"`, so an error row would make Retry duplicate the user
 message — breaking a #2120 pin that does have a test. No schema change, no
-migration.
+migration. (A turn the skill gate held or refused is the one exception to
+"replayed": its rows carry `gate_hold` and the replay leaves them out —
+trinity#3402, [skill-gate.md](skill-gate.md).)
 
 **The client believes a verdict only for the turn it is waiting on**
 (`outcome.execution_id === executionId`), reports it instead of the lost-track

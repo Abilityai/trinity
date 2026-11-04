@@ -22,6 +22,7 @@ Backend catches the failure in:
     ↓
 Classify:
   - model rejection (is_model_rejection, #3012) → NO switch, error_code MODEL_UNSUPPORTED
+  - turn limit (is_turn_limit, #3984) or prompt too long (is_prompt_too_long, #3849) → NO switch, NO walk, never counted as auth
   - 429 → handle_subscription_failure(..., failure_kind="rate_limit")
   - 503 OR is_auth_failure(error_msg) → handle_subscription_failure(..., failure_kind="auth")
     ↓
@@ -111,6 +112,17 @@ it). `is_auth_failure` itself returns False on a model rejection. The Workspace 
 `model_unsupported` (the agent's default was refused) or `invalid_model` (the client's pick,
 which self-heals).
 
+**Never a trigger (#3984, #3849):** a turn that stopped at its cap, or a prompt the API refused
+for its length. Both fail the same way on every credential. The turn-limit answer is a 422
+whose text carries the CLI's turn count, so at a cap of 401 or 403 the bare `"401"`/`"403"`
+auth indicators matched it; `is_turn_limit` keys on the agent's own `Task exceeded turn
+limit:` prefix (`TURN_LIMIT_MARKERS`, pinned to the producer). The length rejection is a
+zero-token exit, so the agent answers 503; `is_prompt_too_long` matches the API's sentence
+(`PROMPT_LENGTH_MARKERS`). Both are checked at the same sites as a model rejection, and
+`is_auth_failure` returns False on either. A prompt-length 503 is coded `agent_error`, not
+`auth`, on the TES, `/chat` and #1083 callback paths, so the AUTH dispatch breaker does not
+count it. Pinned by `test_3984_3849_not_a_credential_failure.py`.
+
 `AUTH_INDICATORS` (canonical list in
 `src/backend/services/failure_classifier.py::is_auth_failure`, #1088):
 `credit balance`, `unauthorized`, `authentication`, `credentials`,
@@ -156,7 +168,7 @@ enforced by `tests/unit/test_904_sigkill_no_false_auth.py::TestBackendSchedulerP
 | Tests | `tests/unit/test_reload_token_endpoint.py` | #1089 — agent-server `POST /api/credentials/reload-token`: sets env, atomically writes the `/var/lib/trinity/oauth-token` override at `0600`, no `.env` write, `remove_api_key` pops both shadow keys + arms force-unset overrides + reports `env_shadow` names-only (#2114), empty token → 400 |
 | Agent | `docker/base-image/agent_server/services/execution_env.py` | #2114 — `arm_subscription_auth_guard()` (boot-time force-unset on baseline-token Claude agents), `SUBSCRIPTION_SHADOW_KEYS`, per-key memoized suppression WARNING, `env_drift_report` `suppressed_for_spawn` marker |
 | Tests | `tests/unit/test_2114_subscription_shadow_guard.py` | #2114 — arm trigger matrix (empty-token / non-Claude / terminal / platform-key / .env-managed all inert), override-layer semantics, drift-marker + memo observability, stale-.env-OAuth residual pinned |
-| Tests | `tests/unit/test_subscription_auto_switch_no_cred_import.py` | Chain-level regression for #606 — pins `_restart_agent → start_agent_internal → inject_assigned_credentials` reaches the `lifecycle.py:155` `subscription_mode` short-circuit and never re-enters file-based credential import |
+| Tests | `tests/unit/test_subscription_auto_switch_no_cred_import.py` | Chain-level regression for #606 — pins that `_restart_agent → start_agent_internal → inject_assigned_credentials` on a subscription agent with no `.credentials.enc` tries the import once and reads it as a clean `no_credentials_enc_file` skip (no retries, restart succeeds). Subscription agents import a committed file since #3510 |
 | Tests | `tests/unit/test_iso_cutoff.py` | Format parity between `iso_cutoff(N)` and `utc_now_iso()` (#476) |
 | Util | `src/backend/utils/helpers.py::iso_cutoff` | Canonical cutoff helper for ISO-Z TEXT comparisons (#476) |
 | Spec | `docs/requirements/SUB-003-subscription-auto-switch.md` | Full requirements |
@@ -593,10 +605,8 @@ persisted: a `docker restart` reverts to the DB baseline by construction.
 
 ### Not covered
 
-Pull pilots: `public` ∈ `PULL_REACHABLE_NON_AUTONOMOUS`, so a Workspace turn on
-a piloted agent is claimed from the durable queue and the pull sink only runs
-the one-shot `spawn_subscription_failure` with **no re-delivery**. Follow-up
-filed with the PR. Multi-worker (`--workers 2`): the process-local #799 lock
+Pull pilots: covered by #3487 — see **Pull pilots walk in place** below.
+Multi-worker (`--workers 2`): the process-local #799 lock
 serialises commits within a worker; two workers committing different serving
 subscriptions is last-write-wins with two hot-reloads and two notifications,
 never a restart or a wedge (the module comment's standing limitation).
@@ -614,3 +624,56 @@ real `execute_task` + real walk, the `/chat` re-issue, the portal ladder, and th
 agent's env layers / header / redaction. `test_792` / `test_2789` are re-seamed
 on `advance_subscription_walk`; `test_2638`'s one-remediation test became "the
 pre-dispatch switch feeds the walk and the origin is never retried".
+### Pull pilots walk in place (#3487)
+
+A pulled turn's attempts are separate result POSTs, so the walk cannot be a loop
+in one call. Instead:
+
+1. The worker (`agent_server/services/pull_worker.py`) says on every result
+   whether it can run a spawn on a per-spawn credential
+   (`metadata.auth_override_capable` — a Claude runtime on a #3487 image), which
+   credential it applied (`metadata.auth_override`, the pull analogue of
+   `X-Trinity-Auth-Override`), and whether the user terminated the turn.
+2. `routers/internal.py` → `pull_coordination_service.handle_task_result`. For a
+   refused attempt (`billing`/`auth`) from a capable, un-terminated worker on a
+   `running` row, `_walk_refused_attempt` wins the attempt with
+   `db.rotate_claim_token` (old → new token, atomic, `running` only), rebuilds the
+   walk from `backlog_metadata["subscription_walk"]` (or starts one), attributes
+   the refusal to the credential the attempt actually ran on, and calls
+   `advance_subscription_walk` with the scrubbed error text (staged runtime
+   secrets + `sanitize_text`) and the remaining budget (the row's own turn limit
+   — its `timeout_seconds` clamped to the agent timeout — minus the time since
+   the claim's `started_at`; the retry's `timeout_seconds` never exceeds it). A
+   container fault (`is_container_fault`) never walks, as on push.
+3. A rung → the reply is `{"applied": false, "retry": {claim_token, auth_override,
+   timeout_seconds, attempt}}`. No terminal is written, so the sync waiter keeps
+   waiting. The worker re-runs the SAME turn under the same claim and lease with
+   that credential staged for redaction, and POSTs again with the new token.
+4. No rung → the result is applied as before, but with the walk's
+   "Tried: …" trail on the FAILED row, the EARLIER refused attempts' cost rolled
+   in (the last one is the terminal and carries its own cost), the
+   once-per-hour exhausted notice, and no one-shot `spawn_subscription_failure`.
+5. Served → `_commit_before_success`, BEFORE the terminal CAS (which wakes the
+   caller): won by another token rotation, it runs `commit_subscription_walk`,
+   re-points the SUB-004 attribution and saves the summary for
+   `result_from_execution_row` (`subscription_switch`, push parity), so the woken
+   caller already reads `switched=True`. A duplicate success POST loses the
+   rotation and commits nothing twice.
+
+A duplicate POST of an attempt that already won (lost 200, resend) carries the
+superseded token: it gets the stored retry again and records nothing — but
+only while that retry's token still owns the row (`db.holds_claim_token`). The
+walk state records the digest of the token that owns it; after a lease requeue
+and a re-claim, a late POST of the old claim is not told to retry (409), and the
+new claim starts its own walk. Between attempts the worker holds the turn as
+pending in its process registry, so a terminate that lands while a refusal is
+being reported skips the next attempt and reports `cancelled`. A worker
+that cannot follow (older image, non-Claude runtime, a restarted worker
+resending from disk) keeps the pre-#3487 path. The #1085 governor is not
+consulted — push has no such gate, and its pause is armed by several agents
+failing on shared credentials, the case the walk is for.
+
+**Tests:** `tests/unit/test_3487_pull_subscription_walk.py` (state round-trip,
+the token CAS on real SQLite, the sink attempt by attempt, the worker) and
+`tests/unit/test_3487_pull_walk_waiter.py` (a refused `public` turn through the
+real claim, sink and sync waiter yields one success).

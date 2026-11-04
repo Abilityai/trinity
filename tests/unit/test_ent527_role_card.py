@@ -153,7 +153,7 @@ def _wire(monkeypatch, client, *, state="running", stamp=None, owner=True, ratin
                         lambda email: [{"agent_name": AGENT}] if owner else [])
     monkeypatch.setattr(rc.portal_db, "get_main_portal_session_id", lambda a, e: "main-1")
     monkeypatch.setattr(rc.portal_db, "get_portal_messages",
-                        lambda a, e, limit=100, session_id=None: messages or [])
+                        lambda a, e, limit=100, session_id=None, include_held=False: messages or [])
     monkeypatch.setattr(rc.db, "list_workspace_ratings_for_targets",
                         lambda ev, kind, ids: ratings or {})
     return rc

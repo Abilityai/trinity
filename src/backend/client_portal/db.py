@@ -170,27 +170,58 @@ def add_portal_message(msg_id: str, agent_name: str, client_email: str,
                        source: Optional[str] = None,
                        voice_call_id: Optional[str] = None,
                        attachments: Optional[str] = None,
-                       execution_id: Optional[str] = None) -> None:
+                       execution_id: Optional[str] = None,
+                       gate_hold: Optional[str] = None) -> None:
     # ent#534: `source`/`voice_call_id` are platform-written only (NULL for a
     # typed turn, 'voice' + the call id for a spoken one) — no request carries them.
     # #3265: `attachments` is the user turn's JSON list, already resolved
     # server-side (`service.resolve_turn_attachments`) — never client text.
     # #3166: `execution_id` names the turn that wrote the row, so a client can
     # take its OWN reply off a thread another turn is writing to.
+    # trinity#3402: `gate_hold` marks a row the skill gate stopped (the request
+    # id or `refused:<code>`) — never replayed to the agent.
     stmt = text(
         "INSERT INTO enterprise_portal_messages "
         "(id, agent_name, client_email, session_id, role, content, cost, created_at, "
-        " source, voice_call_id, attachments, execution_id) "
+        " source, voice_call_id, attachments, execution_id, gate_hold) "
         "VALUES (:id, :agent, :email, :session, :role, :content, :cost, :now, :source, :call, "
-        " :attachments, :execution)"
+        " :attachments, :execution, :gate_hold)"
     )
     with get_engine().begin() as conn:
         conn.execute(stmt, {
             "id": msg_id, "agent": agent_name, "email": (client_email or "").lower(),
             "session": session_id, "role": role, "content": content, "cost": cost, "now": now,
             "source": source, "call": voice_call_id, "attachments": attachments,
-            "execution": execution_id,
+            "execution": execution_id, "gate_hold": gate_hold,
         })
+
+
+def mark_portal_messages_held(message_ids: list, gate_hold: Optional[str]) -> None:
+    """trinity#3402: mark the rows of a turn the skill gate stopped — the request
+    id or `refused:<code>` — or, with None, clear a reused row's old verdict (a
+    retry that reuses a refused turn's row stands for the NEW turn)."""
+    ids = [i for i in (message_ids or []) if i]
+    if not ids:
+        return
+    stmt = text(
+        "UPDATE enterprise_portal_messages SET gate_hold = :gate_hold WHERE id IN :ids"
+    ).bindparams(bindparam("ids", expanding=True))
+    with get_engine().begin() as conn:
+        conn.execute(stmt, {"gate_hold": gate_hold, "ids": ids})
+
+
+def get_turn_reply_row(execution_id: str) -> Optional[dict]:
+    """The assistant row one turn wrote, or None while it has not landed. Read by the
+    Direct call's speech (trinity-enterprise#1046): the row, not the execution, holds
+    what the thread shows."""
+    stmt = text(
+        "SELECT id, content, gate_hold FROM enterprise_portal_messages "
+        "WHERE execution_id = :execution AND role = 'assistant' "
+        "ORDER BY created_at DESC LIMIT 1"
+    )
+    with get_engine().connect() as conn:
+        row = conn.execute(stmt, {"execution": execution_id}).mappings().first()
+    return dict(row) if row else None
 
 
 def set_portal_message_execution_id(msg_id: str, execution_id: str) -> None:
@@ -206,7 +237,8 @@ def set_portal_message_execution_id(msg_id: str, execution_id: str) -> None:
 
 def get_portal_messages(agent_name: str, client_email: str, limit: int = 100,
                         session_id: Optional[str] = None,
-                        before: Optional[str] = None) -> list[dict]:
+                        before: Optional[str] = None,
+                        include_held: bool = False) -> list[dict]:
     """The most-recent ``limit`` messages for a conversation, oldest-first for
     display. Scoped to one ``session_id`` when given (the multi-session read);
     with no session it falls back to the whole (agent, client) history — the
@@ -215,7 +247,11 @@ def get_portal_messages(agent_name: str, client_email: str, limit: int = 100,
     ``before`` (trinity-enterprise#610 §3g L7): only messages strictly older than
     this ISO-Z instant — the ask context's "what led up to it". A bound
     parameter compared with another `utc_now_iso()` column, so the two strings
-    share one format (Invariant #16's trap is `datetime('now')`, not this)."""
+    share one format (Invariant #16's trap is `datetime('now')`, not this).
+
+    ``include_held`` (trinity#3402): a turn the skill gate stopped, and its
+    notice, are left out unless asked for — see `_not_held`. A prompt builder
+    takes the default; a reader a PERSON sees passes True."""
     where = "agent_name = :agent AND client_email = :email"
     params = {"agent": agent_name, "email": (client_email or "").lower(), "lim": limit}
     if session_id is not None:
@@ -224,6 +260,8 @@ def get_portal_messages(agent_name: str, client_email: str, limit: int = 100,
     if before is not None:
         where += " AND created_at < :before"
         params["before"] = before
+    if not include_held:
+        where += " AND " + _not_held("enterprise_portal_messages")
     stmt = text(
         # ent#366: `id` rides along so a message can be RATED. The row has always
         # had a primary key; the client just never saw it, which is why a thumb
@@ -259,6 +297,16 @@ _MESSAGE_COLUMNS = ("id, role, content, cost, created_at, source, voice_call_id,
 # carry NULL `source` too — they are part of the typed timeline, not of a call.
 _TYPED = "source IS NULL"
 
+
+def _not_held(table: str) -> str:
+    """trinity#3402: the rows a prompt may be built from — never a turn the skill
+    gate held or refused, nor its notice, whatever was decided since. The ONE
+    definition every read here uses. The turn marks its rows (`gate_hold`) when
+    the gate stops it; rows held before the column existed were marked once by
+    the `held_gate_turns` migration, from the gate record naming their turn."""
+    return f"{table}.gate_hold IS NULL"
+
+
 # Sized against a real 30-minute transcript (~180 rows): ~3 long calls plus
 # their typed turns. Read at call time (tests pin it), never captured as a
 # default argument.
@@ -273,7 +321,8 @@ class ThreadWindow:
 
 def get_portal_thread_window(agent_name: str, client_email: str, session_id: str,
                              typed_limit: int = 100,
-                             ceiling: Optional[int] = None) -> ThreadWindow:
+                             ceiling: Optional[int] = None,
+                             include_held: bool = False) -> ThreadWindow:
     """The newest ``typed_limit`` typed rows of one thread, plus every spoken
     row inside that span, oldest-first; at most ``ceiling`` rows (the NEWEST
     survive, and ``truncated`` reports the cut).
@@ -283,10 +332,15 @@ def get_portal_thread_window(agent_name: str, client_email: str, session_id: str
     DESC`` so the threshold and the range agree at a tie. Fewer typed rows than
     the limit → the whole thread (≤ ceiling). A call-only thread has no typed
     row at all and is returned whole for the same reason.
+
+    ``include_held`` (trinity#3402): as in `get_portal_messages` — left out of
+    both the window's count and its rows unless asked for.
     """
     ceiling = int(ceiling or PORTAL_HISTORY_ROW_CEILING)
     typed_limit = max(1, int(typed_limit or 1))
     base = "agent_name = :agent AND client_email = :email AND session_id = :session"
+    if not include_held:
+        base += " AND " + _not_held("enterprise_portal_messages")
     params = {"agent": agent_name, "email": (client_email or "").lower(), "session": session_id}
     threshold_stmt = text(
         f"SELECT created_at, id FROM enterprise_portal_messages "
@@ -327,6 +381,15 @@ def get_platform_rows_since_last_reply(agent_name: str, client_email: str,
     the background — typed in form, but it landed mid-call, so it is NOT the
     cursor. Taking it as one would erase the call's earlier spoken rows from
     the next delta, which is the very loss #2694 exists to prevent.
+
+    trinity#3402: nor is a held turn's notice — the platform wrote it, the live
+    session never saw that turn — for the same reason.
+
+    trinity-enterprise#1046: a Direct call's reply IS the cursor, carrying a call id or
+    not. Each one is the agent's own session answering, so nothing before it is
+    unheard. Without this every turn after a Direct call would be re-sent the whole
+    thread since the last typed reply. The call's label row stays out of the delta too:
+    it describes turns the session already holds.
     """
     base = "agent_name = :agent AND client_email = :email AND session_id = :session"
     params = {"agent": agent_name, "email": (client_email or "").lower(), "session": session_id,
@@ -337,9 +400,11 @@ def get_platform_rows_since_last_reply(agent_name: str, client_email: str,
     stmt = text(
         f"SELECT {_MESSAGE_COLUMNS} FROM enterprise_portal_messages "
         f"WHERE {base} AND (source IS NOT NULL OR role = 'system') "
-        f"AND created_at > COALESCE((SELECT MAX(created_at) FROM enterprise_portal_messages "
+        f"AND (voice_call_id IS NULL OR voice_call_id NOT LIKE 'vd\\_%' ESCAPE '\\') "
+        f"AND created_at > COALESCE((SELECT MAX(r.created_at) FROM enterprise_portal_messages r "
         f"                            WHERE {base} AND role = 'assistant' AND {_TYPED} "
-        f"                              AND voice_call_id IS NULL), '') "
+        f"                              AND (voice_call_id IS NULL OR voice_call_id LIKE 'vd\\_%' ESCAPE '\\') "
+        f"                              AND {_not_held('r')}), '') "
         f"ORDER BY created_at DESC, id DESC LIMIT :lim"
     )
     with get_engine().connect() as conn:
@@ -1349,6 +1414,123 @@ def unread_arrivals_with_latest(client_email: str) -> dict[str, dict]:
                     "source": r["source"] if is_msg else None,
                     "title": None if is_msg else r["title"],
                 },
+            }
+    return out
+
+
+# trinity-enterprise#959 — a ROOM's unread arrivals, for one viewer.
+#
+# The same per-viewer timestamp cursor a chat uses (`chat_kind = 'room'`, already
+# written by `mark_chat_read` when the person opens a room) and the same ent#557
+# baseline for a room never opened, so `_UNREAD_CURSOR` is reused unchanged.
+# Rooms keep their own `last_read_seq` too, but that one is the AGENTS' delta
+# cursor and is never advanced for a person.
+#
+# An arrival is an AGENT's message: the chat rule (`role = 'assistant'`) in a
+# room's terms. The person's own messages and the room's system lines never
+# count. (A room seats exactly one person — its creator; only agents are ever
+# added — so "not an agent" is the reader or the room itself.)
+#
+# Membership is the grant, and it is a JOIN, not a filter applied afterwards:
+# a message is only ever read through the viewer's OWN active participant row,
+# in the identity space their credential acts in (`:pkind`/`:pid`). A cursor row
+# can still exist for a room the reader is not in — the row is keyed by EMAIL,
+# which two identity spaces share, and rows written before the write checked
+# membership remain — so this read then has no participant row to join through
+# and returns nothing for it, and `active_room_ids` keeps the row itself out of
+# the payload (fix round 1).
+_UNREAD_ROOM_ARRIVALS = (
+    "SELECT msg.room_id AS room_id, msg.id AS id, msg.seq AS seq, "
+    "       msg.created_at AS at "
+    "FROM enterprise_room_messages msg "
+    "JOIN enterprise_room_participants p "
+    "  ON p.room_id = msg.room_id AND p.kind = :pkind AND p.identity = :pid "
+    " AND p.left_at IS NULL "
+    "LEFT JOIN enterprise_portal_chat_state st "
+    "  ON st.client_email = :email AND st.chat_kind = 'room' "
+    " AND st.chat_id = msg.room_id "
+    "WHERE msg.sender_kind = 'agent' "
+    + _UNREAD_CURSOR.format(at="msg.created_at")
+)
+
+
+def active_room_ids(participant_kind: str, participant_identity: str) -> set[str]:
+    """Every room this participant is ACTIVELY in (`left_at IS NULL`), in one
+    statement — the batched membership read `/chat-state` filters its stored
+    room rows through (trinity-enterprise#959 fix round 1). An empty identity is
+    in no room: the caller could not say whose rooms these are."""
+    if not participant_kind or not participant_identity:
+        return set()
+    stmt = text(
+        "SELECT room_id FROM enterprise_room_participants "
+        "WHERE kind = :pkind AND identity = :pid AND left_at IS NULL"
+    )
+    with get_engine().connect() as conn:
+        return {r[0] for r in conn.execute(
+            stmt, {"pkind": participant_kind, "pid": participant_identity}) if r[0]}
+
+
+def is_active_room_participant(room_id: str, participant_kind: str,
+                               participant_identity: str) -> bool:
+    """Is this participant actively in this one room? The read-cursor write's
+    gate (trinity-enterprise#959 fix round 1). An unknown room and a room the
+    participant is not in (or left) are the same False."""
+    if not room_id or not participant_kind or not participant_identity:
+        return False
+    stmt = text(
+        "SELECT 1 FROM enterprise_room_participants "
+        "WHERE room_id = :room AND kind = :pkind AND identity = :pid "
+        "AND left_at IS NULL"
+    )
+    with get_engine().connect() as conn:
+        return conn.execute(stmt, {"room": room_id, "pkind": participant_kind,
+                                   "pid": participant_identity}).first() is not None
+
+
+def unread_room_arrivals(client_email: str, participant_kind: str,
+                         participant_identity: str) -> dict[str, dict]:
+    """Per-room unread count, the newest arrival and the first unread message
+    id, for the rooms this viewer is an ACTIVE participant of — one statement,
+    so a row's "3 new" and its excerpt are one snapshot (the
+    `unread_arrivals_with_latest` rule).
+
+    Returns ``{room_id: {"n", "first_unread_message_id", "latest": {"id",
+    "at", "content"}}}``. Ordered by ``seq`` — the room's own ordering
+    primitive — so "first" and "latest" never depend on a timestamp tie.
+    An empty identity reads nothing: the caller could not say whose rooms these
+    are, and a guess would be someone else's.
+    """
+    if not participant_kind or not participant_identity:
+        return {}
+    stmt = text(
+        "SELECT w.room_id AS room_id, w.n AS n, w.id AS id, w.at AS at, "
+        "       w.first_id AS first_id, m2.content AS content "
+        "FROM ("
+        "  SELECT a.room_id, a.id, a.at, "
+        "         COUNT(*) OVER (PARTITION BY a.room_id) AS n, "
+        "         ROW_NUMBER() OVER (PARTITION BY a.room_id "
+        "                            ORDER BY a.seq DESC) AS rn, "
+        "         FIRST_VALUE(a.id) OVER (PARTITION BY a.room_id "
+        "                                 ORDER BY a.seq ASC "
+        "           ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING"
+        "         ) AS first_id "
+        "  FROM (" + _UNREAD_ROOM_ARRIVALS + ") AS a"
+        ") AS w "
+        "JOIN enterprise_room_messages m2 ON m2.id = w.id "
+        "WHERE w.rn = 1"
+    )
+    params = {**_unread_params(client_email),
+              "pkind": participant_kind, "pid": participant_identity}
+    out: dict[str, dict] = {}
+    with get_engine().connect() as conn:
+        for r in conn.execute(stmt, params).mappings():
+            rid = r["room_id"]
+            if not rid:
+                continue
+            out[rid] = {
+                "n": int(r["n"]),
+                "first_unread_message_id": r["first_id"],
+                "latest": {"id": r["id"], "at": r["at"], "content": r["content"]},
             }
     return out
 

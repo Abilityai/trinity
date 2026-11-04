@@ -10,7 +10,7 @@ Core REST API endpoints for agent lifecycle management, configuration, files, an
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/agents` | GET | List all agents. Each row carries `readiness` (`{status, changed_at, source}` for an agent whose owner stamped it `ready` or `calibrating`, otherwise `null`) and `brief_held` — see [Dashboard](../operations/dashboard.md#grid-view) |
+| `/api/agents` | GET | List the agents the caller may see — an admin every agent, anyone else their owned and shared agents, an agent-scoped key only its reach (itself, the agents it may call, the agents it spawned; see [Agent Permissions](../collaboration/agent-permissions.md)). Each row carries `readiness` (`{status, changed_at, source}` for an agent whose owner stamped it `ready` or `calibrating`, otherwise `null`) and `brief_held` — see [Dashboard](../operations/dashboard.md#grid-view) |
 | `/api/agents` | POST | Create agent. On a `github:` template, optional `kind` (`agent` default, or `deployment`); the response's `git_mode` says whether the agent pushes and why — see [GitHub Sync](../integrations/github-sync.md#creating-an-agent-with-sync) |
 | `/api/agents/{name}` | GET | Get agent details |
 | `/api/agents/{name}` | DELETE | Delete agent |
@@ -24,7 +24,7 @@ Core REST API endpoints for agent lifecycle management, configuration, files, an
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/api/agents/{name}/info` | GET | Template metadata |
-| `/api/agents/{name}/files` | GET/PUT/DELETE | Workspace file tree / save a text file / delete a file — see [Agent Files](../agents/agent-files.md) |
+| `/api/agents/{name}/files` | GET/PUT/DELETE | Workspace file tree / save a text file / delete a file. Each verb is ruled per path and caller tier (owner, share, key); the tree flags each node with the verbs the caller may not use, and a refusal is `403` with a named code — see [Agent Files](../agents/agent-files.md#who-can-do-what) |
 | `/api/agents/{name}/files/download` | GET | Download file |
 | `/api/agents/{name}/logs` | GET | Container logs |
 | `/api/agents/{name}/stats` | GET | Live telemetry |
@@ -38,6 +38,11 @@ Core REST API endpoints for agent lifecycle management, configuration, files, an
 | `/api/agents/{name}/metrics/points` | POST | Record a batch of metric points (all-or-nothing; accepts `Idempotency-Key`). An agent key records only as itself |
 | `/api/agents/{name}/metrics/definitions` | GET | The declared-metric registry built from `template.yaml` `metrics:` |
 | `/api/agents/{name}/metrics/definitions/refresh` | POST | Re-read `template.yaml` into the registry (agent must be running) |
+| `/api/agents/{name}/metrics/declarations` | GET | What `template.yaml metrics:` declares, as written, with the `template_hash` every write sends back (owner tier) |
+| `/api/agents/{name}/metrics/declarations` | POST | Declare a metric: add one `metrics:` entry to `template.yaml` (owner tier, agent running) |
+| `/api/agents/{name}/metrics/declarations/{metric}` | PUT | Edit one declared metric; name and type cannot change (owner tier, agent running) |
+| `/api/agents/{name}/metrics/declarations/{metric}/references` | GET | What still uses a metric: recorded points, objectives, dashboard widgets, linked projects |
+| `/api/agents/{name}/metrics/declarations/{metric}` | DELETE | Retire a metric: remove its entry (`?base_hash=`; `?acknowledge_references=true` when it is in use) |
 | `/api/agents/{name}/objectives` | GET | Objectives joined to metrics — target, actual, freshness, gap. An agent key reads only its own |
 
 See [Dynamic Dashboards → Declared Metrics](../advanced/dynamic-dashboards.md#declared-metrics).

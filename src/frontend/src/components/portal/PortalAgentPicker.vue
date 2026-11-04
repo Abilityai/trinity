@@ -1,12 +1,15 @@
 <template>
-  <div class="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true" aria-label="Start a chat">
+  <div class="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal="true" :aria-label="isRoom ? 'Start a room' : 'Start a chat'">
     <div class="absolute inset-0 bg-black/40" @click="$emit('cancel')"></div>
 
     <div class="relative w-full max-w-md rounded-2xl bg-white dark:bg-gray-900 shadow-xl ring-1 ring-gray-200 dark:ring-gray-800 flex flex-col max-h-[80vh]">
       <div class="shrink-0 px-4 pt-4 pb-3 border-b border-gray-200 dark:border-gray-800">
-        <h2 class="text-sm font-semibold">Start a chat</h2>
+        <!-- trinity-enterprise#701: a chat is one-to-one, a room has many
+             participants — every door says which it opens. -->
+        <h2 class="text-sm font-semibold">{{ isRoom ? 'Start a room' : 'Start a chat' }}</h2>
         <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
-          {{ multi ? 'Pick one agent, or several to put them in the same conversation.'
+          {{ isRoom ? 'Pick the agents for this room.'
+            : multi ? 'Pick one agent to chat with, or several to start a room with them.'
             : 'Pick an agent to chat with.' }}
         </p>
       </div>
@@ -21,9 +24,9 @@
           type="button"
           class="w-full flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-left hover:bg-gray-50 dark:hover:bg-gray-800 transition"
           :class="{ 'bg-gray-50 dark:bg-gray-800': selected.includes(a.name) }"
-          :role="multi ? 'checkbox' : null"
-          :aria-checked="multi ? selected.includes(a.name) : null"
-          :aria-pressed="multi ? null : selected.includes(a.name)"
+          :role="multiSelect ? 'checkbox' : null"
+          :aria-checked="multiSelect ? selected.includes(a.name) : null"
+          :aria-pressed="multiSelect ? null : selected.includes(a.name)"
           @click="toggle(a.name)"
         >
           <span
@@ -56,8 +59,9 @@
              of their customer to no purpose. -->
         <span class="text-xs text-gray-500 dark:text-gray-400 flex-1">
           {{ selected.length === 0 ? 'Nobody selected'
+            : isRoom ? `${selected.length} agent${selected.length === 1 ? '' : 's'} in this room`
             : selected.length === 1 ? '1 agent'
-            : multi ? `${selected.length} agents — they will share this conversation`
+            : multi ? `${selected.length} agents — this starts a room`
             : `${selected.length} agents` }}
         </span>
         <button
@@ -70,7 +74,7 @@
           class="px-3 py-1.5 rounded-lg text-sm font-medium bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 transition"
           :disabled="!selected.length || busy"
           @click="confirm"
-        >{{ busy ? 'Starting…' : 'Start' }}</button>
+        >{{ busy ? 'Starting…' : (isRoom || selected.length > 1 ? 'Start room' : 'Start chat') }}</button>
       </div>
     </div>
   </div>
@@ -89,7 +93,7 @@
  * (the only substrate that models several agents and @mention-waking). The
  * caller decides which; this component only reports who was chosen.
  */
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import PortalAvatar from './PortalAvatar.vue'
 import { applyAgentSelection, collapseSelection } from './portalUtils'
 
@@ -109,7 +113,13 @@ const props = defineProps({
   // reports who was chosen and nothing else — it says nothing about WHY the
   // affordance is missing, because the viewer here is the operator's customer.
   multi: { type: Boolean, default: false },
+  // trinity-enterprise#701: 'chat' (New chat — one agent, or a room once
+  // several are picked) or 'room' (New room — always a room, even with one
+  // agent, so people can be seated in it). Room mode needs `multi`.
+  mode: { type: String, default: 'chat' },
 })
+const isRoom = computed(() => props.mode === 'room' && props.multi)
+const multiSelect = computed(() => props.multi)
 const emit = defineEmits(['confirm', 'cancel'])
 
 const selected = ref([])

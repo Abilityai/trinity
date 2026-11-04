@@ -165,10 +165,14 @@ regular-agent semantics.
   (#1912) is the remedy and is manual.
 - **`/reinitialize` deliberately does not adopt.** It is already an explicit stop and carries zero
   incremental AC coverage.
-- **The system agent gets no `TRINITY_BACKEND_URL`.** The recreate `setdefault`s it for regular agents,
-  but that env var is the agent-side heartbeat loop's gate and `heartbeat_service.authorize_heartbeat`
-  accepts only `scope == "agent"` keys — the system agent's key is `scope == "system"`, so arming it would
-  yield a permanent 5-second 403 loop. Test-pinned.
+- **The system agent gets no `TRINITY_BACKEND_URL` unless it is a pull pilot.** The recreate `setdefault`s
+  it for regular agents, but that env var is the agent-side heartbeat loop's gate, and whether the
+  orchestrator belongs in fleet health is #1816 §10's open question. A piloted system agent needs it for
+  its pull worker, so `pull_mode.apply_pull_mode_env` sets it at create and recreate and removes it on
+  de-pilot; its own `scope == "system"` key is accepted by the pull seams and the heartbeat for
+  `trinity-system` only (#3814). Boot logs a WARNING while it is piloted and files a
+  `system_agent_pull_drift` alert while the running container has no worker; `/restart` clears it.
+  Test-pinned.
 - **The generic recovery rebuild refuses `trinity-system`** (409). `start_agent_internal` falls through to
   `recreate_missing_container` when the container lookup returns `None`, and #1816 newly reaches that
   from the boot path and from `/restart` — `ensure_deployed` runs in **every** uvicorn worker with no

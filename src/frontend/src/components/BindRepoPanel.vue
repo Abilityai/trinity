@@ -8,7 +8,9 @@
     which may only shrink. Written with zero raw non-gray palette classes;
     every non-gray is a semantic token (action-primary / status-*).
   -->
-  <div class="border-t border-gray-200 dark:border-gray-750 pt-4 mt-4">
+  <!-- `embedded` (trinity-enterprise#888): a row of Settings › Storage ›
+       Repository, where the card's divider already separates it. -->
+  <div :class="embedded ? '' : 'border-t border-gray-200 dark:border-gray-750 pt-4 mt-4'">
     <div class="flex items-start justify-between gap-4">
       <div>
         <h3 class="text-sm font-medium text-gray-900 dark:text-white">
@@ -208,6 +210,7 @@ const props = defineProps({
   // True when the agent has no write credentials — the flagship case, and the
   // one where the copy should explain WHY rather than offer a lateral move.
   isTokenless: { type: Boolean, default: false },
+  embedded: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['bound'])
@@ -315,7 +318,7 @@ const submit = async () => {
   if (!token && (!hasSavedGithubPat.value || patOverriding.value)) {
     binding.value = false
     error.value = {
-      message: 'A GitHub token is required — enter one, or save your personal token in Settings → GitHub token.',
+      message: 'A GitHub token is required — enter one, or save your personal token in Settings → MCP Keys → Personal GitHub Token.',
       code: 'FORK_PAT_REQUIRED',
       partial: false,
     }

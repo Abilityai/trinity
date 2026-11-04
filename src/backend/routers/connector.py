@@ -27,6 +27,8 @@ from dependencies import (
     AuthorizedAgentByName,
     reject_agent_principal,
     _reject_connector_principal,
+    require_interactive,
+    require_person,
 )
 from models import (
     User,
@@ -78,7 +80,7 @@ async def get_connector(agent_name: OwnedAgentByName, request: Request):
     return _status(agent_name, request)
 
 
-@router.put("/{agent_name}/connector", response_model=ConnectorStatus)
+@router.put("/{agent_name}/connector", response_model=ConnectorStatus, dependencies=[Depends(require_person)])
 async def update_connector(agent_name: OwnedAgentByName, body: ConnectorConfigUpdate, request: Request):
     db.upsert_connector_config(
         agent_name,
@@ -89,7 +91,7 @@ async def update_connector(agent_name: OwnedAgentByName, body: ConnectorConfigUp
     return _status(agent_name, request)
 
 
-@router.post("/{agent_name}/connector/key", response_model=ConnectorKeySecret)
+@router.post("/{agent_name}/connector/key", response_model=ConnectorKeySecret, dependencies=[Depends(require_interactive)])
 async def regenerate_connector_key(
     agent_name: OwnedAgentByName,
     request: Request,
@@ -122,7 +124,7 @@ async def regenerate_connector_key(
     )
 
 
-@router.delete("/{agent_name}/connector/key")
+@router.delete("/{agent_name}/connector/key", dependencies=[Depends(require_person)])
 async def revoke_connector_key(agent_name: OwnedAgentByName):
     db.revoke_connector_key(agent_name)
     return {"revoked": True, "agent_name": agent_name}

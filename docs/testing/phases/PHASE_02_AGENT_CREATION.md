@@ -25,7 +25,7 @@ Replaces the January flow that created eight GitHub-template agents and asserted
 ports and "Context 0%". The fixtures already exist, so this phase now creates ONE
 throwaway agent and also absorbs the old Phase 12 cleanup. The fixture templates
 (`test-echo` etc.) are hidden from the template catalog, so the throwaway uses the
-"Blank Agent (Claude Code)" option.
+"Blank agent" option.
 
 ## Prerequisites
 
@@ -62,21 +62,21 @@ curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents \
 - Click **Create Agent**
 
 **Expected**:
-- [ ] A modal titled "Create New Agent" opens above the page
-- [ ] Field "Slug / Identifier" with placeholder `my-agent` and the help text beginning "The permanent identifier used in URLs, containers, and API keys."
-- [ ] Field "Display name (optional)" with placeholder "e.g. Marketing Assistant"
-- [ ] A "Template" list containing "Blank Agent (Claude Code)" (selected by default — highlighted with a check mark) and "GitHub Repository"
-- [ ] Record whether a "Local Templates" and/or "GitHub Templates" group is listed and how many entries each has. "Test Echo", "Test Counter" and "Test Delegator" must NOT be listed
-- [ ] Footer buttons **Create Agent** and **Cancel**
+- [ ] A fixed-size modal titled "New agent" opens above the page, with a source list on the left and details on the right (#3792). No scrollbar on the page or the modal itself, and nothing scrolls sideways
+- [ ] The left list has a "Search templates" box and a "Start" group with "Blank agent" (selected by default, highlighted) and "Import a GitHub repository"
+- [ ] The right pane has one "Name" field (placeholder "e.g. Marketing Assistant") with an "ID" row under it, and a read-only "Runtime" row reading "Claude Code"
+- [ ] Record whether "Featured", "Local templates" and/or "GitHub templates" groups are listed and how many entries each has. "Test Echo", "Test Counter" and "Test Delegator" must NOT be listed
+- [ ] Footer buttons **Cancel** and **Create agent**
 
 ### Step 3: Template options toggle correctly, Cancel discards
 **Action**:
-- Click "GitHub Repository"
-- Click "Blank Agent (Claude Code)" again
+- Click "Import a GitHub repository"
+- Click "Blank agent" again
 - Click **Cancel**
 
 **Expected**:
-- [ ] Selecting "GitHub Repository" reveals an input with placeholder "owner/repo or https://github.com/owner/repo"; re-selecting Blank Agent hides it
+- [ ] Selecting "Import a GitHub repository" reveals a "Repository" input with placeholder "owner/repo or https://github.com/owner/repo" in the right pane; re-selecting Blank agent hides it
+- [ ] Neither click changes the modal's size or moves its header, footer or the left list
 - [ ] **Cancel** closes the modal; no agent was created (the list still shows only the agents recorded in Setup)
 
 ### Step 4: Library entry point
@@ -86,30 +86,31 @@ curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents \
 
 **Expected**:
 - [ ] The Library opens on the "Agent Templates" tab
-- [ ] If starter cards exist: the same "Create New Agent" modal opens with that card's template pre-selected (highlighted) in the Template list; **Cancel** closes it
+- [ ] If starter cards exist: the same "New agent" modal opens with that card's template pre-selected (highlighted) in the left list and shown in the right pane; **Cancel** closes it
 - [ ] If no "Starter Templates" section is shown, record `SKIPPED (no starter templates on this instance)`
 
 ## Test: Name validation
 
-### Step 5: Empty slug is blocked in the browser
+### Step 5: Empty name is blocked in the browser
 **Action**:
-- Back on `http://localhost/?view=list`, open the modal, leave "Slug / Identifier" empty, click **Create Agent**
+- Back on `http://localhost/?view=list`, open the modal, leave "Name" empty, and try **Create agent**
 
 **Expected**:
-- [ ] The browser's own required-field prompt appears on the slug field; the modal stays open
+- [ ] **Create agent** is disabled while the name is empty; the modal stays open
 - [ ] No `POST /api/agents` request is sent
 
-### Step 6: A slug with no usable characters is refused
+### Step 6: A name with no usable characters is refused
 **Action**:
-- Type `!!!` in "Slug / Identifier", keep "Blank Agent (Claude Code)", click **Create Agent**
+- Type `!!!` in "Name", keep "Blank agent"
 
 **Expected**:
-- [ ] The modal stays open and shows, in red above the footer: "Invalid agent name - must contain at least one alphanumeric character"
+- [ ] The ID row is replaced, without moving anything below it, by the error "Enter a name with at least one ASCII letter or number (a-z, 0-9), for example my-agent."
+- [ ] **Create agent** is disabled; the modal stays open
 - [ ] No new agent appears
 
 ### Step 7: A duplicate slug is refused
 **Action**:
-- Replace the slug with `test-echo`, click **Create Agent**
+- Replace the name with `test-echo`, click **Create agent**
 
 **Expected**:
 - [ ] The modal stays open and shows "Agent already exists"
@@ -117,16 +118,15 @@ curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/agents \
 
 ## Test: Create, observe, delete
 
-### Step 8: Create the throwaway (slug is sanitised)
+### Step 8: Create the throwaway (the ID is derived from the name)
 **Action**:
-- Replace the slug with `Sweep Tmp 02 <run>` — capitals and spaces exactly as written, with your suffix (e.g. `Sweep Tmp 02 142507`)
-- Set "Display name" to `Sweep throwaway`
-- Keep "Blank Agent (Claude Code)" selected
-- Click **Create Agent** and wait up to 60 seconds
+- Replace the name with `Sweep throwaway`, then click **Edit** on the ID row and set the ID to `Sweep Tmp 02 <run>` — capitals and spaces exactly as written, with your suffix (e.g. `Sweep Tmp 02 142507`)
+- Keep "Blank agent" selected
+- Click **Create agent** and wait up to 60 seconds
 
 **Expected**:
 - [ ] The button reads "Creating..." with a spinner while the request runs
-- [ ] The modal closes by itself with no error (the modal shows no preview of the final slug — that is expected)
+- [ ] The modal closes by itself with no error (an edited ID is sent as typed and the API sanitises it, which Step 9 checks)
 - [ ] The agent list gains exactly one new entry
 
 **Verify** (API):
@@ -210,7 +210,7 @@ curl -s -H "Authorization: Bearer $TOKEN" http://localhost:8000/api/admin/soft-d
 
 ## Critical Validations
 
-1. The modal opens from the Dashboard and lists "Blank Agent (Claude Code)" selected by default (Step 2).
+1. The modal opens from the Dashboard with "Blank agent" selected by default (Step 2).
 2. `!!!` and `test-echo` are each refused with the named error and create nothing (Steps 6–7).
 3. `Sweep Tmp 02 <run>` is created as `sweep-tmp-02-<run>` and reaches `running` (Steps 8, 10).
 4. Deletion requires the "Delete Agent" confirmation and removes the agent (Steps 12–13).

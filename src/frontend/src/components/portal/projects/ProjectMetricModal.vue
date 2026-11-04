@@ -16,7 +16,8 @@
       <SkeletonLoader v-if="view.state === 'loading'" :count="2" height="2.5rem" gap="0.75rem" />
       <LoadFailed v-else-if="view.state === 'failed'" title="Couldn't load the metrics" :message="loadError" :retrying="loading" @retry="load" />
       <p v-else-if="view.state === 'empty'" class="text-sm text-gray-600 dark:text-gray-300" data-testid="project-metric-none">
-        None of this project's agents declares a metric it hasn't already got. An agent declares its metrics in its template, under <code>metrics:</code>.
+        None of this project's agents declares a metric the project doesn't already track.
+        An agent's owner can declare one from the agent's Dashboard tab with <strong>Declare metric</strong>, or under <code>metrics:</code> in its template. It shows up here right away.
       </p>
       <template v-else>
         <BaseSelect id="project-metric-agent" v-model="agent" label="Agent">

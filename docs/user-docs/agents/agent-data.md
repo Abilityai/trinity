@@ -8,7 +8,7 @@ An agent's home directory, `/home/developer`, is a durable named Docker volume. 
 
 - Container recreate (resource, capability, or mount changes)
 - Image upgrade
-- Template re-pull (the platform resets tracked files to `origin/main`; it never wipes untracked files)
+- Reset to the template's main (the platform overwrites tracked files except those listed in `.trinity/persistent-state.yaml`; an ordinary pull rebases onto the remote; neither wipes untracked files). A force-replace pull (offered when a pull conflicts, and through the MCP `git_pull` tool) is different: it resets to the remote and deletes untracked files that are not gitignored, so keep work you need committed or in a gitignored folder. Declaring `data_paths` gitignores `data/`, so it survives one too.
 - Subscription auto-switch
 
 So runtime data an agent writes under `data/` — SQLite databases, datasets, generated artifacts — is **already durable** today. There is no separate data volume to provision and no platform schema change involved.

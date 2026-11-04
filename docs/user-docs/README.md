@@ -6,7 +6,7 @@ Trinity is the operating system for the AI-native company — open source, self-
 
 ## What's New
 
-- [Release highlights](whats-new/README.md) — user-facing changes per release, newest first ([v0.9.5](whats-new/v0.9.5.md) latest; [v0.9.0](whats-new/v0.9.0.md) illustrated)
+- [Release highlights](whats-new/README.md) — user-facing changes per release, newest first ([v1.0.0](whats-new/v1.0.0.md) latest; [v0.9.0](whats-new/v0.9.0.md) illustrated)
 
 ## FAQ
 
@@ -21,6 +21,7 @@ Trinity is the operating system for the AI-native company — open source, self-
 - [Deploying Trinity](guides/deploying-trinity.md) — Cloud vs self-hosted setup, step-by-step
 - [Local Development](guides/deploying/local-development.md) — Docker Desktop, dev compose, hot reload, base image build
 - [Single Server](guides/deploying/single-server.md) — VPS or bare metal: prebuilt images or source, `.env` reference, database backend, Vultr
+- [Sizing Your Server](guides/deploying/capacity-planning.md) — How much RAM, CPU and disk a fleet needs, how to recommend a size, and when to grow
 - [Deploy on DigitalOcean](guides/deploying/digitalocean.md) — One command from your terminal to an HTTPS Droplet: doctl and an optional domain; you connect Claude on first sign-in
 - [Deploy on AWS](guides/deploying/aws.md) — Script install or CloudFormation stack, the instance-ID claim, IP refresh
 - [Public Access](guides/deploying/public-access.md) — Cloudflare Tunnel, the public webhook surface, DNS
@@ -53,7 +54,7 @@ Trinity is the operating system for the AI-native company — open source, self-
 - [Agent Terminal](agents/agent-terminal.md) — Ephemeral key-based SSH access; the WebSocket terminal for API clients
 - [Agent Files](agents/agent-files.md) — File browser, virtual filesystem, shared folders
 - [Agent Logs](agents/agent-logs.md) — Log viewing, telemetry, Vector aggregation
-- [Agent Configuration](agents/agent-configuration.md) — The Settings tab: guardrails, capacity, MCP exposure, access key, reliability (breaker, wake on answer), autonomy, resources, timeout
+- [Agent Configuration](agents/agent-configuration.md) — The Settings home: General, Guardrails, People, Channels, Integrations and Storage panes, the restart banner, capacity, resources, timeout
 - [Agent Guardrails](agents/agent-guardrails.md) — Deterministic safety enforcement, bash deny-lists, credential protection, tamper-proof hook registration
 - [Recommended Trinity Prompt](agents/recommended-fleet-prompt.md) — Research-backed fleet rules for the instance-wide Trinity prompt, and what not to put there
 - [Self-Execute](agents/self-execute.md) — Background tasks during chat, result injection
@@ -96,7 +97,7 @@ Trinity is the operating system for the AI-native company — open source, self-
 
 ## Sharing and Access
 
-- [Agent Sharing & Access](sharing-and-access/agent-sharing.md) — Access tab (operators), Sharing tab (external clients, channels, client roster)
+- [Agent Sharing & Access](sharing-and-access/agent-sharing.md) — Settings › People (operators), Sharing tab (external clients, channels, client roster)
 - [Access Control](sharing-and-access/access-control.md) — Cross-channel email verification, access requests
 - [Public Links](sharing-and-access/public-links.md) — Public chat URLs, email verification, session memory, Connect Slack
 - [Workspace](sharing-and-access/workspace.md) — The chat app: the Inbox, chat tabs and the pinned Main chat, the composer (typeahead, model picker, files, voice, replies), the rail (Info, Files, Loops, Canvas, Work), keyboard shortcuts, agent pages
@@ -111,7 +112,7 @@ Trinity is the operating system for the AI-native company — open source, self-
 - [Slack Integration](integrations/slack-integration.md) — Multi-agent channels, DMs, thread routing
 - [Telegram Integration](integrations/telegram-integration.md) — Bot setup, group chats, privacy mode, trigger modes
 - [WhatsApp Integration](integrations/whatsapp-integration.md) — Twilio binding, sandbox setup, email verification
-- [MCP Server](integrations/mcp-server.md) — 160 MCP tools, API keys, inline email sign-in, dedicated per-agent tools
+- [MCP Server](integrations/mcp-server.md) — 176 MCP tools, API keys, inline email sign-in, dedicated per-agent tools
 - [A2A Protocol](integrations/a2a-protocol.md) — A2A `0.3.0` in both directions: inbound tasking, outbound calls to external agents, x402 payments
 - [Nevermined Payments](integrations/nevermined-payments.md) — x402 payment monetization
 

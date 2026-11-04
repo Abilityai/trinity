@@ -129,10 +129,10 @@ export function accessDenied(
  *
  * - no auth context → allowed (dev mode installs no `authenticate`; the backend gates)
  * - `system` → allowed (Phase 11.1: the system agent talks to everyone)
- * - `agent` → itself, or a target with an `agent_permissions` edge from it
- *   (`GET /api/agents/{caller}/permissions`, which the client reads FAIL-CLOSED:
- *   an unreadable list is an empty list). A key row with no agent name is
- *   denied, not promoted to the user rule.
+ * - `agent` → itself, or a target with an `agent_permissions` edge from it or
+ *   that it spawned (`GET /api/agents/{caller}/reach/{target}`, decided from the
+ *   database and read FAIL-CLOSED: any error is "not reachable", ent#629). A key
+ *   row with no agent name is denied, not promoted to the user rule.
  * - `user` → allowed HERE: the backend already scopes a user key to what its
  *   owner can access (`AuthorizedAgent*` / `assert_agent_access`), and it does so
  *   by ROLE and per-user grant, which this layer cannot see (#2824).
@@ -211,7 +211,7 @@ const KEY_ADMIN_ONLY =
   "backend require_admin (#1890): admin + human-only; hidden from agent sessions by a per-tool canAccess (#3435)";
 const TEARDOWN_HUMAN_ONLY =
   "backend fence: the gated route requires role 'creator' AND a HUMAN caller — reject_agent_principal plus a credential-kind refusal, because one call removes N agents without delete_agent's per-agent spawn-scope check (abilityai/trinity-enterprise#454)";
-const REMINDER_SELF_GATE = "backend self-gate: reminders.py::_self_gate refuses an agent key naming another agent";
+const REMINDER_SELF_GATE = "backend self-gate: reminders.py assert_own_agent refuses an agent key naming another agent (abilityai/trinity-enterprise#840)";
 const SKILL_MANAGER_FENCE =
   "backend fence: routers/skills.py get_skill_managed_agent_by_name refuses an agent key whose agent does not hold the skills.manage capability — on a sibling AND on itself (abilityai/trinity-enterprise#596)";
 const SKILL_GATE_FENCE =
@@ -234,6 +234,8 @@ const A2A_OUTBOUND_LIST =
   "a2a.ts refuses agent-scoped keys itself (human_only, no round trip) — the OSS settings route behind it is admin + human-only, not self-scoped, so a permission lookup would be inert";
 const ASSIGNMENTS_SELF =
   "assignments.ts — an agent key reads only its own roster (fails closed without an agent name); user/system keys are scoped by the backend, whose 404 is uniform (ent#500)";
+const GRANTS_OWNER_TIER =
+  "backend fence: agent_config.py OwnedAgentByName — an agent key reads itself or an agent it spawned, never through a permission edge; a person key only as owner or admin (ent#164, ent#756). An `enforce` row would admit an edge peer the route refuses (trinity-enterprise#991)";
 const A2A_CALL_SELF = "a2a_call.ts checkSelf — self-only by design (an agent spends only its own endpoint credential)";
 const AGENTS_INLINE = "agents.ts inline getPermittedAgents filter ({self} ∪ permitted)";
 const LOOP_RESOLVE =
@@ -285,6 +287,10 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   list_systems: { kind: "none", why: "no agent target" },
   restart_system: { kind: "none", why: "a system name, not an agent" },
   get_system_manifest: { kind: "none", why: "a system name, not an agent" },
+  apply_system: {
+    kind: "none",
+    why: "a system manifest, no agent target; person-only: its own canAccess shows it to user-scoped sessions alone, and the backend's require_person refuses every other key",
+  },
   // --- docs.ts ---
   get_agent_requirements: { kind: "none", why: "no agent target" },
   ask_trinity: { kind: "none", why: "no agent target" },
@@ -369,6 +375,8 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   get_nevermined_config: { kind: "enforce", param: "agent_name" },
   toggle_nevermined: { kind: "baselined", owner: ADMIN_ONLY },
   get_nevermined_payments: { kind: "baselined", owner: ADMIN_ONLY },
+  get_agent_spending: { kind: "enforce", param: "agent_name" },
+  revoke_agent_delegation: { kind: "enforce", param: "agent_name" },
   // --- executions.ts ---
   list_recent_executions: { kind: "in-tool", how: EXECUTIONS_GATE },
   get_execution_result: { kind: "in-tool", how: EXECUTIONS_GATE },
@@ -393,9 +401,11 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   send_voice_reply: { kind: "enforce", param: "agent_name" },  // also: effect-guarded per execution (#1084)
   // --- memory.ts ---
   write_user_memory: { kind: "enforce", param: "agent_name" },
+  search_memory: { kind: "enforce", param: "agent_name" },  // ent#1028 — same self-fence as the write
   // --- decisions.ts (ent#638) --- the target is only ever the seat's own agent
   record_decision: { kind: "enforce", param: "agent_name" },
   list_seat_decisions: { kind: "enforce", param: "agent_name" },
+  get_autonomy: { kind: "enforce", param: "agent_name" },
   // --- loops.ts ---
   run_agent_loop: { kind: "enforce", param: "agent_name" },
   get_loop_status: { kind: "in-tool", how: LOOP_RESOLVE },
@@ -418,6 +428,7 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   get_my_ask: { kind: "none", why: "self-acting: the agent comes from the key (resolveActingAgent); the backend re-checks identity (trinity-enterprise#611)" },
   ask_operator: { kind: "none", why: "self-acting: the agent comes from the key (resolveActingAgent), `to` is a role and never an agent; the backend re-checks identity (trinity-enterprise#611)" },
   withdraw_ask: { kind: "none", why: "self-acting: the agent comes from the key (resolveActingAgent), request_id names one of its own asks; the backend re-checks identity and ownership (trinity-enterprise#901)" },
+  ask_for_credential: { kind: "none", why: "self-acting: the agent comes from the key (resolveActingAgent), the ask goes to its own primary person; the backend re-checks identity (trinity-enterprise#1066)" },
   // --- git.ts ---
   get_git_status: { kind: "in-tool", how: GIT_GATE },
   git_sync: { kind: "in-tool", how: GIT_GATE },
@@ -468,8 +479,15 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   set_project_health: { kind: "none", why: "a project id; the backend answers only when the calling agent is its active steward (ent#661 v3)" },
   create_project: { kind: "none", why: "creates on the calling agent's OWN owner's behalf; the backend gates it on projects.manage (ent#588)" },
   import_project: { kind: "none", why: "a path in the calling agent's OWN files; the backend gates it on projects.manage (ent#588)" },
+  // `agents` are never acted on by the caller: the backend checks each against the project
+  // CREATOR's roster, nothing happens until the creator approves, and adding one someone else
+  // owns still raises that owner's consent ask (R39). The steward gate is projects.manage.
+  propose_project_changes: { kind: "baselined", owner: "trinity-enterprise#980: projects/proposals.py — creator approval + the agent owner's consent ask" },
   // --- assignments.ts ---
   get_agent_assignments: { kind: "in-tool", how: ASSIGNMENTS_SELF },
+  // --- permissions.ts ---
+  get_agent_permissions: { kind: "enforce", param: "agent_name" },
+  get_agent_capability_grants: { kind: "baselined", owner: GRANTS_OWNER_TIER },
   // --- connector.ts (connector / anonymous tiers) ---
   list_playbooks: { kind: "baselined", owner: CONNECTOR_SCOPE },
   run_playbook: { kind: "baselined", owner: CONNECTOR_SCOPE },

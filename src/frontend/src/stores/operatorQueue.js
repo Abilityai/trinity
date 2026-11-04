@@ -9,6 +9,7 @@ import { defineStore } from 'pinia'
 import { ref, computed, watch } from 'vue'
 import axios from 'axios'
 import api from '../api'
+import { http } from '../utils/boundedHttp'
 import { useAuthStore } from './auth'
 import { apiErrorMessage } from '../utils/apiError'
 import { decideAutoExpand } from '../utils/loadingState'
@@ -21,7 +22,15 @@ import {
   respondRefusedAsDiverged,
   respondRefusedAsNotAddressee,
   queueEndingSortTime,
+  bulkCancelBatches,
 } from '../utils/operatorQueue'
+import { readQueueSnapshot, pendingCountOf } from '../utils/operatorQueueRead'
+
+// #3302: the list read starts with the same 200-row page as before, and reads
+// past it only when the queue needs it (utils/operatorQueueRead.js). Pending is
+// read completely; Resolved stays a window of this size, its total stated.
+const LIST_PAGE = 200
+const RESOLVED_WINDOW = 200
 
 // Agent display helpers
 const AGENT_COLORS = [
@@ -66,6 +75,22 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
   // addressed to this person. Its own ref, not `error`: `fetchItems` clears
   // `error` on every poll, and a failed verb must persist beside its control (p18).
   const notAddresseeItemId = ref(null)
+  // #3302: every header's counts (NavBar badge, subtitle, tab badge). Written
+  // by the list read from the complete pending set, by the count read off the
+  // Operations page, and by an answer — never derived from a window.
+  const pendingTotal = ref(0)
+  const pendingCountExact = ref(true)
+  const criticalTotal = ref(0)
+  // false: the pending walk could not finish, so the list is its first part.
+  const pendingComplete = ref(true)
+  // Ended asks in all, beside the Resolved window; null = could not be read.
+  const resolvedTotal = ref(null)
+  // True while a view renders the list (Operations polls). Only then is a
+  // trigger worth a list read; elsewhere the store only feeds the NavBar badge.
+  const listLive = ref(false)
+  // Bumped by every write the server acknowledged (an answer, a bulk cancel, a
+  // clear): a read that left before it carries the old state and is dropped.
+  let writeGen = 0
   let _pollTimer = null
 
   // Getters
@@ -93,13 +118,9 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
       .sort((a, b) => new Date(queueEndingSortTime(b)) - new Date(queueEndingSortTime(a)))
   })
 
-  const pendingCount = computed(() =>
-    items.value.filter(i => i.status === 'pending').length
-  )
+  const pendingCount = computed(() => pendingTotal.value)
 
-  const criticalCount = computed(() =>
-    items.value.filter(i => i.status === 'pending' && i.priority === 'critical').length
-  )
+  const criticalCount = computed(() => criticalTotal.value)
 
   const openItemsByAgent = computed(() => {
     const groups = {}
@@ -117,17 +138,76 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
   }
 
   // API Actions
-  async function fetchItems() {
+  // #3302: bounded (30 s). The global axios carries no timeout, and with the
+  // reads one-at-a-time a request that never settles would hold every later
+  // read — poll, WS refresh, Retry, the refetch after an answer — forever.
+  function queueGet(params) {
+    return http.get('/api/operator-queue', { params, headers: authStore.authHeader })
+  }
+
+  // #3302: one read at a time, plus ONE more for every trigger that lands while
+  // it runs. A read can take several requests now, and a sync trigger can fire
+  // every 5 s on every open tab; a sequence guard would still SEND them all.
+  // Every caller's promise settles when the chain DRAINS, not when its own run
+  // ends: a caller that awaits a read and then writes `error` (the 409 notice, a
+  // failed bulk cancel) must write after the reads queued behind it, whose
+  // prologue would otherwise clear the notice before it renders. A chain is
+  // capped; a trigger past the cap starts the next chain.
+  const MAX_CHAINED_READS = 3
+
+  function coalesced(run) {
+    let chain = null
+    let again = false
+    function start() {
+      if (chain) {
+        again = true
+        return chain
+      }
+      chain = (async () => {
+        let runs = 0
+        do {
+          again = false
+          await run() // never rejects: each run records its own failure
+          runs += 1
+        } while (again && runs < MAX_CHAINED_READS)
+        chain = null
+        if (again) start()
+      })()
+      return chain
+    }
+    return start
+  }
+
+  // An acknowledged write that lands while a read is out makes that read stale;
+  // it is read again (bounded) so whoever awaits this read sees the state after
+  // the write — a refetch after a 409 must show what the agent changed.
+  const STALE_READ_RETRIES = 2
+
+  async function loadList() {
     loading.value = true
     error.value = null
     try {
-      const response = await axios.get('/api/operator-queue', {
-        params: { limit: 200 },
-        headers: authStore.authHeader
-      })
-      items.value = response.data.items || []
-      undeliveredCount.value = Number(response.data.undelivered_count) || 0
-      closedByFilerCount.value = Number(response.data.closed_by_filer_count) || 0
+      let gen
+      let snap
+      let critical
+      for (let attempt = 0; ; attempt += 1) {
+        gen = writeGen
+        snap = await readQueueSnapshot(queueGet, { pageLimit: LIST_PAGE, endedLimit: RESOLVED_WINDOW })
+        // A walk that could not finish ranks an alert raised during it last, so a
+        // partial read takes the critical count from the route, not the rows.
+        critical = snap.pendingComplete ? null
+          : pendingCountOf((await queueGet({ status: 'pending', priority: 'critical', limit: 1 })).data)
+        if (gen === writeGen || attempt >= STALE_READ_RETRIES) break
+      }
+      if (gen !== writeGen) return // still overtaken: the optimistic state is newer than any read
+      items.value = [...snap.pending, ...snap.ended]
+      pendingComplete.value = snap.pendingComplete
+      pendingCountExact.value = snap.pendingTotal != null
+      pendingTotal.value = snap.pendingTotal ?? snap.pending.length
+      criticalTotal.value = critical ?? snap.pending.filter(i => i.priority === 'critical').length
+      resolvedTotal.value = snap.endedTotal
+      undeliveredCount.value = snap.flags.undelivered
+      closedByFilerCount.value = snap.flags.closedByFiler
       hasLoaded.value = true
     } catch (err) {
       error.value = apiErrorMessage(err, 'Request failed')
@@ -135,6 +215,39 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
     } finally {
       loading.value = false
     }
+  }
+
+  // #3302: the counts alone, for a page that shows no list (the NavBar badge):
+  // two one-row reads whose `total` is the count — not a window of rows.
+  async function loadCounts() {
+    const gen = writeGen
+    try {
+      const [all, critical] = await Promise.all([
+        queueGet({ status: 'pending', limit: 1 }),
+        queueGet({ status: 'pending', priority: 'critical', limit: 1 }),
+      ])
+      // Dropped when an answer overtook it, and when a view renders the list by
+      // the time it lands: the list read owns the counts then, and a count read
+      // started on another page could otherwise paint an older total over it.
+      if (gen !== writeGen || listLive.value) return
+      const pending = pendingCountOf(all.data)
+      const criticalPending = pendingCountOf(critical.data)
+      // An unverified total keeps the number already on screen.
+      if (pending != null) {
+        pendingTotal.value = pending
+        pendingCountExact.value = true
+      }
+      if (criticalPending != null) criticalTotal.value = criticalPending
+    } catch {
+      // The badge keeps its last value; the list surfaces report their own failures.
+    }
+  }
+
+  const fetchItems = coalesced(loadList)
+  const fetchCounts = coalesced(loadCounts)
+
+  function refresh() {
+    return listLive.value ? fetchItems() : fetchCounts()
   }
 
   async function respondToItem(id, response, responseText = '', { acknowledgeDivergence = false } = {}) {
@@ -157,13 +270,23 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
       )
       if (divergedItemId.value === id) divergedItemId.value = null
       if (notAddresseeItemId.value === id) notAddresseeItemId.value = null
+      // #3302: recorded. A read already out still carries this ask as pending,
+      // and the counts are no longer derived from the rows, so both move here.
+      writeGen += 1
+      // A read that landed while the POST was out replaced the row objects:
+      // update the row on screen, and count it only if it is still pending there.
+      const row = items.value.find(i => i.id === id) || item
+      if (row.status === 'pending') {
+        pendingTotal.value = Math.max(0, pendingTotal.value - 1)
+        if (row.priority === 'critical') criticalTotal.value = Math.max(0, criticalTotal.value - 1)
+      }
 
       // Optimistic update — mirror the body that was sent
-      item.status = 'responded'
-      item.response = body.response
-      item.response_text = body.response_text
-      item.responded_by_email = authStore.userEmail || authStore.user?.username
-      item.responded_at = new Date().toISOString()
+      row.status = 'responded'
+      row.response = body.response
+      row.response_text = body.response_text
+      row.responded_by_email = authStore.userEmail || authStore.user?.username
+      row.responded_at = new Date().toISOString()
       expandedItemId.value = null
 
       // Auto-advance: expand next open item
@@ -220,14 +343,34 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
   async function bulkCancel(ids) {
     if (!ids || ids.length === 0) return { cancelled: 0, skipped: 0 }
     error.value = null
+    // #3302: the list is complete now, so it can hold more ids than the route
+    // takes. Batches keep each agent's asks together (bulkCancelBatches), so
+    // the confirm's "one turn per agent" holds across them.
+    const agentOf = new Map(items.value.map(i => [i.id, i.agent_name]))
+    const batches = bulkCancelBatches(ids.map(id => ({ id, agent_name: agentOf.get(id) })))
+    const result = { cancelled: 0, skipped: 0, batch_ids: [] }
+    let landed = 0
     try {
-      const response = await api.post('/api/operator-queue/bulk-cancel', { ids })
-      await fetchItems()
-      return response.data
+      for (const batch of batches) {
+        const response = await api.post('/api/operator-queue/bulk-cancel', { ids: batch })
+        landed += 1
+        result.cancelled += Number(response.data?.cancelled) || 0
+        result.skipped += Number(response.data?.skipped) || 0
+        if (response.data?.batch_id) result.batch_ids.push(response.data.batch_id)
+      }
     } catch (err) {
+      if (landed > 0) {
+        // Some asks did end: show that before saying the rest failed (the
+        // refetch clears `error` in its prologue, so it runs first).
+        writeGen += 1
+        await fetchItems()
+      }
       error.value = apiErrorMessage(err, 'Request failed')
       throw err
     }
+    writeGen += 1
+    await fetchItems()
+    return result
   }
 
   async function clearResolved(agentName = null) {
@@ -236,6 +379,7 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
       const response = await api.post('/api/operator-queue/clear-resolved', {
         agent_name: agentName,
       })
+      writeGen += 1
       await fetchItems()
       return response.data
     } catch (err) {
@@ -278,16 +422,17 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
     if (len === 0) autoExpandArmed.value = true
   })
 
-  // WebSocket event handler
+  // WebSocket event handler. #3302: every refetch here is `refresh()` — the
+  // list where a view shows it, the two counts everywhere else.
   function handleWebSocketEvent(data) {
     if (data.type === 'operator_queue_new') {
       // New item from agent — refetch to get full data
-      fetchItems()
+      refresh()
     } else if (data.type === 'operator_queue_responded' || data.type === 'operator_queue_cancelled') {
       // trinity-enterprise#611: an ask ended (answered / cancelled). The trigger
       // is thin — identifiers only (#918) — so refetch the access-controlled
       // list rather than patching the row from a payload.
-      fetchItems()
+      refresh()
     } else if (data.type === 'operator_queue_acknowledged') {
       // Agent acknowledged — update locally
       const item = items.value.find(i => i.id === data.data?.id)
@@ -296,17 +441,19 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
       }
     } else if (data.type === 'operator_queue_cleared') {
       // Bulk clear by an operator (#1017) — refetch authoritative state
-      fetchItems()
+      refresh()
     } else if (data.type === 'operator_queue_sync') {
       // #2915: the poller changed some row's sync/delivery state — one thin
       // trigger per cycle; refetch the access-controlled list (#918)
-      fetchItems()
+      refresh()
     }
   }
 
-  // Polling (fallback for when WebSocket misses events)
+  // Polling (fallback for when WebSocket misses events). The poller is the
+  // view that renders the list, so it also marks the list live (#3302).
   function startPolling(interval = 15000) {
     stopPolling()
+    listLive.value = true
     fetchItems() // Initial fetch
     _pollTimer = setInterval(fetchItems, interval)
   }
@@ -316,6 +463,7 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
       clearInterval(_pollTimer)
       _pollTimer = null
     }
+    listLive.value = false
   }
 
   return {
@@ -335,10 +483,16 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
     openItems,
     resolvedItems,
     pendingCount,
+    pendingCountExact,
+    pendingComplete,
     criticalCount,
+    resolvedTotal,
     openItemsByAgent,
     getProfile,
     fetchItems,
+    fetchCounts,
+    refresh,
+    listLive,
     toggleExpand,
     maybeAutoExpand,
     respondToItem,

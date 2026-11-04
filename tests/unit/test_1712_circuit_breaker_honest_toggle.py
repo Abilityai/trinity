@@ -18,7 +18,9 @@ import pytest
 
 _FE = Path(__file__).resolve().parents[2] / "src" / "frontend" / "src"
 _PANEL = _FE / "components" / "ReliabilityPanel.vue"
-_SETTINGS = _FE / "components" / "settings" / "SettingsPanel.vue"
+# The agent Settings home (trinity-enterprise#887) hosts the panel in its
+# Guardrails pane; the old components/settings/SettingsPanel.vue is gone.
+_SETTINGS = _FE / "components" / "agent-settings" / "GuardrailsPane.vue"
 
 
 @pytest.fixture(scope="module")
@@ -63,9 +65,9 @@ def test_panel_calls_the_circuit_breaker_endpoint(panel_src):
 
 def test_panel_is_wired_into_the_settings_tab():
     """A component nobody renders is as inert as the bug it fixes — the panel must
-    be mounted in the agent Settings tab."""
+    be mounted in the agent Settings home (Guardrails pane)."""
     settings = _SETTINGS.read_text(encoding="utf-8")
-    assert "ReliabilityPanel" in settings, (
-        "SettingsPanel.vue must render ReliabilityPanel — otherwise the honest "
+    assert "<ReliabilityPanel" in settings, (
+        "GuardrailsPane.vue must render ReliabilityPanel — otherwise the honest "
         "circuit-breaker toggle has no home (#1712)."
     )
