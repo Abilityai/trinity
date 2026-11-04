@@ -1296,6 +1296,8 @@ def test_rollback_whose_checkout_failed_never_rebuilds_or_reports_success(tmp_pa
     proc = inst.run("--rollback", "--yes", env=env)
     assert proc.returncode != 0
     assert "Rolled back" not in proc.stdout
+    assert ("could not put the checkout back" if where == "platform"
+            else "could not put the enterprise tree back") in proc.stderr
     assert not any(re.search(r" (build|up)\b", c) for c in inst.compose_calls()), (
         "a failed checkout must not rebuild the new code and call it the old version"
     )
