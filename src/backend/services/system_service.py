@@ -2199,7 +2199,7 @@ def _configured_preview(cfg: SystemAgentConfig) -> Dict[str, Dict[str, int]]:
     return {"configured": counts} if counts else {}
 
 
-# #4025: what a caller `_caller_may_set_platform_prompt` refuses gets instead of
+# #4025: what a caller `_caller_passes_admin_gate` refuses gets instead of
 # the write. In `warnings[]` because the response contract is pinned (the ent#695
 # create-mode golden), as #4130 did for `deploy: false`; the code is apply's.
 PROMPT_REQUIRES_ADMIN_WARNING = (
@@ -2209,8 +2209,8 @@ PROMPT_REQUIRES_ADMIN_WARNING = (
 )
 
 
-def _caller_may_set_platform_prompt(current_user: User) -> bool:
-    """Would this caller pass the settings route's admin gate for `trinity_prompt`?
+def _caller_passes_admin_gate(current_user: User) -> bool:
+    """Would this caller pass the settings route's admin gate, which guards `trinity_prompt`?
 
     Exactly `assert_admin` with no scope opt-in (#4025): an admin JWT, or an
     admin's `user` / `system` key. A creator, any agent key (one an admin owns
@@ -2291,7 +2291,14 @@ async def deploy_manifest(
                 "report on them"))
         all_warnings = validation_warnings + name_warnings
         # #4025: decided once, before the preview, so the preview predicts the write.
-        may_set_prompt = _caller_may_set_platform_prompt(current_user)
+        # The refusal is reported only when it withholds a change: a prompt that
+        # already matches is apply's `unchanged`, not a refusal.
+        may_set_prompt = _caller_passes_admin_gate(current_user)
+        prompt_refused = (
+            bool(manifest.prompt)
+            and not may_set_prompt
+            and db.get_setting_value("trinity_prompt") != manifest.prompt
+        )
         if declared_only:
             # The response contract is pinned (ent#695 AC6), so the skip is
             # listed where every caller already reads: the warnings.
@@ -2301,7 +2308,7 @@ async def deploy_manifest(
 
         # 4. If dry_run, return preview
         if dry_run:
-            if manifest.prompt and not may_set_prompt:
+            if prompt_refused:
                 all_warnings.append(PROMPT_REQUIRES_ADMIN_WARNING)
             agents_to_create = [
                 {
@@ -2503,7 +2510,7 @@ async def deploy_manifest(
             db.set_setting("trinity_prompt", manifest.prompt)
             prompt_updated = True
             logger.info(f"Updated trinity_prompt for system '{manifest.name}'")
-        elif manifest.prompt:
+        elif prompt_refused:
             all_warnings.append(PROMPT_REQUIRES_ADMIN_WARNING)
             logger.warning(
                 f"Not applying the prompt of system '{manifest.name}': "
@@ -2996,7 +3003,7 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
     system = manifest.name
     blockers: List[SystemApplyBlocker] = []
 
-    caller_is_admin = _caller_may_set_platform_prompt(current_user)
+    caller_is_admin = _caller_passes_admin_gate(current_user)
 
     snapshot = ApplySnapshot(
         system_name=system,

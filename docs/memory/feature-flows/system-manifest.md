@@ -814,7 +814,8 @@ async def deploy_system(
    └─ Any other caller the route admits (a creator, an agent key holding
       agents.manage, even one an admin owns) gets the fleet, prompt_updated=false
       and a `prompt_requires_admin:` warning (#4025). One predicate,
-      `_caller_may_set_platform_prompt`, serves deploy and apply.
+      `_caller_passes_admin_gate`, serves deploy and apply. No warning when the
+      stored prompt already equals the manifest's (apply's `unchanged`).
 
 6c. Survivor scoping + partial warnings:
    └─ created_map = agent_names filtered to created agents; all config phases
@@ -2120,7 +2121,9 @@ prompt: !!python/object:db_models.Setting
 - Cleanup: Delete created agent
 - Non-admin callers: `tests/unit/test_4025_deploy_prompt_admin_only.py` (creator JWT and an
   agent key with `agents.manage` deploy the fleet but not the prompt; parity with
-  `PUT /api/settings/trinity_prompt` across seven principals)
+  `PUT /api/settings/trinity_prompt` across seven principals, three of which the deploy
+  route's fence already refuses; the predicate itself is pinned against `assert_admin`
+  across every MCP scope)
 
 ### Phase 3 Tests: Permissions
 

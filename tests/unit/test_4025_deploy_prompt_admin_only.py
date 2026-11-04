@@ -27,7 +27,7 @@ import routers.agents as agents_router
 import routers.settings as settings_router
 from database import db
 from db_harness import seed_agent, seed_user
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from models import User
 from routers import systems
@@ -234,3 +234,54 @@ def test_deploy_writes_the_prompt_exactly_when_the_settings_route_would(install,
         body = deploy.json()
         assert body["prompt_updated"] is deploy_wrote
         assert len(_prompt_warnings(body)) == (0 if deploy_wrote else 1), body["warnings"]
+
+
+# --- a refusal is reported only when it withholds a change ---------------------
+
+
+@pytest.mark.parametrize("dry_run", [True, False], ids=["preview", "deploy"])
+def test_a_non_admin_whose_prompt_already_matches_gets_no_refusal(install, dry_run):
+    """Apply calls this `unchanged`: nothing is withheld, so nothing is refused."""
+    db.set_setting("trinity_prompt", MANIFEST_PROMPT)
+
+    resp = _deploy(CREATOR_JWT, dry_run=dry_run)
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["prompt_updated"] is False
+    assert _prompt_warnings(resp.json()) == []
+    assert _stored_prompt() == MANIFEST_PROMPT
+
+
+# --- the predicate itself, past the fence ------------------------------------------
+#
+# The parity test above reaches the predicate only for callers the deploy route
+# admits: connector and portal-delegate keys stop at `capability_fence` first. This
+# pins the predicate's own answer for every scope, so the fence is not the only
+# thing standing between those keys and the platform prompt.
+
+
+def _principal(role: str, scope):
+    extra = {
+        "agent": {"agent_name": ORCH},
+        "connector": {"connector_agent": ORCH},
+        "portal_delegate": {"portal_delegate": True},
+    }.get(scope, {})
+    return User(id=ADMIN_ID, username="admin", email=None, role=role, mcp_scope=scope, **extra)
+
+
+SCOPES = [None, "user", "system", "agent", "connector", "portal_delegate", "ops", "a-sixth-scope"]
+ADMITTED = {("admin", None), ("admin", "user"), ("admin", "system")}
+
+
+@pytest.mark.parametrize("role", ["admin", "creator"])
+@pytest.mark.parametrize("scope", SCOPES, ids=[str(s) for s in SCOPES])
+def test_the_predicate_is_exactly_the_settings_routes_admin_gate(role, scope):
+    principal = _principal(role, scope)
+    try:
+        dependencies.assert_admin(principal)
+        gate_admits = True
+    except HTTPException:
+        gate_admits = False
+
+    assert system_service._caller_passes_admin_gate(principal) is gate_admits
+    assert gate_admits is ((role, scope) in ADMITTED)
