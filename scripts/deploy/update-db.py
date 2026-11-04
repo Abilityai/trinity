@@ -29,7 +29,11 @@ backup
 schema
   The schema position: every applied migration the database records, hashed.
   SQLite: `schema_migrations.name` (+ `enterprise_schema_migrations` rows when
-  present). PostgreSQL: `alembic_version` (+ the enterprise table) via `psql`.
+  present). PostgreSQL: `alembic_version`, plus `enterprise_alembic_version` and
+  `enterprise_schema_migrations` when they exist, via `psql`. On PostgreSQL the
+  enterprise track keeps its own Alembic table, so an enterprise-only revision
+  moves nothing else. A probe that cannot answer is a failure, never a smaller
+  hash: "could not look" must not read as "no enterprise migrations".
   Two positions differ exactly when a migration ran between them, which is
   what decides whether rolling the CODE back alone is safe.
 """
@@ -183,19 +187,30 @@ def _psql(conninfo, env, sql):
     return proc.returncode, proc.stdout.decode("utf-8", "replace").splitlines()
 
 
+def _pg_table_exists(conninfo, env, table):
+    rc, out = _psql(conninfo, env, "SELECT to_regclass('%s') IS NOT NULL" % table)
+    if rc != 0 or out not in (["t"], ["f"]):
+        _fail("could not tell whether %s exists" % table)
+    return out == ["t"]
+
+
 def _pg_schema():
     conninfo, env = _pg_conn()
     rc, heads = _psql(conninfo, env, "SELECT version_num FROM alembic_version")
     if rc != 0:
         _fail("could not read alembic_version")
     lines = ["alembic:%s" % h for h in heads if h]
-    rc, has_ent = _psql(conninfo, env, "SELECT to_regclass('enterprise_schema_migrations') IS NOT NULL")
     ent = []
-    if rc == 0 and has_ent and has_ent[0] == "t":
+    if _pg_table_exists(conninfo, env, "enterprise_alembic_version"):
+        rc, rows = _psql(conninfo, env, "SELECT version_num FROM enterprise_alembic_version")
+        if rc != 0:
+            _fail("could not read enterprise_alembic_version")
+        ent += ["ent-alembic:%s" % r for r in rows if r]
+    if _pg_table_exists(conninfo, env, "enterprise_schema_migrations"):
         rc, rows = _psql(conninfo, env, "SELECT * FROM enterprise_schema_migrations")
         if rc != 0:
             _fail("could not read enterprise_schema_migrations")
-        ent = ["ent:%s" % r for r in rows if r]
+        ent += ["ent:%s" % r for r in rows if r]
     _emit({"status": "ok", "backend": "postgresql", "position": _position(lines + ent),
            "oss": ",".join(sorted(h for h in heads if h)), "enterprise": len(ent)}, 0)
 

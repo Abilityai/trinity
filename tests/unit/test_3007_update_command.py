@@ -73,7 +73,11 @@ args="$*"
 case "$1" in
   info) exit "${STUB_DOCKER_INFO_RC:-0}" ;;
   volume) exit 1 ;;
-  logs) printf '%s\n' "${STUB_BOOT_LOG:-}"; exit 0 ;;
+  logs)
+    # A file, because a 300 KB log cannot travel as an environment variable on Linux.
+    if [ -n "${STUB_BOOT_LOG_FILE:-}" ]; then cat "$STUB_BOOT_LOG_FILE"
+    else printf '%s\n' "${STUB_BOOT_LOG:-}"; fi
+    exit 0 ;;
   exec)
     cat >/dev/null
     if [ "${@: -1}" = "schema" ]; then
@@ -89,6 +93,7 @@ case "$1" in
     ;;
   inspect)
     case "$args" in
+      *image.version*) printf '%s\n' "${STUB_IMAGE_VERSION:-}"; exit 0 ;;
       *config_files*)
         [ -n "${STUB_CONFIG_FILES:-}" ] || exit 1
         printf '%s\n' "$STUB_CONFIG_FILES"; exit 0 ;;
@@ -126,6 +131,11 @@ while [ $# -gt 0 ]; do
   shift
 done
 key=$(printf '%s' "$url" | tr -c 'A-Za-z0-9\n' '_')
+# <key>.failn holds a countdown: that many refused connections, then the normal answer.
+if [ -f "$STUB_WEB/$key.failn" ]; then
+  n=$(cat "$STUB_WEB/$key.failn")
+  if [ "$n" -gt 0 ]; then echo $((n - 1)) > "$STUB_WEB/$key.failn"; exit 7; fi
+fi
 if [ -f "$STUB_WEB/$key.fail" ] || [ ! -f "$STUB_WEB/$key" ]; then exit 22; fi
 if [ -n "$out" ]; then cat "$STUB_WEB/$key" > "$out"; else cat "$STUB_WEB/$key"; fi
 exit 0
@@ -162,7 +172,8 @@ def _git(cwd: Path, *args: str) -> str:
 class Instance:
     """An upstream with tags v1.0.0 and v1.1.0, cloned and checked out at v1.0.0."""
 
-    def __init__(self, tmp: Path, *, enterprise: bool, base_image_change: bool = False):
+    def __init__(self, tmp: Path, *, enterprise: bool, base_image_change: bool = False,
+                 predates_update_sh: bool = False):
         self.tmp = tmp
         self.upstream = tmp / "upstream"
         self.ent_upstream = tmp / "ent-upstream"
@@ -212,6 +223,9 @@ class Instance:
         (up / "docker" / "base-image" / "Dockerfile").write_text("FROM scratch\n")
         (up / ".gitignore").write_text(".env\ntrinity-data/\n")
         _git(up, "add", "-A")
+        if predates_update_sh:
+            # The state of every tag cut before this command existed (0.9.5 -> 1.0).
+            _git(up, "rm", "-q", "--cached", "scripts/deploy/update.sh", "scripts/deploy/update-db.py")
         if enterprise:
             _git(up, "update-index", "--add", "--cacheinfo", f"160000,{self.ent_pins[0]},src/backend/enterprise")
         _git(up, "commit", "-qm", "v1.0.0")
@@ -272,7 +286,8 @@ class Instance:
         return ",".join(str(self.root / n) for n in names)
 
     # -- run -----------------------------------------------------------------
-    def run(self, *args: str, env: dict | None = None, stdin: str = "") -> subprocess.CompletedProcess:
+    def run(self, *args: str, env: dict | None = None, stdin: str = "",
+            script: Path | None = None) -> subprocess.CompletedProcess:
         base_env = {
             "PATH": f"{self.bin}:/usr/bin:/bin:/usr/sbin:/sbin",
             "HOME": str(self.tmp),
@@ -281,6 +296,7 @@ class Instance:
             "TRINITY_UPDATE_STATE_DIR": str(self.state),
             "TRINITY_UPDATE_MIN_FREE_GB": "0",
             "TRINITY_UPDATE_HEALTH_TIMEOUT": "2",
+            "TRINITY_UPDATE_PUBLISHED_TIMEOUT": "0",  # one attempt, unless a test is about the wait
             "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
@@ -289,7 +305,7 @@ class Instance:
         if shutil.which("python3"):
             base_env["PATH"] += ":" + str(Path(shutil.which("python3")).parent)
         return subprocess.run(
-            ["bash", str(self.root / "scripts" / "deploy" / "update.sh"), *args],
+            ["bash", str(script or self.root / "scripts" / "deploy" / "update.sh"), *args],
             cwd=self.root, capture_output=True, text=True, input=stdin,
             env={**base_env, **(env or {})}, timeout=120,
         )
@@ -335,8 +351,8 @@ def _ent_env(inst: Instance, **extra: str) -> dict:
         "STUB_CONFIG_FILES": inst.config_files(_PROD, _ENT),
         "STUB_BOOT_LOG": _REGISTERED,
         "STUB_COMPOSE_JSON": _ports_json("80"),
-        "STUB_PORTS_trinity_frontend": "80",
-        "STUB_PORTS_trinity_backend": "8000",
+        "STUB_PORTS_trinity_frontend": ":80",   # what `docker inspect` prints: HostIp is empty
+        "STUB_PORTS_trinity_backend": ":8000",
         **extra,
     }
 
@@ -521,7 +537,7 @@ def test_published_url_502_fails_the_update_and_records_rollback(tmp_path):
     proc = inst.run("--yes", env=_ent_env(inst))
     assert proc.returncode != 0
     out = proc.stdout + proc.stderr
-    assert "https://trinity.example.com" in out
+    assert "\u274c https://trinity.example.com/ did not answer 200" in out
     assert "--rollback" in out
     states = list(inst.state.iterdir())
     assert len(states) == 1
@@ -670,6 +686,9 @@ def test_hosted_delegate_failure_restores_tag_and_checkout(tmp_path):
     proc = inst.run("--yes", env=env)
     assert proc.returncode != 0
     assert "TRINITY_IMAGE_TAG=v1.0.0" in (inst.root / ".env").read_text()
+    # start.sh --hosted skips the schema guard; it can boot old images on a migrated schema.
+    assert "update.sh --rollback" in proc.stderr
+    assert "re-run ./scripts/deploy/start.sh" not in proc.stderr
 
 
 # --------------------------------------------------------------------------- #
@@ -851,7 +870,7 @@ def test_postgres_rollback_prints_pg_restore_of_the_dump(tmp_path):
     _schema(inst, "after002")
     proc = inst.run("--rollback", "--yes", env=env)
     assert proc.returncode != 0
-    assert "pg_restore --clean --if-exists --no-owner" in proc.stderr
+    assert "pg_restore --no-owner" in proc.stderr
     assert "/data/backups/pre-update-20261015-120000.dump" in proc.stderr
 
 
@@ -977,8 +996,10 @@ def test_postgres_backup_rejects_output_without_pgdmp_magic(tmp_path):
 def test_postgres_schema_position_reads_alembic_and_enterprise(tmp_path):
     pytest.importorskip("sqlalchemy")
     psql = r"""case "$*" in
-  *alembic_version*) printf '%s\n' "${HEADS:-0050_x}" ;;
+  *to_regclass*enterprise_alembic_version*) echo "${HAS_ENT_ALEMBIC:-f}"; exit "${PROBE_RC:-0}" ;;
   *to_regclass*) echo t ;;
+  *enterprise_alembic_version*) printf '%s\n' "${ENT_HEAD:-0020_e}" ;;
+  *alembic_version*) printf '%s\n' "${HEADS:-0050_x}" ;;
   *enterprise_schema_migrations*) printf '%s\n' "${ENT:-e1|t}" ;;
 esac
 """
@@ -1027,3 +1048,319 @@ def test_printed_sqlite_restore_command_actually_restores(tmp_path):
     assert (data / "trinity.db").read_text() == "backup"
     assert (data / "trinity.db.before-rollback").read_text() == "live"
     assert not (data / "trinity.db-wal").exists() and not (data / "trinity.db-shm").exists()
+
+
+# --------------------------------------------------------------------------- #
+# Review of 2026-10-28 (#3767) and the live run of 2026-10-16
+# --------------------------------------------------------------------------- #
+
+def _no_ent(inst: Instance, **extra: str) -> dict:
+    return _ent_env(inst, STUB_CONFIG_FILES=inst.config_files(_PROD), STUB_BOOT_LOG="", **extra)
+
+
+_PSQL_ENT = r"""case "$*" in
+  *to_regclass*enterprise_alembic_version*) [ "${PROBE_RC:-0}" = 0 ] || exit "$PROBE_RC"; echo "${HAS_ENT_ALEMBIC:-t}" ;;
+  *to_regclass*) echo f ;;
+  *enterprise_alembic_version*) [ "${ENT_READ_RC:-0}" = 0 ] || exit "$ENT_READ_RC"; printf '%s\n' "${ENT_HEAD:-0020_e}" ;;
+  *alembic_version*) echo 0050_x ;;
+esac
+"""
+
+
+def test_postgres_enterprise_only_migration_moves_the_schema_position(tmp_path):
+    """rc3 -> rc4 was enterprise-only: an unmoved hash let code-only rollback boot OSS-only."""
+    pytest.importorskip("sqlalchemy")
+    env = _pg_env(tmp_path, _fake_bin(tmp_path, "psql", _PSQL_ENT))
+    before = _last_json(_helper(["schema"], {**env, "ENT_HEAD": "0020_e"}))
+    after = _last_json(_helper(["schema"], {**env, "ENT_HEAD": "0021_e"}))
+    assert before["status"] == after["status"] == "ok"
+    assert before["position"] != after["position"]
+
+
+@pytest.mark.parametrize("extra", [{"PROBE_RC": "2"}, {"ENT_READ_RC": "2"}, {"HAS_ENT_ALEMBIC": "garbage"}])
+def test_postgres_enterprise_probe_failure_is_a_failed_position_not_a_smaller_hash(tmp_path, extra):
+    pytest.importorskip("sqlalchemy")
+    env = _pg_env(tmp_path, _fake_bin(tmp_path, "psql", _PSQL_ENT))
+    proc = _helper(["schema"], {**env, **extra})
+    assert proc.returncode != 0
+    assert _last_json(proc)["status"] == "failed"
+
+
+def test_published_url_is_polled_until_the_recreated_frontend_answers(tmp_path):
+    inst = Instance(tmp_path, enterprise=True)
+    (inst.web / (_key("https://trinity.example.com/") + ".failn")).write_text("2")
+    proc = inst.run("--yes", env=_ent_env(inst, TRINITY_UPDATE_PUBLISHED_TIMEOUT="30"))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "did not answer 200" not in proc.stderr, "a retried attempt is not a reported failure"
+
+
+def test_published_url_that_never_answers_fails_after_the_deadline(tmp_path):
+    inst = Instance(tmp_path, enterprise=True)
+    inst.fail("https://trinity.example.com/")
+    proc = inst.run("--yes", env=_ent_env(inst, TRINITY_UPDATE_PUBLISHED_TIMEOUT="3"))
+    assert proc.returncode != 0
+    assert proc.stderr.count("did not answer 200") == 1, proc.stderr
+    tries = [c for c in inst.calls_list() if c.startswith("curl") and c.endswith("https://trinity.example.com/")]
+    assert len(tries) >= 2, "the deadline must buy more than one attempt"
+
+
+def test_verify_alone_answers_at_once(tmp_path):
+    inst = Instance(tmp_path, enterprise=False)
+    inst.fail("https://trinity.example.com/")
+    proc = inst.run("--verify", env={"TRINITY_UPDATE_PUBLISHED_TIMEOUT": "300", "STUB_CONFIG_FILES": inst.config_files(_PROD)})
+    assert proc.returncode != 0
+
+
+def test_install_ahead_of_the_newest_release_is_not_moved_backwards(tmp_path):
+    inst = Instance(tmp_path, enterprise=False)
+    _git(inst.root, "checkout", "-q", "v1.2.0-rc1")
+    proc = inst.run("--yes", env=_no_ent(inst))
+    assert proc.returncode != 0
+    assert "--allow-downgrade" in proc.stderr
+    assert inst.mutating_calls() == []
+    assert inst.version() == "1.2.0-rc1"
+
+
+def test_check_mode_reports_a_downgrade_as_a_refusal(tmp_path):
+    inst = Instance(tmp_path, enterprise=False)
+    _git(inst.root, "checkout", "-q", "v1.1.0")
+    proc = inst.run("--check", "--to", "v1.0.0", env=_no_ent(inst))
+    assert proc.returncode != 0
+    assert "--allow-downgrade" in proc.stderr
+
+
+def test_allow_downgrade_moves_backwards_and_warns_when_the_target_lacks_the_script(tmp_path):
+    inst = Instance(tmp_path, enterprise=False, predates_update_sh=True)
+    _git(inst.root, "checkout", "-q", "v1.1.0")
+    proc = inst.run("--yes", "--to", "v1.0.0", "--allow-downgrade", env=_no_ent(inst))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert inst.version() == "1.0.0"
+    assert "does not contain update.sh" in proc.stderr
+
+
+def _bindings(frontend: list) -> str:
+    return json.dumps({"services": {"frontend": {"container_name": "trinity-frontend", "ports": frontend}}})
+
+
+def test_an_added_binding_warns_and_proceeds(tmp_path):
+    """#3934 adds a loopback listener on the frontend. It moves nothing a proxy points at."""
+    inst = Instance(tmp_path, enterprise=False)
+    target = _bindings([
+        {"target": 8080, "published": "80"},
+        {"target": 8082, "published": "18082", "host_ip": "127.0.0.1"},
+    ])
+    proc = inst.run("--yes", env=_no_ent(inst, STUB_COMPOSE_JSON=target))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "127.0.0.1:18082" in proc.stderr
+    assert inst.version() == "1.1.0"
+
+
+@pytest.mark.parametrize("ports", [
+    pytest.param([{"target": 8080, "published": "80", "host_ip": "127.0.0.1"}], id="bind-address-moved"),
+    pytest.param([], id="removed"),
+    pytest.param([{"target": 8080, "published": "80", "host_ip": "127.0.0.1"},
+                  {"target": 8082, "published": "18082", "host_ip": "127.0.0.1"}], id="moved-and-added"),
+])
+def test_a_removed_or_moved_binding_is_refused(tmp_path, ports):
+    inst = Instance(tmp_path, enterprise=False)
+    proc = inst.run("--yes", env=_no_ent(inst, STUB_COMPOSE_JSON=_bindings(ports)))
+    assert proc.returncode != 0
+    assert "--accept-port-change" in proc.stderr
+    assert not any(re.search(r" (build|up)\b", c) for c in inst.compose_calls())
+    assert inst.version() == "1.0.0"
+
+
+def test_a_long_boot_log_does_not_read_as_oss_only(tmp_path):
+    """`printf | grep -q` under pipefail is 141 once the log outgrows the pipe buffer."""
+    inst = Instance(tmp_path, enterprise=True)
+    log = tmp_path / "boot.log"
+    log.write_text("Trinity Enterprise modules registered\n" + "x" * 80 + "\n" * 1)
+    with log.open("a") as fh:
+        for _ in range(4000):
+            fh.write("y" * 79 + "\n")
+    proc = inst.run("--yes", env=_ent_env(inst, STUB_BOOT_LOG_FILE=str(log)))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "enterprise modules registered" in proc.stdout
+
+
+def _hosted(inst: Instance, tag_line: str) -> None:
+    (inst.root / ".env").write_text(
+        "CREDENTIAL_ENCRYPTION_KEY=" + "a" * 64 + "\n" + tag_line + "FRONTEND_URL=https://trinity.example.com\n"
+    )
+
+
+def _hosted_env(inst: Instance, **extra: str) -> dict:
+    return _ent_env(inst, STUB_CONFIG_FILES=inst.config_files("docker-compose.hosted.yml"), STUB_BOOT_LOG="", **extra)
+
+
+@pytest.mark.parametrize("tag_line", ["", "TRINITY_IMAGE_TAG=latest\n"])
+def test_unpinned_hosted_rollback_pins_the_version_that_was_running(tmp_path, tag_line):
+    """`:-latest` resolves to the NEW release, so restoring the empty value re-pulls it."""
+    inst = Instance(tmp_path, enterprise=False)
+    _hosted(inst, tag_line)
+    env = _hosted_env(inst, STUB_IMAGE_VERSION="1.0.0")
+    assert inst.run("--yes", env=env).returncode == 0
+    proc = inst.run("--rollback", "--yes", env=env)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "TRINITY_IMAGE_TAG=v1.0.0" in (inst.root / ".env").read_text()
+    assert inst.version() == "1.0.0"
+
+
+@pytest.mark.parametrize("label", ["", "<no value>", "not-a-release"])
+def test_hosted_rollback_without_a_concrete_tag_is_refused(tmp_path, label):
+    inst = Instance(tmp_path, enterprise=False)
+    _hosted(inst, "TRINITY_IMAGE_TAG=latest\n")
+    env = _hosted_env(inst, STUB_IMAGE_VERSION=label)
+    first = inst.run("--yes", env=env)
+    assert first.returncode == 0, first.stdout + first.stderr
+    assert "concrete" in first.stderr, "the operator must learn this before they need the rollback"
+    inst.calls.write_text("")
+    proc = inst.run("--rollback", "--yes", env=env)
+    assert proc.returncode != 0
+    assert "concrete" in proc.stderr
+    assert inst.version() == "1.1.0", "nothing moves on a refused rollback"
+    assert not any(c.startswith("start.sh") for c in inst.calls_list())
+
+
+def test_printed_postgres_restore_empties_the_schema_before_restoring(tmp_path):
+    """`pg_restore --clean` drops only what the dump holds; tables from the newer
+    migrations survive it while alembic_version goes back."""
+    (tmp_path / "i").mkdir()
+    inst = Instance(tmp_path / "i", enterprise=False)
+    f = _schema(inst, "before01")
+    env = _no_ent(inst, STUB_SCHEMA_FILE=str(f),
+                  STUB_BACKUP_JSON='{"status": "ok", "path": "/data/backups/pre-update-20261015-120000.dump"}')
+    assert inst.run("--yes", env=env).returncode == 0
+    _schema(inst, "after002")
+    err = inst.run("--rollback", "--yes", env=env).stderr
+    assert "--clean" not in err
+    payload = re.search(r"^\s*'(.*pg_restore.*)'$", err, re.MULTILINE).group(1)
+
+    log = tmp_path / "restore.log"
+    bin_dir = tmp_path / "pgbin"
+    bin_dir.mkdir()
+    for tool in ("psql", "pg_restore"):
+        p = bin_dir / tool
+        p.write_text(f'#!/bin/sh\nprintf \'{tool} %s\\n\' "$*" >> "{log}"\n')
+        p.chmod(0o755)
+    proc = subprocess.run(["sh", "-c", payload], capture_output=True, text=True, env={
+        "PATH": f"{bin_dir}:/usr/bin:/bin", "DATABASE_URL": "postgresql+psycopg://u:p@db/t"})
+    assert proc.returncode == 0, proc.stderr
+    calls = log.read_text().splitlines()
+    assert "DROP SCHEMA public CASCADE" in calls[0] and "CREATE SCHEMA public" in calls[0]
+    assert "ON_ERROR_STOP=1" in calls[0]
+    assert calls[1].startswith("pg_restore --no-owner")
+    assert "postgresql+psycopg" not in "".join(calls), "libpq rejects the SQLAlchemy driver suffix"
+
+
+def test_printed_sqlite_restore_keeps_unchecked_writes_in_the_safety_copy(tmp_path):
+    """The WAL holds writes the main file does not. Delete it first and they are gone."""
+    (tmp_path / "i").mkdir()
+    inst = Instance(tmp_path / "i", enterprise=False)
+    f = _schema(inst, "before01")
+    env = _no_ent(inst, STUB_SCHEMA_FILE=str(f))
+    assert inst.run("--yes", env=env).returncode == 0
+    _schema(inst, "after002")
+    err = inst.run("--rollback", "--yes", env=env).stderr
+    payload = re.search(r"^\s*'(cp /data/trinity\.db .*)'$", err, re.MULTILINE).group(1)
+
+    data = tmp_path / "data"
+    (data / "backups").mkdir(parents=True)
+    src = tmp_path / "live.db"
+    conn = sqlite3.connect(src)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA wal_autocheckpoint=0")
+    conn.execute("CREATE TABLE t (v TEXT)")
+    conn.commit()
+    conn.execute("INSERT INTO t VALUES ('only-in-the-wal')")
+    conn.commit()
+    for suffix in ("", "-wal", "-shm"):
+        shutil.copy(str(src) + suffix, str(data / "trinity.db") + suffix)  # as an unclean stop leaves them
+    conn.close()
+    (data / "backups" / "pre-migration-20261015-120000.db").write_text("backup")
+
+    proc = subprocess.run(["sh", "-c", payload.replace("/data", str(data))], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert not (data / "trinity.db-wal").exists()
+    kept = sqlite3.connect(data / "trinity.db.before-rollback")
+    assert kept.execute("SELECT v FROM t").fetchall() == [("only-in-the-wal",)]
+    kept.close()
+
+
+@pytest.mark.parametrize("where", ["platform", "enterprise"])
+def test_rollback_whose_checkout_failed_never_rebuilds_or_reports_success(tmp_path, where):
+    inst = Instance(tmp_path, enterprise=True)
+    env = _updated(inst, _schema(inst, "same0001"))
+    repo = inst.root if where == "platform" else inst.root / "src" / "backend" / "enterprise"
+    (repo / ".git" / "index.lock").write_text("")
+    proc = inst.run("--rollback", "--yes", env=env)
+    assert proc.returncode != 0
+    assert "Rolled back" not in proc.stdout
+    assert not any(re.search(r" (build|up)\b", c) for c in inst.compose_calls()), (
+        "a failed checkout must not rebuild the new code and call it the old version"
+    )
+
+
+def test_update_whose_checkout_cannot_be_put_back_says_so(tmp_path):
+    inst = Instance(tmp_path, enterprise=False)
+    env = _no_ent(inst, STUB_COMPOSE_JSON=_ports_json("3000"))
+    # The failure the script reports is a port drift; the lock lands after the update's checkout.
+    hook = inst.root / ".git" / "hooks" / "post-checkout"
+    hook.write_text(f'#!/bin/sh\ntouch "{inst.root}/.git/index.lock"\n')
+    hook.chmod(0o755)
+    proc = inst.run("--yes", env=env)
+    assert proc.returncode != 0
+    assert "was put back" not in proc.stderr
+    assert "could not" in proc.stderr.lower()
+
+
+def test_rollback_refuses_a_dirty_checkout_before_reset_hard_destroys_it(tmp_path):
+    inst = Instance(tmp_path, enterprise=False)
+    env = _no_ent(inst, STUB_SCHEMA_FILE=str(_schema(inst, "same0001")))
+    assert inst.run("--yes", env=env).returncode == 0
+    (inst.root / _PROD).write_text("services: {local: edit}\n")
+    proc = inst.run("--rollback", "--yes", env=env)
+    assert proc.returncode != 0
+    assert _PROD in proc.stderr
+    assert (inst.root / _PROD).read_text() == "services: {local: edit}\n"
+    assert inst.version() == "1.1.0"
+
+
+def test_a_re_pointed_tag_does_not_read_as_a_failed_fetch(tmp_path):
+    inst = Instance(tmp_path, enterprise=False)
+    _git(inst.upstream, "tag", "dev-green", "v1.0.0")
+    _git(inst.root, "fetch", "-q", "--tags", "origin")
+    _git(inst.upstream, "tag", "-f", "dev-green", "v1.1.0")
+    proc = inst.run("--check", env=_no_ent(inst))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "git fetch from origin failed" not in proc.stderr
+
+
+def test_first_update_of_an_install_older_than_this_command(tmp_path):
+    """No file to run in the checkout, and an untracked copy would collide with the
+    target's tracked one. The documented step runs a copy from outside the tree."""
+    inst = Instance(tmp_path, enterprise=False, predates_update_sh=True)
+    assert not (inst.root / "scripts" / "deploy" / "update.sh").exists()
+    outside = tmp_path / "bootstrap"
+    outside.mkdir()
+    for name in ("update.sh", "update-db.py"):
+        (outside / name).write_text(_git(inst.upstream, "show", f"v1.1.0:scripts/deploy/{name}") + "\n")
+    env = _no_ent(inst, STUB_SCHEMA_FILE=str(_schema(inst, "same0001")))
+    proc = inst.run("--yes", "--dir", str(inst.root), "--to", "v1.1.0", env=env, script=outside / "update.sh")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert inst.version() == "1.1.0"
+    assert (inst.root / "scripts" / "deploy" / "update.sh").exists()
+    assert _git(inst.root, "status", "--porcelain", "--untracked-files=no") == ""
+
+    # Back again, from the script the update delivered: it removes itself and says how to return.
+    back = inst.run("--rollback", "--yes", env=env)
+    assert back.returncode == 0, back.stdout + back.stderr
+    assert inst.version() == "1.0.0"
+    assert "first-time" in back.stdout
+
+
+def test_dir_that_is_not_a_checkout_is_refused(tmp_path):
+    inst = Instance(tmp_path, enterprise=False)
+    proc = inst.run("--check", "--dir", str(tmp_path / "nope"), env=_no_ent(inst))
+    assert proc.returncode != 0
+    assert "nope" in proc.stderr

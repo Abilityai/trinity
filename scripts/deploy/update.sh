@@ -8,6 +8,9 @@
 #   ./scripts/deploy/update.sh --verify        # published-URL verification only
 #   ./scripts/deploy/update.sh --rollback      # back to the version before the last update
 #
+# First update of an install older than this command: run a copy from outside
+# the checkout with --dir (docs/user-docs/guides/deploying/upgrading.md).
+#
 # Also reachable as `trinity update` from the CLI, which runs this file.
 #
 # Why this exists. Upgrading had no single entry point, and the one the docs
@@ -203,16 +206,30 @@ checkout_target() {
     fi
 }
 
+# Puts the checkout (and enterprise tree) back and proves it. Non-zero with the
+# reason on stderr when it did not land: the callers must not rebuild "the old
+# version" out of whatever the tree holds now, or report it as restored.
 restore_checkout() {
+    local failed=0 head
     if [ -n "${PREV_BRANCH:-}" ]; then
-        g checkout -q --no-recurse-submodules "$PREV_BRANCH" || true
-        g reset -q --hard "$PREV_SHA" || true
+        g checkout -q --no-recurse-submodules "$PREV_BRANCH" && g reset -q --hard "$PREV_SHA" || failed=1
     else
-        g checkout -q --no-recurse-submodules --detach "$PREV_SHA" || true
+        g checkout -q --no-recurse-submodules --detach "$PREV_SHA" || failed=1
+    fi
+    head="$(g rev-parse HEAD 2>/dev/null || true)"
+    if [ "$failed" = 1 ] || [ "$head" != "$PREV_SHA" ]; then
+        printf '❌ could not put the checkout back at %s (it is at %s).\n' "${PREV_SHA:0:12}" "${head:0:12}" >&2
+        failed=1
     fi
     if [ "$SHAPE" = prod-enterprise ] && [ -n "${PREV_ENT_SHA:-}" ]; then
-        git -C "$ROOT/$ENT_REL" checkout -q --detach "$PREV_ENT_SHA" || true
+        git -C "$ROOT/$ENT_REL" checkout -q --detach "$PREV_ENT_SHA" || failed=1
+        head="$(git -C "$ROOT/$ENT_REL" rev-parse HEAD 2>/dev/null || true)"
+        if [ "$head" != "$PREV_ENT_SHA" ] || [ "$failed" = 1 ]; then
+            printf '❌ could not put the enterprise tree back at %s (it is at %s).\n' "${PREV_ENT_SHA:0:12}" "${head:0:12}" >&2
+            failed=1
+        fi
     fi
+    return "$failed"
 }
 
 # The enterprise pin recorded by a commit (empty when it records none).
@@ -226,7 +243,7 @@ ensure_enterprise_commit() {
 }
 
 # --- ports ----------------------------------------------------------------------
-# "service container port port ..." per line, from the rendered file set.
+# "service container ip:port ip:port ..." per line, from the rendered file set.
 # Exit 2 when the file set cannot be rendered to JSON or parsed — the caller
 # must treat that as "unknown", never as "no change" (fail closed).
 rendered_ports() {
@@ -239,29 +256,41 @@ try:
 except Exception:
     sys.exit(2)
 for name, svc in sorted((doc.get("services") or {}).items()):
-    ports = sorted({str(p.get("published")) for p in (svc.get("ports") or [])
+    ports = sorted({"%s:%s" % (p.get("host_ip") or "0.0.0.0", p.get("published"))
+                    for p in (svc.get("ports") or [])
                     if isinstance(p, dict) and p.get("published") not in (None, "")})
     print(name, svc.get("container_name") or "-", *ports)
 '
 }
 
+# A binding docker records with no HostIp listens on every interface, which is
+# what the rendered side spells 0.0.0.0.
 running_ports() {
-    docker inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostPort}} {{end}}{{end}}' \
-        "$1" 2>/dev/null | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ' | sed 's/ $//'
+    docker inspect -f '{{range $p, $b := .HostConfig.PortBindings}}{{range $b}}{{.HostIp}}:{{.HostPort}} {{end}}{{end}}' \
+        "$1" 2>/dev/null | tr ' ' '\n' | grep -v '^$' | sed 's/^:/0.0.0.0:/' | sort -u | tr '\n' ' ' | sed 's/ $//'
 }
 
-# Prints one line per service whose published ports would change; empty = none.
+# One line per service whose bindings would change, tagged by what it means:
+#   MOVED  a binding the running container has is gone or re-addressed. Anything
+#          pointed at it (a host proxy, a firewall rule, a tunnel) stops reaching it.
+#   ADDED  only new bindings. Nothing that works today stops working.
 # Returns 2 when the comparison could not be made at all.
 port_drift() {
     command -v python3 >/dev/null 2>&1 || return 2
-    local rendered name container want have
+    local rendered name container want have b gone added
     rendered="$(rendered_ports)" || return 2
     while read -r name container want; do
         [ -n "$name" ] && [ "$container" != "-" ] || continue
         docker inspect "$container" >/dev/null 2>&1 || continue   # not running: nothing to compare
         have="$(running_ports "$container")"
-        want="$(printf '%s' "$want" | tr ' ' '\n' | grep -v '^$' | sort -u | tr '\n' ' ' | sed 's/ $//')"
-        [ "$have" = "$want" ] || printf '%s: published host port(s) [%s] -> [%s]\n' "$name" "${have:-none}" "${want:-none}"
+        gone="" added=""
+        for b in $have; do case " $want " in *" $b "*) ;; *) gone="$gone $b" ;; esac; done
+        for b in $want; do case " $have " in *" $b "*) ;; *) added="$added $b" ;; esac; done
+        if [ -n "$gone" ]; then
+            printf 'MOVED %s: published binding(s) [%s] -> [%s]\n' "$name" "${have:-none}" "${want:-none}"
+        elif [ -n "$added" ]; then
+            printf 'ADDED %s: new published binding(s)%s\n' "$name" "$added"
+        fi
     done <<EOF_PORTS
 $rendered
 EOF_PORTS
@@ -285,12 +314,15 @@ check_enterprise_registration() {
     else
         log="$(docker logs trinity-backend --tail 2000 2>&1 || true)"
     fi
-    if printf '%s\n' "$log" | grep -q "$ENT_FAILED"; then
+    # A here-string, never `printf | grep -q` under pipefail: once the log outgrows
+    # the pipe buffer grep exits first, printf dies of SIGPIPE, and a healthy
+    # install reads as OSS-only.
+    if grep -q "$ENT_FAILED" <<<"$log"; then
         printf '❌ Enterprise registration FAILED — the backend is running OSS-only (entitled routes 403).\n' >&2
-        printf '%s\n' "$log" | grep -A 10 "$ENT_FAILED" | head -20 >&2
+        { grep -A 10 "$ENT_FAILED" <<<"$log" | head -20 >&2; } || true
         return 1
     fi
-    if ! printf '%s\n' "$log" | grep -q "$ENT_REGISTERED"; then
+    if ! grep -q "$ENT_REGISTERED" <<<"$log"; then
         printf "❌ The backend never printed '%s' — it is running OSS-only.\n" "$ENT_REGISTERED" >&2
         return 1
     fi
@@ -307,11 +339,39 @@ published_url() {
     if [ "$port" = 80 ]; then printf 'http://localhost'; else printf 'http://localhost:%s' "$port"; fi
 }
 
-# Loads the entry point a USER reaches: real HTML, a hashed asset that HTML
-# references, and the API through the same origin. ~The check that would have
-# caught #3007 failure 2 (host proxy on :80, frontend moved to :3000).
+# One attempt at loading the entry point a USER reaches: real HTML, a hashed asset
+# that HTML references, and the API through the same origin. ~The check that would
+# have caught #3007 failure 2 (host proxy on :80, frontend moved to :3000). Leaves
+# the reason in PUBLISHED_ERR rather than printing it, because the caller may retry.
+published_attempt() {
+    local base="$1" tmp="$2" asset
+    PUBLISHED_ERR=""
+    if ! curl -fsS -m 15 -o "$tmp/index" "$base/" 2>/dev/null; then
+        PUBLISHED_ERR="$base/ did not answer 200."
+    elif ! grep -qi '<html' "$tmp/index"; then
+        PUBLISHED_ERR="$base/ answered, but not with HTML (a proxy error page?)."
+    else
+        asset="$(grep -oE '(src|href)="[^"]*/assets/[^"]+-[A-Za-z0-9_-]{6,}\.(js|css)"' "$tmp/index" \
+            | head -1 | sed -E 's/^(src|href)="//; s/"$//' || true)"
+        case "$asset" in http*) ;; /*) asset="$base$asset" ;; ?*) asset="$base/$asset" ;; esac
+        if [ -z "$asset" ]; then
+            PUBLISHED_ERR="$base/ is HTML but references no hashed /assets/ bundle — not the Trinity UI build."
+        elif ! curl -fsS -m 15 -o /dev/null "$asset" 2>/dev/null; then
+            PUBLISHED_ERR="the UI bundle $asset did not answer 200."
+        elif ! curl -fsS -m 15 -o "$tmp/api" "$base/api/auth/mode" 2>/dev/null; then
+            PUBLISHED_ERR="$base/api/auth/mode did not answer 200 — the API is not reachable through this origin."
+        elif ! grep -q '^[[:space:]]*{' "$tmp/api"; then
+            PUBLISHED_ERR="$base/api/auth/mode answered, but not with JSON — the proxy is not routing /api."
+        fi
+    fi
+    [ -z "$PUBLISHED_ERR" ]
+}
+
+# $1: how many seconds to keep trying. A recreated frontend's nginx is not
+# listening yet when `up` returns, so the first refusal right after a restart says
+# nothing; only the verdict at the deadline counts, as with wait_for_health.
 verify_published() {
-    local base tmp asset ok=0
+    local budget="${1:-0}" base tmp deadline ok=0
     base="$(published_url)"
     tmp="$(mktemp -d)"
     say "Verifying the published entry point: $base"
@@ -319,31 +379,18 @@ verify_published() {
         say "  (no FRONTEND_URL in .env — this is the local port only; pass --url https://your-domain"
         say "   to verify what users actually load)"
     fi
-    if ! curl -fsS -m 15 -o "$tmp/index" "$base/" 2>/dev/null; then
-        printf '❌ %s/ did not answer 200.\n' "$base" >&2
-    elif ! grep -qi '<html' "$tmp/index"; then
-        printf '❌ %s/ answered, but not with HTML (a proxy error page?).\n' "$base" >&2
-    else
-        asset="$(grep -oE '(src|href)="[^"]*/assets/[^"]+-[A-Za-z0-9_-]{6,}\.(js|css)"' "$tmp/index" \
-            | head -1 | sed -E 's/^(src|href)="//; s/"$//' || true)"
-        case "$asset" in http*) ;; /*) asset="$base$asset" ;; ?*) asset="$base/$asset" ;; esac
-        if [ -z "$asset" ]; then
-            printf '❌ %s/ is HTML but references no hashed /assets/ bundle — not the Trinity UI build.\n' "$base" >&2
-        elif ! curl -fsS -m 15 -o /dev/null "$asset" 2>/dev/null; then
-            printf '❌ the UI bundle %s did not answer 200.\n' "$asset" >&2
-        elif ! curl -fsS -m 15 -o "$tmp/api" "$base/api/auth/mode" 2>/dev/null; then
-            printf '❌ %s/api/auth/mode did not answer 200 — the API is not reachable through this origin.\n' "$base" >&2
-        elif ! grep -q '^[[:space:]]*{' "$tmp/api"; then
-            printf '❌ %s/api/auth/mode answered, but not with JSON — the proxy is not routing /api.\n' "$base" >&2
-        else
-            ok=1
-        fi
-    fi
+    deadline=$(( $(date +%s) + budget ))
+    while :; do
+        if published_attempt "$base" "$tmp"; then ok=1; break; fi
+        [ "$(date +%s)" -lt "$deadline" ] || break
+        sleep 2
+    done
     rm -rf "$tmp"
     if [ "$ok" = 1 ]; then
         say "✓ $base serves the UI (HTML + hashed asset) and the API through the same origin"
         return 0
     fi
+    printf '❌ %s\n' "$PUBLISHED_ERR" >&2
     return 1
 }
 
@@ -361,6 +408,7 @@ write_state() {
         printf 'PREV_BRANCH=%s\n' "${PREV_BRANCH:-}"
         printf 'PREV_ENT_SHA=%s\n' "${PREV_ENT_SHA:-}"
         printf 'PREV_IMAGE_TAG=%s\n' "${PREV_IMAGE_TAG:-}"
+        printf 'ROLLBACK_IMAGE_TAG=%s\n' "${ROLLBACK_IMAGE_TAG:-}"
         printf 'SHAPE=%s\n' "$SHAPE"
         printf 'TARGET_SHA=%s\n' "$TARGET_SHA"
         printf 'BACKUP=%s\n' "${BACKUP_PATH:-}"
@@ -370,6 +418,23 @@ write_state() {
 }
 
 read_state_key() { grep -E "^$1=" "$(state_file)" 2>/dev/null | tail -1 | cut -d= -f2- || true; }
+
+# The tag rollback returns to on a hosted install. `latest` (or no tag, which
+# compose reads as latest) is not one: after the update it names the NEW release,
+# so re-pulling it would print "back at <prev>" over the same images. Read the
+# version off the running image and accept it only if it is a release this checkout
+# knows; both `1.2.3` and `v1.2.3` are published for one digest. Empty = none.
+concrete_running_tag() {
+    local pinned="$1" v
+    case "$pinned" in ""|latest) ;; *) printf '%s' "$pinned"; return 0 ;; esac
+    v="$(docker inspect -f '{{index .Config.Labels "org.opencontainers.image.version"}}' trinity-backend 2>/dev/null || true)"
+    case "$v" in
+        v[0-9]*|[0-9]*) ;;
+        *) return 0 ;;
+    esac
+    if g rev-parse -q --verify "refs/tags/v${v#v}" >/dev/null 2>&1; then printf 'v%s' "${v#v}"; fi
+    return 0
+}
 
 # --- preflight --------------------------------------------------------------------
 PREFLIGHT_FAILS=0
@@ -424,12 +489,31 @@ $(sed 's/^/     /' "$WORK/config.err")"
     fi
 
     # Target.
-    g fetch -q --tags --no-recurse-submodules origin 2>/dev/null \
+    # --force: a tag re-pointed upstream (dev-green moves on every green dev) would
+    # otherwise fail the whole fetch and print a false alarm below.
+    g fetch -q --force --tags --no-recurse-submodules origin 2>/dev/null \
         || warn "git fetch from origin failed — resolving the target from refs already on this host"
     resolve_target
     PREV_SHA="$(g rev-parse HEAD)"
     PREV_BRANCH="$(g symbolic-ref -q --short HEAD 2>/dev/null || true)"
     say "Current: $(describe "$PREV_SHA")   Target: $TARGET_REF ($(describe "$TARGET_SHA"))"
+
+    # The default target is the newest RELEASE tag, so an install on a release
+    # candidate or a branch past it would otherwise be "updated" backwards.
+    if [ "$PREV_SHA" != "$TARGET_SHA" ] && g merge-base --is-ancestor "$TARGET_SHA" "$PREV_SHA" 2>/dev/null; then
+        if [ "$OPT_ALLOW_DOWNGRADE" = 1 ]; then
+            warn "--allow-downgrade: $TARGET_REF is OLDER than this checkout. A migration already applied"
+            warn "here may not be understood by that release."
+        else
+            pf_fail "$TARGET_REF is older than this checkout ($(describe "$PREV_SHA")), so this would move the install
+   backwards. Nothing newer to update to? There is nothing to do. Meant to downgrade? Re-run with
+   --allow-downgrade."
+        fi
+    fi
+    if [ "$OPT_ALLOW_DOWNGRADE" = 1 ] && ! g cat-file -e "$TARGET_SHA:scripts/deploy/update.sh" 2>/dev/null; then
+        warn "$TARGET_REF does not contain update.sh: it leaves the checkout with this update, and --rollback"
+        warn "afterwards needs the first-time step in docs/user-docs/guides/deploying/upgrading.md."
+    fi
 
     if [ "$SHAPE" = prod-enterprise ]; then
         local want ent="$ROOT/$ENT_REL"
@@ -455,6 +539,12 @@ $(sed 's/^/     /' "$WORK/config.err")"
 
     if [ "$SHAPE" = hosted ]; then
         PREV_IMAGE_TAG="$(env_value TRINITY_IMAGE_TAG)"
+        ROLLBACK_IMAGE_TAG="$(concrete_running_tag "$PREV_IMAGE_TAG")"
+        if [ -z "$ROLLBACK_IMAGE_TAG" ]; then
+            warn "no concrete image tag to come back to: TRINITY_IMAGE_TAG is '${PREV_IMAGE_TAG:-unset}' and the"
+            warn "running image names no release this checkout knows. --rollback will refuse, because"
+            warn "':-latest' now means the new release. To be able to roll back, pin TRINITY_IMAGE_TAG first."
+        fi
         if [ "$TARGET_IS_BRANCH" = 1 ]; then
             pf_fail "a hosted install runs published images, which exist per release tag — '$TARGET_REF' is a
    branch. Pass --to <release tag> (e.g. the newest at https://github.com/abilityai/trinity/releases)."
@@ -520,10 +610,13 @@ backup() {
 # --- the update -------------------------------------------------------------------
 abort_before_containers() {
     printf '❌ %s\n' "$1" >&2
-    restore_checkout
     [ "$SHAPE" = hosted ] && [ -n "${PREV_IMAGE_TAG+x}" ] && (cd "$ROOT" && set_env_key TRINITY_IMAGE_TAG "$PREV_IMAGE_TAG")
-    printf '   The checkout was put back at %s. No image was built and no container was recreated.\n' \
-        "$(describe "$PREV_SHA")" >&2
+    if restore_checkout; then
+        printf '   The checkout was put back at %s. No image was built and no container was recreated.\n' \
+            "$(describe "$PREV_SHA")" >&2
+    else
+        printf '   No image was built and no container was recreated, but the tree needs fixing by hand.\n' >&2
+    fi
     exit 1
 }
 
@@ -540,16 +633,23 @@ check_ports() {
    update, so it does not pass silently. Install python3 / update Docker Compose, or re-run with
    --accept-port-change once you have checked the ports yourself."
     fi
-    [ -n "$drift" ] || { say "✓ published ports unchanged"; return 0; }
+    local moved added
+    moved="$(printf '%s\n' "$drift" | sed -n 's/^MOVED //p')"
+    added="$(printf '%s\n' "$drift" | sed -n 's/^ADDED //p')"
+    if [ -n "$added" ]; then
+        warn "the target publishes something new (nothing that works today stops working):"
+        printf '%s\n' "$added" | sed 's/^/     /' >&2
+    fi
+    [ -n "$moved" ] || { say "✓ no published binding moves"; return 0; }
     if [ "$OPT_ACCEPT_PORTS" = 1 ]; then
-        warn "published ports change (accepted with --accept-port-change):"
-        printf '%s\n' "$drift" | sed 's/^/     /' >&2
+        warn "published bindings change (accepted with --accept-port-change):"
+        printf '%s\n' "$moved" | sed 's/^/     /' >&2
         return 0
     fi
     abort_before_containers "the target would change where services are published:
-$(printf '%s\n' "$drift" | sed 's/^/     /')
-   Anything in front of the old port (a host nginx/Caddy, a firewall rule, a tunnel) would stop
-   reaching it. Usually a .env key (e.g. FRONTEND_PORT) has started to apply. Fix .env so the port
+$(printf '%s\n' "$moved" | sed 's/^/     /')
+   Anything in front of the old binding (a host nginx/Caddy, a firewall rule, a tunnel) would stop
+   reaching it. Usually a .env key (e.g. FRONTEND_PORT) has started to apply. Fix .env so the binding
    stays, or update the proxy and re-run with --accept-port-change."
 }
 
@@ -599,7 +699,7 @@ verify_all() {
     if [ "$SHAPE" = prod-enterprise ]; then
         check_enterprise_registration || return 1
     fi
-    verify_published
+    verify_published "$PUBLISHED_TIMEOUT"
 }
 
 offer_rollback() {
@@ -656,10 +756,11 @@ $(sed 's/^/     /' "$WORK/config.err")"
     if [ "$SHAPE" = hosted ]; then
         if ! start_hosted "$TARGET_REF"; then
             (cd "$ROOT" && set_env_key TRINITY_IMAGE_TAG "$PREV_IMAGE_TAG")
-            restore_checkout
-            printf '❌ start.sh --hosted failed. TRINITY_IMAGE_TAG and the checkout were put back to %s;\n' \
-                "${PREV_IMAGE_TAG:-unset}" >&2
-            printf '   if it failed after pulling, re-run ./scripts/deploy/start.sh --hosted to restore the old images.\n' >&2
+            restore_checkout || true   # says so itself; the guidance below stands either way
+            printf '❌ start.sh --hosted failed. TRINITY_IMAGE_TAG was put back to %s.\n' "${PREV_IMAGE_TAG:-unset}" >&2
+            printf '   If it failed after pulling, new images may have run a migration. To return, run\n' >&2
+            printf '       ./scripts/deploy/update.sh --rollback\n' >&2
+            printf '   which checks the schema first. Starting the old images directly does not.\n' >&2
             exit 1
         fi
     else
@@ -693,6 +794,26 @@ do_rollback() {
     [ -n "$PREV_SHA" ] && [ -n "$SHAPE" ] || die "the recorded state in $(state_file) is incomplete."
     set_compose_files
     FROM_SHA="$(g rev-parse HEAD)"
+    # restore_checkout ends in `reset --hard`, which would destroy local edits.
+    local dirty
+    dirty="$(g status --porcelain --untracked-files=no --ignore-submodules=all 2>/dev/null || true)"
+    if [ -n "$dirty" ]; then
+        die "tracked files have local changes, which the rollback would destroy:
+$(printf '%s\n' "$dirty" | sed 's/^/     /')
+   Commit or stash them (git stash push -m pre-rollback), then re-run."
+    fi
+    if [ "$SHAPE" = prod-enterprise ] && [ -n "$(git -C "$ROOT/$ENT_REL" status --porcelain --untracked-files=no 2>/dev/null)" ]; then
+        die "the enterprise tree has local changes, which the rollback would destroy; commit or discard them and re-run."
+    fi
+    local image_tag=""
+    if [ "$SHAPE" = hosted ]; then
+        image_tag="$(read_state_key ROLLBACK_IMAGE_TAG)"
+        case "$image_tag" in ""|latest)
+            die "no concrete image tag was recorded to return to (TRINITY_IMAGE_TAG was '${PREV_IMAGE_TAG:-unset}').
+   Re-pulling 'latest' would bring back the same new release while reporting a rollback. Nothing was
+   changed. Pick the release yourself: ./scripts/deploy/update.sh --to <tag> --allow-downgrade" ;;
+        esac
+    fi
     local schema_before schema_now
     schema_before="$(read_state_key SCHEMA_BEFORE)"
     if [ "$OPT_DB_RESTORED" = 1 ]; then
@@ -705,15 +826,20 @@ do_rollback() {
         say "✓ schema unchanged since the update ($schema_now) — rolling back the code alone is safe"
     fi
     say "Returning to $(describe "$PREV_SHA") ($SHAPE)"
-    restore_checkout
+    restore_checkout || die "the rollback stopped before rebuilding anything: the tree is not at the recorded version."
     if [ "$SHAPE" = hosted ]; then
-        start_hosted "$PREV_IMAGE_TAG" || die "start.sh --hosted failed during rollback."
+        start_hosted "$image_tag" || die "start.sh --hosted failed during rollback."
     else
         build_and_start || die "rebuild during rollback failed."
     fi
     verify_all || die "the rolled-back version did not verify either — see the output above."
     step "Rolled back"
     say "Code is back at $(describe "$PREV_SHA")."
+    [ "$SHAPE" != hosted ] || say "Images are back at $image_tag."
+    if [ ! -f "$ROOT/scripts/deploy/update.sh" ]; then
+        say "This version predates update.sh, so the script is gone with the rollback. To update again, use the"
+        say "first-time step in docs/user-docs/guides/deploying/upgrading.md (on the release you are moving to)."
+    fi
     if [ "$OPT_DB_RESTORED" = 1 ]; then
         say "The database is the restored pre-update copy."
     else
@@ -754,14 +880,19 @@ refuse_code_only_rollback() {
         printf '   2. Restore the copy (in a one-off backend container with the same /data mount):\n'
         case "$b" in
             *.dump)
+                # Empty the schema first: --clean drops only what the dump holds, so tables from
+                # the newer migrations would survive while alembic_version goes back, and the next
+                # update's CREATE TABLE crash-loops the backend. Enterprise tables live here too.
                 printf '        %s run --rm --no-deps --entrypoint sh backend -c \\\n' "$dcmd"
-                printf "          'pg_restore --clean --if-exists --no-owner --dbname \"\$(echo \"\$DATABASE_URL\" | sed -E \"s#^postgresql[+][a-z0-9]+://#postgresql://#\")\" %s'\n" "$b"
+                printf "          'U=\"\$(echo \"\$DATABASE_URL\" | sed -E \"s#^postgresql[+][a-z0-9]+://#postgresql://#\")\" && psql -X -v ON_ERROR_STOP=1 -d \"\$U\" -c \"DROP SCHEMA public CASCADE; CREATE SCHEMA public;\" && pg_restore --no-owner --dbname \"\$U\" %s'\n" "$b"
                 printf '      (keep your own pg_dump of the current database first if you may need it)\n'
                 ;;
             *)
                 printf '      (the current database is kept beside it as /data/trinity.db.before-rollback)\n'
                 printf '        %s run --rm --no-deps --entrypoint sh backend -c \\\n' "$dcmd"
-                printf "          'cp /data/trinity.db /data/trinity.db.before-rollback && rm -f /data/trinity.db-wal /data/trinity.db-shm /data/trinity.db-journal && cp %s /data/trinity.db'\n" "$b"
+                # The WAL can hold writes the main file does not: it goes into the safety copy
+                # under the name SQLite looks for beside it, and only then is it deleted.
+                printf "          'cp /data/trinity.db /data/trinity.db.before-rollback && for s in -wal -shm; do [ ! -f /data/trinity.db\$s ] || cp /data/trinity.db\$s /data/trinity.db.before-rollback\$s || exit 1; done && rm -f /data/trinity.db-wal /data/trinity.db-shm /data/trinity.db-journal && cp %s /data/trinity.db'\n" "$b"
                 ;;
         esac
         printf '   3. Roll the code back and start it:\n'
@@ -771,19 +902,21 @@ refuse_code_only_rollback() {
 }
 
 usage() {
-    sed -n '3,11p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '3,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     cat <<'EOF'
 
 Options:
   --to <ref>              target release tag (default: newest v* tag that is not a pre-release),
                           or a branch / commit
+  --allow-downgrade       allow a target older than this checkout (refused otherwise)
+  --dir <path>            the checkout to update, when this copy runs from outside it
   --check                 run the preflight and stop; changes nothing
   --verify                verify the published URL only
   --rollback              return to the version recorded before the last update
   --url <url>             published URL to verify (default: FRONTEND_URL in .env,
                           else http://localhost:$FRONTEND_PORT)
   --shape <shape>         override detection: dev | prod | prod-enterprise | hosted
-  --accept-port-change    proceed although a service's published host port changes
+  --accept-port-change    proceed although a published binding moves or disappears
   --skip-backup           do not take the pre-update database copy
   --skip-base-image       never rebuild the agent base image
   --rebuild-base          always rebuild the agent base image (source shapes)
@@ -792,7 +925,7 @@ Options:
   -y, --yes               never prompt (a failed update prints --rollback instead of offering it)
 
 Environment: TRINITY_UPDATE_MIN_FREE_GB (5), TRINITY_UPDATE_HEALTH_TIMEOUT (300 s),
-TRINITY_UPDATE_STATE_DIR (~/.trinity/update).
+TRINITY_UPDATE_PUBLISHED_TIMEOUT (120 s), TRINITY_UPDATE_STATE_DIR (~/.trinity/update).
 EOF
 }
 
@@ -800,12 +933,14 @@ main() {
     set -euo pipefail
     OPT_TO="" OPT_URL="" OPT_SHAPE="" OPT_CHECK=0 OPT_VERIFY=0 OPT_ROLLBACK=0
     OPT_SKIP_BACKUP=0 OPT_SKIP_BASE=0 OPT_REBUILD_BASE=0 OPT_ACCEPT_PORTS=0 OPT_YES=0
-    OPT_DB_RESTORED=0
+    OPT_DB_RESTORED=0 OPT_ALLOW_DOWNGRADE=0 OPT_DIR=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --to) OPT_TO="${2:?--to needs a ref}"; shift ;;
             --url) OPT_URL="${2:?--url needs a URL}"; shift ;;
             --shape) OPT_SHAPE="${2:?--shape needs a value}"; shift ;;
+            --dir) OPT_DIR="${2:?--dir needs a path}"; shift ;;
+            --allow-downgrade) OPT_ALLOW_DOWNGRADE=1 ;;
             --check) OPT_CHECK=1 ;;
             --verify) OPT_VERIFY=1 ;;
             --rollback) OPT_ROLLBACK=1 ;;
@@ -821,6 +956,13 @@ main() {
         shift
     done
     HEALTH_TIMEOUT="${TRINITY_UPDATE_HEALTH_TIMEOUT:-300}"
+    PUBLISHED_TIMEOUT="${TRINITY_UPDATE_PUBLISHED_TIMEOUT:-120}"
+    if [ -n "$OPT_DIR" ]; then
+        ROOT="$(cd "$OPT_DIR" 2>/dev/null && pwd)" || die "--dir: no such directory: $OPT_DIR"
+        if [ ! -f "$ROOT/scripts/deploy/start.sh" ] || ! git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+            die "--dir: $ROOT is not a Trinity checkout."
+        fi
+    fi
     WORK="$(mktemp -d)"
     trap 'rm -rf "$WORK"' EXIT
     cd "$ROOT"
