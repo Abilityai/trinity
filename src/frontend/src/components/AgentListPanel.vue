@@ -11,10 +11,10 @@
        replaces the old page shell's — it is what gives the half-out-of-card
        avatar (32px, 16px overhang) room without clipping or an h-scrollbar. -->
   <div class="h-full overflow-y-auto px-4 sm:px-6 lg:px-8 py-4">
-    <!-- Notification Toast -->
+    <!-- Notification Toast — bottom-right, clear of Create Agent and the view switch (#1953, as AgentDetail.vue). -->
     <div v-if="notification"
       :class="[
-        'fixed top-20 right-4 z-50 px-4 py-3 rounded-lg shadow-lg transition-all duration-300',
+        'fixed bottom-24 right-6 z-50 px-4 py-3 rounded-lg shadow-lg transition-all duration-300',
         notification.type === 'success' ? 'bg-status-success-100 dark:bg-status-success-900/50 border border-status-success-400 dark:border-status-success-700 text-status-success-700 dark:text-status-success-300' : 'bg-status-danger-100 dark:bg-status-danger-900/50 border border-status-danger-400 dark:border-status-danger-700 text-status-danger-700 dark:text-status-danger-300'
       ]"
     >
