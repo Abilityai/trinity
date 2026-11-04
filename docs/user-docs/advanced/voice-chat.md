@@ -141,25 +141,46 @@ The call owns only the blocks it draws: everything the agent put on the canvas i
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/enterprise/client-portal/agents/{name}/voice/start` | POST | Start a Workspace voice call bound to a chat (`portal_session_id`). Platform users only. Returns `voice_session_id` and the WebSocket URL; 409 while a reply is in flight |
-| `/api/agents/{name}/voice/start` | POST | The original per-agent start route; pass `workspace_mode: true` for canvas tools. Retained for API clients — Trinity's own UI no longer calls it |
+| `/api/enterprise/client-portal/agents/{name}/voice/start` | POST | Start a Workspace voice call bound to a chat (`portal_session_id`). Platform users signed in to a session (not an API key). Returns `voice_session_id`, the WebSocket URL and a single-use `websocket_ticket`; 409 while a reply is in flight |
+| `/api/agents/{name}/voice/start` | POST | The original per-agent start route; pass `workspace_mode: true` for canvas tools. Signed-in sessions only (an API key is refused with 403). Returns the same `websocket_ticket`. Retained for API clients — Trinity's own UI no longer calls it |
 | `/api/agents/{name}/voice/stop` | POST | End session; returns transcript and cost. Retained; the Workspace call closes on the socket instead |
 | `/api/agents/{name}/voice/status` | GET | Get current session state. Retained |
 | `/api/agents/{name}/voice/{session_id}/panel` | GET | The agent's `main` canvas, as the call draws on it; read by the Workspace call's canvas column |
 | `/api/agents/{name}/voice/prompt` | GET / PUT | Read or set the per-agent voice system prompt |
 | `/api/agents/{name}/voice/name` | GET / PUT | Read (with `available_voices`) or set the persisted per-agent Gemini voice |
-| `/ws/voice/{session_id}` | WebSocket | Bidirectional audio bridge |
+| `/ws/voice/{session_id}` | WebSocket | Bidirectional audio bridge. Authenticated by the first frame, never by the URL |
+
+### Connecting the voice socket
+
+The voice socket authenticates with a single-use, short-lived credential; no session token appears in any URL. Both start routes return:
+
+```json
+{
+  "voice_session_id": "vs_abc123",
+  "websocket_url": "/ws/voice/vs_abc123",
+  "websocket_ticket": "<opaque, single use>",
+  "websocket_ticket_expires_in": 30
+}
+```
+
+1. Open `websocket_url` on the same host, with no query string.
+2. Send `{"type": "auth", "ticket": "<websocket_ticket>"}` as the first frame, within 5 seconds and within 30 seconds of the start.
+3. Wait for `{"type": "auth_ok"}`, then start sending audio.
+
+A ticket works once, for the call it was issued for, by the account that started it. If it is refused you receive a `status` frame with `state: "ended"` and a message, then the socket closes: `4001` (the credential was missing, expired, already used or for another call), `4004` (the call no longer exists) or `4003` (the call belongs to another account). Start a new call to get a new ticket.
 
 ### WebSocket Message Types
 
 **Client → Server:**
 ```json
+{ "type": "auth",  "ticket": "<websocket_ticket>" }
 { "type": "audio", "data": "<base64 PCM 16kHz audio>" }
 { "type": "end" }
 ```
 
 **Server → Client:**
 ```json
+{ "type": "auth_ok" }
 { "type": "audio",      "data": "<base64 PCM 24kHz audio>" }
 { "type": "transcript", "role": "user|assistant", "text": "..." }
 { "type": "status",     "state": "connecting|listening|speaking|ended", "reason": "cap|error|provider_closed|null", "message": "..." }
@@ -174,6 +195,7 @@ The call owns only the blocks it draws: everything the agent put on the canvas i
 ## Limitations
 
 - Voice is available only to signed-in platform users, in the Workspace (not public links, and not to external clients signed in with an email code).
+- After Trinity is updated, reload any open Workspace tab before starting a voice call; a tab from before the update says "Voice was updated. Reload this page, then start a new call." Administrators should apply their usual session invalidation and log-retention procedures when updating.
 - Maximum duration: 30 minutes in the Workspace (configurable). The call ends with a spoken and written notice.
 - The transcript appears in the chat when the call ends. It is saved turn by turn on the server, so a dropped connection or a restart mid-call loses nothing already said.
 - A call is one chat with one agent: rooms (chats with several agents) have no voice mode, and switching agents ends the call.

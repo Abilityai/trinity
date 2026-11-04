@@ -270,6 +270,10 @@ class PortalVoiceStartResponse(BaseModel):
     websocket_url: str
     portal_session_id: str
     max_duration_seconds: int
+    # trinity-enterprise#595: the voice socket's single-use credential, sent as
+    # its first frame; `websocket_url` never carries one.
+    websocket_ticket: str
+    websocket_ticket_expires_in: int
     # trinity-enterprise#1046: Direct only. `early_speech` is False on a runtime that
     # speaks only once its turn has finished, and the status line says so.
     mode: str = "live"
