@@ -317,3 +317,31 @@ def test_an_unblocked_sender_is_checked_and_admitted():
         _run(router, adapter, message)
     db.is_channel_client_blocked.assert_called_once_with("agent1", "whatsapp", "u1")
     service.execute_task.assert_awaited_once()
+
+
+def test_a_blocked_senders_observed_group_message_is_not_recorded():
+    """Review of #4177: an un-tagged (observe-only) group message returned
+    before the block check, so a blocked sender's words were recorded and
+    joined the history every later turn reads."""
+    router, adapter, message = ChannelMessageRouter(), _make_adapter(), _make_message(is_group=True)
+    message.metadata["observe_only"] = True
+    adapter.get_agent_name = AsyncMock(return_value="agent1")
+    adapter.note_untagged_seen = AsyncMock()
+    adapter.group_context_enabled = AsyncMock(return_value=True)
+    with _env({"require_email": False, "open_access": True, "group_auth_mode": "none"}) as (db, service):
+        db.is_channel_client_blocked.return_value = True
+        _run(router, adapter, message)
+    db.is_channel_client_blocked.assert_called_once_with("agent1", "telegram", "u1")
+    db.add_public_chat_message.assert_not_called()
+    service.execute_task.assert_not_awaited()
+
+
+def test_an_unblocked_senders_observed_group_message_is_recorded():
+    router, adapter, message = ChannelMessageRouter(), _make_adapter(), _make_message(is_group=True)
+    message.metadata["observe_only"] = True
+    adapter.get_agent_name = AsyncMock(return_value="agent1")
+    adapter.note_untagged_seen = AsyncMock()
+    adapter.group_context_enabled = AsyncMock(return_value=True)
+    with _env({"require_email": False, "open_access": True, "group_auth_mode": "none"}) as (db, service):
+        _run(router, adapter, message)
+    db.add_public_chat_message.assert_called_once()

@@ -816,7 +816,14 @@ through the agent-wide access policy. OSS-core, like the portal-client controls
 - **FR-3 — Enforcement**: the channel router drops a blocked sender's message
   right after resolving the agent — before rate limiting, typing indicators,
   the access policy, auth prompts or access requests — with **no reply**, in DMs
-  and groups alike, whatever the policy (open access included).
+  and groups alike, whatever the policy (open access included). The same holds
+  on every other way in: an observed group message is not recorded, a transport
+  command (`/login`, `/reset@bot`) is dropped before it is answered, and the
+  agent cannot send them a proactive message on that channel.
+- **FR-3a — Reachable on the roster**: a blocked client whose chat links are gone
+  (a bot unbind) and a client held at the gate who filed an access request (by
+  its `requester_channel_id`, §46.3) are listed too, so a block can always be
+  lifted and a held client can be blocked or approved.
 - **FR-4 — Revoke**: `POST /api/agents/{name}/clients/revoke` removes the
   client's share on this agent (409 when there is none). Under a restricted
   policy their next message files a fresh access request; under open access the

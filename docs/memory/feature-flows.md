@@ -192,6 +192,7 @@
 | Role Assignments | [role-assignments.md](feature-flows/role-assignments.md) | Which human fills which business role for an agent, and which one it primarily serves — the OSS seam, the execution-context lines, and the audience gates that keep staff identities off outside-facing turns (ent#500) |
 | Agent Permissions | [agent-permissions.md](feature-flows/agent-permissions.md) | Agent communication permissions |
 | Agent Sharing | [agent-sharing.md](feature-flows/agent-sharing.md) | Cross-channel email allow-list (web/Slack/Telegram) with access policy and pending requests |
+| Per-Client Channel Controls | [channel-client-controls.md](feature-flows/channel-client-controls.md) | Block / unblock / revoke / approve one Telegram or WhatsApp client from the roster; enforced on turns, observed group messages, transport commands and proactive sends (ent#21) |
 | Agent Shared Folders | [agent-shared-folders.md](feature-flows/agent-shared-folders.md) | File collaboration via shared volumes |
 | Outbound File Sharing | [file-sharing-outbound.md](feature-flows/file-sharing-outbound.md) | Agents publish files to public download URLs (FILES-001) |
 | Agent Tags & System Views | [agent-tags.md](feature-flows/agent-tags.md) | Tagging and saved filters (ORG-001) |

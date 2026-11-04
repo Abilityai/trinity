@@ -389,6 +389,12 @@ class ChannelMessageRouter:
             agent_name = await adapter.get_agent_name(message)
             if not agent_name:
                 return
+            # trinity-enterprise#21: a blocked client's words are not recorded
+            # either — observed group chatter joins the history every later
+            # turn reads, which is a way to reach the agent. A read failure
+            # lands in the except below: nothing recorded.
+            if message.sender_id and db.is_channel_client_blocked(agent_name, channel, message.sender_id):
+                return
             await adapter.note_untagged_seen(message, agent_name)
             if not await adapter.group_context_enabled(message, agent_name):
                 return

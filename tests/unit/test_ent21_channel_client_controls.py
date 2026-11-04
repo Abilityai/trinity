@@ -188,3 +188,128 @@ class TestRoutes:
         for action in ("block", "unblock", "revoke"):
             r = routes[(("POST",), f"/api/agents/{{agent_name}}/clients/{action}")]
             assert any(getattr(d.dependency, "__name__", "") == "require_person" for d in r.dependencies)
+
+
+# ---------------------------------------------------------------------------
+# Review of #4177: every way a blocked client could still reach the agent,
+# against the real database
+# ---------------------------------------------------------------------------
+
+import asyncio  # noqa: E402
+from unittest.mock import AsyncMock, MagicMock  # noqa: E402
+
+
+def _tg_update(sender="1001", text="hello", chat_type="private", chat_id=None):
+    return {"update_id": 1, "message": {
+        "message_id": 7, "date": 1700000000, "text": text,
+        "from": {"id": int(sender), "is_bot": False, "first_name": "A", "username": "a"},
+        "chat": {"id": int(chat_id or sender), "type": chat_type},
+    }}
+
+
+class TestTheSenderIdIsTheRosterClientId:
+    def test_a_real_telegram_message_is_blocked_by_the_roster_id(self, world):
+        """The gate keys on the parsed `sender_id`, the roster on `client_id`;
+        nothing executed that the two are the same string."""
+        from adapters.telegram_adapter import TelegramAdapter
+        parsed = TelegramAdapter().parse_message({**_tg_update("1001"), "_bot_id": "111"})
+        assert parsed is not None
+        client_id = _roster()[("telegram", "1001")]["client_id"]
+        assert parsed.sender_id == client_id
+        _block(("telegram", client_id))
+        assert world.is_channel_client_blocked(AGENT, "telegram", parsed.sender_id)
+
+
+class TestTransportCommands:
+    def _telegram(self, world, monkeypatch, text):
+        from adapters.transports import telegram_webhook as tw
+        transport = tw.TelegramWebhookTransport.__new__(tw.TelegramWebhookTransport)
+        adapter = MagicMock()
+        from adapters.telegram_adapter import TelegramAdapter
+        adapter.parse_message = lambda update: TelegramAdapter().parse_message({**update, "_bot_id": "111"})
+        adapter.handle_command = AsyncMock(return_value="Send me your email")
+        adapter._send_message = AsyncMock()
+        adapter.get_session_identifier = MagicMock(return_value="sid")
+        transport.adapter = adapter
+        transport.on_event = AsyncMock()
+        asyncio.run(transport._process_update(_tg_update("1001", text), world.get_telegram_binding(AGENT)))
+        return adapter, transport
+
+    def test_a_blocked_senders_telegram_command_gets_no_reply(self, world, monkeypatch):
+        _block(("telegram", "1001"))
+        adapter, transport = self._telegram(world, monkeypatch, "/login")
+        adapter.handle_command.assert_not_awaited()
+        adapter._send_message.assert_not_awaited()
+        transport.on_event.assert_not_awaited()
+
+    def test_an_unblocked_senders_telegram_command_is_answered(self, world, monkeypatch):
+        adapter, _ = self._telegram(world, monkeypatch, "/login")
+        adapter.handle_command.assert_awaited_once()
+
+    def _whatsapp(self, world):
+        from adapters.transports import twilio_webhook as tw
+        transport = tw.TwilioWebhookTransport.__new__(tw.TwilioWebhookTransport)
+        adapter = MagicMock()
+        msg = MagicMock(sender_id=WA, channel_id=WA, thread_id=None)
+        adapter.parse_message = MagicMock(return_value=msg)
+        adapter.is_command = MagicMock(return_value=True)
+        adapter.handle_command = AsyncMock(return_value="Check your email")
+        adapter.send_response = AsyncMock()
+        transport.adapter = adapter
+        transport.on_event = AsyncMock()
+        asyncio.run(transport._process_update({"Body": "/login carol@example.com", "From": WA},
+                                              world.get_whatsapp_binding(AGENT)))
+        return adapter, transport
+
+    def test_a_blocked_senders_whatsapp_command_sends_nothing(self, world):
+        _block(("whatsapp", WA))
+        adapter, transport = self._whatsapp(world)
+        adapter.handle_command.assert_not_awaited()
+        adapter.send_response.assert_not_awaited()
+        transport.on_event.assert_not_awaited()
+
+    def test_an_unblocked_senders_whatsapp_command_is_answered(self, world):
+        adapter, _ = self._whatsapp(world)
+        adapter.handle_command.assert_awaited_once()
+
+
+class TestABlockIsNeverPermanentByAccident:
+    def test_a_blocked_client_whose_chat_links_are_gone_stays_on_the_roster(self, world):
+        """A bot unbind deletes the chat links; the block survives, and the
+        client's messages drop before re-recording, so they never came back to
+        the roster and unblock answered 404."""
+        _block(("telegram", "1002"))
+        world.delete_telegram_binding(AGENT)
+        row = _roster()[("telegram", "1002")]
+        assert row["access"] == "blocked"
+        from services import client_roster_service as svc
+        svc.unblock_client(AGENT, "telegram", "1002")
+        assert ("telegram", "1002") not in _roster()
+
+
+class TestAClientHeldAtTheGateIsReachable:
+    def test_a_pending_requester_with_no_chat_link_is_listed_and_blockable(self, world):
+        """Chat links are written only after the access gate and only for DMs
+        (#1533), so a stranger held there, or a group-only sender, had no row.
+        Their access request names their channel id (ent#737)."""
+        world.upsert_access_request(AGENT, "dave@example.com", "telegram",
+                                    identity={"requester_channel_id": "1003", "requester_name": "Dave",
+                                               "requester_handle": "@dave"})
+        row = _roster()[("telegram", "1003")]
+        assert row["access"] == "pending" and row["access_request_id"]
+        assert row["display_name"] == "Dave"
+        _block(("telegram", "1003"))
+        assert _roster()[("telegram", "1003")]["access"] == "blocked"
+        assert world.is_channel_client_blocked(AGENT, "telegram", "1003")
+
+
+class TestProactiveMessages:
+    @pytest.mark.parametrize("channel, client", [("telegram", "1001"), ("whatsapp", WA)])
+    def test_the_agent_cannot_message_a_blocked_client_on_that_channel(self, world, channel, client):
+        from services import proactive_message_service as pms
+        _block((channel, client))
+        email = ALICE if channel == "telegram" else CAROL
+        deliver = pms.ProactiveMessageService()._deliver_telegram if channel == "telegram" \
+            else pms.ProactiveMessageService()._deliver_whatsapp
+        with pytest.raises(pms.ChannelDeliveryError, match="recipient_blocked"):
+            asyncio.run(deliver(AGENT, email, "hi"))

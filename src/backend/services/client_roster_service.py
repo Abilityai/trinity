@@ -52,6 +52,7 @@ def get_client_roster(agent_name: str) -> List[dict]:
                 channel, agent_name, e,
             )
 
+    _add_unlinked_clients(agent_name, roster)
     _annotate_access(agent_name, roster)
 
     # ISO-Z timestamps sort lexicographically. With reverse=True the newest
@@ -61,16 +62,57 @@ def get_client_roster(agent_name: str) -> List[dict]:
     return roster
 
 
+_ROSTER_CHANNELS = ("telegram", "whatsapp")
+
+
+def _add_unlinked_clients(agent_name: str, roster: List[dict]) -> None:
+    """Rows for clients the controls must reach but who have no chat link
+    (trinity-enterprise#21 review). A chat link is written only after the access
+    gate and only for a DM (#1533), so two kinds of client were missing:
+
+    * a BLOCKED client whose links are gone (a bot unbind deletes them) — their
+      messages now drop before any re-recording, so without this row they never
+      returned to the roster and unblock answered 404, making the block permanent;
+    * a client held at the gate who filed an access request (an unverified
+      stranger, a group-only sender) — the request carries their channel id
+      (`requester_channel_id`, ent#737), the same key a block uses.
+    """
+    seen = {(r["channel"], r.get("client_id") or "") for r in roster}
+
+    def add(channel, client_id, **fields):
+        if channel not in _ROSTER_CHANNELS or not client_id or (channel, client_id) in seen:
+            return
+        seen.add((channel, client_id))
+        roster.append({"channel": channel, "identity": client_id, "client_id": client_id,
+                       "display_name": None, "verified_email": None, "message_count": 0,
+                       "last_active": None, **fields})
+
+    for b in db.list_channel_client_blocks(agent_name):
+        add(b["channel"], b["client_id"])
+    for r in db.list_access_requests(agent_name, "pending"):
+        add(r.get("channel"), r.get("requester_channel_id"),
+            identity=r.get("requester_handle") or r.get("requester_channel_id"),
+            display_name=r.get("requester_name") or None,
+            verified_email=(r.get("email") or None),
+            last_active=r.get("requested_at"))
+
+
 def _annotate_access(agent_name: str, roster: List[dict]) -> None:
     """Stamp each row's access state (trinity-enterprise#21). Block wins over
     everything; a share on this agent is `granted`; a pending access request
     is `pending`; otherwise the agent's policy decides (`none`)."""
     blocks = {(b["channel"], b["client_id"]): b for b in db.list_channel_client_blocks(agent_name)}
     shared = {(s.shared_with_email or "").lower() for s in db.get_agent_shares(agent_name)}
-    pending = {(r["email"] or "").lower(): r["id"] for r in db.list_access_requests(agent_name, "pending")}
+    requests = db.list_access_requests(agent_name, "pending")
+    pending = {(r["email"] or "").lower(): r["id"] for r in requests if r.get("email")}
+    # ent#737: a request names the channel identity that asked, so a client
+    # with no verified email still shows as pending (and approvable).
+    pending_by_id = {(r.get("channel"), r.get("requester_channel_id")): r["id"]
+                     for r in requests if r.get("requester_channel_id")}
     for row in roster:
         email = (row.get("verified_email") or "").lower()
-        block = blocks.get((row["channel"], row.get("client_id") or ""))
+        key = (row["channel"], row.get("client_id") or "")
+        block = blocks.get(key)
         row.update(access="none", access_request_id=None, blocked_at=None,
                    blocked_by_email=None, block_reason=None)
         if block:
@@ -80,6 +122,8 @@ def _annotate_access(agent_name: str, roster: List[dict]) -> None:
             row["access"] = "granted"
         elif email and email in pending:
             row.update(access="pending", access_request_id=pending[email])
+        elif key in pending_by_id:
+            row.update(access="pending", access_request_id=pending_by_id[key])
 
 
 class ClientControlError(Exception):
