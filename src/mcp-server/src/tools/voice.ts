@@ -9,12 +9,19 @@
  * The backend resolves the channel destination (chat id / thread / binding) from
  * the execution_id — the tool only needs the text to speak. Fail-soft: any
  * synthesis/delivery miss returns not-delivered so the agent falls back to text.
+ *
+ * abilityai/trinity-enterprise#700: `recipient_email` + `channel` address the
+ * note to a person instead, so a run with no inbound conversation (a schedule,
+ * a loop, a reminder) can speak. The backend resolves the recipient's linked
+ * chat and applies the proactive-messaging gates (consent, shared rate limit,
+ * audit) — the same ones `send_message` passes.
  */
 
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
 import { resolveExecutionId } from "./execution_id.js";
+import { INTENT_KEY_TEACHING, intentKeyParams, intentResultFields, type IntentKeyParams } from "./intent_key.js";
 
 export function createVoiceReplyTools(
   client: TrinityClient,
@@ -56,6 +63,12 @@ export function createVoiceReplyTools(
       description:
         "Deliver a spoken voice note to the user you are currently talking with on a " +
         "messaging channel (Telegram, Slack, or WhatsApp), instead of plain text. " +
+        "To speak to a specific person when you are NOT replying inside their chat — e.g. a " +
+        "scheduled brief — also pass `to` (a role: primary | approver | viewer; when nobody " +
+        "holds the primary seat, the agent's owner receives it) or recipient_email, " +
+        "plus channel (telegram or whatsapp); the " +
+        "person must be linked on that channel and have opted in to proactive messages from " +
+        "you, and the same per-person hourly limit as send_message applies. " +
         "Use this ONLY when a spoken reply fits — a short confirmation, a greeting, a " +
         "read-aloud answer. The voice note is sent immediately; your normal final text " +
         "reply is still delivered as text unless you end your turn with [NO_REPLY]. " +
@@ -65,7 +78,10 @@ export function createVoiceReplyTools(
         "A refusal here is a limit on THIS TOOL, not proof the surface has no voice at all — " +
         "the Workspace, for one, reads your text aloud on the client's own speaker control. " +
         "Read the `guidance` field when present, act on it, and never quote a `reason` code " +
-        "back to a user (#2157).",
+        "back to a user (#2157). " +
+        "When you address a person:" +
+        INTENT_KEY_TEACHING +
+        " The key is per voice note: a text under the same name is a separate delivery.",
       parameters: z.object({
         text: z.string().min(1).max(4096)
           .describe("The text to speak as a voice note. Keep it short and natural to hear."),
@@ -81,19 +97,39 @@ export function createVoiceReplyTools(
             "Optional discriminator to intentionally send TWO distinct voice notes in one turn. " +
             "Default empty → at-most-one voice note per turn."
           ),
+        to: z.enum(["primary", "approver", "viewer"]).optional()
+          .describe(
+            "Address the voice note to the person in this ROLE instead of the current " +
+            "conversation (ent#700, the send_message `to`). Requires `channel`. Use from a " +
+            "scheduled or other non-chat run. Preferred over recipient_email."
+          ),
+        recipient_email: z.string().email().optional()
+          .describe(
+            "Deprecated — name a role with `to` instead. Address the voice note to this " +
+            "person (ent#700). Requires `channel`; not together with `to`."
+          ),
+        channel: z.enum(["telegram", "slack", "whatsapp"]).optional()
+          .describe(
+            "Channel to deliver an addressed voice note on — telegram or whatsapp " +
+            "(slack is not supported for addressed voice yet). Requires `to` or `recipient_email`."
+          ),
         agent_name: z.string().optional()
           .describe(
             "For a user-scoped key only. An agent-scoped key always speaks as its own agent; " +
             "naming another is refused."
           ),
+        ...intentKeyParams,
       }),
       execute: async (
         params: {
           text: string;
           execution_id?: string;
           dedup_label?: string;
+          to?: "primary" | "approver" | "viewer";
+          recipient_email?: string;
+          channel?: "telegram" | "slack" | "whatsapp";
           agent_name?: string;
-        },
+        } & IntentKeyParams,
         context?: { session?: McpAuthContext }
       ) => {
         const authContext = context?.session;
@@ -101,6 +137,33 @@ export function createVoiceReplyTools(
 
         if (!params.text || params.text.trim().length === 0) {
           return JSON.stringify({ delivered: false, error: "Text cannot be empty" }, null, 2);
+        }
+
+        // ent#700: one address (`to` or recipient_email) plus a channel, or neither.
+        const hasAddress = Boolean(params.to || params.recipient_email);
+        if ((params.to && params.recipient_email) || hasAddress !== Boolean(params.channel)) {
+          return JSON.stringify(
+            {
+              delivered: false,
+              fallback_to_text: true,
+              error:
+                "Address a voice note with ONE of `to` or recipient_email, plus channel — or pass " +
+                "none of them to reply in the current conversation.",
+            },
+            null,
+            2
+          );
+        }
+        if ((params.idempotency_key || params.idempotency_ttl !== undefined) && !hasAddress) {
+          return JSON.stringify(
+            {
+              delivered: false,
+              fallback_to_text: true,
+              error: "idempotency_key applies to an addressed voice note: pass `to` or recipient_email, plus channel.",
+            },
+            null,
+            2
+          );
         }
 
         // #2392: header first, param fallback; the backend needs one to find the channel.
@@ -115,6 +178,12 @@ export function createVoiceReplyTools(
             text: params.text.trim(),
             execution_id: executionId,
             dedup_label: params.dedup_label,
+            ...(params.to ? { to: params.to, channel: params.channel } : {}),
+            ...(params.recipient_email
+              ? { recipient_email: params.recipient_email, channel: params.channel }
+              : {}),
+            ...(params.idempotency_key ? { idempotency_key: params.idempotency_key } : {}),
+            ...(params.idempotency_ttl !== undefined ? { idempotency_ttl: params.idempotency_ttl } : {}),
           });
           return JSON.stringify(
             {
@@ -126,6 +195,10 @@ export function createVoiceReplyTools(
               // clients verbatim ("The system confirmed it: not_a_channel_turn");
               // this is the sentence it should reason from — and act on — instead.
               ...(result.guidance ? { guidance: result.guidance } : {}),
+              // ent#700 / trinity#2999: the cost cap, when the text was too long.
+              ...(result.max_chars ? { max_chars: result.max_chars } : {}),
+              // ent#665: `sent: false` means an earlier run already said this.
+              ...intentResultFields(result),
               // Hint the agent to still send text when voice didn't go out.
               fallback_to_text: !result.delivered,
             },
