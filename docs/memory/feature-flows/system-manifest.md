@@ -2121,9 +2121,9 @@ prompt: !!python/object:db_models.Setting
 - Cleanup: Delete created agent
 - Non-admin callers: `tests/unit/test_4025_deploy_prompt_admin_only.py` (creator JWT and an
   agent key with `agents.manage` deploy the fleet but not the prompt; parity with
-  `PUT /api/settings/trinity_prompt` across seven principals, three of which the deploy
-  route's fence already refuses; the predicate itself is pinned against `assert_admin`
-  across every MCP scope)
+  `PUT /api/settings/trinity_prompt` across seven principals, two of which (a connector
+  key and a portal-delegate key) the deploy route's fence already refuses; the predicate
+  itself is pinned against `assert_admin` across every MCP scope)
 
 ### Phase 3 Tests: Permissions
 
