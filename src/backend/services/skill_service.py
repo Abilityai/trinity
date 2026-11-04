@@ -1394,6 +1394,8 @@ class SkillService:
             "superseded_by": None,
             # trinity-enterprise#753: `recommended` gates it by default where assigned.
             "approval": None,
+            # trinity-enterprise#660: narrows the Skills lists, nothing else reads it.
+            "category": None,
         }
 
         try:
@@ -1412,6 +1414,7 @@ class SkillService:
                 "deprecated": contract["deprecated"],
                 "superseded_by": contract["superseded_by"],
                 "approval": contract["approval"],
+                "category": contract["category"],
             })
 
             # Fallback: first non-header paragraph

@@ -119,7 +119,11 @@ Sign-in / reload on bare /workspace
                       (shield-check / question-mark-circle / bell, kind sr-only); no
                       "Waiting on you"; Critical (danger) / High (urgent) only; "Expires
                       in 18m" (warning, < 1h) / "Expires in 5h" (neutral, 1–24h), absolute
-                      + zone on hover; ≤ 2 badges; a 30 s clock only while such a row exists
+                      + zone on hover; ≤ 2 badges; a 30 s clock only while such a row exists;
+                      a pending row with none of those carries one neutral "Unanswered"
+                      badge (#4229) so the badge line is never empty and the ended badge
+                      (Answered · you / Expired / …) replaces it in place — a row is one
+                      height in every state, nothing below it moves on answer
     PortalInboxPane
       ask   → <PortalAsks :ask-ids="[id]" testid-prefix="inbox-ask"> → store.answerAsk → asks/router
               the card (§3g L6, every surface): a pick focuses the note (not on a coarse

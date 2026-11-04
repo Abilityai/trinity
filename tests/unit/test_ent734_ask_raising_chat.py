@@ -230,7 +230,7 @@ def test_a_file_ingested_ask_keeps_main(world, real_db, monkeypatch):
     wrote — so it stays on Main whatever it cites."""
     chat = _chat(world.agent, OWNER)
     turn = _execution(real_db, world.agent, chat=chat)
-    monkeypatch.setattr(oqs, "_validated_addressee", lambda agent, raw: raw)
+    monkeypatch.setattr(oqs.filechannel, "_validated_addressee", lambda agent, raw: raw)
 
     out = oqs._clamp_ingested_item(
         {"id": "f734", "title": "t", "question": "q", "addressed_to_email": OWNER,
@@ -360,7 +360,7 @@ def test_an_agent_supplied_raised_in_turn_is_stripped_on_the_native_path(world, 
 
 
 def test_an_agent_supplied_raised_in_turn_is_stripped_on_the_file_path(world, monkeypatch):
-    monkeypatch.setattr(oqs, "_validated_addressee", lambda agent, raw: raw)
+    monkeypatch.setattr(oqs.filechannel, "_validated_addressee", lambda agent, raw: raw)
 
     out = oqs._clamp_ingested_item(
         {"id": "f734-turn", "title": "t", "question": "q", "addressed_to_email": OWNER,

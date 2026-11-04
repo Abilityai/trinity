@@ -936,8 +936,11 @@ class TestAccessGate:
 
             reply = _run(WhatsAppAdapter().handle_command(_msg_with_text("/login 123456")))
             assert "pending approval" in reply
+            # trinity-enterprise#737: the request names who asked — the number
+            # is the stable id; no handle, and a DM's chat is the sender.
             mock_db.upsert_access_request.assert_called_once_with(
-                "my-agent", "user@example.com", "whatsapp"
+                "my-agent", "user@example.com", "whatsapp",
+                identity={"requester_channel_id": "whatsapp:+14155551234"},
             )
 
 
