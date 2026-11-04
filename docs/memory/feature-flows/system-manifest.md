@@ -23,7 +23,7 @@ description: Autonomous content pipeline with orchestrator and workers
 
 prompt: |
   System-wide instructions injected into all agents.
-  This updates the global trinity_prompt setting.
+  This updates the global trinity_prompt setting (admin callers only, #4025).
   All agents receive this via CLAUDE.md injection.
 
 # ORG-001 Phase 4: Default tags applied to ALL agents in system
@@ -272,7 +272,8 @@ Each corresponds to a real way the backend can mislead a reader:
 - **Acknowledgement, not a banner** — a manifest setting `prompt:` replaces the
   platform-wide `trinity_prompt` for **every agent on the instance**, and enabled schedules
   start recurring autonomous executions that spend API budget. Deploy is gated on an
-  explicit checkbox.
+  explicit checkbox. For a non-admin the preview returns `prompt_updated: false` and a
+  `prompt_requires_admin:` note (#4025), so only the schedule clause can raise the gate.
 - **Duplicate names are confirm-grade** — on a fresh install, re-installing a bundled
   manifest resolves to `_N` suffixes by default and recovery is manual, per agent.
 - **No blind retry** — a timeout or bare 5xx renders "outcome unknown — may still be
@@ -783,6 +784,8 @@ async def deploy_system(
 
 4. If dry_run=True:
    └─ Return preview: {status: "valid", agents_to_create: [...], warnings: [...]}
+   └─ prompt_updated = manifest.prompt AND the caller passes assert_admin; a
+      non-admin with a prompt gets the prompt_requires_admin warning (#4025)
 
 5. Create agents — BEST-EFFORT loop (trinity-enterprise#125):
    For each agent in manifest.agents:
@@ -803,10 +806,15 @@ async def deploy_system(
       so code-only callers (curl -f) don't read it as success
    └─ Skips prompt write, all config phases, system view, and start
 
-6b. Update trinity_prompt (if manifest.prompt AND ≥1 agent created):
+6b. Update trinity_prompt (if manifest.prompt AND ≥1 agent created AND the
+    caller passes assert_admin, the settings route's own gate):
    └─ db.set_setting("trinity_prompt", manifest.prompt)
    └─ Moved post-loop (trinity-enterprise#125) so a totally-failed deploy
       never mutates the platform-wide prompt
+   └─ Any other caller the route admits (a creator, an agent key holding
+      agents.manage, even one an admin owns) gets the fleet, prompt_updated=false
+      and a `prompt_requires_admin:` warning (#4025). One predicate,
+      `_caller_may_set_platform_prompt`, serves deploy and apply.
 
 6c. Survivor scoping + partial warnings:
    └─ created_map = agent_names filtered to created agents; all config phases
@@ -2110,6 +2118,9 @@ prompt: !!python/object:db_models.Setting
 - Expected: 200, prompt_updated=true, GET /api/settings/trinity_prompt returns updated value
 - Verifies: Trinity prompt database update
 - Cleanup: Delete created agent
+- Non-admin callers: `tests/unit/test_4025_deploy_prompt_admin_only.py` (creator JWT and an
+  agent key with `agents.manage` deploy the fleet but not the prompt; parity with
+  `PUT /api/settings/trinity_prompt` across seven principals)
 
 ### Phase 3 Tests: Permissions
 
