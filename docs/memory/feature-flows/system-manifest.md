@@ -642,7 +642,7 @@ functions in this file, so the dry run and the real run share one plan (P-D):
 
 | Function | Kind | What it does |
 |---|---|---|
-| `read_apply_snapshot(manifest, user)` | reads only | Roster = the live ownership rows the caller may manage (a live owner + `db.can_user_share_agent` + `agent_may_reach(manage=True)`: an agent merely shared with the caller, or a container nobody owns, is outside it), with `docker_service.agent_container_states()` still read (tri-state; `None` → `roster_unreadable`); `system_membership` over it (`tags_readable == False` → `membership_tags_unreadable`; any `prefix`-evidence member → `membership_evidence_prefix_only`). Each declared name: taken (`name in states` / `crud.agent_name_is_taken` / `db.is_volume_base_reserved`) and manageable (`can_user_share_agent` + `agent_may_reach(manage=True)`) → system / ephemeral / no-container / claimed gates, then the member's tags, edges, schedules, folder config, resource override and one container label read (`_member_container`; `None` → `member_reads_unavailable`), and `restart_pending` from `check_resource_limits_match` + `check_shared_folder_mounts_match`; taken but not manageable → `member_name_unavailable` (one text for every case); free → create |
+| `read_apply_snapshot(manifest, user)` | reads only | Roster = the live ownership rows the caller may manage (a live owner + `db.can_user_share_agent` + `agent_may_reach(manage=True)`: an agent merely shared with the caller, or a container nobody owns, is outside it), with `docker_service.agent_container_states()` still read (tri-state; `None` → `roster_unreadable`); `system_membership` over it (`tags_readable == False` → `membership_tags_unreadable`; any `prefix`-evidence member → `membership_evidence_prefix_only`). Each declared name: taken (`name in states` / `crud.agent_name_is_taken` / `db.is_volume_base_reserved`) and manageable (`can_user_share_agent` + `agent_may_reach(manage=True)`) → system / ephemeral / no-container / claimed gates, then the member's tags, edges, schedules, folder config, resource override and one container label read (`_member_container`; `None` → `member_reads_unavailable`), and `restart_pending` from `check_resource_limits_match` + `check_shared_folder_mounts_match`; taken but not manageable → `member_name_unavailable` (one text for every case); free → the leftover-volume probe (`crud.workspace_volume_exists`) and, for a `local:` template, its `schedules:` (`_template_declared_schedules` → `ApplyMemberState.template_schedules`), then create |
 | `resolve_apply_plan(manifest, snapshot)` | pure | Per-member `verdict` + `changes[]` + the ordered write-set (`ApplyOp`s); drift (tagged, undeclared; a `<declared>_<N>` is noted as a suffixed copy); every blocker; prompt and view verdicts. Field rules below |
 | `resolve_declared_schedule_actions(declared, live, *, match=schedule_match_policy)` | pure | `create` / `update` (declared fields only) / `in_sync` / `enabled_differs` (report) / `undeclared` (report) / `unlinked` (report) / `ambiguous` + `declared_twice` (blockers). `schedule_match_policy` is the ent#694 / #1198 seam: exact name, unique on both sides, by default |
 | `execute_apply_plan(plan, …, lease)` | writes only | Creates absent members (the `AgentConfig` create builds) and tags each with the system tag at once; filters every other write to members that exist; then tags, edges, folders, resource overrides, schedules, prompt, view, phase by phase; then starts the created members one at a time. Every write's outcome comes from the writer's return value; nothing raises after the first write |
@@ -660,8 +660,35 @@ other schedule field, and exported only when set (#4151 — it was silently drop
 caller's own or shared views by `SYSTEM_VIEW_AUTO_DESCRIPTION` + the system tag. Members apply
 creates get create's semantics; their template-dependent fields (a same-named template schedule,
 a template resource that overrides a declared one) are resolved after the create, against a fresh
-read. `APPLY_FIELD_CLASSIFICATION` classifies every `SystemManifest` / `SystemAgentConfig` field
+read. For a `local:` template the dry run predicts the schedule half of that read (below). `APPLY_FIELD_CLASSIFICATION` classifies every `SystemManifest` / `SystemAgentConfig` field
 and schedule key (reconciled / report-only / create-only / inert), pinned by a census test.
+
+**Dry-run fidelity (trinity-enterprise#984)**: two places where the preview and the run disagreed.
+- *A leftover workspace volume.* For a free, deployable name (Docker readable), the snapshot asks
+  `crud.workspace_volume_exists(name)`, the predicate create's `_guard_leftover_workspace_volume`
+  (#1667) also uses. `True` → the non-retryable blocker `member_workspace_volume_leftover`, whose
+  detail is create's 409 text (`crud.leftover_workspace_volume_detail`), so the dry run is
+  `invalid` and the real run is `refused` (409) before any write or lock key. A probe error →
+  `member_reads_unavailable` (503); create itself still proceeds on a probe error. A taken name, a
+  `deploy: false` member and an unreadable Docker are never probed. Any future create-time volume
+  refusal must be probed here through the same predicate.
+- *A `local:` template's schedules.* `_template_declared_schedules` reads them as create does
+  (`crud._resolve_local_template` on a throwaway config + `normalize_declared_schedules`; no
+  template → `[]`, `github:` → `None`, not probed). `_plan_created_member` builds stand-in rows
+  (`_template_schedule_rows`, the fields `reconcile_declared_schedules` stores) and maps the actions
+  through `_created_schedule_changes`, the function `_apply_created_schedules` runs over its
+  post-create read: `schedule_create`, `schedule_update` (validated over the merged cron/timezone;
+  an error is a blocker in the dry run), `enabled_differs` (the template row keeps its state) and
+  `schedule_undeclared`. `github:` keeps `pending_template_resolution`. The `created_schedules` op
+  is emitted, with `entries: []`, whenever the template's rows are non-empty or unknown, so the
+  real run re-reads and reports template-only rows too; a failed re-read is a `failed[]` line, and
+  a failed create skips it silently (no write was planned). `_apply_report` drops every plan-side
+  `schedule:*` change of a created member the executor reported on, so each is listed once.
+  Residual: materialization is non-fatal, so an expected template row can be missing and the run
+  then reports `schedule_create` where the preview said `schedule_update`.
+- *Create mode.* `deploy_manifest`'s dry run adds one `warnings[]` line per `local:` member whose
+  manifest schedule shares a name with a template schedule (`_template_schedule_collision_warnings`):
+  deploy keeps the template's row and its `enabled`. `schedules_preview` is unchanged.
 
 **Bare adoption (trinity-enterprise#1030)**: `read_apply_snapshot` marks a bare, managed, tag-less member `ApplyMemberState.untagged` instead of gating it `member_claimed_by_another_system`; `_plan_existing_member` turns that into a `member_adopted` change plus a `tag` op for the system tag; `resolve_apply_plan` collects `ApplyPlan.adopted` and the restart/teardown warning (`ApplyPlan.adoption_warning`, built by `_adoption_line`); `_apply_report` copies it to `SystemApplyResponse.adopted` on a dry run (valid or invalid), empties it and drops the line on a refused run, and on a real run keeps only members whose system tag landed (`ApplyOutcome.tags_landed`, per (name, tag)) with the line in the past tense (#4130).
 
