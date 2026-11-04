@@ -161,7 +161,14 @@ def build_postgres_schema() -> None:
     # Enterprise tables normally appear through register_enterprise at boot,
     # which also seeds, and a seeded target cannot take a copy.
     if _module_available("enterprise.backend"):
-        importlib.import_module("enterprise.backend._alembic_runner").upgrade_to_head()
+        try:
+            importlib.import_module("enterprise.backend._alembic_runner").upgrade_to_head()
+        except ValueError as e:
+            # configparser quotes the URL, password included, in this message.
+            if "interpolation" not in str(e):
+                raise
+            _fail(EXIT_USAGE, "The enterprise module cannot read a DATABASE_URL containing %. "
+                              "Update the module, or use a password that needs no URL encoding.")
     print("PostgreSQL schema at head")
 
 

@@ -11,6 +11,7 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -147,6 +148,22 @@ def test_env_py_survives_percent_in_password(monkeypatch: pytest.MonkeyPatch, ca
     assert "alembic_version" in capsys.readouterr().out
 
 
+def test_enterprise_percent_error_does_not_print_the_password(tool, monkeypatch, capsys) -> None:
+    secret = "postgresql://trinity:p%40ss@postgres:5432/trinity"
+
+    def boom():
+        raise ValueError(f"invalid interpolation syntax in '{secret}' at position 20")
+
+    monkeypatch.setitem(sys.modules, "enterprise.backend._alembic_runner", SimpleNamespace(upgrade_to_head=boom))
+    monkeypatch.setattr(tool, "_module_available", lambda name: True)
+    monkeypatch.setattr("db.alembic_runner.upgrade_to_head", lambda **kwargs: None)
+    with pytest.raises(SystemExit) as exc:
+        tool.build_postgres_schema()
+    assert exc.value.code == tool.EXIT_USAGE
+    captured = capsys.readouterr()
+    assert "p%40ss" not in captured.out + captured.err
+
+
 @pytest.fixture
 def pg(monkeypatch: pytest.MonkeyPatch):
     url = os.getenv("TEST_POSTGRES_URL")
@@ -211,6 +228,36 @@ class TestEndToEnd:
             tool.main()
         assert exc.value.code == tool.EXIT_LOAD
         assert (tmp_path / "trinity.db.copied-to-postgres").exists()
+
+    def test_sqlite_table_with_rows_and_no_postgres_home_stops_the_copy(self, tool, pg, tmp_path: Path, monkeypatch) -> None:
+        source = tmp_path / "trinity.db"
+        self._seed(source)
+        conn = sqlite3.connect(source)
+        conn.execute("CREATE TABLE only_in_sqlite (id INTEGER PRIMARY KEY)")
+        conn.execute("INSERT INTO only_in_sqlite VALUES (1)")
+        conn.commit()
+        conn.close()
+        monkeypatch.setenv("TRINITY_DB_PATH", str(source))
+        with pytest.raises(SystemExit) as exc:
+            tool.main()
+        assert exc.value.code == tool.EXIT_SCHEMA
+        assert not (tmp_path / "trinity.db.copied-to-postgres").exists()
+        with pg.connect() as conn:
+            assert conn.execute(text("SELECT COUNT(*) FROM users")).scalar() == 0
+
+    def test_target_with_rows_that_do_not_conflict_is_refused(self, tool, pg, tmp_path: Path, monkeypatch) -> None:
+        source = tmp_path / "trinity.db"
+        self._seed(source)
+        monkeypatch.setenv("TRINITY_DB_PATH", str(source))
+        tool.build_postgres_schema()
+        with pg.begin() as conn:
+            conn.execute(text(
+                "INSERT INTO system_settings (key, value, updated_at) "
+                "VALUES ('already-here', 'x', '2026-01-01T00:00:00Z')"))
+        with pytest.raises(SystemExit) as exc:
+            tool.main()
+        assert exc.value.code == tool.EXIT_LOAD
+        assert not (tmp_path / "trinity.db.copied-to-postgres").exists()
 
     def test_rowcount_mismatch_commits_nothing(self, tool, pg, tmp_path: Path, monkeypatch) -> None:
         source = tmp_path / "trinity.db"
