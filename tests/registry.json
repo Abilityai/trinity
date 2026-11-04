@@ -1,6 +1,19 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent584_capability_descriptions.py",
+      "feature": "trinity-enterprise#584",
+      "added": "2026-11-03",
+      "categories": [
+        "backend",
+        "skills",
+        "workspace",
+        "compatibility",
+        "unit"
+      ],
+      "description": "trinity-enterprise#584: a capability is described once, in its SKILL.md. skill_packaging.clean_description is the one blank rule (missing/empty/whitespace/collection -> None, YAML scalar -> its string form); it runs at the chokepoints (resolve_exposed_playbooks, the live listing, recall of its kept copy, the public view); the Workspace briefing marks use cases kind=use_case in cards and typeahead and a non-text description no longer empties the briefing; the agent page projects capabilities_state; T-011 retired, X-010 (info) notes capabilities: tags with no described skill (dir or frontmatter name, snake/kebab, brain-orb exempt exactly, unread/capped content skipped, nested SKILL.md and commands ignored, detail bounded); P-002 treats whitespace as missing; the library parse never guesses a description from the body; skill_packaging.py imports only what the community library CI downloads. No Docker."
+    },
+    {
       "file": "unit/test_3007_update_command.py",
       "feature": "#3007",
       "added": "2026-10-15",
