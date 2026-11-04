@@ -782,10 +782,17 @@ describe("ent#695 apply_system through the registered tool (real transport, key 
       const d = await s.call("deploy_system", { manifest: MANIFEST, dry_run: false });
 
       assert.deepEqual(
-        [a, b, c, d].map(({ row }) => [row.details.success, row.details.denied]),
-        [[false, undefined], [true, undefined], [false, true], [false, undefined]]
+        [a, b, c, d].map(({ isError, row }) => [isError, row.details.success, row.details.denied]),
+        [[false, false, undefined], [false, true, undefined], [false, false, true], [false, false, undefined]],
+        "every answer is RETURNED (isError false), and no stamp outlives its own call"
       );
       await s.client.close();
+    });
+
+    it("the description tells the caller a failed deploy is a returned report (a description pin)", () => {
+      const d = createSystemTools(new TrinityClient("http://127.0.0.1:1"), false).deploySystem.description;
+      assert.match(d, /A `failed` deploy \(no member created\) comes back as that report with `http_status: 500`/);
+      assert.match(d, /has `success: false`, `http_status` and the backend's `detail`/);
     });
 
     it("a session with no API key still THROWS, and nothing reaches the backend (unchanged)", async () => {
