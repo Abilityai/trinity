@@ -165,7 +165,7 @@ class TestTemplateSchedulesPredicted:
 
 
 class TestTemplateOnlySchedules:
-    """D6: the template brings rows and the manifest names none."""
+    """The template brings rows and the manifest names none."""
 
     @pytest.mark.parametrize("schedules", ["", "    schedules: []\n"])
     def test_both_runs_report_the_template_row(self, ew, schedules):

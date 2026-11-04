@@ -4114,7 +4114,7 @@ def _plan_created_member(mp: ApplyMemberPlan, manifest: SystemManifest,
                                            "Fix the schedule in the manifest."))
         elif change is not None and template_schedules is not None:
             mp.changes.append(change)
-    # D6: the executor re-reads whenever the template brings rows (or may), so
+    # The executor re-reads whenever the template brings rows (or may), so
     # a template-only row is reported by both runs even with no manifest entry.
     re_read = template_schedules is None or bool(template_schedules)
     if entries or re_read:
@@ -4667,7 +4667,7 @@ async def execute_apply_plan(
             step = _APPLY_OP_STEP[op.kind]
             if op.member not in exists:
                 if op.kind == "created_schedules" and not op.args["entries"]:
-                    continue  # a re-read only (D6): no write was planned, none skipped
+                    continue  # a re-read only: no write was planned, none skipped
                 fail(op.member, op.short_name, step,
                      "skipped_member_not_created: the member was not created")
                 continue
@@ -4831,7 +4831,7 @@ async def _apply_created_schedules(op: ApplyOp, current_user: User, out: ApplyOu
             out.failed.append(SystemApplyFailure(
                 name=name, short_name=short, step="schedules",
                 reason=f"schedule '{entry.get('name')}': the post-create read failed ({reason})"))
-        if not op.args["entries"]:  # D6: the template's rows went unreported
+        if not op.args["entries"]:  # the template's rows went unreported
             out.failed.append(SystemApplyFailure(
                 name=name, short_name=short, step="schedules",
                 reason=f"the template's schedules: the post-create read failed ({reason})"))
