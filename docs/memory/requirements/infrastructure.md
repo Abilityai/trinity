@@ -234,6 +234,17 @@
 
 ---
 
+### 8.13 Marketplace Snapshot Release Flow (trinity-enterprise#1094)
+- **Status**: 🟡 Partial — scripts and gate landed; a real submit has not run through them.
+- **GitHub Issue**: abilityai/trinity-enterprise#1094
+- **Description**: A release run builds, tests and submits the DigitalOcean 1-Click snapshot from the operator's machine (`packer/digitalocean/scripts/`).
+- **Key Features**:
+  - **MKT-001**: A Packer build never submits. `mp-build.sh` prints a snapshot ID; `mp-submit.sh <snapshot-id>` is the only submit path.
+  - **MKT-002**: `boot-check.sh` tests a real droplet from the snapshot end to end and destroys it on every trappable exit. A check that cannot run is a failure. The droplet shuts itself down after 45 minutes.
+  - **MKT-003**: `mp-submit.sh` refuses a snapshot without a boot-check pass record, and refuses unless `mp-status.sh` exits 0. Submission needs operator confirmation in the release run.
+  - **MKT-004**: `mp-status.sh` separates clear (0), queued (3), rejected or unknown (4) and API failure (1). A queued listing keeps the snapshot for a later submit without a rebuild.
+  - **MKT-005**: A failed build deletes only its own run-tagged droplet. Tokens and generated passwords stay out of argv.
+
 ## 12. Platform Operations
 
 ### 12.1 Internal System Agent
