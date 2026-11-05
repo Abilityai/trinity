@@ -778,6 +778,9 @@ provision_site() {
     set_env_key FRONTEND_PORT 8081
     # ...and only Caddy, on this host, needs to reach it (trinity-enterprise#873).
     set_env_key FRONTEND_BIND_ADDRESS 127.0.0.1
+    # The MCP server's raw :8080 likewise: off-box MCP clients use the web
+    # door's /mcp (trinity-enterprise#1101). A --hosted upgrade never moves it.
+    set_env_key MCP_BIND_ADDRESS 127.0.0.1
     set_env_key TRINITY_INSTALL_SOURCE "$provenance"
     if [ -n "${TRINITY_IMAGE_TAG:-}" ]; then
         set_env_key TRINITY_IMAGE_TAG "$TRINITY_IMAGE_TAG"
@@ -1918,7 +1921,20 @@ fi
 echo "Access points:"
 echo "  - Web UI:       ${WEB_UI_URL}"
 echo "  - Backend API:  http://localhost:8000/docs"
-echo "  - MCP Server:   http://localhost:8080/mcp"
+# trinity-enterprise#1101: where an MCP client connects depends on the raw
+# port's bind (shell over .env, as compose resolves it). Loopback means the
+# web door's /mcp is the way in, and only once External MCP access is on.
+_mcp_bind="${MCP_BIND_ADDRESS:-$(env_value MCP_BIND_ADDRESS)}"
+case "$_mcp_bind" in
+    127.0.0.1|::1|localhost)
+        echo "  - MCP Server:   ${WEB_UI_URL}/mcp once an admin turns on External MCP access (Settings → MCP Keys); the container port is published on ${_mcp_bind} only" ;;
+    "")
+        echo "  - MCP Server:   http://localhost:8080/mcp"
+        echo "                  (clients off this host need External MCP access on: Settings → MCP Keys)" ;;
+    *)
+        echo "  - MCP Server:   http://${_mcp_bind}:8080/mcp"
+        echo "                  (clients off this host need External MCP access on: Settings → MCP Keys)" ;;
+esac
 echo ""
 
 # --- Next steps card (#39) ----------------------------------------------------
