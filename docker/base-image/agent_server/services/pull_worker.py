@@ -292,6 +292,26 @@ def _failed_result_body(claim_token: Optional[str], error: str) -> Dict[str, Any
     }
 
 
+# #4257: status codes already reported from the claim loop (warn-once per
+# process). Module-level, so a pool of workers logs one line per code, not one
+# per worker.
+_NOTED_CLAIM_STATUS: set = set()
+
+# #4257: how long a worker stays in the delivery retry loop before persisting
+# the terminal and going back to polling. The loop used to retry until the
+# lease deadline (turn timeout + 300 s), which parks ONE OF N workers with no
+# runtime process running — three workers held this way is a pool that looks
+# alive to the backend and claims nothing, and a queue that does not move. The
+# envelope is already on disk by then (B6), so returning early loses nothing:
+# the resend tick below and the backend's lease reaper both finish it.
+_DELIVERY_IN_LOOP_SECONDS = float(os.getenv("PULL_DELIVERY_IN_LOOP_SECONDS", "90"))
+
+# #4257: the persisted-terminal sweep also runs periodically, not only at boot.
+# A bounded delivery that gives up needs something other than the next restart
+# to retry it.
+_RESEND_TICK_SECONDS = float(os.getenv("PULL_RESEND_TICK_SECONDS", "60"))
+
+
 # ---------------------------------------------------------------------------
 # Claim (GET /api/internal/next-task) — §3.1 / §3.2
 # ---------------------------------------------------------------------------
@@ -310,7 +330,25 @@ async def _claim_once(
     if resp.status_code == 204:
         return None
     if resp.status_code >= 300:
-        logger.debug("[#1081] next-task for %s got %s", worker_id, resp.status_code)
+        # #4257: this branch is where a stall HIDES. Any non-200 is treated as
+        # "queue empty", so the worker sleeps and the rows stay queued — which
+        # is exactly what a 403 from a `PULL_MODE_PILOT_AGENTS` /
+        # `TRINITY_PULL_MODE` disagreement looks like from in here. At debug it
+        # left no trace in the logs the incident was investigated from. WARNING
+        # once per status code per process: the refusal repeats every poll, and
+        # a line each would bury it. Status code only, never the bearer.
+        if resp.status_code not in _NOTED_CLAIM_STATUS:
+            _NOTED_CLAIM_STATUS.add(resp.status_code)
+            logger.warning(
+                "[#4257] next-task for %s refused with %s — treating the queue "
+                "as empty and backing off. Queued rows will not move while this "
+                "persists; if it is 403, the backend's PULL_MODE_PILOT_AGENTS "
+                "and this container's TRINITY_PULL_MODE disagree "
+                "(logged once per status per process)",
+                worker_id, resp.status_code,
+            )
+        else:
+            logger.debug("[#1081] next-task for %s got %s", worker_id, resp.status_code)
         return None
     try:
         data = resp.json()
@@ -515,8 +553,20 @@ async def _run_and_report(
             )
         replies: list = []
         try:
+            # #4257: bound the in-loop window to `_DELIVERY_IN_LOOP_SECONDS`,
+            # never past the lease deadline. Past it the terminal is already
+            # persisted (above), so the worker returns to claiming and the
+            # resend tick / lease reaper deliver it. `persisted` is the gate:
+            # without a safe execution id nothing is on disk, and giving up
+            # early there WOULD drop spent work — so that case keeps the full
+            # lease-deadline window.
+            delivery_deadline = (
+                min(deadline, time.monotonic() + _DELIVERY_IN_LOOP_SECONDS)
+                if persisted else deadline
+            )
             delivered = await _deliver_result(
-                client, execution_id, body, backend_url, mcp_key, deadline, reply_sink=replies
+                client, execution_id, body, backend_url, mcp_key, delivery_deadline,
+                reply_sink=replies,
             )
         except BaseException:
             if hold:
@@ -714,6 +764,12 @@ async def resend_pending_pull_results() -> None:
                 _delete_pull_result(execution_id)
 
 
+# #4257: the periodic resend tasks this process owns, so shutdown can cancel
+# them (one per app; a list rather than a single slot so a test that wires two
+# apps does not leak the first).
+_RESEND_TASKS: list = []
+
+
 def schedule_pending_pull_result_resend(app) -> None:
     """Attach a startup handler that re-sends leftover persisted pull terminals.
     Gated only on worker creds (mirrors ``schedule_pending_result_resend``), NOT
@@ -731,3 +787,28 @@ def schedule_pending_pull_result_resend(app) -> None:
             await resend_pending_pull_results()
         except Exception:  # noqa: BLE001 — never block startup
             logger.debug("[#1081] startup pending pull-result resend failed", exc_info=True)
+
+        # #4257: and again every `_RESEND_TICK_SECONDS`, because the bounded
+        # in-loop delivery now gives up on purpose. Boot-only, a terminal the
+        # worker stopped retrying would wait for the next restart (or for the
+        # backend lease reaper to re-RUN the turn, paying for spent work
+        # twice). One task per process; it swallows everything and is
+        # cancelled with the app.
+        async def _resend_pull_periodically() -> None:
+            while True:
+                await asyncio.sleep(_RESEND_TICK_SECONDS)
+                try:
+                    await resend_pending_pull_results()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001 — a blip never kills the tick
+                    logger.debug("[#4257] periodic pull-result resend failed",
+                                 exc_info=True)
+
+        task = asyncio.create_task(_resend_pull_periodically())
+        _RESEND_TASKS.append(task)
+
+    @app.on_event("shutdown")
+    async def _stop_pull_resend_tick() -> None:
+        while _RESEND_TASKS:
+            _RESEND_TASKS.pop().cancel()
