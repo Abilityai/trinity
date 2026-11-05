@@ -8,7 +8,8 @@
 
 The terms of use are an instance setting with a shipped default. Every signed-in
 person on a declared interactive session — an admin arriving through the panel, a
-member in the Workspace, someone who came through public sign-in — sees the current
+member in the Workspace, someone who came through public sign-in, an external client
+on a Workspace portal session (ruling A(1)) — sees the current
 version once on their first visit and cannot continue until they accept. A new
 version is shown again at the next visit. An admin replaces the text in Settings ›
 Access; one action restores the default.
@@ -22,26 +23,31 @@ who accepted what.
 
 ## Entry Points
 
-- **UI**: `src/frontend/src/views/TermsAcceptance.vue` — the `/terms` screen the SPA opens on a `terms_required` refusal; `src/frontend/src/components/settings/TermsPanel.vue` — Settings › Access editor
+- **UI**: `src/frontend/src/views/TermsAcceptance.vue` — the `/terms` screen the SPA opens on a `terms_required` refusal (platform session); `src/frontend/src/components/portal/PortalTerms.vue` — the same screen inside the Workspace for a portal session; `src/frontend/src/components/settings/TermsPanel.vue` — Settings › Access editor
 - **API**: `GET /api/terms/current`, `POST /api/terms/accept`, `GET /api/terms/acceptances`, `PUT /api/terms`, `POST /api/terms/restore-default`
-- **Gate**: every authenticated call, inside `dependencies.resolve_platform_user_unfloored` (`src/backend/dependencies.py:785`)
+- **Gate**: every authenticated call, inside `dependencies.resolve_platform_user_unfloored` (`src/backend/dependencies.py:785`); a Workspace portal session inside `client_portal/portal_auth.py::get_portal_principal` (`terms_gate.enforce_portal_session`)
 
 ## Frontend Layer
 
 ### Components
 - `views/TermsAcceptance.vue:158` — `onAccept()` posts the version read; `:185` `signOut()` — declining signs out, the copy says how to come back
+- `components/portal/PortalTerms.vue` — the portal session's screen: `load()` (`store.loadTerms`), `onAccept()` (`store.acceptTerms`, emits `accepted` → `Portal.vue::bootstrap()`), `decline` → `Portal.vue::onSignOut()`; mounted by `views/Portal.vue` while `store.termsRefusal && store.portalToken`
 - `components/settings/TermsPanel.vue:252` — `save()` (text + title, stamps a version); `:258` `restore()` (confirmed first); `:262` `saveSwitch()` (the switch alone; a failed save re-reads the toggle); `:216` the watcher keeps an unsaved draft across a store update
 - `utils/termsGate.js:50` — `reactToTermsRefusal()` opens `/terms?redirect=<page>`; `:87` `notifyTermsRefusal()` — one reaction per burst, fed by every HTTP client's interceptor (`api.js`, `main.js`, `stores/clientPortal.js` for a platform session)
 
 ### State Management
 - `stores/terms.js:31` — `load()` (`GET /current`); `:46` `accept(version)`; `save(patch)`, `restoreDefault()`, `loadAcceptances()` for the admin panel
+- `stores/clientPortal.js` — `loadTerms()` / `acceptTerms(version)` on `portalHttp` with the portal bearer; `fetchRoster()` records the refusal as `termsRefusal` (#1082); `verifyCode()` sends `client: 'web'`, which is what makes the portal session a visit the gate asks
 - `stores/auth.js` — `loginWithCredentials` / `verifyEmailCode` / the hand-off send `client: 'web'` (`SPA_CLIENT`), which is what makes the session a visit the gate asks
 
 ## Backend Layer
 
 ### Endpoints
-- `src/backend/routers/terms.py:51` — `current_terms()` (`require_person`, `@workspace_route` + `@terms_route`)
-- `src/backend/routers/terms.py:58` — `accept_terms()` (`require_interactive`, both marks; `terms_gate.assert_door_open` first, then `terms_service.accept`, hooks after the response)
+- `src/backend/routers/terms.py` — `terms_caller()`: a platform principal through `get_optional_user`, or the Workspace portal session the bearer carries (`decode_portal_session` + the client-block check) as a `terms_service.PortalPerson`, else the resolver's own refusal
+- `src/backend/routers/terms.py` — `current_terms()` (`assert_person` first, `@workspace_route` + `@terms_route`)
+- `src/backend/routers/terms.py` — `accept_terms()` (`reject_non_interactive_principal` first, both marks; `terms_gate.assert_door_open`, then `terms_service.accept`, hooks after the response)
+- `src/backend/client_portal/portal_auth.py::get_portal_principal` — the portal-token branch calls `terms_gate.enforce_portal_session(request, email, interactive=portal_session_is_interactive(token))` after `_reject_if_blocked` and before the slide
+- `src/backend/client_portal/router.py::portal_auth_verify` → `service.portal_signin_verify(..., interactive=body.client == SPA_CLIENT)` → `dependencies.create_portal_session_token(..., interactive=True)` mints the claim; `renew_portal_session` carries it
 - `src/backend/routers/terms.py:83` — `list_acceptances()` (`require_admin`)
 - `src/backend/routers/terms.py:90` — `update_terms()`; `:110` `restore_default_terms()` (admin + interactive, audited by version)
 - `src/backend/routers/auth.py:361` — `_session_claims()` mints `interactive: true` for `client=web` (`:374` `login`, `:734` `_complete_email_login`)
@@ -49,10 +55,10 @@ who accepted what.
 
 ### Business Logic
 1. The resolver resolves the credential, then calls `terms_gate.enforce` (`services/terms_gate.py:244`) once.
-2. `_is_person` (`:143`) and `_is_visit` (`:172`) decide whether this principal is asked at all; a marked route (`dependencies.terms_route`, `dependencies.py:1202`) is skipped.
-3. A registered provider answers through `_provider_decision` (`:187`, the fault policy); otherwise `terms_service.decision` (`services/terms_service.py:189`): the switch, the version, one acceptance lookup.
+2. `_is_person` (`:143`) and `_is_visit` (`:172`) decide whether this principal is asked at all; a marked route (`dependencies.terms_route`, `dependencies.py:1202`) is skipped. A portal session enters the same `enforce` through `enforce_portal_session` as a `PortalPerson` whose `interactive_session` is the token's own claim.
+3. A registered provider answers through `_provider_decision` (`:187`, the fault policy — a `PortalPerson` is role `user`, so a provider fault is fail-closed for it); otherwise `terms_service.decision` (`services/terms_service.py`): the switch, the version, one acceptance lookup — `has_accepted` by account, or by email for a `PortalPerson`.
 4. Outstanding → `refusal()` (`:133`), 403 with a code from `REFUSAL_CODES`.
-5. Accepting: `assert_door_open` (`terms_gate.py:228`), then `terms_service.accept` (`terms_service.py:210`) — version check, INSERT, audit, hooks.
+5. Accepting: `assert_door_open` (`terms_gate.py:228`), then `terms_service.accept` (`terms_service.py`) — version check, INSERT (`user_id` NULL + email for a portal person), audit, hooks.
 6. Editing: `set_terms` (`terms_service.py:140`) validates both fields, writes only on a change, stamps a version, records the author; `restore_default` (`:179`) deletes the three rows.
 
 ## The flow
@@ -60,6 +66,8 @@ who accepted what.
 ```
 Person signs in (any door)
   └─ first authenticated call → resolve_platform_user_unfloored        dependencies.py
+     (a Workspace portal session: get_portal_principal                 client_portal/portal_auth.py
+        → terms_gate.enforce_portal_session(email, interactive=claim))
        └─ terms_gate.enforce(request, user)                            services/terms_gate.py
             not a person (agent / connector / delegate / loopback) → pass
             not a visit → pass: a JWT without the `interactive` claim (CLI, curl, a
@@ -72,23 +80,26 @@ Person signs in (any door)
                  → 403 {"code": "terms_required", "version": v}
   └─ SPA interceptor (api.js / axios / portalHttp) → notifyTermsRefusal   utils/termsGate.js
        └─ router.push('/terms?redirect=<page>')                         views/TermsAcceptance.vue
+     (a portal session: fetchRoster → store.termsRefusal → Portal.vue    components/portal/PortalTerms.vue
+        mounts the screen in place of the roster, on the portal bearer)
             GET /api/terms/current  → title, text, version (the shipped default until replaced)
             tick + Accept → POST /api/terms/accept {version}
-                 └─ terms_service.accept → INSERT terms_acceptances (UNIQUE user, version)
+                 └─ terms_service.accept → INSERT terms_acceptances (UNIQUE user, version;
+                                           a portal person: user_id NULL, UNIQUE email, version)
                                            audit AUTHORIZATION/terms_accepted {version, door}
                                            BackgroundTasks → run_acceptance_hooks (an optional
                                            module binds the invitation, boots a member's agent)
-            → back to the page they came from (role-aware)
+            → back to the page they came from (role-aware); a portal session re-bootstraps the Workspace
             Decline → sign out; the copy says how to come back (sign in again and accept)
 ```
 
 ## Data Layer
 
 ### Database Operations
-- `db/terms.py:22` — `insert_terms_acceptance()`: INSERT, `None` on the UNIQUE (user, version) — the second accept is a no-op
-- `db/terms.py:41` — `get_terms_acceptance()`: the one lookup the decision makes; `terms_acceptances_for_email`, `list_terms_acceptances` for the record
+- `db/terms.py` — `insert_terms_acceptance()`: INSERT, `None` on the UNIQUE (user, version) or, for a session row (`user_id` NULL), the partial unique (email, version) — the second accept is a no-op; emails stored lower-cased
+- `db/terms.py` — `get_terms_acceptance()` (by account) / `get_terms_acceptance_by_email()` (a session row or an account's — the same person): the one lookup the decision makes; `terms_acceptances_for_email`, `list_terms_acceptances` for the record
 - `system_settings` rows `terms_required` / `terms_title` / `terms_text` / `terms_version` through `db.get_setting_value` / `set_setting` / `delete_setting`
-- Table `terms_acceptances`: SQLite `terms_acceptances_table` (`db/migrations.py`) + Alembic `0118_terms_acceptances`
+- Table `terms_acceptances`: SQLite `terms_acceptances_table` (`db/migrations.py`; rebuilds a development DB on the earlier NOT NULL shape, rows kept) + Alembic `0118_terms_acceptances` (`user_id` nullable, `uq_terms_acceptances_email_version ... WHERE user_id IS NULL`)
 
 ## The setting
 
@@ -115,10 +126,12 @@ default before is not asked again (the text is byte-identical).
 |---|---|---|
 | JWT carrying `interactive: true` — the SPA's own sign-in (`client=web` on `POST /api/token`, `"client": "web"` on the email verify and the Workspace hand-off), any role (admin included) | yes | every person's first visit; setup resolves no principal, so the admin claim comes first |
 | JWT without the claim — the CLI, curl, a CI harness, a test fixture, a session minted before the claim existed | no | the gate is a UX/record contract the client declares, not a security boundary (`terms_gate.py` module doc); a headless caller never accepts |
+| Workspace portal session (the emailed-code sign-in, no `users` row) minted with `interactive: true` — the Workspace sends `"client": "web"` on `/auth/verify`; the claim is carried across rotation | yes — ruling A(1) | a Workspace person like any other; the acceptance is recorded by email (`user_id` NULL) through the terms routes on that same token; the screen is `PortalTerms.vue` inside the Workspace |
+| portal session token without the claim — a harness, a delegate-minted session (an embedding, the person did not sign in through the Workspace) | no | the same ruling-A line: not a visit the client declared |
 | Workspace-only person's own `user` key | yes | the key is the person (ent#1054) |
 | operator-and-above `user` key, the system key | no | automation, not a visit — an ops key must not fail because the admin has not signed in since an upgrade |
 | agent, connector, portal-delegate, loopback | no | the owner's agents and automations |
-| channel bindings, public links | not consulted | no platform principal |
+| channel bindings, public links, the shared-canvas viewer read (`workspace_email_from_request`) | not consulted | no platform principal / a route anonymous visitors may open |
 
 Failure: the OSS decision fails closed for everyone; a registered provider's fault
 fails closed for a Workspace-only person and is ignored for operator-and-above
@@ -178,10 +191,10 @@ logged and audited (`terms_hook_failed`).
 
 ### Unit and component tests
 
-- `tests/unit/test_ent1107_terms_per_instance.py` — the default, the setting and its named refusals, the gate on an admin JWT (refused on a plain route, admitted on a marked one), accept → lifted, a new version asks everyone else again, the admin record, setup resolves no principal, `main.py` registers the router.
+- `tests/unit/test_ent1107_terms_per_instance.py` — the default, the setting and its named refusals, the gate on an admin JWT (refused on a plain route, admitted on a marked one), accept → lifted, a new version asks everyone else again, the admin record, setup resolves no principal, `main.py` registers the router; ruling A(1): the session row (`user_id` NULL, one per email+version, the four DDL homes agree, the rebuild), the portal door refused until accepted / admitted on the switch off, a marked route or a bare token / delegate-minted session, the terms routes on the portal token record the email, by address not by token, the provider fail-closed and its door passed through, the verify route mints the claim only for `client: "web"`.
 - `tests/unit/test_ent1054_terms_gate.py` — the seam: who is gated, a provider's own reasons, fail-closed vs the operator fallback, exempt routes, one consult in the resolver.
 - `tests/unit/test_837_workspace_route_census.py` — the two terms routes are member pages.
-- Frontend: `termsPanel.mount.spec.js` (editor, named refusals, restore confirmed, the switch, the draft across a switch save, a failed switch save, the record, decline copy), `termsAcceptance.mount.spec.js`, `termsRoute.spec.js`, `apiTermsRequiredInterceptor.spec.js`; `e2e/auth.setup.js` accepts through the API after the UI sign-in.
+- Frontend: `termsPanel.mount.spec.js` (editor, named refusals, restore confirmed, the switch, the draft across a switch save, a failed switch save, the record, decline copy), `termsAcceptance.mount.spec.js`, `termsRoute.spec.js`, `apiTermsRequiredInterceptor.spec.js`; `portalTerms.mount.spec.js` (the portal screen on the portal bearer), `portalTermsRefusal.spec.js` (`loadTerms` / `acceptTerms`, the refusal never reports to the /terms handler on a portal session), `portalTermsRefusal.mount.spec.js` (the shell: screen for a portal session, link for a platform one); `e2e/auth.setup.js` accepts through the API after the UI sign-in.
 
 ## Related Flows
 - [workspace-only-role.md](workspace-only-role.md) — the operator floor the gate sits beside
