@@ -101,8 +101,10 @@ anyone the owner could — and a schedule addressed to a person makes its runs t
 person's seat runs. `_refuse_agent_third_party` refuses an agent principal
 (`403 agent_cannot_address_another_person`) a third-party target on create and
 update, and every per-schedule action (update, delete, enable, disable, trigger,
-webhook mint) on a schedule already addressed to someone else — so the agent can
-neither create, retarget, rewrite nor fire a turn in a colleague's seat. Who the
+and every webhook route, through `_assert_can_manage_webhook`) on a schedule already
+addressed to someone else — so the agent can neither create, retarget, rewrite nor
+fire a turn in a colleague's seat. That includes revoking its webhook: a uniform rule,
+matching delete. `can_manage_webhook` reads false for that caller. Who the
 agent speaks to unprompted is the owner's grant (Invariant #8 grant vs use); the
 owner's own session keeps every control, and a schedule for the owner or with no
 target stays fully agent-manageable.
@@ -161,6 +163,9 @@ needs a per-row discriminator `enterprise_portal_messages` does not carry.
 
 ## Honest limits
 
+- **A webhook URL already held survives a retarget.** If an agent minted a webhook while
+  its schedule had no address, and the owner then addresses it to a colleague, the URL
+  keeps its token and still fires. Rotating or revoking on retarget is undecided.
 - **Durable, not live-pushed.** The Workspace does not poll thread history, so the brief
   appears on the next load or thread switch. Acceptable at daily cadence; stated rather
   than implied.

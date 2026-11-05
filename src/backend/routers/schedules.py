@@ -152,6 +152,8 @@ def _can_manage_webhook(schedule, agent_name: str, current_user: User) -> bool:
     agent its owner owns; the system key is refused). A share holder needs to
     be the creator (`agent_schedules.owner_id`). A schedule with no recorded
     creator is the owner's alone."""
+    if _is_agent_third_party(current_user, getattr(schedule, "deliver_to_workspace_email", None)):
+        return False
     if agent_viewer_tier(current_user, agent_name) != VIEWER_SHARE:
         return True
     uid = getattr(current_user, "id", None)
@@ -167,6 +169,8 @@ _WEBHOOK_FORBIDDEN_DETAIL = {
 
 
 def _assert_can_manage_webhook(schedule, agent_name: str, current_user: User) -> None:
+    # ent#1063: first, so an agent holding `schedules.manage` gets the named refusal.
+    _refuse_agent_third_party(current_user, getattr(schedule, "deliver_to_workspace_email", None))
     if not _can_manage_webhook(schedule, agent_name, current_user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=dict(_WEBHOOK_FORBIDDEN_DETAIL))
 
@@ -194,10 +198,17 @@ async def list_agent_schedules(name: AuthorizedAgent, current_user: User = Depen
 
 _AGENT_THIRD_PARTY = {
     "error": ("An agent can deliver a schedule only to its owner's Workspace. Pointing a schedule at "
-              "someone else, or changing or running one that is, is the owner's decision: ask them to "
-              "set it up in the agent's Schedules."),
+              "someone else, or changing or running one that is, is the owner's decision: ask them."),
     "code": "agent_cannot_address_another_person",
 }
+
+
+def _is_agent_third_party(current_user, email) -> bool:
+    """An agent's own key, and an address other than its owner's."""
+    if not agent_principal_name(current_user):
+        return False
+    target = (email or "").strip().lower()
+    return bool(target) and target != (getattr(current_user, "email", "") or "").strip().lower()
 
 
 def _refuse_agent_third_party(current_user, email) -> None:
@@ -214,10 +225,7 @@ def _refuse_agent_third_party(current_user, email) -> None:
     who the agent speaks to unprompted. Addressing the owner stays open (the
     key's email IS the owner's), and the system key is the platform's own.
     """
-    if not agent_principal_name(current_user):
-        return
-    target = (email or "").strip().lower()
-    if target and target != (getattr(current_user, "email", "") or "").strip().lower():
+    if _is_agent_third_party(current_user, email):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_AGENT_THIRD_PARTY)
 
 
@@ -801,7 +809,6 @@ async def generate_webhook(
     schedule = db.get_schedule(schedule_id)
     if not schedule or schedule.agent_name != name:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
-    _refuse_agent_third_party(current_user, getattr(schedule, "deliver_to_workspace_email", None))
 
     _assert_can_manage_webhook(schedule, name, current_user)
 

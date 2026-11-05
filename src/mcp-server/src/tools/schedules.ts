@@ -232,8 +232,9 @@ export function createScheduleTools(
             "silently deliver nowhere. Omit for today's behaviour (no delivery). " +
             "With the agent's own key, only the owner's address is accepted: pointing a " +
             "schedule at anyone else is refused `agent_cannot_address_another_person` " +
-            "(the owner sets that up in the agent's Schedules), and so is changing, " +
-            "triggering or deleting a schedule that already delivers to someone else."
+            "(that is the owner's decision), and so is changing, enabling, disabling, " +
+            "triggering, deleting or managing the webhook of a schedule that already delivers " +
+            "to someone else."
           ),
       }),
       execute: async (
@@ -569,7 +570,9 @@ export function createScheduleTools(
       description:
         "Enable or disable a schedule without deleting it. Disabled schedules won't run but preserve their configuration. " +
         "With an agent key, changing ANOTHER agent's schedule needs the schedule-management permission an instance admin grants; without it the call is refused with `schedule_management_not_permitted`. " +
-        "Access control: agents can toggle schedules on self or permitted agents.",
+        "Access control: agents can toggle schedules on self or permitted agents. An agent's own key " +
+        "cannot toggle a schedule that delivers to someone other than its owner " +
+        "(`agent_cannot_address_another_person`).",
       parameters: z.object({
         agent_name: z.string().describe("Agent name"),
         schedule_id: z.string().describe("Schedule ID"),

@@ -126,6 +126,66 @@ class TestAnExistingThirdPartySchedule:
         assert call(client, agent, "DELETE", f"/{sid}", as_owner=True).status_code == 204
 
 
+class TestWebhookRoutes:
+    """Every webhook route, with the capability that would otherwise pass it. A
+    URL is a credential that fires the schedule, so reading one is as good as
+    firing it."""
+
+    ROUTES = [
+        ("GET", "/{sid}/webhook"), ("POST", "/{sid}/webhook"),
+        ("POST", "/{sid}/webhook/secret"), ("DELETE", "/{sid}/webhook/secret"),
+        ("DELETE", "/{sid}/webhook"),
+    ]
+
+    @pytest.mark.parametrize("method, path", ROUTES)
+    def test_refused_on_a_colleagues_schedule_with_the_capability(self, client, agent, method, path):
+        db.grant_agent_capability(agent.name, "schedules.manage", agent.owner)
+        sid = owners_colleague_schedule(client, agent)
+        assert call(client, agent, "POST", f"/{sid}/webhook", as_owner=True).status_code == 200
+        token = db.get_schedule(sid).webhook_token
+        refused(call(client, agent, method, path.format(sid=sid)))
+        assert db.get_schedule(sid).webhook_token == token
+
+    @pytest.mark.parametrize("method, path", ROUTES)
+    def test_the_owner_keeps_them(self, client, agent, method, path):
+        sid = owners_colleague_schedule(client, agent)
+        assert call(client, agent, "POST", f"/{sid}/webhook", as_owner=True).status_code == 200
+        assert call(client, agent, method, path.format(sid=sid), as_owner=True).status_code < 300
+
+    def test_the_holder_keeps_them_on_a_schedule_for_the_owner(self, client, agent):
+        db.grant_agent_capability(agent.name, "schedules.manage", agent.owner)
+        sid = call(client, agent, "POST", json={**BODY, "deliver_to_workspace_email": agent.owner}).json()["id"]
+        assert call(client, agent, "POST", f"/{sid}/webhook").status_code == 200
+
+    def test_can_manage_webhook_says_what_the_routes_do(self, client, agent):
+        db.grant_agent_capability(agent.name, "schedules.manage", agent.owner)
+        theirs = owners_colleague_schedule(client, agent)
+        mine = call(client, agent, "POST", json=BODY).json()["id"]
+        rows = {s["id"]: s["can_manage_webhook"] for s in call(client, agent, "GET").json()}
+        assert rows[theirs] is False
+        assert rows[mine] is True
+        as_owner = {s["id"]: s["can_manage_webhook"] for s in call(client, agent, "GET", as_owner=True).json()}
+        assert as_owner[theirs] is True
+
+
+class TestTheOwnersAddress:
+    """The writers normalise both sides today, so a route can't reach this; the
+    compare must not depend on that."""
+
+    @pytest.mark.parametrize("stored, target", [
+        ("Owner@Example.com", "owner@example.com"),
+        ("owner@example.com", "OWNER@Example.com"),
+        ("owner@example.com", "  owner@example.com "),
+    ])
+    def test_case_and_spacing_do_not_make_it_someone_else(self, stored, target):
+        key = SimpleNamespace(agent_name="a", email=stored, mcp_scope="agent")
+        assert schedules_router._is_agent_third_party(key, target) is False
+
+    def test_another_address_is_someone_else(self):
+        key = SimpleNamespace(agent_name="a", email="owner@example.com", mcp_scope="agent")
+        assert schedules_router._is_agent_third_party(key, COLLEAGUE) is True
+
+
 class TestTheAgentsOwnSchedules:
     def test_it_still_manages_and_fires_a_schedule_for_its_owner(self, client, agent):
         sid = call(client, agent, "POST", json={**BODY, "deliver_to_workspace_email": agent.owner}).json()["id"]
