@@ -23,6 +23,7 @@ Self-contained: the unit conftest's real SQLite, no live backend.
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
 import uuid
 from pathlib import Path
@@ -189,7 +190,7 @@ class TestSummarizerHistory:
         assert db.get_or_create_public_user_memory(agent.name, "ann@example.com")["conversation_summary"] == "base"
         assert len(db.list_public_user_memory_writes(agent.name, "ann@example.com", 20, section=None)) == 1
 
-    def test_an_undo_during_the_model_call_survives_the_summarizer(self, agent, monkeypatch):
+    def test_an_undo_during_the_model_call_survives_the_summarizer(self, agent, monkeypatch, caplog):
         """The real `summarize_user_memory_background`: the operator undoes the
         poisoned summary while the model is answering; the summarizer's write,
         built from the poisoned base, must be dropped, not land over the undo."""
@@ -211,10 +212,13 @@ class TestSummarizerHistory:
             return "- clean\n- poisoned line\n- new fact"
         monkeypatch.setattr(model_gateway, "complete", complete)
 
-        asyncio.run(pps.summarize_user_memory_background(agent.name, email, "sess-1"))
+        with caplog.at_level(logging.INFO):
+            asyncio.run(pps.summarize_user_memory_background(agent.name, email, "sess-1"))
         assert db.get_or_create_public_user_memory(agent.name, email)["conversation_summary"] == "- clean"
         rows = db.list_public_user_memory_writes(agent.name, email, 20, section="summary")
         assert len(rows) == 2 and rows[0]["undone_at"] is not None
+        # #4275 review I1: a dropped write is never logged as an update.
+        assert not [r for r in caplog.records if "Updated conversation_summary" in r.getMessage()]
 
 
 # --------------------------------------------------------------------------- #
@@ -381,6 +385,18 @@ class TestPagingAndPeople:
         notes_write = db.list_public_user_memory_writes(agent.name, "notes@example.com", 1)[0]
         assert by["notes@example.com"]["last_changed_at"] == notes_write["written_at"]
 
+    def test_a_person_whose_every_fact_was_forgotten_leaves_the_list(self, agent):
+        """#4275 review I2: the union counts LIVE facts only."""
+        from services import person_memory_service as pms
+        from services import memory_service as ms
+        fid = db.insert_memory_fact(agent_name=agent.name, user_email="gone@example.com", text="Lives in Lyon",
+                                    text_hash=ms.fact_hash("Lives in Lyon"), embedding=b"\0" * 8,
+                                    embedding_model="m", source="public")
+        assert {p["user_email"] for p in pms.list_people(agent.name)["people"]} == {"gone@example.com"}
+        assert db.soft_delete_memory_fact(fid, agent.name, deleted_by="owner")
+        page = pms.list_people(agent.name)
+        assert page["people"] == [] and page["total"] == 0
+
     def test_the_owners_own_row_points_at_the_agent_scope(self, agent):
         from services import person_memory_service as pms
         _notes(agent.name, agent.owner, "The owner chatted on a public link.")
@@ -444,6 +460,38 @@ class TestMigration:
         migrations._migrate_public_user_memory_writes_section(cur, conn)     # idempotent
         assert cur.execute("SELECT section FROM public_user_memory_writes").fetchone() == ("notes",)
         assert "public_user_memory_writes_section" in [n for n, _ in migrations.MIGRATIONS]
+
+    def test_the_alembic_downgrade_never_leaves_summary_text_to_read_as_notes(self, tmp_path):
+        """#4275 review (low): dropping `section` would make a later upgrade label
+        every summary row `notes`, and an Undo on one would restore summary text
+        into the notes. The downgrade deletes the summary rows first. Driven
+        through Alembic's real Operations on a SQLite file."""
+        import importlib.util
+        from alembic.migration import MigrationContext
+        from alembic.operations import Operations
+        from sqlalchemy import create_engine, text
+
+        path = REPO / "src/backend/migrations/versions/0120_public_user_memory_writes_section.py"
+        spec = importlib.util.spec_from_file_location("rev0120", path)
+        rev = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(rev)
+        engine = create_engine(f"sqlite:///{tmp_path / 'a.db'}")
+        with engine.begin() as conn:
+            conn.execute(text("""CREATE TABLE public_user_memory_writes (
+                id TEXT PRIMARY KEY, agent_name TEXT NOT NULL, user_email TEXT NOT NULL,
+                execution_id TEXT, triggered_by TEXT NOT NULL, schedule_id TEXT,
+                previous_notes TEXT NOT NULL DEFAULT '', new_notes TEXT NOT NULL DEFAULT '',
+                written_at TEXT NOT NULL, undone_at TEXT, undone_by TEXT)"""))
+            with Operations.context(MigrationContext.configure(conn)):
+                rev.upgrade()
+            conn.execute(text("INSERT INTO public_user_memory_writes (id, agent_name, user_email, triggered_by, written_at, section) "
+                              "VALUES ('n1','a','p@example.com','public','t','notes'), ('s1','a','p@example.com','summarizer','t','summary')"))
+            with Operations.context(MigrationContext.configure(conn)):
+                rev.downgrade()
+            assert [r[0] for r in conn.execute(text("SELECT id FROM public_user_memory_writes"))] == ["n1"]
+            with Operations.context(MigrationContext.configure(conn)):
+                rev.upgrade()
+            assert conn.execute(text("SELECT section FROM public_user_memory_writes")).fetchall() == [("notes",)]
 
     def test_the_alembic_revision_chains_after_0119(self):
         path = REPO / "src/backend/migrations/versions/0120_public_user_memory_writes_section.py"

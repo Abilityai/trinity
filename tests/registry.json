@@ -8418,6 +8418,18 @@
         "unit"
       ],
       "description": "trinity-enterprise#962: the owner's view of a person's memory. Readers rule through the real dependency chain (owner and admin read; a shared user and an approver get the uniform 404; agent, system and connector keys get 403 before any lookup; a user-scoped key reads as on the facts routes); summarizer writes recorded as `summary` rows only on change, with a compare-and-set that survives an undo during the model call (driven through summarize_user_memory_background); undo latest-first per section through the one primitive the Workspace shares, the operator stamped and the person told without who; keyset paging; the people union and its last-change rule; non-creating reads; channel identity; the live route table; the dual-track migration."
+    },
+    {
+      "file": "unit/test_ent962_memory_row_lock.py",
+      "feature": "trinity-enterprise#962",
+      "added": "2026-11-05",
+      "categories": [
+        "backend",
+        "memory",
+        "postgres",
+        "unit"
+      ],
+      "description": "trinity-enterprise#962: the per-person memory blob is read-modify-written under a row lock on BOTH backends (requires_postgres; schema-parity's PostgreSQL tier runs it). Each writer is held inside its critical section, so without the lock the interleaving is forced: a concurrent notes write and summary write keep both halves, and an undo racing a summary write keeps the undo and the new summary."
     }
   ]
 }

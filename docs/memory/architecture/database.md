@@ -632,7 +632,7 @@ at that instant. `section` is the ent#962 column, both tracks (SQLite
 `public_user_memory.id` — that row is created on demand; `(agent_name, user_email)` is the
 identity. Undo (`undo_user_memory_write`) is latest-first over the open (`undone_at IS NULL`)
 writes of one `(agent, email)` **within the write's section**; a foreign write id is
-`not_found`, never a 403 (Invariant #8). Readers default to `section='notes'`. No retention:
+`not_found`, never a 403 (Invariant #8). Readers default to `section='notes'`; the Alembic downgrade deletes the summary rows before dropping the column, so no summary text is ever relabelled as notes. No retention:
 rows live until the agent is deleted (a bound is a follow-up).
 
 **agent_role_readiness** (ent#527 / #663 — the agent owner's readiness stamp for a role companion):

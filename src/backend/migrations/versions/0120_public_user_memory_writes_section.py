@@ -38,6 +38,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # A summary row's previous_/new_notes hold SUMMARY text. Without the column,
+    # a later upgrade would label every row `notes` and an Undo on one would
+    # restore summary text into the notes, so the summary rows go first: the
+    # history before this revision recorded notes only, and that is what stays.
     bind = op.get_bind()
     if "section" in _columns(bind):
+        op.execute("DELETE FROM public_user_memory_writes WHERE section = 'summary'")
         op.drop_column("public_user_memory_writes", "section")
