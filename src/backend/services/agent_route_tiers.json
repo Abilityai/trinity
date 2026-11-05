@@ -1536,6 +1536,11 @@
   "reason": "legacy",
   "tier": "accessor"
  },
+ "sharing.py::block_channel_client_endpoint": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/clients/block",
+  "tier": "owner"
+ },
  "sharing.py::decide_access_request_endpoint": {
   "method": "POST",
   "path": "/api/agents/{agent_name}/access-requests/{request_id}/decide",
@@ -1571,6 +1576,11 @@
   "path": "/api/agents/{agent_name}/access-requests",
   "tier": "owner"
  },
+ "sharing.py::revoke_channel_client_endpoint": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/clients/revoke",
+  "tier": "owner"
+ },
  "sharing.py::set_public_channel_prompt_endpoint": {
   "method": "PUT",
   "path": "/api/agents/{agent_name}/public-prompt",
@@ -1579,6 +1589,11 @@
  "sharing.py::share_agent_endpoint": {
   "method": "POST",
   "path": "/api/agents/{agent_name}/share",
+  "tier": "owner"
+ },
+ "sharing.py::unblock_channel_client_endpoint": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/clients/unblock",
   "tier": "owner"
  },
  "sharing.py::unshare_agent_endpoint": {
