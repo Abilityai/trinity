@@ -39,10 +39,13 @@ import {
   randomBytes,
   timingSafeEqual,
 } from "node:crypto";
+import { classifyPeer, REASON_UNREACHABLE, refusalFor, type ExternalAccessSource, type PeerClass, type Verdict } from "./external-access.js";
 
 type Listener = (req: IncomingMessage, res: ServerResponse) => void;
 
 const HEADER = "mcp-session-id";
+/** ent#1101 — set by `front()` on every forwarded request; an incoming copy is stripped. No consumer yet. */
+export const PEER_CLASS_HEADER = "x-trinity-peer-class";
 const ID_PREFIX = "t1";
 const RAND_BYTES = 16;
 const TAG_BYTES = 16;
@@ -176,6 +179,10 @@ export interface SessionFrontOptions {
   port: number;
   now?: () => number;
   maxMapped?: number;
+  /** ent#1101 — the external-access verdict source; off-box `/mcp` is refused unless it says on. */
+  externalAccess: ExternalAccessSource;
+  /** ent#1101 — the peer rule (default: `classifyPeer` over the socket address); injected by tests. */
+  classifyPeer?: (req: IncomingMessage) => PeerClass;
 }
 
 export interface SessionFront {
@@ -210,28 +217,34 @@ export async function startWithSessionFront(
   let running = 0;
   const waiters: Array<() => void> = [];
 
+  const classify = opts.classifyPeer ?? ((req: IncomingMessage) => classifyPeer(req.socket?.remoteAddress));
+  let warnedBridgePeer = false;
+
+  // ent#1101: the listener is captured UNCONDITIONALLY — the external-access
+  // gate must front every request whether or not a secret enables revival —
+  // and a capture that fails refuses to start rather than serve an ungated
+  // listener (a fastmcp bump that moves `http.createServer` fails here, loudly).
   let inner: Listener | undefined;
   const original = http.createServer;
-  if (codec) {
-    (http as any).createServer = (...args: unknown[]) => {
-      (http as any).createServer = original;
-      const listener = args.find((a) => typeof a === "function") as Listener | undefined;
-      if (!listener) return (original as any).apply(http, args);
-      inner = listener;
-      const rest = args.filter((a) => a !== listener);
-      return (original as any).call(http, ...rest, front);
-    };
-  }
+  (http as any).createServer = (...args: unknown[]) => {
+    (http as any).createServer = original;
+    const listener = args.find((a) => typeof a === "function") as Listener | undefined;
+    if (!listener) return (original as any).apply(http, args);
+    inner = listener;
+    const rest = args.filter((a) => a !== listener);
+    return (original as any).call(http, ...rest, front);
+  };
   try {
     await start();
   } finally {
     (http as any).createServer = original;
   }
+  if (!inner) {
+    throw new Error("[ent#1101] could not wrap the MCP HTTP listener: refusing to serve /mcp without the external-access gate");
+  }
 
   if (!codec) {
     console.warn("[#4060] INTERNAL_API_SECRET unset: MCP sessions will not survive a restart");
-  } else if (!inner) {
-    console.warn("[#4060] could not wrap the MCP HTTP listener: MCP sessions will not survive a restart");
   }
   const active = Boolean(codec && inner);
 
@@ -382,6 +395,53 @@ export async function startWithSessionFront(
     setRequestHeader(req, "x-trinity-session-front", undefined);
     setRequestHeader(req, "x-trinity-revival-of", undefined);
 
+    // ent#1101: the external-access gate — before authenticate, before the
+    // session layer. The peer class is stamped on every forwarded request.
+    const peer = classify(req);
+    setRequestHeader(req, PEER_CLASS_HEADER, peer);
+    if (peer === "off-box" && req.method !== "DELETE" && isMcpPath(req.url)) {
+      const fresh = opts.externalAccess.cached();
+      if (fresh) {
+        if (fresh.kind !== "on") return refuse(req, res, fresh);
+        return afterGate(req, res);
+      }
+      req.pause();
+      opts.externalAccess.verdict().then(
+        (verdict) => {
+          if (verdict.kind !== "on") return refuse(req, res, verdict);
+          req.resume();
+          afterGate(req, res);
+        },
+        (error) => {
+          console.error("[ent#1101] external-access verdict failed:", error);
+          refuse(req, res, { kind: "unverified", reason: REASON_UNREACHABLE });
+        }
+      );
+      return;
+    }
+    afterGate(req, res);
+  }
+
+  function isMcpPath(url: string | undefined): boolean {
+    const pathname = (url ?? "").split("?")[0];
+    return pathname === "/mcp" || pathname.startsWith("/mcp/");
+  }
+
+  function refuse(req: IncomingMessage, res: ServerResponse, verdict: Verdict): void {
+    const refusal = refusalFor(verdict)!;
+    const addr = req.socket?.remoteAddress ?? "";
+    if (!warnedBridgePeer && /^(::ffff:)?172\./.test(addr)) {
+      warnedBridgePeer = true;
+      console.warn(`[ent#1101] refused an off-box MCP peer at ${addr} that looks like a Docker bridge address (a host-forwarded raw-port caller, or an IPv6-enabled daemon); agents on trinity-agent-network are never refused. First occurrence only.`);
+    }
+    req.resume();
+    req.on("data", () => {});
+    res.writeHead(refusal.status, refusal.headers).end(refusal.body);
+  }
+
+  function afterGate(req: IncomingMessage, res: ServerResponse): void {
+    // No secret → no signed ids and no revival: today's behaviour past the gate.
+    if (!codec) return inner!(req, res);
     const count = headerCount(req, HEADER);
     if (count > 1) {
       res.setHeader("Content-Type", "application/json");
