@@ -75,8 +75,11 @@ def jwt_as(monkeypatch):
         monkeypatch.setattr(
             database.db, "get_user_by_username", lambda name, *_a, **_k: dict(row, username=name)
         )
+        # The SPA's sign-in mints `interactive: true` (ruling A); that is the
+        # session the gate asks. A bare token is never asked.
         return jwt.encode(
-            {"sub": row["username"], "exp": int(time.time()) + 300}, SECRET_KEY, algorithm=ALGORITHM
+            {"sub": row["username"], "exp": int(time.time()) + 300, "interactive": True},
+            SECRET_KEY, algorithm=ALGORITHM,
         )
 
     return make

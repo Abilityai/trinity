@@ -19,12 +19,29 @@ delegates to. With none registered, the OSS decision applies on its own.
 
 Who is gated, and how it fails:
 
-* **Persons on an interactive session, whatever the role.** A Workspace-only
-  person's own ``user``-scoped key is gated too (ent#1054: the key is the
-  person). A machine credential of operator-and-above — a ``user``-scoped key,
-  the system key — is NOT: the gate is for visits, and an ops key failing at
-  03:00 because the admin has not signed in since an upgrade is an outage,
-  not a terms screen.
+* **Persons on a VISIT, whatever the role.** A visit is a session the SPA
+  declared interactive at sign-in (ruling A on ent#1107): the SPA sends
+  ``client=web`` on ``POST /api/token`` and ``"client": "web"`` on the email
+  verify, the token is minted with an ``interactive: true`` claim
+  (``routers/auth.py::_session_claims``), the resolver reads it into
+  ``User.interactive_session``, and this gate asks exactly those sessions. A
+  JWT WITHOUT the claim — the CLI, curl, a CI harness, a test fixture, a
+  session minted before the claim existed — is never gated, whatever the role.
+  A Workspace-only person's own ``user``-scoped key is gated too (ent#1054:
+  the key is the person); a machine credential of operator-and-above — a
+  ``user``-scoped key, the system key — is NOT: an ops key failing at 03:00
+  because the admin has not signed in since an upgrade is an outage, not a
+  terms screen.
+
+  **Why a claim the client declares is enough.** The gate is a UX/record
+  contract — "every new person sees the terms once and the acceptance is
+  recorded" — not a security boundary: nothing is authorized by accepting,
+  and a caller who strips the claim gains only the right not to be shown a
+  screen that a CLI could not render anyway. So the honest signal is the
+  client's own word for what it is, and a header/claim the SPA sets is the
+  right mechanism; deriving "interactive" from the credential type instead
+  (the ent#1054 shape, every JWT) gated every headless caller that holds a
+  session token and turned the harness red (327 fixtures).
 * **Never an agent's credential.** An agent-scoped key, a connector key, a
   delegated portal key and a loopback token are the owner's agents and
   automations, not the person; an agent whose owner has not yet accepted keeps
@@ -149,22 +166,29 @@ def provider_door(user: Any) -> Optional[str]:
     return str(door) if door else None
 
 
-def _machine_credential_of_operator(user: Any) -> bool:
-    """A key (``mcp_scope`` set) held by operator-and-above: a credential for
-    automation, not a visit. Read fail-closed: an absent attribute is not a
-    key, so the principal is gated rather than waved through."""
+def _is_visit(user: Any) -> bool:
+    """A session the gate asks: a JWT carrying the SPA's ``interactive`` claim
+    (``User.interactive_session``), or a Workspace-only person's own key
+    (ent#1054: the key is the person). A bare token or a machine credential of
+    operator-and-above is not a visit. Read with a "not a visit" default: an
+    absent attribute is a principal that never declared itself, and the gate
+    is a UX contract (module doc), so it is waved through rather than refused."""
     from dependencies import is_workspace_only_role
 
+    if getattr(user, "interactive_session", False) is True:
+        return True
     scope = getattr(user, "mcp_scope", None)
-    return scope is not None and not is_workspace_only_role(getattr(user, "role", None))
+    return scope is not None and is_workspace_only_role(getattr(user, "role", None))
 
 
 def enforce(request: Any, user: Any) -> None:
     """Refuse ``user`` (403) while the terms are outstanding.
 
     Called once, by ``resolve_platform_user_unfloored``, after the principal is
-    fully resolved. No-op for an agent's credential, for a machine credential
-    of operator-and-above, and on a route marked ``@terms_route``.
+    fully resolved. No-op for an agent's credential, for anything that is not
+    a visit (``_is_visit``: a token without the ``interactive`` claim, a
+    machine credential of operator-and-above), and on a route marked
+    ``@terms_route``.
     """
     # Late imports: `dependencies` imports this module.
     from dependencies import TERMS_ROUTE_ATTR, is_workspace_only_role
@@ -172,7 +196,7 @@ def enforce(request: Any, user: Any) -> None:
 
     if not _is_person(user):
         return
-    if _machine_credential_of_operator(user):
+    if not _is_visit(user):
         return
     route = request.scope.get("route") if getattr(request, "scope", None) else None
     if getattr(getattr(route, "endpoint", None), TERMS_ROUTE_ATTR, None):

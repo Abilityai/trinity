@@ -242,7 +242,7 @@ The four `terms_*` keys are refused on `PUT /api/settings/{key}` (422) so the va
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/auth/mode` | Auth mode config (unauthenticated) |
-| POST | `/api/token` | Admin login — `username` accepts `admin` OR the admin's registered email + password (#82); form-encoded |
+| POST | `/api/token` | Admin login — `username` accepts `admin` OR the admin's registered email + password (#82); form-encoded. `client=web` (the SPA) mints `interactive: true`, the claim the terms gate asks (ent#1107); the CLI sends nothing |
 | POST | `/api/auth/email/request` / `/verify` | Request email code / verify and login |
 | POST | `/api/auth/logout` | Revoke the caller's JWT — blacklists its `jti` in Redis until the token's own expiry, so an exfiltrated 7-day token dies on logout (#187). Idempotent; MCP-key callers are a no-op (keys revoke via key management) |
 | GET | `/api/auth/validate` | Validate JWT (for nginx auth_request) — also rejects a `jti` revoked via logout (#187) |

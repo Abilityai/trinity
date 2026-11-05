@@ -20,7 +20,8 @@ Person signs in (any door)
   └─ first authenticated call → resolve_platform_user_unfloored        dependencies.py
        └─ terms_gate.enforce(request, user)                            services/terms_gate.py
             not a person (agent / connector / delegate / loopback) → pass
-            a machine credential of operator-and-above (user key, system key) → pass
+            not a visit → pass: a JWT without the `interactive` claim (CLI, curl, a
+              harness, a pre-change token), a machine credential of operator-and-above
             route marked @terms_route (sign-out, /users/me, /terms/*) → pass
             provider registered? its decision (the invite door, then the OSS one)
             else terms_service.decision(user)                          services/terms_service.py
@@ -60,7 +61,8 @@ default before is not asked again (the text is byte-identical).
 
 | Principal | Gated? | Why |
 |---|---|---|
-| JWT session, any role (admin included) | yes | every person's first visit; setup resolves no principal, so the admin claim comes first |
+| JWT carrying `interactive: true` — the SPA's own sign-in (`client=web` on `POST /api/token`, `"client": "web"` on the email verify and the Workspace hand-off), any role (admin included) | yes | every person's first visit; setup resolves no principal, so the admin claim comes first |
+| JWT without the claim — the CLI, curl, a CI harness, a test fixture, a session minted before the claim existed | no | the gate is a UX/record contract the client declares, not a security boundary (`terms_gate.py` module doc); a headless caller never accepts |
 | Workspace-only person's own `user` key | yes | the key is the person (ent#1054) |
 | operator-and-above `user` key, the system key | no | automation, not a visit — an ops key must not fail because the admin has not signed in since an upgrade |
 | agent, connector, portal-delegate, loopback | no | the owner's agents and automations |

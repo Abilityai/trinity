@@ -4,6 +4,10 @@ import {
   clearStoredSession, readStoredToken, readStoredUser, TOKEN_KEY,
 } from '@/utils/platformSession'
 
+// What the SPA tells a sign-in route it is (trinity-enterprise#1107, ruling A):
+// the minted session carries `interactive: true`, the claim the terms gate reads.
+export const SPA_CLIENT = 'web'
+
 export const useAuthStore = defineStore('auth', {
   state: () => ({
     token: null,
@@ -371,6 +375,10 @@ export const useAuthStore = defineStore('auth', {
         const formData = new FormData()
         formData.append('username', username)
         formData.append('password', password)
+        // trinity-enterprise#1107: the SPA declares its session interactive;
+        // the token then carries the claim the terms gate asks. The CLI sends
+        // nothing and is never asked.
+        formData.append('client', SPA_CLIENT)
 
         const response = await axios.post('/api/token', formData)
 
@@ -439,7 +447,7 @@ export const useAuthStore = defineStore('auth', {
       }
 
       try {
-        const response = await axios.post('/api/auth/email/verify', { email, code })
+        const response = await axios.post('/api/auth/email/verify', { email, code, client: SPA_CLIENT })
 
         // Enterprise 2FA (#5): a second factor is required — defer the token.
         if (response.data?.mfa_required) {
@@ -476,7 +484,7 @@ export const useAuthStore = defineStore('auth', {
       const addr = (email || '').trim().toLowerCase()
       if (!held || !addr || held.email !== addr || !this.emailCodeLoginEnabled) return false
       try {
-        const response = await axios.post('/api/auth/email/handoff', { email: addr, token: held.token })
+        const response = await axios.post('/api/auth/email/handoff', { email: addr, token: held.token, client: SPA_CLIENT })
         if (response.data?.mfa_required) {
           this._setMfaChallenge(response.data)
           return false

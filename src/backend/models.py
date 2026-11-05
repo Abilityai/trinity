@@ -497,6 +497,14 @@ class User(BaseModel):
     # agent created could reach `/task` looking like the admin in a browser.
     # `dependencies.is_person_principal` refuses it.
     is_event_loopback: bool = False
+    # trinity-enterprise#1107 (ruling A): True only on a JWT carrying the
+    # `interactive` claim — the session the SPA declared at sign-in
+    # (`client=web` on `/api/token`, `"client": "web"` on the email verify).
+    # The terms gate asks exactly these sessions; a token without the claim
+    # (the CLI, curl, a harness, a session minted before the claim existed) is
+    # never asked. A UX/record contract the client declares, not a security
+    # boundary — nothing is authorized by it. False on every other branch.
+    interactive_session: bool = False
     # trinity-enterprise#629 + #164: the agents a capability fence admitted an
     # agent key to on THIS request (`dependencies._admit_capability_reach`).
     # Private, so it is never serialized and never set from a token: the only

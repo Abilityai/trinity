@@ -797,7 +797,9 @@ async def resolve_platform_user_unfloored(request: Request, token: str) -> User:
     one function every door shares, so a Workspace-only person who has not
     accepted the current terms is refused on all of them (403 `terms_required`),
     and a route the person must reach before accepting is marked `@terms_route`.
-    Operator and above are never gated; an agent's credential is untouched.
+    Since ent#1107 every role is gated — on a session the SPA declared
+    interactive (`User.interactive_session`); a key, a bare token and an
+    agent's credential are untouched.
     """
     user = await _resolve_platform_credential(request, token)
     from services import terms_gate  # late: the seam imports this module's marker
@@ -882,6 +884,8 @@ async def _resolve_platform_credential(request: Request, token: str) -> User:
             loopback_chain_depth=_loopback_chain_depth(payload) if loopback else None,
             # trinity-enterprise#751: never a person, whatever the token resolves to.
             is_event_loopback=bool(loopback),
+            # trinity-enterprise#1107: the session the SPA declared at sign-in.
+            interactive_session=bool(payload.get("interactive")) and not loopback,
         )
     except JWTError:
         # JWT failed, try MCP API key
