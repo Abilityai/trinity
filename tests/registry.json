@@ -8264,6 +8264,17 @@
         "deploy"
       ],
       "description": "start.sh --hosted never drops an operator's Caddy site: the render imports /etc/caddy/Caddyfile.d/*.caddy; a live Caddyfile edited since Trinity wrote it (recorded checksum) or, pre-checksum, holding a site Trinity never renders is refused with the running config kept, unless --caddy-overwrite (old file kept as a backup); --dry-run prints the render and writes nothing; first boot still replaces the packaged default."
+    },
+    {
+      "file": "unit/test_ent1073_env_read_fail_closed.py",
+      "feature": "trinity-enterprise#1073",
+      "added": "2026-11-03",
+      "categories": [
+        "backend",
+        "unit",
+        "credentials"
+      ],
+      "description": "A whole-file .env writer never treats a file it could not read as empty: agent_env_read classifies the credentials-read answer (text / proven absent / not UTF-8 / unconfirmed, malformed bodies raise); the GitHub PAT write skips an unreadable .env (skipped_env_unreadable) and keeps every other line otherwise; Settings names the status; an AST-free guard requires every services module that reads .env and injects it to use the rule. The Nevermined bind/revoke cases are in test_ent966_delegation_routes.py::TestEnvReadFailsClosed."
     }
   ]
 }
