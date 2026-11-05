@@ -345,3 +345,88 @@ AES-256-GCM envelopes. What changed is how git *reads* one.
 - **Security surface**: `docs/memory/requirements/security.md` §20.11.
 - **Flow**: [credential-in-chat.md](../feature-flows/credential-in-chat.md).
 
+### 3.11 A Credential Handed Over to Another Instance (trinity-enterprise#1109)
+
+- **Status**: ✅ Implemented (OSS core, platform half). The asking agent's
+  wording around the ask (where the secret will live, who can read it, how to
+  rotate it) and the "ask for each missing `credentials:` name before
+  `apply_system`" prompting are the agent's own skill, not the platform's.
+- **Need**: a hub Regent runs on one instance and builds agents on the
+  person's own instance. The §3.10 sink lands the value in the ASKING agent's
+  `.env` — the wrong place: the Regent must never hold the value, and the agent
+  that needs it runs elsewhere. The ask needs a destination, and the delivery
+  must merge into that agent's `.env` (the owner inject is a whole-file write).
+- **Behaviour**:
+  - `ask_for_credential(name, why, destination?)` — `destination` is
+    `{instance_url, agent_name, key_env}`: the other instance's base URL —
+    **an instance an admin has approved**: its origin (scheme + host + port)
+    must match an endpoint in the outbound A2A endpoint registry (Settings →
+    Integrations → Outbound A2A endpoints; read through the effective
+    provider, so a module that scopes endpoints per agent counts) — the
+    agent there, and the NAME of the variable in the ASKING agent's own
+    `.env` that holds its key to that instance. The registry entry is the
+    approval only; its own credential is not used. The key itself never
+    travels through the tool call or the ask. **The outbound A2A kill switch
+    governs this path**: with outbound A2A off (default) a destination is
+    refused. Stored on the ask row as `context.credential_destination`,
+    validated at raise time with named 422s (`destination_url_invalid`,
+    `destination_agent_invalid`, `destination_key_env_invalid`,
+    `destination_not_approved`, `destination_outbound_disabled`, each with a
+    `reason`; the first two name where an admin registers the instance); no
+    resolver runs at raise time; a destination on any other ask kind is
+    refused (`destination_on_non_credential`).
+  - The person sees the same masked field, with the destination in plain words
+    ("for the agent lopez-digest on the Trinity at hub.example.com" — never
+    "your": nothing here ties the host to the person; the admin's registry ties
+    it to the platform): the
+    Workspace projection carries `credential_destination: {agent_name, host}` —
+    never the key's name. The agent's receipt carries the same view.
+  - On Send the sink (`services/credential_sink.py`) stages the value in the
+    scrub as before, then: reads the asking agent's key BY NAME from its own
+    `.env` through the agent's read endpoint (`destination_key_missing`, 409,
+    when the agent holds no such variable; `destination_key_invalid`, 409,
+    when it cannot travel as a header; the asking agent must be running),
+    re-checks the switch and the registry, resolves the URL off the loop at
+    delivery time and pins the connection to the resolved address (the A2A
+    transport: capped body, total deadline, redirects refused), audits the
+    attempt (`credential_delivery_attempt`) BEFORE the request leaves, and POSTs
+    `POST {instance_url}/api/agents/{agent}/credentials/inject` with
+    `{mode: "merge", env: {NAME: value}}` under `Authorization: Bearer <key>`.
+    Nothing is written on the hub; after a 2xx the staged value is removed —
+    nothing rests on the hub after delivery. Audit
+    `credentials` / `credential_delivered` with the name, the ask id and the
+    destination (host + agent), never the value or the key.
+  - Delivery failures are plain retries, each named: `destination_outbound_disabled`
+    / `destination_not_approved` (422, the switch or the registry changed since
+    the ask), `destination_url_invalid` (422, the URL no longer validates),
+    `destination_unreachable` (503 — connect failure: nothing was written; a
+    timeout after the request left: the value may have been written and stays
+    staged), `destination_key_refused` (409, the instance answered 401/403),
+    `destination_agent_missing` (409, 404 there — no such agent, or one the key
+    cannot reach), `destination_unconfirmed` (503, a 5xx or an unreadable
+    answer — "may or may not have been stored", the value stays staged: the
+    receiving route's own 503 means exactly that), `destination_refused` (409,
+    any other non-2xx or a redirect, with the status). A refusal that cannot
+    have written unstages the value, so "nothing was stored" holds for the
+    scrub too.
+  - The receiving instance's `POST /api/agents/{name}/credentials/inject` gains
+    `mode: "merge"` with `env: {NAME: value}`: read `.env` through the agent
+    (only a file the agent proves absent is empty), set the named lines in
+    place, every other byte kept, under the sink's per-agent lease — the same
+    leaf the §3.10 sink writes with. The default `mode: "replace"` with `files`
+    is byte-for-byte the existing whole-file contract. The gate is unchanged
+    (`require_person`: a signed-in session or a `user`-scoped key — the Regent's
+    key to the member instance is such a key, and the operator floor applies).
+    Audited as `inject` with `mode` and the names.
+  - A system manifest member may declare `credentials: [NAME, ...]` (variable
+    names, validated); the parsed manifest carries it and the dry-run preview
+    lists it per member. The platform prompts for nothing — that is the agent's.
+  - The wake for a delivered credential says the name was delivered to that
+    agent on that instance and is NOT in the asking agent's environment.
+- **Not in scope**: a vault as the hub's resting place (the scrub staging is
+  the only transit store and it is cleared on delivery); retries the platform
+  schedules itself (the person retries); the Regent's conversation.
+- **Security surface**: `docs/memory/requirements/security.md` §20.11.
+- **Flow**: [credential-in-chat.md](../feature-flows/credential-in-chat.md)
+  (the destination path).
+

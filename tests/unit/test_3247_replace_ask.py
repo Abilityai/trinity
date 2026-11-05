@@ -384,7 +384,8 @@ RECEIPT_KEYS = {"status", "id", "request_id", "raised_by", "channel", "type", "t
                 "wakes_on_ending", "supersedes_expired",
                 "replaces", "replaced_by", "disposed_by",
                 "agent_ending",  # trinity-enterprise#901 — replaced | withdrawn | None
-                "wake_state"}  # abilityai/trinity-enterprise#1108 AC #4 — pending (agent not yet woken) | woken | None
+                "wake_state",  # abilityai/trinity-enterprise#1108 AC #4 — pending (agent not yet woken) | woken | None
+                "credential_destination"}  # trinity-enterprise#1109 — {agent_name, host} | None
 
 
 class _Rejected:

@@ -153,8 +153,23 @@ def _framed_message(
         # row's answer is the word `provided`; the wake names the VARIABLE and
         # tells the agent where to read it — the value is in its environment
         # and nowhere else, and `response_text` is never set for this kind.
+        from services import credential_destination
         from services.credential_ask_policy import credential_name_of
         name = credential_name_of(item.get("context")) or "the credential"
+        destination = credential_destination.destination_of(item.get("context"))
+        if destination is not None:
+            # trinity-enterprise#1109: delivered elsewhere — this agent never
+            # held it and must not go looking for it.
+            where = credential_destination.plain_words(destination)
+            lines += [
+                "---",
+                label,
+                f"answer: {answer} — {name} was delivered to {where}; it is not in your "
+                "environment, you never see its value, and the agent there reads it from "
+                "its own.",
+                "---",
+            ]
+            return "\n".join(lines)
         lines += [
             "---",
             label,

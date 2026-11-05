@@ -43,7 +43,8 @@ RECEIPT_KEYS = {"status", "id", "request_id", "raised_by", "channel", "type", "t
                 "wakes_on_ending", "supersedes_expired",
                 "replaces", "replaced_by", "disposed_by",
                 "agent_ending",  # ent#901 — replaced | withdrawn | None, derived once server-side
-                "wake_state"}  # abilityai/trinity-enterprise#1108 AC #4 — pending (agent not yet woken) | woken | None
+                "wake_state",  # abilityai/trinity-enterprise#1108 AC #4 — pending (agent not yet woken) | woken | None
+                "credential_destination"}  # trinity-enterprise#1109 — {agent_name, host} | None
 # Never on an agent's receipt or readback (the ent#611 redaction).
 PERSON_FIELDS = {"disposed_by_email", "resolved_to", "addressed_to_email",
                  "responded_by_email", "responded_by_id"}

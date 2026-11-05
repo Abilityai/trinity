@@ -1336,6 +1336,10 @@ class SystemAgentConfig(BaseModel):
     # has without running it (verdict `declared_only`): never created, never
     # reconciled, never deleted, and not stored platform-side.
     deploy: bool = True
+    # trinity-enterprise#1109: the `.env` variable NAMES this member needs
+    # (never values). Parsed, validated and previewed; the platform prompts
+    # for nothing — the agent reading the manifest asks for each missing one.
+    credentials: Optional[List[str]] = None
 
 
 class SystemPermissions(BaseModel):
@@ -1719,9 +1723,18 @@ class DeployLocalResponse(BaseModel):
 # ============================================================================
 
 class CredentialInjectRequest(BaseModel):
-    """Request to inject credential files directly into an agent."""
+    """Request to inject credential files directly into an agent.
+
+    `mode: "replace"` (the default) writes `files` / `files_b64` whole — the
+    original contract, unchanged. `mode: "merge"` (trinity-enterprise#1109)
+    takes `env` only: each named `.env` variable is set in place through the
+    sink's read-patch-inject leaf and every other byte is kept, so a caller
+    on another instance can land one credential without holding the file.
+    """
     files: Dict[str, str] = {}       # text files: {".env": "KEY=value\n...", ".mcp.json": "{}"}
     files_b64: Dict[str, str] = {}   # binary files: {path: base64(content)} (#11 — .p12/.pfx/DER)
+    mode: Literal["replace", "merge"] = "replace"
+    env: Dict[str, str] = {}         # merge only: {NAME: value} lines to set in `.env`
 
 
 class CredentialInjectResponse(BaseModel):

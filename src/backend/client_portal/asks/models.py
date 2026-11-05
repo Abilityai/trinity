@@ -120,6 +120,11 @@ class WorkspaceAsk(BaseModel):
     # `pending` ("agent not yet woken": the answer landed, the agent was not
     # running, its next start picks it up) | `woken` | None (no wake owed).
     wake_state: Optional[str] = None
+    # trinity-enterprise#1109: where the value LANDS when that is not the
+    # asking agent — `{agent_name, host}` in plain words for the field's
+    # caption. Never the name of the variable that holds the asking agent's
+    # key to that instance.
+    credential_destination: Optional[Dict[str, str]] = None
 
 
 class WorkspaceAskAnswer(BaseModel):

@@ -619,6 +619,36 @@
   names the shape, never the text. The composer then keeps no copy: the failed
   message is dropped, not offered for Retry, never handed back to the composer,
   and any draft holding it is cleared.
+- **A destination (trinity-enterprise#1109)**: a credential ask may name an
+  agent on ANOTHER Trinity (`context.credential_destination`). **The
+  destination is limited to instances an admin has approved**: its origin
+  (scheme + host + port, the A2A client's `_same_origin` normalisation) must
+  equal a registered outbound A2A endpoint's (`a2a_outbound.list_endpoints`
+  through the effective provider — Settings → Integrations → Outbound A2A
+  endpoints), checked at raise (`destination_not_approved`) and again at
+  delivery; and **the outbound A2A kill switch governs the path** at both
+  points (`destination_outbound_disabled`). The registry entry is the
+  approval only — its own credential is never used. No resolver runs at
+  raise time (`raise_ask` is synchronous under an async route); the sink
+  resolves the URL off the loop at delivery (`a2a_client.validate_endpoint`),
+  pins the connection to the resolved address with the registered host in
+  `Host` + SNI, and sends through the A2A client's capped reader under its
+  total deadline (redirects refused, error bodies never read). The key to
+  that instance is never carried: the ask names the VARIABLE in the asking
+  agent's own `.env` (`key_env`, never a reserved name; a key that cannot
+  travel as a header is `destination_key_invalid`), the sink reads it through
+  the agent's read endpoint at delivery, and the key reaches nothing a reader
+  sees. `key_env` is a NAME, stored on the ask row's `context` like the rest
+  of the ask — an admin reading the raw operator-queue row sees it — and it
+  is withheld from the person's projection, the receipt, the logs and the
+  audit rows (`credential_delivery_attempt`, written BEFORE the request
+  leaves, and `credential_delivered` carry host + agent + name). The value is
+  sent once, as `{mode: "merge", env: {NAME: value}}`, to the destination's
+  owner inject route under that key; nothing is written on this instance and
+  the staged value is removed after a 2xx; a 5xx or a timeout keeps it
+  staged and says "may or may not have been stored". The receiving route's
+  gate is unchanged (`require_person`); `mode: "merge"` only narrows what a
+  caller can change to the named lines.
 - **Residuals (stated, not closed here)**: the guard is not wired into channel
   adapters (Slack, Telegram, voice); the owner's Credentials-tab inject and the
   other non-sink `.env` writers are whole-file and do not take the sink's lease,
@@ -626,7 +656,8 @@
   (ent#279).
 - **Tests**: `tests/unit/test_ent1066_credential_ask_kind.py`,
   `test_ent1066_credential_sink.py`, `test_ent1066_credential_route_gates.py`,
-  `test_ent1066_secret_paste_guard.py`; `src/mcp-server/src/operator_queue.test.ts`;
+  `test_ent1066_secret_paste_guard.py`, `test_ent1109_credential_handover.py`;
+  `src/mcp-server/src/operator_queue.test.ts`;
   `src/frontend/tests/unit/{portalCredentialField,credentialAskSurfaces,portalSecretInMessage}.mount.spec.js`.
 
 ---
