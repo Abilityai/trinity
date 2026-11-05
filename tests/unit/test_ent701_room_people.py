@@ -488,4 +488,3 @@ class TestWhatACollaboratorReads:
         mine = next(r for r in rooms_db.list_rooms(ALICE)["rooms"] if r["id"] == room_id)
         assert "max_cost_usd" not in theirs
         assert "max_cost_usd" in mine
-
