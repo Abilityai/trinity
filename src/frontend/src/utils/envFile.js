@@ -10,9 +10,18 @@
  * operator never touched changes on someone else's save.
  */
 
-/** `KEY="value"`, with the value's `"` escaped. */
+/**
+ * `KEY="value"`, exactly as the agent's `format_env_line` emits it.
+ *
+ * Backslash is escaped BEFORE quote, because every reader reverses both.
+ * Escaping only the quote made a written `\\` read back as `\`, so a credential
+ * containing two backslashes lost one on the next save of any credential in
+ * the file. The order matters too: escaping the quote first would then double
+ * the backslash just added, so `a"b` would be written `a\\"b` and read back as
+ * `a\"b`.
+ */
 export function formatEnvLine (key, value) {
-  const escaped = String(value).replace(/"/g, '\\"')
+  const escaped = String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')
   return `${key}="${escaped}"`
 }
 
@@ -24,13 +33,9 @@ export function formatEnvLine (key, value) {
  * literally. Anything else is returned unchanged.
  */
 export function unquoteEnvValue (raw) {
-  let value = raw
-  const wasDoubleQuoted = value.startsWith('"') && value.endsWith('"') && value.length >= 2
-  if (wasDoubleQuoted || (value.startsWith("'") && value.endsWith("'"))) {
-    value = value.slice(1, -1)
+  if (raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')) {
+    return raw.slice(1, -1).replace(/\\(["\\])/g, '$1')
   }
-  if (wasDoubleQuoted) {
-    value = value.replace(/\\(["\\])/g, '$1')
-  }
-  return value
+  if (raw.startsWith("'") && raw.endsWith("'")) return raw.slice(1, -1)
+  return raw
 }

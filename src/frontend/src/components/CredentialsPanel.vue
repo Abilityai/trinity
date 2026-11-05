@@ -512,17 +512,11 @@ const parseEnvText = (text) => {
 const formatEnvContent = (credentials) => {
   const lines = ['# Credential file - managed by Trinity', '']
   for (const [key, value] of Object.entries(credentials)) {
-    // Escape quotes in values. `parseEnvText` unescapes this (ent#127), so the
-    // UI round-trip is now stable.
-    //
-    // RESIDUAL, deliberately not changed here: the AGENT's own reader
-    // (`agent_server/routers/credentials.py`) strips quote characters and does
-    // not unescape, so a value containing a `"` reaches the agent with the
-    // backslash. Escaping for a format nobody unescapes is a pre-existing
-    // defect in its own right; widening the escaping would make the agent-side
-    // mismatch worse, not better. NOT filed on either tracker as of this
-    // writing — said plainly rather than as "filed separately", because a
-    // comment asserting a follow-up exists is exactly why nobody re-checks.
+    // The agent's own encoding (#2023): `\` and `"` escaped, backslash first.
+    // `parseEnvText` reverses it here, and the agent's `unquote_env_value`
+    // reverses it when it reads the file, so every credential this rewrite
+    // carries over reaches the agent exactly as it was. Both sides are held
+    // to one table: tests/fixtures/ent1117-env-escape-cases.json.
     lines.push(formatEnvLine(key, value))
   }
   return lines.join('\n') + '\n'
