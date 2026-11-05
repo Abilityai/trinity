@@ -202,6 +202,20 @@ const askForCredentialParameters = z.object({
     .string()
     .optional()
     .describe("An ISO-8601 time WITH a timezone, at least 15 minutes out. When it passes unanswered the ask ends denied by timeout."),
+  destination: z
+    .object({
+      instance_url: z.string().min(1).max(512).describe("The other Trinity's base URL (https://host, no path)."),
+      agent_name: z.string().min(1).max(64).describe("The agent there that the credential is for."),
+      key_env: z
+        .string()
+        .min(1)
+        .max(64)
+        .describe("The NAME of the variable in YOUR OWN environment that holds your key to that Trinity. The key itself never travels: the platform reads it by name when it delivers."),
+    })
+    .optional()
+    .describe(
+      "trinity-enterprise#1109: where the value LANDS when that is not you — an agent on another Trinity you hold a key to. The person's field says so in plain words, the value is merged into that agent's .env there under your key, nothing is kept here, and your wake says it was delivered (it is never in your environment). Left out, the value is stored in your own environment as before. Refusals: 422 destination_url_invalid / destination_agent_invalid / destination_key_env_invalid (reason says which).",
+    ),
 });
 
 /** trinity-enterprise#901: what an agent sends to withdraw one of its own asks. */
@@ -696,10 +710,17 @@ export function createOperatorQueueTools(
         "as {success: false, status, code, message}: 422 no_person (no single person " +
         "to ask — ask from a chat with them), 422 invalid_credential_name (a malformed " +
         "or reserved name; reason says which), 429 rate_limited or queue_full. Acts " +
-        "as the agent your key belongs to; there is no agent parameter.",
+        "as the agent your key belongs to; there is no agent parameter. For an " +
+        "agent on another Trinity you hold a key to, set destination (see the parameter).",
       parameters: askForCredentialParameters,
       execute: async (
-        params: { name: string; why: string; request_id?: string; expires_at?: string },
+        params: {
+          name: string;
+          why: string;
+          request_id?: string;
+          expires_at?: string;
+          destination?: { instance_url: string; agent_name: string; key_env: string };
+        },
         context?: { session?: McpAuthContext },
       ) => {
         const authContext = context?.session;
@@ -717,12 +738,23 @@ export function createOperatorQueueTools(
         // agent passes — least of all a value — reaches the backend.
         const turn = authContext?.executionId;
         const derived = `credential-${params.name}${turn ? `-${turn}` : ""}`.replace(/[^A-Za-z0-9._:-]/g, "-").slice(0, 256);
+        // trinity-enterprise#1109: the destination's three declared fields
+        // only — the key's NAME, never a key.
+        const destination = params.destination
+          ? {
+              credential_destination: {
+                instance_url: params.destination.instance_url,
+                agent_name: params.destination.agent_name,
+                key_env: params.destination.key_env,
+              },
+            }
+          : {};
         const body: OperatorAskCreate = {
           request_id: params.request_id ?? derived,
           type: "credential",
           title: `Needs ${params.name}`,
           question: params.why,
-          context: { credential_name: params.name },
+          context: { credential_name: params.name, ...destination },
           to: "primary",
           ...(params.expires_at === undefined ? {} : { expires_at: params.expires_at }),
         };

@@ -18,7 +18,7 @@ from typing import List, Optional
 from sqlalchemy.exc import OperationalError
 
 from database import db
-from services import ask_service, credential_ask_policy, skill_gate_service
+from services import ask_service, credential_ask_policy, credential_destination, skill_gate_service
 from services.operator_queue_choices import (
     SOMETHING_ELSE,
     ReservedAnswerError,
@@ -328,6 +328,9 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
         # trinity-enterprise#1066: the variable's NAME, for a credential ask only.
         credential_name=(credential_ask_policy.credential_name_of(context)
                          if item.get("type") == "credential" else None),
+        credential_destination=(credential_destination.public_view(
+            credential_destination.destination_of(context))
+            if item.get("type") == "credential" else None),
     )
 
 
@@ -752,11 +755,15 @@ async def provide_credential(item_id: str, email: str, is_platform: bool, value:
                        {"sync": _coarse_sync(item)})
     name = (item.get("context") or {}).get("credential_name")         if isinstance(item.get("context"), dict) else None
     agent = item.get("agent_name") or ""
+    # trinity-enterprise#1109: read from the STORED row, never the request —
+    # the person's field cannot redirect a value the agent asked for itself.
+    destination = credential_destination.destination_of(item.get("context"))
 
     try:
         await credential_sink.set_env_value(
             agent, name, value, actor_email=email, ask_id=item_id,
-            actor_ip=actor_ip, endpoint=endpoint, request_id=request_id)
+            actor_ip=actor_ip, endpoint=endpoint, request_id=request_id,
+            destination=destination)
     except credential_sink.CredentialSinkError as e:
         raise AskError(e.status_code, e.code, e.message, dict(e.data))
 

@@ -52,6 +52,27 @@ agent untouched:
    the variable set on its next read).
 
 The caller answers the ask afterwards, by name, through the ask sink.
+
+**A destination (trinity-enterprise#1109).** A credential ask may say the
+value is for an agent on ANOTHER Trinity (`context.credential_destination`,
+`services/credential_destination.py`). Then steps 3-5 are replaced by
+`_deliver_remote`: the asking agent must be running (its `.env` is read, by
+NAME, for the key it holds to that instance — `destination_key_missing` when
+it holds none), the URL is validated AGAIN at delivery time and the
+connection pinned to the address it resolved to (the A2A transport), and one
+`POST {instance}/api/agents/{agent}/credentials/inject` with
+`{mode: "merge", env: {NAME: value}}` is sent under that key. Nothing is
+written on this instance; after a 2xx the staged value is removed — nothing
+rests here after delivery. Each failure is a named plain retry
+(`destination_unreachable`, `destination_key_refused`,
+`destination_agent_missing`, `destination_refused`); a connect failure
+unstages, a timeout after the request left keeps the value staged and says
+so. The audit row is `credential_delivered` with the destination's host and
+agent — never the value, never the key.
+
+**The receiving side.** `merge_env_values` is the same read-patch-inject leaf
+(steps 3-5) exposed to the owner inject route's `mode: "merge"`, so a remote
+delivery lands as one line set in place, not a whole-file rewrite.
 """
 
 from __future__ import annotations
@@ -63,7 +84,7 @@ import httpx
 
 from redis_breaker_util import SingleFlightLock, get_breaker_redis
 from services import agent_env_patch, agent_env_read, credential_ask_policy, credential_requirements_service
-from services import runtime_secret_scrub
+from services import a2a_client, credential_destination, runtime_secret_scrub
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container, get_agent_status_from_container
 from services.platform_audit_service import AuditEventType, platform_audit_service
@@ -80,7 +101,10 @@ ENV_MAX_BYTES = 256 * 1024
 #: bounded by `AGENT_HTTP_TIMEOUT_SECONDS` each.
 LOCK_TTL_SECONDS = 90
 AGENT_HTTP_TIMEOUT_SECONDS = 30.0
+#: One pinned request to another Trinity (trinity-enterprise#1109).
+DESTINATION_HTTP_TIMEOUT_SECONDS = 30.0
 AUDIT_ACTION = "chat_provide"
+AUDIT_ACTION_DELIVERED = "credential_delivered"
 
 
 class CredentialSinkError(Exception):
@@ -105,6 +129,13 @@ def _agent_client(agent_name: str) -> httpx.AsyncClient:
     return agent_httpx_client(agent_name, timeout=AGENT_HTTP_TIMEOUT_SECONDS)
 
 
+def _destination_client() -> httpx.AsyncClient:
+    """The outbound client for another Trinity (trinity-enterprise#1109): the
+    A2A transport — no redirects, no proxy env, explicit TLS — reached through
+    the module object so one seam serves both; a seam tests replace."""
+    return a2a_client._http_client(httpx.Timeout(DESTINATION_HTTP_TIMEOUT_SECONDS))
+
+
 def _check_name(name: object) -> str:
     problem = credential_ask_policy.credential_name_problem(name)
     if problem is not None:
@@ -116,12 +147,14 @@ def _check_name(name: object) -> str:
     return name
 
 
-def _check_value(value: object) -> None:
+def _check_value(value: object, *, scrub_floor: bool = True) -> None:
     """Refuse a value the file or the scrub cannot carry. Only the SHAPE is
-    named back; the value itself is never part of the refusal."""
+    named back; the value itself is never part of the refusal. The scrub's
+    identity floor applies to a value this sink stages; the owner route's
+    merge (`merge_env_values`) stages nothing and sets any one-line value."""
     if not isinstance(value, str) or not value.strip():
         raise CredentialSinkError(422, "invalid_value", "Type the credential's value.")
-    if len(value) < runtime_secret_scrub._MIN_VALUE_LEN:
+    if scrub_floor and len(value) < runtime_secret_scrub._MIN_VALUE_LEN:
         raise CredentialSinkError(
             422, "invalid_value",
             f"A credential is at least {runtime_secret_scrub._MIN_VALUE_LEN} characters.")
@@ -221,10 +254,15 @@ async def set_env_value(
     actor_ip: Optional[str] = None,
     endpoint: Optional[str] = None,
     request_id: Optional[str] = None,
+    destination: Optional[Dict[str, str]] = None,
 ) -> None:
     """Set ``name`` to ``value`` in ``agent_name``'s `.env`, as the person
     ``actor_email`` answering ask ``ask_id``. Raises `CredentialSinkError`;
-    returns nothing — the caller answers the ask by name."""
+    returns nothing — the caller answers the ask by name.
+
+    With a ``destination`` (trinity-enterprise#1109) the value is delivered to
+    that agent on that instance instead, under the key ``agent_name`` holds
+    for it; this instance keeps nothing."""
     name = _check_name(name)
     _check_value(value)
 
@@ -237,7 +275,10 @@ async def set_env_value(
         raise _store_unavailable("stage") from None
 
     try:
-        await _deliver(agent_name, name, value)
+        if destination is not None:
+            await _deliver_remote(agent_name, destination, name, value)
+        else:
+            await _deliver(agent_name, {name: value})
     except CredentialSinkError as e:
         # A refusal that left the agent's file untouched takes back what this
         # call staged, so "nothing was stored" is true of the scrub as well. The
@@ -248,6 +289,36 @@ async def set_env_value(
                                "could not be removed and expires with the scrub TTL (ask %s)",
                                name, agent_name, e.code, ask_id)
         raise
+
+    if destination is not None:
+        # Delivered elsewhere: nothing of the value rests on this instance, so
+        # the staging that protected the hand-over is taken back too. (A
+        # staging someone else holds stays theirs.)
+        if staged_here and not runtime_secret_scrub.unstage_secret(value):
+            logger.warning("[CredentialSink] %s delivered for ask %s; the staged value could not "
+                           "be removed and expires with the scrub TTL", name, ask_id)
+        view = credential_destination.public_view(destination) or {}
+        logger.info("[CredentialSink] %s delivered to agent %s on %s through ask %s (asked by %s)",
+                    name, view.get("agent_name"), view.get("host"), ask_id, agent_name)
+        try:
+            await platform_audit_service.log(
+                event_type=AuditEventType.CREDENTIALS,
+                event_action=AUDIT_ACTION_DELIVERED,
+                source="api",
+                actor_email=actor_email,
+                actor_ip=actor_ip,
+                target_type="agent",
+                target_id=agent_name,
+                endpoint=endpoint,
+                request_id=request_id,
+                details={"name": name, "ask_id": ask_id,
+                         "destination": {"host": view.get("host"),
+                                         "agent_name": view.get("agent_name")}},
+            )
+        except Exception:  # noqa: BLE001 — the delivery stands; audit is best-effort
+            logger.warning("[CredentialSink] audit row skipped for %s delivered through ask %s",
+                           name, ask_id, exc_info=True)
+        return
 
     # 6. the record — names only — and the checklist cache
     logger.info("[CredentialSink] %s set on agent %s through ask %s", name, agent_name, ask_id)
@@ -274,7 +345,22 @@ async def set_env_value(
                        exc_info=True)
 
 
-async def _deliver(agent_name: str, name: str, value: str) -> None:
+async def merge_env_values(agent_name: str, values: Dict[str, str]) -> None:
+    """Set every ``values`` line in ``agent_name``'s `.env` in place
+    (trinity-enterprise#1109): the owner inject route's `mode: "merge"`. The
+    same leaf as the sink's local write — the agent running, the lease, read,
+    `set_keys`, inject — so a remote delivery never rewrites the whole file.
+    Names and values are checked first; the caller audits."""
+    checked: Dict[str, str] = {}
+    for key, item in values.items():
+        checked[_check_name(key)] = item
+        _check_value(item, scrub_floor=False)
+    if not checked:
+        raise CredentialSinkError(422, "invalid_value", "Name at least one variable to set.")
+    await _deliver(agent_name, checked)
+
+
+async def _deliver(agent_name: str, values: Dict[str, str]) -> None:
     """Steps 3-5: the agent running, the lease, read-patch-inject. Every
     `CredentialSinkError` before the inject leaves the agent's file untouched."""
     # 3. the agent must be running
@@ -302,7 +388,7 @@ async def _deliver(agent_name: str, name: str, value: str) -> None:
         async with _agent_client(agent_name) as client:
             env_text = await _read_env(client, agent_name)
             try:
-                patched = agent_env_patch.set_keys(env_text, {name: value})
+                patched = agent_env_patch.set_keys(env_text, values)
             except ValueError:
                 # belt: `_check_value` already refused every shape the writer refuses
                 raise CredentialSinkError(422, "invalid_value",
@@ -315,3 +401,101 @@ async def _deliver(agent_name: str, name: str, value: str) -> None:
             await _inject_env(client, agent_name, patched)
     finally:
         lock.release_if_owned()
+
+
+def _destination_failure(code: str, message: str, data: Optional[Dict[str, Any]] = None, *,
+                         status_code: int = 409, may_have_written: bool = False) -> CredentialSinkError:
+    return CredentialSinkError(status_code, code, message, data, may_have_written=may_have_written)
+
+
+async def _read_key_by_name(agent_name: str, key_env: str) -> str:
+    """The key ``agent_name`` holds under ``key_env`` in its own `.env`, read
+    through its own read endpoint. Absent → `destination_key_missing`. The
+    key's variable NAME is never in the refusal: it describes the asking
+    agent's environment, and the person is told what to do, not what it is
+    called."""
+    state = _running_state(agent_name)
+    if state is not None:
+        raise CredentialSinkError(
+            409, "agent_not_running",
+            f"The agent that asked is not running (it is {state}), so nothing was stored; "
+            "start it and send the credential again.",
+            {"status": state})
+    async with _agent_client(agent_name) as client:
+        env_text = await _read_env(client, agent_name)
+    found = agent_env_patch.values_of(env_text, key_env)
+    key = found[-1] if found else ""
+    if not key.strip():
+        raise _destination_failure(
+            "destination_key_missing",
+            "The agent that asked does not hold a key to that Trinity yet, so nothing was "
+            "stored. Once it has one, send the credential again.")
+    return key
+
+
+async def _deliver_remote(agent_name: str, destination: Dict[str, str], name: str,
+                          value: str) -> None:
+    """trinity-enterprise#1109: one merge inject on the destination instance,
+    under the key the asking agent holds for it. Every `CredentialSinkError`
+    raised before the request leaves says nothing was stored, and means it."""
+    key = await _read_key_by_name(agent_name, destination["key_env"])
+    try:
+        validated = credential_destination.validate_instance_url(destination["instance_url"])
+    except credential_destination.DestinationProblem as exc:
+        raise CredentialSinkError(
+            422, exc.code,
+            "That Trinity's address no longer passes the platform's checks, so nothing was "
+            "stored. Ask the agent to request the credential again.",
+            {"reason": exc.reason}) from None
+    target_agent = destination["agent_name"]
+    route = f"{validated.url.rstrip('/')}/api/agents/{target_agent}/credentials/inject"
+    pinned = a2a_client._pinned_url(route, validated.addresses[0])
+    headers = {
+        "Host": a2a_client._host_header(validated),
+        "Authorization": f"Bearer {key}",
+        "Accept-Encoding": "identity",
+    }
+    # Built outside the call, so the value sits in a dict and nowhere else
+    # (the AST guard reads every call the name `value` is an argument of).
+    body = {"mode": "merge", "env": {name: value}}
+    view = credential_destination.public_view(destination) or {}
+    try:
+        async with _destination_client() as client:
+            response = await client.post(
+                pinned, json=body, headers=headers,
+                extensions={"sni_hostname": validated.hostname},
+            )
+    except (httpx.ConnectError, httpx.ConnectTimeout):
+        raise _destination_failure(
+            "destination_unreachable",
+            f"Your Trinity at {view.get('host')} could not be reached, so nothing was stored. "
+            "Check it is up and send the credential again.",
+            status_code=503) from None
+    except httpx.RequestError:
+        raise _destination_failure(
+            "destination_unreachable",
+            f"Your Trinity at {view.get('host')} did not answer in time, so the credential may "
+            "or may not have been stored there. Check the agent there and send it again if "
+            "it is missing.",
+            {"may_have_written": True}, status_code=503, may_have_written=True) from None
+    status = response.status_code
+    if 200 <= status < 300:
+        return
+    if status in (401, 403):
+        raise _destination_failure(
+            "destination_key_refused",
+            f"Your Trinity at {view.get('host')} refused the key the agent that asked holds for "
+            "it, so nothing was stored. Once the key is fixed, send the credential again.",
+            {"status": status})
+    if status == 404:
+        raise _destination_failure(
+            "destination_agent_missing",
+            f"Your Trinity at {view.get('host')} reports no agent named {target_agent} that this "
+            "key can reach, so nothing was stored. Once the agent exists there, send the "
+            "credential again.",
+            {"status": status})
+    raise _destination_failure(
+        "destination_refused",
+        f"Your Trinity at {view.get('host')} did not accept the credential (HTTP {status}), so "
+        "nothing was stored there. Check the agent there is running and send it again.",
+        {"status": status})

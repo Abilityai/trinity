@@ -1247,7 +1247,7 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]
     if not isinstance(context, Mapping):
         raise AskRejected(422, "invalid_context", "context must be an object.")
     if kind == "credential":
-        from services import credential_ask_policy
+        from services import credential_ask_policy, credential_destination
         problem = credential_ask_policy.credential_name_problem(context.get("credential_name"))
         if problem is not None:
             raise AskRejected(
@@ -1257,6 +1257,17 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]
                 f"{credential_ask_policy.CREDENTIAL_NAME_MAX} characters that the platform "
                 "and the agent runtime do not reserve.",
                 reason=problem)
+        if credential_destination.CONTEXT_KEY in context:
+            # trinity-enterprise#1109: where the value lands when that is not
+            # this agent — validated here, by name, and stored normalised.
+            try:
+                stored = credential_destination.validate(context[credential_destination.CONTEXT_KEY])
+            except credential_destination.DestinationProblem as exc:
+                raise AskRejected(422, exc.code, exc.message, reason=exc.reason) from None
+            context = {**context, credential_destination.CONTEXT_KEY: stored}
+    elif isinstance(context, Mapping) and "credential_destination" in context:
+        raise AskRejected(422, "destination_on_non_credential",
+                          "Only a credential ask carries a destination.")
     # The workspace thread is platform-written: an agent that could author it
     # would choose which conversation its ask claims to belong to (ent#429), and
     # whether it is drawn in that chat at all (ent#734).
@@ -1729,10 +1740,21 @@ def _receipt(
         # trinity-enterprise#901: which ending the agent authored, if any —
         # derived here, once, never inferred client-side from `replaced_by`.
         "agent_ending": agent_ending_kind(row),
+        # trinity-enterprise#1109: where a credential lands when that is not
+        # this agent — the agent and the host, never the key's variable name.
+        "credential_destination": _destination_view(row),
     }
     if differs is not None:
         receipt["differs"] = differs
     return receipt
+
+
+def _destination_view(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    if row.get("type") != "credential":
+        return None
+    from services import credential_destination
+    return credential_destination.public_view(
+        credential_destination.destination_of(row.get("context")))
 
 
 # ---------------------------------------------------------------------------

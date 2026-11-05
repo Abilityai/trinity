@@ -95,7 +95,9 @@
       >
         <p>
           <span class="font-medium">{{ askerLabel(ask) }}</span> is asking you for
-          <code class="font-mono">{{ ask.credential_name }}</code>.<template v-if="!ask.question"> It gave no reason.</template>
+          <code class="font-mono">{{ ask.credential_name }}</code><template v-if="ask.credential_destination">
+            <!-- trinity-enterprise#1109: the value lands elsewhere — say where, in plain words -->
+            for your agent <span class="font-medium" :data-testid="`${tid.prefix}-destination-${ask.id}`">{{ ask.credential_destination.agent_name }}</span> on your Trinity at <span class="font-medium">{{ ask.credential_destination.host }}</span></template>.<template v-if="!ask.question"> It gave no reason.</template>
         </p>
         <figure v-if="ask.question" class="mt-1">
           <figcaption class="text-xs" :data-testid="`${tid.prefix}-why-by-${ask.id}`">In {{ askerLabel(ask) }}’s words:</figcaption>

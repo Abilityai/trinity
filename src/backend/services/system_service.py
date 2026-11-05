@@ -87,13 +87,15 @@ _KNOWN_AGENT_KEYS = frozenset({
     "skills", "skill_sets", "grants", "gates",  # trinity-enterprise#1030
     "seat", "person_seats",  # trinity-enterprise#1030 CP4
     "deploy",  # trinity-enterprise#1030 CP5
+    "credentials",  # trinity-enterprise#1109: variable NAMES the member needs
 })
 
 # trinity-enterprise#1030: the per-agent twin of `_UNLISTED_MANIFEST_KEYS` —
 # read, never unknown, but left out of the pinned "Recognised per-agent keys
 # are:" text.
 _UNLISTED_AGENT_KEYS = frozenset({"skills", "skill_sets", "grants", "gates",
-                                  "seat", "person_seats", "deploy"})
+                                  "seat", "person_seats", "deploy",
+                                  "credentials"})  # trinity-enterprise#1109
 
 # trinity-enterprise#1030 CP5 (T6 = A): nothing platform-side records a
 # `deploy: false` member, so no export can carry one. Every export says so in
@@ -233,6 +235,13 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
             raise ValueError(f"Agent '{agent_name}' missing required field: template")
 
         extra = sorted(str(k) for k in set(agent_config.keys()) - _KNOWN_AGENT_KEYS)
+        # trinity-enterprise#1109: `credentials:` is read ONLY as a list of
+        # variable names. The older map form (`credentials: {KEY: value}`,
+        # which this parser never read) stays what it was — an unknown key,
+        # warned about and dropped — so a manifest that deployed yesterday
+        # deploys byte-identically today and no value is ever read from one.
+        if "credentials" in agent_config and not isinstance(agent_config["credentials"], list):
+            extra = sorted(extra + ["credentials"])
         if extra:
             unknown_agent_keys[str(agent_name)] = extra
 
@@ -243,6 +252,20 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
                 raise ValueError(f"Agent '{agent_name}' {list_key} must be a list of names")
         if "deploy" in agent_config and not isinstance(agent_config["deploy"], bool):
             raise ValueError(f"Agent '{agent_name}' deploy must be true or false")
+        credentials = agent_config.get("credentials")
+        if not isinstance(credentials, list):
+            credentials = None  # the legacy map form: unknown, warned, dropped (above)
+        if credentials is not None:
+            # trinity-enterprise#1109: names only, each one a variable a
+            # credential ask may fill (so a value pasted here is refused by
+            # shape, and a reserved name by policy).
+            from services import credential_ask_policy
+            for entry in credentials:
+                problem = credential_ask_policy.credential_name_problem(entry)
+                if problem is not None:
+                    raise ValueError(
+                        f"Agent '{agent_name}' credentials: {entry!r} is not a variable name the "
+                        f"platform can set ({problem})")
 
         agents[agent_name] = SystemAgentConfig(
             template=agent_config["template"],
@@ -260,6 +283,7 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
             person_seats=apply_seats.parse_person_seats(
                 agent_name, agent_config.get("person_seats")),
             deploy=agent_config.get("deploy", True),  # trinity-enterprise#1030 CP5
+            credentials=credentials,  # trinity-enterprise#1109
         )
 
     # Parse permissions
@@ -2185,7 +2209,7 @@ def _failure_reason(exc: Exception) -> Tuple[str, Optional[int]]:
     return reason[:_REASON_MAX_LEN], status_code
 
 
-def _configured_preview(cfg: SystemAgentConfig) -> Dict[str, Dict[str, int]]:
+def _configured_preview(cfg: SystemAgentConfig) -> Dict[str, Any]:
     """trinity-enterprise#1030 CP6: what a created member is configured with
     after create — counts per group, for the preview's one line. Empty (no
     key at all) when the member declares none of them. A held-back write is
@@ -2196,7 +2220,12 @@ def _configured_preview(cfg: SystemAgentConfig) -> Dict[str, Dict[str, int]]:
         "seat": 1 if cfg.seat else 0, "person_seats": len(cfg.person_seats or []),
     }
     counts = {k: v for k, v in counts.items() if v}
-    return {"configured": counts} if counts else {}
+    out: Dict[str, Any] = {"configured": counts} if counts else {}
+    if cfg.credentials:
+        # trinity-enterprise#1109: the names themselves, so whoever reads the
+        # preview back knows what to ask for before apply.
+        out["credentials"] = list(cfg.credentials)
+    return out
 
 
 async def deploy_manifest(
@@ -3423,6 +3452,8 @@ APPLY_FIELD_CLASSIFICATION: Dict[str, Tuple[str, str]] = {
                                 "gate map's own write; undeclared gates reported, never cleared"),
     "SystemAgentConfig.seat": ("reconciled", "the canon seat the agent holds, written only through "
                                "an assignment module's optional writer; unobserved without it"),
+    "SystemAgentConfig.credentials": ("report-only", "variable NAMES the member needs; parsed and "
+                                                      "previewed, never written (trinity-enterprise#1109)"),
     "SystemAgentConfig.deploy": ("report-only", "false names a member without running it "
                                  "(declared_only): template_in_catalog / template_not_in_catalog / "
                                  "declared_only_member_live reported; never created, reconciled "

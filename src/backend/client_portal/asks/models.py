@@ -116,6 +116,11 @@ class WorkspaceAsk(BaseModel):
     # with. Never a value: the value goes to the agent's environment and to
     # nothing a reader sees.
     credential_name: Optional[str] = None
+    # trinity-enterprise#1109: where the value LANDS when that is not the
+    # asking agent — `{agent_name, host}` in plain words for the field's
+    # caption. Never the name of the variable that holds the asking agent's
+    # key to that instance.
+    credential_destination: Optional[Dict[str, str]] = None
 
 
 class WorkspaceAskAnswer(BaseModel):
