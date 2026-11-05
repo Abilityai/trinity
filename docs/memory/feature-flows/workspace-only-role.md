@@ -124,6 +124,29 @@ sends a held portal token before the platform JWT. An address the platform login
 admit keeps the client door unchanged. Residual: a portal session minted for a platform
 address before #3922 keeps the client view until it ends or a `/login` supersedes it.
 
+**One code, not two (#4157).** The first code is correct and spent at the portal door, so
+the 409 also carries `handoff` — a one-time token from `services/login_handoff_service.py`
+(`secrets.token_urlsafe(32)`, held in Redis as `login_handoff:<sha256>` bound to the
+address, 5-minute TTL, never logged). It is minted only after a correct code, and only when
+the platform email login would take the address (email login on, policy allows codes,
+allow-listed — `client_portal.service.platform_login_handoff`); a password-only account
+with email login off gets a bare 409 and signs in with its password. `Portal.vue` keeps the
+token in the auth store (`workspaceHandoff`, memory only — never the URL or storage) and
+pushes the same `/login?redirect=…&email=…`. `Login.vue` redeems it once at
+`POST /api/auth/email/handoff` `{email, token}`, which shares the verify route's code
+(`_require_email_login_open`, `_email_allow_listed`, `_email_login_failed`,
+`_complete_email_login`): same door gates, per-account/per-IP login buckets and
+`otp_attempts:{email}`, #2381 allow-list re-check, audit (`method: email_handoff`) and 2FA
+step; only the code check is replaced by an atomic `GETDEL` of the token. A second
+redemption, an expired token or another address's token is the verify route's uniform 401.
+A reload drops the in-memory token and `/login` shows the ordinary code form, filled in.
+Because a correct portal code now leads to a platform session, a wrong portal code for an
+address `platform_login_admits` also spends that account's platform budget
+(`login_attempts_acct:{email}`, `otp_attempts:{email}`); outsiders' platform buckets stay
+untouched (ent#311).
+Portal codes are not made redeemable at `/api/auth/email/verify` by this (that is #3983's
+territory).
+
 **Known limit (follow-up):** the loop routes keep their pre-#837 reach — a member lists every
 loop on a reachable agent and may stop any of them.
 
@@ -239,8 +262,10 @@ self-signup and SSO first sign-in keep writing.
 
 ```
 /workspace code page → POST …/client-portal/auth/verify → 409 platform_login_required (#3922)
+      + handoff token (#4157, held in memory by the auth store)
       → /login?redirect=<Workspace page>&email=<address>
-/login → POST /api/auth/email/verify → _finalizeLogin (ends any Workspace client sign-in)
+/login → POST /api/auth/email/handoff (#4157; no token held → POST /api/auth/email/verify
+      with a second code) → _finalizeLogin (ends any Workspace client sign-in)
       → GET /api/users/me (marked) → role "user"
       → landingAfterSignIn(redirect, "user") → /workspace
 /workspace → App.vue token watch → followToken → POST /api/ws/ticket (marked) → /ws (#3445)

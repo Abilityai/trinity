@@ -18,6 +18,7 @@
 |------|------|-------|
 | **Email** (primary) | Email → 6-digit code → `POST /api/auth/email/verify` | JWT with `mode: "email"` |
 | **Admin** (secondary) | Password → `POST /api/token` | JWT with `mode: "admin"` |
+| **Email, started at the Workspace** (#4157) | Workspace code page → correct code for a platform account → 409 carrying a one-time `handoff` → `POST /api/auth/email/handoff` | JWT with `mode: "email"` — one emailed code; the hand-off is minted only after the code verified, is single-use and bound to the email |
 
 - Email whitelist controls who can login via email; admin login always available for 'admin'.
 - **JWT revocation on logout** (#187): every access token carries a random `jti`; `POST /api/auth/logout` writes `jwt:revoked:{jti}` to Redis with a TTL equal to the token's remaining life, and `get_current_user` / `decode_token` (WS) / `/api/auth/validate` (nginx) reject a revoked `jti`. Closes the "exfiltrated 7-day token survives logout" gap (pentest 3.3.4). Fail-open (Redis down or a legacy no-`jti` token → not revoked), so the check can never lock out a valid session; backend restart still rotates `SECRET_KEY` and invalidates everything. Token-lifetime reduction + refresh tokens deferred (separate issue).

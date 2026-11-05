@@ -8296,6 +8296,29 @@
         "ui"
       ],
       "description": "The Workspace read write sends what the client held (ent#1010): laterInstant compares as instants and keeps the winner's spelling; newestAt and heldThrough pick the newest rendered row, READ_UP_TO_NOW when it has no instant, nothing for an empty view; the store keeps the newest chat-state as_of (an overtaken poll never lowers it) and posts `through` = the later of it and the rendered row, no body for up-to-now or before any state was read."
+    },
+    {
+      "file": "unit/test_4157_workspace_login_handoff.py",
+      "feature": "#4157",
+      "added": "2026-11-02",
+      "categories": [
+        "unit",
+        "auth",
+        "security",
+        "workspace"
+      ],
+      "description": "#4157: a platform account that starts at the Workspace sign-in enters ONE code. The portal 409 carries a one-time hand-off (Redis, SHA-256 at rest, email-bound, 5-min TTL, single-use) only after a correct code; POST /api/auth/email/handoff redeems it through the platform email login's gates, buckets, allow-list, audit and 2FA. Real-flow test pins one minted code used once, and no code or token in logs."
+    },
+    {
+      "file": "../src/frontend/tests/unit/workspaceLoginHandoff.mount.spec.js",
+      "feature": "#4157",
+      "added": "2026-11-02",
+      "categories": [
+        "frontend",
+        "auth",
+        "workspace"
+      ],
+      "description": "#4157: Portal.vue holds the 409 hand-off in the auth store only (never URL or storage); Login.vue redeems it once at /api/auth/email/handoff and lands on the redirect, still shows 2FA, and falls back to the filled code form when refused or after a reload."
     }
   ]
 }

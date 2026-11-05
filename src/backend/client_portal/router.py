@@ -320,13 +320,33 @@ def portal_auth_verify(body: PortalAuthVerify, request: Request):
     token = service.portal_signin_verify(email, body.code)
     if not token:
         record_otp_attempt(otp_scope, success=False)
+        # #4157: a correct code here now leads to a platform session (via the
+        # hand-off), so a wrong guess also spends the address's PLATFORM budget —
+        # the guesses `/login` would have counted. For EVERY address, account or
+        # not: spending it only for platform accounts made those buckets an
+        # oracle (5 wrong portal codes, then one wrong `/api/auth/email/verify`:
+        # 429 for an account, 401 for an outsider). Not a new lockout: the
+        # platform route already spends both buckets for any address an
+        # unauthenticated caller names (`_email_login_failed`), so the ent#311
+        # isolation never protected them from a deliberate guesser.
+        if email:
+            from routers.auth import record_login_attempt_account_only
+            record_login_attempt_account_only(email, success=False)
+            record_otp_attempt(email, success=False)
         raise HTTPException(status_code=401, detail="Invalid or expired code")
 
     record_otp_attempt(otp_scope, success=True)
     if token is service.PLATFORM_LOGIN_REQUIRED:
         # #3922: the code was right, but this is a platform account. It signs in
         # at `/login`, so it gets the team view, not a client session.
-        raise HTTPException(status_code=409, detail={"reason": "platform_login_required"})
+        # #4157: with a one-time hand-off `/login` redeems, so the correct code
+        # just spent here is the only one the person enters. Only reached after
+        # the code verified, so the token reveals nothing to a guesser (#186).
+        detail = {"reason": "platform_login_required"}
+        handoff = service.platform_login_handoff(email)
+        if handoff:
+            detail["handoff"] = handoff
+        raise HTTPException(status_code=409, detail=detail)
     return PortalSession(token=token, email=email)
 
 
