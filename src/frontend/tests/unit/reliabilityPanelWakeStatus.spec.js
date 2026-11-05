@@ -46,6 +46,20 @@ describe('ReliabilityPanel — wake on ask ending status (ent#1108)', () => {
     expect(w.get('[data-testid="resume-status"]').text()).toBe('Wakes when an ask ends: off')
   })
 
+  it('a GET that fails reads "unknown", never "off" — the setting is on by default', async () => {
+    get.mockImplementation(async (url) => {
+      if (url.endsWith('/operator-resume')) throw new Error('503')
+      if (url.endsWith('/circuit-breaker')) return { data: { config: { enabled: false, global_enabled: true } } }
+      throw new Error(`unexpected GET ${url}`)
+    })
+    const w = await mountPanel()
+    expect(w.get('[data-testid="resume-status"]').text()).toBe('Wakes when an ask ends: unknown')
+    const boxes = w.findAll('input[type="checkbox"]')
+    const box = boxes[boxes.length - 1].element
+    expect(box.checked).toBe(false)
+    expect(box.disabled).toBe(true)
+  })
+
   it('switching it off writes the owner\'s choice and the status follows the server', async () => {
     answering(true)
     put.mockResolvedValue({ data: { agent_name: 'a', enabled: false } })

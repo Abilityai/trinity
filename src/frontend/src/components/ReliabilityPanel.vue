@@ -86,15 +86,15 @@
         <input
           type="checkbox"
           class="sr-only peer"
-          :checked="resumeEnabled"
-          :disabled="resumeSaving"
+          :checked="resumeEnabled === true"
+          :disabled="resumeSaving || resumeEnabled === null"
           @change="onResumeToggle($event.target.checked)"
         />
         <div class="w-11 h-6 bg-gray-200 dark:bg-gray-700 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-action-primary-600"></div>
       </label>
       <div class="min-w-0">
         <p class="text-sm text-gray-900 dark:text-gray-100" data-testid="resume-status">
-          Wakes when an ask ends: {{ resumeEnabled ? 'on' : 'off' }}
+          Wakes when an ask ends: {{ resumeEnabled === null ? 'unknown' : resumeEnabled ? 'on' : 'off' }}
         </p>
         <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
           Each wake-up costs one agent turn, billed to you — one per answer, and one
@@ -174,8 +174,11 @@ async function onToggle(next) {
   }
 }
 
-// ent#329 — respond → resume; on by default since abilityai/trinity-enterprise#1108
-const resumeEnabled = ref(false)
+// ent#329 — respond → resume; on by default since abilityai/trinity-enterprise#1108.
+// null = not yet read / the GET failed: rendered "unknown", never "off" — a
+// false default would show the platform's default-on setting as off whenever
+// the read fails, and the switch stays disabled until the server has answered.
+const resumeEnabled = ref(null)
 const resumeLoading = ref(false)
 const resumeSaving = ref(false)
 const resumeMessage = ref('')
