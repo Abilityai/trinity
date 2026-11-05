@@ -112,7 +112,8 @@
               >deprecated</BaseBadge>
               <SkillContractChips :skill="s" />
             </div>
-            <p v-if="s.description" class="mt-1 text-[12.5px] text-gray-600 dark:text-gray-300">{{ s.description }}</p>
+            <!-- trinity-enterprise#584: the one empty state. -->
+            <p class="mt-1 text-[12.5px] text-gray-600 dark:text-gray-300" :class="{ italic: describeSkill(s.description).missing }">{{ describeSkill(s.description).text }}</p>
             <p
               v-if="supersededLine(s)"
               :title="supersededLine(s)"
@@ -205,6 +206,7 @@
 
 <script setup>
 import { computed, ref, watch } from 'vue'
+import { describeSkill } from '../../utils/skillDescription'
 import BaseBadge from '../base/BaseBadge.vue'
 import BaseButton from '../base/BaseButton.vue'
 import BaseModal from '../base/BaseModal.vue'

@@ -42,6 +42,22 @@ def _row(role, username="member"):
     }
 
 
+@pytest.fixture(autouse=True)
+def _terms_off():
+    """trinity-enterprise#1107: the terms gate runs inside the shared resolver,
+    BEFORE the floor, and a Workspace-only person's own key is a visit it asks
+    (ent#1054). These tests are about the floor, so the switch is off here —
+    `test_ent1054_terms_gate.py` is where the gate's order is pinned."""
+    from database import db
+
+    db.set_setting("terms_required", "false")
+    yield
+    try:
+        db.delete_setting("terms_required")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 @pytest.fixture
 def jwt_as(monkeypatch):
     """A real platform JWT whose `sub` resolves to a user holding `role`."""
@@ -610,7 +626,7 @@ class TestWebSocketDoors:
             "main.py::websocket_events_endpoint": "refuses a Workspace-only owner (ent#837)",
             "routers/agents.py::agent_terminal": "refuses a Workspace-only role (ent#837)",
             "routers/system_agent.py::system_agent_terminal": "admin only",
-            "routers/voice.py::voice_websocket": "bound to the voice session's owner (#600)",
+            "routers/voice.py::voice_websocket": "first-frame single-use ticket from either voice start (the Workspace one admits a Workspace-only account); account re-read at attach, bound to the session's owner (#600, ent#595)",
             "routers/voip.py::voip_media_stream": "provider media stream, authenticated by the call binding",
         }
         assert set(dispositions) == set(rc.WEBSOCKET_ROUTES)

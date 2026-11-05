@@ -65,6 +65,8 @@ This:
 3. Provisions an MCP API key
 4. Writes `.mcp.json` pointing at `<instance-url>/mcp` — the production frontend serves that path, so it works on installs that expose only ports 80/443; it falls back to the MCP server's own port 8080 when the route is not served
 
+The connection works only while the instance has **External MCP access** on. A fresh install starts with it off and answers `403 external_mcp_access_off`; an admin turns it on once under **Settings → MCP Keys**. See [MCP Server](../integrations/mcp-server.md#external-mcp-access).
+
 An account that requires a second factor stops after step 2: complete the sign-in in the web UI, create the key under **Settings → MCP Keys**, then re-run `/trinity:connect --force`.
 
 No instance yet? `/trinity:connect` hands you to `/trinity:deploy-new-instance`. Trinity is self-hosted; there is no hosted instance to sign up for. See [Authentication](../api-reference/authentication.md).
@@ -221,7 +223,7 @@ The generated skill writes only widget types Trinity renders — `metric`, `stat
 /trinity:deploy-new-instance
 ```
 
-Deploys a complete Trinity instance — through the DigitalOcean guided installer (which you run in your own terminal, so your password never passes through the session), on any server you can reach over SSH, or on local Docker; fresh installs and existing instances both — and scaffolds a dedicated ops agent with 13 skills to manage it (health checks, updates, rollbacks, provisioning). It builds from source or pulls prebuilt images (`start.sh --hosted` with a pinned `TRINITY_IMAGE_TAG`), seeds the admin account from `.env` so there is no first-run setup screen, and needs only the frontend port opened in the firewall — the MCP server is reachable through it at `/mcp`. See [Deploying Trinity](../guides/deploying-trinity.md) and the [Trinity Ops Agent](../guides/deploying/ops-agent.md).
+Deploys a complete Trinity instance — through the DigitalOcean guided installer (which you run in your own terminal, so your password never passes through the session), on any server you can reach over SSH, or on local Docker; fresh installs and existing instances both — and scaffolds a dedicated ops agent with 13 skills to manage it (health checks, updates, rollbacks, provisioning). It builds from source or pulls prebuilt images (`start.sh --hosted` with a pinned `TRINITY_IMAGE_TAG`), seeds the admin account from `.env` so there is no first-run setup screen, and needs only the frontend port opened in the firewall — the MCP server is reachable through it at `/mcp` once an admin turns on External MCP access (Settings → MCP Keys). See [Deploying Trinity](../guides/deploying-trinity.md) and the [Trinity Ops Agent](../guides/deploying/ops-agent.md).
 
 ## Alternative: Trinity CLI
 

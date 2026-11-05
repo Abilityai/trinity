@@ -692,6 +692,22 @@ async def start_agent_internal(agent_name: str, *, allow_key_mint: bool = True) 
             e,
         )
 
+    # abilityai/trinity-enterprise#1108 AC #4: an answered ask whose wake found
+    # this agent stopped reads "agent not yet woken" (`operator_queue.wake_state
+    # = pending`). Now that it runs, re-dispatch each ONCE through the ent#329
+    # path (the idempotency key is the ask's); a second start finds nothing
+    # pending. Fire-and-forget like the spawns above: zero added start latency.
+    try:
+        from services import operator_resume_service
+        operator_resume_service.spawn_pending_wakes(agent_name)
+    except Exception as e:
+        logger.warning(
+            "[ent#1108] failed to spawn the pending-wake re-dispatch for %s on "
+            "start: %s",
+            agent_name,
+            e,
+        )
+
     # trinity-enterprise#752: the skill-gate marker tells the in-container hook
     # to refuse skills while the platform cannot be reached — only on an agent
     # that has gates. It lives on the writable layer, so a fresh container has

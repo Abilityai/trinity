@@ -64,6 +64,12 @@ _PROTECTED_BASENAMES = {
 META_FILENAME = ".trinity-skill.json"
 
 FRONTMATTER_MAX_BYTES = 64 * 1024
+# The block runs from a first line of `---` to the next line that starts with
+# `---`. Anchored to line starts, like the agent server's parser
+# (`agent_server/routers/skills.py::parse_yaml_frontmatter`), so a `---` inside
+# a value does not end the block (trinity-enterprise#584: the two parsers must
+# agree on what a skill's description is).
+_FRONTMATTER_BLOCK_RE = re.compile(r"\A---[ \t]*\n(.*?)^[ \t]*---", re.DOTALL | re.MULTILINE)
 
 
 def _env_cap(name: str, default: int) -> int:
@@ -103,12 +109,15 @@ def parse_frontmatter(text: str) -> Tuple[Optional[Dict[str, Any]], Optional[str
     oversized / invalid / non-mapping / alias-bearing → ``(None, "frontmatter_invalid")``.
     Never raises.
     """
-    if not text.startswith("---"):
+    # Same framing as the agent server: a byte-order mark and CRLF line ends
+    # are an editor's, not the author's (trinity-enterprise#584).
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    m = _FRONTMATTER_BLOCK_RE.match(text)
+    if not m:
         return None, None
-    parts = text.split("---", 2)
-    if len(parts) < 3:
-        return None, None
-    block = parts[1]
+    block = m.group(1)
     if len(block.encode("utf-8", errors="replace")) > FRONTMATTER_MAX_BYTES:
         return None, "frontmatter_invalid"
     try:
@@ -131,6 +140,30 @@ def parse_frontmatter(text: str) -> Tuple[Optional[Dict[str, Any]], Optional[str
     if not isinstance(data, dict):
         return None, "frontmatter_invalid" if data is not None else None
     return data, None
+
+
+def clean_description(value: Any) -> Optional[str]:
+    """The one blank rule for a capability description (trinity-enterprise#584).
+
+    A capability is described once, in its skill's SKILL.md frontmatter
+    ``description:`` (requirements/skills.md §23). Every surface agrees on
+    whether a skill HAS one only if every place a description enters the
+    backend applies this rule, so it is called at those chokepoints and
+    nowhere else needs one: ``extract_contract`` (the skills library),
+    ``connector_service.resolve_exposed_playbooks`` (the MCP connector and the
+    Workspace briefing) and ``agent_skills_listing`` (the agent's live listing
+    and its kept copy). It lives HERE, not in a module of its own, because the
+    community skills library's CI downloads exactly this file and
+    ``utils/safe_yaml.py`` to validate against: a new import would break it.
+
+    The text rule mirrors the agent server's ``_coerce_optional_str``: a
+    string passes, a YAML 1.1 scalar (bool, number, date) becomes its string
+    form, a collection cannot be text. On top of that, blank means absent.
+    """
+    if value is None or isinstance(value, (list, dict, set, tuple)):
+        return None
+    text = (value if isinstance(value, str) else str(value)).strip()
+    return text or None
 
 
 def _as_str_list(value: Any) -> List[str]:
@@ -235,9 +268,10 @@ def extract_contract(frontmatter: Optional[Dict[str, Any]]) -> Tuple[Dict[str, A
     elif requires_raw is not None:
         warnings.append("frontmatter_invalid:requires")
 
-    description = fm.get("description")
-    if not isinstance(description, str):
-        description = None
+    # trinity-enterprise#584: the one blank rule, so the library and the agent
+    # agree on whether a skill has a description (no new warning code: a
+    # library whose CI runs this parser fails on `frontmatter_invalid*`).
+    description = clean_description(fm.get("description"))
 
     # Lifecycle keys (#672). A malformed value is NAMED rather than ignored: a
     # library whose validation runs this parser fails on `frontmatter_invalid*`,

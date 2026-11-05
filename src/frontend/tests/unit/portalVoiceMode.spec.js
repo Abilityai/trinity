@@ -734,7 +734,7 @@ describe('ent#551 — background tasks', () => {
     // While the call is on, what lands in the thread is read, not unread: the
     // read cursor advances on spoken turns and task landings (no list refresh).
     const marker = conv.split("watch([() => voice.transcriptEntries.value.length, () => voice.panelVersion.value]")[1] || ''
-    expect(marker).toContain("store.markChatRead('thread', currentSessionId.value)")
+    expect(marker).toContain("store.markChatRead('thread', currentSessionId.value, READ_UP_TO_NOW)")
     expect(marker.slice(0, 700)).not.toContain("emit('sessions-changed'")
     expect(conv).toContain('data-testid="portal-voice-task-caption"')
     expect(conv).toContain('voiceTaskCaption(item.message)')
@@ -873,7 +873,12 @@ describe('useVoiceSession uses the single API client (#2720)', () => {
     expect(COMPOSABLE).not.toContain('authStore.authHeader')
   })
 
-  it('still authenticates the WebSocket with the store token', () => {
-    expect(COMPOSABLE).toContain('?token=${authStore.token}')
+  // trinity-enterprise#595: the socket authenticates with the start response's
+  // single-use ticket as its first frame; no session token is in any URL.
+  // (Behaviour is pinned in useVoiceSessionAuth.spec.js; this is the source guard.)
+  it('never puts a session token in the WebSocket URL', () => {
+    expect(COMPOSABLE).not.toContain('?token=')
+    expect(COMPOSABLE).not.toContain('authStore.token')
+    expect(COMPOSABLE).toContain("type: 'auth', ticket")
   })
 })

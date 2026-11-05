@@ -65,6 +65,7 @@ def test_feature_flags_does_not_carry_workspace_available(monkeypatch):
         is_hardening_guide_eligible=lambda: False,
         get_install_tls_posture=lambda: "unconfigured",
         is_public_url_reached=lambda: False,
+        is_mcp_external_access_enabled=lambda: (False, "default"),
     )
     monkeypatch.setattr(settings_module, "settings_service", stub_settings)
     monkeypatch.setattr(

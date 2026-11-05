@@ -471,10 +471,17 @@ PORTAL_MINT_DELEGATE = "delegate"
 
 def create_portal_session_token(
     email: str, mode: str = "prod", session_start: Optional[int] = None,
-    minted_by: Optional[str] = None,
+    minted_by: Optional[str] = None, interactive: bool = False,
 ) -> str:
     """Mint a Workspace session token for a verified email. Carries no ``sub``
     (no platform identity) — only the email + the portal scope.
+
+    ``interactive`` (trinity-enterprise#1107 ruling A, the portal half): the
+    Workspace SPA declares itself on the emailed-code verify (``"client":
+    "web"``), and only such a session carries ``interactive: true`` — the
+    session the terms gate asks (`services/terms_gate.enforce_portal_session`).
+    A token minted without it — a harness, a delegate-minted embedding — is
+    never asked, exactly as a platform JWT without the claim is not.
 
     Carries an explicit ``iat`` so bulk revocation (ent#281) can date the token
     against the per-email cutoff. Set here rather than in ``create_access_token``
@@ -508,6 +515,8 @@ def create_portal_session_token(
     }
     if minted_by:
         data["minted_by"] = minted_by  # #3404
+    if interactive:
+        data["interactive"] = True  # ent#1107 ruling A
     return create_access_token(
         data=data,
         expires_delta=timedelta(seconds=expires_in),
@@ -529,6 +538,17 @@ def portal_session_minted_by(token: str) -> Optional[str]:
         return None
     minted_by = payload.get("minted_by")
     return minted_by if isinstance(minted_by, str) and minted_by else None
+
+
+def portal_session_is_interactive(token: str) -> bool:
+    """Does this portal session carry the SPA's ``interactive`` claim
+    (ent#1107 ruling A)? Says nothing about validity — call it only on a
+    token `decode_portal_session` accepted. False for a token without it."""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except JWTError:
+        return False
+    return payload.get("scope") == PORTAL_SESSION_SCOPE and payload.get("interactive") is True
 
 
 def decode_portal_session(token: str) -> Optional[str]:
@@ -697,7 +717,10 @@ def renew_portal_session(token: str) -> Optional[str]:
     minted_by = payload.get("minted_by")
     new_token = create_portal_session_token(
         email, session_start=started,
-        minted_by=minted_by if isinstance(minted_by, str) else None)
+        minted_by=minted_by if isinstance(minted_by, str) else None,
+        # ent#1107: a visit stays a visit across rotation, and a bare token
+        # stays bare — the claim is the client's declaration at sign-in.
+        interactive=payload.get("interactive") is True)
 
     # Retire the old jti, but only after a grace: requests already in flight are
     # still carrying it, and a hard revoke here would 401 them mid-rotation.
@@ -797,7 +820,9 @@ async def resolve_platform_user_unfloored(request: Request, token: str) -> User:
     one function every door shares, so a Workspace-only person who has not
     accepted the current terms is refused on all of them (403 `terms_required`),
     and a route the person must reach before accepting is marked `@terms_route`.
-    Operator and above are never gated; an agent's credential is untouched.
+    Since ent#1107 every role is gated — on a session the SPA declared
+    interactive (`User.interactive_session`); a key, a bare token and an
+    agent's credential are untouched.
     """
     user = await _resolve_platform_credential(request, token)
     from services import terms_gate  # late: the seam imports this module's marker
@@ -882,6 +907,8 @@ async def _resolve_platform_credential(request: Request, token: str) -> User:
             loopback_chain_depth=_loopback_chain_depth(payload) if loopback else None,
             # trinity-enterprise#751: never a person, whatever the token resolves to.
             is_event_loopback=bool(loopback),
+            # trinity-enterprise#1107: the session the SPA declared at sign-in.
+            interactive_session=bool(payload.get("interactive")) and not loopback,
         )
     except JWTError:
         # JWT failed, try MCP API key

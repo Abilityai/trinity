@@ -65,6 +65,7 @@ Migration Order (as of 2026-05-07):
 58. execution_retention_index - #772 partial index on schedule_executions(completed_at)
 59. execution_retry_count - #678 retry_count column for reader-race auto-retry
 60. agent_compatibility_results_table - #668 latest-snapshot agent compatibility reports
+61. mcp_external_access_backfill - ent#1101 existing installs keep external MCP access on
 """
 import logging
 import sqlite3
@@ -3047,6 +3048,75 @@ def _migrate_agent_ownership_operator_resume(cursor, conn):
     conn.commit()
 
 
+def _migrate_operator_resume_default_on(cursor, conn):
+    """Agents wake on an answered ask by default (abilityai/trinity-enterprise#1108), data only.
+
+    ``agent_ownership.operator_resume_enabled`` becomes tri-state: NULL is the
+    platform default — ON — 0 the owner's explicit OFF, 1 the owner's explicit
+    ON. The ent#329 column was added ``DEFAULT 0``, so every row holds 0
+    whether or not an owner ever touched it; the toggle is audited
+    (``audit_log`` ``operator_resume_config``, ``details.enabled``), so the
+    one explicit-OFF signal there is: an agent whose LATEST toggle said
+    ``false`` keeps its 0, every other 0 moves to NULL and inherits the
+    default. A DB with no ``audit_log`` yet has no signal, and every 0 moves.
+    Runs once (tracked in ``schema_migrations``); an owner's later OFF is then
+    the only writer of a 0. New rows pass NULL explicitly
+    (``register_agent_owner``) because SQLite keeps the baked ``DEFAULT 0``.
+
+    Mirrored by the Alembic revision 0116_operator_resume_default_on.
+    """
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='audit_log'"
+    )
+    if cursor.fetchone():
+        cursor.execute(
+            """
+            UPDATE agent_ownership SET operator_resume_enabled = NULL
+            WHERE operator_resume_enabled = 0
+              AND agent_name NOT IN (
+                  SELECT a.target_id FROM audit_log a
+                  WHERE a.event_action = 'operator_resume_config'
+                    AND a.target_type = 'agent'
+                    AND a.details LIKE '%"enabled": false%'
+                    AND a.timestamp = (
+                        SELECT MAX(b.timestamp) FROM audit_log b
+                        WHERE b.event_action = 'operator_resume_config'
+                          AND b.target_type = 'agent'
+                          AND b.target_id = a.target_id
+                    )
+              )
+            """
+        )
+    else:
+        cursor.execute(
+            "UPDATE agent_ownership SET operator_resume_enabled = NULL"
+            " WHERE operator_resume_enabled = 0"
+        )
+    conn.commit()
+
+
+def _migrate_operator_queue_wake_state(cursor, conn):
+    """abilityai/trinity-enterprise#1108 AC #4 — the answer wake's status on the ask.
+
+    One nullable TEXT column on `operator_queue`: `wake_state`. NULL on a row
+    that owes no wake (or predates the column), `pending` when the answer wake
+    found the agent stopped or missing ("agent not yet woken" — its next start
+    re-dispatches it once, `operator_resume_service.redispatch_pending_wakes`),
+    `woken` once a turn carried the ending. No default, no backfill: a wake
+    before this column either happened or was readable on the next turn
+    through the Execution Context line, which now marks `woken` too.
+    PostgreSQL twin: Alembic `0117_operator_queue_wake_state`.
+    """
+    _safe_add_column(
+        cursor,
+        "operator_queue",
+        "wake_state",
+        "ALTER TABLE operator_queue ADD COLUMN wake_state TEXT",
+        log_msg="Adding wake_state to operator_queue for the deferred answer wake (abilityai/trinity-enterprise#1108)",
+    )
+    conn.commit()
+
+
 def _migrate_agent_ownership_tts_voice(cursor, conn):
     """epic #24 / #25 — outbound voice replies (shared agent-level config).
 
@@ -5910,6 +5980,59 @@ def _migrate_agent_memory_provenance(cursor, conn):
     )
     conn.commit()
     print("Created agent_memory_fact_events table and updated_by_execution_id (trinity-enterprise#1022)")
+
+def _migrate_terms_acceptances_table(cursor, conn):
+    """Terms of use per instance (trinity-enterprise#1107).
+
+    One row per (person, terms version) — which text they accepted and when.
+    The OSS home of the record the ent#1054 invite door kept privately; an
+    optional module's own migration copies its rows across. The text itself is
+    a `system_settings` row with a shipped default (`services/terms_defaults.py`),
+    so no seed is needed here. Schema is also in db/schema.py for fresh installs;
+    mirrored by Alembic revision 0119_terms_acceptances.
+
+    Ruling A(1): a Workspace portal session (the emailed-code sign-in) has no
+    `users` row, so `user_id` is nullable and a session row is keyed by
+    (email, version) through a partial unique index — UNIQUE(user_id, version)
+    alone treats two NULL user_ids as distinct. The entry shipped in no release
+    before this shape, so the DDL changed in place; a development database
+    that ran the earlier NOT NULL shape is rebuilt here (rows kept).
+    """
+    cursor.execute("PRAGMA table_info(terms_acceptances)")
+    cols = {row[1]: row for row in cursor.fetchall()}
+    create = """
+        CREATE TABLE IF NOT EXISTS {name} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            email TEXT,
+            terms_version TEXT NOT NULL,
+            accepted_at TEXT NOT NULL,
+            door TEXT,
+            actor_ip TEXT,
+            UNIQUE(user_id, terms_version)
+        )
+    """
+    indexes = (
+        "CREATE INDEX IF NOT EXISTS idx_terms_acceptances_email ON terms_acceptances(email)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_terms_acceptances_email_version "
+        "ON terms_acceptances(email, terms_version) WHERE user_id IS NULL",
+    )
+    if cols and cols["user_id"][3]:  # notnull: the pre-ruling shape — rebuild, rows kept
+        _atomic_rebuild(
+            cursor, conn, "terms_acceptances",
+            create.format(name="terms_acceptances_new"),
+            "INSERT INTO terms_acceptances_new (id, user_id, email, terms_version, accepted_at, door, actor_ip) "
+            "SELECT id, user_id, email, terms_version, accepted_at, door, actor_ip FROM terms_acceptances",
+            indexes=indexes,
+        )
+        print("Rebuilt terms_acceptances with a nullable user_id (trinity-enterprise#1107)")
+        return
+    cursor.execute(create.format(name="terms_acceptances"))
+    for sql in indexes:
+        cursor.execute(sql)
+    conn.commit()
+    print("Created terms_acceptances table (trinity-enterprise#1107)")
+
 def run_loop_runs_stale_cleanup(run, *, now_iso: str) -> int:
     """#4058 — close every `running` loop-run row no terminal can advance.
 
@@ -6077,6 +6200,52 @@ def _migrate_access_requests_requester_identity(cursor, conn):
     for column in ("requester_channel_id", "requester_handle", "requester_name", "requester_chat_id", "requester_thread_id"):
         _safe_add_column(cursor, "access_requests", column,
                          f"ALTER TABLE access_requests ADD COLUMN {column} TEXT")
+
+
+def run_mcp_external_access_backfill(run, *, now_iso: str) -> bool:
+    """abilityai/trinity-enterprise#1101 — an install that already has users
+    was serving `/mcp` to off-box clients before the switch existed, so it
+    keeps that: `mcp_external_access='true'` is written for it, and only for
+    it. Shared by both tracks (`run(sql, params, fetch=False)` adapts the
+    driver, the 0112 shape). Insert-only: an existing row — either value — is
+    never touched, and a database with no `users` row (a fresh install, whose
+    admin is provisioned after `init_database`) gets nothing, so the default
+    (off) applies. Idempotent. Returns True when the row was written.
+    """
+    existing = run("SELECT 1 FROM system_settings WHERE key = :k", {"k": "mcp_external_access"}, fetch=True)
+    if existing:
+        return False
+    any_user = run("SELECT 1 FROM users LIMIT 1", {}, fetch=True)
+    if not any_user:
+        return False
+    run(
+        "INSERT INTO system_settings (key, value, updated_at) VALUES (:k, :v, :t)",
+        {"k": "mcp_external_access", "v": "true", "t": now_iso},
+    )
+    return True
+
+
+def _migrate_mcp_external_access_backfill(cursor, conn):
+    """ent#1101 — keep external MCP access ON for installs that already have
+    users (`run_mcp_external_access_backfill`). On a fresh install the tables
+    do not exist yet on the first pass; on the second pass (after init_schema)
+    `users` is still empty, so nothing is written and the default (off)
+    applies. Mirrored by the Alembic revision 0118_mcp_external_access_backfill.
+    """
+    cursor.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' "
+        "AND name IN ('system_settings', 'users')"
+    )
+    if cursor.fetchone()[0] < 2:
+        return
+
+    def _run(sql, params, fetch=False):
+        cursor.execute(sql, params)
+        return cursor.fetchall() if fetch else None
+
+    if run_mcp_external_access_backfill(_run, now_iso=utc_now_iso()):
+        conn.commit()
+        logger.info("Existing install: external MCP access kept on (ent#1101)")
 
 
 MIGRATIONS = [
@@ -6264,4 +6433,8 @@ MIGRATIONS = [
     ("seat_ask_class_state_table", _migrate_seat_ask_class_state_table),
     ("room_participant_visible_from", _migrate_room_participant_visible_from),
     ("access_requests_requester_identity", _migrate_access_requests_requester_identity),
+    ("operator_resume_default_on", _migrate_operator_resume_default_on),
+    ("operator_queue_wake_state", _migrate_operator_queue_wake_state),
+    ("mcp_external_access_backfill", _migrate_mcp_external_access_backfill),
+    ("terms_acceptances_table", _migrate_terms_acceptances_table),
 ]

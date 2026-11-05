@@ -122,10 +122,10 @@ agent_ownership = Table(
     Column("a2a_exposed", Integer),                # ent#157: A2A inbound-server exposure opt-in (default OFF)
     Column("a2a_scope", Text, server_default="public"),          # inert since ent#885; drop under #746
     Column("a2a_keyless_internal", Integer, server_default="1"),  # inert since ent#885; drop under #746
-    # ent#329: owner opt-in — an operator answer re-triggers the agent. Default OFF:
-    # a dispatch on respond spends money, so it is never unconditional. Per-AGENT and
-    # not per-request, so hosting asks cannot hand a client a spend button (ent#430 AC #3).
-    Column("operator_resume_enabled", Integer),
+    # ent#329: an operator answer re-triggers the agent. Per-AGENT and not
+    # per-request, so hosting asks cannot hand a client a spend button (ent#430
+    # AC #3). Default ON since abilityai/trinity-enterprise#1108; the owner's OFF is 0.
+    Column("operator_resume_enabled", Integer),         # tri-state since abilityai/trinity-enterprise#1108: NULL = platform default (on), 0 = owner OFF, 1 = owner ON
     Column("memory_opt_out", Integer),             # trinity-enterprise#1022: per-agent retrieval-memory opt-out (default 0)
     Column("tts_voice_replies_enabled", Integer),  # epic #24/#25: outbound voice-out toggle (shared agent-level)
     Column("tts_voice_id", Text),                  # epic #24/#25: ElevenLabs voice id for spoken replies
@@ -1643,6 +1643,10 @@ operator_queue = Table(
     # one locked transaction that ends the predecessor and inserts the successor.
     Column("replaces", Text),            # on the successor: the predecessor row's uuid
     Column("replaced_by", Text),         # on the predecessor: the successor row's uuid
+    # abilityai/trinity-enterprise#1108 AC #4: whether the answer wake produced a
+    # turn. NULL (no wake owed / before the column) | "pending" (the agent was not
+    # running — its next start re-dispatches) | "woken".
+    Column("wake_state", Text),
     Index(
         "uq_operator_queue_pending_subject",
         "agent_name", "subject",
@@ -1956,4 +1960,25 @@ metric_points = Table(
     # partition key (`agent_name`) inside the only unique constraint is what
     # lets ent#80 partition by month without a table rebuild.
     PrimaryKeyConstraint("agent_name", "ts", "idempotency_key"),
+)
+
+
+# Terms acceptances (trinity-enterprise#1107) — one row per (person, terms
+# version). `door` is the invitation id an optional module names, else NULL.
+terms_acceptances = Table(
+    "terms_acceptances",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    # NULL for a Workspace portal session (no `users` row, ruling A(1) on
+    # trinity-enterprise#1107): such a row is keyed by (email, version) below.
+    Column("user_id", Integer, nullable=True),
+    Column("email", Text),
+    Column("terms_version", Text, nullable=False),
+    Column("accepted_at", Text, nullable=False),
+    Column("door", Text),
+    Column("actor_ip", Text),
+    UniqueConstraint("user_id", "terms_version", name="uq_terms_acceptances_user_version"),
+    Index("idx_terms_acceptances_email", "email"),
+    Index("uq_terms_acceptances_email_version", "email", "terms_version", unique=True,
+          sqlite_where=text("user_id IS NULL"), postgresql_where=text("user_id IS NULL")),
 )

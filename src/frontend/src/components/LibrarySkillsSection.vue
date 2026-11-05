@@ -168,8 +168,9 @@
                     :data-testid="`skill-deprecated-library-${s.name}`"
                   >deprecated</BaseBadge>
                 </div>
-                <p v-if="s.description" class="mt-1 text-[12.5px] text-gray-600 dark:text-gray-400 flex-grow">{{ s.description }}</p>
-                <div v-else class="flex-grow"></div>
+                <!-- trinity-enterprise#584: the one empty state, never a guess
+                     from the body (the backend's first-line fallback is gone). -->
+                <p class="mt-1 text-[12.5px] text-gray-600 dark:text-gray-400 flex-grow" :class="{ italic: describeSkill(s.description).missing }">{{ describeSkill(s.description).text }}</p>
                 <!-- The author's text, interpolated. It can be a sentence, so it
                      is clamped with the whole of it on hover. -->
                 <p
@@ -248,6 +249,7 @@ import SkillFilterBar from './skills/SkillFilterBar.vue'
 import AssignedAgents from './skills/AssignedAgents.vue'
 import LibrarySkillSets from './skills/LibrarySkillSets.vue'
 import { deps, supersededLine, DEPRECATED_TITLE } from './skills/contract'
+import { describeSkill } from '../utils/skillDescription'
 import BaseBadge from './base/BaseBadge.vue'
 import BaseButton from './base/BaseButton.vue'
 import BaseCard from './base/BaseCard.vue'

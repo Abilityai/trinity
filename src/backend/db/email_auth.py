@@ -295,12 +295,19 @@ class EmailAuthOperations:
             if datetime.utcnow() > expires_at:
                 return None
 
-            # Mark as verified
-            conn.execute(
+            # Mark as verified — only if still unused. The SELECT above takes no
+            # row lock on PostgreSQL, so two concurrent verifies of one code
+            # could both read `verified = 0`; the conditional UPDATE lets
+            # exactly one of them win, and the loser is an invalid code (#4157
+            # review: two hand-off tokens from one code).
+            marked = conn.execute(
                 update(email_login_codes)
-                .where(email_login_codes.c.id == code_record["id"])
+                .where(and_(email_login_codes.c.id == code_record["id"],
+                            email_login_codes.c.verified == 0))
                 .values(verified=1, used_at=utc_now_iso())
             )
+            if marked.rowcount != 1:
+                return None
 
             return {
                 "code_id": code_record["id"],

@@ -294,7 +294,10 @@ two dep codes.
 Parsed by `skill_packaging.parse_frontmatter`/`extract_contract` (64 KiB cap,
 alias-refusing SafeLoader — billion-laughs guard, #919 convention; every field
 isinstance-guarded; unknown keys ignored — skills are authored for Claude Code
-first). Flat keys are the convention; a `trinity:` mapping wins when present:
+first). Since trinity-enterprise#584 the framing matches the agent server's parser
+(byte-order mark and CRLF normalised; the block ends at the first line starting with
+`---`), `description` goes through `clean_description`, and a skill without one has
+none (no first-paragraph guess). Flat keys are the convention; a `trinity:` mapping wins when present:
 
 ```yaml
 ---

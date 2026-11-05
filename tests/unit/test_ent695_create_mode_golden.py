@@ -686,9 +686,11 @@ def test_deployed_by_creator_over_foreign_name(install):
     """A non-admin creator deploys over a base name another user's agent holds.
 
     Create mode suffixes it (`gold-lead_2`), names the existing agent but never
-    its owner, makes the caller the owner of everything it writes, and lets a
-    creator overwrite the platform-wide `trinity_prompt`: a known gap, pinned
-    here so that a change to it is a decision with its own issue.
+    its owner, and makes the caller the owner of everything it writes. It does
+    NOT let a creator overwrite the platform-wide `trinity_prompt`: the prompt is
+    skipped with a `prompt_requires_admin` warning and `prompt_updated: false`
+    (abilityai/trinity#4025, which regenerated this case; it was a known gap
+    pinned here until then).
     """
     seed_user(user_id=CREATOR.id, username=CREATOR.username, role=CREATOR.role)
     seed_user(user_id=OTHER_OWNER_ID, username=OTHER_OWNER, role="creator")
