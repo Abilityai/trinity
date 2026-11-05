@@ -87,13 +87,15 @@ _KNOWN_AGENT_KEYS = frozenset({
     "skills", "skill_sets", "grants", "gates",  # trinity-enterprise#1030
     "seat", "person_seats",  # trinity-enterprise#1030 CP4
     "deploy",  # trinity-enterprise#1030 CP5
+    "credentials",  # trinity-enterprise#1109: variable NAMES the member needs
 })
 
 # trinity-enterprise#1030: the per-agent twin of `_UNLISTED_MANIFEST_KEYS` —
 # read, never unknown, but left out of the pinned "Recognised per-agent keys
 # are:" text.
 _UNLISTED_AGENT_KEYS = frozenset({"skills", "skill_sets", "grants", "gates",
-                                  "seat", "person_seats", "deploy"})
+                                  "seat", "person_seats", "deploy",
+                                  "credentials"})  # trinity-enterprise#1109
 
 # trinity-enterprise#1030 CP5 (T6 = A): nothing platform-side records a
 # `deploy: false` member, so no export can carry one. Every export says so in
@@ -233,6 +235,13 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
             raise ValueError(f"Agent '{agent_name}' missing required field: template")
 
         extra = sorted(str(k) for k in set(agent_config.keys()) - _KNOWN_AGENT_KEYS)
+        # trinity-enterprise#1109: `credentials:` is read ONLY as a list of
+        # variable names. The older map form (`credentials: {KEY: value}`,
+        # which this parser never read) stays what it was — an unknown key,
+        # warned about and dropped — so a manifest that deployed yesterday
+        # deploys byte-identically today and no value is ever read from one.
+        if "credentials" in agent_config and not isinstance(agent_config["credentials"], list):
+            extra = sorted(extra + ["credentials"])
         if extra:
             unknown_agent_keys[str(agent_name)] = extra
 
@@ -243,6 +252,22 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
                 raise ValueError(f"Agent '{agent_name}' {list_key} must be a list of names")
         if "deploy" in agent_config and not isinstance(agent_config["deploy"], bool):
             raise ValueError(f"Agent '{agent_name}' deploy must be true or false")
+        credentials = agent_config.get("credentials")
+        if not isinstance(credentials, list):
+            credentials = None  # the legacy map form: unknown, warned, dropped (above)
+        if credentials is not None:
+            # trinity-enterprise#1109: names only, each one a variable a
+            # credential ask may fill (so a value pasted here is refused by
+            # shape, and a reserved name by policy).
+            from services import credential_ask_policy
+            for position, entry in enumerate(credentials, start=1):
+                problem = credential_ask_policy.credential_name_problem(entry)
+                if problem is not None:
+                    # Named by POSITION, never echoed: a value pasted where a
+                    # name belongs would otherwise come back in the error.
+                    raise ValueError(
+                        f"Agent '{agent_name}' credentials: entry {position} is not a variable "
+                        f"name the platform can set ({problem})")
 
         agents[agent_name] = SystemAgentConfig(
             template=agent_config["template"],
@@ -260,6 +285,7 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
             person_seats=apply_seats.parse_person_seats(
                 agent_name, agent_config.get("person_seats")),
             deploy=agent_config.get("deploy", True),  # trinity-enterprise#1030 CP5
+            credentials=credentials,  # trinity-enterprise#1109
         )
 
     # Parse permissions
@@ -2185,7 +2211,7 @@ def _failure_reason(exc: Exception) -> Tuple[str, Optional[int]]:
     return reason[:_REASON_MAX_LEN], status_code
 
 
-def _configured_preview(cfg: SystemAgentConfig) -> Dict[str, Dict[str, int]]:
+def _configured_preview(cfg: SystemAgentConfig) -> Dict[str, Any]:
     """trinity-enterprise#1030 CP6: what a created member is configured with
     after create — counts per group, for the preview's one line. Empty (no
     key at all) when the member declares none of them. A held-back write is
@@ -2196,7 +2222,41 @@ def _configured_preview(cfg: SystemAgentConfig) -> Dict[str, Dict[str, int]]:
         "seat": 1 if cfg.seat else 0, "person_seats": len(cfg.person_seats or []),
     }
     counts = {k: v for k, v in counts.items() if v}
-    return {"configured": counts} if counts else {}
+    out: Dict[str, Any] = {"configured": counts} if counts else {}
+    if cfg.credentials:
+        # trinity-enterprise#1109: the names themselves, so whoever reads the
+        # preview back knows what to ask for before apply.
+        out["credentials"] = list(cfg.credentials)
+    return out
+
+
+# #4025: what a caller `_caller_passes_admin_gate` refuses gets instead of
+# the write. In `warnings[]` because the response contract is pinned (the ent#695
+# create-mode golden), as #4130 did for `deploy: false`; the code is apply's.
+PROMPT_REQUIRES_ADMIN_WARNING = (
+    "prompt_requires_admin: this manifest's `prompt:` is not applied for this "
+    "caller. It replaces the platform-wide prompt every agent receives, so only "
+    "an admin may set it; the rest of the manifest is unaffected by this."
+)
+
+
+def _caller_passes_admin_gate(current_user: User) -> bool:
+    """Would this caller pass the settings route's admin gate, which guards `trinity_prompt`?
+
+    Exactly `assert_admin` with no scope opt-in (#4025): an admin JWT, or an
+    admin's `user` / `system` key. A creator, any agent key (one an admin owns
+    included: it carries the owner's role, which is how `require_role("creator")`
+    and `capability_fence("agents.manage")` admitted it to deploy), a connector
+    or a portal-delegate key may not. One predicate for deploy and apply, so the
+    two modes cannot disagree about who may change every agent's instructions.
+    """
+    from dependencies import assert_admin
+
+    try:
+        assert_admin(current_user)
+    except HTTPException:
+        return False
+    return True
 
 
 async def deploy_manifest(
@@ -2261,6 +2321,17 @@ async def deploy_manifest(
                 "creates nothing. Remove deploy: false from a member, or use apply to "
                 "report on them"))
         all_warnings = validation_warnings + name_warnings
+        # #4025: decided once, before the preview, so the preview predicts the write.
+        # The refusal is reported only when it withholds a change: a prompt that
+        # already matches is apply's `unchanged`, not a refusal. That tells a
+        # non-admin whether a guessed prompt matches, which apply's verdict already
+        # does, and every agent they own receives the prompt anyway.
+        may_set_prompt = _caller_passes_admin_gate(current_user)
+        prompt_refused = (
+            bool(manifest.prompt)
+            and not may_set_prompt
+            and db.get_setting_value("trinity_prompt") != manifest.prompt
+        )
         if declared_only:
             # The response contract is pinned (ent#695 AC6), so the skip is
             # listed where every caller already reads: the warnings.
@@ -2270,6 +2341,8 @@ async def deploy_manifest(
 
         # 4. If dry_run, return preview
         if dry_run:
+            if prompt_refused:
+                all_warnings.append(PROMPT_REQUIRES_ADMIN_WARNING)
             agents_to_create = [
                 {
                     "name": final_name,
@@ -2367,7 +2440,7 @@ async def deploy_manifest(
                 agents_created=[],
                 agents_to_create=agents_to_create,
                 agents_declared_only=declared_only,
-                prompt_updated=bool(manifest.prompt),
+                prompt_updated=bool(manifest.prompt) and may_set_prompt,
                 warnings=all_warnings,
                 failed=preview_failed,
                 permission_edges=dict(edges),
@@ -2464,11 +2537,18 @@ async def deploy_manifest(
         # 6b. Update trinity_prompt (if provided) — moved after the create loop
         # (trinity-enterprise#125) so a totally-failed deploy never mutates the
         # platform-wide prompt; injection happens at agent start (step 12).
+        # #4025: only for a caller the settings route's admin gate admits.
         prompt_updated = False
-        if manifest.prompt:
+        if manifest.prompt and may_set_prompt:
             db.set_setting("trinity_prompt", manifest.prompt)
             prompt_updated = True
             logger.info(f"Updated trinity_prompt for system '{manifest.name}'")
+        elif prompt_refused:
+            all_warnings.append(PROMPT_REQUIRES_ADMIN_WARNING)
+            logger.warning(
+                f"Not applying the prompt of system '{manifest.name}': "
+                f"'{current_user.username}' is not an admin (#4025)"
+            )
 
         # 6c. Scope post-create configuration to the agents that were actually
         # created (the config functions skip short_names missing from the map).
@@ -2948,7 +3028,7 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
     `member_name_unavailable`; free -> create. Never "absent -> create" for a
     taken name, so apply cannot suffix.
     """
-    from dependencies import agent_may_reach, assert_admin, is_interactive_admin
+    from dependencies import agent_may_reach, is_interactive_admin
 
     from services import docker_service
     from services.agent_service.crud import agent_name_is_taken
@@ -2956,11 +3036,7 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
     system = manifest.name
     blockers: List[SystemApplyBlocker] = []
 
-    try:
-        assert_admin(current_user)
-        caller_is_admin = True
-    except HTTPException:
-        caller_is_admin = False
+    caller_is_admin = _caller_passes_admin_gate(current_user)
 
     snapshot = ApplySnapshot(
         system_name=system,
@@ -3400,7 +3476,7 @@ APPLY_FIELD_CLASSES = frozenset({"reconciled", "report-only", "create-only", "in
 APPLY_FIELD_CLASSIFICATION: Dict[str, Tuple[str, str]] = {
     "SystemManifest.name": ("reconciled", "the system tag and every member's name"),
     "SystemManifest.description": ("inert", "neither mode stores it"),
-    "SystemManifest.prompt": ("reconciled", "admin only (P-F exception 3)"),
+    "SystemManifest.prompt": ("reconciled", "admin only, the same gate as deploy"),
     "SystemManifest.agents": ("reconciled", "absent -> create, present -> update"),
     "SystemManifest.permissions": ("reconciled", "edges added; extras reported, never removed"),
     "SystemManifest.default_tags": ("reconciled", "added, never replaced"),
@@ -3423,6 +3499,8 @@ APPLY_FIELD_CLASSIFICATION: Dict[str, Tuple[str, str]] = {
                                 "gate map's own write; undeclared gates reported, never cleared"),
     "SystemAgentConfig.seat": ("reconciled", "the canon seat the agent holds, written only through "
                                "an assignment module's optional writer; unobserved without it"),
+    "SystemAgentConfig.credentials": ("report-only", "variable NAMES the member needs; parsed and "
+                                                      "previewed, never written (trinity-enterprise#1109)"),
     "SystemAgentConfig.deploy": ("report-only", "false names a member without running it "
                                  "(declared_only): template_in_catalog / template_not_in_catalog / "
                                  "declared_only_member_live reported; never created, reconciled "
@@ -4069,7 +4147,7 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
                         "removes it")
             drift.append(SystemApplyDrift(name=member, evidence=evidence, note=note))
 
-    # The platform prompt (P-F exception 3).
+    # The platform prompt: admin only, the same gate as deploy.
     prompt_op = None
     if not manifest.prompt:
         prompt = SystemApplyPromptVerdict(verdict="not_declared")
@@ -4230,7 +4308,7 @@ class ApplyLeaseKeeper:
 
     def _renew(self) -> LeaseState:
         issued = time.monotonic()
-        state = self._lock.refresh_if_owned_atomic()
+        state = self._lock.refresh_if_owned()
         if state is LeaseState.OWNED:
             self._deadline = issued + self._ttl - self._margin
         return state
@@ -4748,7 +4826,7 @@ async def apply_manifest(
             )
         finally:
             await lease.stop()
-            lock.release_if_owned_atomic()
+            lock.release_if_owned()
 
         if not outcome.failed:
             status = "applied"

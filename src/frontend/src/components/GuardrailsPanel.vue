@@ -153,8 +153,19 @@ async function load() {
     maxTurnsChat.value = g.max_turns_chat ?? null
     maxTurnsTask.value = g.max_turns_task ?? null
     const { max_turns_chat, max_turns_task, ...rest } = g
+    // trinity-enterprise#341: once a tool-access profile is stored, the profile
+    // and its tool list belong to Settings › Tool access, and the backend keeps
+    // them when this form leaves them out — so a copy taken when this form
+    // opened can never write back an older list.
+    const copy = { ...g }
+    if (rest.tool_access?.profile) {
+      for (const key of ['tool_access', 'disallowed_tools']) {
+        delete rest[key]
+        delete copy[key]  // the visitor toggle's copy too (ent#926)
+      }
+    }
     otherKeys.value = rest
-    stored.value = { ...g }
+    stored.value = copy
     visitorShell.value = g.visitor_shell !== false
   } catch (err) {
     console.error('Failed to load guardrails:', err)

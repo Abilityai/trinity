@@ -229,7 +229,9 @@ class TestRoute:
             with pytest.raises(HTTPException) as exc:
                 _call_verify(route, PLATFORM)
         assert exc.value.status_code == 409
-        assert exc.value.detail == {"reason": "platform_login_required"}
+        assert exc.value.detail["reason"] == "platform_login_required"
+        # #4157: plus a one-time hand-off `/login` redeems instead of a 2nd code.
+        assert set(exc.value.detail) == {"reason", "handoff"}
         mint.assert_not_called()
 
     def test_platform_account_wrong_code_is_the_uniform_401(self, route):

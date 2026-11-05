@@ -1235,6 +1235,36 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
+    // Tool access (GUARD-008, trinity-enterprise#341) — the profile, its five
+    // cards with per-runtime coverage, and whether a restart is waiting.
+    async getToolAccess(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/tool-access`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    // `body`: { profile, custom?: { read_only, disallowed_tools } }
+    async setToolAccess(name, body) {
+      const authStore = useAuthStore()
+      const response = await axios.put(`/api/agents/${name}/tool-access`, body, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    // The header and list Read-only toggle: ON selects Strict read-only, OFF
+    // returns to the profile it came from (409 when read-only belongs to
+    // another profile). Answers with the resolved tool access.
+    async setReadOnly(name, enabled) {
+      const authStore = useAuthStore()
+      const response = await axios.put(`/api/agents/${name}/read-only`, { enabled }, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
     // Capacity (CAPACITY-001 / #506 — per-agent max_parallel_tasks within the fleet ceiling)
     async getAgentCapacity(name) {
       const authStore = useAuthStore()

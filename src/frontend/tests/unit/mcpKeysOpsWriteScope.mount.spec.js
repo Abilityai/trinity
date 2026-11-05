@@ -15,7 +15,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
 import { setActivePinia, createPinia } from 'pinia'
 
-vi.mock('axios', () => ({ default: { get: vi.fn(async () => ({ data: { url: null, default_url: '' } })) } }))
+// ent#1101: the tab reads its URL + external-access state through the api client.
+vi.mock('@/api', () => ({
+  default: {
+    get: vi.fn(async () => ({ data: { enabled: true, source: 'settings', advertised_url: 'http://localhost/mcp' } })),
+  },
+}))
 
 import McpKeysTab from '@/components/settings/McpKeysTab.vue'
 import { useAuthStore } from '@/stores/auth'

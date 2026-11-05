@@ -8,7 +8,7 @@
  * is under test is solely the session layer.
  */
 import { strict as assert } from "node:assert";
-import { after, before, beforeEach, describe, it } from "node:test";
+import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import http, { createServer as createHttpServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -19,10 +19,19 @@ import {
   bearerKey,
   createSessionIdCodec,
   idPrefix,
+  offBoxAlwaysOpen,
+  parsedPath,
   REVIVE_MAX_AGE_MS,
+  PEER_CLASS_HEADER,
   startWithSessionFront,
   type SessionFront,
+  type SessionFrontOptions,
 } from "./session-front.js";
+import { OFF_MESSAGE, REASON_NO_SECRET, type PeerClass, type Verdict } from "./external-access.js";
+
+/** ent#1101 — a verdict source for the #4060 cases, which are about sessions, not the gate. */
+const alwaysOn = { cached: () => ({ kind: "on", source: "test" }) as Verdict, verdict: async () => ({ kind: "on", source: "test" }) as Verdict };
+const alwaysOff = { cached: () => ({ kind: "off", source: "default" }) as Verdict, verdict: async () => ({ kind: "off", source: "default" }) as Verdict };
 
 const SECRET = "test-internal-secret-4060";
 const KEY_A = "trinity_mcp_key_a";
@@ -163,7 +172,7 @@ describe("#4060 keyed sessions survive a restart (real transport)", () => {
     auditRows = [];
   });
 
-  async function start(secret = SECRET): Promise<void> {
+  async function start(secret = SECRET, extra: Partial<SessionFrontOptions> = {}): Promise<void> {
     const { server } = await createServer({
       trinityApiUrl: backendUrl,
       requireApiKey: true,
@@ -173,17 +182,17 @@ describe("#4060 keyed sessions survive a restart (real transport)", () => {
     });
     front = await startWithSessionFront(
       () => server.start({ transportType: "httpStream", httpStream: { port, host: "127.0.0.1" } }),
-      { secret, host: "127.0.0.1", port }
+      { secret, host: "127.0.0.1", port, externalAccess: alwaysOn, ...extra }
     );
     server.on("disconnect", (event: any) => front.innerClosed(event?.session?.sessionId));
     mcp = server;
   }
 
-  async function restart(secret = SECRET): Promise<void> {
+  async function restart(secret = SECRET, extra: Partial<SessionFrontOptions> = {}): Promise<void> {
     await mcp?.stop();
     mcp = undefined;
     await new Promise((r) => setTimeout(r, 150)); // let pooled client sockets see the close
-    await start(secret);
+    await start(secret, extra);
   }
 
   /** One JSON-RPC POST on a fresh connection (no pooled socket across restarts). */
@@ -359,10 +368,369 @@ describe("#4060 keyed sessions survive a restart (real transport)", () => {
     await restart();
   });
 
+  it("ent#1101: the nonce-marked revival requests run BEFORE the external-access gate", async () => {
+    // The classifier calls exactly the synthetic (nonce-marked) requests
+    // off-box, with the switch OFF. Were the gate ahead of the nonce check,
+    // the revival initialize would be refused and the client would get 404.
+    const id = await keyedSession(KEY_A);
+    await restart(SECRET, {
+      externalAccess: alwaysOff,
+      classifyPeer: (req) => ("x-trinity-session-front" in req.headers ? "off-box" : "on-box"),
+    });
+    const r = await rpc("tools/list", { key: KEY_A, sessionId: id });
+    assert.equal(r.status, 200, r.body);
+    await restart();
+  });
+
   it("tool lists stay per key on revival", async () => {
     const x = await keyedSession(KEY_A);
     const listed = toolNames((await rpc("tools/list", { key: KEY_A, sessionId: x })).body);
     await restart();
     assert.deepEqual(toolNames((await rpc("tools/list", { key: KEY_A, sessionId: x })).body).sort(), listed.sort());
+  });
+
+  // -------------------------------------------------------------------------
+  // ent#1101 — the gate over the REAL fastmcp server: an allowlist on the
+  // parsed path. mcp-proxy routes on `new URL(req.url, "http://localhost")
+  // .pathname`, which resolves dot segments, percent-encoded dots and
+  // absolute-form targets, and it serves the legacy SSE transport at `/sse` +
+  // `/messages` beside `/mcp`; a raw-string match on `/mcp` let every one of
+  // those spellings through. The stub listener below answers every path, so
+  // only the real server can prove the door is shut.
+  // -------------------------------------------------------------------------
+
+  describe("ent#1101 off-box requests are refused on the PARSED path, as an allowlist (real fastmcp server)", () => {
+    let verdict: Verdict = { kind: "off", source: "default" };
+    const switchable = { cached: () => verdict, verdict: async () => verdict };
+    /** The peer class comes from a test header: one server serves on-box set-up and off-box probes. */
+    const peerByHeader = (req: http.IncomingMessage): PeerClass => (req.headers["x-test-peer"] === "off-box" ? "off-box" : "on-box");
+
+    before(async () => {
+      verdict = { kind: "off", source: "default" };
+      await restart(SECRET, { externalAccess: switchable, classifyPeer: peerByHeader });
+    });
+
+    const initBody = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } } });
+
+    function raw(method: string, path: string, peer: PeerClass, headers: Record<string, string> = {}, body = initBody): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> {
+      return new Promise((resolve, reject) => {
+        // A refusal is answered by the gate itself; a request wrongly let
+        // through reaches mcp-proxy, and `GET /sse` then streams forever.
+        const signal = AbortSignal.timeout(2000);
+        const req = http.request(
+          {
+            host: "127.0.0.1",
+            port,
+            path,
+            method,
+            agent: false,
+            signal,
+            headers: {
+              "content-type": "application/json",
+              accept: "application/json, text/event-stream",
+              "mcp-protocol-version": "2025-06-18",
+              authorization: `Bearer ${KEY_A}`,
+              "x-test-peer": peer,
+              ...headers,
+            },
+          },
+          (res) => {
+            let data = "";
+            res.on("data", (c) => {
+              data += c;
+              // An SSE stream has no end: the first event is the proof.
+              if (res.headers["content-type"]?.startsWith("text/event-stream") && data.includes("\n\n")) res.destroy();
+            });
+            res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: data }));
+            res.on("close", () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: data }));
+          }
+        );
+        req.on("error", (err) => {
+          if (signal.aborted) reject(new assert.AssertionError({ message: `${method} ${path} (${peer}): no answer from the gate within 2000 ms — let through instead of refused` }));
+          else reject(err);
+        });
+        req.end(method === "GET" || method === "HEAD" || method === "DELETE" ? undefined : body);
+      });
+    }
+
+    /** Every spelling the validator drove past the raw-string gate, plus the SSE transport. */
+    const BYPASS_SPELLINGS: Array<[string, string]> = [
+      ["POST", "/x/../mcp"],
+      ["POST", "/./mcp"],
+      ["POST", "/%2e/mcp"],
+      ["POST", "http://127.0.0.1/mcp"],
+      ["GET", "/sse"],
+      ["POST", "/messages?sessionId=x"],
+      ["POST", "/mcpx"],
+      ["GET", "/ping"],
+    ];
+
+    it("on-box + off: /mcp and its dot-segment spelling both reach the real server (the resolver is real)", async () => {
+      const init = await raw("POST", "/mcp", "on-box");
+      assert.equal(init.status, 200, init.body);
+      const sid = init.headers["mcp-session-id"] as string;
+      assert.ok(sid?.startsWith("t1."));
+      const viaDots = await raw("POST", "/x/../mcp", "on-box", { "mcp-session-id": sid }, JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }));
+      assert.equal(viaDots.status, 200, `mcp-proxy routes /x/../mcp to /mcp: ${viaDots.body}`);
+      assert.equal(viaDots.headers["x-trinity-refusal"], undefined);
+    });
+
+    it("off-box + off: every bypass spelling and the SSE transport are refused 403 with the refusal header", async () => {
+      for (const [method, path] of BYPASS_SPELLINGS) {
+        const r = await raw(method, path, "off-box");
+        assert.equal(r.status, 403, `${method} ${path} → ${r.status} ${r.body.slice(0, 120)}`);
+        assert.equal(r.headers["x-trinity-refusal"], "external_mcp_access_off", `${method} ${path}`);
+        assert.equal(r.headers["mcp-session-id"], undefined, `${method} ${path}: no session was created`);
+        assert.deepEqual(JSON.parse(r.body), { jsonrpc: "2.0", error: { code: -32003, message: OFF_MESSAGE }, id: null }, `${method} ${path}`);
+      }
+      const plain = await raw("POST", "/mcp", "off-box");
+      assert.equal(plain.status, 403);
+    });
+
+    it("off-box + off: DELETE on the parsed /mcp passes (session clean-up, T4) and the health path passes", async () => {
+      const init = await raw("POST", "/mcp", "on-box");
+      assert.equal(init.status, 200, init.body);
+      const sid = init.headers["mcp-session-id"] as string;
+      const del = await raw("DELETE", "/mcp", "off-box", { "mcp-session-id": sid });
+      assert.equal(del.status, 200, `DELETE /mcp → ${del.status} ${del.body}`);
+      assert.equal(del.headers["x-trinity-refusal"], undefined);
+      const health = await raw("GET", "/health", "off-box");
+      assert.equal(health.status, 200, health.body);
+      assert.equal(health.headers["x-trinity-refusal"], undefined);
+      assert.match(health.body, /Ok/);
+      assert.equal((await raw("HEAD", "/health", "off-box")).status, 200, "the Dockerfile healthcheck is a wget --spider (HEAD)");
+    });
+
+    it("off-box + unverified: the same spellings are 503 + Retry-After", async () => {
+      verdict = { kind: "unverified", reason: REASON_NO_SECRET };
+      try {
+        for (const [method, path] of [...BYPASS_SPELLINGS, ["POST", "/mcp"] as [string, string]]) {
+          const r = await raw(method, path, "off-box");
+          assert.equal(r.status, 503, `${method} ${path} → ${r.status}`);
+          assert.equal(r.headers["x-trinity-refusal"], "external_mcp_access_unverified", `${method} ${path}`);
+          assert.equal(r.headers["retry-after"], "5", `${method} ${path}`);
+          assert.equal(r.headers["mcp-session-id"], undefined, `${method} ${path}`);
+        }
+        assert.equal((await raw("GET", "/health", "off-box")).status, 200, "the healthcheck never waits on the backend");
+      } finally {
+        verdict = { kind: "off", source: "default" };
+      }
+    });
+
+    it("off-box + on: /mcp passes", async () => {
+      verdict = { kind: "on", source: "settings" };
+      try {
+        const init = await raw("POST", "/mcp", "off-box");
+        assert.equal(init.status, 200, init.body);
+        assert.ok((init.headers["mcp-session-id"] as string)?.startsWith("t1."));
+      } finally {
+        verdict = { kind: "off", source: "default" };
+      }
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ent#1101 — the external-access gate, over the real captured http listener
+// ---------------------------------------------------------------------------
+
+describe("ent#1101 off-box requests are refused while external access is off (stub listener behind the real captured http.createServer)", () => {
+  let srv: Server | undefined;
+  let port = 0;
+  const seen: Array<{ method?: string; url?: string; headers: http.IncomingHttpHeaders; raw: string[]; body: string }> = [];
+
+  async function boot(o: { secret?: string; verdict: Verdict | (() => Verdict | undefined); peer: PeerClass | ((req: http.IncomingMessage) => PeerClass); asyncVerdict?: () => Promise<Verdict> }): Promise<SessionFront> {
+    const cached = typeof o.verdict === "function" ? o.verdict : () => o.verdict as Verdict;
+    const source = { cached, verdict: o.asyncVerdict ?? (async () => cached()!) };
+    return startWithSessionFront(
+      async () => {
+        srv = http.createServer((req, res) => {
+          let body = "";
+          req.on("data", (c) => (body += c));
+          req.on("end", () => {
+            seen.push({ method: req.method, url: req.url, headers: req.headers, raw: req.rawHeaders, body });
+            res.writeHead(200, { "content-type": "application/json" }).end("{}");
+          });
+        });
+        await new Promise<void>((r) => srv!.listen(0, "127.0.0.1", () => r()));
+        port = (srv!.address() as AddressInfo).port;
+      },
+      { secret: o.secret ?? SECRET, host: "127.0.0.1", port: 0, externalAccess: source, classifyPeer: typeof o.peer === "function" ? o.peer : () => o.peer as PeerClass }
+    );
+  }
+
+  afterEach(async () => {
+    if (srv) await new Promise<void>((r) => srv!.close(() => r()));
+    srv = undefined;
+    seen.length = 0;
+  });
+
+  // `timeoutMs` bounds a request the gate must answer itself: a refusal that
+  // is wrongly passed through reaches the inner stub and may never answer, so
+  // without a bound the case hangs until the file timeout instead of failing.
+  function hit(method: string, path: string, headers: Record<string, string> = {}, body = '{"jsonrpc":"2.0","id":1,"method":"ping"}', timeoutMs?: number): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> {
+    return new Promise((resolve, reject) => {
+      const signal = timeoutMs === undefined ? undefined : AbortSignal.timeout(timeoutMs);
+      const req = http.request({ host: "127.0.0.1", port, path, method, headers: { "content-type": "application/json", ...headers }, agent: false, signal }, (res) => {
+        let data = "";
+        res.on("data", (c) => (data += c));
+        res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: data }));
+      });
+      req.on("error", (err) => {
+        if (signal?.aborted) {
+          reject(new assert.AssertionError({ message: `${method} ${path}: no answer from the gate within ${timeoutMs} ms — the request was let through instead of refused` }));
+        } else {
+          reject(err);
+        }
+      });
+      req.end(method === "GET" || method === "HEAD" || method === "DELETE" ? undefined : body);
+    });
+  }
+
+  const REFUSAL_BOUND_MS = 2000;
+  const off: Verdict = { kind: "off", source: "default" };
+  const on: Verdict = { kind: "on", source: "settings" };
+  const unverified: Verdict = { kind: "unverified", reason: REASON_NO_SECRET };
+
+  it("off-box + off → 403, the named refusal header and the exact JSON-RPC body", async () => {
+    await boot({ verdict: off, peer: "off-box" });
+    const r = await hit("POST", "/mcp", {}, undefined, REFUSAL_BOUND_MS);
+    assert.equal(r.status, 403);
+    assert.equal(r.headers["content-type"], "application/json");
+    assert.equal(r.headers["x-trinity-refusal"], "external_mcp_access_off");
+    assert.deepEqual(JSON.parse(r.body), { jsonrpc: "2.0", error: { code: -32003, message: OFF_MESSAGE }, id: null });
+    assert.match(OFF_MESSAGE, /Settings → MCP Keys → External MCP access/);
+    assert.equal(seen.length, 0, "never reached the inner listener");
+  });
+
+  it("off-box + unverified → 503 + Retry-After: 5, naming the reason", async () => {
+    await boot({ verdict: unverified, peer: "off-box" });
+    const r = await hit("POST", "/mcp", {}, undefined, REFUSAL_BOUND_MS);
+    assert.equal(r.status, 503);
+    assert.equal(r.headers["retry-after"], "5");
+    assert.equal(r.headers["x-trinity-refusal"], "external_mcp_access_unverified");
+    assert.match(JSON.parse(r.body).error.message, /INTERNAL_API_SECRET is not set/);
+    assert.equal(seen.length, 0);
+  });
+
+  it("on-box + off → passes (agents are never asked)", async () => {
+    await boot({ verdict: off, peer: "on-box" });
+    assert.equal((await hit("POST", "/mcp")).status, 200);
+    assert.equal(seen.length, 1);
+  });
+
+  it("off-box + on → passes", async () => {
+    await boot({ verdict: on, peer: "off-box" });
+    assert.equal((await hit("POST", "/mcp")).status, 200);
+    assert.equal(seen[0]?.url, "/mcp");
+  });
+
+  it("DELETE passes while off (a client may clean its session up after a toggle-off)", async () => {
+    await boot({ verdict: off, peer: "off-box" });
+    assert.equal((await hit("DELETE", "/mcp", { "mcp-session-id": "x" })).status, 200);
+    assert.equal(seen[0]?.method, "DELETE");
+  });
+
+  it("is an allowlist on the PARSED path: everything off-box is refused except GET/HEAD on the health path and DELETE on /mcp", async () => {
+    await boot({ verdict: off, peer: "off-box" });
+    const refused: Array<[string, string, Record<string, string>?]> = [
+      ["GET", "/mcp", { accept: "text/event-stream" }],
+      ["POST", "/mcp/sub"],
+      ["POST", "/mcp?x=1"],
+      ["POST", "/mcpx"],
+      ["POST", "/sse"],
+      ["GET", "/sse"],
+      ["POST", "/messages?sessionId=x"],
+      ["POST", "/x/../mcp"],
+      ["POST", "/./mcp"],
+      ["POST", "/%2e/mcp"],
+      ["POST", "http://127.0.0.1/mcp"],
+      ["POST", "//evil/mcp"],
+      ["POST", "/health"],
+      ["POST", "/health/../mcp"],
+      ["DELETE", "/mcpx"],
+      ["DELETE", "/mcp/sub"],
+      ["GET", "/ping"],
+      ["OPTIONS", "/mcp"],
+      ["GET", "/"],
+    ];
+    for (const [method, path, headers] of refused) {
+      const r = await hit(method, path, headers, undefined, REFUSAL_BOUND_MS);
+      assert.equal(r.status, 403, `${method} ${path} → ${r.status}`);
+      assert.equal(r.headers["x-trinity-refusal"], "external_mcp_access_off", `${method} ${path}`);
+    }
+    assert.equal(seen.length, 0, "none reached the inner listener");
+    assert.equal((await hit("GET", "/health")).status, 200);
+    assert.equal((await hit("HEAD", "/health")).status, 200);
+    assert.equal((await hit("GET", "/health?probe=1")).status, 200, "the query is not part of the path");
+    assert.equal((await hit("DELETE", "/mcp", { "mcp-session-id": "x" })).status, 200);
+    assert.equal((await hit("DELETE", "/x/../mcp", { "mcp-session-id": "x" })).status, 200, "DELETE is decided on the parsed path too");
+    assert.equal(seen.length, 5);
+  });
+
+  it("an unparsable request target is refused, never forwarded", () => {
+    // Node's parser lets these through to the listener; WHATWG URL does not parse them.
+    for (const target of ["http://[::1/mcp", "http://a:b@/mcp"]) {
+      assert.equal(parsedPath(target), undefined, target);
+      assert.equal(offBoxAlwaysOpen("DELETE", target), false, target);
+      assert.equal(offBoxAlwaysOpen("GET", target), false, target);
+    }
+    assert.equal(parsedPath("/x/../mcp"), "/mcp");
+    assert.equal(parsedPath("/%2e/mcp"), "/mcp");
+    assert.equal(parsedPath("http://h/mcp?x=1"), "/mcp");
+    assert.equal(parsedPath(undefined), "/");
+    assert.equal(offBoxAlwaysOpen("GET", "/health"), true);
+    assert.equal(offBoxAlwaysOpen("HEAD", "/health"), true);
+    assert.equal(offBoxAlwaysOpen("POST", "/health"), false);
+    assert.equal(offBoxAlwaysOpen("DELETE", "/mcp"), true);
+    assert.equal(offBoxAlwaysOpen("DELETE", "/mcp/"), false);
+    assert.equal(offBoxAlwaysOpen("POST", "/mcp"), false);
+    assert.equal(offBoxAlwaysOpen(undefined, "/health"), false);
+  });
+
+  it("strips an incoming x-trinity-peer-class and sets its own on the forwarded request", async () => {
+    await boot({ verdict: on, peer: "off-box" });
+    await hit("POST", "/mcp", { [PEER_CLASS_HEADER]: "on-box" });
+    assert.equal(seen[0].headers[PEER_CLASS_HEADER], "off-box");
+    const rawNames = seen[0].raw.filter((_, i) => i % 2 === 0).map((n) => n.toLowerCase());
+    assert.equal(rawNames.filter((n) => n === PEER_CLASS_HEADER).length, 1, "exactly one copy");
+    seen.length = 0;
+    await hit("GET", "/health");
+    assert.equal(seen[0].headers[PEER_CLASS_HEADER], "off-box", "stamped on every forwarded request");
+  });
+
+  it("the listener is captured with secret '' too: the gate runs without session revival", async () => {
+    const front = await boot({ secret: "", verdict: off, peer: "off-box" });
+    assert.equal(front.active, false);
+    assert.equal((await hit("POST", "/mcp")).status, 403);
+    assert.equal((await hit("GET", "/health")).status, 200);
+  });
+
+  it("a stale cache waits for the verdict and still delivers the body to the inner listener", async () => {
+    let resolveVerdict!: (v: Verdict) => void;
+    await boot({ verdict: () => undefined, peer: "off-box", asyncVerdict: () => new Promise<Verdict>((r) => (resolveVerdict = r)) });
+    const pending = hit("POST", "/mcp", {}, '{"jsonrpc":"2.0","id":7,"method":"ping"}');
+    await new Promise((r) => setTimeout(r, 50));
+    assert.equal(seen.length, 0, "held until the verdict arrives");
+    resolveVerdict(on);
+    assert.equal((await pending).status, 200);
+    assert.equal(seen[0].body, '{"jsonrpc":"2.0","id":7,"method":"ping"}');
+    const refused = hit("POST", "/mcp");
+    await new Promise((r) => setTimeout(r, 20));
+    resolveVerdict(off);
+    assert.equal((await refused).status, 403);
+  });
+
+  it("a failed listener capture refuses to start", async () => {
+    await assert.rejects(
+      startWithSessionFront(async () => {
+        srv = http.createServer(); // no request listener to wrap
+      }, { secret: SECRET, host: "127.0.0.1", port: 0, externalAccess: alwaysOn }),
+      /refusing to serve \/mcp without the external-access gate/
+    );
+    await assert.rejects(
+      startWithSessionFront(async () => {}, { secret: SECRET, host: "127.0.0.1", port: 0, externalAccess: alwaysOn }),
+      /could not wrap the MCP HTTP listener/
+    );
   });
 });

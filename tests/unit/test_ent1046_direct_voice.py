@@ -811,6 +811,7 @@ class _DoorSocket:
     def __init__(self):
         self.closed = None
         self.accepted = False
+        self.frames = []
 
     async def close(self, code=None, reason=None):
         self.closed = code
@@ -818,9 +819,11 @@ class _DoorSocket:
     async def accept(self):
         self.accepted = True
 
+    async def send_json(self, frame):
+        self.frames.append(frame)
+
 
 def _knock(monkeypatch, *, session_user, caller_id, caller_role="user"):
-    import dependencies
     from routers import voice as door
 
     dvs._local_sessions.clear()
@@ -835,13 +838,17 @@ def _knock(monkeypatch, *, session_user, caller_id, caller_role="user"):
     monkeypatch.setattr(dvs, "run_bridge", bridge)
     from services import docker_service
     monkeypatch.setattr(docker_service, "get_agent_runtime", lambda name: "claude-code")
-    import jose.jwt
-    monkeypatch.setattr(jose.jwt, "decode", lambda *a, **k: {"sub": "someone", "jti": "j"})
-    monkeypatch.setattr(dependencies, "is_token_revoked", lambda jti: False)
-    monkeypatch.setattr(dependencies, "session_predates_user_revoke", lambda payload: False)
-    monkeypatch.setattr(door.db, "get_user_by_username", lambda u: {"id": caller_id, "role": caller_role, "username": u})
+    from models import User
+
+    # trinity-enterprise#595: the door authenticates the accepted socket's
+    # first-frame ticket; the Direct branch receives the resolved `User`.
+    async def authenticated(_ws, voice_session_id):
+        assert voice_session_id == session.session_id
+        return User(id=caller_id, username="someone", email=None, role=caller_role)
+
+    monkeypatch.setattr(door, "authenticate_voice_socket", authenticated)
     socket = _DoorSocket()
-    asyncio.run(door.voice_websocket(socket, session.session_id, token="t"))
+    asyncio.run(door.voice_websocket(socket, session.session_id))
     return socket, ran, session
 
 
@@ -850,11 +857,14 @@ def test_the_owner_reaches_the_bridge_with_the_real_stream_and_runtime(monkeypat
     from client_portal.router import direct_call_stream
     assert socket.accepted and ran[0][0] == session.session_id
     assert ran[0][1] == {"stream_attach": direct_call_stream, "runtime": "claude-code"}
+    # The microphone starts only on this, so it must precede the bridge.
+    assert socket.frames == [{"type": "auth_ok"}]
 
 
 def test_an_admin_cannot_attach_to_someone_elses_direct_call(monkeypatch):
     socket, ran, _ = _knock(monkeypatch, session_user=7, caller_id=1, caller_role="admin")
-    assert socket.closed == 4003 and not socket.accepted and ran == []
+    assert socket.closed == 4003 and ran == []
+    assert {"type": "auth_ok"} not in socket.frames
 
 
 def _stream_route(monkeypatch, voice_call_id, *, is_platform=True, joins=True):
@@ -1051,10 +1061,25 @@ def test_the_start_route_hands_the_requested_mode_to_the_call(monkeypatch):
     monkeypatch.setattr(rate_limiter, "enforce", lambda *a, **k: None)
     monkeypatch.setattr(router, "resolve_platform_user_unfloored", fake_user)
     monkeypatch.setattr(workspace_voice, "start_workspace_voice", fake_start)
+    monkeypatch.setattr(router, "require_interactive", lambda user: user)
+    from services import voice_auth_service
+
+    async def fake_ticket(user, voice_session_id, *, origin, remove_session):
+        seen["ticket_for"] = voice_session_id
+        seen["remove_session"] = remove_session
+        return {"websocket_ticket": "T" * 43, "websocket_ticket_expires_in": 30}
+
+    monkeypatch.setattr(voice_auth_service, "issue_voice_ticket", fake_ticket)
     out = asyncio.run(router.portal_voice_start(
         "scout", PortalVoiceStartRequest(portal_session_id="ps1", mode="direct"),
-        request=MagicMock(), principal=PortalPrincipal("alice@example.com", True), token="t"))
+        request=MagicMock(), response=MagicMock(headers={}),
+        principal=PortalPrincipal("alice@example.com", True), token="t"))
     assert seen["mode"] == "direct" and out.mode == "direct"
+    # trinity-enterprise#595: a Direct call gets its ticket too, and a ticket-store
+    # failure removes the session from the Direct store, not the realtime one.
+    assert seen["ticket_for"] == "vd_x" and out.websocket_ticket == "T" * 43
+    from services.gemini_voice import voice_service
+    assert seen["remove_session"] != voice_service.remove_session
 
 
 def test_the_roster_carries_the_direct_voice_capability(monkeypatch):

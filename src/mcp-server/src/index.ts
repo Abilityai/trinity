@@ -7,6 +7,7 @@
 import { createServer } from "./server.js";
 import { startExposedToolsReconciler } from "./tools/dynamic-agents.js";
 import { startWithSessionFront } from "./session-front.js";
+import { ExternalAccessGate } from "./external-access.js";
 
 async function main() {
   console.log("Starting Trinity MCP Server...\n");
@@ -40,6 +41,14 @@ async function main() {
       // Bind to 0.0.0.0 to allow connections from outside the container
       const host = process.env.MCP_HOST || "0.0.0.0";
       console.log(`Starting HTTP stream server on ${host}:${port}...`);
+      // ent#1101: off-box /mcp is refused while external MCP access is off.
+      // The backend is the sole resolver; the verdict is pre-fetched (bounded
+      // retry) so the first off-box request after boot is answered, not held.
+      const externalAccess = new ExternalAccessGate({
+        trinityApiUrl,
+        internalSecret: process.env.INTERNAL_API_SECRET || "",
+      });
+      await externalAccess.prefetch();
       // #4060: keyed sessions survive a restart. Awaited so the listener
       // capture window closes before anything else creates an HTTP server.
       const front = await startWithSessionFront(
@@ -51,7 +60,7 @@ async function main() {
               host,
             },
           }),
-        { secret: process.env.INTERNAL_API_SECRET || "", host, port }
+        { secret: process.env.INTERNAL_API_SECRET || "", host, port, externalAccess }
       );
       // A reaped inner session is forgotten, so its key's next request revives it.
       server.on("disconnect", (event: any) => front.innerClosed(event?.session?.sessionId));

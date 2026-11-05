@@ -30,7 +30,7 @@ import httpx
 from sqlalchemy.exc import IntegrityError
 
 from database import db
-from services import agent_env_patch
+from services import agent_env_patch, agent_env_read
 from services.agent_auth import agent_httpx_client
 from services.credential_paths import disallowed_paths
 from services.docker_service import get_agent_container, get_agent_status_from_container
@@ -555,9 +555,23 @@ def _agent_unreachable(what: str) -> DelegationError:
     )
 
 
+def _env_unreadable(reason: str) -> DelegationError:
+    return DelegationError(
+        409, "env_unreadable",
+        f"The agent's credential file could not be read as text ({reason}), so it was left "
+        "exactly as it is and nothing was changed: the Nevermined mandate is untouched. "
+        "Ask whoever runs the agent to check its .env file.",
+    )
+
+
 async def _read_agent_env(client: httpx.AsyncClient, agent_name: str) -> str:
-    """The agent's current `.env` text (missing file ⇒ ""). Held in memory for
-    the patch only — never logged."""
+    """The agent's current `.env` text, or "" ONLY when the agent proved there is
+    no file. Held in memory for the patch only — never logged.
+
+    The write that follows replaces the whole file, so a file the agent did not
+    hand back as text — non-UTF-8 bytes, a read error, or an image too old to
+    say "absent" — is refused (`env_unreadable`), never treated as empty: that
+    deleted every other credential on the agent (trinity-enterprise#1073)."""
     response = await client.get(
         f"http://agent-{agent_name}:8000/api/credentials/read", params={"paths": ".env"},
     )
@@ -568,10 +582,12 @@ async def _read_agent_env(client: httpx.AsyncClient, agent_name: str) -> str:
             "the Nevermined mandate is untouched and nothing was bound.",
         )
     try:
-        content = response.json().get("files", {}).get(".env")
-    except (ValueError, AttributeError):
+        state, content = agent_env_read.classify_env_read(response.json())
+    except ValueError:
         raise _agent_unreachable("unreadable read response") from None
-    return content if isinstance(content, str) else ""
+    if state in (agent_env_read.TEXT, agent_env_read.ABSENT):
+        return content
+    raise _env_unreadable(state)
 
 
 async def _inject_agent_env(client: httpx.AsyncClient, agent_name: str, env_text: str) -> None:
@@ -772,6 +788,11 @@ REVOKE_NOTE_AGENT_UNREACHABLE = (
     "the organization's agent key stays in the agent's .env until the next bind rewrites it "
     "or you remove it"
 )
+REVOKE_NOTE_ENV_UNREADABLE = (
+    "env_unreadable — the Nevermined mandate is revoked and the delegation id is inert; "
+    "the agent's .env could not be read as text, so it was left exactly as it is and its "
+    "Nevermined lines stay until you remove them"
+)
 REVOKE_NOTE_CONCURRENT = (
     "already_revoked — the Nevermined mandate was already revoked by a concurrent request"
 )
@@ -847,9 +868,14 @@ async def revoke_delegation(agent_name: str, *, actor: str, revoked_by: str) -> 
         except (DelegationError, httpx.HTTPError) as exc:
             logger.warning(
                 "Nevermined delegation revoke for %s by %s: env removal failed (%s)",
-                agent_name, actor, type(exc).__name__,
+                agent_name, actor, getattr(exc, "code", None) or type(exc).__name__,
             )
-            env_note = REVOKE_NOTE_AGENT_UNREACHABLE
+            # trinity-enterprise#1073: the revoke itself stands (stopping a
+            # mandate must never wait on the agent's file); an unreadable file is
+            # left untouched and said so, not reported as an unreachable agent.
+            env_note = (REVOKE_NOTE_ENV_UNREADABLE
+                        if getattr(exc, "code", None) == "env_unreadable"
+                        else REVOKE_NOTE_AGENT_UNREACHABLE)
 
     logger.info(
         "Nevermined delegation revoked for %s by %s (env_removed=%s, agent_key_removed=%s)",

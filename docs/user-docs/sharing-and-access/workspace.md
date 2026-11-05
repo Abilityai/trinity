@@ -172,7 +172,7 @@ Clicking an agent no longer opens a report about it. Its numbers sit in a band u
 | **Suggested for you** | What is waiting on you and what you could do next — see [Suggestions](#suggestions). Platform users only |
 | **Role** | Shown when the agent has a seat on record, a canon, or a role declared in its template — see [The role card](#the-role-card) |
 | **Your chats** | The full list, unread counts included — Main shows as **Current conversation**, archived chats in grey |
-| **What it can do** | Capability cards; clicking one pre-fills the composer |
+| **What it can do** | Capability cards, each with its skill's description (or **No description yet**); clicking one pre-fills the composer. An agent exposing no skills shows its template's use cases here as **What you can ask** instead, and an agent that could not be reached says so rather than showing an empty list |
 | **Reports** | Structured reports the agent has published; expand one to read it — see [Agent Reports](../operations/agent-reports.md) |
 | **What it remembers about you** | The agent's notes about you, and a **Changes** list of the runs that rewrote them, with **Undo** |
 | **Decisions** | The seat's decision record — see [Decisions](#decisions) |
@@ -287,7 +287,7 @@ The open rail carries a small **shortcut tips** panel at its foot with the most-
 
 Workspace surfaces the agents already shared with a person's email — there is no separate access list. To give a client agents, share each one with their email using the normal [agent sharing](agent-sharing.md) and [access control](access-control.md) model; remove the share to revoke access.
 
-Capability cards come from the agent's exposed skills where an operator has configured them, and otherwise from the `use_cases` in its template — so what a client sees you can shape without touching Workspace itself. The model an external client's turns run on is the one set for the agent's public channels on its **Sharing** tab, falling back to the platform default.
+Capability cards come from the agent's exposed skills where an operator has configured them, and otherwise from the `use_cases` in its template (shown as **What you can ask**) — so what a client sees you can shape without touching Workspace itself. A card's description is the skill's `SKILL.md` `description:`, the one place a capability is described ([Skill frontmatter](../automation/skills-and-playbooks.md#skill-frontmatter-and-dependency-checks)). The model an external client's turns run on is the one set for the agent's public channels on its **Sharing** tab, falling back to the platform default.
 
 ## For Agents
 

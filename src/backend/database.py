@@ -68,6 +68,7 @@ from db_models import (
     EmailWhitelistAdd,
     EmailLoginRequest,
     EmailLoginVerify,
+    EmailLoginHandoff,
     EmailLoginResponse,
     # Agent Notifications (NOTIF-001)
     NotificationCreate,
@@ -167,6 +168,7 @@ from db.compatibility import CompatibilityOperations
 from db.metric_definitions import MetricDefinitionOperations
 from db.metric_points import MetricPointOperations
 from db.sync_state import SyncStateOperations
+from db.terms import TermsOperations  # trinity-enterprise#1107 terms acceptances
 from db.idempotency import IdempotencyOperations
 from db.loops import LoopOperations
 
@@ -1095,6 +1097,7 @@ class DatabaseManager:
         self._sync_state_ops = SyncStateOperations()  # #389 sync health
         self._idempotency_ops = IdempotencyOperations()  # RELIABILITY-006, #525
         self._loop_ops = LoopOperations()  # #740 sequential agent loops
+        self._terms_ops = TermsOperations()  # trinity-enterprise#1107 terms acceptances
 
     # =========================================================================
     # User Management (delegated to db/users.py)
@@ -1459,6 +1462,13 @@ class DatabaseManager:
     def set_guardrails_config(self, agent_name: str, config: dict = None) -> bool:
         return self._agent_ops.set_guardrails_config(agent_name, config)
 
+    # Tool access (GUARD-008, trinity-enterprise#341)
+    def get_tool_access_row(self, agent_name: str):
+        return self._agent_ops.get_tool_access_row(agent_name)
+
+    def write_tool_access_row(self, agent_name: str, **kwargs) -> bool:
+        return self._agent_ops.write_tool_access_row(agent_name, **kwargs)
+
     # =========================================================================
     # Parallel Capacity (delegated to db/agents.py) - CAPACITY-001
     # =========================================================================
@@ -1783,8 +1793,10 @@ class DatabaseManager:
         """#1745: activate/deactivate an agent's per-agent MCP keys."""
         return self._mcp_key_ops.set_agent_keys_active(agent_name, active)
 
-    def deactivate_orphaned_agent_keys(self) -> int:
-        """#1745: deactivate per-agent keys whose agent is no longer live."""
+    def deactivate_orphaned_agent_keys(self) -> List[str]:
+        """#1745: deactivate per-agent keys whose agent is no longer live;
+        returns the agents whose keys were revoked (#4259 skips keys still
+        inside the start-up grace window)."""
         return self._mcp_key_ops.deactivate_orphaned_agent_keys()
 
     def delete_agent_mcp_api_key(self, agent_name: str):
@@ -4208,6 +4220,23 @@ class DatabaseManager:
         # trinity-enterprise#747: link a pending ask to its discussion chat, once.
         return self._operator_queue_ops.set_discussion_link(item_id, key, chat_id)
 
+    def read_operator_queue_address(self, item_id):
+        # trinity-enterprise#1095: one row's address columns as stored (raw).
+        return self._operator_queue_ops.read_address(item_id)
+
+    def list_pending_role_addressed_operator_queue_items(self, agent_name, to_role):
+        # trinity-enterprise#1095: the pending rows a role change moves — an
+        # allowlist (the agent's raises, gated-skill approvals), raw address.
+        return self._operator_queue_ops.list_pending_role_addressed(agent_name, to_role)
+
+    def readdress_operator_queue_item(self, item_id, people, single, *, expect_single,
+                                      expect_resolved_raw, context=None, expect_context_raw=None):
+        # trinity-enterprise#1095: rewrite a pending row's audience under CAS.
+        return self._operator_queue_ops.readdress(
+            item_id, people, single, expect_single=expect_single,
+            expect_resolved_raw=expect_resolved_raw, context=context,
+            expect_context_raw=expect_context_raw)
+
     def bulk_cancel_operator_queue_items(self, ids, accessible_agent_names=None, *,
                                          disposed_by_email, reason=None):
         # trinity-enterprise#611: returns {"batch_id", "rows"} — the rows THIS
@@ -4240,6 +4269,16 @@ class DatabaseManager:
 
     def set_operator_queue_delivery_state(self, item_id, state, detail, now):
         return self._operator_queue_ops.set_delivery_state(item_id, state, detail, now)
+
+    # abilityai/trinity-enterprise#1108 AC #4 — the answer wake's status
+    def set_operator_queue_wake_state(self, item_id, state):
+        return self._operator_queue_ops.set_wake_state(item_id, state)
+
+    def list_operator_queue_pending_wakes(self, agent_name):
+        return self._operator_queue_ops.list_pending_wakes_for_agent(agent_name)
+
+    def mark_operator_queue_wakes_woken(self, agent_name, request_ids):
+        return self._operator_queue_ops.mark_wakes_woken(agent_name, request_ids)
 
     def mark_operator_queue_unconfirmed(self, detail, now, agent_name=None, exclude_agents=None,
                                         exclude_request_id_prefixes=None):
@@ -4703,6 +4742,32 @@ class DatabaseManager:
 
     def list_due_loops(self, now: str, *, limit: int = 100):
         return self._loop_ops.list_due_loops(now, limit=limit)
+
+
+    # =========================================================================
+    # Terms acceptances (trinity-enterprise#1107 — delegated to db/terms.py)
+    # =========================================================================
+
+    def insert_terms_acceptance(self, user_id, email, terms_version: str, accepted_at: str,
+                                *, door=None, actor_ip=None):
+        return self._terms_ops.insert_terms_acceptance(
+            user_id, email, terms_version, accepted_at, door=door, actor_ip=actor_ip
+        )
+
+    def get_terms_acceptance(self, user_id: int, terms_version: str):
+        return self._terms_ops.get_terms_acceptance(user_id, terms_version)
+
+    def get_terms_acceptance_by_email(self, email: str, terms_version: str):
+        return self._terms_ops.get_terms_acceptance_by_email(email, terms_version)
+
+    def terms_acceptances_for_user(self, user_id: int):
+        return self._terms_ops.terms_acceptances_for_user(user_id)
+
+    def terms_acceptances_for_email(self, email: str):
+        return self._terms_ops.terms_acceptances_for_email(email)
+
+    def list_terms_acceptances(self, limit: int = 200):
+        return self._terms_ops.list_terms_acceptances(limit)
 
 
 # Global database manager instance
