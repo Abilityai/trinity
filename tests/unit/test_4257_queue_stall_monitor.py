@@ -238,9 +238,18 @@ class _Stubs:
         self.alerts.clear.return_value = 1
 
 
-def _run(stubs, *, pilot=True, threshold=30, max_parallel=3, now=_NOW):
+def _run(stubs, *, pilot=True, threshold=30, max_parallel=3, now=_NOW,
+         active_slots=None):
+    """Drive one tick. `active_slots=None` leaves the slot meter unreadable
+    (no Redis in the unit island); an int stands the meter up at that count."""
     database = MagicMock()
     database.db = stubs.db
+    if active_slots is None:
+        slots = {"side_effect": RuntimeError("no redis in the unit island")}
+    else:
+        service = MagicMock()
+        service.active_slot_count.return_value = active_slots
+        slots = {"return_value": service}
     with patch.dict(sys.modules, {"database": database}), \
             patch.object(qss, "threshold_minutes", return_value=threshold), \
             patch("services.platform_alerts.observe", stubs.alerts.observe), \
@@ -248,9 +257,74 @@ def _run(stubs, *, pilot=True, threshold=30, max_parallel=3, now=_NOW):
             patch("services.pull_pilot.is_pull_pilot_agent", return_value=pilot), \
             patch("services.settings_service.get_effective_max_parallel_tasks",
                   return_value=max_parallel), \
-            patch("services.slot_service.get_slot_service",
-                  side_effect=RuntimeError("no redis in the unit island")):
+            patch("services.slot_service.get_slot_service", **slots):
         return qss.run_once(now=now)
+
+
+# --- the push-agent meter is read, not assumed (#4257 review I1) ------------
+
+
+def test_a_push_agent_at_capacity_is_capacity_not_a_missing_drain():
+    """A push agent with a full meter and a long turn is NOT a stalled drain.
+
+    `max_parallel=1` and one slot held is the ordinary shape of a long
+    execution (timeouts run to hours). Calling that `backlog_drain` tells the
+    operator the backend owes a dispatch it does not owe — and a high-priority
+    alert that fires on healthy agents trains them to ignore the kind.
+    """
+    stubs = _Stubs([_head(minutes_ago=45)])
+
+    _run(stubs, pilot=False, max_parallel=1, active_slots=1)
+
+    ctx = stubs.alerts.observe.call_args[1]["context"]
+    assert ctx["wait_reason"] == qss.WAIT_CAPACITY
+
+
+def test_a_push_agent_with_a_free_slot_is_still_a_drain_that_has_not_landed():
+    """The real stall on the push side: room to run and a row still queued."""
+    stubs = _Stubs([_head(minutes_ago=45)])
+
+    _run(stubs, pilot=False, max_parallel=3, active_slots=1)
+
+    ctx = stubs.alerts.observe.call_args[1]["context"]
+    assert ctx["wait_reason"] == qss.WAIT_BACKLOG_DRAIN
+
+
+def test_an_unreadable_meter_keeps_the_reading_it_had_before():
+    """No meter is not evidence of capacity. With Redis down the dispatch path
+    is down too, so the drain reading stands rather than inventing a full
+    pool — and the tick still files on age alone."""
+    stubs = _Stubs([_head(minutes_ago=45)])
+
+    summary = _run(stubs, pilot=False, max_parallel=1, active_slots=None)
+
+    assert summary["observed"] == 1
+    ctx = stubs.alerts.observe.call_args[1]["context"]
+    assert ctx["wait_reason"] == qss.WAIT_BACKLOG_DRAIN
+
+
+def test_the_pilot_path_never_asks_the_slot_meter():
+    """A pilot's queue is claimed by its own workers; the backend slot meter is
+    disjoint from those rows by construction (#1766), so reading it would be a
+    wrong answer, not a slow one."""
+    stubs = _Stubs([_head(minutes_ago=45)])
+    service = MagicMock()
+    service.active_slot_count.return_value = 99
+    database = MagicMock()
+    database.db = stubs.db
+    with patch.dict(sys.modules, {"database": database}), \
+            patch.object(qss, "threshold_minutes", return_value=30), \
+            patch("services.platform_alerts.observe", stubs.alerts.observe), \
+            patch("services.platform_alerts.clear", stubs.alerts.clear), \
+            patch("services.pull_pilot.is_pull_pilot_agent", return_value=True), \
+            patch("services.settings_service.get_effective_max_parallel_tasks",
+                  return_value=3), \
+            patch("services.slot_service.get_slot_service", return_value=service):
+        qss.run_once(now=_NOW)
+
+    service.active_slot_count.assert_not_called()
+    assert (stubs.alerts.observe.call_args[1]["context"]["wait_reason"]
+            == qss.WAIT_WORKER_CLAIM)
 
 
 def test_run_once_files_one_alert_for_a_stalled_head():

@@ -237,6 +237,19 @@ def _redis_age_seconds(redis, key: str, now: datetime) -> Optional[int]:
         return None
 
 
+def _active_slots(agent_name: str) -> Optional[int]:
+    """Slots the agent is holding right now, or None when the meter is
+    unreadable. The same ZSET `CapacityManager.acquire` admits against."""
+    try:
+        from services.slot_service import get_slot_service
+
+        return int(get_slot_service().active_slot_count(agent_name))
+    except Exception:  # noqa: BLE001 — the caller keeps its prior reading
+        logger.debug("[#4257] could not read the slot meter for %s",
+                     agent_name, exc_info=True)
+        return None
+
+
 def _redis_counter(redis, key: str) -> int:
     try:
         raw = redis.get(key)
@@ -412,6 +425,23 @@ def _enrich(head: Dict[str, Any], *, redis, now: datetime) -> Dict[str, Any]:
             head_conversation_running = key in set(
                 db.agents_with_running_conversation(agent)
             )
+    # The push answer comes from the meter, never from an assumption. A push
+    # agent with `max_parallel=1` and a legitimately long turn (timeouts run to
+    # hours) keeps a row queued past the threshold with the meter full: that is
+    # `capacity`, an expected wait, and calling it `backlog_drain` tells the
+    # operator the backend owes a dispatch it does not owe. A row still queued
+    # a full tick after admission refused it *with a slot now free* is the real
+    # drain miss — the backend's own job there, unlike on a pilot where it has
+    # none by design (#1766). An unreadable meter keeps the drain reading: no
+    # meter is not evidence of a full pool, and with Redis down the dispatch
+    # path is down with it. The pilot branch never asks — the slot meter is
+    # disjoint from pilot rows by construction, so it would be a wrong answer
+    # rather than a slow one.
+    slot_free = True
+    if not is_pilot:
+        active = _active_slots(agent)
+        if active is not None:
+            slot_free = active < max(max_parallel, 1)
     head["is_pilot"] = is_pilot
     head["leased_running"] = leased_running
     head["max_parallel"] = max_parallel
@@ -420,14 +450,7 @@ def _enrich(head: Dict[str, Any], *, redis, now: datetime) -> Dict[str, Any]:
         leased_running=leased_running,
         max_parallel=max_parallel,
         head_conversation_running=head_conversation_running,
-        # A push agent's row that is STILL queued a full tick after admission
-        # refused it is a drain that has not landed — the backend's own job
-        # there, unlike on a pilot where it has none by design (#1766). The
-        # receipt reads the same row as `capacity`, because at admission the
-        # meter had just refused it; both are true at their own instant. The
-        # physical lease count is disjoint from push rows by construction, so
-        # it is deliberately not the push answer here either.
-        slot_free=True,
+        slot_free=slot_free,
     )
     if redis is not None:
         head["last_worker_poll_age_seconds"] = _redis_age_seconds(
