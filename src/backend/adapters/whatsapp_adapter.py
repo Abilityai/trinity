@@ -40,6 +40,13 @@ logger = logging.getLogger(__name__)
 # Twilio's message body limit for WhatsApp
 TWILIO_WHATSAPP_MAX_LENGTH = 1600
 
+# The most text `_markdown_to_whatsapp` runs its regexes over. Agent replies
+# reach it uncapped (message_router, proactive delivery), and it runs
+# synchronously on the event loop. Sized to the largest response the platform
+# accepts anywhere -- routers/agents.py::_MAX_CALLBACK_RESPONSE_CHARS -- so no
+# real reply is affected; anything past it is passed through unconverted.
+_MARKDOWN_CONVERSION_MAX_CHARS = 4_000_000
+
 # Twilio REST API base (outbound send)
 TWILIO_API_BASE = "https://api.twilio.com"
 
@@ -948,14 +955,28 @@ class WhatsAppAdapter(ChannelAdapter):
 
         Conversion order matters: bold runs before italic so that **x** isn't
         mis-parsed as two *italic* tokens.
+
+        Every rule here must stay linear in the text length: this runs on the
+        event loop over replies of any size (trinity-enterprise#1117).
         """
         if not text:
             return text
+        tail = ""
+        if len(text) > _MARKDOWN_CONVERSION_MAX_CHARS:
+            text, tail = text[:_MARKDOWN_CONVERSION_MAX_CHARS], text[_MARKDOWN_CONVERSION_MAX_CHARS:]
         try:
-            # Strip headers (# Title, ## Section, ### Sub) → bold line
-            text = re.sub(r'^[ \t]*#{1,6}[ \t]+(.+?)\s*$', r'*\1*', text, flags=re.MULTILINE)
-            # Markdown links → "text (url)"
-            text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'\1 (\2)', text)
+            # Strip headers (# Title, ## Section, ### Sub) → bold line.
+            # The title starts and ends on a non-space, so the trailing `\s*`
+            # never competes with it for the same whitespace (a lazy `.+?` here
+            # re-tried `\s*$` at every step: quadratic in the line length).
+            text = re.sub(r'^[ \t]*#{1,6}[ \t]+(\S(?:.*\S)?)\s*$', r'*\1*', text, flags=re.MULTILINE)
+            # Markdown links → "text (url)".
+            # Text: no brackets, so each `[` scans only to the next bracket.
+            # URL: anything but `)`, brackets included (`http://[::1]:8000/`,
+            # `?filter[]=a`), except the `](` that starts the next link -- so a
+            # link with no closing `)` stops at the next link instead of
+            # re-scanning to the end of the text once per link (quadratic).
+            text = re.sub(r'\[([^\[\]]+)\]\(((?:[^\])]|\]+[^\]()])+\]*|\]+)\)', r'\1 (\2)', text)
             # Bold: **x** or __x__ → *x*  (must come before italic)
             text = re.sub(r'\*\*(.+?)\*\*', r'*\1*', text)
             text = re.sub(r'__(.+?)__', r'*\1*', text)
@@ -965,10 +986,10 @@ class WhatsAppAdapter(ChannelAdapter):
             # compromise — see feature-flows/whatsapp-integration.md.
             # Strikethrough: ~~x~~ → ~x~
             text = re.sub(r'~~(.+?)~~', r'~\1~', text)
-            return text
+            return text + tail
         except Exception as e:
             logger.debug("[WHATSAPP] markdown conversion failed, passing through: %s", e)
-            return text
+            return text + tail
 
     @staticmethod
     def _split_message(text: str) -> List[str]:
