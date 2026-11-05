@@ -121,6 +121,42 @@ def _pull_authorized(request: Request, agent_name: str) -> bool:
     return heartbeat_service.authorize_heartbeat(_validated_agent_key(request), agent_name)
 
 
+_CLAIM_DENIED_NOTED: set = set()
+
+
+def _note_claim_denied(agent_name: str) -> None:
+    """Count a refused `/next-task` claim for this agent (#4257).
+
+    Best-effort: a Redis failure must never change the answer the caller gets,
+    and the counter is observability only. The WARNING is once per agent per
+    process — the refusal repeats every poll (≤15 s), and a log line per poll
+    would bury the one thing worth reading.
+    """
+    try:
+        from services.pull_pilot import (
+            PULL_CLAIM_DENIED_KEY_PREFIX,
+            PULL_CLAIM_DENIED_TTL_SECONDS,
+        )
+        from services.slot_service import get_slot_service
+
+        key = f"{PULL_CLAIM_DENIED_KEY_PREFIX}{agent_name}"
+        redis = get_slot_service().redis
+        redis.incr(key)
+        redis.expire(key, PULL_CLAIM_DENIED_TTL_SECONDS)
+    except Exception:  # noqa: BLE001
+        logger.debug("[#4257] could not count a denied claim for %s",
+                     agent_name, exc_info=True)
+    if agent_name not in _CLAIM_DENIED_NOTED:
+        _CLAIM_DENIED_NOTED.add(agent_name)
+        logger.warning(
+            "[#4257] refusing pull claims for '%s' — it is not in "
+            "PULL_MODE_PILOT_AGENTS, or its key does not authorize it. Its "
+            "queued rows will not move until this agrees with the container's "
+            "TRINITY_PULL_MODE (logged once per process)",
+            agent_name,
+        )
+
+
 # =============================================================================
 # Pull / work-stealing coordination (#1081 Phase 2)
 # =============================================================================
@@ -149,6 +185,14 @@ async def internal_next_task(request: Request, agent_name: str, worker_id: str):
     chosen so a drained poll and a real claim are one unambiguous 200 shape).
     """
     if not _pull_authorized(request, agent_name):
+        # #4257: the backend is the party that ISSUED this refusal, and the
+        # worker swallows it — `pull_worker._claim_once` treats any non-200 as
+        # "queue empty" and goes back to sleep. So a disagreement between
+        # `PULL_MODE_PILOT_AGENTS` here and the container's `TRINITY_PULL_MODE`
+        # parks every row silently, with a live pool that B-08 reads as healthy.
+        # Count it where it happens, so the stall alert can say "alive and being
+        # turned away" rather than only "nothing has run".
+        _note_claim_denied(agent_name)
         raise HTTPException(status_code=403, detail=_PULL_AUTH_DENIED)
 
     from services import pull_coordination_service

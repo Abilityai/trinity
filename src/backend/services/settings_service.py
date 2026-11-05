@@ -1519,6 +1519,50 @@ def get_max_parallel_tasks_ceiling() -> int:
 
 
 # ============================================================================
+# Queue stall alert threshold (#4257 — how long a queued head may wait)
+# ============================================================================
+
+QUEUE_STALL_ALERT_MINUTES_KEY = "queue_stall_alert_minutes"
+QUEUE_STALL_ALERT_MINUTES_DEFAULT = 30
+QUEUE_STALL_ALERT_MINUTES_MIN = 5
+QUEUE_STALL_ALERT_MINUTES_MAX = 1440
+
+
+def get_queue_stall_alert_minutes() -> int:
+    """How long an agent's oldest queued row may wait before an alert (#4257).
+
+    Default 30 minutes, matching the stall rule dispatching agents already
+    apply on their own side. Stored in the generic ``system_settings`` key/value
+    store (no migration, the #506 precedent), so the value comes back as a
+    string and is parsed to int.
+
+    Clamped to ``[MIN, MAX]`` rather than defaulted, for the #506 reason: this
+    getter is the single read-through, and a stray ``0`` would make every tick
+    file an alert for a row queued one second ago, while a huge value would
+    silence the monitor entirely. A garbage or absent value falls back to the
+    code default. Read-through every call — the backend runs two workers, and a
+    cache would let one keep an old threshold after an admin changed it.
+    """
+    try:
+        raw = settings_service.get_setting(QUEUE_STALL_ALERT_MINUTES_KEY)
+    except Exception:  # noqa: BLE001
+        # Fail-open: a settings read failure must never break the 60 s sweep
+        # this is read from.
+        return QUEUE_STALL_ALERT_MINUTES_DEFAULT
+    if raw is None:
+        return QUEUE_STALL_ALERT_MINUTES_DEFAULT
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        return QUEUE_STALL_ALERT_MINUTES_DEFAULT
+    if parsed < QUEUE_STALL_ALERT_MINUTES_MIN:
+        return QUEUE_STALL_ALERT_MINUTES_MIN
+    if parsed > QUEUE_STALL_ALERT_MINUTES_MAX:
+        return QUEUE_STALL_ALERT_MINUTES_MAX
+    return parsed
+
+
+# ============================================================================
 # Proactive channel-message rate limits (#1609)
 # ============================================================================
 #
