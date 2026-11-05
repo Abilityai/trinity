@@ -224,6 +224,17 @@ export interface AgentTemplateInfo {
   skills?: string[];
   use_cases?: string[];
   status?: "running" | "stopped";
+  /**
+   * ent#1102: whether a delegated run's ending wakes this agent, and which
+   * layer decided — the standing policy behind a receipt's `wake` field.
+   * `source`: "agent" (the owner's own tri-state), "legacy_resume" (ent#329's
+   * pre-tri-state opt-in), "instance" (the instance default) or "unreadable"
+   * (fail-closed: the flag could not be read, so no turn is spent).
+   */
+  wake_on_ending?: {
+    effective: boolean;
+    source: "agent" | "legacy_resume" | "instance" | "unreadable";
+  };
 }
 
 // SSH Access Types
