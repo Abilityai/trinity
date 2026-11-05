@@ -469,6 +469,20 @@ async def update_setting(
             ),
         )
 
+    # trinity-enterprise#1101: the external-MCP-access switch moves the
+    # instance's perimeter, so it has one write path — the typed, audited
+    # route — and the catch-all cannot store a value it would not validate.
+    from services.settings_service import MCP_EXTERNAL_ACCESS_KEY
+
+    if key == MCP_EXTERNAL_ACCESS_KEY:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} must be set via PUT /api/settings/mcp-external-access "
+                "(admin, boolean, audit-logged)"
+            ),
+        )
+
     if key == "a2a_trusted_networks":
         raise HTTPException(
             status_code=422,

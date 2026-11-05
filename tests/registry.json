@@ -8319,6 +8319,18 @@
         "workspace"
       ],
       "description": "#4157: Portal.vue holds the 409 hand-off in the auth store only (never URL or storage); Login.vue redeems it once at /api/auth/email/handoff and lands on the redirect, still shows 2FA, and falls back to the filled code form when refused or after a reload."
+    },
+    {
+      "file": "unit/test_ent1101_external_mcp_access.py",
+      "feature": "abilityai/trinity-enterprise#1101",
+      "added": "2026-11-05",
+      "categories": [
+        "backend",
+        "settings",
+        "mcp",
+        "unit"
+      ],
+      "description": "External MCP access switch, backend half: the resolver (Settings row wins both directions, MCP_EXTERNAL_ACCESS env opt-in, default off, the tier named, read failure falls to env/default); GET/PUT/DELETE /api/settings/mcp-external-access on the real composed settings router (any-auth read with env_value and advertised URL, admin write and clear audited, non-admin and admin-owned agent keys refused, non-boolean 422, the generic PUT catch-all refuses the key); feature-flags carries mcp_external_access_enabled; GET /api/internal/mcp-external-access behind the internal secret; the advertised default URL (any forwarded scheme -> same origin, MCP_BIND_ADDRESS set -> host-local raw port, unset -> today's); ConnectorStatus.external_access."
     }
   ]
 }

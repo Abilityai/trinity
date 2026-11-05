@@ -30,6 +30,7 @@ from models import (
     GitHubTemplatesUpdate,
     TemplateRegistryUpdate,
     MaxParallelTasksCeilingUpdate,
+    McpExternalAccessUpdate,
     McpUrlUpdate,
     OpsSettingsUpdate,
     RetentionAcknowledge,
@@ -47,6 +48,8 @@ from services import operator_intake_service, telemetry_sharing_service
 
 # Import from settings_service (these are re-exported for backward compatibility)
 from services.settings_service import (
+    MCP_EXTERNAL_ACCESS_KEY,
+    get_mcp_external_access_env_value,
     get_anthropic_api_key,
     get_github_pat,
     get_google_api_key,
@@ -119,15 +122,23 @@ PUBLIC_CHAT_URL_SETTING_KEY = "public_chat_url"
 def _get_default_mcp_url(request: Request) -> str:
     """Compute the auto-detected MCP URL from the request hostname.
 
-    Behind an HTTPS proxy (`X-Forwarded-Proto: https`, read by
-    `public_base_url`) the proxy serves `/mcp` on the same origin, so the URL is
-    `https://<host>/mcp` with no `:8080` (#2907). The hostname is the `Host`
-    header: the frontend nginx forwards the client's `$host`, and no other
-    route trusts `X-Forwarded-Host`.
+    A request carrying `X-Forwarded-Proto` came through the bundled nginx
+    (which always sets it) or an operator's proxy, and that proxy serves
+    `/mcp` on the same origin — so the URL is `<origin>/mcp` with no `:8080`,
+    whatever the scheme (#2907 for https; trinity-enterprise#1101 for http,
+    where a loopback-bound raw port would otherwise be advertised to a client
+    that cannot reach it). The origin comes from `public_base_url`; the
+    hostname is the `Host` header, and no route trusts `X-Forwarded-Host`.
+
+    No forwarded header (a direct `:8000` hit) → the raw port. With
+    `MCP_BIND_ADDRESS` set it is published on that address only, so the honest
+    URL is the host-local one; unset keeps every interface, and today's URL.
     """
     origin = public_base_url(request)
-    if origin.startswith("https://"):
+    if origin and (request.headers.get("x-forwarded-proto") or origin.startswith("https://")):
         return f"{origin}/mcp"
+    if os.getenv("MCP_BIND_ADDRESS", "").strip():
+        return "http://127.0.0.1:8080/mcp"
     host = request.headers.get("host", "localhost:8080")
     hostname = host.split(":")[0]
     if hostname in ("localhost", "127.0.0.1"):
@@ -261,3 +272,81 @@ async def delete_mcp_url(
         "deleted": deleted,
         "message": "MCP server URL reset to auto-detect"
     }
+
+
+# ---------------------------------------------------------------------------
+# External MCP access (trinity-enterprise#1101)
+# ---------------------------------------------------------------------------
+
+def _mcp_external_access_state(request: Request) -> Dict[str, Any]:
+    enabled, source = settings_service.is_mcp_external_access_enabled()
+    return {
+        "enabled": enabled,
+        "source": source,
+        "env_value": get_mcp_external_access_env_value(),
+        "advertised_url": resolve_mcp_url(request),
+        "raw_port_bind_address": os.getenv("MCP_BIND_ADDRESS", "").strip() or None,
+    }
+
+
+async def _audit_mcp_external_access(request: Request, current_user: User, action: str, enabled=None):
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="settings_change",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        endpoint=request.scope["path"],
+        request_id=getattr(request.state, "request_id", None),
+        details={"setting": MCP_EXTERNAL_ACCESS_KEY, "action": action, "enabled": enabled},
+    )
+
+
+@router.get("/mcp-external-access")
+async def get_mcp_external_access(
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Whether off-box clients may reach `/mcp`, which tier decided, and the
+    URL the instance advertises.
+
+    Any authenticated user, like `GET /mcp-url`: the MCP Keys page is not
+    admin-only, and the answer is on/off plus where it came from. `env_value`
+    lets the page say an environment value exists even when the Settings row
+    overrides it; `raw_port_bind_address` is the `MCP_BIND_ADDRESS` the raw
+    `:8080` port is published on (None = every interface).
+    """
+    return _mcp_external_access_state(request)
+
+
+@router.put("/mcp-external-access")
+async def update_mcp_external_access(
+    body: McpExternalAccessUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Turn external MCP access on or off for the whole instance.
+
+    Admin-only (`assert_admin` refuses agent keys, #1890). The Settings row wins
+    over `MCP_EXTERNAL_ACCESS` in both directions until cleared. Agents are
+    never affected. Audit-logged: this moves the instance's perimeter.
+    """
+    assert_admin(current_user)
+
+    db.set_setting(MCP_EXTERNAL_ACCESS_KEY, "true" if body.enabled else "false")
+    await _audit_mcp_external_access(request, current_user, "set", body.enabled)
+    return _mcp_external_access_state(request)
+
+
+@router.delete("/mcp-external-access")
+async def delete_mcp_external_access(
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Clear the Settings row so `MCP_EXTERNAL_ACCESS`, else the default
+    (off), decides. Admin-only, audit-logged when a row was removed."""
+    assert_admin(current_user)
+
+    if db.delete_setting(MCP_EXTERNAL_ACCESS_KEY):
+        await _audit_mcp_external_access(request, current_user, "clear")
+    return _mcp_external_access_state(request)

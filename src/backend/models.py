@@ -2410,6 +2410,13 @@ class ConnectorPlaybook(BaseModel):
     automation: Optional[str] = None
 
 
+class McpExternalAccessStatus(BaseModel):
+    """Whether off-box clients may reach /mcp, and which tier decided
+    (`settings` | `environment` | `default`) — trinity-enterprise#1101."""
+    enabled: bool = False
+    source: str = "default"
+
+
 class ConnectorStatus(BaseModel):
     """Response for GET .../connector (owner view)."""
     agent_name: str
@@ -2425,6 +2432,9 @@ class ConnectorStatus(BaseModel):
     # `keyless_snippets` is the no-key config (empty when the flag is off).
     inline_auth_available: bool = False
     keyless_snippets: List[ConnectorClientSnippet] = Field(default_factory=list)
+    # trinity-enterprise#1101: when off, the connection config above does not
+    # answer from outside the box — the UI says so instead of offering it.
+    external_access: McpExternalAccessStatus = Field(default_factory=McpExternalAccessStatus)
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -4780,6 +4790,11 @@ class AAuthSettingsUpdate(BaseModel):
 class McpUrlUpdate(BaseModel):
     """Request body for updating the MCP server URL."""
     url: str
+
+
+class McpExternalAccessUpdate(BaseModel):
+    """Request body for PUT /api/settings/mcp-external-access (trinity-enterprise#1101)."""
+    enabled: StrictBool
 
 
 class AgentQuotaUpdate(BaseModel):

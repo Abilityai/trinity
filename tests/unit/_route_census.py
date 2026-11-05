@@ -1143,6 +1143,11 @@ AGENT_CALLABLE_ANY: Dict[str, Tuple[str, str, str]] = {
         _SIB_READ + " — one boolean"),
     # The autonomy dial (ent#641): the instance ceiling a companion reads to tell a person
     # why it asks first. The write is the GRANT (PUT /api/settings/autonomy-dial, admin + interactive).
+    # trinity-enterprise#1101: the external-MCP-access state the MCP Keys page reads (on/off, the
+    # tier that decided, the advertised URL). The write (PUT/DELETE) is admin-tier.
+    "routers/settings/mcp_url.py::get_mcp_external_access": (
+        "GET /api/settings/mcp-external-access", "ent#1101 status read beside GET /mcp-url; reading the switch is not a grant",
+        _SIB_NO_AGENT + ": one instance-wide switch"),
     "routers/settings/autonomy_dial.py::get_autonomy_dial": (
         "GET /api/settings/autonomy-dial", "ent#641 read of the instance ceiling; reading the level is not a grant",
         _SIB_NO_AGENT + ": one instance-wide level"),
@@ -1171,6 +1176,7 @@ OWN_AUTH: Dict[str, Tuple[str, str]] = {
     "routers/internal.py::internal_next_task": ("GET /api/internal/next-task", _PULL),
     "routers/internal.py::internal_task_result": ("POST /api/internal/tasks/{execution_id}/result", _PULL),
     "routers/internal.py::log_audit_entry": ("POST /api/internal/audit", _SECRET),
+    "routers/internal.py::mcp_external_access": ("GET /api/internal/mcp-external-access", _SECRET),
     "routers/internal.py::mcp_exposed_agents": ("GET /api/internal/mcp-exposed-agents", _SECRET),
     "routers/internal.py::validate_execution": ("POST /api/internal/validate-execution", _SECRET),
     "routers/setup.py::get_setup_status": ("GET /api/setup/status", "unauthenticated by design (first-run status)"),
