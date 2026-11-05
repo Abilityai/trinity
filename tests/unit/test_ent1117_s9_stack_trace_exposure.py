@@ -453,3 +453,189 @@ def test_agent_auth_status_500_detail_carries_no_raw_message(sub_env, monkeypatc
     assert SENTINEL not in ei.value.detail
     assert "RuntimeError" in ei.value.detail
     assert SENTINEL in _log_text(caplog)
+
+
+# ---------------------------------------------------------------------------
+# #347 #348 #390 (+ #4284) routers/settings/credentials.py
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def cr(monkeypatch):
+    mod = _live("routers.settings.credentials")
+    monkeypatch.setattr(mod, "assert_admin", lambda user, **kw: None)
+    monkeypatch.setattr(mod, "platform_audit_service", MagicMock(log=AsyncMock()))
+    return mod
+
+
+def _request():
+    r = MagicMock()
+    r.client.host = "127.0.0.1"
+    r.scope = {"path": "/api/settings/x"}
+    return r
+
+
+def _assert_clean(text: str, held: str | None = None):
+    assert SENTINEL not in text, text
+    if held:
+        assert held not in text, text
+    assert "RuntimeError" in text, text
+
+
+def _assert_logged(caplog, held: str | None = None):
+    logs = _log_text(caplog)
+    assert SENTINEL in logs, "the detail must reach the backend log"
+    if held:
+        assert held not in logs, "the credential must be masked in the log"
+
+
+def test_anthropic_key_test_error_carries_no_raw_message_or_key(cr, monkeypatch, caplog):
+    monkeypatch.setattr(cr.httpx, "AsyncClient", _RaisingHttpx(RuntimeError(f"{SENTINEL} {ANTHROPIC_KEY}")))
+    caplog.set_level(logging.WARNING)
+    out = _run(cr.test_anthropic_key(
+        body=cr.ApiKeyTest(api_key=f" {ANTHROPIC_KEY} "), request=_request(), current_user=_admin()))
+    assert out["valid"] is False
+    assert out["error"].startswith("Error testing key")
+    _assert_clean(_blob(out), ANTHROPIC_KEY)
+    _assert_logged(caplog, ANTHROPIC_KEY)
+
+
+def test_github_pat_test_error_carries_no_raw_message_or_pat(cr, monkeypatch, caplog):
+    monkeypatch.setattr(cr.httpx, "AsyncClient", _RaisingHttpx(RuntimeError(f"{SENTINEL} Bearer {GITHUB_PAT}")))
+    caplog.set_level(logging.WARNING)
+    out = _run(cr.test_github_pat(
+        body=cr.ApiKeyTest(api_key=GITHUB_PAT), request=_request(), current_user=_admin()))
+    assert out["valid"] is False
+    assert out["error"].startswith("Error testing token")
+    _assert_clean(_blob(out), GITHUB_PAT)
+    _assert_logged(caplog, GITHUB_PAT)
+
+
+def test_github_pat_propagation_error_keeps_the_key_and_drops_the_text(cr, monkeypatch, caplog):
+    monkeypatch.setattr(cr, "set_secret_setting", lambda k, v: None)
+    prop = _live("services.github_pat_propagation_service")
+
+    async def _boom(key):
+        raise RuntimeError(f"{SENTINEL} https://x-access-token:{GITHUB_PAT}@github.com/o/r")
+
+    monkeypatch.setattr(prop, "propagate_github_pat", _boom)
+    caplog.set_level(logging.WARNING)
+
+    out = _run(cr.update_github_pat(
+        body=cr.ApiKeyUpdate(api_key=GITHUB_PAT), request=_request(), current_user=_admin()))
+
+    assert out["success"] is True
+    # Settings.vue renders "PAT saved, but propagation failed: {{ error }}" when
+    # `propagation.error` is truthy — the key must stay.
+    assert out["propagation"]["error"]
+    _assert_clean(_blob(out), GITHUB_PAT)
+    _assert_logged(caplog, GITHUB_PAT)
+
+
+def _raise(*a, **k):
+    raise RuntimeError(SENTINEL)
+
+
+def _raise_with(held):
+    def _f(*a, **k):
+        raise RuntimeError(f"{SENTINEL} {held}")
+    return _f
+
+
+def _case_api_keys_status(cr, monkeypatch):
+    monkeypatch.setattr(cr, "get_anthropic_api_key", _raise)
+    return cr.get_api_keys_status(request=_request(), current_user=_admin()), None, "Failed to get API keys status"
+
+
+def _case_update_anthropic(cr, monkeypatch):
+    monkeypatch.setattr(cr, "is_claude_auth_configured", lambda: True)
+    monkeypatch.setattr(cr, "set_secret_setting", _raise_with(ANTHROPIC_KEY))
+    body = cr.ApiKeyUpdate(api_key=ANTHROPIC_KEY)
+    return cr.update_anthropic_key(body=body, request=_request(), current_user=_admin()), ANTHROPIC_KEY, "Failed to update API key"
+
+
+def _case_delete_anthropic(cr, monkeypatch):
+    monkeypatch.setattr(cr, "clear_secret_setting", _raise)
+    return cr.delete_anthropic_key(request=_request(), current_user=_admin()), None, "Failed to delete API key"
+
+
+def _case_update_github(cr, monkeypatch):
+    monkeypatch.setattr(cr, "set_secret_setting", _raise_with(GITHUB_PAT))
+    body = cr.ApiKeyUpdate(api_key=GITHUB_PAT)
+    return cr.update_github_pat(body=body, request=_request(), current_user=_admin()), GITHUB_PAT, "Failed to update GitHub PAT"
+
+
+def _case_delete_github(cr, monkeypatch):
+    monkeypatch.setattr(cr, "clear_secret_setting", _raise)
+    return cr.delete_github_pat(request=_request(), current_user=_admin()), None, "Failed to delete GitHub PAT"
+
+
+def _case_get_slack(cr, monkeypatch):
+    ss = _live("services.settings_service")
+    monkeypatch.setattr(ss, "get_slack_client_id", _raise)
+    return cr.get_slack_settings_status(request=_request(), current_user=_admin()), None, "Failed to get Slack settings"
+
+
+def _case_update_slack(cr, monkeypatch):
+    monkeypatch.setattr(cr, "db", MagicMock())
+    monkeypatch.setattr(cr, "set_secret_setting", _raise_with(f"{SLACK_SECRET} {SLACK_SIGNING}"))
+    body = cr.SlackSettingsUpdate(client_secret=SLACK_SECRET, signing_secret=SLACK_SIGNING)
+    return cr.update_slack_settings(body=body, request=_request(), current_user=_admin()), SLACK_SECRET, "Failed to update Slack settings"
+
+
+def _case_delete_slack(cr, monkeypatch):
+    monkeypatch.setattr(cr, "db", MagicMock(delete_setting=_raise))
+    return cr.delete_slack_settings(request=_request(), current_user=_admin()), None, "Failed to delete Slack settings"
+
+
+def _case_connect_slack(cr, monkeypatch):
+    monkeypatch.setattr(cr, "set_secret_setting", lambda k, v: None)
+    ss = _live("services.settings_service")
+    monkeypatch.setattr(ss, "get_slack_transport_mode", lambda: "socket")
+    monkeypatch.setattr(ss, "get_slack_app_token", lambda: SLACK_APP_TOKEN)
+    for name in ("adapters.slack_adapter", "adapters.message_router", "adapters.transports.slack_socket"):
+        fake = types.ModuleType(name)
+        monkeypatch.setitem(sys.modules, name, fake)
+    sys.modules["adapters.slack_adapter"].SlackAdapter = MagicMock
+    sys.modules["adapters.message_router"].message_router = MagicMock()
+
+    class _Transport:
+        def __init__(self, *a):
+            pass
+
+        async def start(self):
+            raise RuntimeError(f"{SENTINEL} {SLACK_APP_TOKEN}")
+
+    sys.modules["adapters.transports.slack_socket"].SlackSocketTransport = _Transport
+    request = _request()
+    request.app.state = SimpleNamespace(slack_transport=None)
+    body = cr.SlackConnectRequest(app_token=SLACK_APP_TOKEN)
+    return cr.connect_slack_transport(request=request, body=body, current_user=_admin()), SLACK_APP_TOKEN, "Failed to connect"
+
+
+@pytest.mark.parametrize("case", [
+    _case_api_keys_status, _case_update_anthropic, _case_delete_anthropic,
+    _case_update_github, _case_delete_github, _case_get_slack,
+    _case_update_slack, _case_delete_slack, _case_connect_slack,
+], ids=lambda f: f.__name__[len("_case_"):])
+def test_settings_credentials_500_detail_carries_no_raw_message(cr, monkeypatch, caplog, case):
+    coro, held, prefix = case(cr, monkeypatch)
+    caplog.set_level(logging.WARNING)
+
+    with pytest.raises(HTTPException) as ei:
+        _run(coro)
+
+    assert ei.value.status_code == 500
+    detail = str(ei.value.detail)
+    assert detail.startswith(prefix), detail
+    _assert_clean(detail, held)
+    _assert_logged(caplog, held)
+    if held == SLACK_SECRET:
+        assert SLACK_SIGNING not in _log_text(caplog)
+
+
+def test_update_anthropic_key_format_refusal_is_untouched(cr, monkeypatch):
+    """A deliberate 400 domain message still passes through as written."""
+    with pytest.raises(HTTPException) as ei:
+        _run(cr.update_anthropic_key(
+            body=cr.ApiKeyUpdate(api_key="not-a-key"), request=_request(), current_user=_admin()))
+    assert ei.value.status_code == 400
