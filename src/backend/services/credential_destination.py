@@ -254,4 +254,7 @@ def public_view(destination: Optional[Mapping[str, Any]]) -> Optional[Dict[str, 
 
 
 def plain_words(destination: Mapping[str, Any]) -> str:
-    return f"your agent {destination.get('agent_name')} on your Trinity at {host_of(destination)}"
+    """"the agent X on the Trinity at host" — never "your": nothing on this
+    instance ties the host to the person reading the sentence; the admin's
+    registry is what ties it to the platform."""
+    return f"the agent {destination.get('agent_name')} on the Trinity at {host_of(destination)}"

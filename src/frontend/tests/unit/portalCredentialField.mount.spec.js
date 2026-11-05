@@ -112,11 +112,20 @@ describe('PortalAsks renders a credential ask as the secret field', () => {
   it('says where the value lands when the ask carries a destination', () => {
     const w = mountAsks([credentialAsk({ credential_destination: { agent_name: 'lopez-digest', host: 'member.example.com' } })])
     expect(tid(w, 'portal-ask-destination-c1').text()).toBe('lopez-digest')
-    expect(tid(w, 'portal-ask-asker-c1').text()).toContain('for your agent lopez-digest on your Trinity at member.example.com')
     const caption = tid(w, 'portal-credential-caption-c1').text()
-    expect(caption).toContain('Sent to your agent lopez-digest on your Trinity at member.example.com')
+    expect(caption).toContain('Sent to the agent lopez-digest on the Trinity at member.example.com')
     expect(caption).toContain('Nothing is kept here after delivery')
     expect(w.text()).not.toContain('MEMBER_KEY')
+  })
+
+  // The PortalAsks sentence itself: "the agent … on the Trinity at …" — never
+  // "your". Nothing on this instance ties the host to the person reading it;
+  // an admin's endpoint registry ties it to the platform (ent#1109 review).
+  it('the card names the agent and the host as the Trinity at <host>, never as yours', () => {
+    const w = mountAsks([credentialAsk({ credential_destination: { agent_name: 'lopez-digest', host: 'member.example.com' } })])
+    const sentence = tid(w, 'portal-ask-asker-c1').text().replace(/\s+/g, ' ')
+    expect(sentence).toContain('for the agent lopez-digest on the Trinity at member.example.com')
+    expect(w.text()).not.toMatch(/your agent|your Trinity/)
   })
 
   it('without a destination the card and the caption read as before', () => {

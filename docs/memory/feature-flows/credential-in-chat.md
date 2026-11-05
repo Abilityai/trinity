@@ -46,7 +46,7 @@ agent ──ask_for_credential(name, why, destination={instance_url, agent_name,
               agent: a slug; key_env: a variable NAME the policy allows) → stored normalised
         receipt + Workspace projection: credential_destination {agent_name, host} — never key_env
 
-person's field: "Sent to your agent lopez-digest on your Trinity at member.example.com …"
+person's field: "Sent to the agent lopez-digest on the Trinity at member.example.com …"  (never "your")
         Send ─▶ provide_credential  (destination read from the STORED row, never the request)
              └─ credential_sink.set_env_value(..., destination)
                   stage_secret (fail closed)
@@ -60,7 +60,7 @@ person's field: "Sent to your agent lopez-digest on your Trinity at member.examp
                     may_have_written), destination_key_refused (401/403), destination_agent_missing (404),
                     destination_refused (other) — all 409, ask pending, value in no log/audit/message
              └─ ask_service.answer(response="provided", via_credential_sink=True)
-                  └─ wake: "NAME was delivered to your agent X on your Trinity at host; it is not in
+                  └─ wake: "NAME was delivered to the agent X on the Trinity at host; it is not in
                      your environment"
 receiving instance: POST /api/agents/{name}/credentials/inject mode "merge"
         require_person (a user-scoped key is a person) → credential_sink.merge_env_values

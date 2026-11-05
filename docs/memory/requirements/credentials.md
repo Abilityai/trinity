@@ -369,7 +369,9 @@ AES-256-GCM envelopes. What changed is how git *reads* one.
     `destination_key_env_invalid`, each with a `reason`); a destination on any
     other ask kind is refused (`destination_on_non_credential`).
   - The person sees the same masked field, with the destination in plain words
-    ("for your agent lopez-digest on your Trinity at hub.example.com"): the
+    ("for the agent lopez-digest on the Trinity at hub.example.com" — never
+    "your": nothing here ties the host to the person; the admin's registry ties
+    it to the platform): the
     Workspace projection carries `credential_destination: {agent_name, host}` —
     never the key's name. The agent's receipt carries the same view.
   - On Send the sink (`services/credential_sink.py`) stages the value in the

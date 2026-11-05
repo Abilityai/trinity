@@ -55,7 +55,7 @@
     </div>
     <p class="mt-1 text-xs" :data-testid="`${prefix}-caption-${ask.id}`">
       <template v-if="destination">
-        Sent to your agent {{ destination.agent_name }} on your Trinity at {{ destination.host }} and stored there as {{ name }}. Nothing is kept here after delivery; it never appears in the chat, and the agent that asked is only told it was delivered.
+        Sent to the agent {{ destination.agent_name }} on the Trinity at {{ destination.host }} and stored there as {{ name }}. Nothing is kept here after delivery; it never appears in the chat, and the agent that asked is only told it was delivered.
       </template>
       <template v-else>
         Stored on the agent as {{ name }}. It never appears in the chat, and the agent is only told it was provided.
@@ -106,7 +106,7 @@ const COPY = {
   asks_unavailable: 'Asks are unavailable right now, so nothing was stored. Try again in a minute.',
   // trinity-enterprise#1109: a delivery to another Trinity that did not land —
   // each a plain retry; the server's own sentence names the host.
-  destination_key_missing: "The agent that asked doesn't hold a key to your Trinity yet, so nothing was stored. Once it does, send the value again.",
+  destination_key_missing: "The agent that asked doesn't hold a key to that Trinity yet, so nothing was stored. Once it does, send the value again.",
 }
 
 function refusalCopy(err) {
