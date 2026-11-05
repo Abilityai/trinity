@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 # The share field is free text, and this module makes it a recipient: one plain
 # address only, or a list or a header could ride on one quota slot.
-_SINGLE_ADDRESS = re.compile(r"""[^@\s,;:<>()\[\]"']+@[^@\s,;:<>()\[\]"']+\.[^@\s,;:<>()\[\]"'.]+""")
+_NOT_IN_AN_ADDRESS = re.compile(r"""[@\s,;:<>()\[\]"']""")
 
 SENT = "sent"
 INVALID_ADDRESS = "invalid_address"
@@ -58,7 +58,11 @@ class InviteRefused(Exception):
 
 
 def is_single_address(email: str) -> bool:
-    return bool(_SINGLE_ADDRESS.fullmatch(email or ""))
+    local, _, domain = (email or "").partition("@")
+    host, _, tld = domain.rpartition(".")
+    if not (local and host and tld):
+        return False
+    return not (_NOT_IN_AN_ADDRESS.search(local) or _NOT_IN_AN_ADDRESS.search(domain))
 
 
 def _email_sign_in_enabled() -> bool:

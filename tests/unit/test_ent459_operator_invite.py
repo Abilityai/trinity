@@ -234,6 +234,10 @@ class TestOneAddressOnly:
         rows = world.client.get(f"/api/agents/{world.agent}/access", headers=world.headers(world.owner)).json()
         assert {r["email"]: r["invite_available"] for r in rows}["a@x.com,b@y.com"] is False
 
+    @pytest.mark.parametrize("email", ["", "@x.com", "a@", "a@.com", "a@x.", "a@x", "a@b@c.com", "a b@x.com", "a@x.com\nBcc:b@y.com"])
+    def test_not_a_single_address(self, world, email):
+        assert not world.svc.is_single_address(email)
+
     @pytest.mark.parametrize("email", ["pat@example.com", "pat.o+tag@sub.example.co.uk", "o_k-1@example.io"])
     def test_a_real_address_passes(self, world, email):
         assert world.svc.is_single_address(email)
