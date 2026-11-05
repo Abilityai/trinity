@@ -26,8 +26,16 @@ saw it, and reading that as an opt-out would silence the entire pre-upgrade
 fleet. Those owners are covered by the instance default and can say "off" again
 through the tri-state, where the answer is distinguishable.
 
-Fail-closed: an unreadable flag or an empty agent name resolves to OFF. Never
-spend a turn on a flag you could not read (the ent#329 rule).
+Fail-closed: an empty agent name, or ANY of the three reads raising, resolves to
+OFF. Never spend a turn on a flag you could not read (the ent#329 rule) — which
+includes the instance default, whose read is as fallible as the other two.
+
+The reads go through the module-level ``db``, never a function-local import. A
+local import binds whatever ``sys.modules`` holds at CALL time and is invisible
+to a test that substitutes its own ``db`` on the module under test, so the four
+gates this resolver replaced lost their opt-out and fail-closed coverage the
+moment they started calling it (the stale-fake class, found by the ent#1102
+sweep). One module attribute means one place to point at.
 """
 
 from __future__ import annotations
@@ -35,6 +43,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from typing import Optional
+
+from database import db
 
 logger = logging.getLogger(__name__)
 
@@ -73,16 +83,17 @@ class WakeVerdict:
 
 
 def instance_default() -> bool:
-    """The instance-wide default, ON unless an admin wrote otherwise."""
-    from database import db
+    """The instance-wide default, ON unless an admin wrote otherwise.
 
-    try:
-        raw = db.get_setting_value(
-            SETTING_DEFAULT, default="true" if INSTANCE_DEFAULT_ON else "false"
-        )
-    except Exception:  # noqa: BLE001 — an unreadable setting falls back, never raises
-        logger.warning("wake_policy: %s unreadable; using the built-in default", SETTING_DEFAULT)
-        return INSTANCE_DEFAULT_ON
+    Raises if the setting cannot be READ. ``resolve`` turns that into OFF — the
+    unreadable-flag rule, which is about the read failing and not about what the
+    value says. A setting that reads fine but says something unrecognised is a
+    different case and falls back to the built-in default below: ruling D4 is
+    the policy for an absent or malformed VALUE, never for a broken read.
+    """
+    raw = db.get_setting_value(
+        SETTING_DEFAULT, default="true" if INSTANCE_DEFAULT_ON else "false"
+    )
     text = str(raw if raw is not None else "").strip().lower()
     if text in _TRUE:
         return True
@@ -101,8 +112,6 @@ def resolve(agent_name: Optional[str]) -> WakeVerdict:
     if not agent_name:
         return WakeVerdict(enabled=False, source=SOURCE_UNREADABLE)
 
-    from database import db
-
     try:
         override = db.get_wake_on_ending(agent_name)
     except Exception:  # noqa: BLE001
@@ -117,9 +126,24 @@ def resolve(agent_name: Optional[str]) -> WakeVerdict:
     try:
         legacy_optin = db.get_operator_resume_enabled(agent_name)
     except Exception:  # noqa: BLE001
-        legacy_optin = False
+        # Fail CLOSED, like the read above it. This path used to swallow the
+        # error and carry on to an instance default of ON, i.e. a read failure
+        # became a billed turn — the exact trade the docstring above forbids.
+        logger.warning(
+            "wake_policy: operator_resume_enabled unreadable for %s; resolving OFF",
+            agent_name,
+        )
+        return WakeVerdict(enabled=False, source=SOURCE_UNREADABLE)
 
     if legacy_optin:
         return WakeVerdict(enabled=True, source=SOURCE_LEGACY_RESUME)
 
-    return WakeVerdict(enabled=instance_default(), source=SOURCE_INSTANCE)
+    try:
+        default_on = instance_default()
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "wake_policy: %s unreadable; resolving OFF for %s", SETTING_DEFAULT, agent_name
+        )
+        return WakeVerdict(enabled=False, source=SOURCE_UNREADABLE)
+
+    return WakeVerdict(enabled=default_on, source=SOURCE_INSTANCE)

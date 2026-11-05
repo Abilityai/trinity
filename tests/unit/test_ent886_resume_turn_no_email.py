@@ -87,6 +87,17 @@ def _install(monkeypatch):
 
     monkeypatch.setitem(sys.modules, "database", SimpleNamespace(
         db=SimpleNamespace(get_operator_resume_enabled=lambda name: True)))
+    # ent#1102: the opt-in is decided by `wake_policy.resolve`, which binds its
+    # `db` at import — a module swapped into `sys.modules` afterwards never
+    # reaches it. Point the resolver at the same opted-in agent explicitly, so
+    # these tests say what they mean instead of depending on whatever the real
+    # unit-island database happens to answer.
+    import services.wake_policy as wake_policy
+    monkeypatch.setattr(wake_policy, "db", SimpleNamespace(
+        get_wake_on_ending=lambda name: None,
+        get_operator_resume_enabled=lambda name: True,
+        get_setting_value=lambda key, default=None: default,
+    ))
     _mod("services.idempotency_service", SimpleNamespace(
         begin=lambda scope, key: SimpleNamespace(replay=False, in_flight=False),
         complete=lambda *a, **k: None, fail=lambda *a, **k: None,

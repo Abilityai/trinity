@@ -52,7 +52,13 @@ def seeded_db(tmp_path, monkeypatch):
         )
         """
     )
-    conn.execute("CREATE TABLE system_settings (key TEXT PRIMARY KEY, value TEXT)")
+    # `updated_at` is part of the real table (db/tables.py), so the column
+    # has to be here for the instance-default read to SUCCEED and answer
+    # "no row": a read that raises now resolves OFF (fail-closed), which
+    # would make this fixture, not the policy, decide the verdict.
+    conn.execute(
+        "CREATE TABLE system_settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)"
+    )
     conn.execute(
         "INSERT INTO agent_ownership (agent_name, owner_id, created_at) "
         "VALUES ('alpha', 1, '2026-01-01T00:00:00Z')"

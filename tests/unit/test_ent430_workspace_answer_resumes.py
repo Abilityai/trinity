@@ -29,13 +29,42 @@ def asks():
     return m
 
 
+class _PolicyDb:
+    """What `wake_policy.resolve` reads (ent#1102).
+
+    The fakes in this file speak the ent#329 vocabulary, and the opt-in is now
+    decided by the resolver, which reads through its OWN module-level `db`. So
+    the resolver is pointed at a view of the same fake: the tri-state read
+    defers to the fake when it has an opinion and answers "no opinion"
+    otherwise, and the instance-default read answers "no row" so the built-in
+    default (ON, ruling D4) applies. Without this the fakes do not reach the
+    decision at all and these tests pin nothing.
+    """
+
+    def __init__(self, fake):
+        self._fake = fake
+
+    def get_wake_on_ending(self, agent_name):
+        getter = getattr(self._fake, "get_wake_on_ending", None)
+        return getter(agent_name) if getter else None
+
+    def get_operator_resume_enabled(self, agent_name):
+        return self._fake.get_operator_resume_enabled(agent_name)
+
+    def get_setting_value(self, key, default=None):
+        return default
+
+
 def _stub_db(monkeypatch, asks, fake):
     """trinity-enterprise#611: `answer_ask` reads through its own `db` and ends
     the ask through the ask sink, which writes and reads the opt-in through ITS
-    `db` — one stub for both, or the answer lands in the real unit DB."""
+    `db` — one stub for both, or the answer lands in the real unit DB.
+    ent#1102: and the resolver reads through a third, so it gets the fake too."""
     import services.ask_service as sink
+    import services.wake_policy as wake_policy
     monkeypatch.setattr(asks, "db", fake, raising=False)
     monkeypatch.setattr(sink, "db", fake)
+    monkeypatch.setattr(wake_policy, "db", _PolicyDb(fake))
 
 
 ITEM = {
@@ -189,7 +218,12 @@ def test_the_response_says_whether_a_resume_was_requested(asks, wired):
 
 def test_resume_requested_is_false_when_the_agent_has_not_opted_in(asks, monkeypatch):
     """AC #3 — per-agent, never per-answer. Hosting asks must not hand a client
-    a spend button; the owner opts in, and the answer is still recorded."""
+    a spend button; the OWNER decides, and the answer is still recorded.
+
+    ent#1102 moved where the owner says it: the instance default is now ON
+    (ruling D4), so "off" is the tri-state column rather than the absence of
+    ent#329's opt-in. The property is unchanged — one per-agent switch, read
+    from the same accessor the dispatch gates on — only its spelling."""
     class _Db:
         def get_operator_queue_item(self, item_id):
             return dict(ITEM)
@@ -197,11 +231,19 @@ def test_resume_requested_is_false_when_the_agent_has_not_opted_in(asks, monkeyp
         def respond_to_operator_queue_item(self, **kw):
             return {**ITEM, "status": "responded"}
 
+        def get_wake_on_ending(self, agent_name):
+            return 0
+
         def get_operator_resume_enabled(self, agent_name):
             return False
 
     _stub_db(monkeypatch, asks, _Db())
     monkeypatch.setattr(asks, "_on_roster", lambda *a, **k: True, raising=False)
+    # The spawn is stubbed to SUCCEED (as in `wired`), so a False here can only
+    # come from the policy. Left real, the unstubbed spawn fails on its own and
+    # the assertion would hold whatever the policy said.
+    import services.operator_resume_service as ors
+    monkeypatch.setattr(ors, "spawn_resume_dispatch", lambda *a, **k: None, raising=False)
     out = asks.answer_ask("q1", "x@example.com", False, response="Ship it", response_text=None)
     assert out.resume_requested is False
 

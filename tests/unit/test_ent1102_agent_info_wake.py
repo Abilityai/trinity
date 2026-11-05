@@ -55,8 +55,12 @@ def seeded_db(tmp_path, monkeypatch):
         )
         """
     )
+    # `updated_at` is part of the real table (db/tables.py), so the column
+    # has to be here for the instance-default read to SUCCEED and answer
+    # "no row": a read that raises now resolves OFF (fail-closed), which
+    # would make this fixture, not the policy, decide the verdict.
     conn.execute(
-        "CREATE TABLE system_settings (key TEXT PRIMARY KEY, value TEXT)"
+        "CREATE TABLE system_settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)"
     )
     conn.commit()
 

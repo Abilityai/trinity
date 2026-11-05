@@ -153,9 +153,17 @@ def _stub_setting(monkeypatch, wake_policy, value):
 
 
 class TestResolver:
-    def test_default_is_on_for_an_agent_with_no_opinion(self, policy, tmp_db_conn):
+    def test_default_is_on_for_an_agent_with_no_opinion(
+        self, policy, tmp_db_conn, monkeypatch
+    ):
         """D4: the default is ON. A fresh instance that wrote no setting row and
-        an agent that predates the column both get the wake."""
+        an agent that predates the column both get the wake.
+
+        The setting read is stubbed to answer NOTHING rather than left to raise
+        against the partial fixture DB — that is what a real install with no
+        row does, and a raising read now resolves OFF (fail-closed), which is a
+        different property, pinned below."""
+        _stub_setting(monkeypatch, policy, None)
         _seed(tmp_db_conn, "fresh", wake=None)
         verdict = policy.resolve("fresh")
         assert verdict.enabled is True
@@ -216,6 +224,50 @@ class TestResolver:
         verdict = policy.resolve("anyone")
         assert verdict.enabled is False
         assert verdict.source == "unreadable"
+
+    def test_an_unreadable_legacy_column_reads_off(self, policy, tmp_db_conn, monkeypatch):
+        """The second read is as fallible as the first. This path used to
+        swallow the error and fall through to an instance default of ON, so a
+        broken read BOUGHT a billed turn — the one trade the module forbids."""
+        from database import db as real_db
+
+        _stub_setting(monkeypatch, policy, "true")
+        _seed(tmp_db_conn, "anyone", wake=None)
+
+        def _boom(agent_name):
+            raise RuntimeError("database is locked")
+
+        monkeypatch.setattr(real_db, "get_operator_resume_enabled", _boom, raising=False)
+        verdict = policy.resolve("anyone")
+        assert verdict.enabled is False
+        assert verdict.source == "unreadable"
+
+    def test_an_unreadable_instance_default_reads_off(self, policy, tmp_db_conn, monkeypatch):
+        """Ruling D4 is the policy for an absent or malformed VALUE, not for a
+        read that failed: an install whose settings are unreadable gets no wake
+        rather than the default's."""
+        from database import db as real_db
+
+        _seed(tmp_db_conn, "anyone", wake=None)
+
+        def _boom(key, default=None):
+            raise RuntimeError("database is locked")
+
+        monkeypatch.setattr(real_db, "get_setting_value", _boom, raising=False)
+        verdict = policy.resolve("anyone")
+        assert verdict.enabled is False
+        assert verdict.source == "unreadable"
+
+    def test_a_malformed_setting_value_still_falls_back_to_the_default(
+        self, policy, tmp_db_conn, monkeypatch
+    ):
+        """The other side of the line above — the read worked, the value is
+        nonsense, so D4 applies and the fleet is not silenced by a typo."""
+        _stub_setting(monkeypatch, policy, "maybe")
+        _seed(tmp_db_conn, "fresh", wake=None)
+        verdict = policy.resolve("fresh")
+        assert verdict.enabled is True
+        assert verdict.source == "instance"
 
     def test_missing_agent_name_reads_off(self, policy):
         assert policy.resolve("").enabled is False
