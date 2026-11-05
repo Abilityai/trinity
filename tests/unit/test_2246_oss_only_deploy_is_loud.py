@@ -121,6 +121,19 @@ def test_a_dns_failure_is_neither_of_the_above():
     assert klass(NETWORK_OUTPUT) == "network"
 
 
+@pytest.mark.parametrize("head, expected", [
+    ("Host key verification failed.\n", "host-key"),
+    ("git@github.com: Permission denied (publickey).\n", "authorization"),
+    ("ssh: Could not resolve hostname github.com: Temporary failure\n", "network"),
+])
+def test_a_match_early_in_long_output_is_not_lost_to_sigpipe(head, expected):
+    """#4280: under `pipefail`, `printf | grep -q` reads as a miss when grep exits
+    on its match while printf is still writing. Short output only loses that race
+    now and then (it turned dev-ci red, #4271). Output larger than any pipe buffer
+    loses it every time, so this is deterministic rather than a stress loop."""
+    assert klass(head + "remote: progress noise\n" * 8000) == expected
+
+
 def test_silence_is_its_own_class_because_update_none_exits_zero():
     """#1443 made this submodule `update = none`; a skipped submodule prints
     nothing and exits 0, so an empty capture is a distinct diagnosis."""
