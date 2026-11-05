@@ -231,3 +231,55 @@ def test_agent_playbooks_named_refusal_is_untouched(monkeypatch):
     with pytest.raises(HTTPException) as ei:
         _run(af.get_agent_playbooks_endpoint(agent_name="a1", request=MagicMock(), last_known=False))
     assert (ei.value.status_code, ei.value.detail) == (503, "Agent is not running")
+
+
+# ---------------------------------------------------------------------------
+# #52 #53 (+ the 502 sibling) routers/telegram.py — the token is in the URL
+# ---------------------------------------------------------------------------
+
+def _url_echoing_error(path: str) -> httpx.ConnectError:
+    # The shape a URL-echoing failure takes (httpx's HTTPStatusError puts the
+    # request URL in its message, and the bot token is a path segment).
+    return httpx.ConnectError(
+        f"{SENTINEL} for url 'https://api.telegram.org/bot{BOT_TOKEN}/{path}'"
+    )
+
+
+@pytest.mark.parametrize("chat_id,path", [(None, "getMe"), ("42", "sendMessage")])
+def test_telegram_test_bot_message_carries_no_raw_message_or_token(monkeypatch, caplog, chat_id, path):
+    tg = _live("routers.telegram")
+    models = _live("models")
+    monkeypatch.setattr(tg, "db", SimpleNamespace(get_telegram_bot_token=lambda n: BOT_TOKEN))
+    monkeypatch.setattr(tg.httpx, "AsyncClient", _RaisingHttpx(_url_echoing_error(path)))
+    caplog.set_level(logging.WARNING)
+
+    out = _run(tg.test_telegram_bot(
+        agent_name="a1", test=models.TelegramTestRequest(chat_id=chat_id)))
+
+    body = _blob(out)
+    assert out["ok"] is False
+    assert SENTINEL not in body and BOT_TOKEN not in body, body
+    assert "ConnectError" in out["message"]
+    logs = _log_text(caplog)
+    assert SENTINEL in logs, "the detail must reach the backend log"
+    assert BOT_TOKEN not in logs, "the bot token must be masked in the log"
+    assert BOT_TOKEN.split(":", 1)[1] not in logs
+
+
+def test_telegram_configure_502_detail_carries_no_raw_message_or_token(monkeypatch, caplog):
+    tg = _live("routers.telegram")
+    models = _live("models")
+    monkeypatch.setattr(tg.httpx, "AsyncClient", _RaisingHttpx(_url_echoing_error("getMe")))
+    caplog.set_level(logging.WARNING)
+
+    with pytest.raises(HTTPException) as ei:
+        _run(tg.configure_telegram_bot(
+            agent_name="a1", config=models.TelegramConfigureRequest(bot_token=f"  {BOT_TOKEN} ")))
+
+    assert ei.value.status_code == 502
+    detail = str(ei.value.detail)
+    assert SENTINEL not in detail and BOT_TOKEN not in detail
+    assert detail.startswith("Could not reach Telegram API")
+    assert "ConnectError" in detail
+    logs = _log_text(caplog)
+    assert SENTINEL in logs and BOT_TOKEN not in logs
