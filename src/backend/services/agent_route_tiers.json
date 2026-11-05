@@ -144,6 +144,11 @@
   "reason": "legacy",
   "tier": "accessor"
  },
+ "agent_config.py::get_agent_tool_access": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/tool-access",
+  "tier": "owner"
+ },
  "agent_config.py::get_public_channel_model": {
   "method": "GET",
   "path": "/api/agents/{agent_name}/public-channel-model",
@@ -197,6 +202,11 @@
  "agent_config.py::set_agent_timeout": {
   "method": "PUT",
   "path": "/api/agents/{agent_name}/timeout",
+  "tier": "owner"
+ },
+ "agent_config.py::set_agent_tool_access": {
+  "method": "PUT",
+  "path": "/api/agents/{agent_name}/tool-access",
   "tier": "owner"
  },
  "agent_config.py::set_public_channel_model": {

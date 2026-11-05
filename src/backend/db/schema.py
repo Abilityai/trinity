@@ -102,7 +102,7 @@ TABLES = {
             a2a_exposed INTEGER DEFAULT 0,
             a2a_scope TEXT DEFAULT 'public',  -- inert since ent#885; drop under #746
             a2a_keyless_internal INTEGER DEFAULT 1,  -- inert since ent#885; drop under #746
-            operator_resume_enabled INTEGER DEFAULT 0,
+            operator_resume_enabled INTEGER,  -- tri-state since ent#1108: NULL = platform default (on), 0 = owner OFF, 1 = owner ON
             memory_opt_out INTEGER DEFAULT 0,
             tts_voice_replies_enabled INTEGER DEFAULT 0,
             tts_voice_id TEXT,
@@ -1150,6 +1150,25 @@ TABLES = {
     # materialised verdict outlives its own evidence silently, and a level
     # change would otherwise be an unbounded fleet-wide write. The instance
     # LEVEL is not here at all — it is one validated `system_settings` key.
+    # trinity-enterprise#1107: terms of use per instance — one row per (person,
+    # terms version): the record of which text they accepted and when. A version
+    # bump asks again. `door` names the invitation an optional module bound the
+    # acceptance to (the ent#1054 invite door), else NULL. `users` is never
+    # ALTERed for it; the text itself is a `system_settings` row with a shipped
+    # default (`services/terms_defaults.py`).
+    "terms_acceptances": """
+        CREATE TABLE IF NOT EXISTS terms_acceptances (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            email TEXT,
+            terms_version TEXT NOT NULL,
+            accepted_at TEXT NOT NULL,
+            door TEXT,
+            actor_ip TEXT,
+            UNIQUE(user_id, terms_version)
+        )
+    """,
+
     "seat_ask_class_state": """
         CREATE TABLE IF NOT EXISTS seat_ask_class_state (
             id TEXT PRIMARY KEY,
@@ -1902,6 +1921,8 @@ TABLES = {
             last_seen_at TEXT,
             replaces TEXT,
             replaced_by TEXT,
+            -- abilityai/trinity-enterprise#1108 AC #4: NULL | 'pending' (agent not yet woken) | 'woken'
+            wake_state TEXT,
             FOREIGN KEY (responded_by_id) REFERENCES users(id)
         )
     """,
@@ -2278,6 +2299,12 @@ TABLES = {
 # =============================================================================
 
 INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_terms_acceptances_email ON terms_acceptances(email)",
+    # trinity-enterprise#1107 ruling A(1): a Workspace portal session has no
+    # `users` row — its row is keyed by (email, version); UNIQUE(user_id, version)
+    # alone treats two NULL user_ids as distinct.
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_terms_acceptances_email_version "
+    "ON terms_acceptances(email, terms_version) WHERE user_id IS NULL",
     # Core indexes
     "CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)",
     "CREATE INDEX IF NOT EXISTS idx_users_auth0_sub ON users(auth0_sub)",

@@ -5,7 +5,7 @@ import asyncio
 import logging
 from datetime import timedelta
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, status, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
@@ -353,13 +353,34 @@ async def get_auth_mode():
     }
 
 
+#: The value the SPA sends to declare its session interactive
+#: (`client=web` / `"client": "web"`), trinity-enterprise#1107 ruling A.
+SPA_CLIENT = "web"
+
+
+def _session_claims(username: str, *, interactive: bool) -> dict:
+    """The platform session's claims: `sub`, plus `interactive: true` when the
+    client declared itself the SPA. The claim is a UX/record contract the
+    terms gate reads (`services/terms_gate.py`) — never an authorization input
+    — so a client's own word for it is enough. Absent on every other token."""
+    claims = {"sub": username}
+    if interactive:
+        claims["interactive"] = True
+    return claims
+
+
 @router.post("/token", response_model=Token, response_model_exclude_none=True,
              responses={403: {"description": "Second factor required — no session issued (#2322)"}})
-async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
+async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(),
+                client: Optional[str] = Form(None)):
     """Login with username/password and get JWT token.
 
     Used for admin login (username 'admin' with password).
     Regular users should use email authentication.
+
+    `client=web` is what the SPA sends (trinity-enterprise#1107, ruling A): the
+    token then carries `interactive: true`, the claim the terms gate asks. The
+    CLI and every script send nothing and are never asked.
 
     Rate limited (issue #591): per-account (5 fails / 15 min) plus
     per-IP (30 fails / 5 min). The two-bucket design prevents one user's
@@ -451,7 +472,7 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
 
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        data={"sub": user["username"]},
+        data=_session_claims(user["username"], interactive=client == SPA_CLIENT),
         expires_delta=access_token_expires,
         mode="admin"  # Mark as admin login token
     )
@@ -474,9 +495,10 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
 
 @router.post("/api/token", response_model=Token, response_model_exclude_none=True,
              responses={403: {"description": "Second factor required — no session issued (#2322)"}})
-async def login_api(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
+async def login_api(request: Request, form_data: OAuth2PasswordRequestForm = Depends(),
+                    client: Optional[str] = Form(None)):
     """Alias for /token endpoint."""
-    return await login(request, form_data)
+    return await login(request, form_data, client)
 
 
 @router.get("/api/auth/validate")
@@ -643,15 +665,11 @@ async def request_email_login_code(request: Request):
     return generic_response
 
 
-@router.post("/api/auth/email/verify")  # deliberately no response_model — see #2322
-async def verify_email_login_code(request: Request):
-    """
-    Verify email login code and get JWT token.
-
-    Unauthenticated endpoint. Verifies the code and creates/returns user session.
-    """
-    from database import EmailLoginVerify, EmailLoginResponse
-
+def _require_email_login_open() -> None:
+    """The door gates every platform email-login redeemer applies before it
+    reads the body: setup done, email login on. Each redeemer then asks the
+    login policy itself, in its own body, so the ent#849 per-function guard
+    (`test_every_login_code_caller_asks_the_gate`) sees the call."""
     # Block if setup is not completed
     if not is_setup_completed():
         raise HTTPException(
@@ -667,14 +685,140 @@ async def verify_email_login_code(request: Request):
             detail="Email authentication is disabled"
         )
 
-    # ent#849: a registered login policy can turn email-code sign-in off.
-    # Checked before the body is read, so the refusal is identical for every
-    # address and spends no rate-limit budget. `/token` never asks this gate.
-    if not login_policy_gate.email_code_allowed():
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="email_code_disabled"
+
+def _email_code_disabled() -> HTTPException:
+    """ent#849: the refusal when a registered login policy turns email-code
+    sign-in off. Asked before the body is read, so the refusal is identical for
+    every address and spends no rate-limit budget. `/token` never asks it."""
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="email_code_disabled"
+    )
+
+
+def _email_allow_listed(email: str) -> bool:
+    """The #2381 allow-list re-check (see `verify_email_login_code`). A lookup
+    error refuses."""
+    try:
+        return bool(db.is_email_whitelisted(email))
+    except Exception as e:
+        logger.error(
+            "Allow-list check failed during email verify (%s) — refusing",
+            type(e).__name__,
         )
+        return False
+
+
+async def _email_login_failed(request: Request, client_ip: str, email: str, method: str):
+    """The one failure branch for every reason a platform email redeemer
+    refuses: identical status, message, audit row and rate-limit accounting,
+    so no reason is an oracle for another (#186, #2381). Always raises."""
+    record_login_attempt(client_ip, success=False, account=email)
+    record_otp_attempt(email, success=False)
+    # SEC-001: audit failed email login
+    await platform_audit_service.log(
+        event_type=AuditEventType.AUTHENTICATION,
+        event_action="login_failed",
+        source="api",
+        actor_ip=client_ip,
+        endpoint=request.scope["path"],
+        request_id=getattr(request.state, "request_id", None),
+        details={"method": method, "email": email},
+    )
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or expired verification code"
+    )
+
+
+async def _complete_email_login(request: Request, client_ip: str, email: str, method: str,
+                                *, interactive: bool = False):
+    """Everything after the first factor is proven: clear the buckets, resolve
+    the account, run the 2FA gate, mint the JWT, audit. `interactive` is the
+    SPA's declaration (`"client": "web"`, ent#1107 ruling A) and becomes the
+    token's `interactive` claim."""
+    from database import EmailLoginResponse
+
+    # Clear rate limit counters on successful verification
+    record_login_attempt(client_ip, success=True, account=email)
+    record_otp_attempt(email, success=True)
+
+    # Get or create user
+    user = db.get_or_create_email_user(email)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to create user account"
+        )
+
+    # Update last login
+    db.update_last_login(user["username"])
+
+    # #5 — enterprise 2FA gate. The verified email code is the first factor;
+    # if a second factor is required, return a challenge instead of a token.
+    # OSS-only builds have no provider → returns None → unchanged behaviour.
+    from services import mfa_gate
+    challenge = mfa_gate.gate_login(user, mode="email")
+    if challenge:
+        await platform_audit_service.log(
+            event_type=AuditEventType.AUTHENTICATION,
+            event_action="mfa_challenge_issued",
+            source="api",
+            actor_ip=client_ip,
+            target_type="user",
+            target_id=user["username"],
+            endpoint=request.scope["path"],
+            request_id=getattr(request.state, "request_id", None),
+            details={"method": method, "email": email},
+        )
+        return challenge
+
+    # Create JWT token
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data=_session_claims(user["username"], interactive=interactive),
+        expires_delta=access_token_expires,
+        mode="email"  # Mark as email auth token
+    )
+
+    # SEC-001: audit successful email login
+    await platform_audit_service.log(
+        event_type=AuditEventType.AUTHENTICATION,
+        event_action="login_success",
+        source="api",
+        actor_ip=client_ip,
+        target_type="user",
+        target_id=user["username"],
+        endpoint=request.scope["path"],
+        request_id=getattr(request.state, "request_id", None),
+        details={"method": method, "email": email},
+    )
+
+    return EmailLoginResponse(
+        access_token=access_token,
+        token_type="bearer",
+        user={
+            "username": user["username"],
+            "email": user["email"],
+            "role": user["role"],
+            "name": user.get("name"),
+            "picture": user.get("picture")
+        }
+    )
+
+
+@router.post("/api/auth/email/verify")  # deliberately no response_model — see #2322
+async def verify_email_login_code(request: Request):
+    """
+    Verify email login code and get JWT token.
+
+    Unauthenticated endpoint. Verifies the code and creates/returns user session.
+    """
+    from database import EmailLoginVerify
+
+    _require_email_login_open()
+    if not login_policy_gate.email_code_allowed():
+        raise _email_code_disabled()
 
     # Get client IP for rate limiting
     client_ip = request.client.host if request.client else "unknown"
@@ -720,101 +864,55 @@ async def verify_email_login_code(request: Request):
     # Fails into the SAME branch as a bad code — identical status, message,
     # audit row and rate-limit accounting — so this is not an oracle for
     # "is this address allow-listed".
-    allowed = False
-    try:
-        allowed = db.is_email_whitelisted(email)
-    except Exception as e:
-        logger.error(
-            "Allow-list check failed during email verify (%s) — refusing",
-            type(e).__name__,
-        )
+    allowed = _email_allow_listed(email)
 
     # Verify code
     verification = db.verify_login_code(email, code) if allowed else None
     if not verification:
-        record_login_attempt(client_ip, success=False, account=email)
-        record_otp_attempt(email, success=False)
-        # SEC-001: audit failed email login
-        await platform_audit_service.log(
-            event_type=AuditEventType.AUTHENTICATION,
-            event_action="login_failed",
-            source="api",
-            actor_ip=client_ip,
-            endpoint=request.scope["path"],
-            request_id=getattr(request.state, "request_id", None),
-            details={"method": "email", "email": email},
-        )
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired verification code"
-        )
+        await _email_login_failed(request, client_ip, email, "email")
 
-    # Clear rate limit counters on successful verification
-    record_login_attempt(client_ip, success=True, account=email)
-    record_otp_attempt(email, success=True)
+    return await _complete_email_login(request, client_ip, email, "email",
+                                       interactive=verify_request.client == SPA_CLIENT)
 
-    # Get or create user
-    user = db.get_or_create_email_user(email)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create user account"
-        )
 
-    # Update last login
-    db.update_last_login(user["username"])
+@router.post("/api/auth/email/handoff")  # no response_model, like verify (#2322)
+async def redeem_email_login_handoff(request: Request):
+    """#4157 — finish a platform sign-in that the Workspace's code page started.
 
-    # #5 — enterprise 2FA gate. The verified email code is the first factor;
-    # if a second factor is required, return a challenge instead of a token.
-    # OSS-only builds have no provider → returns None → unchanged behaviour.
-    from services import mfa_gate
-    challenge = mfa_gate.gate_login(user, mode="email")
-    if challenge:
-        await platform_audit_service.log(
-            event_type=AuditEventType.AUTHENTICATION,
-            event_action="mfa_challenge_issued",
-            source="api",
-            actor_ip=client_ip,
-            target_type="user",
-            target_id=user["username"],
-            endpoint=request.scope["path"],
-            request_id=getattr(request.state, "request_id", None),
-            details={"method": "email", "email": email},
-        )
-        return challenge
+    The Workspace door verified a correct emailed code for a platform account
+    and, instead of a portal session, gave the browser a one-time token
+    (`services/login_handoff_service`). This route redeems that token in place
+    of a second code and is otherwise the platform email login: the same door
+    gates, rate-limit buckets, #2381 allow-list re-check, failure branch, audit
+    and 2FA step as `POST /api/auth/email/verify`. The token is single-use,
+    email-bound and short-lived; every refusal is that route's uniform 401.
+    """
+    from database import EmailLoginHandoff
+    from services import login_handoff_service
 
-    # Create JWT token
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": user["username"]},
-        expires_delta=access_token_expires,
-        mode="email"  # Mark as email auth token
-    )
+    _require_email_login_open()
+    if not login_policy_gate.email_code_allowed():
+        raise _email_code_disabled()
 
-    # SEC-001: audit successful email login
-    await platform_audit_service.log(
-        event_type=AuditEventType.AUTHENTICATION,
-        event_action="login_success",
-        source="api",
-        actor_ip=client_ip,
-        target_type="user",
-        target_id=user["username"],
-        endpoint=request.scope["path"],
-        request_id=getattr(request.state, "request_id", None),
-        details={"method": "email", "email": email},
-    )
+    client_ip = request.client.host if request.client else "unknown"
+    try:
+        handoff_request = await _parse_body(request, EmailLoginHandoff)
+    except (HTTPException, RequestValidationError):
+        record_login_attempt(client_ip, success=False)
+        raise
+    email = handoff_request.email.strip().lower()
 
-    return EmailLoginResponse(
-        access_token=access_token,
-        token_type="bearer",
-        user={
-            "username": user["username"],
-            "email": user["email"],
-            "role": user["role"],
-            "name": user.get("name"),
-            "picture": user.get("picture")
-        }
-    )
+    check_login_rate_limit(client_ip, account=email)
+    check_otp_rate_limit(email)
+
+    # Allow-list first, so a refusal here does not spend the token (verify
+    # likewise does not spend a code it refuses).
+    allowed = _email_allow_listed(email)
+    if not (allowed and login_handoff_service.redeem(handoff_request.token, email)):
+        await _email_login_failed(request, client_ip, email, "email_handoff")
+
+    return await _complete_email_login(request, client_ip, email, "email_handoff",
+                                       interactive=handoff_request.client == SPA_CLIENT)
 
 
 # =========================================================================

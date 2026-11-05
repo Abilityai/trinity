@@ -1701,16 +1701,23 @@ class CleanupService:
         # The delete/recover paths keep this in sync going forward; this catches
         # keys orphaned BEFORE the fix, and any that slip through a path that
         # removes an agent without going through delete_agent_ownership. Not
-        # age-gated — an orphaned credential is a security invariant, not a
-        # retention window (the #1449 reasoning).
+        # retention-gated — an orphaned credential is a security invariant, not
+        # a retention window (the #1449 reasoning) — with ONE bounded exception
+        # (#4259): a key minted inside the last ORPHANED_KEY_GRACE_SECONDS is
+        # skipped, because the create path mints the key before the container
+        # exists and registers the owner only after it does, so a tick inside
+        # that window revoked healthy agents' keys. The log line names the
+        # agents so an operator can see whose key went.
         try:
-            revoked = db.deactivate_orphaned_agent_keys()
+            revoked_agents = db.deactivate_orphaned_agent_keys()
+            revoked = len(revoked_agents)
             report.orphaned_agent_keys_revoked = revoked
             if revoked > 0:
                 _log_prune(
                     revoked,
                     f"[Cleanup] Deactivated {revoked} MCP key(s) belonging to "
-                    f"agents that are no longer live (#1745)",
+                    f"agents that are no longer live (#1745): "
+                    f"{', '.join(sorted(set(revoked_agents)))}",
                 )
         except Exception as e:
             logger.error(f"[Cleanup] Error deactivating orphaned agent keys: {e}")

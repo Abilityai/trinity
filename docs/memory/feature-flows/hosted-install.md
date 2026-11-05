@@ -178,6 +178,23 @@ poll https://<ip>/ with verification for 15 min → print the address, or the co
 
 The provisioned Caddyfile has two HTTPS sites: the bare IP on the `shortlived` profile, and a catch-all with `tls { on_demand }` gated by `ask http://127.0.0.1:8000/api/public/tls-allowed`. So Caddy obtains a certificate for the saved Public URL's host on its first request and refuses every other name; the operator never needs a root shell on the host. The gate's contract — exact parsed host, unauthenticated, fails closed — lives in [install-provenance.md](install-provenance.md) → *The step*.
 
+## Marketplace Release Layer — `packer/digitalocean/scripts/` (trinity-enterprise#1094)
+
+A full `/release` runs these on the operator's machine, in order. Each takes `DIGITALOCEAN_TOKEN`; none prompts.
+
+| Script | Does | Output |
+|---|---|---|
+| `mp-status.sh` | Reads the Vendor Portal listing | Exit 0 clear, 3 queued, 4 rejected or unknown, 1 API failure |
+| `mp-build.sh <tag>` | Refuses when baked files differ from the tag; runs Packer with a fixed SSH key and a per-run droplet tag | Snapshot ID on the last line |
+| `boot-check.sh <id> <tag>` | Boots a throwaway droplet, claims `/setup`, checks first boot, TLS, images, database, firewall, sign-in and agent creation, then destroys it | `~/.trinity-marketplace/<id>.pass` |
+| `mp-submit.sh <id>` | Requires the pass record and `mp-status.sh` exit 0; PATCHes the listing; in `softwareIncluded` it moves the Trinity version, adds PostgreSQL if missing and keeps the rest | Listing status |
+
+`/health` through Caddy is a static nginx 200, so backend health is checked over SSH on `localhost:8000`. `/data/trinity.db` is a path inside the backend container.
+
+### The Caddyfile is Trinity's; operators' sites live in `Caddyfile.d` (#4149)
+
+`/etc/caddy/Caddyfile` is rewritten on every render (first boot, `--site-only`, `--caddy-only`, the IP refresh, the managed upgrade) and ends with `import /etc/caddy/Caddyfile.d/*.caddy`, a directory Trinity creates `0755` and never writes. Whether the live file may be replaced is read off the FILE, never off which caller renders (`provision_caddyfile_is_ours`): absent; matching the checksum Trinity recorded when it last wrote it (`Caddyfile.trinity-sha256`); with no record, the apt package's unedited `:80` default, or a file made only of lines Trinity has ever rendered in its top-level shape. Anything else is refused unless `--caddy-overwrite` (which keeps `Caddyfile.bak-<timestamp>`, and refuses if that copy fails). The check runs before `provision_apply_ip` touches `.env`, so a refused refresh applies nothing. A `Caddyfile.d` entry the `caddy` user cannot read is refused too (root's `caddy validate` reads it, the restart would not). An unchanged Caddyfile with a changed `Caddyfile.d` (digest in `Caddyfile.d.trinity-sha256`) is a `systemctl reload caddy`, not a restart. `--dry-run` previews the `--caddy-only` render and is refused with any other phase.
+
 ## Stop Layer — `scripts/deploy/stop.sh`
 
 Hosted mode passes an explicit `-f`, which disables compose's default file merge — so a bare `docker compose` in the checkout loads the **dev** file instead. Same project name, so it acts on the same containers, but it knows nothing about `cloudflared`, which the dev file does not define: the tunnel keeps running and the instance stays publicly reachable after the script prints "All services stopped". That is the same hazard `persist_compose_profile` closes, re-entering through the one entry point that change did not touch.
@@ -212,8 +229,10 @@ A plain `docker compose -f docker-compose.hosted.yml pull` skips the base image 
 | `tests/unit/test_2280_hosted_compose_parity.py` | Wholesale prod↔hosted service parity, third-party pin equality, top-level volumes/networks, the 8 GB floor in the header, `FRONTEND_PORT` in both files |
 | `tests/unit/test_2280_publish_workflow_and_stop.py` | The verify step never passes a mixed-case owner as an image reference and lowercases the one it builds; `flavor: latest=false`; every non-sha tag gated on `github.event_name == 'push'` and the sha tag on nothing; `stop.sh` never runs `compose down` and selects its file from the compose label |
 | `tests/unit/test_2390_start_sh_env_and_project_name.py` | `env_value()` dotenv parity with compose (quotes, inline comments, last-wins) and `compose_project_name()` against compose's real derivation, including the `_`/`-`-bearing directory names that made the data guard fail open |
+| `tests/unit/test_ent1094_marketplace_release.py` | Runs the marketplace release scripts against fake `doctl`, `curl`, `ssh`, `packer` and `git`: status codes, submit refusals, every boot-check failure destroying the droplet, signal handling, secrets outside argv |
 | `tests/unit/test_2380_provision_single_source.py` | The Packer tree calls `start.sh --provision` for both phases and re-implements nothing (no packages, no Caddyfile); the firewall has no port list, RETURNs `ESTABLISHED` before it drops, and drops link-local ahead of the bridge RETURNs; ufw and `iptables-persistent` never both installed; the unit reapplies on boot; `--provision` refuses a workstation; the Caddyfile's `ask` gate and the endpoint's exact-host, fail-closed match |
 | `tests/unit/test_2380_installer_portability.py` | Full `mktemp` template; snap `doctl` gets the file under `$HOME` and a missing `$HOME` is refused before any question; every single-quoted user-data interpolation is quoted, executed round-trip through a shell; the installer run against a stub `doctl` with no SSH keys |
+| `tests/unit/test_4149_caddyfile_operator_sites.py` | Through the real `start.sh` (ent#873 harness): an operator's file is refused by the upgrade, `--caddy-only` and the refresh (which then applies nothing); the packaged default and Trinity's own legacy file are replaced; a legacy file with any line Trinity never rendered is refused; `--caddy-overwrite` keeps a backup; `--dry-run` writes nothing and is refused outside `--caddy-only`; `Caddyfile.d` is `0755` under umask 077, an unreadable drop-in is refused, a changed one reloads Caddy |
 | `tests/unit/test_2380_installer_release_pin.py` | The installer's default tag matches `VERSION` and is `v`-prefixed |
 | `tests/unit/test_2528_compose_file_sets.py` | `quickstart.sh` is an alias for `start.sh` (static + argv passthrough); the data-switch guard executed under `bash` with a `docker` shim — reverse refusal names prod, both-stores-present warns naming the store in use, clean states silent; both standalone compose headers state they are not overlays; every supported file set renders locally (skips without a Compose CLI) and is listed verbatim in `container-security.yml` → `verify-compose-file-sets` |
 

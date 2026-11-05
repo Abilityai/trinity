@@ -1021,7 +1021,7 @@
                         Failed: {{ githubPatPropagation.failed.map(a => a.agent_name).join(', ') }}
                       </div>
                       <div v-if="githubPatPropagation.skipped.length" class="mt-1 text-gray-500 dark:text-gray-400">
-                        Skipped: {{ githubPatPropagation.skipped.map(a => `${a.agent_name} (${a.status === 'skipped_per_agent_pat' ? 'per-agent PAT' : 'no GITHUB_PAT'})`).join(', ') }}
+                        Skipped: {{ githubPatPropagation.skipped.map(a => `${a.agent_name} (${a.status === 'skipped_per_agent_pat' ? 'per-agent PAT' : a.status === 'skipped_env_unreadable' ? '.env not readable as text — not rewritten' : 'no GITHUB_PAT'})`).join(', ') }}
                       </div>
                     </template>
                   </div>
@@ -1469,6 +1469,15 @@ Example:
                 </div>
               </dl>
             </div>
+          </div>
+
+          <!-- Terms of use (trinity-enterprise#1107) — the text every person
+               accepts once per version on their first visit, on any door. On
+               the Access tab because it is the first thing a person meets after
+               the door opens, beside who may sign in. Shown in every edition:
+               the shipped default is in force whether or not anyone edited it. -->
+          <div v-if="activeTab === 'access'" class="mb-6">
+            <TermsPanel />
           </div>
 
           <!-- Email Whitelist Section (Phase 12.4) -->
@@ -2359,6 +2368,7 @@ import RoomBudgetDefaultsPanel from '../components/settings/RoomBudgetDefaultsPa
 import AutonomyDialPanel from '../components/settings/AutonomyDialPanel.vue'
 import BackupStatusPanel from '../components/settings/BackupStatusPanel.vue'
 import InvitesPanel from '../components/settings/InvitesPanel.vue'
+import TermsPanel from '../components/settings/TermsPanel.vue'
 import { SETTINGS_NUMBER_INPUT_CLASS, SETTINGS_TEXT_INPUT_CLASS } from '../components/settings/fieldStyles'
 // #2691: one home for what the Public URL buys, what must be true first, and
 // what saving it re-points — shared with the first-run step so the explanation

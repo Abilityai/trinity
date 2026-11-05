@@ -156,6 +156,10 @@ def _load_voip_router() -> types.ModuleType:
     audit_mod.platform_audit_service = MagicMock()
     audit_mod.AuditEventType = MagicMock()
 
+    # trinity-enterprise#341: the send check every send route runs first.
+    guard_mod = types.ModuleType("services.tool_access_guard")
+    guard_mod.assert_tool_allowed = lambda *a, **k: None
+
     path = _BACKEND / "routers" / "voip.py"
     spec = importlib.util.spec_from_file_location("routers.voip", str(path))
     mod = importlib.util.module_from_spec(spec)
@@ -166,6 +170,7 @@ def _load_voip_router() -> types.ModuleType:
         "services.idempotency_service": idem_svc,
         "services.settings_service": settings_mod,
         "services.platform_audit_service": audit_mod,
+        "services.tool_access_guard": guard_mod,
         "routers.voip": mod,
     }
     # Save only the keys we touch; restore them in finally. Real modules that

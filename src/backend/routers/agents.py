@@ -37,6 +37,7 @@ from models import (
 )
 from database import db
 from dependencies import get_current_user, decode_token, require_role, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal, agent_may_reach, assert_own_agent, capability_fence, ops_write_route, require_admin_allowing, assert_not_share_viewer, OPS_WRITE_SCOPE, require_admin, require_person
+from services.tool_access_guard import assert_tool_allowed
 from services.docker_service import (
     get_agent_container,
     get_agent_by_name,
@@ -516,6 +517,9 @@ async def get_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request
     agent_dict["autonomy_enabled"] = db.get_autonomy_enabled(agent_name)
     read_only_data = db.get_read_only_mode(agent_name)
     agent_dict["read_only_enabled"] = read_only_data["enabled"]
+    # trinity-enterprise#341: the header's Read-only toggle is ON for Strict only.
+    from services.agent_service.tool_access import tool_access_profile_for
+    agent_dict["tool_access_profile"] = tool_access_profile_for(agent_name)
 
     # Avatar URL (AVATAR-001)
     identity = db.get_avatar_identity(agent_name)
@@ -1418,9 +1422,9 @@ async def get_operator_resume_endpoint(
 ):
     """Whether an operator answer re-triggers this agent (ent#329).
 
-    Default OFF. When off, an answer still reaches the agent's queue file — it is
-    simply processed at the agent's next turn, which is the behaviour every agent
-    had before this flag existed.
+    Default ON since abilityai/trinity-enterprise#1108 (an untouched agent reads
+    `enabled: true`). When an owner switches it off, an answer still reaches
+    the agent's queue file — it is simply processed at the agent's next turn.
     """
     return {
         "agent_name": agent_name,
@@ -1568,6 +1572,8 @@ async def send_voice_reply_endpoint(
     import config as app_config
     from services import voice_reply_service, idempotency_service
 
+    # trinity-enterprise#341: refused when this agent's tool access removes send_voice_reply.
+    assert_tool_allowed(current_user, "send_voice_reply")
     execution = db.get_execution(body.execution_id)
     if not execution or execution.agent_name != agent_name:
         return {"delivered": False, "reason": "execution_not_found"}

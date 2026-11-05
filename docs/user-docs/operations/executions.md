@@ -25,7 +25,7 @@ View, monitor, and manage task executions across all agents. Executions are crea
 | `room` | A turn inside a shared multi-agent room |
 | `a2a` | A task sent in by an external A2A orchestrator |
 | `operator_response` | An answer to a parked request waking the agent, on an agent with the ask-ending wake turned on (see [Approvals](../automation/approvals.md)) |
-| `operator_ending` | A parked request that was cancelled or expired waking the agent — one turn per agent per sweep or expiry, same switch |
+| `operator_ending` | A parked request that was cancelled or dismissed waking the agent — one turn per agent per sweep, same switch; an expiry wakes nobody |
 | `validation` | The audit run that follows a scheduled run with post-run validation on (see [Scheduling](../automation/scheduling.md#post-run-validation)). Recorded and shown on the row, but not accepted as a `triggered_by` filter |
 | `skill_gate` | A request for a gated skill that waited for an operator's approval, run once it was approved (see [Approvals](../automation/approvals.md)) |
 

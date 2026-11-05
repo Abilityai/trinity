@@ -21,7 +21,7 @@ answers.
 |-------|------|-------|
 | Router (card) | `src/backend/routers/a2a.py` → `router` | `GET /api/agents/{name}/a2a/agent-card` — authenticated (`AuthorizedAgentByName`), any accessible agent (#737) |
 | Router (inbound) | `src/backend/routers/a2a.py` → `a2a_server_router` | Prefix-less so external clients get spec-shaped paths: `GET /a2a/{name}/.well-known/agent-card.json` + `POST /a2a/{name}` (ent#157) |
-| Card generator | `src/backend/services/a2a_card_service.py` | `generate_a2a_card` — pure; `template.yaml` → card, `capabilities[]`→`skills[]`, `use_cases[]` as examples |
+| Card generator | `src/backend/services/a2a_card_service.py` | `generate_a2a_card` — pure; `template.yaml` → card, `capabilities[]`→`skills[]`, `use_cases[]` as examples. **Known limit (trinity-enterprise#584):** everywhere else `capabilities:` are template tags and a capability is described by its SKILL.md `description:` (requirements/skills.md §23); the card still lists the tags (id = name = tag, each with the agent's description). Moving it to skills, and remapping curated tag lists, is trinity-enterprise#178 |
 | Allow-list seam | `src/backend/services/a2a_gate.py` | Open-core provider protocol; OSS registers none → allow. **Fails open** by design |
 | DB | `src/backend/db/agent_settings/` + `db/schema.py` / `db/tables.py` | `a2a_exposed` getter/setter on the `AgentOperations` mixin (Invariant #2) |
 | MCP tools | `src/mcp-server/src/tools/a2a.ts` (+ `a2a.test.ts`) | ent#160 control surface (Invariant #13) |

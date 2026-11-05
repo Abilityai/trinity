@@ -51,7 +51,12 @@ class FakeSocket {
     FakeSocket.last = this
     setTimeout(() => this.onopen?.())
   }
-  send(raw) { this.sent.push(JSON.parse(raw)) }
+  send(raw) {
+    const frame = JSON.parse(raw)
+    this.sent.push(frame)
+    // trinity-enterprise#595: the server acknowledges a ticket frame before any media.
+    if (frame.type === 'auth') setTimeout(() => this.push({ type: 'auth_ok' }))
+  }
   close() { this.readyState = 3 }
   push(frame) { this.onmessage({ data: JSON.stringify(frame) }) }
   of(type) { return this.sent.filter((f) => f.type === type) }
@@ -66,6 +71,7 @@ const { useClientPortalStore } = await import('@/stores/clientPortal')
 const AGENT = { name: 'scout', playbooks: [], pulls_turns: false }
 const SID = 's1'
 const CALL = 'vd_call'
+const TICKET = 'T'.repeat(43)
 const APPROVAL = {
   id: 'ask-1', kind: 'approval', status: 'pending', agent_name: 'scout', raised_in_turn: true, chat_id: SID,
   title: 'Approve merge', options: ['Approve', 'Reject'], created_at: '2026-11-02T10:00:00Z',
@@ -90,6 +96,7 @@ beforeEach(async () => {
   store.answerAsk = vi.fn(async () => ({}))
   store.startWorkspaceVoice = vi.fn(async () => ({
     voice_session_id: CALL, websocket_url: `/ws/voice/${CALL}`, portal_session_id: SID,
+    websocket_ticket: TICKET, websocket_ticket_expires_in: 30,
     max_duration_seconds: 1800, mode: 'direct', provider: 'gemini', runtime: 'claude-code', early_speech: true,
   }))
   wrapper = mount(PortalConversation, {
@@ -110,6 +117,9 @@ async function startCall() {
   await flushPromises()
   await wait(0)
   await flushPromises()
+  // trinity-enterprise#595: one more turn for the server's `auth_ok`, which starts the mic.
+  await wait(0)
+  await flushPromises()
   return FakeSocket.last
 }
 const say = async (socket, seq, text) => {
@@ -119,6 +129,13 @@ const say = async (socket, seq, text) => {
 const composer = () => wrapper.get('textarea')
 
 describe('a Direct call in the conversation', () => {
+  it('opens its socket with no credential in the URL and sends the ticket as the first frame (trinity-enterprise#595)', async () => {
+    const socket = await startCall()
+    expect(socket.url.endsWith(`/ws/voice/${CALL}`)).toBe(true)
+    expect(socket.url).not.toContain('?')
+    expect(socket.sent[0]).toEqual({ type: 'auth', ticket: TICKET })
+  })
+
   it('the Direct button starts a Direct call, shows the stage, and leaves the composer usable', async () => {
     await startCall()
     expect(store.startWorkspaceVoice).toHaveBeenCalledWith('scout', SID, null, 'direct')

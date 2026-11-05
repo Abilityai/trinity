@@ -128,7 +128,7 @@ describe('#3439 — the shell on `thread-caught-up`', () => {
     conversation(w).vm.$emit('thread-caught-up', 't1')
     await flushPromises()
     expect(store.markChatReadStrict).toHaveBeenCalledTimes(1)
-    expect(store.markChatReadStrict).toHaveBeenCalledWith('thread', 't1')
+    expect(store.markChatReadStrict).toHaveBeenCalledWith('thread', 't1', undefined)
     expect(store.fetchAllSessions).toHaveBeenCalledTimes(lists)   // not a turn: no list refresh, no settle cycle
   })
 

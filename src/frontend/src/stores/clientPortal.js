@@ -21,6 +21,10 @@ import axios from 'axios'
 import { notifyPlatformUnauthorized, setPlatformUnauthorizedHandler } from '@/utils/platformSession'
 import { isTermsRefusal, notifyTermsRefusal } from '@/utils/termsGate'
 import { useAuthStore } from './auth'
+// The value the auth store sends on its own sign-in calls (`client: 'web'`),
+// spelled here rather than imported: specs mock the auth store whole.
+const SPA_CLIENT = 'web'
+import { laterInstant, READ_UP_TO_NOW } from '@/utils/readThrough'
 // A cycle by shape (that store reads this one's `clientEmail`), safe by use:
 // neither side touches the other at module evaluation, only inside actions.
 import { usePortalDraftsStore } from './portalDrafts'
@@ -364,6 +368,16 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // agentName, chatId, since }` — whose result the chat `chatId` is waiting
     // to show. Cleared when the result lands or the wait gives up.
     askResultWatch: null,
+    // trinity-enterprise#1010: the server's `as_of` for the newest chat-state
+    // read — the instant the badges on screen were read. A read write sends it
+    // back as `through` when nothing newer was rendered for that chat.
+    chatStateAsOf: null,
+    // trinity-enterprise#1010 (review of #4103): per `${kind}:${id}`, the
+    // instant the last read write for that chat covered — what a later load
+    // compares against (`heldPast`), not the newest `as_of`, which a poll can
+    // advance past an arrival the read never covered. A lower bound: a write
+    // with no body read "up to now", recorded as the `as_of` known when it left.
+    readCovered: {},
     // Where the user was when it expired, so re-authenticating returns them
     // there instead of the roster root.
     resumePath: null,
@@ -403,6 +417,11 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // of `TERMS_REFUSAL_CODES`, or null. The stage names the state and links to
     // /terms; the HTTP interceptor stays the only thing that navigates there.
     termsRefusal: null,
+    // trinity-enterprise#1107 ruling A(1): the terms a portal session reads and
+    // accepts INSIDE the Workspace, on its own token (`loadTerms` /
+    // `acceptTerms`); `{ required, version, title, text, accepted, is_default }`
+    // or null. A platform session is sent to /terms instead (the interceptor).
+    terms: null,
 
     // #2198 — the last successfully-loaded thread list, and whether the most
     // recent attempt failed.
@@ -609,8 +628,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
     },
 
     // Step 2 — verify the code → portal session token (persisted).
+    // `client: 'web'` (trinity-enterprise#1107 ruling A): the Workspace declares
+    // the session interactive, which is what makes it one the terms gate asks.
     async verifyCode(email, code) {
-      const { data } = await portalHttp.post('/api/enterprise/client-portal/auth/verify', { email, code })
+      const { data } = await portalHttp.post('/api/enterprise/client-portal/auth/verify', { email, code, client: SPA_CLIENT })
       this.portalToken = data.token
       this.clientEmail = data.email
       // #2261 — a successful client sign-in is a new session in this tab, so the
@@ -621,6 +642,25 @@ export const useClientPortalStore = defineStore('clientPortal', {
       writeSuppressed(false)
       this.sessionExpired = false
       localStorage.setItem(PORTAL_TOKEN_KEY, data.token)
+      return data
+    },
+
+    // trinity-enterprise#1107 ruling A(1): the terms routes accept the portal
+    // token (`routers/terms.py::terms_caller`), so a client session reads and
+    // accepts here, on `portalHttp`, never through the platform `api` client.
+    async loadTerms() {
+      const { data } = await portalHttp.get('/api/terms/current', { headers: this.authHeader })
+      this.terms = data
+      return data
+    },
+
+    // Accept `version` — the one the person read. Rejects with the server's
+    // error (409 `version_stale`, 403 a closed invitation); on success the
+    // roster refusal is over and the shell re-bootstraps.
+    async acceptTerms(version) {
+      const { data } = await portalHttp.post('/api/terms/accept', { version }, { headers: this.authHeader })
+      if (this.terms) this.terms = { ...this.terms, version: data.version, accepted: true }
+      this.termsRefusal = null
       return data
     },
 
@@ -675,6 +715,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       this.modelOptions = []
       this.rosterLoaded = false
       this.termsRefusal = null
+      this.terms = null
       // #3894: the no-email verdict is this session's roster refusal — the next
       // client signing in must not see the "Add an email" page before its own
       // roster answers.
@@ -1647,6 +1688,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       })
       const out = {}
       const previews = {}
+      if (data && data.as_of) this.chatStateAsOf = laterInstant(this.chatStateAsOf, data.as_of)
       for (const c of data.chats || []) {
         if (!(c && c.kind && c.id)) continue
         const key = `${c.kind}:${c.id}`
@@ -1668,13 +1710,15 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // Fire-and-forget by design: a failed read marker leaves a stale badge,
     // which is not worth interrupting navigation over, and the next state fetch
     // corrects it.
-    async markChatRead(kind, chatId) {
+    //
+    // trinity-enterprise#1010: `through` is the newest instant this client held
+    // for the chat — the cursor moves there, not to the server's now, so an
+    // arrival after the last fetch still counts. Omitted, it falls back to the
+    // last chat-state `as_of`; with neither — or READ_UP_TO_NOW — no body, and
+    // the server reads up to now.
+    async markChatRead(kind, chatId, through) {
       try {
-        await portalHttp.post(
-          `/api/enterprise/client-portal/chat-state/${kind}/${encodeURIComponent(chatId)}/read`,
-          null,
-          { headers: this.authHeader },
-        )
+        await this.markChatReadStrict(kind, chatId, through)
       } catch { /* stale badge only */ }
     },
 
@@ -1682,10 +1726,19 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // read settles many of these and must report how many failed —
     // `markChatRead` swallows every error by design, so `Promise.allSettled`
     // over it would report zero failures even if all of them failed.
-    async markChatReadStrict(kind, chatId) {
+    //
+    // Before any chat state was read there is no `as_of`, and a `through` taken
+    // from one chat's rows would also be the viewer's FIRST read — the ent#557
+    // account baseline, set at that instant for every chat they never opened.
+    // So with no `as_of` yet, no body: the server reads up to now, as before #1010.
+    async markChatReadStrict(kind, chatId, through) {
+      const held = through === READ_UP_TO_NOW || !this.chatStateAsOf
+        ? null : laterInstant(this.chatStateAsOf, through)
+      const key = `${kind}:${chatId}`
+      this.readCovered = { ...this.readCovered, [key]: laterInstant(this.readCovered[key], held || this.chatStateAsOf) }
       await portalHttp.post(
         `/api/enterprise/client-portal/chat-state/${kind}/${encodeURIComponent(chatId)}/read`,
-        null,
+        held ? { through: held } : null,
         { headers: this.authHeader },
       )
     },
@@ -1862,8 +1915,11 @@ export const useClientPortalStore = defineStore('clientPortal', {
     },
 
     // ent#534 — start a real-time voice call bound to a Workspace thread. The
-    // platform-principal route (uniform 404 for anyone else); the audio socket
-    // the response names is the OSS one and takes the platform JWT.
+    // platform-principal route (uniform 404 for anyone else). The response
+    // carries the audio socket's single-use ticket (trinity-enterprise#595),
+    // so the socket is authorized by THIS request's credential decision
+    // (`authHeader` + the `portalHttp` interceptor) — never by reading a
+    // session token for the socket.
     async startWorkspaceVoice(agentName, portalSessionId, voiceName = null, mode = 'live') {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/voice/start`,

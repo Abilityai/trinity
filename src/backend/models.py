@@ -497,6 +497,14 @@ class User(BaseModel):
     # agent created could reach `/task` looking like the admin in a browser.
     # `dependencies.is_person_principal` refuses it.
     is_event_loopback: bool = False
+    # trinity-enterprise#1107 (ruling A): True only on a JWT carrying the
+    # `interactive` claim — the session the SPA declared at sign-in
+    # (`client=web` on `/api/token`, `"client": "web"` on the email verify).
+    # The terms gate asks exactly these sessions; a token without the claim
+    # (the CLI, curl, a harness, a session minted before the claim existed) is
+    # never asked. A UX/record contract the client declares, not a security
+    # boundary — nothing is authorized by it. False on every other branch.
+    interactive_session: bool = False
     # trinity-enterprise#629 + #164: the agents a capability fence admitted an
     # agent key to on THIS request (`dependencies._admit_capability_reach`).
     # Private, so it is never serialized and never set from a token: the only
@@ -1336,6 +1344,10 @@ class SystemAgentConfig(BaseModel):
     # has without running it (verdict `declared_only`): never created, never
     # reconciled, never deleted, and not stored platform-side.
     deploy: bool = True
+    # trinity-enterprise#1109: the `.env` variable NAMES this member needs
+    # (never values). Parsed, validated and previewed; the platform prompts
+    # for nothing — the agent reading the manifest asks for each missing one.
+    credentials: Optional[List[str]] = None
 
 
 class SystemPermissions(BaseModel):
@@ -1430,8 +1442,9 @@ class BundledManifestSummary(BaseModel):
     templates: List[str] = []
     schedule_count: int = 0
     # True when the manifest carries a top-level `prompt:`, which OVERWRITES the
-    # platform-wide trinity_prompt for every agent. The UI gates deploy on an
-    # explicit acknowledgement for this.
+    # platform-wide trinity_prompt for every agent when an admin deploys it (#4025:
+    # anyone else's deploy leaves it alone and says so). A property of the manifest,
+    # not of the caller: the preview gives the caller-specific answer.
     sets_prompt: bool = False
     permissions_preset: Optional[str] = None
     # parse + validate + the same side-effect-free template/resource preflight the
@@ -1718,9 +1731,18 @@ class DeployLocalResponse(BaseModel):
 # ============================================================================
 
 class CredentialInjectRequest(BaseModel):
-    """Request to inject credential files directly into an agent."""
+    """Request to inject credential files directly into an agent.
+
+    `mode: "replace"` (the default) writes `files` / `files_b64` whole — the
+    original contract, unchanged. `mode: "merge"` (trinity-enterprise#1109)
+    takes `env` only: each named `.env` variable is set in place through the
+    sink's read-patch-inject leaf and every other byte is kept, so a caller
+    on another instance can land one credential without holding the file.
+    """
     files: Dict[str, str] = {}       # text files: {".env": "KEY=value\n...", ".mcp.json": "{}"}
     files_b64: Dict[str, str] = {}   # binary files: {path: base64(content)} (#11 — .p12/.pfx/DER)
+    mode: Literal["replace", "merge"] = "replace"
+    env: Dict[str, str] = {}         # merge only: {NAME: value} lines to set in `.env`
 
 
 class CredentialInjectResponse(BaseModel):
@@ -1847,7 +1869,8 @@ class CredentialRequirementsResponse(BaseModel):
 class AgentPropagationStatus(BaseModel):
     """Per-agent result when propagating the global GitHub PAT."""
     agent_name: str
-    # "updated", "skipped_per_agent_pat", "skipped_no_pat", "failed"
+    # "updated", "skipped_per_agent_pat", "skipped_no_pat", "failed",
+    # "skipped_env_unreadable" (trinity-enterprise#1073: .env not readable as text, left untouched)
     status: str
     error: Optional[str] = None
     # #1967: whether the LIVE git remote was re-templated. The `.env` write only
@@ -2272,9 +2295,10 @@ class CircuitBreakerConfigUpdate(BaseModel):
 class OperatorResumeUpdate(BaseModel):
     """Body for PUT /api/agents/{name}/operator-resume (ent#329).
 
-    Per-agent opt-in: when enabled, answering one of this agent's parked
-    operator-queue items dispatches a turn so the agent acts on the answer
-    instead of waiting for a next tick it may never have.
+    Per-agent switch, on by default (abilityai/trinity-enterprise#1108): when
+    enabled, answering one of this agent's parked operator-queue items
+    dispatches a turn so the agent acts on the answer instead of waiting for a
+    next tick it may never have.
 
     Per-agent rather than per-item deliberately — a dispatch spends money, and an
     agent-declared per-item flag would let the agent make answering costly for
@@ -2430,6 +2454,13 @@ class ConnectorPlaybook(BaseModel):
     automation: Optional[str] = None
 
 
+class McpExternalAccessStatus(BaseModel):
+    """Whether off-box clients may reach /mcp, and which tier decided
+    (`settings` | `environment` | `default`) — trinity-enterprise#1101."""
+    enabled: bool = False
+    source: str = "default"
+
+
 class ConnectorStatus(BaseModel):
     """Response for GET .../connector (owner view)."""
     agent_name: str
@@ -2445,6 +2476,9 @@ class ConnectorStatus(BaseModel):
     # `keyless_snippets` is the no-key config (empty when the flag is off).
     inline_auth_available: bool = False
     keyless_snippets: List[ConnectorClientSnippet] = Field(default_factory=list)
+    # trinity-enterprise#1101: when off, the connection config above does not
+    # answer from outside the box — the UI says so instead of offering it.
+    external_access: McpExternalAccessStatus = Field(default_factory=McpExternalAccessStatus)
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -4802,6 +4836,11 @@ class McpUrlUpdate(BaseModel):
     url: str
 
 
+class McpExternalAccessUpdate(BaseModel):
+    """Request body for PUT /api/settings/mcp-external-access (trinity-enterprise#1101)."""
+    enabled: StrictBool
+
+
 class AgentQuotaUpdate(BaseModel):
     """Request body for updating per-role agent quotas."""
     max_agents_creator: Optional[str] = None
@@ -5083,6 +5122,10 @@ class VoiceStartResponse(BaseModel):
     voice_session_id: str
     websocket_url: str
     chat_session_id: str
+    # trinity-enterprise#595: the voice socket's single-use credential, sent as
+    # its first frame; `websocket_url` never carries one.
+    websocket_ticket: str
+    websocket_ticket_expires_in: int
 
 
 class VoiceStopRequest(BaseModel):
@@ -6321,3 +6364,45 @@ class NeverminedDelegationBind(BaseModel):
         if any(c in v for c in "\r\n"):
             raise ValueError("provider must be a single line")
         return v or None
+
+
+# --- Terms of use per instance (trinity-enterprise#1107) --------------------
+
+class TermsCurrent(BaseModel):
+    """What the terms screen and the Settings editor read."""
+    required: bool          # the gate's switch (on by default)
+    version: str            # the version a person accepts
+    title: str
+    text: str               # markdown — the shipped default until replaced
+    is_default: bool        # the shipped text is in force
+    accepted: bool          # the caller has an acceptance row for `version`
+
+
+class TermsAccept(BaseModel):
+    version: str = Field(..., max_length=100)
+
+
+class TermsAccepted(BaseModel):
+    accepted: bool
+    created: bool           # False when this person had already accepted this version
+    version: str
+    accepted_at: str
+
+
+class TermsUpdate(BaseModel):
+    """`PUT /api/terms` — any subset; a text or title save stamps a new version.
+    Validated at the boundary AND at the sink (`terms_service.validate_*`),
+    because the generic `PUT /api/settings/{key}` is refused for these keys."""
+    title: Optional[str] = None
+    text: Optional[str] = None
+    required: Optional[bool] = None
+
+
+class TermsAcceptance(BaseModel):
+    id: int
+    user_id: Optional[int] = None   # None: a Workspace portal session (ruling A(1))
+    email: Optional[str] = None
+    terms_version: str
+    accepted_at: str
+    door: Optional[str] = None
+    actor_ip: Optional[str] = None

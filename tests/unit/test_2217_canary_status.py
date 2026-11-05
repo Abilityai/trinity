@@ -405,6 +405,7 @@ def test_feature_flags_carries_canary_enabled(monkeypatch):
         get_install_tls_posture=lambda: "unconfigured",
         # #2691 — whether the saved Public URL has been reached over TLS.
         is_public_url_reached=lambda: False,
+        is_mcp_external_access_enabled=lambda: (False, "default"),
     )
     monkeypatch.setattr(settings_module, "settings_service", stub_settings)
     monkeypatch.setattr(
