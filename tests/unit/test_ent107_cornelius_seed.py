@@ -28,12 +28,16 @@ from __future__ import annotations
 import asyncio
 import sys
 import types
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 import services.cornelius_agent_service as cas
 from services.cornelius_agent_service import cornelius_agent_service as svc
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # `_ent695_lua`
+import _ent695_lua as lua  # noqa: E402
 
 
 class _FakeSettings:
@@ -236,6 +240,10 @@ def _store_backed_redis():
     redis.get.side_effect = lambda key: store.get(key)
     redis.delete.side_effect = lambda key: store.pop(key, None)
     redis.store = store
+    # trinity#4028: the lock renews/releases through a Lua script; this one
+    # EXECUTES the production script text against the same dict.
+    redis.scripts = []
+    redis.register_script.side_effect = lua.dict_register_script(store, log=redis.scripts)
     return redis
 
 
@@ -261,8 +269,8 @@ def test_provision_lock_acquired_and_released(env):
     redis.set.assert_called_once()
     _, kwargs = redis.set.call_args
     assert kwargs.get("nx") is True and kwargs.get("ex")  # SETNX with a TTL
-    # The SETNX stored a real uuid token; the release GET matched it -> DELETE.
-    redis.delete.assert_called_once_with(cas._PROVISION_LOCK_KEY)
+    # The SETNX stored a real uuid token; the release script matched it and deleted.
+    assert redis.scripts == [("release", cas._PROVISION_LOCK_KEY)]
     assert redis.store.get(cas._PROVISION_LOCK_KEY) is None  # lock free again
     assert result["action"] == "created"
 

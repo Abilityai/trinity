@@ -46,6 +46,9 @@ os.environ.setdefault("TRINITY_DB_PATH", str(_TMP_DB))
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # `_ent695_lua`
+import _ent695_lua as lua  # noqa: E402
+
 
 def _load(path: str, name: str):
     spec = importlib.util.spec_from_file_location(name, str(_PROJECT_ROOT / path))
@@ -913,10 +916,14 @@ class TestLockSemantics:
         )
         fake.get.side_effect = lambda k: store.get(k)
         fake.delete.side_effect = lambda k: store.pop(k, None)
+        # trinity#4028: the release is a Lua script; this one EXECUTES the
+        # production text against the same dict.
+        scripts = []
+        fake.register_script.side_effect = lua.dict_register_script(store, log=scripts)
 
         # Fail-open sentinel (no lock held) → release is a no-op.
         service._release_inject_lock(None, "agent-x")
-        fake.delete.assert_not_called()
+        assert scripts == []
 
         lock = SingleFlightLock("skill_inject:agent-x", 1800, client=fake)
         assert lock.acquire()  # held; unique token minted into the store
@@ -924,12 +931,14 @@ class TestLockSemantics:
         # Successor holds a different token → release must NOT delete.
         store["skill_inject:agent-x"] = "someone-elses-token"
         service._release_inject_lock(lock, "agent-x")
-        fake.delete.assert_not_called()
+        assert store["skill_inject:agent-x"] == "someone-elses-token"
 
         # Own token back → release deletes exactly our key.
         store["skill_inject:agent-x"] = lock.token
         service._release_inject_lock(lock, "agent-x")
-        fake.delete.assert_called_once_with("skill_inject:agent-x")
+        assert "skill_inject:agent-x" not in store
+        assert scripts == [("release", "skill_inject:agent-x")] * 2
+        fake.delete.assert_not_called()  # never a client-side DELETE
 
     def test_lock_ttl_covers_one_restore_attempt(self):
         # A lock that expires mid-injection evaporates exactly in the slow

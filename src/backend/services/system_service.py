@@ -4275,7 +4275,7 @@ class ApplyLeaseKeeper:
 
     def _renew(self) -> LeaseState:
         issued = time.monotonic()
-        state = self._lock.refresh_if_owned_atomic()
+        state = self._lock.refresh_if_owned()
         if state is LeaseState.OWNED:
             self._deadline = issued + self._ttl - self._margin
         return state
@@ -4793,7 +4793,7 @@ async def apply_manifest(
             )
         finally:
             await lease.stop()
-            lock.release_if_owned_atomic()
+            lock.release_if_owned()
 
         if not outcome.failed:
             status = "applied"

@@ -42,6 +42,9 @@ _BACKEND = Path(__file__).resolve().parent.parent.parent / "src" / "backend"
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # `_ent695_lua`
+import _ent695_lua as lua  # noqa: E402
+
 T0 = datetime(2026, 9, 7, 14, 16, 34, 257400, tzinfo=timezone.utc)
 H = timedelta(hours=1)
 DAY = timedelta(hours=24)
@@ -374,7 +377,7 @@ def test_stop_cancels_the_loop_and_waits_for_it_to_unwind(tss):
 def test_marker_ttl_follows_the_send_cadence_never_the_wake(tss, interval_hours):
     mod, _, _ = tss
     fakeredis = pytest.importorskip("fakeredis")
-    client = fakeredis.FakeRedis()
+    client = lua.with_lua(fakeredis.FakeRedis())
     svc = mod.TelemetrySharingService(interval_hours=interval_hours)
     with patch.object(mod, "get_breaker_redis", return_value=client):
         assert svc._claim_tick() is True
@@ -387,7 +390,7 @@ def test_marker_is_a_fresh_setnx_per_claim(tss):
     """A reused SingleFlightLock answers True forever after its first win; the loop must not."""
     mod, _, _ = tss
     fakeredis = pytest.importorskip("fakeredis")
-    client = fakeredis.FakeRedis()
+    client = lua.with_lua(fakeredis.FakeRedis())
     svc = mod.TelemetrySharingService(interval_hours=24)
     with patch.object(mod, "get_breaker_redis", return_value=client):
         assert svc._claim_tick() is True
@@ -398,7 +401,7 @@ def test_marker_is_a_fresh_setnx_per_claim(tss):
 def test_failed_send_releases_the_marker_so_a_sibling_retries_at_the_next_wake(tss):
     mod, store, _ = tss
     fakeredis = pytest.importorskip("fakeredis")
-    client = fakeredis.FakeRedis()
+    client = lua.with_lua(fakeredis.FakeRedis())
     _consent_on(mod, store)
     store[mod.KEY_LAST_SHARED_AT] = _iso(T0)
     a = mod.TelemetrySharingService(interval_hours=24)
@@ -419,7 +422,7 @@ def test_acknowledged_send_keeps_the_marker_even_when_the_stamp_write_raises(tss
     only thing standing between a sibling and a duplicate of an accepted snapshot."""
     mod, store, mdb = tss
     fakeredis = pytest.importorskip("fakeredis")
-    client = fakeredis.FakeRedis()
+    client = lua.with_lua(fakeredis.FakeRedis())
     _consent_on(mod, store)
     store[mod.KEY_LAST_SHARED_AT] = _iso(T0)
     store[mod.KEY_BACKFILL_DELIVERED_AT] = _iso(T0)
@@ -450,7 +453,7 @@ def test_release_only_touches_the_lock_created_in_this_tick(tss):
     """A fail-open claim must not later release a marker a previous, successful claim still holds."""
     mod, _, _ = tss
     fakeredis = pytest.importorskip("fakeredis")
-    client = fakeredis.FakeRedis()
+    client = lua.with_lua(fakeredis.FakeRedis())
     svc = mod.TelemetrySharingService(interval_hours=24)
     with patch.object(mod, "get_breaker_redis", return_value=client):
         assert svc._claim_tick() is True
@@ -477,7 +480,7 @@ def test_cancellation_mid_send_releases_the_marker(tss):
     """A reload or SIGTERM during the POST must not leave a dead process's marker blocking the next boot."""
     mod, store, _ = tss
     fakeredis = pytest.importorskip("fakeredis")
-    client = fakeredis.FakeRedis()
+    client = lua.with_lua(fakeredis.FakeRedis())
     _consent_on(mod, store)
     store[mod.KEY_LAST_SHARED_AT] = _iso(T0)
     svc = mod.TelemetrySharingService(interval_hours=24)
