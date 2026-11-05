@@ -10,8 +10,11 @@ gating request; this module is the platform-side fix.
 
 Shape, and why:
 
-* **Opt-in, per agent.** A dispatch spends money. Unconditional respond→resume
-  turns a respond-storm into an execution storm, so the flag defaults OFF. It
+* **A per-agent switch, on by default.** A dispatch spends money, so the OWNER
+  holds the switch (a respond-storm is an execution storm, and an owner can
+  turn that off for an agent). Default ON since abilityai/trinity-enterprise#1108
+  — before it, an approval in the Inbox moved nothing until the person wrote
+  "go ahead" in the chat. It
   lives on the AGENT rather than on the item because a per-request
   ``resume: true`` the agent sets itself would let the agent decide that
   answering costs the answerer money — unacceptable once the answerer is an
@@ -234,6 +237,7 @@ async def maybe_dispatch_resume(
     # DEFINED `task_execution_service` — manufacturing the very symbol whose
     # absence was the bug. Verified against a live instance: flag on, answer
     # recorded, zero executions created.
+    from services.docker_utils import agent_container_state_async
     from services.task_execution_service import dispatch_and_await_terminal
 
     agent_name = item.get("agent_name")
@@ -249,6 +253,26 @@ async def maybe_dispatch_resume(
         logger.exception(
             "operator-resume: opt-in unreadable for agent=%s item=%s — not dispatching",
             agent_name, item_id,
+        )
+        return None
+
+    # abilityai/trinity-enterprise#1108 AC #4: nothing auto-starts an agent, so a
+    # wake for a stopped one is a FAILED execution and nothing else. Skipped and
+    # said so — the ask reads "agent not yet woken" (`wake_state = pending`) and
+    # the agent's next start re-dispatches it once (`redispatch_pending_wakes`).
+    # `None` means Docker could not be asked — attempt it, the dispatch path
+    # records its own failure. Read off the event loop (#2196), like the ending
+    # wake below.
+    try:
+        state = await agent_container_state_async(agent_name)
+    except Exception:  # noqa: BLE001 — "could not ask" is None, never a raise
+        state = None
+    if state in ("stopped", "missing"):
+        _set_wake_state(db, item_id, "pending")
+        await _audit(
+            platform_audit_service, AuditEventType,
+            agent_name, item_id, responded_by_email,
+            execution_id=None, status="skipped_not_running", error=None,
         )
         return None
 
@@ -310,6 +334,27 @@ async def maybe_dispatch_resume(
             agent_name, item_id, responded_by_email,
             execution_id=None, status="dispatch_error", error=type(exc).__name__,
         )
+        # No turn ran, so the wake is still owed (ent#1108 AC #4): the next
+        # start tries once more, under a fresh idempotency claim (released above).
+        _set_wake_state(db, item_id, "pending")
+        return None
+
+    if _never_reached_the_agent(result):
+        # The platform's own `network` class — "HTTP/connection error to agent
+        # container": no turn ran, so the wake is still owed (ent#1108 AC #4).
+        # The idempotency claim is RELEASED, not completed: a completed key would
+        # make the next start's re-dispatch replay into nothing.
+        if idem is not None:
+            try:
+                idempotency_service.fail(idem)
+            except Exception:
+                logger.exception("operator-resume: idempotency release failed")
+        _set_wake_state(db, item_id, "pending")
+        await _audit(
+            platform_audit_service, AuditEventType,
+            agent_name, item_id, responded_by_email,
+            execution_id=result.execution_id, status=result.status, error=result.error,
+        )
         return None
 
     if idem is not None:
@@ -318,12 +363,82 @@ async def maybe_dispatch_resume(
         except Exception:
             logger.exception("operator-resume: idempotency complete failed")
 
+    # A turn ran (its own row says how it went): the wake is no longer owed.
+    _set_wake_state(db, item_id, "woken")
     await _audit(
         platform_audit_service, AuditEventType,
         agent_name, item_id, responded_by_email,
         execution_id=result.execution_id, status=result.status, error=result.error,
     )
     return result.execution_id
+
+
+def _never_reached_the_agent(result) -> bool:
+    """A result whose failure is the `network` error class (ent#1108 AC #4):
+    the platform could not reach the agent container, so no turn ran. Read off
+    the result's own `error_code` (the enum or its value); any other failure
+    is a turn that ran and failed, which its execution row reports."""
+    code = getattr(result, "error_code", None)
+    code = getattr(code, "value", code)
+    return code == "network"
+
+
+def _set_wake_state(db, item_id: str, state: str) -> None:
+    """Record the answer wake's status on the ask (ent#1108 AC #4). Best-effort:
+    the status must never decide whether the wake itself happens."""
+    try:
+        db.set_operator_queue_wake_state(item_id, state)
+    except Exception:  # noqa: BLE001
+        logger.warning("operator-resume: wake_state=%s not recorded for item=%s",
+                       state, item_id, exc_info=True)
+
+
+async def redispatch_pending_wakes(agent_name: str) -> int:
+    """Deliver the answer wakes this agent missed while it was not running
+    (abilityai/trinity-enterprise#1108 AC #4) — once each, through the same
+    path, now that it runs. Called from the agent-start hook. Returns how many
+    turns were dispatched. Never raises; a row that still cannot be woken stays
+    `pending` for the start after this one."""
+    from database import db
+
+    # The container is "running" the moment it is started, but the agent server
+    # is not up yet: a dispatch now fails on a refused connection, and would
+    # stamp the ask `woken` under a completed idempotency key. Gated on
+    # agent-server readiness like the #2069 merge; a start that never becomes
+    # ready leaves every row `pending` for the next one.
+    try:
+        ready = await _agent_ready(agent_name)
+    except Exception:  # noqa: BLE001 — the probe never raises; belt and braces
+        logger.exception("operator-resume: readiness probe raised for agent=%s", agent_name)
+        ready = False
+    if not ready:
+        logger.warning("operator-resume: agent=%s did not become ready; its pending wakes stay "
+                       "pending until its next start", agent_name)
+        return 0
+
+    try:
+        rows = db.list_operator_queue_pending_wakes(agent_name) or []
+    except Exception:  # noqa: BLE001
+        logger.exception("operator-resume: pending wakes unreadable for agent=%s", agent_name)
+        return 0
+    woken = 0
+    for row in rows:
+        try:
+            execution_id = await maybe_dispatch_resume(
+                row,
+                response=row.get("response") or "",
+                response_text=row.get("response_text"),
+                responded_by_email=row.get("responded_by_email"),
+            )
+        except Exception:  # noqa: BLE001 — `maybe_dispatch_resume` never raises; belt and braces
+            logger.exception("operator-resume: re-dispatch raised for item=%s", row.get("id"))
+            continue
+        if execution_id:
+            woken += 1
+    if rows:
+        logger.info("operator-resume: re-dispatched %d of %d pending wake(s) for agent=%s on start",
+                    woken, len(rows), agent_name)
+    return woken
 
 
 def _framed_ending(items, disposition: str, reason: Optional[str]) -> str:
@@ -671,6 +786,20 @@ def spawn_resume_dispatch(item: Dict[str, Any], **kwargs) -> None:
     (`spawn_on_loop`).
     """
     spawn_on_loop(lambda: maybe_dispatch_resume(item, **kwargs))
+
+
+async def _agent_ready(agent_name: str) -> bool:
+    """Wait for the agent server's `/health` (lifecycle's own probe and timeout,
+    `AGENT_READINESS_TIMEOUT_S`). Late import: lifecycle is a heavy module and
+    this service is imported by the ask sink."""
+    from services.agent_service.lifecycle import wait_for_agent_ready
+    return await wait_for_agent_ready(agent_name)
+
+
+def spawn_pending_wakes(agent_name: str) -> None:
+    """Fire `redispatch_pending_wakes` in the background from the agent-start
+    path (ent#1108 AC #4). Callable from a sync or an async caller."""
+    spawn_on_loop(lambda: redispatch_pending_wakes(agent_name))
 
 
 def spawn_ending_dispatch(rows, **kwargs) -> None:

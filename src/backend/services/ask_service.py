@@ -1726,6 +1726,10 @@ def _receipt(
         "replaces": replaces_request_id,
         "replaced_by": request_id_of(row.get("replaced_by")),
         "disposed_by": row.get("disposed_by"),
+        # abilityai/trinity-enterprise#1108 AC #4: `pending` = the answer landed
+        # but the agent was not running ("agent not yet woken" — its next start
+        # delivers it); `woken` = a turn carried it; None = no wake owed yet.
+        "wake_state": row.get("wake_state"),
         # trinity-enterprise#901: which ending the agent authored, if any —
         # derived here, once, never inferred client-side from `replaced_by`.
         "agent_ending": agent_ending_kind(row),
@@ -1817,7 +1821,8 @@ def _ended(
 
 
 def _opted_in(agent_name: str) -> bool:
-    """Has this agent's owner opted in to being woken by its asks' endings?
+    """Does this agent wake when its asks end? On unless its owner switched it
+    off (abilityai/trinity-enterprise#1108).
 
     Read ONCE per agent per event, before anything is scheduled, so an agent
     that has not opted in costs one flag read and nothing else (ent#329). The

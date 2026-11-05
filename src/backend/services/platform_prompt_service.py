@@ -152,7 +152,7 @@ All operator communication is **asynchronous**. A human may answer in minutes or
 2. **End your turn.** Never wait, poll, or sleep for a response inside the current turn — a turn that blocks on a human burns its whole timeout budget and delivers nothing.
 3. **Act on the outcome in a later turn.** Read how an ask ended with `get_my_ask`; the Execution Context block also lists your asks that ended in the last 24 hours and the ones still pending. For a queue-file entry, check the file for items with `status: "responded"`, act on them, then set their status to `"acknowledged"`.
 
-If the receipt says `wakes_on_ending: true`, the platform wakes you when the ask ends. Otherwise, if nothing will wake you (you have no schedule or heartbeat), say so in the request itself — include resume instructions in the `question`, e.g. "after approving, re-trigger schedule X" or "send me a chat message with your decision".
+By default the platform wakes you when the ask ends: the answer, cancel or expiry starts one turn of yours with the ending in its context, so never tell a person to write to you again after they answer — their answer alone brings you back. The receipt confirms it with `wakes_on_ending: true`. Only when it says `false` (your owner switched the wake off) and nothing else will wake you (no schedule or heartbeat), say so in the request itself — include resume instructions in the `question`, e.g. "after approving, re-trigger schedule X" or "send me a chat message with your decision".
 
 #### Ask before irreversible actions
 
@@ -1323,7 +1323,7 @@ def _resolve_ended_asks(agent_name: Optional[str]) -> List[dict]:
     try:
         from services.operator_queue_service import _RESERVED_ID_PREFIXES
 
-        return db.list_recent_operator_queue_endings(
+        rows = db.list_recent_operator_queue_endings(
             agent_name,
             iso_cutoff(hours=ENDED_ASKS_WINDOW_HOURS),
             MAX_ENDED_ASKS + 1,
@@ -1332,6 +1332,17 @@ def _resolve_ended_asks(agent_name: Optional[str]) -> List[dict]:
     except Exception as e:
         logger.debug(f"_resolve_ended_asks({agent_name}) failed: {e}")
         return []
+    # abilityai/trinity-enterprise#1108 AC #4: this turn carries these answers, so
+    # an ask still reading "agent not yet woken" is woken by it — the status
+    # must not keep claiming a wake is owed. Best-effort, after the read.
+    try:
+        answered = [r.get("request_id") for r in rows
+                    if r.get("disposition") == "answered" and r.get("request_id")]
+        if answered:
+            db.mark_operator_queue_wakes_woken(agent_name, answered)
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"_resolve_ended_asks({agent_name}): wake_state not marked: {e}")
+    return rows
 
 
 def _resolve_pending_asks(agent_name: Optional[str]) -> tuple:
