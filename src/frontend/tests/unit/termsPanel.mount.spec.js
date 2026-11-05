@@ -114,6 +114,30 @@ describe('TermsPanel — the editor', () => {
     w.unmount()
   })
 
+  it('keeps an unsaved draft when the switch is toggled', async () => {
+    // Merge-train finding on ent#1107: `watch(terms, adopt)` re-adopted the
+    // server's text on every store update, so a switch save while a draft
+    // was being written wiped the draft.
+    const w = await mountPanel()
+    await w.find('textarea').setValue('## Draft in progress')
+    expect(w.find('[data-testid="terms-panel-discard"]').exists()).toBe(true)
+    await w.find('[data-testid="terms-panel-required"]').trigger('click')
+    await flushPromises()
+    expect(api.put).toHaveBeenCalledWith('/api/terms', { required: false })
+    expect(w.find('textarea').element.value).toBe('## Draft in progress')
+    expect(w.find('[data-testid="terms-panel-save"]').attributes('disabled')).toBeUndefined()
+  })
+
+  it('puts the toggle back when the switch save fails', async () => {
+    const w = await mountPanel()
+    api.put.mockRejectedValueOnce({ response: { status: 500, data: { detail: { message: 'Saving failed.' } } } })
+    await w.find('[data-testid="terms-panel-required"]').trigger('click')
+    await flushPromises()
+    expect(api.put).toHaveBeenCalledWith('/api/terms', { required: false })
+    expect(w.find('[data-testid="terms-panel-required"]').attributes('aria-checked')).toBe('true')
+    expect(w.text()).toContain('Saving failed.')
+  })
+
   it('posts the switch on its own', async () => {
     const w = await mountPanel()
     await w.find('[data-testid="terms-panel-required"]').trigger('click')

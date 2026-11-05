@@ -203,10 +203,17 @@ function adopt() {
   if (!terms.value) return
   title.value = terms.value.title || ''
   text.value = terms.value.text || ''
-  required.value = terms.value.required !== false
+  adoptSwitch()
 }
 
-watch(terms, adopt)
+function adoptSwitch() {
+  if (terms.value) required.value = terms.value.required !== false
+}
+
+// A store update while a draft is being written (a switch save, a reload)
+// must not wipe the draft: only the switch follows the server then. The text
+// is re-adopted when nothing is pending.
+watch(terms, () => (dirty.value ? adoptSwitch() : adopt()))
 
 function errorDetail(e) {
   if (!e) return ''
@@ -224,19 +231,19 @@ function notice(message) {
   setTimeout(() => { savedNotice.value = '' }, 4000)
 }
 
-async function run(action, done) {
+async function run(action, done, { onFail } = {}) {
   saving.value = true
   saveError.value = ''
   saveErrorDetail.value = ''
   try {
     await action()
-    adopt()
     notice(done)
     await store.loadAcceptances()
   } catch (e) {
     const d = e.response?.data?.detail
     saveError.value = (d && d.message) || 'The terms were not saved. Try again.'
     saveErrorDetail.value = errorDetail(e)
+    if (onFail) onFail()
   } finally {
     saving.value = false
   }
@@ -244,15 +251,19 @@ async function run(action, done) {
 
 function save() {
   if (clientError.value || !dirty.value) return
+  // The server's answer is the saved text, so the watcher adopts it (not dirty any more).
   return run(() => store.save({ title: title.value, text: text.value }), 'Saved as a new version — everyone else is asked at their next visit.')
 }
 
 function restore() {
-  return run(() => store.restoreDefault(), 'The default terms are back.')
+  return run(() => store.restoreDefault().then(adopt), 'The default terms are back.')
 }
 
 function saveSwitch(value) {
-  return run(() => store.save({ required: value }), value ? 'Everyone is asked at their next visit.' : 'Nobody is asked.')
+  // A failed save must not leave the toggle showing a state the server never took.
+  return run(() => store.save({ required: value }),
+    value ? 'Everyone is asked at their next visit.' : 'Nobody is asked.',
+    { onFail: adoptSwitch })
 }
 
 onMounted(async () => {
