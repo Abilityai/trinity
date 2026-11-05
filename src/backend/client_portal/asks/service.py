@@ -328,6 +328,8 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
         # trinity-enterprise#1066: the variable's NAME, for a credential ask only.
         credential_name=(credential_ask_policy.credential_name_of(context)
                          if item.get("type") == "credential" else None),
+        # abilityai/trinity-enterprise#1108 AC #4: "agent not yet woken" / woken.
+        wake_state=item.get("wake_state") or None,
     )
 
 

@@ -167,6 +167,7 @@ _MACHINE_ROW_FIELDS = (
     "replaces", "replaced_by",  # #3247 — uuids; the readback maps them to request_ids
     "aging", "aged_since",
     "subject", "last_seen_at",  # #3246: a platform alert's condition key + latest reading
+    "wake_state",  # abilityai/trinity-enterprise#1108 AC #4: pending (not yet woken) | woken
 )
 
 
@@ -210,6 +211,7 @@ _READBACK_FIELDS = (
     "disposition", "disposed_at", "disposed_by", "disposition_reason",
     "raised_by", "channel", "to_role", "proposal", "supersedes_expired",
     "replaces", "replaced_by",  # #3247 — mapped to request_ids below
+    "wake_state",  # abilityai/trinity-enterprise#1108 AC #4
 )
 
 

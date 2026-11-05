@@ -6,18 +6,18 @@ PostgreSQL half of the dual-track pair; the SQLite half is
 ``run_mcp_external_access_backfill``: no ``mcp_external_access`` row AND at
 least one ``users`` row → insert ``'true'``; otherwise nothing. A fresh
 database has no users at migration time, so it gets the default (off). An
-existing row is never touched. Data only — no DDL. Chained after 0115 so the
+existing row is never touched. Data only — no DDL. Chained after 0117 so the
 version-line keeps ONE head (#2068).
 
-Revision ID: 0116_mcp_external_access_backfill
-Revises: 0115_access_requests_requester_identity
+Revision ID: 0118_mcp_external_access_backfill
+Revises: 0117_operator_queue_wake_state
 """
 from alembic import op
 from sqlalchemy import text
 
 
-revision = "0116_mcp_external_access_backfill"
-down_revision = "0115_access_requests_requester_identity"
+revision = "0118_mcp_external_access_backfill"
+down_revision = "0117_operator_queue_wake_state"
 branch_labels = None
 depends_on = None
 

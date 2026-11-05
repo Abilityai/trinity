@@ -23,8 +23,8 @@ sys.path.insert(0, str(BACKEND))
 pytestmark = pytest.mark.unit
 
 KEY = "mcp_external_access"
-REVISION = "0116_mcp_external_access_backfill"
-PREVIOUS = "0115_access_requests_requester_identity"
+REVISION = "0118_mcp_external_access_backfill"
+PREVIOUS = "0117_operator_queue_wake_state"
 
 
 @pytest.fixture()
@@ -107,7 +107,7 @@ def test_the_shared_decision_function_drives_both_tracks(conn):
     assert run_mcp_external_access_backfill(_run, now_iso="later") is False
 
 
-def test_registered_on_both_tracks_and_chained_after_0115():
+def test_registered_on_both_tracks_and_chained_after_0117():
     from db import migrations
     names = [n for n, _ in migrations.MIGRATIONS]
     assert "mcp_external_access_backfill" in names
