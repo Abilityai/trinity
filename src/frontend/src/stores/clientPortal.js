@@ -414,6 +414,11 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // of `TERMS_REFUSAL_CODES`, or null. The stage names the state and links to
     // /terms; the HTTP interceptor stays the only thing that navigates there.
     termsRefusal: null,
+    // trinity-enterprise#1107 ruling A(1): the terms a portal session reads and
+    // accepts INSIDE the Workspace, on its own token (`loadTerms` /
+    // `acceptTerms`); `{ required, version, title, text, accepted, is_default }`
+    // or null. A platform session is sent to /terms instead (the interceptor).
+    terms: null,
 
     // #2198 — the last successfully-loaded thread list, and whether the most
     // recent attempt failed.
@@ -637,6 +642,25 @@ export const useClientPortalStore = defineStore('clientPortal', {
       return data
     },
 
+    // trinity-enterprise#1107 ruling A(1): the terms routes accept the portal
+    // token (`routers/terms.py::terms_caller`), so a client session reads and
+    // accepts here, on `portalHttp`, never through the platform `api` client.
+    async loadTerms() {
+      const { data } = await portalHttp.get('/api/terms/current', { headers: this.authHeader })
+      this.terms = data
+      return data
+    },
+
+    // Accept `version` — the one the person read. Rejects with the server's
+    // error (409 `version_stale`, 403 a closed invitation); on success the
+    // roster refusal is over and the shell re-bootstraps.
+    async acceptTerms(version) {
+      const { data } = await portalHttp.post('/api/terms/accept', { version }, { headers: this.authHeader })
+      if (this.terms) this.terms = { ...this.terms, version: data.version, accepted: true }
+      this.termsRefusal = null
+      return data
+    },
+
     // ent#375 — the backend slides the session and hands back a rotated token
     // in a response header. Swapping it in is the whole client side of renewal.
     // A response without the header is the normal case (rotation only happens
@@ -688,6 +712,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       this.modelOptions = []
       this.rosterLoaded = false
       this.termsRefusal = null
+      this.terms = null
       // #3894: the no-email verdict is this session's roster refusal — the next
       // client signing in must not see the "Add an email" page before its own
       // roster answers.
