@@ -278,7 +278,8 @@ RECEIPT_KEYS = {"status", "id", "request_id", "raised_by", "channel", "type", "t
                 "resolved", "ask_status", "disposition", "disposed_at", "expires_at",
                 "wakes_on_ending", "supersedes_expired",
                 "replaces", "replaced_by", "disposed_by",  # #3247
-                "agent_ending"}  # trinity-enterprise#901 — replaced | withdrawn | None
+                "agent_ending",  # trinity-enterprise#901 — replaced | withdrawn | None
+                "credential_destination"}  # trinity-enterprise#1109 — {agent_name, host} | None
 
 
 def _in(minutes):
