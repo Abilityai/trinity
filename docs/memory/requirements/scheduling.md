@@ -814,8 +814,10 @@ schedules:
   01:00Z, 00:30Z, 01:00Z, ...), with pytz and `zoneinfo` zones alike. The job loop never advanced,
   the scheduler grew without bound, and two hosts ran out of memory on 2026-10-25. The images pin
   **APScheduler 3.11.3** (fixed since 3.11.1), and every user schedule registers
-  `src/scheduler/cron_trigger.py::MonotonicCronTrigger`, which replaces any answer not after the
-  previous fire time with `previous + 1 minute` and logs it once. It compares and adds on UTC
+  `src/scheduler/cron_trigger.py::MonotonicCronTrigger`. An answer not after the previous fire time
+  (earlier, or EQUAL — the `0 1 * * *` shape) is retried once, asking for the first fire time
+  after `previous + 1s` in UTC, which lands on the correct schedule; only if the retry is not after
+  the previous fire time either does it fall back to `previous + 1 minute`. Logged once per trigger. It compares and adds on UTC
   instants only: two datetimes sharing a zone compare by wall clock, and local arithmetic resets
   `fold`, so either mistake lets a backwards time through inside the repeated hour. Guarded by
   `tests/unit/test_3940_cron_dst_fold.py`, which also requires `tests/requirements-test.txt` to pin
