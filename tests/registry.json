@@ -8361,6 +8361,19 @@
       "description": "#4259: the orphaned-key sweep skips agent/connector keys younger than ORPHANED_KEY_GRACE_SECONDS (crud mints the key before the ownership row lands), still revokes older keys with no live row, never touches a key whose ownership row is live whatever its age, and the [Cleanup] log line names the revoked agents through the real _sweep_retention_772 hand-off."
     },
     {
+      "file": "unit/test_ent1109_credential_handover.py",
+      "feature": "trinity-enterprise#1109",
+      "added": "2026-11-04",
+      "categories": [
+        "backend",
+        "credentials",
+        "workspace",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1109: a credential ask with a destination. Validated and stored at raise (URL gate, agent slug, key variable name), said in plain words on the receipt and the Workspace projection (never the key's name); the sink reads the asking agent's key by name, pins the connection and merge-injects one .env line into the agent on the other instance, writes nothing here, unstages after a 2xx and audits credential_delivered; every delivery failure is a named plain retry with the value in no log, audit row or message; the inject route's mode merge keeps every other byte; manifest credentials: names are parsed, validated and previewed while the legacy map form stays an unknown key."
+    },
+    {
       "file": "unit/test_ent1107_terms_per_instance.py",
       "feature": "trinity-enterprise#1107",
       "added": "2026-11-04",

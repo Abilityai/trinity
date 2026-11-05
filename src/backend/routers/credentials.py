@@ -351,6 +351,43 @@ async def inject_credentials(
             detail=f"Agent is not running (status: {agent_status.status}). Start the agent first."
         )
 
+    if request_body.mode == "merge":
+        # trinity-enterprise#1109: set the named `.env` lines in place through
+        # the sink's read-patch-inject leaf — every other byte kept, under the
+        # per-agent lease — so a credential delivered from another instance
+        # never rewrites this agent's file. `files` has no meaning here.
+        if request_body.files or request_body.files_b64 or not request_body.env:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "merge_takes_env",
+                        "message": "mode \"merge\" takes env ({NAME: value}) and no files."},
+            )
+        from services import credential_sink
+        try:
+            await credential_sink.merge_env_values(agent_name, dict(request_body.env))
+        except credential_sink.CredentialSinkError as e:
+            raise HTTPException(status_code=e.status_code,
+                                detail={"code": e.code, "message": e.message, **e.data})
+        await platform_audit_service.log(
+            event_type=AuditEventType.CREDENTIALS,
+            event_action="inject",
+            source="api",
+            actor_user=current_user,
+            actor_ip=request.client.host if request.client else None,
+            target_type="agent",
+            target_id=agent_name,
+            endpoint=request.scope["path"],
+            request_id=getattr(request.state, "request_id", None),
+            details={"files": [".env"], "mode": "merge",
+                     "names": sorted(request_body.env.keys())},
+        )
+        credential_requirements_service.invalidate_report_cache(agent_name)
+        return CredentialInjectResponse(
+            status="success",
+            files_written=[".env"],
+            message=f"Set {len(request_body.env)} variable(s) in agent {agent_name}'s .env",
+        )
+
     if not request_body.files and not request_body.files_b64:
         raise HTTPException(status_code=400, detail="No files provided for injection")
 

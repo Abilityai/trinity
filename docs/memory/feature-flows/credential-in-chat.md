@@ -1,8 +1,11 @@
 # Feature Flow: A Credential Handed in the Chat (trinity-enterprise#1066)
 
 > **Status**: OSS core. No schema change — the kind rides the existing
-> `operator_queue.type` TEXT column and the name rides `context.credential_name`.
-> Requirements: [credentials.md §3.10](../requirements/credentials.md),
+> `operator_queue.type` TEXT column, the name rides `context.credential_name`
+> and, since trinity-enterprise#1109, a destination rides
+> `context.credential_destination`.
+> Requirements: [credentials.md §3.10](../requirements/credentials.md) and
+> [§3.11](../requirements/credentials.md) (the destination),
 > [security.md §20.11](../requirements/security.md).
 
 ## Problem
@@ -34,6 +37,42 @@ person's Workspace thread ── PortalAsks → PortalCredentialField (masked)
 thread row: "NAME provided"
 ```
 
+### With a destination (trinity-enterprise#1109)
+
+```
+agent ──ask_for_credential(name, why, destination={instance_url, agent_name, key_env})──▶ MCP
+        context.credential_destination ── _validated_ask → credential_destination.validate(agent_name)
+             (URL: shape only, no resolver on the loop; the outbound A2A switch ON; the origin equal to
+              an endpoint in the admin's outbound A2A registry for THIS agent — destination_not_approved /
+              destination_outbound_disabled; agent: a slug; key_env: a variable NAME the policy allows)
+             → stored normalised (canonical host, default port dropped, IPv6 bracketed, scheme kept)
+        receipt + Workspace projection: credential_destination {agent_name, host} — never key_env
+
+person's field: "Sent to the agent lopez-digest on the Trinity at member.example.com …"  (never "your")
+        Send ─▶ provide_credential  (destination read from the STORED row, never the request)
+             └─ credential_sink.set_env_value(..., destination)
+                  stage_secret (fail closed)
+                  · _deliver_remote: the switch and the registry re-read (422 destination_outbound_disabled /
+                    destination_not_approved, nothing read) → the ASKING agent running → its .env read →
+                    the key by NAME (destination_key_missing; destination_key_invalid if not header-safe)
+                    · URL resolved OFF the loop (a2a_client.validate_endpoint), connection pinned
+                    (Host + SNI = the registered host) · audit credential_delivery_attempt BEFORE the POST
+                  · POST {instance}/api/agents/{agent}/credentials/inject through a2a_client._read_capped
+                    under _with_deadline — {mode: "merge", env: {NAME: value}}  Authorization: Bearer <key>
+                  · 2xx → unstage (nothing rests here) → audit credential_delivered {host, agent_name}
+                  · refusals: destination_unreachable (503; connect → unstaged, timeout → stays staged,
+                    may_have_written), destination_unconfirmed (503; a 5xx or an unreadable answer → stays
+                    staged, "may or may not"), destination_key_refused (401/403), destination_agent_missing
+                    (404), destination_refused (other, or a redirect) — 409, ask pending, value in no
+                    log/audit/message
+             └─ ask_service.answer(response="provided", via_credential_sink=True)
+                  └─ wake: "NAME was delivered to the agent X on the Trinity at host; it is not in
+                     your environment"
+receiving instance: POST /api/agents/{name}/credentials/inject mode "merge"
+        require_person (a user-scoped key is a person) → credential_sink.merge_env_values
+        → the same read-patch-inject leaf, every other byte kept → audit inject {mode: merge, names}
+```
+
 ## Pieces
 
 | Layer | File | Role |
@@ -44,7 +83,10 @@ thread row: "NAME provided"
 | Backend | `services/credential_ask_policy.py` | Name charset, ≤64, reserved names (agent-side mirror, parity-tested) |
 | Backend | `client_portal/asks/router.py` → `POST /{id}/credential` | Person-only door, rate-limited, uniform 404 |
 | Backend | `client_portal/asks/service.py::provide_credential` | Ownership and state checks, sink, then the ask sink |
-| Backend | `services/credential_sink.py` | The one leaf that handles the value |
+| Backend | `services/credential_sink.py` | The one leaf that handles the value; `_deliver_remote` (destination branch) and `merge_env_values` (the inject route's `mode: "merge"`) since ent#1109 |
+| Backend | `services/credential_destination.py` | ent#1109: the destination's shape, URL gate (`validate_a2a_endpoint_url`), `destination_of` at answer time, `public_view` / `plain_words` (agent + host, never `key_env`) |
+| Backend | `routers/credentials.py` → `POST /agents/{name}/credentials/inject` | `mode: "merge"` + `env` (ent#1109): one line set in place through the sink's leaf; `mode: "replace"` (default) is the whole-file write, unchanged |
+| Backend | `services/system_service.py` → `parse_manifest` | ent#1109: `credentials: [NAME, ...]` read as variable names (validated, previewed); the older map form stays an unknown key, warned and dropped |
 | Agent | `agent_server/routers/credentials.py` → `GET /api/credentials/read` | Lists a path in `missing` only when the agent proved it absent; a path in none of `files` / `files_b64` / `missing` was not read |
 | Backend | `services/operator_resume_service.py` | Wake names the variable, never a value |
 | Backend | `client_portal/router.py::_refuse_secret_in_message` | Paste guard on both Workspace chat routes (422 `secret_in_message`) |
@@ -85,12 +127,27 @@ thread row: "NAME provided"
 | `agent_unreachable` | 503 | sink | The agent's read (nothing stored) or inject (may or may not be stored) failed |
 | `already_resolved` | 409 / 400 | door | Ended first; `credential_written: true` when the value landed |
 | `secret_in_message` | 422 | Workspace chat | The message looked like a secret; nothing stored |
+| `destination_invalid` / `destination_url_invalid` / `destination_agent_invalid` / `destination_key_env_invalid` | 422 | raise (ent#1109) | The destination's shape, URL (`reason`: `endpoint_not_https`, `endpoint_private_address`, `endpoint_dns_failure`, `endpoint_invalid`, `path`, …), agent name or key variable name |
+| `destination_on_non_credential` | 422 | raise | Only a credential ask carries a destination |
+| `destination_key_missing` | 409 | sink | The asking agent holds no key under `key_env`; nothing stored |
+| `destination_url_invalid` | 422 | sink | The URL no longer passes the gate at delivery time; nothing stored |
+| `destination_unreachable` | 503 | sink | Connect failure (nothing stored, unstaged) or a timeout after the request left (`may_have_written: true`, stays staged) |
+| `destination_key_refused` | 409 | sink | The destination answered 401/403 to the key; nothing stored |
+| `destination_agent_missing` | 409 | sink | The destination answered 404 — no such agent, or one the key cannot reach |
+| `destination_refused` | 409 | sink | Any other non-2xx (`status`); nothing stored here |
+| `merge_takes_env` | 400 | inject route | `mode: "merge"` with `files`, or without `env` |
 
 ## Residuals
 
 - The paste guard is not wired into channel adapters (Slack, Telegram, voice).
 - The value is stored in the agent's `.env` only; a vault target is a second
-  sink target, not a change to the ask kind or the field.
+  sink target, not a change to the ask kind or the field. A destination
+  (ent#1109) is such a second target: another Trinity's agent, over the key
+  the asking agent holds for it.
+- The platform schedules no retry of a failed delivery: the person sends the
+  value again. The asking agent's own wording (where the secret lives, who
+  reads it, how to rotate it) and the "ask for each missing manifest
+  `credentials:` name before apply" prompting are the agent's skill.
 - The owner's Credentials-tab inject and the other non-sink `.env` writers are
   whole-file writes that do not take the sink's lease, so they stay
   last-writer-wins against it.
@@ -105,6 +162,7 @@ thread row: "NAME provided"
 - `tests/unit/test_ent1066_credential_ask_kind.py` — the kind, the name policy and parity, primary-only on the REST door and the file channel, `no_person`, the answer refusal on both doors, the wake.
 - `tests/unit/test_ent1066_credential_sink.py` — round-trip through the agent's parser, the agent image's real read/inject over a tmp home (non-UTF-8 and unreadable `.env` keep every byte), fail-closed staging and unstaging on refusal, stopped agent, lease, CAS after write, value absent from logs, audit and refusals.
 - `tests/unit/test_ent1066_credential_route_gates.py` — agent, system and connector keys refused; Workspace-only person admitted; stranger 404.
+- `tests/unit/test_ent1109_credential_handover.py` — the destination: validated and stored at raise, said in plain words on the receipt and the projection, the key read by name and never shown, the pinned merge inject on the destination, nothing written here and nothing staged after, every refusal named and unstaged when nothing could have been written, the wake, `mode: "merge"` on the inject route, manifest `credentials:` names (and the legacy map form kept as an unknown key).
 - `tests/unit/test_ent1066_secret_paste_guard.py` — every shape, both routes, nothing persisted, no echo; `ops_` snake_case identifiers neither refused nor redacted.
 - `src/mcp-server/src/operator_queue.test.ts` — the tool's shape, only declared fields travel, the description.
 - `src/frontend/tests/unit/portalCredentialField.mount.spec.js`, `credentialAskSurfaces.mount.spec.js`, `portalSecretInMessage.mount.spec.js` — mounted.
