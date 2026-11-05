@@ -157,6 +157,12 @@ def _sig(route):
 # the guard worth keeping; the alternative (moving the pinned blob forward on
 # every merge) silently re-baselines whatever drifted in with it.
 _ADDED_SINCE_SPLIT = {
+    # #4257 — the queue-stall alert threshold (admin; range-validated 5–1440,
+    # which is why the generic `/{key}` PUT refuses the key).
+    ("/api/settings/queue-stall-alert-minutes", ("GET",),
+     "get_queue_stall_alert_minutes_setting"),
+    ("/api/settings/queue-stall-alert-minutes", ("PUT",),
+     "update_queue_stall_alert_minutes_setting"),
     # trinity-enterprise#1046 — Workspace Direct calls (admin).
     ("/api/settings/direct-voice", ("GET",), "get_direct_voice_settings"),
     ("/api/settings/direct-voice", ("PUT",), "update_direct_voice_settings"),
