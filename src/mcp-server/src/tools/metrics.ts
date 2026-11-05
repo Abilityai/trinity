@@ -423,7 +423,7 @@ export function createMetricsTools(client: TrinityClient, requireApiKey: boolean
         "and `source` counts the files listed, read, skipped by name and left unscanned, so " +
         "an empty answer is never ambiguous. `findings` covers only the objectives returned " +
         "to you — another role's YAML mistake is not yours to fix. Only your own objectives; " +
-        "there is no agent parameter.",
+        "an admin's user key names the agent with agent_name.",
       parameters: z.object({
         agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
       }),

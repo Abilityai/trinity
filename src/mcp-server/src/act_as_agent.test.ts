@@ -60,6 +60,20 @@ describe("#1024 resolveActingAgent — the scope matrix", () => {
   }
 });
 
+describe("#1024 ask_for_credential stays out of act-as", () => {
+  it("has no agent_name, and a user key is not told to pass one", async () => {
+    const tool = (createOperatorQueueTools({} as unknown as TrinityClient, false) as any).askForCredential;
+    assert.equal(tool.parameters.shape.agent_name, undefined);
+    const out = JSON.parse(await tool.execute(
+      { name: "OP_SERVICE_ACCOUNT_TOKEN", why: "To open your vault.", request_id: "cred-1" },
+      { session: ctx("user") },
+    ));
+    assert.equal(out.success, false);
+    assert.match(out.error, /requires an agent-scoped key/);
+    assert.doesNotMatch(out.error, /pass agent_name/);
+  });
+});
+
 describe("#1024 the act-as header travels on a clone only", () => {
   const realFetch = globalThis.fetch;
   afterEach(() => { globalThis.fetch = realFetch; });

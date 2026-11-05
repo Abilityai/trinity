@@ -1109,6 +1109,7 @@ def raise_ask(
                 "agent_name": agent_name,
                 "request_id": replaced["request_id"],
                 "replaced_by": row["id"],
+                **_acted_by(actor_user),
             },
         }]
         ending_trigger = _broadcast_payload({"type": "operator_queue_cancelled",

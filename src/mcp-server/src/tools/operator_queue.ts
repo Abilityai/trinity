@@ -570,7 +570,7 @@ export function createOperatorQueueTools(
         "re-ask the same action without new information. A dismissed ask is the " +
         "person you addressed choosing not to answer (response empty): do not " +
         "proceed, and do not raise the same ask again straight away. Acts as the agent your " +
-        "key belongs to — there is no agent parameter.",
+        "key belongs to (admin keys: agent_name).",
       parameters: z.object({
         agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         request_id: z
@@ -645,7 +645,7 @@ export function createOperatorQueueTools(
         "invalid_<field> for a malformed field, and each field's description names its " +
         "other codes and the fix. 429 rate_limited or queue_full: too " +
         "many open asks, wait for some to end. Acts as the agent your key belongs to; " +
-        "there is no agent parameter.",
+        "admin keys name it with agent_name.",
       // ent#1024: `agent_name` is the TOOL's, never the body's — extended here
       // so `askOperatorParameters.shape` (the body allowlist below) stays as is.
       parameters: askOperatorParameters.extend({
@@ -731,6 +731,14 @@ export function createOperatorQueueTools(
         const authContext = context?.session;
         let agentName: string;
         try {
+          // trinity-enterprise#1024: credentials stay out of act-as, so this tool
+          // has no agent_name, and resolveActingAgent's "pass agent_name" is wrong here.
+          if (authContext?.scope === "user") {
+            throw new Error(
+              "The ask_for_credential tool: this call requires an agent-scoped key. Asking for a " +
+                "credential is not available on behalf of an agent, so a user-scoped key can't use it.",
+            );
+          }
           agentName = resolveActingAgent(authContext, "The ask_for_credential tool");
         } catch (error) {
           return JSON.stringify(
@@ -795,7 +803,7 @@ export function createOperatorQueueTools(
         "is not one of your own asks (a gate's approval or the platform's alarm is " +
         "not yours to withdraw); 422 invalid_reason for a blank reason or one over " +
         "500 characters. A queue-file entry cannot be withdrawn. Acts as the agent " +
-        "your key belongs to — there is no agent parameter.",
+        "your key belongs to (admin keys: agent_name).",
       parameters: withdrawAskParameters.extend({
         agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
       }),

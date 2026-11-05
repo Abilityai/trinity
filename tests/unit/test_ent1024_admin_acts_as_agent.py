@@ -216,3 +216,104 @@ def test_an_on_behalf_ask_records_the_acting_user(audit, monkeypatch):
 def test_an_agents_own_ask_carries_no_acted_by(monkeypatch):
     row = _raise(_user(scope="agent", agent_name="worker"), monkeypatch)
     assert "acted_by" not in row["details"]
+
+
+def _ending_rows(monkeypatch):
+    from services import ask_service
+
+    rows = []
+    monkeypatch.setattr(ask_service, "_ended", lambda event, audit, trigger: rows.extend(audit))
+    return rows
+
+
+def _new_ask(agent, actor, monkeypatch, **extra):
+    from services import ask_service, operator_resume_service
+
+    monkeypatch.setattr(ask_service, "_announce", lambda rows, trigger: None)
+    monkeypatch.setattr(operator_resume_service, "spawn_on_loop", lambda fn: fn())
+    request_id = f"r-{uuid.uuid4().hex[:8]}"
+    ask_service.raise_ask(
+        agent,
+        {"request_id": request_id, "type": "question", "title": "Approve?", "question": "May I proceed?", **extra},
+        raised_by="agent", channel="mcp", actor_user=actor,
+    )
+    return request_id
+
+
+def test_an_on_behalf_withdrawal_records_the_acting_user(audit, monkeypatch):
+    from services import ask_service
+
+    actor = _admit(_user(), {HEADER: "worker"})
+    agent = f"agent-1024-{uuid.uuid4().hex[:6]}"
+    request_id = _new_ask(agent, actor, monkeypatch)
+    rows = _ending_rows(monkeypatch)
+    ask_service.withdraw(agent, request_id, "no longer needed", actor_user=actor)
+    assert rows[0]["event_action"] == "withdrawn"
+    assert rows[0]["details"]["acted_by"] == "user:7"
+
+
+def test_an_on_behalf_replacement_records_the_acting_user(audit, monkeypatch):
+    actor = _admit(_user(), {HEADER: "worker"})
+    agent = f"agent-1024-{uuid.uuid4().hex[:6]}"
+    first = _new_ask(agent, actor, monkeypatch)
+    rows = _ending_rows(monkeypatch)
+    _new_ask(agent, actor, monkeypatch, replaces=first)
+    assert rows[0]["event_action"] == "replaced"
+    assert rows[0]["details"]["acted_by"] == "user:7"
+
+
+# Through the real door. Every test above calls `admit_act_as` directly, so they
+# would all stay green if `get_current_user` stopped calling it.
+class TestThroughTheRealDoor:
+    @pytest.fixture
+    def door(self, monkeypatch):
+        from fastapi import Depends, FastAPI
+        from starlette.testclient import TestClient
+
+        import database
+        from dependencies import act_as_agent_of, get_current_user
+
+        database.db.set_setting("terms_required", "false")
+        row = {"id": 7, "username": "ops-admin", "email": "admin@example.com", "role": "admin", "suspended_at": None}
+        monkeypatch.setattr(database.db, "get_user_by_email", lambda *_a, **_k: row)
+        monkeypatch.setattr(database.db, "get_user_by_username", lambda *_a, **_k: row)
+        monkeypatch.setattr(database.db, "get_agent_ephemeral_info", lambda *_a, **_k: {"is_ephemeral": False})
+
+        def key(scope):
+            monkeypatch.setattr(database.db, "validate_mcp_api_key", lambda *_a, **_k: {
+                "scope": scope, "agent_name": "worker" if scope == "agent" else None,
+                "key_id": "k1", "key_name": scope, "user_id": "ops-admin", "user_email": "admin@example.com",
+            })
+
+        app = FastAPI()
+
+        @app.post("/probe", status_code=201)
+        async def probe(user=Depends(get_current_user)):
+            return {"acting_as": act_as_agent_of(user)}
+
+        yield TestClient(app), key
+        database.db.delete_setting("terms_required")
+
+    def _post(self, client, **headers):
+        return client.post("/probe", headers={"Authorization": "Bearer trinity_mcp_fake", **headers})
+
+    def test_an_admins_user_key_is_admitted_with_one_audit_row(self, door, audit):
+        client, key = door
+        key("user")
+        r = self._post(client, **{HEADER: "worker"})
+        assert (r.status_code, r.json()["acting_as"]) == (201, "worker")
+        assert [row["event_action"] for row in audit] == ["acted_as_agent"]
+
+    def test_an_agent_key_is_refused_with_no_audit_row(self, door, audit):
+        client, key = door
+        key("agent")
+        r = self._post(client, **{HEADER: "other"})
+        assert (r.status_code, r.json()["detail"]["code"]) == (403, "act_as_not_permitted")
+        assert audit == []
+
+    def test_no_header_is_no_act_as(self, door, audit):
+        client, key = door
+        key("user")
+        r = self._post(client)
+        assert (r.status_code, r.json()["acting_as"]) == (201, None)
+        assert audit == []

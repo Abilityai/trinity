@@ -613,8 +613,10 @@ export function withAgentAccess<P extends Record<string, unknown>>(
  *     carries one. The name comes from the key row, never from a parameter,
  *     so this widens identity by exactly zero: a system key already reaches
  *     every agent's data on the read surfaces.
- *   - everything else — `user`, `connector`, `portal_delegate`, `ops`,
- *     `anonymous`, and whatever ships next — is refused. `connector` is the
+ *   - `user`   → the agent named by `requested` (trinity-enterprise#1024). The
+ *     backend decides whether this key may: only an admin's is admitted.
+ *   - everything else — `connector`, `portal_delegate`, `ops`, `anonymous`,
+ *     and whatever ships next — is refused. `connector` is the
  *     one worth naming: it carries an `agentName` too (it is bound to one
  *     agent), and it is an END USER's consumption key. Letting it through
  *     would let a client publish reports as the agent serving them.

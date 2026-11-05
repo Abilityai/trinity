@@ -2500,8 +2500,9 @@ def get_self_acting_agent(
     agent may read only about itself — an agent reading back its own ask. The
     identity comes from the KEY, never from a body or the path alone: an
     agent-scoped key may act only as the agent it belongs to, the system key only
-    as `trinity-system`, and every other principal (a person, a user-scoped key,
-    a connector) is refused — a person reads the queue through the operator
+    as `trinity-system`, an admin's user key only as the agent it was admitted to
+    act for (ent#1024), and every other principal (a person, any other user-scoped
+    key, a connector) is refused — a person reads the queue through the operator
     routes.
 
     Identity FIRST, as one uniform 403 for every name that is not the caller's,
@@ -3200,11 +3201,12 @@ def assert_own_agent(
     Two keys act as an agent: an agent-scoped key (``agent_principal_name``, the
     predicate ``agent_may_reach`` uses) and the system key, which carries no
     agent name on REST and acts as ``trinity-system`` (trinity-enterprise#719) —
-    the rule ``get_self_acting_agent`` already applies. Its scope is read with
+    the rule ``get_self_acting_agent`` already applies. An admin's user key
+    admitted to act for an agent is held to that agent too (ent#1024). Its scope is read with
     the ``_SCOPE_ABSENT`` sentinel and compared to the string, so a test double
     whose ``mcp_scope`` is absent or a mock is not the system key. A no-op for
-    every other principal — a person, a ``user`` / connector key, the event
-    loopback: whether those may reach the agent is the access check's question,
+    every other principal — a person, an unadmitted ``user`` key, a connector
+    key, the event loopback: whether those may reach the agent is the access check's question,
     not this one's.
 
     ``detail`` is the route's own message. ``refusal`` builds the exception
