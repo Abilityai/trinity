@@ -309,3 +309,62 @@ def test_the_cold_retry_keeps_the_flag(monkeypatch, once_calls):
     monkeypatch.setattr(cc, "_execute_claude_code_once", once)
     asyncio.run(cc.execute_claude_code("m", model="sonnet", execution_id="e4", disable_auto_memory=True))
     assert [c.get("disable_auto_memory") for c in once_calls] == [True, True]
+
+
+# ---------------------------------------------------------------------------
+# The whole hand-off, from the runtime's public method to the process env.
+# Every test above enters past at least one of these joins, so dropping the
+# keyword at any of them left the suite green while `/api/task` lost the fix.
+# ---------------------------------------------------------------------------
+
+def _runtime_turn(monkeypatch, method, **kw):
+    registry = MagicMock()
+    registry.was_terminated.return_value = False
+    monkeypatch.setattr(he, "get_process_registry", lambda: registry)
+    monkeypatch.setattr(cc, "get_process_registry", lambda: registry, raising=False)
+    monkeypatch.setattr(cc, "_load_guardrails", lambda: {})
+    runtime = cc.ClaudeCodeRuntime()
+    # The fake Popen stops the run; each path may wrap that in its own error.
+    with pytest.raises(Exception):
+        asyncio.run(getattr(runtime, method)(prompt="Remember I prefer invoices as PDF.", model="sonnet",
+                                             execution_id="exec-4156-hop", **kw))
+
+
+@pytest.mark.parametrize("method, extra", [("execute_headless", {"timeout_seconds": 60}), ("execute", {})])
+@pytest.mark.parametrize("flag", [True, False])
+def test_the_runtime_method_carries_the_flag_to_the_spawn(monkeypatch, captured_env, method, extra, flag):
+    _runtime_turn(monkeypatch, method, disable_auto_memory=flag, **extra)
+    assert "env" in captured_env, "the turn never reached the spawn"
+    assert (captured_env["env"].get(KEY) == "1") is flag
+
+
+class _Resp:
+    status_code = 200
+    text = ""
+
+    def json(self):
+        return {"applied": True}
+
+
+class _Client:
+    async def post(self, *_a, **_k):
+        return _Resp()
+
+
+@pytest.mark.parametrize("flag", [True, False])
+def test_a_pulled_turn_carries_the_flag_to_the_spawn(monkeypatch, captured_env, flag):
+    from agent_server.services import pull_worker as pw
+
+    registry = MagicMock()
+    registry.was_terminated.return_value = False
+    monkeypatch.setattr(he, "get_process_registry", lambda: registry)
+    monkeypatch.setattr("agent_server.services.process_registry.get_process_registry", lambda: registry)
+    monkeypatch.setattr(ra, "get_runtime", lambda: cc.ClaudeCodeRuntime())
+    claim = {
+        "execution_id": "exec-4156-pull", "claim_token": "tok",
+        "envelope": {"payload": {"message": "Remember I prefer invoices as PDF.", "session_id": None,
+                                 "disable_auto_memory": flag}},
+    }
+    asyncio.run(pw._run_and_report(claim, _Client(), "http://backend:8000", "key", "alpha"))
+    assert "env" in captured_env, "the turn never reached the spawn"
+    assert (captured_env["env"].get(KEY) == "1") is flag
