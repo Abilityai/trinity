@@ -46,7 +46,8 @@ compare-and-set won.
 import asyncio
 import hashlib
 import logging
-from typing import Any, Awaitable, Callable, Dict, Optional, Set
+from collections import OrderedDict
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 from services.execution_envelope import TaskExecutionErrorCode
 from services.operator_queue_choices import SOMETHING_ELSE
@@ -415,6 +416,56 @@ def _set_wake_state(db, item_id: str, state: str) -> None:
     except Exception:  # noqa: BLE001
         logger.warning("operator-resume: wake_state=%s not recorded for item=%s",
                        state, item_id, exc_info=True)
+
+
+# abilityai/trinity-enterprise#1108 AC #4: the answer wakes a composed turn
+# carries in its Execution Context line, keyed by execution id, marked `woken`
+# when THAT execution's SUCCESS terminal lands (`mark_carried_wakes`, hung off
+# `event_dispatch_service.spawn_task_terminal_event` — the one fan-out every
+# CAS-won terminal writer calls). Process-local by design: the compose and the
+# terminal of a push turn run in one coroutine. Where they can land on
+# different uvicorn workers (a #1083 callback, a pull claim's result) the entry
+# is missed and the row stays `pending`, which the agent's next start
+# re-dispatches once — a duplicate turn, never a silently dropped wake, which
+# is the direction AC #4 requires. Bounded; an entry a terminal never claims
+# (the sync `/chat` route emits no terminal event) is evicted oldest-first.
+_carried_wakes: "OrderedDict[str, Tuple[str, Tuple[str, ...]]]" = OrderedDict()
+_CARRIED_WAKES_MAX = 1024
+
+
+def note_carried_wakes(execution_id: str, agent_name: str, request_ids: List[str]) -> None:
+    """Record the answers an execution's composed prompt lists (the compose
+    step calls this; `platform_prompt_service.carried_answer_wakes` decides
+    which). A re-composed execution — a pull re-delivery — replaces its entry."""
+    ids = tuple(r for r in (request_ids or []) if r)
+    if not execution_id or not agent_name or not ids:
+        return
+    _carried_wakes[execution_id] = (agent_name, ids)
+    _carried_wakes.move_to_end(execution_id)
+    while len(_carried_wakes) > _CARRIED_WAKES_MAX:
+        _carried_wakes.popitem(last=False)
+
+
+async def mark_carried_wakes(execution_id: Optional[str], terminal_status: Any) -> None:
+    """The terminal side of `note_carried_wakes`: on SUCCESS the carried
+    answers are no longer owed a wake (`pending` → `woken`); any other terminal
+    drops the entry and leaves the rows `pending` for the next start. Never
+    raises — it runs on the path of an already-billed terminal."""
+    if not execution_id:
+        return
+    entry = _carried_wakes.pop(execution_id, None)
+    if entry is None:
+        return
+    status = getattr(terminal_status, "value", terminal_status)
+    if status != "success":
+        return
+    agent_name, ids = entry
+    try:
+        from database import db
+        db.mark_operator_queue_wakes_woken(agent_name, list(ids))
+    except Exception:  # noqa: BLE001
+        logger.warning("operator-resume: carried wakes not marked woken for execution=%s",
+                       execution_id, exc_info=True)
 
 
 async def redispatch_pending_wakes(agent_name: str) -> int:

@@ -130,6 +130,10 @@ def _install(monkeypatch, *, state="running", enabled=True, pending=None, raises
     the `services` package attribute; `docker_utils` loaded for real first."""
     import services as _services_pkg
     import services.docker_utils  # noqa: F401
+    # The ending wake imports this lazily (`_wakes_on_ending`); loaded for real
+    # BEFORE the fake `database` is in `sys.modules`, or its `from database
+    # import db` binds the fake for every later test in the session.
+    import services.operator_queue_service  # noqa: F401
 
     calls, audit, wake_writes, idem = [], [], [], []
 
@@ -350,23 +354,146 @@ class TestTheStartHook:
 
 
 # ---------------------------------------------------------------------------
-# The context line marks a pending ask woken when a turn carries it
+# A turn that carries a pending answer marks it woken at ITS terminal, not
+# when its prompt is composed (merge-train ruling on AC #4)
 # ---------------------------------------------------------------------------
 
-def test_the_ended_asks_line_marks_pending_wakes_woken(monkeypatch):
-    import services.platform_prompt_service as pps
-    marked = []
-    rows = [{"request_id": "r1", "disposition": "answered", "disposed_at": NOW,
-             "disposed_by": "person", "replaced_by": None},
-            {"request_id": "r2", "disposition": "cancelled", "disposed_at": NOW,
-             "disposed_by": "operator", "replaced_by": None}]
-    fake_db = SimpleNamespace(
-        list_recent_operator_queue_endings=lambda *a, **k: list(rows),
-        mark_operator_queue_wakes_woken=lambda agent, ids: marked.append((agent, list(ids))) or 1,
+def _ended(rid, disposition="answered"):
+    return {"request_id": rid, "disposition": disposition, "disposed_at": NOW,
+            "disposed_by": "person", "replaced_by": None}
+
+
+def _ctx(pps, ended, execution_id="exec-9"):
+    """A context with every auto-filled field pre-filled, so composing reads no
+    DB and the ended-asks line is the only thing under test."""
+    return pps.ExecutionContext(
+        agent_name="agent-w", triggered_by="schedule", execution_id=execution_id,
+        ended_asks=ended, collaborators=[], platform_url="http://localhost",
+        primary_user_display="", role_id="", stakeholders=[], proactive_consent=False,
+        pending_asks=[], pending_asks_total=0, served_role_id="",
     )
-    monkeypatch.setattr(pps, "db", fake_db)
-    assert pps._resolve_ended_asks("agent-w") == rows
-    assert marked == [("agent-w", ["r1"])]
+
+
+class TestTheCarriedWakeIsMarkedAtTheTerminal:
+    """Composing a turn proves nothing reached the agent: a schedule firing at
+    a stopped agent composes, the HTTP call fails, and marking at compose time
+    dropped the pending wake silently (AC #4 forbids that). The compose step
+    stashes the answers the turn LISTS; the execution's SUCCESS terminal marks
+    them; any other terminal leaves them `pending` for the next start."""
+
+    @pytest.fixture(autouse=True)
+    def _clean(self, ors):
+        ors._carried_wakes.clear()
+        yield
+        ors._carried_wakes.clear()
+
+    @pytest.fixture
+    def marked(self, monkeypatch):
+        """The real `database.db` facade with the one writer recorded — never a
+        fake module in `sys.modules`, which a lazy `from database import db`
+        in a module first imported here would bind for the whole session."""
+        import database
+        import services.platform_prompt_service as pps
+        marked = []
+        monkeypatch.setattr(database.db, "mark_operator_queue_wakes_woken",
+                            lambda agent, ids: marked.append((agent, list(ids))) or 1)
+        monkeypatch.setattr(pps, "db", database.db)
+        # The platform instructions read a setting; not under test here.
+        monkeypatch.setattr(pps, "get_platform_system_prompt", lambda **k: "PLATFORM")
+        return marked
+
+    def test_the_resolver_reads_and_marks_nothing(self, monkeypatch, marked):
+        import database
+        import services.platform_prompt_service as pps
+        rows = [_ended("r1"), _ended("r2", "cancelled")]
+        monkeypatch.setattr(database.db, "list_recent_operator_queue_endings",
+                            lambda *a, **k: list(rows))
+        assert pps._resolve_ended_asks("agent-w") == rows
+        assert marked == []
+
+    def test_composing_marks_nothing_and_stashes_only_the_listed_answers(self, ors, marked):
+        import services.platform_prompt_service as pps
+        # MAX+2 rows: the renderer lists the first MAX; the overflow row only
+        # makes the line say "and more" and is NOT carried.
+        ended = [_ended(f"r{i}") for i in range(1, pps.MAX_ENDED_ASKS + 1)]
+        ended[2] = _ended("r3", "cancelled")
+        ended += [_ended("r-overflow-1"), _ended("r-overflow-2")]
+        prompt = pps.compose_system_prompt(_ctx(pps, ended))
+        assert "r1 answered" in prompt and "and more" in prompt
+        assert marked == []
+        assert ors._carried_wakes["exec-9"] == ("agent-w", ("r1", "r2", "r4", "r5"))
+
+    def test_a_turn_with_no_execution_id_stashes_nothing(self, ors, marked):
+        import services.platform_prompt_service as pps
+        pps.compose_system_prompt(_ctx(pps, [_ended("r1")], execution_id=None))
+        assert ors._carried_wakes == {}
+
+    @pytest.mark.asyncio
+    async def test_the_success_terminal_marks_the_carried_answers_once(self, ors, marked):
+        ors.note_carried_wakes("exec-9", "agent-w", ["r1", "r2"])
+        await ors.mark_carried_wakes("exec-9", "success")
+        assert marked == [("agent-w", ["r1", "r2"])]
+        await ors.mark_carried_wakes("exec-9", "success")
+        assert marked == [("agent-w", ["r1", "r2"])], "popped on first terminal"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", ["failed", "cancelled", "skipped"])
+    async def test_any_other_terminal_leaves_the_row_pending(self, ors, marked, status):
+        from models import TaskExecutionStatus
+        ors.note_carried_wakes("exec-9", "agent-w", ["r1"])
+        await ors.mark_carried_wakes("exec-9", TaskExecutionStatus(status))
+        assert marked == []
+        assert "exec-9" not in ors._carried_wakes
+
+    @pytest.mark.asyncio
+    async def test_a_terminal_for_an_unknown_execution_is_a_no_op(self, ors, marked):
+        await ors.mark_carried_wakes("exec-none", "success")
+        await ors.mark_carried_wakes(None, "success")
+        assert marked == []
+
+    @pytest.mark.asyncio
+    async def test_the_stopped_agent_scenario_end_to_end(self, ors, ops, queue_db, monkeypatch):
+        """The row is real: answered, `pending`. A composed turn whose dispatch
+        FAILS leaves it pending; a later turn that completes marks it woken."""
+        import services.platform_prompt_service as pps
+        from database import db as real_db
+        monkeypatch.setattr(pps, "db", real_db)
+        monkeypatch.setattr(pps, "get_platform_system_prompt", lambda **k: "PLATFORM")
+        _answered(queue_db, "p1", wake_state="pending", request_id="r1")
+        pps.compose_system_prompt(_ctx(pps, [_ended("r1")], execution_id="exec-fail"))
+        await ors.mark_carried_wakes("exec-fail", "failed")
+        assert ops.get_item("p1")["wake_state"] == "pending"
+        pps.compose_system_prompt(_ctx(pps, [_ended("r1")], execution_id="exec-ok"))
+        await ors.mark_carried_wakes("exec-ok", "success")
+        assert ops.get_item("p1")["wake_state"] == "woken"
+
+    def test_every_terminal_writer_reaches_the_marker(self, ors, monkeypatch):
+        """`spawn_task_terminal_event` is the one fan-out every CAS-won terminal
+        writer calls (push, #1083 callback, pull sink, sweeps): the marker hangs
+        there, beside the loop advance and the fan-out join."""
+        import services.event_dispatch_service as eds
+        import services.memory_service as mem
+        seen = []
+
+        async def _noop(*a, **k):
+            return None
+
+        async def _mark(execution_id, terminal_status):
+            seen.append((execution_id, getattr(terminal_status, "value", terminal_status)))
+
+        monkeypatch.setattr(eds, "emit_task_terminal_event", _noop)
+        monkeypatch.setattr(eds, "_terminal_side_effects", _noop)
+        monkeypatch.setattr(mem, "spawn_retain_for_execution", lambda eid: None)
+        monkeypatch.setattr(ors, "mark_carried_wakes", _mark)
+
+        async def main():
+            from models import TaskExecutionStatus
+            eds.spawn_task_terminal_event("agent-w", "exec-9", terminal_status=TaskExecutionStatus.SUCCESS)
+            for _ in range(3):
+                await asyncio.sleep(0)
+
+        asyncio.run(main())
+        assert seen == [("exec-9", "success")]
 
 
 # ---------------------------------------------------------------------------
