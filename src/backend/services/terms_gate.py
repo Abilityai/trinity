@@ -42,10 +42,22 @@ Who is gated, and how it fails:
   right mechanism; deriving "interactive" from the credential type instead
   (the ent#1054 shape, every JWT) gated every headless caller that holds a
   session token and turned the harness red (327 fixtures).
+* **A Workspace portal session** (the emailed-code sign-in: a verified email
+  with no ``users`` row, ruling A(1)) is gated too, through
+  ``enforce_portal_session`` from ``get_portal_principal``'s portal-token
+  branch — the same decision, the same provider consultation (fail-closed:
+  it is the Workspace-only population), the same refusal shape — as a
+  ``terms_service.PortalPerson``, whose acceptance is recorded by email. The
+  same ruling-A line applies: the Workspace SPA sends ``"client": "web"`` on
+  the emailed-code verify, the session is minted with ``interactive: true``
+  (carried across rotation), and only that session is asked; a bare token
+  or a delegate-minted session is not a visit.
 * **Never an agent's credential.** An agent-scoped key, a connector key, a
   delegated portal key and a loopback token are the owner's agents and
   automations, not the person; an agent whose owner has not yet accepted keeps
-  its own runtime (heartbeat, reports, asks).
+  its own runtime (heartbeat, reports, asks). The shared-canvas viewer read
+  (``workspace_email_from_request``) serves a route anonymous visitors may
+  open, so it is not consulted either.
 * **Fail CLOSED on the OSS decision**: a fault reading it refuses — it is the
   same database the resolver just read the account from.
 * **A provider fault is fail-closed for a Workspace-only person** (the
@@ -275,3 +287,21 @@ def enforce(request: Any, user: Any) -> None:
     if not decision.get("required"):
         return
     raise refusal(str(decision.get("reason") or TERMS_REQUIRED), decision.get("version"))
+
+
+def enforce_portal_session(request: Any, email: str, *, interactive: bool) -> None:
+    """Refuse a Workspace portal session (403) while the terms are outstanding
+    for its address — ruling A(1) on trinity-enterprise#1107.
+
+    Called once, by ``client_portal.portal_auth.get_portal_principal``, after
+    the block check and before the session is slid. The same path as
+    ``enforce``: only a session carrying the SPA's ``interactive`` claim is a
+    visit (``_is_visit``; a bare token — a harness, a delegate-minted
+    embedding — is waved through, ruling A), a route marked ``@terms_route``
+    is skipped, a registered provider answers first (fail-closed — a portal
+    person is the Workspace-only population), else the instance decision by
+    email.
+    """
+    from services.terms_service import PortalPerson
+
+    enforce(request, PortalPerson(email, interactive_session=interactive))

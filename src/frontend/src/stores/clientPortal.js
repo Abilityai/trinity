@@ -20,7 +20,7 @@ import {
 import axios from 'axios'
 import { notifyPlatformUnauthorized, setPlatformUnauthorizedHandler } from '@/utils/platformSession'
 import { isTermsRefusal, notifyTermsRefusal } from '@/utils/termsGate'
-import { useAuthStore } from './auth'
+import { SPA_CLIENT, useAuthStore } from './auth'
 import { laterInstant, READ_UP_TO_NOW } from '@/utils/readThrough'
 // A cycle by shape (that store reads this one's `clientEmail`), safe by use:
 // neither side touches the other at module evaluation, only inside actions.
@@ -620,8 +620,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
     },
 
     // Step 2 — verify the code → portal session token (persisted).
+    // `client: 'web'` (trinity-enterprise#1107 ruling A): the Workspace declares
+    // the session interactive, which is what makes it one the terms gate asks.
     async verifyCode(email, code) {
-      const { data } = await portalHttp.post('/api/enterprise/client-portal/auth/verify', { email, code })
+      const { data } = await portalHttp.post('/api/enterprise/client-portal/auth/verify', { email, code, client: SPA_CLIENT })
       this.portalToken = data.token
       this.clientEmail = data.email
       // #2261 — a successful client sign-in is a new session in this tab, so the

@@ -605,3 +605,228 @@ class TestAPortalPersonIsRecorded:
         cur.execute("SELECT user_id, email FROM terms_acceptances ORDER BY id")
         assert cur.fetchall() == [(41, "admin@example.com"), (None, "client@example.com")]
         conn.close()
+
+
+CLIENT = "client@example.com"
+
+
+def _portal_request(path="/api/enterprise/client-portal/my-agents", endpoint=None):
+    """An ASGI-scope request; `endpoint` (optional) is what `scope["route"]` names."""
+    from starlette.requests import Request
+
+    scope = {
+        "type": "http", "method": "GET", "path": path, "root_path": "",
+        "query_string": b"", "scheme": "http", "server": ("backend", 8000),
+        "headers": [(b"host", b"backend:8000")],
+    }
+    if endpoint is not None:
+        scope["route"] = type("R", (), {"endpoint": endpoint})()
+    return Request(scope)
+
+
+@pytest.fixture
+def portal_session(monkeypatch):
+    """A real Workspace portal session token (the emailed-code sign-in), the
+    client not blocked."""
+    import client_portal.db as portal_db
+    from dependencies import PORTAL_MINT_OTP, create_portal_session_token
+
+    monkeypatch.setattr(portal_db, "is_client_blocked", lambda *_a, **_k: False)
+
+    def make(email=CLIENT, minted_by=PORTAL_MINT_OTP, interactive=True):
+        # The Workspace SPA's sign-in mints `interactive: true` (ruling A); that
+        # is the session the gate asks. A bare token is never asked.
+        return create_portal_session_token(email, minted_by=minted_by, interactive=interactive)
+
+    return make
+
+
+def _portal_door(token, request=None):
+    """`get_portal_principal` on `token`: the principal, or the HTTPException."""
+    from client_portal.portal_auth import get_portal_principal
+    from fastapi import HTTPException
+    from starlette.responses import Response
+
+    try:
+        return asyncio.run(get_portal_principal(request or _portal_request(), Response(), token=token))
+    except HTTPException as e:
+        return e
+
+
+class TestThePortalSessionIsGated:
+    """Ruling A(1): a Workspace portal session (the emailed-code sign-in, no
+    `users` row) is gated like every other visit — refused 403 `terms_required`
+    until the address has an acceptance row for the current version, which the
+    terms routes record on that same token."""
+
+    def test_a_session_with_no_acceptance_is_refused_on_the_portal_door(self, portal_session):
+        from services import terms_service
+
+        refused = _portal_door(portal_session())
+        assert getattr(refused, "status_code", None) == 403, refused
+        assert refused.detail["code"] == "terms_required"
+        assert refused.detail["version"] == terms_service.current_version()
+        assert refused.detail["message"]
+
+    def test_a_bare_or_delegate_minted_session_is_not_a_visit(self, portal_session):
+        """Ruling A on the portal half: only a session the Workspace SPA
+        declared (`"client": "web"` on the verify) carries the claim and is
+        asked; a harness-minted or delegate-minted token is not."""
+        from dependencies import PORTAL_MINT_DELEGATE
+
+        assert _portal_door(portal_session(interactive=False)).email == CLIENT
+        assert _portal_door(portal_session(minted_by=PORTAL_MINT_DELEGATE, interactive=False)).email == CLIENT
+
+    def test_the_verify_route_mints_the_claim_only_for_the_spa(self, monkeypatch):
+        import client_portal.service as service
+        from client_portal.router import router as portal_router
+        from dependencies import portal_session_is_interactive, portal_session_minted_by
+
+        monkeypatch.setattr(service.login_policy_gate, "email_code_allowed_for", lambda *_a: True)
+        import database
+        monkeypatch.setattr(database.db, "verify_login_code", lambda *_a, **_k: True)
+        monkeypatch.setattr(service, "platform_login_admits", lambda *_a: False)
+        monkeypatch.setattr(service, "email_has_access", lambda *_a: True)
+        app = FastAPI()
+        app.include_router(portal_router)
+        c = TestClient(app)
+        web = c.post("/api/enterprise/client-portal/auth/verify",
+                     json={"email": CLIENT, "code": "123456", "client": "web"})
+        assert web.status_code == 200, web.text
+        assert portal_session_is_interactive(web.json()["token"]) is True
+        assert portal_session_minted_by(web.json()["token"]) == "otp"
+        bare = c.post("/api/enterprise/client-portal/auth/verify", json={"email": CLIENT, "code": "123456"})
+        assert bare.status_code == 200, bare.text
+        assert portal_session_is_interactive(bare.json()["token"]) is False
+
+    def test_rotation_carries_the_claim(self):
+        """`renew_portal_session` needs Redis; the carry is pinned in the source."""
+        src = (BACKEND / "dependencies.py").read_text()
+        renew = src[src.index("def renew_portal_session"):src.index("def decode_token")]
+        assert 'interactive=payload.get("interactive") is True' in renew
+        store = pathlib.Path(__file__).resolve().parents[2] / "src" / "frontend" / "src" / "stores" / "clientPortal.js"
+        assert "client: SPA_CLIENT" in store.read_text()[store.read_text().index("async verifyCode"):]
+
+    def test_the_switch_off_admits_the_session(self, portal_session):
+        from database import db
+
+        db.set_setting("terms_required", "false")
+        principal = _portal_door(portal_session())
+        assert principal.email == CLIENT and principal.is_platform is False
+
+    def test_a_marked_route_answers_before_acceptance(self, portal_session):
+        import dependencies as deps
+
+        @deps.terms_route("probe: reachable before acceptance")
+        def marked():  # pragma: no cover — only its mark is read
+            pass
+
+        principal = _portal_door(portal_session(), _portal_request(endpoint=marked))
+        assert principal.email == CLIENT
+
+    def test_the_terms_routes_answer_the_session_and_record_the_email(self, portal_session, jwt_as):
+        from database import db
+        from services import terms_service
+
+        c = _app()
+        token = portal_session()
+        r = c.get("/api/terms/current", headers=_bearer(token))
+        assert r.status_code == 200, r.text
+        assert r.json()["accepted"] is False and r.json()["text"]
+        version = r.json()["version"]
+
+        r = c.post("/api/terms/accept", json={"version": version}, headers=_bearer(token))
+        assert r.status_code == 200, r.text
+        assert r.json() == {"accepted": True, "created": True, "version": version,
+                            "accepted_at": r.json()["accepted_at"]}
+
+        rows = db.list_terms_acceptances(10)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["user_id"] is None and row["email"] == CLIENT
+        assert row["terms_version"] == version and row["accepted_at"]
+        assert row["door"] is None and row["actor_ip"] == "testclient"
+        assert terms_service.decision(terms_service.PortalPerson(CLIENT))["required"] is False
+
+        # The door opens, the read says so, and a second accept is a no-op.
+        assert _portal_door(token).email == CLIENT
+        assert c.get("/api/terms/current", headers=_bearer(token)).json()["accepted"] is True
+        again = c.post("/api/terms/accept", json={"version": version}, headers=_bearer(token))
+        assert again.status_code == 200 and again.json()["created"] is False
+        assert len(db.list_terms_acceptances(10)) == 1
+        # The admin record lists the session row by email, with no account.
+        admin = jwt_as(ADMIN)
+        _accept(c, admin)
+        listed = c.get("/api/terms/acceptances", headers=_bearer(admin))
+        assert listed.status_code == 200, listed.text
+        assert [(x["user_id"], x["email"]) for x in listed.json()
+                if x["email"] == CLIENT] == [(None, CLIENT)]
+
+    def test_the_acceptance_is_by_address_not_by_token(self, portal_session):
+        """A second session of the same address is not asked again; another
+        address is."""
+        c = _app()
+        version = c.get("/api/terms/current", headers=_bearer(portal_session())).json()["version"]
+        assert c.post("/api/terms/accept", json={"version": version},
+                      headers=_bearer(portal_session("Client@Example.com"))).status_code == 200
+        assert _portal_door(portal_session()).email == CLIENT
+        assert _portal_door(portal_session("other@example.com")).status_code == 403
+
+    def test_a_stale_version_is_refused_for_the_session_too(self, portal_session):
+        c = _app()
+        r = c.post("/api/terms/accept", json={"version": "not-current"}, headers=_bearer(portal_session()))
+        assert r.status_code == 409 and r.json()["detail"]["code"] == "version_stale"
+
+    def test_a_blocked_client_is_refused_before_the_terms(self, monkeypatch, portal_session):
+        import client_portal.db as portal_db
+
+        token = portal_session()
+        monkeypatch.setattr(portal_db, "is_client_blocked", lambda *_a, **_k: True)
+        for path in ("/api/terms/current",):
+            r = _app().get(path, headers=_bearer(token))
+            assert r.status_code == 403 and "revoked" in str(r.json()["detail"]).lower()
+        assert _portal_door(token).detail == "Access has been revoked."
+
+    def test_a_providers_fault_is_fail_closed_and_its_door_passes_through(self, portal_session):
+        from services import terms_gate
+
+        class Broken:
+            def decision(self, user):
+                raise RuntimeError("boom")
+
+        terms_gate.register_provider(Broken())
+        assert _portal_door(portal_session()).detail["code"] == "terms_required"
+
+        class Closed:
+            def decision(self, user):
+                assert user.email == CLIENT and user.id is None
+                return {"required": True, "version": "v", "reason": "invite_revoked"}
+
+        terms_gate.register_provider(Closed())
+        assert _portal_door(portal_session()).detail["code"] == "invite_revoked"
+        # The accept route asks the door first, on the session too (W2).
+        r = _app().post("/api/terms/accept", json={"version": "v"}, headers=_bearer(portal_session()))
+        assert r.status_code == 403 and r.json()["detail"]["code"] == "invite_revoked"
+
+    def test_a_platform_person_through_the_terms_routes_is_unchanged(self, jwt_as, agent_key):
+        c = _app()
+        assert c.get("/api/terms/current", headers=_bearer(jwt_as(MEMBER))).status_code == 200
+        # An agent's key is still no person here, and a bare bad token is 401.
+        assert c.get("/api/terms/current", headers=_bearer(agent_key)).status_code == 403
+        assert c.post("/api/terms/accept", json={"version": "v"}, headers=_bearer(agent_key)).status_code == 403
+
+    def test_a_credential_that_is_neither_gets_the_resolvers_own_answer(self):
+        c = _app()
+        assert c.get("/api/terms/current", headers=_bearer("not-a-token")).status_code == 401
+        assert c.post("/api/terms/accept", json={"version": "v"}, headers=_bearer("not-a-token")).status_code == 401
+
+    def test_the_shared_canvas_viewer_and_the_delegate_key_are_not_gated(self):
+        """`workspace_email_from_request` serves a route anonymous visitors may
+        open and a delegate key is an automation: neither consults the gate."""
+        src = (BACKEND / "client_portal" / "portal_auth.py").read_text()
+        body = src[src.index("def workspace_email_from_request"):src.index("async def get_portal_principal")]
+        assert "terms_gate" not in body
+        door = src[src.index("async def get_portal_principal"):]
+        assert door.index("_reject_if_blocked(email)") < door.index("terms_gate.enforce_portal_session(")
+        assert door.index("terms_gate.enforce_portal_session(") < door.index("_maybe_rotate(token, response)")
+

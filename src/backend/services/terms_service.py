@@ -25,10 +25,14 @@ range is always validated: empty text ``terms_text_empty``, text over
 ``decision(user)`` — required ⇔ the switch is on and the person has no
 acceptance row for the current version. Every person, every role: an admin's
 own first visit is not exempt (setup resolves no principal, so the claim always
-comes first).
+comes first). A ``PortalPerson`` — a Workspace portal session, the emailed-code
+sign-in with no ``users`` row (ruling A(1)) — is decided by its EMAIL: any row
+for that address and version, a session's or an account's, is the same person
+having accepted.
 
-``accept(user, version, ...)`` — idempotent on the table's UNIQUE: one row per
-(person, version), the second call a no-op. ``version_stale`` (409) when the
+``accept(user, version, ...)`` — idempotent on the table's unique keys: one row
+per (person, version), the second call a no-op. A ``PortalPerson``'s row
+carries ``user_id`` NULL, the email, and no door. ``version_stale`` (409) when the
 body's version is not the current one. Audits ``AUTHORIZATION/terms_accepted``
 (version and door — never the text).
 
@@ -43,6 +47,7 @@ so every hook runs ON the event-loop thread.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 from database import db
@@ -60,7 +65,54 @@ SETTING_KEYS = frozenset({SETTING_REQUIRED, SETTING_VERSION, SETTING_TEXT, SETTI
 TERMS_TEXT_MAX_BYTES = 200_000
 TERMS_TITLE_MAX_CHARS = 200
 
-AcceptanceHook = Callable[[int, Optional[str], Optional[str], Optional[str]], Any]
+AcceptanceHook = Callable[[Optional[int], Optional[str], Optional[str], Optional[str]], Any]
+
+
+@dataclass(frozen=True)
+class PortalPerson:
+    """A Workspace portal session as the gate and the terms routes see it
+    (ruling A(1) on trinity-enterprise#1107): a verified email with no platform
+    account. Carries every identity field the principal predicates read, each
+    with the PERSON value — a JWT-shaped interactive visit (``mcp_scope`` None,
+    ``interactive_session`` True, no agent identity) — so ``is_person_principal``
+    / ``is_interactive_principal`` admit it and ``terms_gate._is_person`` /
+    ``_is_visit`` ask it (``interactive_session`` is the token's own claim on
+    the gate path; the terms routes do not read it). ``id`` is None: that is
+    what keys its record by email.
+    Role ``user``: the gate's fault policy treats it as the Workspace-only
+    population it is (a provider fault is fail-closed)."""
+
+    email: str
+    id: Optional[int] = None
+    username: Optional[str] = None
+    role: str = "user"
+    mcp_scope: Optional[str] = None
+    mcp_key_id: Optional[str] = None
+    mcp_key_name: Optional[str] = None
+    agent_name: Optional[str] = None
+    connector_agent: Optional[str] = None
+    portal_delegate: bool = False
+    is_event_loopback: bool = False
+    vouched_source_agent: Optional[str] = None
+    interactive_session: bool = True
+    suspended_at: Optional[str] = None
+
+    def __post_init__(self):
+        object.__setattr__(self, "email", (self.email or "").strip().lower())
+
+
+def _email_of(user: Any) -> Optional[str]:
+    return (getattr(user, "email", None) or "").strip().lower() or None
+
+
+def has_accepted(user: Any, version: str) -> bool:
+    """One acceptance lookup: by account for a platform person, by address
+    for a ``PortalPerson`` (``id`` None)."""
+    user_id = getattr(user, "id", None)
+    if user_id is not None:
+        return bool(db.get_terms_acceptance(int(user_id), version))
+    email = _email_of(user)
+    return bool(email and db.get_terms_acceptance_by_email(email, version))
 
 
 class TermsError(Exception):
@@ -193,16 +245,18 @@ def decision(user: Any) -> dict:
     if not switch_on():
         return {"required": False, "version": None, "reason": "terms_required"}
     version = current_version()
-    user_id = getattr(user, "id", None)
-    if user_id is None:
-        return {"required": True, "version": version, "reason": "terms_required"}
-    if db.get_terms_acceptance(int(user_id), version):
+    if has_accepted(user, version):
         return {"required": False, "version": version, "reason": "terms_required"}
     return {"required": True, "version": version, "reason": "terms_required"}
 
 
-def accepted_current(user_id: int) -> bool:
-    return bool(db.get_terms_acceptance(int(user_id), current_version()))
+def accepted_current(user: Any) -> bool:
+    """Has this principal (an account, or a ``PortalPerson`` by address)
+    accepted the current version? An int is read as a user id for the
+    callers that still pass one."""
+    if isinstance(user, int):
+        return bool(db.get_terms_acceptance(user, current_version()))
+    return has_accepted(user, current_version())
 
 
 # --- The acceptance -----------------------------------------------------
@@ -216,16 +270,21 @@ async def accept(user: Any, version: str, *, actor_ip: Optional[str],
     if (version or "").strip() != current:
         raise TermsError(409, "version_stale", "The terms have changed; read the current version.",
                          version=current)
-    user_id = int(getattr(user, "id"))
-    email = (getattr(user, "email", None) or "").strip().lower() or None
+    raw_id = getattr(user, "id", None)
+    user_id = int(raw_id) if raw_id is not None else None
+    email = _email_of(user)
+    if user_id is None and not email:
+        raise TermsError(403, "person_required", "Only a person can accept the terms.")
 
     row_id = db.insert_terms_acceptance(user_id, email, current, now, door=door, actor_ip=actor_ip)
     created = row_id is not None
     if created:
         await _audit("terms_accepted", user, actor_ip=actor_ip, request_id=request_id,
                      endpoint=endpoint, details={"version": current, "door": door})
-        logger.info("[terms] user %s accepted terms version %s", user_id, current)
-    row = db.get_terms_acceptance(user_id, current) or {}
+        logger.info("[terms] %s accepted terms version %s",
+                    f"user {user_id}" if user_id is not None else "a Workspace session", current)
+    row = (db.get_terms_acceptance(user_id, current) if user_id is not None
+           else db.get_terms_acceptance_by_email(email, current)) or {}
     return {
         "accepted": True,
         "created": created,
@@ -277,7 +336,8 @@ async def _audit(action: str, actor: Any, *, actor_ip: Optional[str], request_id
             actor_user=actor,
             actor_ip=actor_ip,
             target_type="user",
-            target_id=str(getattr(actor, "username", None) or getattr(actor, "id", "")),
+            target_id=str(getattr(actor, "username", None) or getattr(actor, "id", None)
+                          or getattr(actor, "email", None) or ""),
             endpoint=endpoint,
             request_id=request_id,
             details=details,
@@ -307,7 +367,7 @@ def acceptance_hooks() -> tuple:
     return tuple(_HOOKS)
 
 
-async def run_acceptance_hooks(user_id: int, email: Optional[str], terms_version: Optional[str],
+async def run_acceptance_hooks(user_id: Optional[int], email: Optional[str], terms_version: Optional[str],
                                accepted_at: Optional[str]) -> None:
     """Call every hook once, on the event loop, swallowing and auditing failures."""
     for fn in tuple(_HOOKS):

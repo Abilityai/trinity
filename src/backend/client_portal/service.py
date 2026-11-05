@@ -391,7 +391,7 @@ def portal_signin_request(email: str | None) -> str | None:
     return core_db.create_login_code(email, expiry_minutes=10)["code"]
 
 
-def portal_signin_verify(email: str | None, code: str | None):
+def portal_signin_verify(email: str | None, code: str | None, *, interactive: bool = False):
     """Step 2: verify the code AND re-check access, then mint a portal session
     token (a verified email, no platform account). Returns None on any failure.
 
@@ -410,7 +410,9 @@ def portal_signin_verify(email: str | None, code: str | None):
     if not email_has_access(email):
         return None
     from dependencies import PORTAL_MINT_OTP, create_portal_session_token
-    return create_portal_session_token(email, minted_by=PORTAL_MINT_OTP)
+    # `interactive`: the Workspace SPA's own declaration (ent#1107 ruling A) —
+    # the session the terms gate asks.
+    return create_portal_session_token(email, minted_by=PORTAL_MINT_OTP, interactive=interactive)
 
 
 def portal_exchange(email: str | None) -> str | None:
