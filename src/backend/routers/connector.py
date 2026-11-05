@@ -36,6 +36,7 @@ from models import (
     ConnectorStatus,
     ConnectorKeySecret,
     ConnectorPlaybook,
+    McpExternalAccessStatus,
 )
 import config
 from database import db
@@ -46,6 +47,7 @@ from services.connector_service import (
     resolve_exposed_playbooks,
 )
 from routers.settings import resolve_mcp_url
+from services import settings_service
 
 router = APIRouter(prefix="/api/agents", tags=["mcp_connector"])
 
@@ -60,6 +62,7 @@ def _status(agent_name: str, request: Request) -> ConnectorStatus:
     # an anonymous MCP session is rejected otherwise, so the config would not
     # work. Independent of `has_key`: the two are alternative ways to share.
     inline_available = config.MCP_INLINE_AUTH_ENABLED
+    ext_enabled, ext_source = settings_service.is_mcp_external_access_enabled()
     return ConnectorStatus(
         agent_name=agent_name,
         enabled=bool(cfg["enabled"]) if cfg else False,
@@ -70,6 +73,7 @@ def _status(agent_name: str, request: Request) -> ConnectorStatus:
         snippets=build_snippets(agent_name, mcp_url, _KEY_PLACEHOLDER) if key_prefix else [],
         inline_auth_available=inline_available,
         keyless_snippets=build_keyless_snippets(agent_name, mcp_url) if inline_available else [],
+        external_access=McpExternalAccessStatus(enabled=ext_enabled, source=ext_source),
         created_at=cfg["created_at"] if cfg else None,
         updated_at=cfg["updated_at"] if cfg else None,
     )

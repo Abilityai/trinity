@@ -933,6 +933,7 @@
 </template>
 
 <script setup>
+import { heldPast, heldThrough, READ_UP_TO_NOW } from '@/utils/readThrough'
 import ProjectChatControls from './projects/ProjectChatControls.vue'
 import { wrapUpPrompt } from './projects/projectsUtils'
 import { ref, computed, watch, nextTick, onMounted, onBeforeUnmount, useId } from 'vue'
@@ -1598,6 +1599,18 @@ async function loadThread(sessionId) {
     // places a chat-turn ask among the messages (`threadRows`).
     // #3166: each reply under its own question, when two turns overlapped.
     messages.value = pairRepliesWithQuestions(msgs).map(historyRow)
+    // trinity-enterprise#1010: the history now on screen is read, up to its
+    // newest row. The open's own read covers only what the chat state held, so
+    // without this an arrival that landed between that read and this load would
+    // badge the conversation the person is looking at. Only then, though: a load
+    // that brings nothing past that state owes no read (#3439 — no write for
+    // nothing new).
+    // Compared with what the open's read COVERED for this chat, not the newest
+    // `as_of`: a poll that returns during the load moves `as_of` past an arrival
+    // the open's read never covered (review of #4103).
+    const held = heldThrough(messages.value, 'at')
+    const covered = (store.readCovered || {})[`thread:${sessionId}`] || store.chatStateAsOf
+    if (sessionId && heldPast(held, covered)) emit('thread-caught-up', sessionId, held)
     inFlight = inFlightExecutionId
     inFlightBudget = inFlightWaitBudgetSeconds
     outcome = lastTurnOutcome
@@ -1711,7 +1724,7 @@ async function reattach(executionId, budgetSeconds, budgetReadAt) {
       // has to announce itself like `deliver()` does. Without this the thread
       // keeps its server-side unread count and the sidebar badges the
       // conversation on screen.
-      emit('sessions-changed', currentSessionId.value)
+      emit('sessions-changed', currentSessionId.value, heldThrough(messages.value, 'at'))
     }
   } catch { /* the reply lands in history on the next load */ }
   finally {
@@ -2333,7 +2346,7 @@ async function deliver(text, { replyId = null, attachments = null, tags = null }
     // after the user has navigated away (the send is an async closure that
     // outlives the component), and without the id the shell cannot tell the two
     // apart, so it cleared the badge for a reply the user never saw.
-    if (startedNew || currentSessionId.value) emit('sessions-changed', currentSessionId.value)
+    if (startedNew || currentSessionId.value) emit('sessions-changed', currentSessionId.value, heldThrough(messages.value, 'at'))
     // ent#365: a turn is the only thing that can produce a deliverable in this
     // chat, so the card list is re-read exactly then — no poll, and nothing to
     // refresh on a conversation nobody is talking in.
@@ -3391,7 +3404,10 @@ watch([() => voice.transcriptEntries.value.length, () => voice.panelVersion.valu
   if (!voiceCallActive.value || !currentSessionId.value) return
   clearTimeout(voiceReadTimer)
   voiceReadTimer = setTimeout(() => {
-    if (voiceCallActive.value && currentSessionId.value) void store.markChatRead('thread', currentSessionId.value)
+    // "Up to now", not the last `as_of`: the whole thread is on screen, and a
+    // spoken turn persists after the last poll (which the call skips), so an
+    // `as_of` up to 20 s old left the newest turn badged (review of #4103).
+    if (voiceCallActive.value && currentSessionId.value) void store.markChatRead('thread', currentSessionId.value, READ_UP_TO_NOW)
   }, 800)
 })
 // The call ended — by End, by the cap, by the provider — and the bridge has
@@ -3402,7 +3418,7 @@ watch(voiceCallActive, async (on, was) => {
   voiceEndNotice.value = endedNotice({ reason: voice.endReason.value, message: voice.endMessage.value })
   if (voice.error.value && !voiceEndNotice.value) voiceError.value = voice.error.value
   if (currentSessionId.value) await loadThread(currentSessionId.value)
-  emit('sessions-changed', currentSessionId.value)
+  emit('sessions-changed', currentSessionId.value, heldThrough(messages.value, 'at'))
 })
 
 async function startVoiceCall(mode = 'live') {
@@ -3594,7 +3610,7 @@ watch(
       // at it. A distinct event, not `sessions-changed`: that one also clears and
       // re-arms the #2579 title-settle cycle and re-reads the list, none of which
       // an agent-initiated row should drive.
-      emit('thread-caught-up', sid)
+      emit('thread-caught-up', sid, heldThrough(messages.value, 'at'))
     } else if (countOf(sig) === countOf(before)) {
       // The time moved and the count did not: a deliverable touched the row
       // (`report_service`, `added=0`) — the one writer with that shape. The card
@@ -3629,7 +3645,7 @@ async function checkAskResult(watch) {
   // #3439: what landed here was watched landing — read, the same as the
   // signature path says it. Before this the report appeared and the chat the
   // person was sitting in kept its badge until the next turn.
-  if (fresh.length) emit('thread-caught-up', sid)
+  if (fresh.length) emit('thread-caught-up', sid, heldThrough(messages.value, 'at'))
   if (!fresh.some((m) => m.role === 'assistant' && String(m.source || '').startsWith('completion:'))) return
   stopAskResultPoll()
   if (store.askResultWatch === watch) store.askResultWatch = null

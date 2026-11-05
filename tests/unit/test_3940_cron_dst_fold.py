@@ -110,6 +110,10 @@ CONTROLS = [
     ("Europe/Lisbon", {"minute": "*/30"}, datetime(2026, 3, 29, 0, 59, 59)),
     # hour-pinned across the fold, and UTC
     ("America/New_York", {"minute": "0", "hour": "*/4"}, datetime(2026, 11, 1, 3, 59, 59)),
+    # `0 1 * * *`: a daily fire inside the repeated hour, where the outage's
+    # third shape answered a next fire time EQUAL to the previous one
+    ("Europe/London", {"minute": "0", "hour": "1"}, datetime(2026, 10, 24, 23, 59, 59)),
+    ("America/Denver", {"minute": "0", "hour": "1"}, datetime(2026, 10, 31, 23, 59, 59)),
     ("UTC", {"minute": "*/30"}, datetime(2026, 11, 1, 5, 59, 59)),
 ]
 ZONES = {"pytz": pytz.timezone, "zoneinfo": zoneinfo.ZoneInfo}
@@ -180,6 +184,27 @@ def test_the_guard_recovers_the_correct_schedule_from_a_backwards_parent():
     with _backwards_parent():
         fires = _fires(trigger, start, n=6)
     assert fires == correct, [f"{f:%H:%M:%S}" for f in fires]
+
+
+def test_the_guard_advances_past_a_parent_that_repeats_the_previous_fire():
+    """The third outage shape: `0 1 * * *`, where the parent answers the
+    previous fire time itself. Equal is not after, so the guard must retry —
+    a guard that accepts `>=` hands the job loop the same instant forever."""
+    mod = _guard()
+    real = CronTrigger.get_next_fire_time
+
+    def repeats(self, previous_fire_time, now):
+        if previous_fire_time is not None:
+            return previous_fire_time
+        return real(self, previous_fire_time, now)
+
+    start = datetime(2026, 10, 24, 23, 59, 59)
+    correct = _fires(CronTrigger(timezone=pytz.timezone("Europe/London"), minute="0", hour="1"), start, n=4)
+    trigger = mod.MonotonicCronTrigger(timezone=pytz.timezone("Europe/London"), minute="0", hour="1")
+    with patch.object(CronTrigger, "get_next_fire_time", repeats):
+        fires = _fires(trigger, start, n=4)
+    assert fires == correct, [f"{f:%m-%d %H:%M}" for f in fires]
+    assert all(b > a for a, b in zip(fires, fires[1:]))
 
 
 def test_the_guard_clamps_in_utc_when_the_retry_is_wrong_too():

@@ -52,10 +52,12 @@ def _mk_key(name: str, agent: str, scope: str = "agent", active: int = 1):
     from sqlalchemy import insert
     from db.engine import get_engine
     from db.tables import mcp_api_keys
+    # An old real timestamp: the backfill skips keys inside the #4259 start-up
+    # grace window, and a placeholder like "t" sorts AFTER every ISO-Z cutoff.
     with get_engine().begin() as conn:
         conn.execute(insert(mcp_api_keys).values(
             id=name, name=name, key_prefix="trinity_mcp_x", key_hash=f"h-{name}",
-            created_at="t", is_active=active, user_id=1,
+            created_at="2020-01-01T00:00:00Z", is_active=active, user_id=1,
             agent_name=agent, scope=scope))
 
 
@@ -175,7 +177,7 @@ def test_backfill_deactivates_keys_of_soft_deleted_and_missing_agents(keys_db):
     with get_engine().begin() as conn:             # soft-delete WITHOUT the fix
         conn.execute(text("UPDATE agent_ownership SET deleted_at='t' WHERE agent_name='soft'"))
 
-    assert db.deactivate_orphaned_agent_keys() == 2
+    assert len(db.deactivate_orphaned_agent_keys()) == 2
     assert _active("k-ghost") == 0 and _active("k-soft") == 0
     assert _active("k-live") == 1
 
@@ -184,15 +186,15 @@ def test_backfill_is_idempotent(keys_db):
     from database import db
 
     _mk_key("k-ghost", "never-existed")
-    assert db.deactivate_orphaned_agent_keys() == 1
-    assert db.deactivate_orphaned_agent_keys() == 0
+    assert len(db.deactivate_orphaned_agent_keys()) == 1
+    assert db.deactivate_orphaned_agent_keys() == []
 
 
 def test_backfill_leaves_user_scoped_keys_alone(keys_db):
     from database import db
 
     _mk_key("k-user", None, scope="user")
-    assert db.deactivate_orphaned_agent_keys() == 0
+    assert db.deactivate_orphaned_agent_keys() == []
     assert _active("k-user") == 1
 
 

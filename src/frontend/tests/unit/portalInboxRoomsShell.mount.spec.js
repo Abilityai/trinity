@@ -122,7 +122,7 @@ describe('the room on stage reads itself', () => {
     store.markChatReadStrict.mockClear()
     room.vm.$emit('read', 'room_1')
     await flushPromises()
-    expect(store.markChatReadStrict).toHaveBeenCalledWith('room', 'room_1')
+    expect(store.markChatReadStrict).toHaveBeenCalledWith('room', 'room_1', undefined)
   })
 })
 

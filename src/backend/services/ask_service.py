@@ -630,6 +630,193 @@ def drop_addressee(ask_id: str, email: str, *, reason: str) -> bool:
     return True
 
 
+# trinity-enterprise#1095: the platform re-addresses a pending row it addressed
+# BY ROLE, for exactly these reasons — a closed vocabulary like
+# `PLATFORM_ENDING_REASONS`, carried on the audit row. The assignments router's
+# write is the one trigger today; ent#961's unshare adds its own reason here.
+ASSIGNMENT_CHANGED = "assignment_changed"
+PLATFORM_READDRESS_REASONS = (ASSIGNMENT_CHANGED,)
+
+
+def _people_list(values: Optional[Iterable[Any]]) -> List[str]:
+    """Lower-cased, de-duplicated, in order; nothing blank."""
+    out: List[str] = []
+    for value in values or []:
+        email = str(value or "").strip().lower()
+        if email and email not in out:
+            out.append(email)
+    return out
+
+
+def readdress_item(ask_id: str, people: Iterable[str], single: Optional[str], *,
+                   reason: str, trigger: bool = True) -> bool:
+    """The PLATFORM rewrites ONE pending row's audience
+    (trinity-enterprise#1095): `resolved_to` becomes `people`, the single
+    Workspace addressee becomes `single`. The row is not ended and its
+    question is not touched — the same ask now waits on the people the role
+    reaches today, and every ending door (`may_end`, the gate's
+    `_approved_by_addressee`, the Inbox's `resolved_to` membership) reads the
+    rewritten columns unchanged.
+
+    The Workspace chat keys follow the single addressee: when it changes, the
+    thread, turn and discussion keys are dropped — a stale key would link the
+    new person to a chat they cannot open — and, when there is a new single
+    addressee, their Main is attached as a fresh raise would attach it
+    (`operator_queue_service._workspace_attachment`, Main only: the raising
+    turn is long over). Attaching may create Main; the row is then written
+    under a compare-and-set on the three address columns as read plus
+    `status = 'pending'`, so a row answered, cancelled or dropped meanwhile is
+    never overwritten.
+
+    `reason` is one of `PLATFORM_READDRESS_REASONS`. An unchanged audience
+    writes, audits and announces nothing. Per changed row: one audit row (ids
+    and enums only, never an address — ent#715) and, when `trigger`, the thin
+    agent-keyed `/ws` trigger the Operations store refetches on. Returns
+    whether the row changed; no row, or a row no longer pending, is False.
+    `single` must be one of `people` — anything else is a programming error.
+    """
+    from services import operator_queue_service as oqs
+
+    if reason not in PLATFORM_READDRESS_REASONS:
+        raise ValueError(f"platform readdress reason must be one of {PLATFORM_READDRESS_REASONS}, got {reason!r}")
+    new_people = _people_list(people)
+    new_single = (single or "").strip().lower() or None
+    if new_single and new_single not in new_people:
+        raise ValueError("readdress_item: single must be one of people")
+    row = db.read_operator_queue_address(ask_id)
+    if not row or row.get("status") != "pending":
+        return False
+    old_people = _people_list(_resolved_people(row))
+    old_single = (row.get("addressed_to_email") or "").strip().lower() or None
+    if set(old_people) == set(new_people) and old_single == new_single:
+        return False
+
+    raw_context = row.get("context")
+    context: Optional[Dict[str, Any]] = None
+    if old_single != new_single:
+        try:
+            parsed = json.loads(raw_context) if raw_context else {}
+        except ValueError:
+            parsed = {}
+        context = dict(parsed) if isinstance(parsed, dict) else {}
+        for key in (oqs._WORKSPACE_THREAD_KEY, oqs._WORKSPACE_TURN_KEY, oqs._WORKSPACE_DISCUSSION_KEY):
+            context.pop(key, None)
+        if new_single:
+            thread, _ = oqs._workspace_attachment(row["agent_name"], new_single)
+            if thread:
+                context[oqs._WORKSPACE_THREAD_KEY] = thread
+
+    changed = bool(db.readdress_operator_queue_item(
+        ask_id, new_people, new_single,
+        expect_single=row.get("addressed_to_email"), expect_resolved_raw=row.get("resolved_to"),
+        context=context, expect_context_raw=raw_context))
+    if not changed:
+        return False
+    audit = [{
+        "event_action": "platform_readdressed",
+        "source": "system",
+        "target_type": "operator_queue",
+        "target_id": ask_id,
+        "details": {"reason": reason, "to_role": row.get("to_role"), "agent_name": row["agent_name"]},
+    }]
+    payload = _broadcast_payload({"type": "operator_queue_new",
+                                  "data": {"id": ask_id, "agent_name": row["agent_name"]}})
+    try:
+        operator_resume_service.spawn_on_loop(lambda: _announce(audit, payload if trigger else None))
+    except Exception:  # noqa: BLE001 — the write is committed; it must stand
+        logger.warning("[AskService] could not schedule the readdressed audit", exc_info=True)
+    return True
+
+
+def readdress_role(agent_name: str, role: str, *, reason: str) -> Dict[str, int]:
+    """Who fills `role` on `agent_name` changed: re-resolve it and move this
+    agent's pending rows that were addressed to it BY ROLE
+    (trinity-enterprise#1095) — the agent's own raises, and gated-skill
+    approvals (`db.list_pending_role_addressed`'s allowlist). A row the
+    platform addressed to a named person (a gate note, a project consent card,
+    a reach row — ent#661) is never moved: the role was never its fence.
+
+    The fresh audience is what a fresh raise would get: an agent's row through
+    `_address` (the one resolution rule), a gate approval through the gate's
+    own `_approvers` (ent#881 reachability applied), so a moved approval
+    reaches exactly who `enforce` would ask today. Nobody filling `primary`
+    leaves the row with NO audience — it falls to the operators exactly as a
+    fresh no-primary raise does, and is re-addressed when a primary is set
+    again. A refused role (`approver`/`viewer` unfilled, nobody seated who can
+    open the agent) leaves the rows AS THEY WERE: an empty snapshot on an
+    approver row would un-fence it (ent#1053). A credential row keeps exactly
+    one reader (ent#1066): it moves only to a single person.
+
+    `role` is one of `ASK_ROLES`; anything else is a programming error. One
+    audit row per changed row (`readdress_item`), and ONE agent-keyed `/ws`
+    trigger per call when anything changed — a replace is two writes
+    (delete, then create) and each announces once. Returns the counts.
+    """
+    if role not in ASK_ROLES:
+        raise ValueError(f"readdress_role: role must be one of {ASK_ROLES}, got {role!r}")
+    if reason not in PLATFORM_READDRESS_REASONS:
+        raise ValueError(f"platform readdress reason must be one of {PLATFORM_READDRESS_REASONS}, got {reason!r}")
+    rows = db.list_pending_role_addressed_operator_queue_items(agent_name, role)
+    out = {"readdressed": 0, "unchanged": 0}
+    if not rows:
+        return out
+    fresh: Dict[bool, Optional[Tuple[List[str], Optional[str]]]] = {}
+    first_changed: Optional[str] = None
+    for row in rows:
+        gate = row.get("raised_by") == "gate"
+        if gate not in fresh:
+            fresh[gate] = _fresh_audience(agent_name, role, gate=gate)
+        audience = fresh[gate]
+        if audience is None:
+            out["unchanged"] += 1
+            continue
+        people, single = audience
+        if row.get("type") == "credential" and not single:
+            logger.info("[AskService] credential ask %s on %s keeps its reader: %s now reaches %d people",
+                        row["id"], agent_name, role, len(people))
+            out["unchanged"] += 1
+            continue
+        if readdress_item(row["id"], people, single, reason=reason, trigger=False):
+            out["readdressed"] += 1
+            first_changed = first_changed or row["id"]
+        else:
+            out["unchanged"] += 1
+    if first_changed:
+        trigger = _broadcast_payload({"type": "operator_queue_new",
+                                      "data": {"id": first_changed, "agent_name": agent_name}})
+        try:
+            operator_resume_service.spawn_on_loop(lambda: _announce([], trigger))
+        except Exception:  # noqa: BLE001 — the writes are committed; they must stand
+            logger.warning("[AskService] could not schedule the readdressed trigger", exc_info=True)
+    return out
+
+
+def _fresh_audience(agent_name: str, role: str, *, gate: bool) -> Optional[Tuple[List[str], Optional[str]]]:
+    """`(people, single)` the role reaches NOW, by the rule the row's raiser
+    uses; None when the role refuses and the rows must stay as they were.
+    Nobody filling `primary` is `([], None)` — the operators — for both."""
+    if gate:
+        from services import skill_gate_service as sgs
+        try:
+            people = sgs._approvers(agent_name, role)
+        except sgs.SkillGateRefused as e:
+            if role == "primary" and e.code == "role_unassigned":
+                people = []
+            else:
+                logger.info("[AskService] %s on %s not re-addressed for gate approvals: %s",
+                            role, agent_name, e.code)
+                return None
+    else:
+        try:
+            people, _, _ = _address(agent_name, role)
+        except AskRejected as e:
+            logger.info("[AskService] %s on %s not re-addressed for the agent's asks: %s",
+                        role, agent_name, e.code)
+            return None
+    people = _people_list(people)
+    return people, (people[0] if len(people) == 1 else None)
+
+
 def raise_ask(
     agent_name: str,
     ask: Mapping[str, Any],
@@ -752,7 +939,7 @@ def raise_ask(
     pre = _named_addressees(addressees, to_role_override, raised_by, named)
     if raised_by != "gate" and (attach_chat is not True or platform_context is not None):
         raise ValueError("raise_ask: only a gate raise may skip the chat or attach platform context")
-    norm = _validated_ask(ask, oqs, raised_by=raised_by)
+    norm = _validated_ask(ask, oqs, raised_by=raised_by, agent_name=agent_name)
     existing = db.get_operator_queue_item_for_agent_by_request_id(agent_name, norm["request_id"])
     if existing:
         return _replay(existing, norm, oqs, raised_by)
@@ -980,7 +1167,8 @@ def _too_large(field: str, limit: int, unit: str) -> AskRejected:
                        field=field, limit=limit, unit=unit)
 
 
-def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]:
+def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent",
+                   agent_name: str = "") -> Dict[str, Any]:
     """The static half of validation — nothing here depends on the clock or
     the database, so a replay is checked right after it.
 
@@ -1060,7 +1248,7 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]
     if not isinstance(context, Mapping):
         raise AskRejected(422, "invalid_context", "context must be an object.")
     if kind == "credential":
-        from services import credential_ask_policy
+        from services import credential_ask_policy, credential_destination
         problem = credential_ask_policy.credential_name_problem(context.get("credential_name"))
         if problem is not None:
             raise AskRejected(
@@ -1070,6 +1258,20 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]
                 f"{credential_ask_policy.CREDENTIAL_NAME_MAX} characters that the platform "
                 "and the agent runtime do not reserve.",
                 reason=problem)
+        if credential_destination.CONTEXT_KEY in context:
+            # trinity-enterprise#1109: where the value lands when that is not
+            # this agent — validated here, by name (shape, the outbound A2A
+            # switch, the admin's endpoint registry for THIS agent; no
+            # resolver call on the loop), and stored normalised.
+            try:
+                stored = credential_destination.validate(
+                    context[credential_destination.CONTEXT_KEY], agent_name=agent_name)
+            except credential_destination.DestinationProblem as exc:
+                raise AskRejected(422, exc.code, exc.message, reason=exc.reason) from None
+            context = {**context, credential_destination.CONTEXT_KEY: stored}
+    elif isinstance(context, Mapping) and "credential_destination" in context:
+        raise AskRejected(422, "destination_on_non_credential",
+                          "Only a credential ask carries a destination.")
     # The workspace thread is platform-written: an agent that could author it
     # would choose which conversation its ask claims to belong to (ent#429), and
     # whether it is drawn in that chat at all (ent#734).
@@ -1539,13 +1741,28 @@ def _receipt(
         "replaces": replaces_request_id,
         "replaced_by": request_id_of(row.get("replaced_by")),
         "disposed_by": row.get("disposed_by"),
+        # abilityai/trinity-enterprise#1108 AC #4: `pending` = the answer landed
+        # but the agent was not running ("agent not yet woken" — its next start
+        # delivers it); `woken` = a turn carried it; None = no wake owed yet.
+        "wake_state": row.get("wake_state"),
         # trinity-enterprise#901: which ending the agent authored, if any —
         # derived here, once, never inferred client-side from `replaced_by`.
         "agent_ending": agent_ending_kind(row),
+        # trinity-enterprise#1109: where a credential lands when that is not
+        # this agent — the agent and the host, never the key's variable name.
+        "credential_destination": _destination_view(row),
     }
     if differs is not None:
         receipt["differs"] = differs
     return receipt
+
+
+def _destination_view(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    if row.get("type") != "credential":
+        return None
+    from services import credential_destination
+    return credential_destination.public_view(
+        credential_destination.destination_of(row.get("context")))
 
 
 # ---------------------------------------------------------------------------
@@ -1630,7 +1847,8 @@ def _ended(
 
 
 def _opted_in(agent_name: str) -> bool:
-    """Has this agent's owner opted in to being woken by its asks' endings?
+    """Does this agent wake when its asks end? On unless its owner switched it
+    off (abilityai/trinity-enterprise#1108).
 
     Read ONCE per agent per event, before anything is scheduled, so an agent
     that has not opted in costs one flag read and nothing else (ent#329). The
@@ -1650,8 +1868,9 @@ def _wake_filer(event: EndingEvent) -> None:
     """The default observer — wake the agent that raised the ask (ent#329).
 
     An answer keeps its ent#329 resume, one per ask, framed with the answer. A
-    cancel or an expiry wakes the agent through `spawn_ending_dispatch`, one
-    dispatch per agent per event. Only agents whose owner opted in are woken.
+    cancel or a dismissal wakes the agent through `spawn_ending_dispatch`, one
+    dispatch per agent per event; an expiry wakes nobody (ent#1108 ruling).
+    Only agents whose owner has not switched the wake off are woken.
     A platform-minted row opened no loop for the agent to resume and carries text
     withheld from it by design (ent#499), so an answer to one never dispatches;
     the ending wake applies the same rule itself. An ending the agent authored
@@ -1677,6 +1896,14 @@ def _wake_filer(event: EndingEvent) -> None:
                 response_text=row.get("response_text"),
                 responded_by_email=event.actor_email,
             )
+        return
+    # abilityai/trinity-enterprise#1108 (merge-train ruling): an expiry wakes
+    # nobody. The wake is on by default now, and the sweep spending an owner's
+    # turn by default — for a timeout nobody chose — is out; the issue names
+    # answers and cancellations. The expired row is still committed, announced
+    # and read on the agent's next turn (the readback, the Execution Context
+    # line, `get_my_ask`), and the rider reaches it there.
+    if event.disposition == EXPIRED:
         return
     # #3247: an ending the agent authored itself (it replaced the ask) wakes
     # nobody — the agent holds the receipt in the same turn (ent#329's spend

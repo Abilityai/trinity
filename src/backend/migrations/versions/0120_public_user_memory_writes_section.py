@@ -7,17 +7,17 @@ the owner can undo it). NOT NULL with a server default, so existing rows read
 as ``notes`` — which is what every one of them is.
 
 Mirrors the SQLite ``public_user_memory_writes_section`` migration. Chained
-after 0115 so the version-line keeps ONE head (#2068).
+after 0119 so the version-line keeps ONE head (#2068).
 
-Revision ID: 0116_public_user_memory_writes_section
-Revises: 0115_access_requests_requester_identity
+Revision ID: 0120_public_user_memory_writes_section
+Revises: 0119_terms_acceptances
 """
 import sqlalchemy as sa
 from alembic import op
 
 
-revision = "0116_public_user_memory_writes_section"
-down_revision = "0115_access_requests_requester_identity"
+revision = "0120_public_user_memory_writes_section"
+down_revision = "0119_terms_acceptances"
 branch_labels = None
 depends_on = None
 

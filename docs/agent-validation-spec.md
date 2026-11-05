@@ -41,7 +41,6 @@
 | T-008 | INFO | STATIC | template.yaml | `author` field present |
 | T-009 | SOFT | AI | template.yaml | `description` is substantive (2+ sentences, explains purpose clearly) |
 | T-010 | INFO | STATIC | template.yaml | `use_cases` array present with 3–7 examples |
-| T-011 | INFO | STATIC | template.yaml | `capabilities` array present |
 | T-013 | SOFT | AI | template.yaml | `use_cases` entries are realistic, specific, actionable prompts (not buzzword lists) |
 | T-014 | SOFT | AI | template.yaml | `tagline` (if present) is concise and explains unique value (not generic "AI assistant") |
 | T-015 | HARD | STATIC | template.yaml | `credentials` schema lists all variables referenced in `.mcp.json.template` |
@@ -96,6 +95,7 @@
 | X-007 | SOFT | STATIC | Consistency | Scheduled messages resolve to an existing `.claude/skills/<name>/SKILL.md` **or** `.claude/commands/<name>.md` |
 | X-008 | INFO | AI | Consistency | Resource allocation (`cpu`/`memory`) is appropriate for the agent's stated workload |
 | X-009 | SOFT | STATIC | Consistency | `dashboard.yaml` bindings can resolve: `metric:` is text, and each `dims:` selector names declared dimensions of its metric in `template.yaml` |
+| X-010 | INFO | STATIC | Consistency | Each `template.yaml` `capabilities:` tag names a skill in `.claude/skills/` whose SKILL.md has a `description:` (feature flags such as `brain-orb` exempt) |
 | I-001 | SOFT | AI | Composability | If the agent is callable by others (declares Trinity MCP or `permissions`), it documents its output format in `template.yaml` or `CLAUDE.md` |
 | I-002 | SOFT | AI | Composability | Scheduled/autonomous tasks write structured output to a file or shared folder, not only as a chat response |
 | I-006 | INFO | STATIC | Composability | The Trinity plugin (`trinity@abilityai`) is installed, so the agent can run `/trinity:onboard` in place and make itself compatible without a human checkout |
@@ -250,10 +250,6 @@ The description must explain what the agent does and for whom in at least 2 sent
 **T-010** — `use_cases` array with 3–7 entries  
 Severity: INFO | Type: STATIC  
 Fewer than 3 gives users no guidance. More than 7 clutters the UI.
-
-**T-011** — `capabilities` array present  
-Severity: INFO | Type: STATIC  
-These appear as feature chips in the template gallery.
 
 **T-013** — `use_cases` entries are realistic and specific  
 Severity: SOFT | Type: AI  
@@ -581,6 +577,10 @@ A bound widget may name one series of a dimensioned metric with `dims: {channel:
 
 The selector is validated by the binding's own parser (`metric_read_service.parse_dims_selector`), which wraps the write path's `validate_dims`, so "is this selector valid" has one answer on the report, the tile and the point write path. Deliberately **not** flagged: a valid selector with no points yet (a runtime fact the tile states), a partial selector (a point may carry any subset of the declared dimensions, so it is not provably wrong from the template), and a widget whose metric is undeclared or malformed (D-009 owns malformed entries). `dims: {}` and `dims: null` mean "no selector". `metric:` and `dims:` are judged as the tile receives them: the agent server sends the parsed `dashboard.yaml` as JSON, so an unquoted YAML date (`dims: {day: 2024-01-01}`) arrives as the text `"2024-01-01"` and is not flagged, while a number stays a number (`dims: {channel: 2024}` is flagged). Skipped when `dashboard.yaml` is missing or invalid; the selector half is skipped when `template.yaml` is missing or invalid. Fails closed with the exception's type name only if it cannot evaluate. Every echoed string is clipped to printable text, and values are never echoed.
 
+**X-010** — `capabilities:` tags name described skills (trinity-enterprise#584)  
+Severity: INFO | Type: STATIC | Claude runtime only  
+A capability is described once, in its skill's `SKILL.md` frontmatter `description:`; `template.yaml` `capabilities:` are tags. This check notes a tag that matches no skill, or matches one with no description, so the tag list cannot drift from the real catalog unnoticed. A tag matches a skill by directory name or frontmatter `name`, ignoring case and treating `_` as `-`. A tag that switches a feature on (exactly `brain-orb`) is exempt. The snapshot holds at most 80 skill files and 2 MB, so a skill that is listed but whose `SKILL.md` was not read, or was cut, is not a finding. INFO for now: the A2A card still lists these tags as its skills, so deleting a tag to clear the note would empty the card; trinity-enterprise#178 moves the card to skills and raises this to SOFT.
+
 ---
 
 ### Category: Composability
@@ -683,6 +683,7 @@ Removed from the catalog; their ids are permanently retired.
 | `C-009` | "Are constraints actionable?" split from "do constraints exist?". | C-006 |
 | `G-002` | Compared against the 58-entry fleet-wide `_GITIGNORE_PATTERNS` that **Trinity injects at git-init**; most of it (`.bashrc`, `.profile`, `.cache/`, `.ssh/`, `.claude/plugins/`, …) is not authorable content, and every author-controllable line is already owned by S-001..S-008. | S-001..S-008, G-001 |
 | `DP-005` | `.trinity/pre-snapshot` has no executor — PR2 of #1169 never shipped. | — |
+| `T-011` | "`capabilities` array present" asked every author for `template.yaml` tags, which stopped being shown as capabilities in trinity-enterprise#584 (a capability is described in its SKILL.md). | `X-010` (a mapping, not a rewording) |
 
 ### Implementation deviations (#668)
 

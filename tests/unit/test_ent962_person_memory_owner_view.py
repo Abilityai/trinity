@@ -445,8 +445,8 @@ class TestMigration:
         assert cur.execute("SELECT section FROM public_user_memory_writes").fetchone() == ("notes",)
         assert "public_user_memory_writes_section" in [n for n, _ in migrations.MIGRATIONS]
 
-    def test_the_alembic_revision_chains_after_0115(self):
-        path = REPO / "src/backend/migrations/versions/0116_public_user_memory_writes_section.py"
+    def test_the_alembic_revision_chains_after_0119(self):
+        path = REPO / "src/backend/migrations/versions/0120_public_user_memory_writes_section.py"
         src = path.read_text()
-        assert 'down_revision = "0115_access_requests_requester_identity"' in src
-        assert 'revision = "0116_public_user_memory_writes_section"' in src
+        assert 'down_revision = "0119_terms_acceptances"' in src
+        assert 'revision = "0120_public_user_memory_writes_section"' in src

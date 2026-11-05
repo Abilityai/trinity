@@ -19,6 +19,7 @@ import asyncio
 import datetime
 import json
 import re
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -29,6 +30,9 @@ from services.compatibility import static_checks
 from services.compatibility.static_checks import run_static, STATIC_CHECKS
 from services.compatibility import fixes
 from services.compatibility import ai_checks
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # `_ent695_lua`
+import _ent695_lua as lua  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +123,7 @@ class TestSpecConsistency:
         # ent#479: +1 (D-010, metrics.json superseded) -> 91.
         # ent#730: +1 (X-009, dashboard metric:/dims: bindings) -> 92.
         # #4002: +1 (F-014, last setup.sh exit code) -> 93.
+        # ent#584: T-011 retired, X-010 added (capabilities: tags vs skills) -> 93.
         assert len(spec.CHECKS) == 93, f"expected 93 checks, found {len(spec.CHECKS)}"
 
     def test_retired_ids_are_never_reissued(self):
@@ -130,7 +135,7 @@ class TestSpecConsistency:
         retired = {
             "F-008", "F-012", "F-013", "T-012", "T-016", "T-017", "C-009",
             "K-002", "K-005", "G-002", "G-003", "G-004", "G-005", "D-006",
-            "I-003", "I-004", "I-005", "DP-005",
+            "I-003", "I-004", "I-005", "DP-005", "T-011",
         }
         clash = retired & set(spec.ALL_IDS)
         assert not clash, f"retired ids reissued: {sorted(clash)}"
@@ -1375,6 +1380,9 @@ class TestCompatFixLock:
         client.get.side_effect = lambda key: store.get(key)
         client.delete.side_effect = lambda key: store.pop(key, None)
         client.store = store
+        # trinity#4028: the release is a Lua script; this one EXECUTES the
+        # production text against the same dict.
+        client.register_script.side_effect = lua.dict_register_script(store)
         return client
 
     def test_lock_win_busy_then_ownership_checked_release(self, monkeypatch):
@@ -1398,6 +1406,12 @@ class TestCompatFixLock:
         client.store["compat_fix:agent-x"] = "successor-token"
         fixes._unlock(lock, "agent-x")
         assert client.store["compat_fix:agent-x"] == "successor-token"
+
+        # Our own token -> the release deletes it (the assertion above would
+        # pass against a release that deletes nothing at all).
+        client.store["compat_fix:agent-x"] = lock.token
+        fixes._unlock(lock, "agent-x")
+        assert "compat_fix:agent-x" not in client.store
 
     def test_lock_fails_open_when_redis_unconfigured(self, monkeypatch):
         monkeypatch.setattr(fixes, "_redis_lib", None)

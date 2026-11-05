@@ -43,6 +43,7 @@ from opentelemetry.instrumentation.redis import RedisInstrumentor
 
 # Import routers
 from routers.auth import router as auth_router
+from routers.terms import router as terms_router  # trinity-enterprise#1107 terms of use
 from routers.agents import router as agents_router, set_websocket_manager as set_agents_ws_manager, set_filtered_websocket_manager as set_agents_filtered_ws_manager
 from routers.agent_config import router as agent_config_router
 from routers.agent_data import router as agent_data_router
@@ -1374,6 +1375,7 @@ app.add_middleware(HostHeaderGuard)
 
 # Include all routers
 app.include_router(auth_router)
+app.include_router(terms_router)  # trinity-enterprise#1107: /api/terms/*
 app.include_router(agents_router)
 app.include_router(agent_config_router)
 app.include_router(agent_data_router)  # #1169: data export/import
@@ -1605,7 +1607,10 @@ async def websocket_endpoint(
         await websocket.close(code=4001, reason="Authentication required: provide ?ticket=<opaque>")
         return
 
-    payload = consume_ticket(ticket)
+    # trinity-enterprise#595: `/ws` accepts only a `user` ticket. A voice or
+    # VoIP ticket is consumed and refused here by its scope, never by an
+    # accident of its subject's shape.
+    payload = consume_ticket(ticket, scope="user")
     if not payload or not payload.get("sub"):
         await websocket.close(code=4001, reason="Invalid or expired WebSocket ticket")
         return
@@ -1614,9 +1619,9 @@ async def websocket_endpoint(
     # now scoped to the agents this user may see. Fails CLOSED: a ticket whose
     # subject is not a resolvable Trinity user is refused rather than
     # registered with an empty roster, so an identity we cannot establish
-    # never becomes a silently-degraded connection nobody notices. This also
-    # incidentally refuses a VoIP-scoped ticket (`subject` there is a numeric
-    # user id, not a username) on a surface it was never minted for.
+    # never becomes a silently-degraded connection nobody notices. (A ticket
+    # minted for another surface never reaches this point: the scope check in
+    # `consume_ticket` above refuses it.)
     try:
         identity = resolve_ws_identity(str(payload.get("sub")))
     except Exception:

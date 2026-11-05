@@ -674,7 +674,10 @@
     `delegation_active`, nothing upstream, no env read/write) → agent running
     (409 `agent_not_running`) → ONE Nevermined verify (404 → 422
     `delegation_not_found`; a present non-active status → 422
-    `delegation_inactive`; an absent status binds) → `.env` read → a
+    `delegation_inactive`; an absent status binds) → `.env` read (a file the
+    agent did not hand back as text — non-UTF-8, a read error, or an image too
+    old to report it absent — is 409 `env_unreadable`, no row and no write,
+    never read as empty: trinity-enterprise#1073) → a
     hand-set `NVM_API_KEY` (409 `agent_key_present`, no row, no write) → row insert
     (a concurrent bind tripping the partial unique index → 409
     `bind_in_progress`) → inject `NVM_DELEGATION_ID`/`NVM_API_KEY`/`NVM_ENVIRONMENT`
@@ -689,7 +692,9 @@
   - **DELETE** (`require_person` + owner tier): 404 `no_active_delegation`;
     revokes at Nevermined first (2xx/404 = revoked; else 503/502, nothing local
     changes), then the row, then best-effort env removal — agent down → 200
-    with `env_removed: false` and an `env_note`.
+    with `env_removed: false` and an `env_note`; a `.env` not readable as text
+    → 200, `env_removed: false`, the file left exactly as it is and an
+    `env_note` starting `env_unreadable` (trinity-enterprise#1073).
   - **MCP**: `get_agent_spending` (GET pass-through) and
     `revoke_agent_delegation` (DELETE; advertised to `user`/`system` keys only).
 - **FR-4 Errors** are `{"detail": {"code", "message"}}` so the panel (ent#967)
@@ -1153,6 +1158,18 @@ spoken replies (#2157) stay as composer affordances.
   brand-new chat gets its thread created and adopted BEFORE the call starts.
   Context = the thread's recent rows (system rows skipped, earlier spoken rows
   labelled). `/stop`, `/ws/voice/{id}` and `/panel` are the shared OSS routes.
+- **FR-2b — The socket credential (trinity-enterprise#595)**: the voice socket
+  authenticates with a single-use, short-lived credential; no session token
+  appears in any URL. The start response carries `websocket_ticket` (≤ 30 s,
+  one use, bound to the new call and its caller) and is `Cache-Control:
+  no-store`; the client sends it as the socket's first frame and starts the
+  mic only after the server's `auth_ok` (runtimes.md VOICE-002). The
+  credential comes from the same Workspace-authorized start request, so a
+  Workspace-only account still gets a call; the resolved platform user must be
+  an interactive session (MCP keys are refused), and a portal-token client is
+  still the uniform 404. Every failure — an expired or reused credential, a
+  stale tab, the ticket store being unavailable — reaches the person as words
+  ("Start a new call", "Reload this page"), never a silent orb.
 - **FR-3 — Transcript, written as it goes**: each completed turn is inserted by
   the worker holding the live socket as an `enterprise_portal_messages` row
   with `source='voice'` and `voice_call_id`; the call closes with one `system`
