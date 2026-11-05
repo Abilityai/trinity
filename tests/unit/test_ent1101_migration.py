@@ -119,6 +119,6 @@ def test_registered_on_both_tracks_and_chained_after_0117():
     # The Alembic half drives the same decision function — the PG install is
     # never answered by a second copy of the rule (the 0112 shape).
     assert "run_mcp_external_access_backfill" in rev
-    # Nothing else revises 0115: the version-line keeps ONE head (#2068).
+    # Nothing else revises 0117: the version-line keeps ONE head (#2068).
     revisers = [p.name for p in versions.glob("*.py") if f'down_revision = "{PREVIOUS}"' in p.read_text()]
     assert revisers == [f"{REVISION}.py"]
