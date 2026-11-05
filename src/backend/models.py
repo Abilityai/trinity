@@ -2005,6 +2005,15 @@ class SkillsLibraryAutomationUpdate(BaseModel):
     auto_reinject_enabled: Optional[bool] = None
 
 
+class QueueStallAlertMinutesUpdate(BaseModel):
+    """Body for PUT /api/settings/queue-stall-alert-minutes (#4257).
+
+    Range (5–1440) is enforced in the router so an out-of-range value returns a
+    400 with a descriptive message rather than a generic 422.
+    """
+    value: int
+
+
 class MaxParallelTasksCeilingUpdate(BaseModel):
     """Body for PUT /api/settings/max-parallel-tasks-ceiling (#506).
 

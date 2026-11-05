@@ -420,10 +420,14 @@ def _enrich(head: Dict[str, Any], *, redis, now: datetime) -> Dict[str, Any]:
         leased_running=leased_running,
         max_parallel=max_parallel,
         head_conversation_running=head_conversation_running,
-        # A push agent with a queued row either has a full meter or a drain
-        # that has not landed; the physical leased count is the pilot term, so
-        # fall back to the queue's own existence meaning "not yet drained".
-        slot_free=leased_running < max_parallel,
+        # A push agent's row that is STILL queued a full tick after admission
+        # refused it is a drain that has not landed — the backend's own job
+        # there, unlike on a pilot where it has none by design (#1766). The
+        # receipt reads the same row as `capacity`, because at admission the
+        # meter had just refused it; both are true at their own instant. The
+        # physical lease count is disjoint from push rows by construction, so
+        # it is deliberately not the push answer here either.
+        slot_free=True,
     )
     if redis is not None:
         head["last_worker_poll_age_seconds"] = _redis_age_seconds(
