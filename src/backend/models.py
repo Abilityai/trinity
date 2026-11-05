@@ -1430,8 +1430,9 @@ class BundledManifestSummary(BaseModel):
     templates: List[str] = []
     schedule_count: int = 0
     # True when the manifest carries a top-level `prompt:`, which OVERWRITES the
-    # platform-wide trinity_prompt for every agent. The UI gates deploy on an
-    # explicit acknowledgement for this.
+    # platform-wide trinity_prompt for every agent when an admin deploys it (#4025:
+    # anyone else's deploy leaves it alone and says so). A property of the manifest,
+    # not of the caller: the preview gives the caller-specific answer.
     sets_prompt: bool = False
     permissions_preset: Optional[str] = None
     # parse + validate + the same side-effect-free template/resource preflight the
