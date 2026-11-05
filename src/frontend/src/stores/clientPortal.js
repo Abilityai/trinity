@@ -20,7 +20,10 @@ import {
 import axios from 'axios'
 import { notifyPlatformUnauthorized, setPlatformUnauthorizedHandler } from '@/utils/platformSession'
 import { isTermsRefusal, notifyTermsRefusal } from '@/utils/termsGate'
-import { SPA_CLIENT, useAuthStore } from './auth'
+import { useAuthStore } from './auth'
+// The value the auth store sends on its own sign-in calls (`client: 'web'`),
+// spelled here rather than imported: specs mock the auth store whole.
+const SPA_CLIENT = 'web'
 import { laterInstant, READ_UP_TO_NOW } from '@/utils/readThrough'
 // A cycle by shape (that store reads this one's `clientEmail`), safe by use:
 // neither side touches the other at module evaluation, only inside actions.
