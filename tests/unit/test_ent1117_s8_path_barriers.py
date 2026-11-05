@@ -15,10 +15,14 @@ the properties that barrier has to hold:
   and each route keeps its own 404 text and the WebP-before-PNG order;
 * ``sanitize_agent_name`` never returns a separator, ``.`` or ``..``;
 * ``a..b`` stays a valid agent name.
+
+It also pins two responses that used to carry exception text: the Generate
+Default Avatars per-agent error, and the rename 500 (abilityai/trinity#4284).
 """
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -507,3 +511,41 @@ def test_template_barrier_fuzz(template_roots, name):
         assert got.is_relative_to(root_resolved)
         assert got.name == name
 
+
+# =============================================================================
+# 9. Exception text stays out of responses (#1917 pattern)
+# =============================================================================
+
+SENTINEL = "SENTINEL-/data/avatars/private-path-and-internals"
+
+
+def test_generate_defaults_error_carries_the_class_name_not_the_message(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(avatar_paths, "AVATAR_DIR", tmp_path / "avatars")
+
+    def boom(_):
+        raise RuntimeError(SENTINEL)
+
+    _defaults_env(monkeypatch, optimize=boom)
+    with caplog.at_level(logging.WARNING, logger=avatar.logger.name):
+        body = _run(avatar.generate_default_avatars(current_user=_admin()))
+    assert body["failed"] == 1
+    err = body["errors"][0]
+    assert err["agent"] == "a1"
+    assert SENTINEL not in str(body)
+    assert "RuntimeError" in err["error"]
+    logged = [r for r in caplog.records if r.exc_info and SENTINEL in str(r.exc_info[1])]
+    assert logged, "the full exception must still reach the backend log"
+
+
+def test_rename_500_carries_the_class_name_not_the_message(store, monkeypatch, caplog):
+    user, request = _rename_env(monkeypatch, rename_side_effect=RuntimeError(SENTINEL))
+    with caplog.at_level(logging.ERROR, logger=agent_rename.logger.name):
+        with pytest.raises(HTTPException) as exc:
+            _run(agent_rename.rename_agent_endpoint(
+                "old", SimpleNamespace(new_name="new-name"), request, user))
+    assert exc.value.status_code == 500
+    assert SENTINEL not in str(exc.value.detail)
+    assert "RuntimeError" in exc.value.detail
+    assert exc.value.detail.startswith("Failed to rename agent")
+    logged = [r for r in caplog.records if r.exc_info and SENTINEL in str(r.exc_info[1])]
+    assert logged, "the full exception must still reach the backend log"

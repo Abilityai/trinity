@@ -220,8 +220,17 @@ async def generate_default_avatars(
             )
 
         except Exception as e:
-            errors.append({"agent": agent_name, "error": str(e)})
-            logger.warning(f"[AVATAR-003] Default avatar error for {agent_name}: {e}")
+            # py/stack-trace-exposure (#28, the #1917 pattern): this arm sees
+            # post-processing failures (PIL, the file write, the DB), whose text
+            # names server paths and internals. The log keeps it; the caller gets
+            # the class name.
+            errors.append({
+                "agent": agent_name,
+                "error": f"{e.__class__.__name__} — details in backend logs",
+            })
+            logger.warning(
+                f"[AVATAR-003] Default avatar error for {agent_name}: {e}", exc_info=True
+            )
 
     return {
         "generated": len(generated),

@@ -275,8 +275,10 @@ async def rename_agent_endpoint(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to rename agent {agent_name}: {e}")
+        # abilityai/trinity#4284 (the #1917 pattern): a Docker or DB failure's
+        # text names internals. The log keeps it; the caller gets the class name.
+        logger.error(f"Failed to rename agent {agent_name}: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to rename agent: {str(e)}"
+            detail=f"Failed to rename agent ({e.__class__.__name__} — details in backend logs)"
         )
