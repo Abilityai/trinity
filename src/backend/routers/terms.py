@@ -68,8 +68,12 @@ async def terms_caller(
         from client_portal.portal_auth import _reject_if_blocked
         _reject_if_blocked(email)
         return PortalPerson(email)
-    # Neither: let the platform resolver say why (401, or its own 403).
-    return await get_current_user(request, token)
+    # Neither: a bearer this door does not recognise. The same 401 whatever
+    # the token was — an ops key included — so the door reads as one that
+    # swallows (`get_optional_user`) to the #3180 census, never as a second
+    # route into the ops fence.
+    raise HTTPException(status_code=401, detail="Not authenticated",
+                        headers={"WWW-Authenticate": "Bearer"})
 
 
 def _raise(e: TermsError):
