@@ -255,3 +255,84 @@ describe('PersonMemoryModal — one person', () => {
     expect(q('[data-testid="person-memory-facts-empty"]').textContent).toContain('Platform switch is off')
   })
 })
+
+describe('#4276 review round — the four unpinned behaviours, and the >200 re-read', () => {
+  it('a history row renders its text as text, never as markup', async () => {
+    serve({ person: detail({ history: { writes: [
+      write({ id: 'w9', text: '<img src=x onerror="alert(1)"> <b>poisoned</b>' }),
+    ], next_before: null } }) })
+    await openAnn()
+    const row = q('[data-testid="person-memory-write"]')
+    expect(row.textContent).toContain('<b>poisoned</b>')
+    expect(row.querySelector('b')).toBeNull()
+    expect(row.querySelector('img')).toBeNull()
+  })
+
+  it('after an Undo the owner\'s history is re-read to the length on screen, past the first page', async () => {
+    serve()
+    await openAnn()
+    await click(q('[data-testid="person-memory-writes-more"]'))
+    expect(qa('[data-testid="person-memory-write"]')).toHaveLength(4)
+    await click(qa('[data-testid="person-memory-undo"]')[1])
+    api.post.mockResolvedValueOnce({ data: { write_id: 'w2', notes: '', summary: '' } })
+    await click(q('[data-testid="confirm-dialog-confirm"]'))
+    expect(qa('[data-testid="person-memory-write"]')).toHaveLength(4)
+    expect(api.get.mock.calls.filter(([u]) => u === `${BASE}/person-memory/writes`)).toHaveLength(2)
+  })
+
+  it('Load more on facts asks for the next page at the count on screen', async () => {
+    const page = (n, from) => Array.from({ length: n }, (_, i) => ({
+      id: `f${from + i}`, text: `Fact ${from + i}`, source: 'public', created_at: ago(1000), updated_at: ago(1000),
+    }))
+    serve()
+    api.get.mockImplementation((url, cfg = {}) => {
+      if (url === `${BASE}/retrieval-memory/facts`) {
+        return Promise.resolve({ data: cfg.params.offset === 0 ? page(20, 0) : page(3, 20) })
+      }
+      if (url === `${BASE}/person-memory`) return Promise.resolve({ data: PEOPLE })
+      if (url === `${BASE}/person-memory/person`) return Promise.resolve({ data: detail() })
+      if (url === `${BASE}/retrieval-memory`) return Promise.resolve({ data: { enabled_platform: true } })
+      return Promise.reject(new Error(`unexpected GET ${url}`))
+    })
+    await openAnn()
+    await click(q('[data-testid="person-memory-facts-more"]'))
+    expect(api.get).toHaveBeenCalledWith(`${BASE}/retrieval-memory/facts`,
+      { params: { user_email: 'ann@example.com', limit: 20, offset: 20 } })
+    expect(qa('[data-testid="person-memory-fact"]')).toHaveLength(23)
+  })
+
+  it('a slow answer for the previous person never lands under the next one', async () => {
+    const store = usePersonMemoryStore()
+    serve()
+    await store.loadPeople(AGENT)
+    let resolveA
+    api.get.mockImplementationOnce(() => new Promise((r) => { resolveA = r }))
+    const a = store.openPerson('ann@example.com')
+    api.get.mockImplementationOnce(() => Promise.resolve({ data: detail({ user_email: 'bob@example.com', notes: 'Bob notes' }) }))
+    await store.openPerson('bob@example.com')
+    resolveA({ data: detail() })
+    await a
+    expect(store.personEmail).toBe('bob@example.com')
+    expect(store.person.notes).toBe('Bob notes')
+  })
+
+  it('a quiet re-read keeps a list longer than one 200-row page', async () => {
+    const people = (n, from) => Array.from({ length: n }, (_, i) => ({
+      user_email: `p${from + i}@example.com`, last_changed_at: ago(1000), has_notes: true, has_summary: false,
+      write_count: 1, fact_count: 0, agent_scope: false, channel: null, channel_name: null, channel_handle: null,
+    }))
+    const store = usePersonMemoryStore()
+    api.get.mockImplementation((url, cfg = {}) => {
+      if (url !== `${BASE}/person-memory`) return Promise.reject(new Error(`unexpected GET ${url}`))
+      const { offset, limit } = cfg.params
+      return Promise.resolve({ data: { agent_name: AGENT, total: 250, offset, limit,
+        people: people(Math.max(0, Math.min(limit, 250 - offset)), offset) } })
+    })
+    await store.loadPeople(AGENT)
+    while (store.people.length < 250) await store.loadMorePeople()
+    expect(store.people).toHaveLength(250)
+    await store.loadPeople(AGENT)                       // the re-read after an Undo or a Forget
+    expect(store.people).toHaveLength(250)
+    expect(new Set(store.people.map((p) => p.user_email)).size).toBe(250)
+  })
+})

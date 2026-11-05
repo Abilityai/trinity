@@ -22,6 +22,7 @@ import { ref } from 'vue'
 import api from '../api'
 
 const PEOPLE_PAGE = 50
+const PEOPLE_PAGE_MAX = 200     // the route's cap (`person_memory_service.PEOPLE_PAGE_MAX`)
 const HISTORY_PAGE = 20
 const FACTS_PAGE = 20
 const LINEAGE_LIMIT = 50
@@ -115,13 +116,28 @@ export const usePersonMemoryStore = defineStore('personMemory', () => {
     const gen = agentGen
     peopleError.value = ''
     // A quiet re-read (after an Undo or a Forget) keeps as many rows as are on
-    // screen, so the list behind the dialog does not shrink back to one page.
-    const limit = Math.min(Math.max(people.value.length, PEOPLE_PAGE), 200)
+    // screen, so the list behind the dialog does not shrink back to one page —
+    // paged at the route's 200-row cap, as refreshPerson pages the history.
+    const want = Math.max(people.value.length, PEOPLE_PAGE)
     try {
-      const { data } = await api.get(`${base(name)}/person-memory`, { params: { offset: 0, limit } })
-      if (gen !== agentGen) return
-      people.value = data?.people || []
-      peopleTotal.value = data?.total || 0
+      let rows = []
+      let total = 0
+      let offset = 0
+      while (rows.length < want) {
+        const limit = Math.min(want - rows.length, PEOPLE_PAGE_MAX)
+        const { data } = await api.get(`${base(name)}/person-memory`, { params: { offset, limit } })
+        if (gen !== agentGen) return
+        const page = data?.people || []
+        total = data?.total || 0
+        offset += page.length
+        const seen = new Set(rows.map((p) => p.user_email))
+        const fresh = page.filter((p) => !seen.has(p.user_email))
+        rows = rows.concat(fresh)
+        // The last page, or a page of only rows already held (the order moved): stop.
+        if (page.length < limit || !fresh.length) break
+      }
+      people.value = rows
+      peopleTotal.value = total
       peopleLoaded.value = true
     } catch (e) {
       if (gen !== agentGen) return
