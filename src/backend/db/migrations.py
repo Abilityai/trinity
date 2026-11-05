@@ -5807,6 +5807,29 @@ def _migrate_agent_sync_state_git_stats_at(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_ownership_wake_on_ending(cursor, conn):
+    """ent#1102 — per-agent wake-on-ending override (tri-state).
+
+    Adds ``wake_on_ending INTEGER`` to ``agent_ownership``, deliberately WITHOUT
+    a default: NULL means "no opinion, follow the instance default"
+    (``wake_on_ending_default``, ON), 0 means "never wake me", 1 means "always".
+
+    No backfill. ent#790's flip is the instance default, not a bulk edit of
+    every row's ``operator_resume_enabled`` — rewriting owner intent in place is
+    the #1945 mistake, and the resolver (``services/wake_policy.py``) already
+    reads a pre-existing ``operator_resume_enabled = 1`` as an explicit opt-in.
+
+    Mirrored by Alembic revision 0116_agent_ownership_wake_on_ending.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "wake_on_ending",
+        "ALTER TABLE agent_ownership ADD COLUMN wake_on_ending INTEGER",
+    )
+    conn.commit()
+
+
 def _migrate_agent_memory_facts(cursor, conn):
     """trinity-enterprise#1022 (MEM-002) — retrieval memory facts.
 
@@ -6264,4 +6287,5 @@ MIGRATIONS = [
     ("seat_ask_class_state_table", _migrate_seat_ask_class_state_table),
     ("room_participant_visible_from", _migrate_room_participant_visible_from),
     ("access_requests_requester_identity", _migrate_access_requests_requester_identity),
+    ("agent_ownership_wake_on_ending", _migrate_agent_ownership_wake_on_ending),
 ]

@@ -1511,6 +1511,16 @@ class DatabaseManager:
     def set_operator_resume_enabled(self, agent_name: str, enabled: bool) -> bool:
         return self._agent_ops.set_operator_resume_enabled(agent_name, enabled)
 
+    # --- wake on ending, tri-state (ent#1102) ---
+    # None = no opinion, follow the instance default. Read only through
+    # services/wake_policy.py, never directly.
+
+    def get_wake_on_ending(self, agent_name: str):
+        return self._agent_ops.get_wake_on_ending(agent_name)
+
+    def set_wake_on_ending(self, agent_name: str, enabled) -> bool:
+        return self._agent_ops.set_wake_on_ending(agent_name, enabled)
+
     def get_mcp_exposed_agents(self):
         return self._agent_ops.get_mcp_exposed_agents()
 

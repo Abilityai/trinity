@@ -126,6 +126,12 @@ agent_ownership = Table(
     # a dispatch on respond spends money, so it is never unconditional. Per-AGENT and
     # not per-request, so hosting asks cannot hand a client a spend button (ent#430 AC #3).
     Column("operator_resume_enabled", Integer),
+    # ent#1102: tri-state wake-on-ending override. NULL = follow the instance
+    # default (``wake_on_ending_default``, ON), 0 = never wake, 1 = always wake.
+    # Nullable BY DESIGN: a NULL is "no opinion", which an INTEGER DEFAULT 0
+    # could not express — and telling "never set" from "the owner said off" is
+    # the whole reason the default could be flipped on without erasing intent.
+    Column("wake_on_ending", Integer),
     Column("memory_opt_out", Integer),             # trinity-enterprise#1022: per-agent retrieval-memory opt-out (default 0)
     Column("tts_voice_replies_enabled", Integer),  # epic #24/#25: outbound voice-out toggle (shared agent-level)
     Column("tts_voice_id", Text),                  # epic #24/#25: ElevenLabs voice id for spoken replies
