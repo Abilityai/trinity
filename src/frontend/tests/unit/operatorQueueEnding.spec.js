@@ -190,11 +190,13 @@ describe('ResolvedCard renders the ending (mounted)', () => {
 })
 
 describe('the wake setting says what it spends on (mounted)', () => {
-  it('names every ending, not only an answer', async () => {
+  it('names the endings that wake it — an answer or a cancel, never an expiry', async () => {
     api.get.mockResolvedValue({ data: {} })
     const w = mount(ReliabilityPanel, { props: { agentName: 'agent-a' } })
     await new Promise((r) => setTimeout(r, 0))
-    expect(w.text()).toContain('When an ask this agent raised ends — answered, cancelled or expired')
+    expect(w.text()).toContain('When a person ends an ask this agent raised — answers it or cancels it')
+    expect(w.text()).toContain('An expiry wakes nobody')
+    expect(w.text()).not.toContain('cancelled or expired')
     expect(w.text()).not.toContain('Each answer then costs one agent turn')
   })
 })

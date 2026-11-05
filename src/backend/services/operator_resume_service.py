@@ -33,14 +33,17 @@ The caller invokes this only on a CAS-*won* respond (the item actually moved
 ``pending → responded``), mirroring the #1083 rule that side effects hang off the
 CAS result and never off a lost race.
 
-**Any ending, not only an answer (trinity-enterprise#611).** A cancelled or an
-expired ask is an ending the agent is waiting on too — without a wake it waits
-for an answer that will never come. ``maybe_dispatch_ending`` wakes it under the
-same opt-in, through the same dispatch surface, with its own trigger
-(``operator_ending``), ONE turn per agent per ending event (a bulk sweep of 25 of
-one agent's asks is one turn, not 25). Both are called only from the ask sink
-(``services/ask_service.py``), which hands them only the rows its
-compare-and-set won.
+**A person's ending, not only an answer (trinity-enterprise#611).** A cancelled
+or a dismissed ask is an ending the agent is waiting on too — without a wake it
+waits for an answer that will never come. ``maybe_dispatch_ending`` wakes it
+under the same switch, through the same dispatch surface, with its own trigger
+(``operator_ending``), ONE turn per agent per ending event (a bulk cancel of 25
+of one agent's asks is one turn, not 25). An EXPIRY wakes nobody (ruled on
+abilityai/trinity-enterprise#1108: the wake is on by default, and the sweep
+must not spend an owner's turn for a timeout nobody chose) — the ask sink
+returns before the spawn, and the agent reads the timeout on its next turn.
+Both are called only from the ask sink (``services/ask_service.py``), which
+hands them only the rows its compare-and-set won.
 """
 
 import asyncio
@@ -61,9 +64,9 @@ RESPONSE_MAX_CHARS = 4000
 
 TRIGGERED_BY = "operator_response"
 
-# trinity-enterprise#611: a cancel or an expiry wakes the agent that raised the
-# ask. Its own trigger, so Executions never records a timeout as an operator's
-# response.
+# trinity-enterprise#611: a cancel or a dismissal wakes the agent that raised
+# the ask. Its own trigger, so Executions never records an ending as an
+# operator's response. (An expiry no longer dispatches — ent#1108 ruling.)
 TRIGGERED_BY_ENDING = "operator_ending"
 
 # The rider on an expiry (trinity-enterprise#611, operator ruling): a timeout is
@@ -589,7 +592,9 @@ async def maybe_dispatch_ending(
     reason: Optional[str] = None,
     batch_id: Optional[str] = None,
 ) -> Optional[str]:
-    """Wake ONE agent, once, for asks of its that were cancelled or expired.
+    """Wake ONE agent, once, for asks of its that a person ended without an
+    answer (cancelled, dismissed). The `expired` framing is kept for the
+    readback's rider, but the ask sink no longer dispatches an expiry.
 
     `items` are one agent's CAS-won rows from a single ending event. Returns the
     execution id, or None when nothing is owed a wake, the agent has not opted

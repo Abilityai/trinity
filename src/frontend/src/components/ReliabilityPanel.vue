@@ -70,9 +70,10 @@
 
     <h3 class="font-medium text-gray-900 dark:text-white mb-2" :class="embedded ? 'text-sm' : 'text-lg'">Wake this agent when its asks end</h3>
     <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
-      When an ask this agent raised ends — answered, cancelled or expired — the
-      agent is woken for one turn with the ending in its context, so it acts on
-      the answer, or stops waiting for one that will not come. On by default.
+      When a person ends an ask this agent raised — answers it or cancels it —
+      the agent is woken for one turn with the ending in its context, so it acts
+      on the answer, or stops waiting for one that will not come. On by default.
+      An expiry wakes nobody; the agent reads it on its next turn.
       Switched off, the ending still reaches the agent, but only on its
       <em>next</em> turn — and an agent with no schedule has no next turn, so an
       approved action waits until someone writes to it (ent#329).
@@ -97,7 +98,8 @@
         </p>
         <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
           Each wake-up costs one agent turn, billed to you — one per answer, and one
-          per cancellation or expiry event (a sweep of several asks is one turn).
+          per cancellation event (a sweep of several asks is one turn; an expiry
+          costs nothing, it wakes nobody).
           That is why the switch is yours, per agent, not the agent's per request.
         </p>
         <p v-if="resumeMessage" class="mt-1 text-xs" :class="resumeMessageOk ? 'text-green-600 dark:text-green-400' : 'text-amber-700 dark:text-amber-400'">
