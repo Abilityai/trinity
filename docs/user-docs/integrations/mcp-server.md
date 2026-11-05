@@ -80,7 +80,7 @@ The URL Trinity advertises — in the MCP Keys page's connection snippet and in 
 | `403` | `external_mcp_access_off` | External MCP access is off on this instance | An admin turns it on under **Settings → MCP Keys** |
 | `503` (with `Retry-After: 5`) | `external_mcp_access_unverified` | The MCP server could not get the setting from the backend yet — it is still starting, or `INTERNAL_API_SECRET` is not set | Retry shortly; if it persists, check the backend and that `INTERNAL_API_SECRET` is set |
 
-The JSON-RPC error code is `-32003` for both. Only `GET /health` (the container's own health probe) and `DELETE /mcp` are ever let through while the switch is off; there is no path or transport on the port that bypasses it.
+The JSON-RPC error code is `-32003` for both. Only `GET` or `HEAD /health` (the container's own health probe) and `DELETE /mcp` are ever let through while the switch is off; there is no path or transport on the port that bypasses it.
 
 **The published port — `MCP_BIND_ADDRESS`.** This `.env` key is the interface the MCP server's `:8080` port is published on. Fresh installs set `127.0.0.1`, so the port answers only on the Trinity host and outside clients use the frontend's `/mcp`. An upgraded `.env` that does not carry the key keeps publishing on every interface, as before. Empty means every interface. The key is read when the containers are created, so change it in `.env` and recreate the stack.
 
