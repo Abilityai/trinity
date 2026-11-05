@@ -163,3 +163,160 @@ def test_snapshot_barrier_precedes_resolve():
     assert "if not full.startswith(base):" in body
     assert body.index("if not full.startswith(base):") < body.index(".resolve()")
     assert "relative_to(_HOME.resolve())" in body
+
+
+# ---------------------------------------------------------------------------
+# #30 / #31 — dashboard
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def dashboard(tmp_path, monkeypatch):
+    import sys
+
+    base = str(_REPO / "docker" / "base-image")
+    if base not in sys.path:
+        sys.path.insert(0, base)
+    import importlib
+
+    mod = importlib.import_module("agent_server.routers.dashboard")
+    path = tmp_path / "dashboard.yaml"
+    monkeypatch.setattr(mod, "get_dashboard_path", lambda: path)
+    return mod, path
+
+
+def _dash(mod):
+    return asyncio.run(mod.get_dashboard())
+
+
+_VALID_WIDGET = "{type: text, content: hi}"
+
+
+@pytest.mark.parametrize(
+    ("yaml_text", "expected"),
+    [
+        pytest.param(
+            "- a\n- b\n",
+            "dashboard.yaml must be a mapping (key: value pairs) at the top level",
+            id="top-level-list",
+        ),
+        pytest.param(
+            "just a sentence\n",
+            "dashboard.yaml must be a mapping (key: value pairs) at the top level",
+            id="top-level-string",
+        ),
+        pytest.param(
+            f"title: T\nsections:\n  - widgets: [{_VALID_WIDGET}]\n  - not-a-section\n",
+            "dashboard.yaml: section 1 must be a mapping (key: value pairs)",
+            id="section-not-a-mapping",
+        ),
+        pytest.param(
+            f"title: T\nsections:\n  - widgets: [{_VALID_WIDGET}, just-text]\n",
+            "dashboard.yaml: section 0, widget 1 must be a mapping (key: value pairs)",
+            id="widget-not-a-mapping",
+        ),
+    ],
+)
+def test_dashboard_shape_failures_get_a_named_answer(dashboard, yaml_text, expected):
+    """#31: a structure the validator cannot walk used to surface as the raw
+    AttributeError/TypeError text; now the owner is told what to fix."""
+    mod, path = dashboard
+    path.write_text(yaml_text)
+    out = _dash(mod)
+    assert out["has_dashboard"] is False
+    assert out["error"] == expected
+
+
+def test_dashboard_missing_title_keeps_its_validation_answer(dashboard):
+    """Characterization: a missing title is a validation answer, not an exception."""
+    mod, path = dashboard
+    path.write_text(f"sections:\n  - widgets: [{_VALID_WIDGET}]\n")
+    out = _dash(mod)
+    assert out["has_dashboard"] is False
+    assert out["error"] == "Validation errors: Missing required 'title' field"
+
+
+def test_dashboard_a_valid_file_still_renders(dashboard):
+    """Characterization: the happy path is untouched."""
+    mod, path = dashboard
+    path.write_text(f"title: T\nsections:\n  - widgets: [{_VALID_WIDGET}]\n")
+    out = _dash(mod)
+    assert out["has_dashboard"] is True
+    assert out["error"] is None
+
+
+def test_dashboard_unreadable_file_names_the_failure(dashboard, caplog):
+    mod, path = dashboard
+    path.mkdir()  # a directory where the file should be: IsADirectoryError
+    with caplog.at_level(logging.ERROR, logger=mod.logger.name):
+        out = _dash(mod)
+    assert out["has_dashboard"] is False
+    assert (
+        out["error"]
+        == "Failed to read dashboard.yaml: the file could not be read (IsADirectoryError)"
+    )
+    assert any("dashboard.yaml" in r.getMessage() for r in caplog.records)
+
+
+def test_dashboard_permission_denied_names_the_failure(dashboard, monkeypatch):
+    mod, path = dashboard
+    path.write_text("title: T\n")
+
+    def _denied(self, *a, **kw):
+        raise PermissionError(13, "Permission denied", str(self))
+
+    monkeypatch.setattr(type(path), "read_text", _denied)
+    out = _dash(mod)
+    assert (
+        out["error"]
+        == "Failed to read dashboard.yaml: the file could not be read (PermissionError)"
+    )
+
+
+def test_dashboard_non_utf8_file_names_the_failure(dashboard):
+    mod, path = dashboard
+    path.write_bytes(b"title: \xff\xfe broken\n")
+    out = _dash(mod)
+    assert out["has_dashboard"] is False
+    assert (
+        out["error"]
+        == "Failed to read dashboard.yaml: the file is not valid UTF-8 text"
+    )
+
+
+def test_dashboard_unknown_failure_returns_the_class_name_only(
+    dashboard, monkeypatch, caplog
+):
+    """#31 sentinel: an unforeseen exception's text stays in the (scrubbed) log."""
+    mod, path = dashboard
+    path.write_text(f"title: T\nsections:\n  - widgets: [{_VALID_WIDGET}]\n")
+
+    def _boom(_config):
+        raise RuntimeError(_PLANT)
+
+    monkeypatch.setattr(mod, "validate_dashboard", _boom)
+    with caplog.at_level(logging.ERROR, logger=mod.logger.name):
+        out = _dash(mod)
+    assert out["has_dashboard"] is False
+    assert out["error"] == "Failed to read dashboard.yaml: RuntimeError"
+    _assert_answer_clean(out["error"], "RuntimeError")
+    _assert_log_scrubbed(caplog.records, "dashboard.yaml")
+
+
+def test_dashboard_malformed_yaml_keeps_the_named_refusal(dashboard):
+    """Characterization (#30, #282): every YAML parse failure arrives as
+    HardenedYamlError, whose named answer is the product."""
+    mod, path = dashboard
+    path.write_text("title: [unclosed\n")
+    out = _dash(mod)
+    assert out["has_dashboard"] is False
+    assert out["error"].startswith("workspace_yaml_yaml_invalid: ")
+
+
+def test_dashboard_has_no_unreachable_yaml_error_arm():
+    """#30: `load_hardened_yaml` converts every yaml.YAMLError, so the arm
+    that caught one could never run. It and its import are gone."""
+    src = (_AGENT_SERVER / "routers" / "dashboard.py").read_text()
+    assert "except yaml.YAMLError" not in src
+    assert "\nimport yaml\n" not in src
+    assert "except HardenedYamlError" in src  # test_1965's contract

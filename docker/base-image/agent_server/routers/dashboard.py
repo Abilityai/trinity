@@ -4,13 +4,14 @@ Agent Dashboard endpoint.
 Reads and serves dashboard configuration from dashboard.yaml file.
 """
 import logging
+import traceback
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 from fastapi import APIRouter
-import yaml
 
 from ..safe_yaml import AliasPolicy, HardenedYamlError, load_hardened_yaml
+from ..utils.credential_sanitizer import sanitize_text
 from ..utils.helpers import iso_z_from_mtime
 
 logger = logging.getLogger(__name__)
@@ -135,6 +136,42 @@ def validate_section(section: Dict[str, Any], index: int) -> List[str]:
     return errors
 
 
+def _shape_error(config: Any) -> Optional[str]:
+    """The first place `config` is not the nested mappings the validator walks,
+    as a sentence its author can act on; None when the shape is walkable.
+
+    Without it a list where a mapping belongs surfaced as the raw
+    AttributeError/TypeError text (`'str' object has no attribute 'get'`).
+    """
+    if not isinstance(config, dict):
+        return "dashboard.yaml must be a mapping (key: value pairs) at the top level"
+    sections = config.get('sections')
+    if not isinstance(sections, list):
+        return None  # validate_dashboard names a missing or non-list `sections`
+    for section_index, section in enumerate(sections):
+        if not isinstance(section, dict):
+            return f"dashboard.yaml: section {section_index} must be a mapping (key: value pairs)"
+        widgets = section.get('widgets')
+        if not isinstance(widgets, list):
+            continue  # validate_dashboard names it
+        for widget_index, widget in enumerate(widgets):
+            if not isinstance(widget, dict):
+                return (
+                    f"dashboard.yaml: section {section_index}, widget {widget_index} "
+                    "must be a mapping (key: value pairs)"
+                )
+    return None
+
+
+def _no_dashboard(error: str) -> Dict[str, Any]:
+    return {
+        "has_dashboard": False,
+        "config": None,
+        "last_modified": None,
+        "error": error,
+    }
+
+
 def validate_dashboard(config: Dict[str, Any]) -> List[str]:
     """Validate dashboard configuration. Returns list of error messages.
 
@@ -234,6 +271,10 @@ async def get_dashboard():
                 "error": "dashboard.yaml is empty"
             }
 
+        shape = _shape_error(config)
+        if shape:
+            return _no_dashboard(shape)
+
         # Validate configuration — strips bad widgets, keeps valid ones
         errors = validate_dashboard(config)
 
@@ -264,36 +305,38 @@ async def get_dashboard():
         }
 
     except HardenedYamlError as e:
-        # #1965: listed BEFORE the YAMLError arm and separately from it, because
-        # HardenedYamlError is a ValueError — not a YAMLError. Without its own
-        # arm a refused bomb would fall through to the generic `except
-        # Exception` below and surface as an unnamed "Failed to read
-        # dashboard.yaml", which is the timeout-shaped answer the AC rules out.
-        # `static_checks._parse_yaml` records the same trap on the backend side.
+        # #1965: the only parse-failure arm. `load_hardened_yaml` converts every
+        # yaml.YAMLError into a HardenedYamlError (a ValueError, not a
+        # YAMLError), so a refused bomb and a plain syntax error both land here
+        # with their named code. Without this arm they would fall through to
+        # the generic `except Exception` below and surface as an unnamed
+        # "Failed to read dashboard.yaml", which is the timeout-shaped answer
+        # the AC rules out. `static_checks._parse_yaml` records the same trap on
+        # the backend side.
         return {
             "has_dashboard": False,
             "config": None,
             "last_modified": None,
             "error": f"{e.code}: {e}",
         }
-    except yaml.YAMLError as e:
-        # Get line number from YAML error if available
-        error_msg = str(e)
-        if hasattr(e, 'problem_mark') and e.problem_mark:
-            mark = e.problem_mark
-            error_msg = f"YAML parse error at line {mark.line + 1}, column {mark.column + 1}: {e.problem}"
-
-        return {
-            "has_dashboard": False,
-            "config": None,
-            "last_modified": None,
-            "error": error_msg
-        }
+    except UnicodeDecodeError:
+        # `read_text` on bytes that are not UTF-8 (a ValueError, so ahead of the
+        # generic arm).
+        logger.warning("dashboard.yaml is not valid UTF-8 text")
+        return _no_dashboard("Failed to read dashboard.yaml: the file is not valid UTF-8 text")
+    except OSError as e:
+        logger.error(
+            "Failed to read dashboard.yaml (%s): %s",
+            type(e).__name__, sanitize_text(traceback.format_exc()),
+        )
+        return _no_dashboard(
+            f"Failed to read dashboard.yaml: the file could not be read ({type(e).__name__})"
+        )
     except Exception as e:
-        logger.error(f"Failed to read dashboard.yaml: {e}")
-        return {
-            "has_dashboard": False,
-            "config": None,
-            "last_modified": None,
-            "error": f"Failed to read dashboard.yaml: {str(e)}"
-        }
+        # Not ours to return: the text of an exception we did not foresee goes
+        # to the log (scrubbed) and the answer names only its class.
+        logger.error(
+            "Failed to read dashboard.yaml (%s): %s",
+            type(e).__name__, sanitize_text(traceback.format_exc()),
+        )
+        return _no_dashboard(f"Failed to read dashboard.yaml: {type(e).__name__}")
