@@ -875,6 +875,15 @@ class TestManifestCredentials:
         with pytest.raises(ValueError, match="credentials"):
             system_service.parse_manifest(self._manifest(creds))
 
+    def test_a_bad_credentials_entry_is_named_by_position_never_echoed(self):
+        """A value pasted where a name belongs must not come back in the error."""
+        from services import system_service
+        with pytest.raises(ValueError) as info:
+            system_service.parse_manifest(self._manifest("[TELEGRAM_BOT_TOKEN, 'sk-live-pasted-by-mistake']"))
+        text = str(info.value)
+        assert "sk-live-pasted-by-mistake" not in text
+        assert "entry 2" in text and "not_a_name" in text
+
     @pytest.mark.parametrize("creds", ["{}", "{OPENAI_API_KEY: sk-value}", "TELEGRAM_BOT_TOKEN"])
     def test_the_older_map_form_stays_an_unknown_key_warned_and_dropped(self, creds):
         # The shape this parser never read keeps its exact pre-1109 fate (the

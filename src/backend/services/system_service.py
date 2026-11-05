@@ -260,12 +260,14 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
             # credential ask may fill (so a value pasted here is refused by
             # shape, and a reserved name by policy).
             from services import credential_ask_policy
-            for entry in credentials:
+            for position, entry in enumerate(credentials, start=1):
                 problem = credential_ask_policy.credential_name_problem(entry)
                 if problem is not None:
+                    # Named by POSITION, never echoed: a value pasted where a
+                    # name belongs would otherwise come back in the error.
                     raise ValueError(
-                        f"Agent '{agent_name}' credentials: {entry!r} is not a variable name the "
-                        f"platform can set ({problem})")
+                        f"Agent '{agent_name}' credentials: entry {position} is not a variable "
+                        f"name the platform can set ({problem})")
 
         agents[agent_name] = SystemAgentConfig(
             template=agent_config["template"],
