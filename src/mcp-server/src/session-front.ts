@@ -46,6 +46,16 @@ type Listener = (req: IncomingMessage, res: ServerResponse) => void;
 const HEADER = "mcp-session-id";
 /** ent#1101 — set by `front()` on every forwarded request; an incoming copy is stripped. No consumer yet. */
 export const PEER_CLASS_HEADER = "x-trinity-peer-class";
+/**
+ * ent#1101 — the ONLY off-box requests that pass while the switch is off (or
+ * unverified): the fastmcp health path (default `/health`, no `basePath` set
+ * in server.ts) that the Dockerfile `HEALTHCHECK`, the prod/hosted compose
+ * healthchecks and `scripts/deploy/verify-platform.sh` dial — GET and HEAD
+ * only, since `wget --spider` sends HEAD — and `DELETE` on the stream
+ * endpoint, so a client can clean its session up after a toggle-off (T4).
+ */
+export const HEALTH_PATH = "/health";
+const STREAM_PATH = "/mcp";
 const ID_PREFIX = "t1";
 const RAND_BYTES = 16;
 const TAG_BYTES = 16;
@@ -126,6 +136,36 @@ export function createSessionIdCodec(secret: string): SessionIdCodec {
   };
 }
 
+/**
+ * The path mcp-proxy routes on — `new URL(req.url, "http://localhost")
+ * .pathname`, the exact parse at `startHTTPServer` — which resolves dot
+ * segments (`/x/../mcp`), percent-encoded dots (`/%2e/mcp`) and absolute-form
+ * targets (`http://h/mcp`) to `/mcp`. A raw-string match on `req.url` saw none
+ * of those. Undefined when the target does not parse at all.
+ */
+export function parsedPath(url: string | undefined): string | undefined {
+  try {
+    return new URL(url ?? "", "http://localhost").pathname;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * ent#1101 — may an off-box request pass WITHOUT a verdict? An allowlist on
+ * the parsed path, so `/sse` + `/messages` (the legacy SSE transport mcp-proxy
+ * serves by default and fastmcp cannot turn off), `/ping`, `/mcpx`, every
+ * spelling of `/mcp`, and any transport a future library bump adds are closed
+ * by construction, not by enumeration. An unparsable target is refused.
+ */
+export function offBoxAlwaysOpen(method: string | undefined, url: string | undefined): boolean {
+  const path = parsedPath(url);
+  if (path === undefined) return false;
+  if (path === HEALTH_PATH) return method === "GET" || method === "HEAD";
+  if (path === STREAM_PATH) return method === "DELETE";
+  return false;
+}
+
 /** First 8 characters of the random part — the only form an outer id is logged in. */
 export const idPrefix = (id: string): string => (id.split(".")[1] ?? id).slice(0, 8);
 
@@ -179,7 +219,7 @@ export interface SessionFrontOptions {
   port: number;
   now?: () => number;
   maxMapped?: number;
-  /** ent#1101 — the external-access verdict source; off-box `/mcp` is refused unless it says on. */
+  /** ent#1101 — the external-access verdict source; every off-box request outside `offBoxAlwaysOpen` is refused unless it says on. */
   externalAccess: ExternalAccessSource;
   /** ent#1101 — the peer rule (default: `classifyPeer` over the socket address); injected by tests. */
   classifyPeer?: (req: IncomingMessage) => PeerClass;
@@ -397,9 +437,11 @@ export async function startWithSessionFront(
 
     // ent#1101: the external-access gate — before authenticate, before the
     // session layer. The peer class is stamped on every forwarded request.
+    // Off-box, the decision is an ALLOWLIST on the parsed path: only the
+    // health probe and a session DELETE pass without an "on" verdict.
     const peer = classify(req);
     setRequestHeader(req, PEER_CLASS_HEADER, peer);
-    if (peer === "off-box" && req.method !== "DELETE" && isMcpPath(req.url)) {
+    if (peer === "off-box" && !offBoxAlwaysOpen(req.method, req.url)) {
       const fresh = opts.externalAccess.cached();
       if (fresh) {
         if (fresh.kind !== "on") return refuse(req, res, fresh);
@@ -420,11 +462,6 @@ export async function startWithSessionFront(
       return;
     }
     afterGate(req, res);
-  }
-
-  function isMcpPath(url: string | undefined): boolean {
-    const pathname = (url ?? "").split("?")[0];
-    return pathname === "/mcp" || pathname.startsWith("/mcp/");
   }
 
   function refuse(req: IncomingMessage, res: ServerResponse, verdict: Verdict): void {

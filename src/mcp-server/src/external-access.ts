@@ -164,7 +164,7 @@ export const OFF_MESSAGE =
   "external_mcp_access_off: External MCP access is off on this Trinity instance. " +
   "An admin can turn it on under Settings → MCP Keys → External MCP access.";
 
-/** The refusal `front()` writes for an off-box `/mcp` request that may not pass. */
+/** The refusal `front()` writes for an off-box request that may not pass (every path outside `offBoxAlwaysOpen`). */
 export function refusalFor(verdict: Verdict): { status: number; headers: Record<string, string>; body: string } | undefined {
   if (verdict.kind === "on") return undefined;
   const headers: Record<string, string> = { "Content-Type": "application/json" };
