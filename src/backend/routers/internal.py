@@ -765,6 +765,26 @@ async def log_audit_entry(request: InternalAuditRequest):
 
 
 # ---------------------------------------------------------------------------
+# External MCP access verdict (trinity-enterprise#1101)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/mcp-external-access")
+async def mcp_external_access():
+    """The MCP server's read of the external-access switch.
+
+    The backend is the sole resolver (Settings row → `MCP_EXTERNAL_ACCESS`
+    env opt-in → default off); the MCP server caches this verdict and refuses
+    off-box `/mcp` requests while it is off. Agents are on-box and never asked
+    about. Behind the router-level `verify_internal_secret`.
+    """
+    from services import settings_service
+
+    enabled, source = settings_service.is_mcp_external_access_enabled()
+    return {"enabled": enabled, "source": source}
+
+
+# ---------------------------------------------------------------------------
 # MCP-exposed agents poll endpoint (#846)
 # ---------------------------------------------------------------------------
 

@@ -138,12 +138,12 @@ def test_rendered_ingress_topology_matches_the_backend_trust(name, prefix, extra
     def addr(svc):
         return (svcs[svc]["networks"].get(key) or {}).get("ipv4_address")
 
-    # Reserved, outside the dynamic pool; the MCP server draws from the pool.
-    assert (addr("frontend"), addr("cloudflared"), addr("backend")) == (
-        f"{prefix}.2", f"{prefix}.3", f"{prefix}.4")
-    assert key in svcs["mcp-server"]["networks"] and addr("mcp-server") is None
+    # Reserved, outside the dynamic pool. The MCP server's .5 is what
+    # cloudflared's host mappings pin (trinity-enterprise#1101).
+    assert (addr("frontend"), addr("cloudflared"), addr("backend"), addr("mcp-server")) == (
+        f"{prefix}.2", f"{prefix}.3", f"{prefix}.4", f"{prefix}.5")
     pool = ipaddress.ip_network(ipam["ip_range"])
-    for svc in ("frontend", "cloudflared", "backend"):
+    for svc in ("frontend", "cloudflared", "backend", "mcp-server"):
         assert ipaddress.ip_address(addr(svc)) not in pool, svc
 
     # The frontend left the agent network: no agent can be handed its address.
@@ -156,12 +156,14 @@ def test_rendered_ingress_topology_matches_the_backend_trust(name, prefix, extra
         nets = set(svcs[svc]["networks"])
         assert {"trinity-platform", "trinity-agent", key} <= nets, (svc, nets)
 
-    # Direct-to-backend tunnel rules reach the backend over the ingress bridge.
+    # Direct-to-backend (and, ent#1101, direct-to-MCP) tunnel rules arrive over
+    # the ingress bridge.
     hosts = svcs["cloudflared"].get("extra_hosts")
     hosts = hosts if isinstance(hosts, list) else [f"{h}:{a}" for h, a in (hosts or {}).items()]
     hosts = {h.replace("=", ":", 1).split(":", 1)[0]: h.replace("=", ":", 1).split(":", 1)[1]
              for h in hosts}
-    assert hosts == {"backend": f"{prefix}.4", "trinity-backend": f"{prefix}.4"}, hosts
+    assert hosts == {"backend": f"{prefix}.4", "trinity-backend": f"{prefix}.4",
+                     "mcp-server": f"{prefix}.5", "trinity-mcp-server": f"{prefix}.5"}, hosts
 
     # Both frontend listeners, and only the ordinary one may be non-loopback.
     # Unset FRONTEND_BIND_ADDRESS renders NO host_ip — every interface, IPv6
@@ -202,7 +204,8 @@ def test_prod_and_hosted_wire_the_same_knobs_raw():
     """The four-file rule, raw: every new knob has a default (rendering with
     `--env-file /dev/null` must work) and is documented in .env.example."""
     example = (_ROOT / ".env.example").read_text()
-    for knob in ("TRINITY_PROXY_PREFIX", "TRUSTED_PROXIES", "FRONTEND_BIND_ADDRESS", "CADDY_PROXY_PORT"):
+    for knob in ("TRINITY_PROXY_PREFIX", "TRUSTED_PROXIES", "FRONTEND_BIND_ADDRESS", "CADDY_PROXY_PORT",
+                 "MCP_BIND_ADDRESS", "MCP_EXTERNAL_ACCESS"):
         assert re.search(rf"^#?\s*{knob}=", example, re.M), f".env.example does not document {knob}"
         for name in _PROD_LIKE:
             text = (_ROOT / name).read_text()
