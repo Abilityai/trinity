@@ -96,6 +96,18 @@ def test_key_older_than_the_grace_window_with_no_live_row_is_still_revoked(keys_
     assert _active("k-ghost") == 0
 
 
+def test_key_minted_nine_minutes_ago_is_still_inside_the_window(keys_db):
+    """The window is ten minutes, not a few seconds: a slow create (a large
+    template snapshot) is still covered at nine minutes, so a grace lowered to
+    30 s would fail here rather than silently shrink the protection."""
+    from database import db
+
+    _mk_key("k-slow", "slow-create", created_at=_iso(timedelta(minutes=9)))
+
+    assert db.deactivate_orphaned_agent_keys() == []
+    assert _active("k-slow") == 1
+
+
 def test_ownership_row_arriving_inside_the_window_keeps_the_key_for_good(keys_db, monkeypatch):
     """Create path end-to-end: mint, a sweep tick, the ownership row lands,
     and every later sweep (simulated by a zero grace) leaves the key alone."""

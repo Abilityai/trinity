@@ -20,8 +20,8 @@ agents from a hook (onboarding) this was a coin flip per person.
   attempt failed and was not rolled back is still revoked on the first tick after the window.
 - A key whose agent row exists and is not soft-deleted is never treated as orphaned, whatever the
   container state (creating, starting, stopped) — unchanged, now pinned by a test.
-- The `[Cleanup] Deactivated MCP key(s) of N agent(s) that are no longer live (#1745): a, b` line
-  names the agents, so a revocation is visible in the backend log.
+- The `[Cleanup] Deactivated N MCP key(s) belonging to agents that are no longer live (#1745): a, b`
+  line names the agents, so a revocation is visible in the backend log.
 
 ## Why there is no automatic repair
 
