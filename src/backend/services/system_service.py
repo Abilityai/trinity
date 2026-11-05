@@ -3445,7 +3445,7 @@ APPLY_FIELD_CLASSES = frozenset({"reconciled", "report-only", "create-only", "in
 APPLY_FIELD_CLASSIFICATION: Dict[str, Tuple[str, str]] = {
     "SystemManifest.name": ("reconciled", "the system tag and every member's name"),
     "SystemManifest.description": ("inert", "neither mode stores it"),
-    "SystemManifest.prompt": ("reconciled", "admin only (P-F exception 3)"),
+    "SystemManifest.prompt": ("reconciled", "admin only, the same gate as deploy"),
     "SystemManifest.agents": ("reconciled", "absent -> create, present -> update"),
     "SystemManifest.permissions": ("reconciled", "edges added; extras reported, never removed"),
     "SystemManifest.default_tags": ("reconciled", "added, never replaced"),
@@ -4114,7 +4114,7 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
                         "removes it")
             drift.append(SystemApplyDrift(name=member, evidence=evidence, note=note))
 
-    # The platform prompt (P-F exception 3).
+    # The platform prompt: admin only, the same gate as deploy.
     prompt_op = None
     if not manifest.prompt:
         prompt = SystemApplyPromptVerdict(verdict="not_declared")
