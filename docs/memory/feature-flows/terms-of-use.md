@@ -49,9 +49,11 @@ Person signs in (any door)
 | `terms_text` | absent ⇒ `terms_defaults.DEFAULT_TERMS_TEXT` (Markdown) | `PUT /api/terms {text}` |
 | `terms_version` | absent ⇒ `terms_defaults.DEFAULT_TERMS_VERSION` (`default-1`) | stamped (ISO-Z) by every text/title save; deleted by restore-default |
 
-The generic `PUT /api/settings/{key}` refuses the four keys (422), so the validated
+The generic `PUT` and `DELETE /api/settings/{key}` both refuse the four keys (422), so the validated
 route is the only writer: empty text `terms_text_empty`, over 200 KB
-`terms_text_too_large`, a title over 200 chars `terms_title_too_long`. The admin who
+`terms_text_too_large`, a title over 200 chars `terms_title_too_long` — both fields validated
+before either is written, so a refused title publishes nothing. A save of the text and
+title already in force writes nothing and stamps no version. The admin who
 saves a version is recorded as having accepted it (`door = "author"`), so they are not
 bounced out of Settings by their own save; everyone else is asked at their next visit.
 Restoring the default brings the constant version back, so anyone who accepted the

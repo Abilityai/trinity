@@ -17,7 +17,7 @@ Settings (``system_settings`` rows, resolved ``system_settings → default``):
   restoring the default deletes the three rows so the constant is back.
 
 The four keys are written only through ``set_terms`` / ``restore_default``
-(the generic ``PUT /api/settings/{key}`` refuses them), so a value with a
+(the generic ``PUT`` and ``DELETE /api/settings/{key}`` refuse them), so a value with a
 range is always validated: empty text ``terms_text_empty``, text over
 ``TERMS_TEXT_MAX_BYTES`` ``terms_text_too_large``, a title over
 ``TERMS_TITLE_MAX_CHARS`` ``terms_title_too_long``.
@@ -140,26 +140,30 @@ def validate_title(title: Any) -> str:
 def set_terms(*, title: Any = None, text: Any = None, required: Optional[bool] = None,
               author: Any = None, actor_ip: Optional[str] = None,
               now: Optional[str] = None) -> dict:
-    """Save what was given. A text (or title) save stamps a NEW version — the
-    change is what asks everyone again — and the switch alone does not.
+    """Save what was given. A text (or title) save that CHANGES what a person
+    reads stamps a NEW version — the change is what asks everyone again — and
+    the switch alone does not. A save of the text and title already in force
+    writes nothing (W7): the same words are the same version, so nobody is
+    asked twice for a save that changed nothing.
+
+    Both fields are validated BEFORE either is written (C3): a refused title
+    must not have published the text under the old version — that would be
+    a change nobody is asked to accept.
 
     ``author`` (the admin saving) is recorded as having accepted the version
     they just wrote (``door="author"``): the person who set the text is not
     bounced out of Settings by their own save."""
+    current = current_terms()
+    new_text = validate_text(text) if text is not None else None
+    new_title = validate_title(title) if title is not None else None
+    text_changes = new_text is not None and new_text != current["text"]
+    title_changes = new_title is not None and new_title != current["title"]
     stamped = None
-    if text is not None:
-        body = validate_text(text)
-        db.set_setting(SETTING_TEXT, body)
-        if title is not None:
-            db.set_setting(SETTING_TITLE, validate_title(title))
-        stamped = now or utc_now_iso()
-        db.set_setting(SETTING_VERSION, stamped)
-    elif title is not None:
-        db.set_setting(SETTING_TITLE, validate_title(title))
-        if current_terms()["is_default"]:
-            # A title over the shipped body: the body is still the default,
-            # but what a person reads changed, so the version moves.
-            db.set_setting(SETTING_TEXT, terms_defaults.DEFAULT_TERMS_TEXT)
+    if text_changes or title_changes:
+        # Both rows are written so a title over the shipped body pins that
+        # body: what a person reads is (title, text), and the version names it.
+        db.set_setting(SETTING_TEXT, new_text if new_text is not None else current["text"])
+        db.set_setting(SETTING_TITLE, new_title if new_title is not None else current["title"])
         stamped = now or utc_now_iso()
         db.set_setting(SETTING_VERSION, stamped)
     if required is not None:

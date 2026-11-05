@@ -734,6 +734,19 @@ async def delete_setting(
             ),
         )
 
+    # trinity-enterprise#1107: deleting `terms_version` alone would make the
+    # shipped version name a custom text (nobody asked again); deleting the
+    # text brings the default back without the audit row restore-default
+    # writes. The terms routes are the only writer on BOTH verbs.
+    if key in TERMS_SETTING_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} is set via PUT /api/terms (admin + interactive-only, validated, "
+                "audit-logged; POST /api/terms/restore-default restores the shipped text)"
+            ),
+        )
+
     # ent#14: blocked here as well as on PUT, unlike the #1644 retention acks.
     # Deleting an ack re-arms a guard and therefore fails safe; deleting
     # `template_registry_enabled` reverts it to its default of ON, which

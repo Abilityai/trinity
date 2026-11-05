@@ -236,7 +236,7 @@ Token lifecycle: `secrets.token_urlsafe(32)` stored in `agent_schedules.webhook_
 | `/api/terms` | PUT | `require_admin` + interactive | any of `{title, text, required}`; a text/title save stamps a new version; 422 `terms_text_empty` / `terms_text_too_large` / `terms_title_too_long` |
 | `/api/terms/restore-default` | POST | `require_admin` + interactive | the one action that brings the shipped text back |
 
-The four `terms_*` keys are refused on `PUT /api/settings/{key}` (422) so the validated route is the only writer.
+The four `terms_*` keys are refused on `PUT` and `DELETE /api/settings/{key}` (422) so the validated route is the only writer; an identical text+title save stamps no version.
 
 ### Auth, Users & MCP (21 endpoints)
 | Method | Path | Description |

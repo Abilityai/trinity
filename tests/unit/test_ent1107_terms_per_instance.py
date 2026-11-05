@@ -140,6 +140,73 @@ def _app():
 
 
 # --------------------------------------------------------------------------- #
+# The writer validates before it writes, and writes nothing for no change
+# --------------------------------------------------------------------------- #
+
+class TestTheWriterIsAtomic:
+    """Merge-train findings on ent#1107: C3 (a 422 on the title must not have
+    published the text under the old version), W7 (an identical save stamps
+    nothing) and C4 (DELETE on the generic settings route must refuse the four
+    keys exactly as PUT does, or the terms route is not the only writer)."""
+
+    def test_a_refused_title_publishes_nothing(self):
+        from services import terms_defaults, terms_service
+        from services.terms_service import TermsError
+
+        before = terms_service.current_terms()
+        with pytest.raises(TermsError) as refused:
+            terms_service.set_terms(text="## New text", title="t" * 201)
+        assert refused.value.code == "terms_title_too_long"
+        after = terms_service.current_terms()
+        assert after == before, "a refused save must leave every field as it was"
+        assert after["text"] == terms_defaults.DEFAULT_TERMS_TEXT
+        assert after["version"] == terms_defaults.DEFAULT_TERMS_VERSION
+
+    def test_an_identical_save_stamps_no_version_and_records_nothing(self):
+        from database import db
+        from models import User
+        from services import terms_service
+
+        author = User(id=41, username="admin", email="admin@example.com", role="admin")
+        first = terms_service.set_terms(text="## Custom", title="Custom terms", author=author, now="2026-11-04T10:00:00Z")
+        assert first["version"] == "2026-11-04T10:00:00Z"
+        again = terms_service.set_terms(text="## Custom", title="Custom terms", author=author, now="2026-11-04T11:00:00Z")
+        assert again["version"] == "2026-11-04T10:00:00Z", "the same text is the same version"
+        assert db.get_terms_acceptance(41, "2026-11-04T11:00:00Z") is None
+        assert db.list_terms_acceptances() and len(db.list_terms_acceptances()) == 1
+        # The switch alone is still written on an identical text.
+        off = terms_service.set_terms(text="## Custom", title="Custom terms", required=False, author=author)
+        assert off["required"] is False and off["version"] == "2026-11-04T10:00:00Z"
+
+    @pytest.mark.parametrize("key", ["terms_required", "terms_version", "terms_text", "terms_title"])
+    def test_the_generic_settings_route_refuses_the_keys_on_both_verbs(self, jwt_as, key):
+        """PUT and DELETE, executed, on the real settings router: 422 and no row
+        change either way, so the terms route is the only writer in fact."""
+        from fastapi import FastAPI
+        from database import db
+        from routers.settings import router as settings_router
+        from services import terms_service
+
+        app = FastAPI()
+        app.include_router(settings_router)
+        app.include_router(__import__("routers.terms", fromlist=["router"]).router)
+        client = TestClient(app)
+        token = jwt_as(ADMIN)
+        terms_service.set_terms(text="## Custom", title="Custom terms", now="2026-11-04T10:00:00Z")
+        _accept(client, token)  # the admin's own visit: accept the custom text first
+        before = terms_service.current_terms()
+
+        put = client.put(f"/api/settings/{key}", json={"value": "x"}, headers=_bearer(token))
+        assert put.status_code == 422, put.text
+        assert "PUT /api/terms" in str(put.json()["detail"])
+        delete = client.delete(f"/api/settings/{key}", headers=_bearer(token))
+        assert delete.status_code == 422, delete.text
+        assert "PUT /api/terms" in str(delete.json()["detail"])
+        assert terms_service.current_terms() == before
+        assert db.get_setting_value("terms_text", None) == "## Custom"
+
+
+# --------------------------------------------------------------------------- #
 # The shipped default and the setting
 # --------------------------------------------------------------------------- #
 
