@@ -178,7 +178,17 @@ class ScheduleQueueMixin:
         values = {
             "status": TaskExecutionStatus.RUNNING,
             "started_at": now,
-            "queued_at": None,
+            # #4257: `queued_at` is NOT cleared. `started_at` already means
+            # "left the queue", so the pair is the wait — the same reading
+            # `executions.py` (`_park_for_limiter`) already preserves on the
+            # limiter-park path. Nulling it here erased every wait at the
+            # instant it became measurable, which is why a row that sat
+            # queued for hours was indistinguishable afterwards from one
+            # claimed on the first poll. Readers all filter on
+            # `status='queued'` first (`expire_stale_queued`,
+            # `claim_next_queued`, canary E-04), so a `running` row carrying a
+            # `queued_at` is never mistaken for a queued one; never write a
+            # reader that treats `queued_at IS NOT NULL` as "is queued".
         }
         if worker_id is not None:
             # Pull claim (#1081): stamp the lease columns in the SAME atomic
@@ -268,7 +278,16 @@ class ScheduleQueueMixin:
                 )
                 .values(
                     status=TaskExecutionStatus.QUEUED,
-                    queued_at=schedule_executions.c.started_at,
+                    # #4257: coalesce, not overwrite. Now that a claim keeps
+                    # `queued_at`, a row released back to the backlog keeps its
+                    # ORIGINAL admission instant and so its FIFO place; only a
+                    # row that was never queued (NULL) falls back to
+                    # `started_at`. Overwriting would send a row that already
+                    # waited to the back of the queue.
+                    queued_at=func.coalesce(
+                        schedule_executions.c.queued_at,
+                        schedule_executions.c.started_at,
+                    ),
                 )
             )
             return result.rowcount > 0
@@ -587,6 +606,102 @@ class ScheduleQueueMixin:
         with get_engine().connect() as conn:
             row = conn.execute(stmt).mappings().first()
         return int(row["c"]) if row else 0
+
+    def count_queued_ahead(
+        self, agent_name: str, queued_at: Optional[str], execution_id: str
+    ) -> int:
+        """How many of this agent's queued rows sit ahead of this one (#4257).
+
+        "Ahead" is the claim's own order on the plain path: `status='queued'`
+        for the same agent, ordered by `(queued_at, id)`. The head answers 0.
+        The interactive-first precedence (#2842) is deliberately NOT applied —
+        the number is a FIFO depth a person can read, not a prediction of the
+        next claim, and a receipt that promised the latter would be wrong the
+        moment an interactive row arrived. Other agents' rows never count.
+
+        A row with no `queued_at` (never admitted) answers 0. Read-only.
+        """
+        if not queued_at:
+            return 0
+        c = schedule_executions.c
+        stmt = select(func.count().label("c")).where(
+            and_(
+                c.agent_name == agent_name,
+                c.status == TaskExecutionStatus.QUEUED,
+                or_(
+                    c.queued_at < queued_at,
+                    and_(c.queued_at == queued_at, c.id < execution_id),
+                ),
+            )
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        return int(row["c"]) if row else 0
+
+    def oldest_queued_head_per_agent(self) -> List[Dict]:
+        """One row per agent with queued work: its oldest queued row (#4257).
+
+        The stall monitor's single read. Returns, per agent,
+        ``{agent_name, execution_id, queued_at, conversation_key,
+        triggered_by, redelivery_count, queued_count}`` for the row with the
+        smallest `(queued_at, id)`. An agent whose queued rows all carry a
+        NULL `queued_at` is absent — there is no age to measure. Read-only.
+        """
+        c = schedule_executions.c
+        stmt = (
+            select(
+                c.id,
+                c.agent_name,
+                c.queued_at,
+                c.conversation_key,
+                c.triggered_by,
+                c.redelivery_count,
+            )
+            .where(
+                and_(
+                    c.status == TaskExecutionStatus.QUEUED,
+                    c.queued_at.isnot(None),
+                )
+            )
+            .order_by(c.agent_name.asc(), c.queued_at.asc(), c.id.asc())
+        )
+        heads: Dict[str, Dict] = {}
+        counts: Dict[str, int] = {}
+        with get_engine().connect() as conn:
+            for row in conn.execute(stmt).mappings():
+                agent = row["agent_name"]
+                counts[agent] = counts.get(agent, 0) + 1
+                if agent not in heads:
+                    heads[agent] = {
+                        "agent_name": agent,
+                        "execution_id": row["id"],
+                        "queued_at": row["queued_at"],
+                        "conversation_key": row["conversation_key"],
+                        "triggered_by": row["triggered_by"],
+                        "redelivery_count": int(row["redelivery_count"] or 0),
+                    }
+        for agent, head in heads.items():
+            head["queued_count"] = counts.get(agent, 1)
+        return list(heads.values())
+
+    def agents_with_running_conversation(self, agent_name: str) -> List[str]:
+        """Conversation keys this agent currently has a `running` row for (#4257).
+
+        The read half of the #2843 claim guard: a queued head whose
+        `conversation_key` appears here cannot be claimed until that row
+        terminates, which is a distinct reason for a wait from "no worker
+        polled". Read-only.
+        """
+        c = schedule_executions.c
+        stmt = select(c.conversation_key).where(
+            and_(
+                c.agent_name == agent_name,
+                c.status == TaskExecutionStatus.RUNNING,
+                c.conversation_key.isnot(None),
+            )
+        ).distinct()
+        with get_engine().connect() as conn:
+            return [row["conversation_key"] for row in conn.execute(stmt).mappings()]
 
     def get_queued_count(self, agent_name: str) -> int:
         """Count queued backlog items for an agent."""
