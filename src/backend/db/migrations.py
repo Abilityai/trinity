@@ -5819,7 +5819,7 @@ def _migrate_agent_ownership_wake_on_ending(cursor, conn):
     the #1945 mistake, and the resolver (``services/wake_policy.py``) already
     reads a pre-existing ``operator_resume_enabled = 1`` as an explicit opt-in.
 
-    Mirrored by Alembic revision 0116_agent_ownership_wake_on_ending.
+    Mirrored by Alembic revision 0119_agent_ownership_wake_on_ending.
     """
     _safe_add_column(
         cursor,

@@ -9,17 +9,17 @@ distinguishing them is the whole reason ent#790's default could be flipped on
 without discarding an owner's earlier decision.
 
 Mirrors the SQLite ``agent_ownership_wake_on_ending`` migration. Chained after
-0115 so the version-line keeps ONE head (#2068).
+0118 so the version-line keeps ONE head (#2068).
 
-Revision ID: 0116_agent_ownership_wake_on_ending
-Revises: 0115_access_requests_requester_identity
+Revision ID: 0119_agent_ownership_wake_on_ending
+Revises: 0118_mcp_external_access_backfill
 """
 import sqlalchemy as sa
 from alembic import op
 
 
-revision = "0116_agent_ownership_wake_on_ending"
-down_revision = "0115_access_requests_requester_identity"
+revision = "0119_agent_ownership_wake_on_ending"
+down_revision = "0118_mcp_external_access_backfill"
 branch_labels = None
 depends_on = None
 
