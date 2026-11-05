@@ -129,7 +129,7 @@ Order matters — the tailnet rule has to exist before the deny takes effect. (T
 Two more things specific to this image:
 
 - **Install Tailscale *after* provisioning, never before.** The installer resets the host firewall when it provisions a machine, discarding rules you added by hand. If you re-run provisioning later, re-add these.
-- **Container ports stay unreachable over the tailnet.** 8000 for the API, 8080 for MCP, 8686 for the log collector — a firewall rule cannot open them, because Trinity's container rules are evaluated first.
+- **Container ports stay unreachable over the tailnet.** 8000 for the API, 8080 for MCP, 8686 for the log collector — a firewall rule cannot open them, because Trinity's container rules are evaluated first. (On this image MCP's 8080 is published on `127.0.0.1` only anyway — `MCP_BIND_ADDRESS`; MCP clients use `https://your-domain.com/mcp`, once External MCP access is on.)
 
 Worth knowing: a new tailnet's default policy lets **every** device on your tailnet reach this one, not only the laptop you joined from. And Slack is the one integration that survives this path, because Trinity connects outward to Slack over a WebSocket — though installing the Slack app the first time still needs a public address for the OAuth callback.
 
@@ -206,6 +206,7 @@ The full six-probe check is in [Monitoring](monitoring.md) — run it if anythin
 | Telegram or WhatsApp stopped delivering after saving the domain | The webhooks were re-pointed at the new address before it was live | Confirm the domain loads, then re-save the Public URL to re-register them |
 | Site unreachable after closing 80/443 | The tunnel is not carrying traffic | Reopen the ports, check `docker logs trinity-cloudflared`, re-check the ingress rules, then close them again |
 | MCP client cannot connect over the tailnet | It is pointed at a container port, which the container firewall drops | Point it at `https://your-domain.com/mcp`, or tunnel to `127.0.0.1:8081` over SSH |
+| MCP client connects but gets `403 external_mcp_access_off` | External MCP access is off — the default on a fresh install; every client outside the server, through the domain or a tunnel, counts as outside | An admin turns it on under **Settings → MCP Keys → External MCP access** — [MCP Server](../../integrations/mcp-server.md#external-mcp-access) |
 | Browser cannot reach the UI after joining a tailnet and closing the ports | A tailnet address has no certificate and cannot get one | Set `PRIVATE_NETWORK_CIDRS` and re-render — [Reaching the UI over the tailnet](#reaching-the-ui-over-the-tailnet) |
 
 **Clearing the Public URL** stops Trinity handing the name out, but if the address was also baked into the server's environment at install time, the web server keeps serving certificates for it. Settings then reads *not configured* while that is still true — change the environment value and restart if you need it genuinely gone.

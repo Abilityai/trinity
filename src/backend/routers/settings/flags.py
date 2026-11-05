@@ -212,6 +212,11 @@ async def get_public_feature_flags(
         # actually agree after a deploy — the failure mode that shipped this PR
         # with the flag wired into neither container. NOT a UI surface.
         "mcp_inline_auth_enabled": MCP_INLINE_AUTH_ENABLED,
+        # External MCP access (trinity-enterprise#1101) — default OFF on a
+        # fresh install. Observability-only here, like the two flags above:
+        # the gate is the MCP server's read of GET /api/internal/mcp-external-access.
+        # The Settings page reads the full state from /mcp-external-access.
+        "mcp_external_access_enabled": settings_service.is_mcp_external_access_enabled()[0],
         # Re-delivery governor (#1085) — default OFF. Observability-only here:
         # the actual gates live at the callback endpoint / reaper / drain read
         # points. Lets an operator confirm via the API whether the correlated-

@@ -99,7 +99,7 @@ Person signs in (any door)
 - `db/terms.py` — `insert_terms_acceptance()`: INSERT, `None` on the UNIQUE (user, version) or, for a session row (`user_id` NULL), the partial unique (email, version) — the second accept is a no-op; emails stored lower-cased
 - `db/terms.py` — `get_terms_acceptance()` (by account) / `get_terms_acceptance_by_email()` (a session row or an account's — the same person): the one lookup the decision makes; `terms_acceptances_for_email`, `list_terms_acceptances` for the record
 - `system_settings` rows `terms_required` / `terms_title` / `terms_text` / `terms_version` through `db.get_setting_value` / `set_setting` / `delete_setting`
-- Table `terms_acceptances`: SQLite `terms_acceptances_table` (`db/migrations.py`; rebuilds a development DB on the earlier NOT NULL shape, rows kept) + Alembic `0118_terms_acceptances` (`user_id` nullable, `uq_terms_acceptances_email_version ... WHERE user_id IS NULL`)
+- Table `terms_acceptances`: SQLite `terms_acceptances_table` (`db/migrations.py`; rebuilds a development DB on the earlier NOT NULL shape, rows kept) + Alembic `0119_terms_acceptances` (`user_id` nullable, `uq_terms_acceptances_email_version ... WHERE user_id IS NULL`)
 
 ## The setting
 

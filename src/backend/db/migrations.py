@@ -65,6 +65,7 @@ Migration Order (as of 2026-05-07):
 58. execution_retention_index - #772 partial index on schedule_executions(completed_at)
 59. execution_retry_count - #678 retry_count column for reader-race auto-retry
 60. agent_compatibility_results_table - #668 latest-snapshot agent compatibility reports
+61. mcp_external_access_backfill - ent#1101 existing installs keep external MCP access on
 """
 import logging
 import sqlite3
@@ -5988,7 +5989,7 @@ def _migrate_terms_acceptances_table(cursor, conn):
     optional module's own migration copies its rows across. The text itself is
     a `system_settings` row with a shipped default (`services/terms_defaults.py`),
     so no seed is needed here. Schema is also in db/schema.py for fresh installs;
-    mirrored by Alembic revision 0118_terms_acceptances.
+    mirrored by Alembic revision 0119_terms_acceptances.
 
     Ruling A(1): a Workspace portal session (the emailed-code sign-in) has no
     `users` row, so `user_id` is nullable and a session row is keyed by
@@ -6201,6 +6202,52 @@ def _migrate_access_requests_requester_identity(cursor, conn):
                          f"ALTER TABLE access_requests ADD COLUMN {column} TEXT")
 
 
+def run_mcp_external_access_backfill(run, *, now_iso: str) -> bool:
+    """abilityai/trinity-enterprise#1101 — an install that already has users
+    was serving `/mcp` to off-box clients before the switch existed, so it
+    keeps that: `mcp_external_access='true'` is written for it, and only for
+    it. Shared by both tracks (`run(sql, params, fetch=False)` adapts the
+    driver, the 0112 shape). Insert-only: an existing row — either value — is
+    never touched, and a database with no `users` row (a fresh install, whose
+    admin is provisioned after `init_database`) gets nothing, so the default
+    (off) applies. Idempotent. Returns True when the row was written.
+    """
+    existing = run("SELECT 1 FROM system_settings WHERE key = :k", {"k": "mcp_external_access"}, fetch=True)
+    if existing:
+        return False
+    any_user = run("SELECT 1 FROM users LIMIT 1", {}, fetch=True)
+    if not any_user:
+        return False
+    run(
+        "INSERT INTO system_settings (key, value, updated_at) VALUES (:k, :v, :t)",
+        {"k": "mcp_external_access", "v": "true", "t": now_iso},
+    )
+    return True
+
+
+def _migrate_mcp_external_access_backfill(cursor, conn):
+    """ent#1101 — keep external MCP access ON for installs that already have
+    users (`run_mcp_external_access_backfill`). On a fresh install the tables
+    do not exist yet on the first pass; on the second pass (after init_schema)
+    `users` is still empty, so nothing is written and the default (off)
+    applies. Mirrored by the Alembic revision 0118_mcp_external_access_backfill.
+    """
+    cursor.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' "
+        "AND name IN ('system_settings', 'users')"
+    )
+    if cursor.fetchone()[0] < 2:
+        return
+
+    def _run(sql, params, fetch=False):
+        cursor.execute(sql, params)
+        return cursor.fetchall() if fetch else None
+
+    if run_mcp_external_access_backfill(_run, now_iso=utc_now_iso()):
+        conn.commit()
+        logger.info("Existing install: external MCP access kept on (ent#1101)")
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -6388,5 +6435,6 @@ MIGRATIONS = [
     ("access_requests_requester_identity", _migrate_access_requests_requester_identity),
     ("operator_resume_default_on", _migrate_operator_resume_default_on),
     ("operator_queue_wake_state", _migrate_operator_queue_wake_state),
+    ("mcp_external_access_backfill", _migrate_mcp_external_access_backfill),
     ("terms_acceptances_table", _migrate_terms_acceptances_table),
 ]

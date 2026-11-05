@@ -8374,6 +8374,28 @@
       "description": "trinity-enterprise#1109: a credential ask with a destination. Validated and stored at raise (URL gate, agent slug, key variable name), said in plain words on the receipt and the Workspace projection (never the key's name); the sink reads the asking agent's key by name, pins the connection and merge-injects one .env line into the agent on the other instance, writes nothing here, unstages after a 2xx and audits credential_delivered; every delivery failure is a named plain retry with the value in no log, audit row or message; the inject route's mode merge keeps every other byte; manifest credentials: names are parsed, validated and previewed while the legacy map form stays an unknown key."
     },
     {
+      "file": "journeys/test_j24_external_mcp_access_journey.py",
+      "feature": "abilityai/trinity-enterprise#1101",
+      "added": "2026-11-05",
+      "categories": [
+        "journeys",
+        "integration"
+      ],
+      "description": "Journey J24 (External MCP access): from the host the stack runs on (an off-box peer to the MCP server), a fresh install refuses initialize with 403, X-Trinity-Refusal: external_mcp_access_off, JSON-RPC -32003 and a message naming Settings → MCP Keys, before any key is checked. After the admin turns External MCP access on, the same user-scoped client initializes with 200 and lists tools, and turning it off refuses it again within the gate's cache window. Each test restores the switch it found."
+    },
+    {
+      "file": "unit/test_ent1101_external_mcp_access.py",
+      "feature": "abilityai/trinity-enterprise#1101",
+      "added": "2026-11-05",
+      "categories": [
+        "backend",
+        "settings",
+        "mcp",
+        "unit"
+      ],
+      "description": "External MCP access switch, backend half: the resolver (Settings row wins both directions, MCP_EXTERNAL_ACCESS env opt-in, default off, the tier named, read failure falls to env/default); GET/PUT/DELETE /api/settings/mcp-external-access on the real composed settings router (any-auth read with env_value and advertised URL, admin write and clear audited, non-admin and admin-owned agent keys refused, non-boolean 422, the generic PUT catch-all refuses the key); feature-flags carries mcp_external_access_enabled; GET /api/internal/mcp-external-access behind the internal secret; the advertised default URL (any forwarded scheme -> same origin, MCP_BIND_ADDRESS set -> host-local raw port, unset -> today's); ConnectorStatus.external_access."
+    },
+    {
       "file": "unit/test_ent1107_terms_per_instance.py",
       "feature": "trinity-enterprise#1107",
       "added": "2026-11-04",

@@ -16,14 +16,14 @@ shipped default, so nothing is seeded here. Chained after #4261's
 keeps ONE head (#2068) — it was ``0116`` off 0115 until the merge train
 re-parented it.
 
-Revision ID: 0118_terms_acceptances
-Revises: 0117_operator_queue_wake_state
+Revision ID: 0119_terms_acceptances
+Revises: 0118_mcp_external_access_backfill
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0118_terms_acceptances"
-down_revision = "0117_operator_queue_wake_state"
+revision = "0119_terms_acceptances"
+down_revision = "0118_mcp_external_access_backfill"
 branch_labels = None
 depends_on = None
 

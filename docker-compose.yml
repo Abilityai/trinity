@@ -397,6 +397,13 @@ services:
       # session tier. Must be wired in both services or the whole feature is
       # un-flippable on deploy (#1056/#1039 packaging-gap class).
       - MCP_INLINE_AUTH_ENABLED=${MCP_INLINE_AUTH_ENABLED:-false}
+      # ent#1101 external MCP access. MCP_BIND_ADDRESS is the interface the MCP
+      # server's raw :8080 is published on (see mcp-server); the backend reads it
+      # so the advertised URL and the status payload are honest about that port.
+      # MCP_EXTERNAL_ACCESS is the env opt-in under the Settings → MCP Keys
+      # switch (the backend is its only resolver). Wired here or both are inert.
+      - MCP_BIND_ADDRESS=${MCP_BIND_ADDRESS:-}
+      - MCP_EXTERNAL_ACCESS=${MCP_EXTERNAL_ACCESS:-}
       # #1081 pull/work-stealing pilot allowlist — the SINGLE switch that opts an
       # agent into pull mode. Backend-only, process-env (needs a backend restart),
       # default empty = pull fully dark. Forwarded here (G1) because the backend
@@ -594,7 +601,9 @@ services:
     container_name: trinity-mcp-server
     logging: *default-logging
     ports:
-      - "8080:8080"
+      # ent#1101: MCP_BIND_ADDRESS unset publishes on every interface, as
+      # before; fresh installs set 127.0.0.1 (.env.example, provision_site).
+      - "${MCP_BIND_ADDRESS:+${MCP_BIND_ADDRESS}:}8080:8080"
     environment:
       - NODE_ENV=production
       - MCP_PORT=8080

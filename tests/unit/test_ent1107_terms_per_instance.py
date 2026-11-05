@@ -567,7 +567,7 @@ class TestAPortalPersonIsRecorded:
             "schema.py": (BACKEND / "db" / "schema.py").read_text(),
             "migrations.py": (BACKEND / "db" / "migrations.py").read_text(),
             "tables.py": (BACKEND / "db" / "tables.py").read_text(),
-            "0118": (BACKEND / "migrations" / "versions" / "0118_terms_acceptances.py").read_text(),
+            "0118": (BACKEND / "migrations" / "versions" / "0119_terms_acceptances.py").read_text(),
         }
         for name, src in homes.items():
             body = src[src.index("terms_acceptances"):]

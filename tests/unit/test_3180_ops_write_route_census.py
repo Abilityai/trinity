@@ -361,6 +361,7 @@ NO_TRINITY_CREDENTIAL = {
     "routers/internal.py::validate_execution": OTHER_CREDENTIAL + " (X-Internal-Secret)",
     "routers/internal.py::log_audit_entry": OTHER_CREDENTIAL + " (X-Internal-Secret)",
     "routers/internal.py::mcp_exposed_agents": OTHER_CREDENTIAL + " (X-Internal-Secret)",
+    "routers/internal.py::mcp_external_access": OTHER_CREDENTIAL + " (X-Internal-Secret)",
     "routers/internal.py::internal_next_task": OWN_VALIDATOR + " (pull seam: internal secret or the agent's own key)",
     "routers/internal.py::internal_task_result": OWN_VALIDATOR + " (pull seam: internal secret or the agent's own key)",
     "routers/mcp_auth.py::request_inline_login": OTHER_CREDENTIAL + " (X-Internal-Secret)",

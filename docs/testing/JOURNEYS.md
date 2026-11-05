@@ -34,8 +34,9 @@ coverage debt is queryable rather than rediscovered.
 | **J21** | A business action my agent asks another agent for runs only after the right person approves it, exactly once, and my agent is told how it ended. | user | local | live-stack | **no** | `tests/system_chains/test_j21_approval_chain.py` | — | abilityai/trinity-enterprise#795 |
 | **J22** | A project is worked by agents and people from open to close: an agent cannot close its own task, a person verifies it, and anyone on the project can read who did what. | user | local | live-stack | **no** | `tests/system_chains/test_j22_project_chain.py` | — | abilityai/trinity-enterprise#795 |
 | **J23** | My project's record shows an action approved inside it: who approved it and how it ended. | user | local | live-stack | **no** | `tests/system_chains/test_j23_approved_action_in_project_chain.py` | — | abilityai/trinity-enterprise#795 |
+| **J24** | My fresh install does not serve MCP to clients outside the machine until I turn it on, and a refused client is told why. | operator | local | journey-smoke | yes | `tests/journeys/test_j24_external_mcp_access_journey.py` | — | abilityai/trinity-enterprise#1101 |
 
-**0 of 23 journeys built.** Green/red is NOT recorded here — regenerate with `--junit <dir>` against CI artifacts for a coverage figure.
+**1 of 24 journeys built.** Green/red is NOT recorded here — regenerate with `--junit <dir>` against CI artifacts for a coverage figure.
 
 _Harnesses not present in `tests/registry.json`: J20, J21, J22, J23._
 
