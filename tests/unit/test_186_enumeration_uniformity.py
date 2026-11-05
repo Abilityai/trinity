@@ -392,7 +392,7 @@ def test_nvm_shared_reader_reads_but_cannot_write(seeded, _no_docker):
 
 
 def test_avatar_path_builds_within_root_for_valid_name():
-    from routers.avatar import AVATAR_DIR, _avatar_path
+    from utils.avatar_paths import AVATAR_DIR, avatar_path as _avatar_path
 
     p = _avatar_path("my-agent_1.2", "_ref.png")
     assert p == AVATAR_DIR / "my-agent_1.2_ref.png"
@@ -404,7 +404,7 @@ def test_avatar_path_builds_within_root_for_valid_name():
 )
 def test_avatar_path_rejects_escape_with_404(bad):
     """Any agent_name whose normalized path leaves AVATAR_DIR is a uniform 404."""
-    from routers.avatar import _avatar_path
+    from utils.avatar_paths import avatar_path as _avatar_path
 
     with pytest.raises(HTTPException) as exc:
         _avatar_path(bad, "_ref.png")

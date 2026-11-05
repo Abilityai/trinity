@@ -3,7 +3,6 @@
 import re
 import json
 import logging
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -14,6 +13,7 @@ from services.docker_service import get_agent_container
 from services.docker_utils import container_stop, container_rename
 from services.image_generation_prompts import AVATAR_EMOTIONS
 from services.platform_audit_service import platform_audit_service, AuditEventType
+from utils import avatar_paths
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -33,6 +33,17 @@ def set_filtered_websocket_manager(ws_manager):
     """Set the filtered WebSocket manager for /ws/events (Trinity Connect)."""
     global filtered_manager
     filtered_manager = ws_manager
+
+
+def _move_avatar_file(old_name: str, new_name: str, suffix: str) -> None:
+    """Move one avatar-store file to the new name. Both paths go through the
+    store's barrier; a name it refuses has no file to move."""
+    old_path = avatar_paths.avatar_path_or_none(old_name, suffix)
+    new_path = avatar_paths.avatar_path_or_none(new_name, suffix)
+    if old_path is None or new_path is None:
+        return
+    if old_path.exists():
+        old_path.rename(new_path)
 
 
 @router.put("/{agent_name}/rename", dependencies=[Depends(require_person)])
@@ -211,21 +222,12 @@ async def rename_agent_endpoint(
         # Rename cached avatar, reference, and emotion image files (AVATAR-001, AVATAR-002)
         try:
             for ext in (".webp", ".png"):
-                old_path = Path("/data/avatars") / f"{agent_name}{ext}"
-                new_path = Path("/data/avatars") / f"{sanitized_name}{ext}"
-                if old_path.exists():
-                    old_path.rename(new_path)
+                _move_avatar_file(agent_name, sanitized_name, ext)
             # Reference stays .png
-            old_ref = Path("/data/avatars") / f"{agent_name}_ref.png"
-            new_ref = Path("/data/avatars") / f"{sanitized_name}_ref.png"
-            if old_ref.exists():
-                old_ref.rename(new_ref)
+            _move_avatar_file(agent_name, sanitized_name, "_ref.png")
             for emotion in AVATAR_EMOTIONS:
                 for ext in (".webp", ".png"):
-                    old_path = Path("/data/avatars") / f"{agent_name}_emotion_{emotion}{ext}"
-                    new_path = Path("/data/avatars") / f"{sanitized_name}_emotion_{emotion}{ext}"
-                    if old_path.exists():
-                        old_path.rename(new_path)
+                    _move_avatar_file(agent_name, sanitized_name, f"_emotion_{emotion}{ext}")
         except Exception as e:
             logger.warning(f"Failed to rename avatar for agent {agent_name}: {e}")
 
