@@ -328,10 +328,20 @@ class TestTheStartHook:
         monkeypatch.setattr(mod, "check_base_image_matches", AsyncMock(return_value=True), raising=False)
         harness._mock_db.get_read_only_mode.return_value = {"enabled": False}
 
+        # The start path also spawns the ent#752 skill-gate marker sync — a
+        # task on `harness._run`'s THROWAWAY loop, which that harness closes.
+        # Left in `skill_gate_service._inflight`, the dead task makes every
+        # later `gather(*_inflight)` in test_ent752_marker_sync raise "The
+        # future belongs to a different loop". Stubbed here, so test order
+        # cannot matter; this test pins the wake hook, not the marker.
+        import services.skill_gate_service as gate
+        monkeypatch.setattr(gate, "spawn_gate_marker_sync", Mock(return_value=False))
+
         woken = []
         monkeypatch.setattr(ors, "spawn_pending_wakes", lambda name: woken.append(name))
         harness._run(mod.start_agent_internal("agent-a"))
         assert woken == ["agent-a"]
+        assert gate.spawn_gate_marker_sync.call_args.args == ("agent-a",)
 
     def test_the_hook_line_is_in_the_start_path(self):
         """Source pin on top of the executing test above (the ent#477 shape)."""
