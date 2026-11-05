@@ -1,0 +1,115 @@
+# mcp: none — the terms a PERSON accepts on their own visit, and the admin editor of the instance's text (trinity-enterprise#1107); a human surface, not an agent capability
+"""Terms of use per instance (trinity-enterprise#1107).
+
+* ``GET /api/terms/current`` — ``require_person``, marked ``@workspace_route``
+  (the terms screen is a member page) AND ``@terms_route`` (the text must be
+  readable before it can be accepted).
+* ``POST /api/terms/accept`` — ``require_interactive`` (a person accepts on
+  their own session, never through a key), both marks. Schedules the
+  acceptance hooks after the response.
+* ``GET /api/terms/acceptances`` — ``require_admin``: the record (version,
+  time, account).
+* ``PUT /api/terms`` / ``POST /api/terms/restore-default`` — admin AND
+  interactive: replacing the text every person on the instance must accept is
+  a grant-shaped configuration write (Invariant #8), audited by version.
+"""
+from __future__ import annotations
+
+import logging
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+
+from dependencies import (
+    reject_non_interactive_principal,
+    require_admin,
+    require_interactive,
+    require_person,
+    terms_route,
+    workspace_route,
+)
+from models import TermsAccept, TermsAcceptance, TermsAccepted, TermsCurrent, TermsUpdate, User
+from services import terms_gate, terms_service
+from services.terms_service import TermsError
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/terms", tags=["terms"])
+
+
+def _raise(e: TermsError):
+    raise HTTPException(status_code=e.status_code,
+                        detail={"code": e.code, "message": e.message, "version": e.version})
+
+
+def _with_accepted(current: dict, user: User) -> dict:
+    return {**current, "accepted": terms_service.accepted_current(int(user.id))}
+
+
+@router.get("/current", response_model=TermsCurrent)
+@workspace_route("the terms screen a person reads before accepting")
+@terms_route("the text must be readable before it can be accepted")
+def current_terms(current_user: User = Depends(require_person)):
+    return _with_accepted(terms_service.current_terms(), current_user)
+
+
+@router.post("/accept", response_model=TermsAccepted)
+@workspace_route("the terms screen is where a person accepts")
+@terms_route("accepting is what ends the refusal")
+async def accept_terms(body: TermsAccept, request: Request, background: BackgroundTasks,
+                       current_user: User = Depends(require_interactive)):
+    try:
+        out = await terms_service.accept(
+            current_user, body.version,
+            actor_ip=request.client.host if request.client else None,
+            request_id=getattr(request.state, "request_id", None),
+            endpoint=request.scope["path"],
+            door=terms_gate.provider_door(current_user),
+        )
+    except TermsError as e:
+        _raise(e)
+    if out["created"]:
+        # After the response, inside this request: the consumers (an invite
+        # door, a member's agent) never hold the acceptance up, once per new row.
+        background.add_task(terms_service.run_acceptance_hooks, out["user_id"], out["email"],
+                            out["version"], out["accepted_at"])
+    return out
+
+
+@router.get("/acceptances", response_model=list[TermsAcceptance])
+def list_acceptances(email: str | None = Query(None, max_length=254),
+                     limit: int = Query(200, ge=1, le=1000),
+                     _: User = Depends(require_admin)):
+    return terms_service.list_acceptances(limit, email=email)
+
+
+@router.put("", response_model=TermsCurrent)
+async def update_terms(body: TermsUpdate, request: Request,
+                       current_user: User = Depends(require_admin)):
+    reject_non_interactive_principal(current_user)
+    try:
+        current = terms_service.set_terms(
+            title=body.title, text=body.text, required=body.required,
+            author=current_user, actor_ip=request.client.host if request.client else None,
+        )
+    except TermsError as e:
+        _raise(e)
+    await terms_service.audit_change(
+        "terms_updated", current_user,
+        actor_ip=request.client.host if request.client else None,
+        request_id=getattr(request.state, "request_id", None),
+        endpoint=request.scope["path"], version=current["version"],
+    )
+    return _with_accepted(current, current_user)
+
+
+@router.post("/restore-default", response_model=TermsCurrent)
+async def restore_default_terms(request: Request, current_user: User = Depends(require_admin)):
+    reject_non_interactive_principal(current_user)
+    current = terms_service.restore_default()
+    await terms_service.audit_change(
+        "terms_restored", current_user,
+        actor_ip=request.client.host if request.client else None,
+        request_id=getattr(request.state, "request_id", None),
+        endpoint=request.scope["path"], version=current["version"],
+    )
+    return _with_accepted(current, current_user)

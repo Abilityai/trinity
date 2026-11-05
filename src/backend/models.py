@@ -6305,3 +6305,45 @@ class NeverminedDelegationBind(BaseModel):
         if any(c in v for c in "\r\n"):
             raise ValueError("provider must be a single line")
         return v or None
+
+
+# --- Terms of use per instance (trinity-enterprise#1107) --------------------
+
+class TermsCurrent(BaseModel):
+    """What the terms screen and the Settings editor read."""
+    required: bool          # the gate's switch (on by default)
+    version: str            # the version a person accepts
+    title: str
+    text: str               # markdown — the shipped default until replaced
+    is_default: bool        # the shipped text is in force
+    accepted: bool          # the caller has an acceptance row for `version`
+
+
+class TermsAccept(BaseModel):
+    version: str = Field(..., max_length=100)
+
+
+class TermsAccepted(BaseModel):
+    accepted: bool
+    created: bool           # False when this person had already accepted this version
+    version: str
+    accepted_at: str
+
+
+class TermsUpdate(BaseModel):
+    """`PUT /api/terms` — any subset; a text or title save stamps a new version.
+    Validated at the boundary AND at the sink (`terms_service.validate_*`),
+    because the generic `PUT /api/settings/{key}` is refused for these keys."""
+    title: Optional[str] = None
+    text: Optional[str] = None
+    required: Optional[bool] = None
+
+
+class TermsAcceptance(BaseModel):
+    id: int
+    user_id: int
+    email: Optional[str] = None
+    terms_version: str
+    accepted_at: str
+    door: Optional[str] = None
+    actor_ip: Optional[str] = None

@@ -1150,6 +1150,25 @@ TABLES = {
     # materialised verdict outlives its own evidence silently, and a level
     # change would otherwise be an unbounded fleet-wide write. The instance
     # LEVEL is not here at all — it is one validated `system_settings` key.
+    # trinity-enterprise#1107: terms of use per instance — one row per (person,
+    # terms version): the record of which text they accepted and when. A version
+    # bump asks again. `door` names the invitation an optional module bound the
+    # acceptance to (the ent#1054 invite door), else NULL. `users` is never
+    # ALTERed for it; the text itself is a `system_settings` row with a shipped
+    # default (`services/terms_defaults.py`).
+    "terms_acceptances": """
+        CREATE TABLE IF NOT EXISTS terms_acceptances (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            email TEXT,
+            terms_version TEXT NOT NULL,
+            accepted_at TEXT NOT NULL,
+            door TEXT,
+            actor_ip TEXT,
+            UNIQUE(user_id, terms_version)
+        )
+    """,
+
     "seat_ask_class_state": """
         CREATE TABLE IF NOT EXISTS seat_ask_class_state (
             id TEXT PRIMARY KEY,
@@ -2261,6 +2280,7 @@ TABLES = {
 # =============================================================================
 
 INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_terms_acceptances_email ON terms_acceptances(email)",
     # Core indexes
     "CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)",
     "CREATE INDEX IF NOT EXISTS idx_users_auth0_sub ON users(auth0_sub)",

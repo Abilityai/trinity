@@ -5910,6 +5910,37 @@ def _migrate_agent_memory_provenance(cursor, conn):
     )
     conn.commit()
     print("Created agent_memory_fact_events table and updated_by_execution_id (trinity-enterprise#1022)")
+
+def _migrate_terms_acceptances_table(cursor, conn):
+    """Terms of use per instance (trinity-enterprise#1107).
+
+    One row per (person, terms version) — which text they accepted and when.
+    The OSS home of the record the ent#1054 invite door kept privately; an
+    optional module's own migration copies its rows across. The text itself is
+    a `system_settings` row with a shipped default (`services/terms_defaults.py`),
+    so no seed is needed here. Schema is also in db/schema.py for fresh installs;
+    mirrored by Alembic revision 0116_terms_acceptances.
+    """
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS terms_acceptances (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            email TEXT,
+            terms_version TEXT NOT NULL,
+            accepted_at TEXT NOT NULL,
+            door TEXT,
+            actor_ip TEXT,
+            UNIQUE(user_id, terms_version)
+        )
+        """
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_terms_acceptances_email ON terms_acceptances(email)"
+    )
+    conn.commit()
+    print("Created terms_acceptances table (trinity-enterprise#1107)")
+
 def run_loop_runs_stale_cleanup(run, *, now_iso: str) -> int:
     """#4058 — close every `running` loop-run row no terminal can advance.
 
@@ -6264,4 +6295,5 @@ MIGRATIONS = [
     ("seat_ask_class_state_table", _migrate_seat_ask_class_state_table),
     ("room_participant_visible_from", _migrate_room_participant_visible_from),
     ("access_requests_requester_identity", _migrate_access_requests_requester_identity),
+    ("terms_acceptances_table", _migrate_terms_acceptances_table),
 ]

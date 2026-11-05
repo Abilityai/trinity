@@ -226,6 +226,18 @@ Token lifecycle: `secrets.token_urlsafe(32)` stored in `agent_schedules.webhook_
 
 **Creation gate (#1445):** schedule *and* webhook creation require a **live owning agent** — `db.is_agent_live(name)` checks an `agent_ownership` row with `deleted_at IS NULL` (no `users` join, so it matches the token-lookup predicate exactly). A nonexistent / soft-deleted agent returns **404** (non-owners get a uniform **403** whether or not the agent exists — no enumeration oracle); enforced at both the router (`create_schedule`/`generate_webhook`) and the db chokepoint (`db/schedules.py:create_schedule` → `None`). This closes the orphan-schedule class (an admin's `can_user_access_agent` is unconditionally `True`, so admin callers could otherwise mint a schedule + real token on a never-created agent) so a webhook token always resolves to a schedule of a live agent — the invariant the #1423 token-lookup INNER JOIN assumes.
 
+### Terms of use (trinity-enterprise#1107, 5 endpoints)
+
+| Endpoint | Method | Gate | Purpose |
+|---|---|---|---|
+| `/api/terms/current` | GET | `require_person`, `@workspace_route` + `@terms_route` | `{required, version, title, text, is_default, accepted}` — the shipped default until replaced |
+| `/api/terms/accept` | POST | `require_interactive`, both marks | `{version}` → `{accepted, created, version, accepted_at}`; 409 `version_stale`; schedules the acceptance hooks after the response |
+| `/api/terms/acceptances` | GET | `require_admin` | the record: `?email=`, `?limit=` (≤1000) |
+| `/api/terms` | PUT | `require_admin` + interactive | any of `{title, text, required}`; a text/title save stamps a new version; 422 `terms_text_empty` / `terms_text_too_large` / `terms_title_too_long` |
+| `/api/terms/restore-default` | POST | `require_admin` + interactive | the one action that brings the shipped text back |
+
+The four `terms_*` keys are refused on `PUT /api/settings/{key}` (422) so the validated route is the only writer.
+
 ### Auth, Users & MCP (21 endpoints)
 | Method | Path | Description |
 |--------|------|-------------|

@@ -9,9 +9,12 @@ route reached through `get_current_user` (the `/ws` ticket mint included).
 
 The rules the tests pin:
 
-* no provider → byte-identical behaviour (OSS-only builds never change);
-* operator and above are NEVER gated — the provider is not even consulted, so a
-  gate fault can never lock an admin out;
+* no provider → the instance's own decision applies (trinity-enterprise#1107:
+  the terms are an OSS setting with a shipped default, gating every person);
+* operator and above are gated on their VISITS too (ent#1107) — a provider
+  fault falls back to the instance decision for them, so a broken optional
+  module cannot lock an admin out, while their machine credentials (a
+  user-scoped key) are never gated;
 * a Workspace-only person is refused with 403 `{"code": "terms_required", ...}`
   on every door while the provider says so, and the provider's own reason
   (`invite_expired`, `invite_revoked`) is passed through;
@@ -39,6 +42,32 @@ from starlette.testclient import TestClient
 pytestmark = pytest.mark.unit
 
 BACKEND = pathlib.Path(__file__).resolve().parents[2] / "src" / "backend"
+
+
+@pytest.fixture(autouse=True)
+def _clean_terms_state():
+    """trinity-enterprise#1107: the instance decision reads real rows, so start
+    and end every test with no terms configured and no acceptance."""
+    from database import db
+    from db.engine import get_engine
+
+    def reset():
+        for key in ("terms_required", "terms_version", "terms_text", "terms_title"):
+            try:
+                db.delete_setting(key)
+            except Exception:  # noqa: BLE001
+                pass
+        with get_engine().begin() as conn:
+            conn.exec_driver_sql("DELETE FROM terms_acceptances")
+
+    reset()
+    yield
+    reset()
+
+
+def _switch_off():
+    from database import db
+    db.set_setting("terms_required", "false")
 
 
 def _row(role, username="member"):
@@ -169,16 +198,28 @@ def _probe_app():
 # --------------------------------------------------------------------------- #
 
 class TestWithoutAProvider:
-    def test_a_user_passes_a_workspace_route_exactly_as_before(self, jwt_as):
+    def test_a_user_is_gated_by_the_instance_decision(self, jwt_as):
+        """trinity-enterprise#1107: no provider is not "no gate" any more — the
+        shipped default terms are outstanding until accepted."""
         from services import terms_gate
 
         terms_gate.clear_provider()
         assert terms_gate.get_provider() is None
         r = _probe_app().get("/api/probe/workspace", headers=_bearer(jwt_as("user")))
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"]["code"] == "terms_required"
+
+    def test_a_user_passes_a_workspace_route_once_the_switch_is_off(self, jwt_as):
+        from services import terms_gate
+
+        terms_gate.clear_provider()
+        _switch_off()
+        r = _probe_app().get("/api/probe/workspace", headers=_bearer(jwt_as("user")))
         assert r.status_code == 200, r.text
         assert r.json() == {"who": "member"}
 
     def test_the_floor_still_refuses_a_user_off_its_routes(self, jwt_as):
+        _switch_off()
         r = _probe_app().get("/api/probe/plain", headers=_bearer(jwt_as("user")))
         assert r.status_code == 403
         assert r.json()["detail"]["code"] == "workspace_only"
@@ -267,19 +308,45 @@ class TestTheRefusalOnEveryDoor:
 # Who is never gated
 # --------------------------------------------------------------------------- #
 
-class TestWhoIsNeverGated:
+class TestWhoIsGatedAndWhoIsNot:
     @pytest.mark.parametrize("role", ["operator", "creator", "admin"])
-    def test_operator_and_above_are_never_consulted(self, jwt_as, provider, role):
+    def test_operator_and_above_are_gated_on_their_visits(self, jwt_as, provider, role):
+        """trinity-enterprise#1107: every person's first visit, the admin's included."""
         p = provider(REQUIRED)
         r = _probe_app().get("/api/probe/plain", headers=_bearer(jwt_as(role)))
-        assert r.status_code == 200, r.text
-        assert p.seen == []
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"]["code"] == "terms_required"
+        assert p.seen == [("member", role)]
 
     @pytest.mark.parametrize("role", ["operator", "admin"])
-    def test_a_raising_provider_cannot_lock_an_operator_out(self, jwt_as, provider, role):
+    def test_a_raising_provider_falls_back_to_the_instance_decision_for_an_operator(
+        self, jwt_as, provider, role
+    ):
+        """A broken optional module must not lock an administrator out: the
+        door layer is ignored for them and the instance decision stands —
+        the shipped default is outstanding (accept it), or the switch is off."""
+        from services import terms_defaults
+
         provider(RuntimeError("the provider is broken"))
         r = _probe_app().get("/api/probe/plain", headers=_bearer(jwt_as(role)))
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"]["code"] == "terms_required"
+        assert r.json()["detail"]["version"] == terms_defaults.DEFAULT_TERMS_VERSION
+        _switch_off()
+        r = _probe_app().get("/api/probe/plain", headers=_bearer(jwt_as(role)))
         assert r.status_code == 200, r.text
+
+    def test_an_operators_user_scoped_key_is_not_gated(self, agent_key_as, provider):
+        """A machine credential of operator-and-above is for automation, not a
+        visit: an ops key keeps working while the admin has not signed in."""
+        import dependencies as deps
+
+        p = provider(REQUIRED)
+        user = asyncio.run(
+            deps.resolve_platform_user_unfloored(_plain_request(), agent_key_as("admin", scope="user"))
+        )
+        assert user.role == "admin" and user.mcp_scope == "user"
+        assert p.seen == []
 
     def test_an_agent_key_of_a_workspace_only_owner_is_untouched(self, agent_key_as, provider):
         """The agent's own runtime (heartbeat, reports, asks) keeps working while

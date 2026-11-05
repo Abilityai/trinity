@@ -1957,3 +1957,20 @@ metric_points = Table(
     # lets ent#80 partition by month without a table rebuild.
     PrimaryKeyConstraint("agent_name", "ts", "idempotency_key"),
 )
+
+
+# Terms acceptances (trinity-enterprise#1107) — one row per (person, terms
+# version). `door` is the invitation id an optional module names, else NULL.
+terms_acceptances = Table(
+    "terms_acceptances",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", Integer, nullable=False),
+    Column("email", Text),
+    Column("terms_version", Text, nullable=False),
+    Column("accepted_at", Text, nullable=False),
+    Column("door", Text),
+    Column("actor_ip", Text),
+    UniqueConstraint("user_id", "terms_version", name="uq_terms_acceptances_user_version"),
+    Index("idx_terms_acceptances_email", "email"),
+)
