@@ -17,7 +17,7 @@ This file covers the agent-server half:
   AC3 — a stuck lock is REPORTED, never deleted, and the boot reap is observable
   AC4 — an agent commit survives a concurrent poll
 
-Two test-construction rules this file obeys, both learned by measurement:
+Three test-construction rules this file obeys, all learned by measurement:
 
   - **Assert the lock SIGHTING, never an index rewrite.** "A plain status
     afterwards rewrites `.git/index`" fails 3/3 once fixture setup crosses ~1 s
@@ -30,6 +30,9 @@ Two test-construction rules this file obeys, both learned by measurement:
     stdout) whenever a round writes content identical to the previous one —
     observed in 5/60 trials — which under `check=True` is indistinguishable from
     a lock failure. Every writer round therefore writes `time.time_ns()`.
+  - **A sampler that must see a sub-millisecond lock window samples in capped
+    rounds, never one pass.** One pass of six plain runs went unseen on a
+    loaded CI runner (#4256); the lock-sighting test's docstring has the reason.
 """
 
 from __future__ import annotations
@@ -229,15 +232,43 @@ class TestStatusReadIsLockFree:
         never be. Asserting the sighting rather than an index rewrite is
         deliberate: git's racily-clean rule makes a rewrite assertion fail once
         fixture setup crosses ~1 s, which is ordinary under CI's `-n auto`.
+
+        **The control samples in rounds (#4256).** The plain argv holds the
+        lock for a fraction of a millisecond per run, and the sampler is just
+        one more runnable thread. On a CPU-saturated runner it is off-CPU for
+        most of those windows, so a single pass of six runs could miss all six
+        and redden CI with no product change. So the control repeats in rounds,
+        up to `max_rounds`, until it is seen, and still fails if it never is: it
+        cannot pass without a real sighting. The flagged argv runs in the SAME
+        rounds, interleaved, so it gets as many runs as the control needed,
+        under the same load.
+
+        Both argvs also run under `nice -n 10`. Under load that keeps the
+        sampler on-CPU ahead of git, and a preempted git holds its lock
+        longer. Measured on 4 pinned cores with 12 busy processes, it cut the
+        per-run miss rate from 98% to 50%. On an idle machine it changes
+        nothing, and it does not change which locks git takes.
+
+        Every run first moves each file to a fresh, never-recorded mtime, so
+        every run in every round has a refresh to write: the case where an
+        unflagged status both locks and rewrites the index. Dirtying once, as
+        this test used to, stays dirty only through git's racily-clean rule,
+        which lapses about a second later, so a later round would sample a
+        different state from the first. This is not what cures the miss.
+        Measured, a clean index is seen about as often as a dirty one.
         """
+        import time
+
         lock = status_home / ".git" / "index.lock"
-        # Make the index stat-dirty so a refresh has work to do.
-        for i in range(200):
-            (status_home / f"f{i}.txt").write_text(f"x{i}")
+        files = [status_home / f"f{i}.txt" for i in range(200)]
+        for i, path in enumerate(files):
+            path.write_text(f"x{i}")
         _run(["git", "add", "-A"], status_home)
         _run(["git", "commit", "-m", "bulk"], status_home)
-        for i in range(200):
-            os.utime(status_home / f"f{i}.txt", None)
+
+        runs_per_round = 6
+        max_rounds = 30
+        stamp = [time.time() - 5000]
 
         def _sample(argv):
             import threading
@@ -252,19 +283,27 @@ class TestStatusReadIsLockFree:
             t = threading.Thread(target=_poll, daemon=True)
             t.start()
             try:
-                for _ in range(6):
-                    _run(argv, status_home)
+                for _ in range(runs_per_round):
+                    # Make the index stat-dirty so a refresh has work to do.
+                    stamp[0] -= 1
+                    for path in files:
+                        os.utime(path, (stamp[0], stamp[0]))
+                    _run(["nice", "-n", "10", *argv], status_home)
             finally:
                 stop.set()
                 t.join(timeout=5)
             return sightings["n"]
 
-        plain = _sample(["git", "status", "--porcelain"])
-        flagged = _sample(["git", "--no-optional-locks", "status", "--porcelain", "-z"])
+        plain = flagged = rounds = 0
+        while plain == 0 and rounds < max_rounds:
+            rounds += 1
+            plain += _sample(["git", "status", "--porcelain"])
+            flagged += _sample(["git", "--no-optional-locks", "status", "--porcelain", "-z"])
 
         assert plain > 0, (
             "control lost its teeth: the plain argv was never observed holding "
-            "index.lock, so a zero for the flagged argv proves nothing"
+            f"index.lock in {rounds} rounds of {runs_per_round} runs, so a zero "
+            "for the flagged argv proves nothing"
         )
         assert flagged == 0, (
             f"the flagged argv was observed holding index.lock {flagged}x"
