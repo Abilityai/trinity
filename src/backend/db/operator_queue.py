@@ -1157,6 +1157,31 @@ class OperatorQueueOperations:
         with get_engine().connect() as conn:
             return [dict(r) for r in conn.execute(stmt).mappings().all()]
 
+    def list_pending_ask_ids_for_execution(self, execution_id: str, limit: int):
+        """The request ids one execution parked and never got answered (ent#1102).
+
+        The wake's "it stopped at an ask" signal: a run can reach a normal
+        terminal with its asks still pending, and a caller told only "ended
+        successfully" would read that as finished work. Ids only — never a
+        title, a question or anything a person wrote.
+        """
+        if not execution_id:
+            return []
+        stmt = (
+            select(operator_queue.c.request_id)
+            .where(
+                and_(
+                    operator_queue.c.execution_id == execution_id,
+                    operator_queue.c.status == "pending",
+                    _NOT_A_GATE_ROW,
+                )
+            )
+            .order_by(operator_queue.c.created_at.asc(), operator_queue.c.request_id.asc())
+            .limit(limit)
+        )
+        with get_engine().connect() as conn:
+            return [r["request_id"] for r in conn.execute(stmt).mappings().all()]
+
     def list_recent_endings_for_agent(
         self,
         agent_name: str,

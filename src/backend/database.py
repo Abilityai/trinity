@@ -4172,6 +4172,12 @@ class DatabaseManager:
         return self._operator_queue_ops.list_pending_asks_for_agent(
             agent_name, limit, exclude_request_id_prefixes)
 
+    def list_pending_ask_ids_for_execution(self, execution_id: str, limit: int = 10):
+        """ent#1102: the asks one execution parked and never got answered."""
+        return self._operator_queue_ops.list_pending_ask_ids_for_execution(
+            execution_id, limit
+        )
+
     def list_recent_operator_queue_endings(self, agent_name, since, limit,
                                            exclude_request_id_prefixes=None):
         # trinity-enterprise#611: ids + endings for the Execution Context line.
