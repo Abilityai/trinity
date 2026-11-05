@@ -645,7 +645,7 @@ export function createOperatorQueueTools(
         "invalid_<field> for a malformed field, and each field's description names its " +
         "other codes and the fix. 429 rate_limited or queue_full: too " +
         "many open asks, wait for some to end. Acts as the agent your key belongs to; " +
-        "admin keys name it with agent_name.",
+        "admin keys pass agent_name.",
       // ent#1024: `agent_name` is the TOOL's, never the body's — extended here
       // so `askOperatorParameters.shape` (the body allowlist below) stays as is.
       parameters: askOperatorParameters.extend({
