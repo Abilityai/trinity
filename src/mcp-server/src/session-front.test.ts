@@ -423,25 +423,36 @@ describe("ent#1101 off-box /mcp is refused while external access is off (real ht
     seen.length = 0;
   });
 
-  function hit(method: string, path: string, headers: Record<string, string> = {}, body = '{"jsonrpc":"2.0","id":1,"method":"ping"}'): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> {
+  // `timeoutMs` bounds a request the gate must answer itself: a refusal that
+  // is wrongly passed through reaches the inner stub and may never answer, so
+  // without a bound the case hangs until the file timeout instead of failing.
+  function hit(method: string, path: string, headers: Record<string, string> = {}, body = '{"jsonrpc":"2.0","id":1,"method":"ping"}', timeoutMs?: number): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> {
     return new Promise((resolve, reject) => {
-      const req = http.request({ host: "127.0.0.1", port, path, method, headers: { "content-type": "application/json", ...headers }, agent: false }, (res) => {
+      const signal = timeoutMs === undefined ? undefined : AbortSignal.timeout(timeoutMs);
+      const req = http.request({ host: "127.0.0.1", port, path, method, headers: { "content-type": "application/json", ...headers }, agent: false, signal }, (res) => {
         let data = "";
         res.on("data", (c) => (data += c));
         res.on("end", () => resolve({ status: res.statusCode ?? 0, headers: res.headers, body: data }));
       });
-      req.on("error", reject);
+      req.on("error", (err) => {
+        if (signal?.aborted) {
+          reject(new assert.AssertionError({ message: `${method} ${path}: no answer from the gate within ${timeoutMs} ms — the request was let through instead of refused` }));
+        } else {
+          reject(err);
+        }
+      });
       req.end(method === "GET" || method === "DELETE" ? undefined : body);
     });
   }
 
+  const REFUSAL_BOUND_MS = 2000;
   const off: Verdict = { kind: "off", source: "default" };
   const on: Verdict = { kind: "on", source: "settings" };
   const unverified: Verdict = { kind: "unverified", reason: REASON_NO_SECRET };
 
   it("off-box + off → 403, the named refusal header and the exact JSON-RPC body", async () => {
     await boot({ verdict: off, peer: "off-box" });
-    const r = await hit("POST", "/mcp");
+    const r = await hit("POST", "/mcp", {}, undefined, REFUSAL_BOUND_MS);
     assert.equal(r.status, 403);
     assert.equal(r.headers["content-type"], "application/json");
     assert.equal(r.headers["x-trinity-refusal"], "external_mcp_access_off");
@@ -452,7 +463,7 @@ describe("ent#1101 off-box /mcp is refused while external access is off (real ht
 
   it("off-box + unverified → 503 + Retry-After: 5, naming the reason", async () => {
     await boot({ verdict: unverified, peer: "off-box" });
-    const r = await hit("POST", "/mcp");
+    const r = await hit("POST", "/mcp", {}, undefined, REFUSAL_BOUND_MS);
     assert.equal(r.status, 503);
     assert.equal(r.headers["retry-after"], "5");
     assert.equal(r.headers["x-trinity-refusal"], "external_mcp_access_unverified");
