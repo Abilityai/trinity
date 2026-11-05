@@ -11,6 +11,7 @@ Provides API endpoints for:
 import contextlib
 import hashlib
 import logging
+import traceback
 import uuid
 from typing import Dict, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -43,6 +44,34 @@ from services import git_service
 from services.platform_audit_service import platform_audit_service, AuditEventType
 
 logger = logging.getLogger(__name__)
+
+
+def _log_redacted_failure(what: str, agent_name: str, e: Exception, held: str) -> None:
+    """Log an unexpected failure with its traceback, credentials redacted (#4284).
+
+    The exception text can carry the PAT (an httpx header-validation error
+    echoes `Bearer <token>`) or a credentialed remote URL. The caller returns
+    the class name only, so the detail moves here, and it must not carry the
+    credential with it. The traceback is formatted and redacted by hand,
+    because `exc_info=True` renders the raw message unredacted.
+
+    Three passes: the token this handler holds (and its `x-access-token:` b64
+    form), then any URL userinfo (a stale baked token is not the held one),
+    then the known credential shapes.
+    """
+    import base64
+
+    from utils.credential_sanitizer import redact_url_userinfo, sanitize_text
+
+    text = "".join(traceback.format_exception(type(e), e, e.__traceback__))
+    if held:
+        b64 = base64.b64encode(f"x-access-token:{held}".encode()).decode()
+        text = text.replace(held, "***").replace(b64, "***")
+    logger.error(
+        "%s for %s failed (%s): %s",
+        what, agent_name, type(e).__name__, sanitize_text(redact_url_userinfo(text)),
+    )
+
 
 router = APIRouter(prefix="/api/agents", tags=["git"])
 
@@ -639,7 +668,8 @@ async def initialize_github_sync(
     except GitHubError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to initialize GitHub sync: {str(e)}")
+        _log_redacted_failure("GitHub sync initialize", agent_name, e, github_pat)
+        raise HTTPException(status_code=500, detail=f"Failed to initialize GitHub sync ({e.__class__.__name__} — details in backend logs)")
 
 
 # =============================================================================
@@ -726,7 +756,8 @@ async def set_agent_github_pat(
     except HTTPException:
         raise  # Re-raise HTTP exceptions as-is
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to validate PAT: {str(e)}")
+        _log_redacted_failure("GitHub PAT validation", agent_name, e, pat)
+        raise HTTPException(status_code=500, detail=f"Failed to validate PAT ({e.__class__.__name__} — details in backend logs)")
 
     # Check if agent has git config (required for storing PAT)
     git_config = git_service.get_agent_git_config(agent_name)
