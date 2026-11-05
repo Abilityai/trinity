@@ -53,8 +53,13 @@
         :data-testid="`${prefix}-send-${ask.id}`"
       >Send</BaseButton>
     </div>
-    <p class="mt-1 text-xs">
-      Stored on the agent as {{ name }}. It never appears in the chat, and the agent is only told it was provided.
+    <p class="mt-1 text-xs" :data-testid="`${prefix}-caption-${ask.id}`">
+      <template v-if="destination">
+        Sent to the agent {{ destination.agent_name }} on the Trinity at {{ destination.host }} and stored there as {{ name }}. Nothing is kept here after delivery; it never appears in the chat, and the agent that asked is only told it was delivered.
+      </template>
+      <template v-else>
+        Stored on the agent as {{ name }}. It never appears in the chat, and the agent is only told it was provided.
+      </template>
     </p>
     <div v-if="error" class="mt-1.5" :data-testid="`${prefix}-error-${ask.id}`">
       <InlineError :message="error" @dismiss="error = ''" />
@@ -79,6 +84,9 @@ const emit = defineEmits(['provided'])
 const store = useClientPortalStore()
 const prefix = computed(() => props.testidPrefix)
 const name = computed(() => props.ask.credential_name || 'Credential')
+// trinity-enterprise#1109: where the value lands when that is not the asking
+// agent — `{agent_name, host}` from the projection, in plain words.
+const destination = computed(() => props.ask.credential_destination || null)
 const inputId = `portal-credential-${useId()}`
 const formEl = ref(null)
 
@@ -96,6 +104,9 @@ const COPY = {
   agent_not_running: "The agent isn't running, so nothing was stored. Once it has been started, send the value again.",
   scrub_unavailable: "Nothing was stored: the platform couldn't arm the protection that keeps this value out of the agent's replies. Try again in a minute.",
   asks_unavailable: 'Asks are unavailable right now, so nothing was stored. Try again in a minute.',
+  // trinity-enterprise#1109: a delivery to another Trinity that did not land —
+  // each a plain retry; the server's own sentence names the host.
+  destination_key_missing: "The agent that asked doesn't hold a key to that Trinity yet, so nothing was stored. Once it does, send the value again.",
 }
 
 function refusalCopy(err) {

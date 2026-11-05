@@ -628,6 +628,9 @@ export interface OperatorAskReceipt {
   // (answered, the agent was not running; its next start delivers it) | `woken` |
   // null (no wake owed). On a `created` receipt it is null; a replay carries it.
   wake_state?: "pending" | "woken" | null;
+  // trinity-enterprise#1109: where a credential lands when that is not the
+  // asking agent — the agent and the host, never the key's variable name.
+  credential_destination?: { agent_name: string; host: string } | null;
   differs?: string[];
 }
 

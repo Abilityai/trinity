@@ -698,7 +698,7 @@ class TestTheAskSide:
 # delivery step are the only moves the module may make with it.
 _ALLOWED_VALUE_CALLEES = {"len", "isinstance", "strip", "encode", "splitlines",
                           "stage_secret", "unstage_secret", "set_keys", "_check_value",
-                          "_deliver", "set_env_value"}
+                          "_deliver", "_deliver_remote", "set_env_value"}
 
 
 def test_the_sink_module_never_interpolates_the_value():
