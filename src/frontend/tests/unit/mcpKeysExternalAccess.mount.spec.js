@@ -11,7 +11,9 @@
  *  - when off, the connection snippet is replaced by a callout naming the
  *    refusal, never a URL an outside client cannot reach;
  *  - the URL is the server's `advertised_url` — there is no client-side
- *    `:8080` guess left to disagree with it.
+ *    `:8080` guess left to disagree with it;
+ *  - a failed status read says so, with a Retry, instead of blanking the
+ *    block; the switch appears only once a read succeeds.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
@@ -128,6 +130,52 @@ describe('ent#1101 External MCP access in the MCP Keys tab', () => {
     expect(offCallout().text()).toContain('external_mcp_access_off')
     expect(offCallout().text()).toContain('Agents keep connecting')
     expect(w.text()).not.toContain(ADVERTISED)
+  })
+
+  it('says the status could not be read, offers Retry, and shows no switch until a read succeeds', async () => {
+    setActivePinia(createPinia())
+    const auth = useAuthStore()
+    auth.user = { username: 'admin', role: 'admin' }
+    auth.token = 'jwt-1101'
+    apiMock.get.mockRejectedValueOnce({ response: { status: 404, data: { detail: 'Not Found' } } })
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      json: async () => [{ id: 'k1', name: 'default', key_prefix: 'trinity_mcp_x', scope: 'user', is_active: true,
+        created_at: '2026-11-01T09:00:00Z', last_used_at: null, usage_count: 0 }],
+    }))
+    w = mount(McpKeysTab, { attachTo: document.body })
+    await flushPromises()
+
+    const failed = w.find('[data-testid="load-failed"]')
+    expect(failed.exists()).toBe(true)
+    expect(failed.text()).toContain('Could not read External MCP access status')
+    expect(failed.text()).toContain('Not Found')
+    expect(findSwitch().exists()).toBe(false)
+    expect(snippet().exists()).toBe(false)
+    expect(offCallout().exists()).toBe(false)
+
+    apiMock.get.mockResolvedValueOnce({ data: state() })
+    await findButton('Retry').trigger('click')
+    await flushPromises()
+    expect(apiMock.get).toHaveBeenCalledTimes(2)
+    expect(apiMock.get).toHaveBeenLastCalledWith('/api/settings/mcp-external-access')
+    expect(w.find('[data-testid="load-failed"]').exists()).toBe(false)
+    expect(findSwitch().exists()).toBe(true)
+    expect(snippet().text()).toContain(ADVERTISED)
+  })
+
+  it('keeps the failure line, and no switch, when Retry fails again', async () => {
+    await render('admin', state())
+    w.unmount()
+    apiMock.get.mockRejectedValue(new Error('Network Error'))
+    w = mount(McpKeysTab, { attachTo: document.body })
+    await flushPromises()
+    expect(apiMock.get).toHaveBeenCalledTimes(2)
+    await findButton('Retry').trigger('click')
+    await flushPromises()
+    expect(apiMock.get).toHaveBeenCalledTimes(3)
+    expect(w.find('[data-testid="load-failed"]').text()).toContain('Network Error')
+    expect(findSwitch().exists()).toBe(false)
   })
 
   it('renders the server advertised_url in the snippet, with no client :8080 guess', async () => {

@@ -45,6 +45,17 @@
       </div>
       <p v-if="externalAccessError" class="text-sm text-status-danger-700 dark:text-status-danger-400">{{ externalAccessError }}</p>
     </div>
+    <!-- A failed read says so; the switch waits for a read that succeeds. -->
+    <LoadFailed
+      v-else-if="externalAccessLoadError"
+      dense
+      class="mb-4"
+      title="Could not read External MCP access status"
+      :message="externalAccessLoadError"
+      retry-label="Retry"
+      :retrying="externalAccessRetrying"
+      @retry="retryExternalAccess"
+    />
 
     <!-- Off: an outside client would be refused, so no URL is offered. -->
     <div
@@ -530,6 +541,7 @@ import BaseTextarea from '../base/BaseTextarea.vue'
 import { ref, reactive, onMounted, computed, watch } from 'vue'
 import api from '../../api'
 import ConfirmDialog from '../ConfirmDialog.vue'
+import LoadFailed from '../LoadFailed.vue'
 import { useAuthStore } from '../../stores/auth'
 import { useRole } from '../../composables/useRole'
 import { copyToClipboard } from '../../utils/clipboard'
@@ -573,6 +585,8 @@ const confirmDialog = reactive({
 const externalAccess = ref(null)
 const externalAccessBusy = ref(false)
 const externalAccessError = ref('')
+const externalAccessLoadError = ref('')
+const externalAccessRetrying = ref(false)
 
 const mcpServerUrl = computed(() => externalAccess.value?.advertised_url || '')
 
@@ -588,8 +602,19 @@ const fetchExternalAccess = async () => {
   try {
     const { data } = await api.get('/api/settings/mcp-external-access')
     externalAccess.value = data
+    externalAccessLoadError.value = ''
   } catch (error) {
     console.error('Failed to fetch external MCP access:', error)
+    externalAccessLoadError.value = error.response?.data?.detail || error.message || 'The request failed.'
+  }
+}
+
+const retryExternalAccess = async () => {
+  externalAccessRetrying.value = true
+  try {
+    await fetchExternalAccess()
+  } finally {
+    externalAccessRetrying.value = false
   }
 }
 
