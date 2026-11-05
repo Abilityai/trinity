@@ -194,6 +194,85 @@ describe('PortalAgentMemory — ent#962: paging and an operator undo', () => {
   })
 })
 
+describe('PortalAgentMemory — ent#962 ruling 13: every change shows what it did', () => {
+  const at = () => new Date(Date.now() - 3600_000).toISOString()
+  const row = (over) => ({ id: 'w', kind: 'conversation', execution_id: 'e', schedule_name: null,
+    written_at: at(), undone_at: null, undone_by_operator: false, undoable: false,
+    notes: '', previous_notes: '', ...over })
+  async function mountWith(writes) {
+    axios.get.mockResolvedValueOnce({ data: payload({ writes }) })
+    const w = mount(PortalAgentMemory, { props: { agentName: AGENT } })
+    await flushPromises()
+    return w
+  }
+  // The VISIBLE line: the sr-only "Added:" / "Removed:" prefix is pinned on its own below.
+  const lines = (li, sign) => li.findAll(`[data-testid="portal-memory-diff-${sign}"]`)
+    .map((l) => l.text().replace(l.find('.sr-only').text(), ''))
+
+  it('a conversation change lists the lines it added and removed, and nothing unchanged', async () => {
+    const w = await mountWith([row({ id: 'w2', undoable: true,
+      previous_notes: 'Prefers short answers.\nOpen loop #22: the Q4 budget memo',
+      notes: 'Prefers short answers.\nOpen loop #23: the Q4 budget memo' })])
+    const li = w.get('[data-testid="portal-memory-write"]')
+    expect(lines(li, 'added')).toEqual(['+ Open loop #23: the Q4 budget memo'])
+    expect(lines(li, 'removed')).toEqual(['− Open loop #22: the Q4 budget memo'])
+    expect(li.text()).not.toContain('Prefers short answers.')
+  })
+
+  it('a first write is all +, a write that cleared the notes is all −', async () => {
+    const w = await mountWith([
+      row({ id: 'w2', previous_notes: 'Based in Lyon.', notes: '' }),
+      row({ id: 'w1', previous_notes: '', notes: 'Based in Lyon.' }),
+    ])
+    const [cleared, first] = w.findAll('[data-testid="portal-memory-write"]')
+    expect(lines(first, 'added')).toEqual(['+ Based in Lyon.'])
+    expect(lines(first, 'removed')).toEqual([])
+    expect(lines(cleared, 'added')).toEqual([])
+    expect(lines(cleared, 'removed')).toEqual(['− Based in Lyon.'])
+  })
+
+  it('an identical rewrite says "No change to the text"', async () => {
+    const w = await mountWith([row({ previous_notes: 'Same.', notes: 'Same.' })])
+    const li = w.get('[data-testid="portal-memory-write"]')
+    expect(li.get('[data-testid="portal-memory-diff-none"]').text()).toBe('No change to the text')
+    expect(lines(li, 'added')).toEqual([])
+  })
+
+  it('a scheduled-run change shows the same diff, not its full text', async () => {
+    const w = await mountWith([row({ kind: 'scheduled_run', schedule_name: 'Daily brief',
+      previous_notes: 'Open loop: budget.', notes: 'Open loop: budget.\nCommitment: Friday memo.' })])
+    const li = w.get('[data-testid="portal-memory-write-scheduled"]')
+    expect(lines(li, 'added')).toEqual(['+ Commitment: Friday memo.'])
+    expect(li.text()).not.toContain('Open loop: budget.')
+  })
+
+  it('an undone change keeps its diff on screen, faded', async () => {
+    const w = await mountWith([row({ undone_at: at(), previous_notes: 'Old.', notes: 'New.' })])
+    const li = w.get('[data-testid="portal-memory-write"]')
+    expect(li.classes()).toContain('opacity-60')
+    expect(lines(li, 'added')).toEqual(['+ New.'])
+    expect(lines(li, 'removed')).toEqual(['− Old.'])
+  })
+
+  it('only the undoable change explains what Undo does', async () => {
+    const w = await mountWith([
+      row({ id: 'w2', undoable: true, previous_notes: 'A', notes: 'B' }),
+      row({ id: 'w1', previous_notes: '', notes: 'A' }),
+    ])
+    const [latest, older] = w.findAll('[data-testid="portal-memory-write"]')
+    expect(latest.get('[data-testid="portal-memory-undo-explain"]').text())
+      .toBe('Undo puts your notes back to how they were before this change.')
+    expect(older.find('[data-testid="portal-memory-undo-explain"]').exists()).toBe(false)
+  })
+
+  it('a + or − is never the only cue: each line names itself for a screen reader', async () => {
+    const w = await mountWith([row({ previous_notes: 'Old.', notes: 'New.' })])
+    const li = w.get('[data-testid="portal-memory-write"]')
+    expect(li.get('[data-testid="portal-memory-diff-added"] .sr-only').text()).toBe('Added:')
+    expect(li.get('[data-testid="portal-memory-diff-removed"] .sr-only').text()).toBe('Removed:')
+  })
+})
+
 describe('clientPortal store — memory slice', () => {
   it('a response that lands after an agent switch is discarded, never shown under the new name', async () => {
     const store = useClientPortalStore()

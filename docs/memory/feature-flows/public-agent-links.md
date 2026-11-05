@@ -1959,8 +1959,11 @@ History (bounded, Load more by cursor, Undo on the latest write of each section 
 `ConfirmDialog`, Cancel focused; after an Undo the store re-reads as many rows as were shown)
 and Facts (`retrieval-memory.md` → Frontend). One post-flush watcher re-homes focus on Close
 when Undo or Forget disables or unmounts the focused control. The person's Workspace panel
-(`portal/PortalAgentMemory.vue`) gains Load more (`?before=`, bounded list) and the line
-"Undone by an operator of this agent" on a write someone else undid.
+(`portal/PortalAgentMemory.vue`) gains Load more (`?before=`, bounded list), shows every
+change as the lines it added and removed (`utils/lineDiff.js`, a whole-line LCS of
+`previous_notes` → `notes`; "No change to the text" when none), explains Undo on the
+undoable row, and reads "Undone by an operator of this agent" on a write someone else
+undid.
 
 **Tests** — `tests/unit/test_ent962_person_memory_owner_view.py`: the readers rule through the
 real dependency chain, the summarizer CAS driven through `summarize_user_memory_background`,

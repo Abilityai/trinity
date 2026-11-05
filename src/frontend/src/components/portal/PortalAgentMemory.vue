@@ -52,7 +52,19 @@
               @click="undo(w.id)"
             >Undo</BaseButton>
           </div>
-          <p v-if="w.kind === 'scheduled_run'" class="mt-1 whitespace-pre-wrap break-words">{{ w.notes || '(cleared)' }}</p>
+          <!-- ent#962 ruling 13: what the change did, as lines added and removed
+               against the version before — on every row, conversation and
+               scheduled run alike. The sign is never the only cue (p24). -->
+          <ul v-if="diffs[w.id].added.length || diffs[w.id].removed.length" class="mt-1 space-y-0.5">
+            <li v-for="(line, i) in diffs[w.id].added" :key="`a${i}`"
+                class="whitespace-pre-wrap break-words text-status-success-700 dark:text-status-success-400"
+                data-testid="portal-memory-diff-added"><span class="sr-only">Added:</span><span aria-hidden="true">+ </span>{{ line }}</li>
+            <li v-for="(line, i) in diffs[w.id].removed" :key="`r${i}`"
+                class="whitespace-pre-wrap break-words text-status-danger-700 dark:text-status-danger-400"
+                data-testid="portal-memory-diff-removed"><span class="sr-only">Removed:</span><span aria-hidden="true">− </span>{{ line }}</li>
+          </ul>
+          <p v-else class="mt-1 text-gray-600 dark:text-gray-400" data-testid="portal-memory-diff-none">No change to the text</p>
+          <p v-if="w.undoable" class="mt-1 text-gray-600 dark:text-gray-400" data-testid="portal-memory-undo-explain">Undo puts your notes back to how they were before this change.</p>
           <!-- ent#962: someone else undid it. One line for the owner and an admin; never who. -->
           <p v-if="w.undone_at && w.undone_by_operator" class="mt-1 text-gray-600 dark:text-gray-400" data-testid="portal-memory-undone-by-operator">Undone by an operator of this agent</p>
         </li>
@@ -96,6 +108,7 @@ import { useClientPortalStore } from '@/stores/clientPortal'
 import InlineError from '@/components/InlineError.vue'
 import LoadFailed from '@/components/LoadFailed.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
+import { lineDiff } from '@/utils/lineDiff'
 
 const props = defineProps({
   agentName: { type: String, required: true },
@@ -109,6 +122,10 @@ const memoryLoaded = computed(() => memoryMine.value && store.memoryLoaded)
 const memoryError = computed(() => (memoryMine.value ? store.memoryError : null))
 const memoryUndoError = computed(() => (memoryMine.value ? store.memoryUndoError : null))
 const memoryWrites = computed(() => memory.value.writes || [])
+// One diff per row, recomputed only when the list changes (ent#962 ruling 13).
+const diffs = computed(() => Object.fromEntries(
+  memoryWrites.value.map((w) => [w.id, lineDiff(w.previous_notes, w.notes)]),
+))
 function loadMemory() { return store.loadAgentMemory(props.agentName) }
 function undo(id) { return store.undoMemoryWrite(props.agentName, id) }
 /** Who changed it, in the viewer's words: the run's schedule name, or the chat. */

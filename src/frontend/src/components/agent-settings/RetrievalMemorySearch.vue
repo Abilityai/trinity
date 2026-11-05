@@ -20,7 +20,7 @@
         : 'What the agent would be reminded of for a given question, and where each fact came from.' }}
     </p>
 
-    <form class="flex items-start gap-2" @submit.prevent="run">
+    <form class="flex items-stretch gap-2" @submit.prevent="run">
       <BaseInput
         v-model="query"
         class="min-w-0 flex-1"
@@ -33,8 +33,6 @@
       <BaseButton
         type="submit"
         variant="secondary"
-        size="sm"
-        class="mt-px"
         :loading="inFlight"
         loading-label="Searching…"
         data-testid="retrieval-memory-search-submit"
