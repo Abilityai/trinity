@@ -149,6 +149,12 @@ class TestSettingsRoutes:
         assert body["source"] == "default"
         assert body["env_value"] is None
         assert body["advertised_url"].endswith("/mcp")
+
+    def test_payload_advertises_a_non_loopback_bind_consistently(self, client_as, store, monkeypatch):
+        monkeypatch.setenv("MCP_BIND_ADDRESS", "203.0.113.7")
+        body = client_as(_user(role="user", username="u")).get(self.PATH).json()
+        assert body["raw_port_bind_address"] == "203.0.113.7"
+        assert body["advertised_url"] == "http://203.0.113.7:8080/mcp"
         assert "raw_port_bind_address" in body
 
     def test_read_reports_env_value_and_source(self, client_as, store, monkeypatch):
@@ -265,11 +271,23 @@ class TestDefaultMcpUrl:
             monkeypatch.delenv("MCP_BIND_ADDRESS", raising=False)
         assert mcp_url._get_default_mcp_url(_request(x_forwarded_proto=proto)) == expected
 
-    def test_loopback_bound_raw_port_is_advertised_as_host_only(self, monkeypatch):
-        monkeypatch.setenv("MCP_BIND_ADDRESS", "127.0.0.1")
+    @pytest.mark.parametrize("bind", ["127.0.0.1", "localhost", "::1", " 127.0.0.1 "])
+    def test_loopback_bound_raw_port_is_advertised_as_host_only(self, monkeypatch, bind):
+        monkeypatch.setenv("MCP_BIND_ADDRESS", bind)
         assert mcp_url._get_default_mcp_url(_request()) == "http://127.0.0.1:8080/mcp"
 
-    @pytest.mark.parametrize("bind", [None, ""])
+    @pytest.mark.parametrize("bind, expected", [
+        # A LAN / VPN address: the raw port answers there, so that is the URL.
+        ("203.0.113.7", "http://203.0.113.7:8080/mcp"),
+        ("trinity-vpn.example.com", "http://trinity-vpn.example.com:8080/mcp"),
+        # An IPv6 literal needs brackets to be a URL at all.
+        ("2001:db8::7", "http://[2001:db8::7]:8080/mcp"),
+    ])
+    def test_specific_non_loopback_bind_is_advertised_as_itself(self, monkeypatch, bind, expected):
+        monkeypatch.setenv("MCP_BIND_ADDRESS", bind)
+        assert mcp_url._get_default_mcp_url(_request()) == expected
+
+    @pytest.mark.parametrize("bind", [None, "", "0.0.0.0", "::"])
     def test_unset_bind_keeps_todays_raw_port_url(self, monkeypatch, bind):
         if bind is None:
             monkeypatch.delenv("MCP_BIND_ADDRESS", raising=False)

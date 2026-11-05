@@ -1928,8 +1928,11 @@ _mcp_bind="${MCP_BIND_ADDRESS:-$(env_value MCP_BIND_ADDRESS)}"
 case "$_mcp_bind" in
     127.0.0.1|::1|localhost)
         echo "  - MCP Server:   ${WEB_UI_URL}/mcp once an admin turns on External MCP access (Settings → MCP Keys); the container port is published on ${_mcp_bind} only" ;;
-    "")
+    ""|0.0.0.0|::)
         echo "  - MCP Server:   http://localhost:8080/mcp"
+        echo "                  (clients off this host need External MCP access on: Settings → MCP Keys)" ;;
+    *:*)
+        echo "  - MCP Server:   http://[${_mcp_bind}]:8080/mcp"
         echo "                  (clients off this host need External MCP access on: Settings → MCP Keys)" ;;
     *)
         echo "  - MCP Server:   http://${_mcp_bind}:8080/mcp"

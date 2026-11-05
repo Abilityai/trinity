@@ -130,15 +130,21 @@ def _get_default_mcp_url(request: Request) -> str:
     that cannot reach it). The origin comes from `public_base_url`; the
     hostname is the `Host` header, and no route trusts `X-Forwarded-Host`.
 
-    No forwarded header (a direct `:8000` hit) → the raw port. With
-    `MCP_BIND_ADDRESS` set it is published on that address only, so the honest
-    URL is the host-local one; unset keeps every interface, and today's URL.
+    No forwarded header (a direct `:8000` hit) → the raw port, published on
+    `MCP_BIND_ADDRESS`. A loopback bind is reachable from this host only, so
+    the honest URL is the host-local one; a specific non-loopback address (a
+    LAN or VPN interface) is advertised as itself, as `start.sh` and
+    `verify-platform.sh` print it; unset, `0.0.0.0` or `::` keeps every
+    interface, and today's URL.
     """
     origin = public_base_url(request)
     if origin and (request.headers.get("x-forwarded-proto") or origin.startswith("https://")):
         return f"{origin}/mcp"
-    if os.getenv("MCP_BIND_ADDRESS", "").strip():
+    bind = os.getenv("MCP_BIND_ADDRESS", "").strip()
+    if bind in ("127.0.0.1", "localhost", "::1"):
         return "http://127.0.0.1:8080/mcp"
+    if bind and bind not in ("0.0.0.0", "::"):
+        return f"http://[{bind}]:8080/mcp" if ":" in bind else f"http://{bind}:8080/mcp"
     host = request.headers.get("host", "localhost:8080")
     hostname = host.split(":")[0]
     if hostname in ("localhost", "127.0.0.1"):

@@ -313,6 +313,22 @@ def test_a_loopback_bind_points_at_the_web_door_not_the_raw_port(tmp_path):
     assert ":8080/mcp" not in summary, summary
 
 
+
+@pytest.mark.parametrize("bind, url", [
+    # A wildcard bind is every interface: today's URL, as the backend says.
+    ("0.0.0.0", "http://localhost:8080/mcp"),
+    # A specific address is advertised as itself, as the backend says.
+    ("203.0.113.7", "http://203.0.113.7:8080/mcp"),
+])
+def test_start_summary_names_the_raw_port_as_the_backend_does(tmp_path, bind, url):
+    h = _caddy_harness()
+    r = h._install(tmp_path, "--hosted", "--unattended", dotenv_extra=f"MCP_BIND_ADDRESS={bind}\n",
+                   env={"DOCKER_PORT_OUT": ""})
+    assert r.proc.returncode == 0, r.proc.stdout[-2000:] + r.proc.stderr[-2000:]
+    summary = _mcp_summary(r.proc.stdout)
+    assert url in summary and _SETTINGS_POINTER in summary, summary
+    assert "0.0.0.0:8080" not in summary, summary
+
 # ---------------------------------------------------------------------------
 # verify-platform.sh (executed): same wording, still probes localhost:8080
 # ---------------------------------------------------------------------------
@@ -354,3 +370,16 @@ def test_verify_platform_every_interface_wording(tmp_path):
     summary = r.stdout[r.stdout.index("Access points:"):]
     assert "http://localhost:8080/mcp" in summary and _SETTINGS_POINTER in summary, summary
     assert "http://localhost:8080/health" in calls
+
+
+@pytest.mark.parametrize("bind, url", [
+    ("0.0.0.0", "http://localhost:8080/mcp"),
+    ("::", "http://localhost:8080/mcp"),
+    ("203.0.113.7", "http://203.0.113.7:8080/mcp"),
+    ("2001:db8::7", "http://[2001:db8::7]:8080/mcp"),
+])
+def test_verify_platform_names_the_raw_port_as_the_backend_does(tmp_path, bind, url):
+    r, _ = _verify(tmp_path, f"FRONTEND_PORT=8081\nMCP_BIND_ADDRESS={bind}\n")
+    assert r.returncode == 0, r.stdout[-2000:]
+    summary = r.stdout[r.stdout.index("Access points:"):]
+    assert url in summary and _SETTINGS_POINTER in summary, summary

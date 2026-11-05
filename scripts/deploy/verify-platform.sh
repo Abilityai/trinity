@@ -134,8 +134,11 @@ if [ "$all_running" = true ]; then
     case "$MCP_BIND_ADDRESS" in
         127.0.0.1|::1|localhost)
             echo "  - MCP Server:   $FRONTEND_URL/mcp once an admin turns on External MCP access (Settings → MCP Keys); the container port is published on $MCP_BIND_ADDRESS only" ;;
-        "")
+        ""|0.0.0.0|::)
             echo "  - MCP Server:   http://localhost:8080/mcp"
+            echo "                  (clients off this host need External MCP access on: Settings → MCP Keys)" ;;
+        *:*)
+            echo "  - MCP Server:   http://[$MCP_BIND_ADDRESS]:8080/mcp"
             echo "                  (clients off this host need External MCP access on: Settings → MCP Keys)" ;;
         *)
             echo "  - MCP Server:   http://$MCP_BIND_ADDRESS:8080/mcp"
