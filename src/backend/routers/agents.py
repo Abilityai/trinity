@@ -1422,9 +1422,9 @@ async def get_operator_resume_endpoint(
 ):
     """Whether an operator answer re-triggers this agent (ent#329).
 
-    Default OFF. When off, an answer still reaches the agent's queue file — it is
-    simply processed at the agent's next turn, which is the behaviour every agent
-    had before this flag existed.
+    Default ON since abilityai/trinity-enterprise#1108 (an untouched agent reads
+    `enabled: true`). When an owner switches it off, an answer still reaches
+    the agent's queue file — it is simply processed at the agent's next turn.
     """
     return {
         "agent_name": agent_name,

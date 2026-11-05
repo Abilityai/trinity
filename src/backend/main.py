@@ -43,6 +43,7 @@ from opentelemetry.instrumentation.redis import RedisInstrumentor
 
 # Import routers
 from routers.auth import router as auth_router
+from routers.terms import router as terms_router  # trinity-enterprise#1107 terms of use
 from routers.agents import router as agents_router, set_websocket_manager as set_agents_ws_manager, set_filtered_websocket_manager as set_agents_filtered_ws_manager
 from routers.agent_config import router as agent_config_router
 from routers.agent_data import router as agent_data_router
@@ -1373,6 +1374,7 @@ app.add_middleware(HostHeaderGuard)
 
 # Include all routers
 app.include_router(auth_router)
+app.include_router(terms_router)  # trinity-enterprise#1107: /api/terms/*
 app.include_router(agents_router)
 app.include_router(agent_config_router)
 app.include_router(agent_data_router)  # #1169: data export/import

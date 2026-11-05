@@ -326,11 +326,13 @@ def test_unknown_per_agent_keys_surface_as_warnings():
         "    credentials: [OPENAI_API_KEY]\n"
         "    display_label: Web\n"
     )
-    assert manifest.unknown_agent_keys == {"web": ["credentials", "display_label"]}
+    # trinity-enterprise#1109: `credentials:` is read now (variable names); `display_label` is still unknown
+    assert manifest.unknown_agent_keys == {"web": ["display_label"]}
+    assert manifest.agents["web"].credentials == ["OPENAI_API_KEY"]
 
     warnings = validate_manifest(manifest)
     joined = " ".join(warnings)
-    assert "web" in joined and "credentials" in joined and "display_label" in joined
+    assert "web" in joined and "display_label" in joined
 
 
 def test_a_fully_recognised_manifest_warns_about_nothing_per_agent():

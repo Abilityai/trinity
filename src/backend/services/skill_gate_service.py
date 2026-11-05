@@ -1382,6 +1382,11 @@ DISPATCH_FIELDS: Dict[str, str] = {
     "images": DROP,
     "open_canvas_id": DROP,
     "conversation_key": DROP,
+    # abilityai/trinity-enterprise#1108: an answer wake asks to queue on the
+    # durable backlog rather than fail at capacity. That is the wake producer's
+    # choice for its own dispatch; an approved run is the requester's request
+    # replayed later, and keeps every producer's default admission.
+    "queue_on_capacity": DROP,
     "execution_id": RESET,
     "slot_already_held": RESET,
     "attempt": RESET,

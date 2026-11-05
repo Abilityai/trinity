@@ -84,7 +84,8 @@ def pull_queue_allowance(agent_name: str) -> int:
 #
 #   task_execution_service   → "reject" | "queue_persistent"  ← #2391, pilot-gated
 #                              scheduler/ALL cron, webhooks, reminders, loops,
-#                              fan-out, A2A, operator resumes
+#                              fan-out, A2A; operator resumes opt in with
+#                              ``queue_on_capacity=True`` on every agent (ent#1108)
 #   dispatch_admission_svc   → "queue_in_memory"   — POST /chat (push agents;
 #                              on a pilot /chat skips acquire and is pulled, #3127)
 #   chat_execution_service   → "queue_persistent"  — POST /task

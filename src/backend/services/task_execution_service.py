@@ -708,9 +708,19 @@ def build_pull_queue_payload(
     images: Optional[list] = None,
     collaboration_activity_id: Optional[str] = None,
     max_turns: Optional[int] = None,
+    queue_on_capacity: bool = False,
 ) -> Optional[PersistentTaskPayload]:
     """The #2391 producer gate: the overflow payload that lets THIS producer put
     a row on the durable queue, or ``None`` to keep today's ``"reject"`` policy.
+
+    ``queue_on_capacity`` (abilityai/trinity-enterprise#1108) is a caller's
+    explicit opt-in to the durable backlog for ONE dispatch, pilot or not — the
+    operator-queue wakes (`operator_resume_service`), whose rejected turn was a
+    FAILED row under a completed idempotency key and so never retried. On a
+    non-pilot the payload is only the overflow: admission still takes a free
+    slot first, and only at capacity does `capacity_manager.acquire` hand the
+    row to `BacklogService`, where the push drain runs it when a slot frees.
+    The default keeps the pull predicate the sole widening, as #2391 pinned.
 
     Until #2391 this producer dispatched with ``overflow_policy="reject"``
     unconditionally, so the scheduler's traffic — all cron, plus webhooks and
@@ -765,7 +775,7 @@ def build_pull_queue_payload(
     """
     if slot_already_held or not execution_id:
         return None
-    if not pull_owns_dispatch(agent_name, triggered_by):
+    if not queue_on_capacity and not pull_owns_dispatch(agent_name, triggered_by):
         return None
 
     # Lazy: several unit suites stub `models` with a partial module, and a
@@ -1646,6 +1656,11 @@ class TaskExecutionService:
         # to the agent, which applies it to `--max-turns`; None ⇒ the agent's
         # own guardrail. Queued for a pull pilot, frozen by the skill gate.
         max_turns: Optional[int] = None,
+        # abilityai/trinity-enterprise#1108: this producer's explicit opt-in to
+        # the durable backlog at capacity (`overflow_policy="queue_persistent"`),
+        # whether or not the agent is a pull pilot. Off, the #2391 pilot gate
+        # alone decides. See `build_pull_queue_payload`.
+        queue_on_capacity: bool = False,
     ) -> TaskExecutionResult:
         """
         Execute a task on an agent container with full lifecycle management.
@@ -1777,6 +1792,7 @@ class TaskExecutionService:
             images=images,
             collaboration_activity_id=collaboration_activity_id,
             max_turns=max_turns,
+            queue_on_capacity=queue_on_capacity,
         )
 
         # Wrap entire execution flow to ensure execution status is updated on any failure.

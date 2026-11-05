@@ -199,6 +199,12 @@ _ADDED_SINCE_SPLIT = {
     # write; the generic catch-all refuses those keys.
     ("/api/settings/aauth", ("GET",), "get_aauth_settings"),
     ("/api/settings/aauth", ("PUT",), "update_aauth_settings"),
+    # trinity-enterprise#1101 — the external-MCP-access switch: any-auth read,
+    # admin write and clear; the generic catch-all refuses the key. In
+    # `mcp_url`, above the catch-all (Invariant #4).
+    ("/api/settings/mcp-external-access", ("GET",), "get_mcp_external_access"),
+    ("/api/settings/mcp-external-access", ("PUT",), "update_mcp_external_access"),
+    ("/api/settings/mcp-external-access", ("DELETE",), "delete_mcp_external_access"),
 }
 
 

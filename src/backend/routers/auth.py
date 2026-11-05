@@ -5,7 +5,7 @@ import asyncio
 import logging
 from datetime import timedelta
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, status, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
@@ -353,13 +353,34 @@ async def get_auth_mode():
     }
 
 
+#: The value the SPA sends to declare its session interactive
+#: (`client=web` / `"client": "web"`), trinity-enterprise#1107 ruling A.
+SPA_CLIENT = "web"
+
+
+def _session_claims(username: str, *, interactive: bool) -> dict:
+    """The platform session's claims: `sub`, plus `interactive: true` when the
+    client declared itself the SPA. The claim is a UX/record contract the
+    terms gate reads (`services/terms_gate.py`) — never an authorization input
+    — so a client's own word for it is enough. Absent on every other token."""
+    claims = {"sub": username}
+    if interactive:
+        claims["interactive"] = True
+    return claims
+
+
 @router.post("/token", response_model=Token, response_model_exclude_none=True,
              responses={403: {"description": "Second factor required — no session issued (#2322)"}})
-async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
+async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends(),
+                client: Optional[str] = Form(None)):
     """Login with username/password and get JWT token.
 
     Used for admin login (username 'admin' with password).
     Regular users should use email authentication.
+
+    `client=web` is what the SPA sends (trinity-enterprise#1107, ruling A): the
+    token then carries `interactive: true`, the claim the terms gate asks. The
+    CLI and every script send nothing and are never asked.
 
     Rate limited (issue #591): per-account (5 fails / 15 min) plus
     per-IP (30 fails / 5 min). The two-bucket design prevents one user's
@@ -451,7 +472,7 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
 
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        data={"sub": user["username"]},
+        data=_session_claims(user["username"], interactive=client == SPA_CLIENT),
         expires_delta=access_token_expires,
         mode="admin"  # Mark as admin login token
     )
@@ -474,9 +495,10 @@ async def login(request: Request, form_data: OAuth2PasswordRequestForm = Depends
 
 @router.post("/api/token", response_model=Token, response_model_exclude_none=True,
              responses={403: {"description": "Second factor required — no session issued (#2322)"}})
-async def login_api(request: Request, form_data: OAuth2PasswordRequestForm = Depends()):
+async def login_api(request: Request, form_data: OAuth2PasswordRequestForm = Depends(),
+                    client: Optional[str] = Form(None)):
     """Alias for /token endpoint."""
-    return await login(request, form_data)
+    return await login(request, form_data, client)
 
 
 @router.get("/api/auth/validate")
@@ -709,9 +731,12 @@ async def _email_login_failed(request: Request, client_ip: str, email: str, meth
     )
 
 
-async def _complete_email_login(request: Request, client_ip: str, email: str, method: str):
+async def _complete_email_login(request: Request, client_ip: str, email: str, method: str,
+                                *, interactive: bool = False):
     """Everything after the first factor is proven: clear the buckets, resolve
-    the account, run the 2FA gate, mint the JWT, audit."""
+    the account, run the 2FA gate, mint the JWT, audit. `interactive` is the
+    SPA's declaration (`"client": "web"`, ent#1107 ruling A) and becomes the
+    token's `interactive` claim."""
     from database import EmailLoginResponse
 
     # Clear rate limit counters on successful verification
@@ -751,7 +776,7 @@ async def _complete_email_login(request: Request, client_ip: str, email: str, me
     # Create JWT token
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
-        data={"sub": user["username"]},
+        data=_session_claims(user["username"], interactive=interactive),
         expires_delta=access_token_expires,
         mode="email"  # Mark as email auth token
     )
@@ -846,7 +871,8 @@ async def verify_email_login_code(request: Request):
     if not verification:
         await _email_login_failed(request, client_ip, email, "email")
 
-    return await _complete_email_login(request, client_ip, email, "email")
+    return await _complete_email_login(request, client_ip, email, "email",
+                                       interactive=verify_request.client == SPA_CLIENT)
 
 
 @router.post("/api/auth/email/handoff")  # no response_model, like verify (#2322)
@@ -885,7 +911,8 @@ async def redeem_email_login_handoff(request: Request):
     if not (allowed and login_handoff_service.redeem(handoff_request.token, email)):
         await _email_login_failed(request, client_ip, email, "email_handoff")
 
-    return await _complete_email_login(request, client_ip, email, "email_handoff")
+    return await _complete_email_login(request, client_ip, email, "email_handoff",
+                                       interactive=handoff_request.client == SPA_CLIENT)
 
 
 # =========================================================================

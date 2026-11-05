@@ -42,6 +42,22 @@ def _row(role, username="member"):
     }
 
 
+@pytest.fixture(autouse=True)
+def _terms_off():
+    """trinity-enterprise#1107: the terms gate runs inside the shared resolver,
+    BEFORE the floor, and a Workspace-only person's own key is a visit it asks
+    (ent#1054). These tests are about the floor, so the switch is off here —
+    `test_ent1054_terms_gate.py` is where the gate's order is pinned."""
+    from database import db
+
+    db.set_setting("terms_required", "false")
+    yield
+    try:
+        db.delete_setting("terms_required")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 @pytest.fixture
 def jwt_as(monkeypatch):
     """A real platform JWT whose `sub` resolves to a user holding `role`."""

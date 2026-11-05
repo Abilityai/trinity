@@ -115,6 +115,13 @@ from services.subscription_headroom_alerts import (
 )
 
 
+# trinity-enterprise#1107 — the terms of use are written only through
+# `PUT /api/terms` / `POST /api/terms/restore-default` (admin + interactive,
+# validated by name, audited by version). Blocked on the generic PUT so an
+# empty or oversized text, or a hand-typed version, cannot reach the sink.
+from services.terms_service import SETTING_KEYS as TERMS_SETTING_KEYS
+
+
 
 router = APIRouter()
 
@@ -218,6 +225,16 @@ async def update_setting(
         raise HTTPException(
             status_code=422,
             detail=f"{key} is recorded by the platform at boot and is not writable through the API.",
+        )
+
+    # trinity-enterprise#1107: the terms text, title, version and switch.
+    if key in TERMS_SETTING_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} is set via PUT /api/terms (admin + interactive-only, validated, "
+                "audit-logged; POST /api/terms/restore-default restores the shipped text)"
+            ),
         )
 
     # #506: the fleet ceiling must go through the dedicated range-validated
@@ -483,6 +500,20 @@ async def update_setting(
             ),
         )
 
+    # trinity-enterprise#1101: the external-MCP-access switch moves the
+    # instance's perimeter, so it has one write path — the typed, audited
+    # route — and the catch-all cannot store a value it would not validate.
+    from services.settings_service import MCP_EXTERNAL_ACCESS_KEY
+
+    if key == MCP_EXTERNAL_ACCESS_KEY:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} must be set via PUT /api/settings/mcp-external-access "
+                "(admin, boolean, audit-logged)"
+            ),
+        )
+
     if key == "a2a_trusted_networks":
         raise HTTPException(
             status_code=422,
@@ -728,6 +759,19 @@ async def delete_setting(
             detail=(
                 f"{key} must be changed via PUT /api/settings/aauth "
                 "(admin + interactive-only, audit-logged)"
+            ),
+        )
+
+    # trinity-enterprise#1107: deleting `terms_version` alone would make the
+    # shipped version name a custom text (nobody asked again); deleting the
+    # text brings the default back without the audit row restore-default
+    # writes. The terms routes are the only writer on BOTH verbs.
+    if key in TERMS_SETTING_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} is set via PUT /api/terms (admin + interactive-only, validated, "
+                "audit-logged; POST /api/terms/restore-default restores the shipped text)"
             ),
         )
 
