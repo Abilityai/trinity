@@ -3625,6 +3625,23 @@ class GitSyncRequest(BaseModel):
     paths: Optional[List[str]] = None  # Specific paths to sync
     strategy: Optional[str] = "normal"  # "normal", "pull_first", "force_push"
 
+    @field_validator("paths")
+    @classmethod
+    def _reject_option_like_paths(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        # The agent server passes `paths` to `git add`. An agent created on an
+        # older base image runs `git add <paths>` without `--`, so an element
+        # like `-f` is read as an option and force-stages an ignored file such
+        # as `.env`, which the sync then pushes (ent#1117). Refuse it here, at
+        # the edge every caller crosses. A dash elsewhere (`sub/-x.md`) is fine.
+        for i, path in enumerate(v or []):
+            if path.startswith("-"):
+                raise ValueError(
+                    f"paths[{i}] {path!r} starts with '-' and would be read by "
+                    "git as an option; name a file that starts with '-' as "
+                    f"'./{path}'"
+                )
+        return v
+
 
 class GitPullRequest(BaseModel):
     """Request body for git pull operation."""
