@@ -23,6 +23,7 @@ import re
 import subprocess
 import threading
 import time
+import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -1919,5 +1920,11 @@ async def execute_headless_task(
             detail="Agent subprocess closed before task could complete",
         )
     except Exception as e:
-        logger.error(f"[Headless Task] Execution error: {e}")
-        raise HTTPException(status_code=500, detail=f"Task execution error: {str(e)}")
+        # trinity#4284: an exception we did not raise ourselves (the messages we
+        # write are HTTPExceptions, re-raised above). Its text goes to the log,
+        # scrubbed; the answer names only the class.
+        logger.error(
+            "[Headless Task] Execution error (%s): %s",
+            type(e).__name__, sanitize_text("".join(traceback.format_exception(e))),
+        )
+        raise HTTPException(status_code=500, detail=f"Task execution error: {type(e).__name__}") from e

@@ -16,6 +16,7 @@ import logging
 import os
 import subprocess
 import threading
+import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -733,8 +734,13 @@ async def _execute_claude_code_once(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Claude Code execution error: {e}")
-        raise HTTPException(status_code=500, detail=f"Execution error: {str(e)}")
+        # trinity#4284: an exception we did not raise ourselves. Its text goes to
+        # the log, scrubbed; the answer names only the class.
+        logger.error(
+            "Claude Code execution error (%s): %s",
+            type(e).__name__, sanitize_text("".join(traceback.format_exception(e))),
+        )
+        raise HTTPException(status_code=500, detail=f"Execution error: {type(e).__name__}") from e
 
 
 # #2958: statuses that are never a dead-session symptom — a rate limit, an auth

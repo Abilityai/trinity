@@ -320,3 +320,338 @@ def test_dashboard_has_no_unreachable_yaml_error_arm():
     assert "except yaml.YAMLError" not in src
     assert "\nimport yaml\n" not in src
     assert "except HardenedYamlError" in src  # test_1965's contract
+
+
+# ---------------------------------------------------------------------------
+# trinity#4284 — files router
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def files(tmp_path, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    mod = _load("routers/files.py", "_ent1117_s6_files")
+    home = (tmp_path / "home").resolve()
+    (home / "workspace").mkdir(parents=True)
+    (home / "workspace" / "a.txt").write_text("hello")
+    monkeypatch.setattr(mod, "_HOME", home)
+    app = FastAPI()
+    app.include_router(mod.router)
+    return mod, home, TestClient(app, raise_server_exceptions=True)
+
+
+def _raise_plant(*_a, **_kw):
+    raise PermissionError(_PLANT)
+
+
+def _check_files_500(resp, prefix, caplog, needle):
+    assert resp.status_code == 500, resp.text
+    detail = resp.json()["detail"]
+    assert detail == f"{prefix}: PermissionError"
+    _assert_answer_clean(detail, "PermissionError")
+    _assert_log_scrubbed(caplog.records, needle)
+
+
+def test_files_list_error_returns_the_class_name(files, monkeypatch, caplog):
+    mod, home, client = files
+
+    class _Path(type(Path())):
+        def relative_to(self, *a, **kw):
+            raise PermissionError(_PLANT)
+
+    monkeypatch.setattr(mod, "Path", _Path)
+    with caplog.at_level(logging.ERROR, logger=mod.logger.name):
+        resp = client.get("/api/files", params={"path": str(home / "workspace")})
+    _check_files_500(resp, "Failed to list files", caplog, "File listing error")
+
+
+def test_files_download_error_returns_the_class_name(files, monkeypatch, caplog):
+    mod, home, client = files
+    real_fdopen = os.fdopen
+
+    class _Reader:
+        def __init__(self, fd):
+            self._f = real_fdopen(fd, "rb")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._f.close()
+            return False
+
+        def read(self, *_a):
+            raise PermissionError(_PLANT)
+
+    monkeypatch.setattr(mod.os, "fdopen", lambda fd, *_a, **_kw: _Reader(fd))
+    with caplog.at_level(logging.ERROR, logger=mod.logger.name):
+        resp = client.get("/api/files/download", params={"path": "workspace/a.txt"})
+    _check_files_500(resp, "Failed to read file", caplog, "File download error")
+
+
+def test_files_delete_error_returns_the_class_name(files, monkeypatch, caplog):
+    mod, home, client = files
+    monkeypatch.setattr(mod.os, "unlink", _raise_plant)
+    with caplog.at_level(logging.ERROR, logger=mod.logger.name):
+        resp = client.delete("/api/files", params={"path": "workspace/a.txt"})
+    _check_files_500(resp, "Failed to delete", caplog, "File delete error")
+
+
+def test_files_update_error_returns_the_class_name(files, monkeypatch, caplog):
+    mod, home, client = files
+    monkeypatch.setattr(mod, "_write_text_atomic_at", _raise_plant)
+    with caplog.at_level(logging.ERROR, logger=mod.logger.name):
+        resp = client.put(
+            "/api/files", params={"path": "workspace/a.txt"}, json={"content": "new"}
+        )
+    _check_files_500(resp, "Failed to update file", caplog, "File update error")
+
+
+def test_files_mkdir_error_returns_the_class_name(files, monkeypatch, caplog):
+    mod, home, client = files
+    real_mkdir = os.mkdir
+
+    def _mkdir(path, *a, **kw):
+        if path == "new-folder":
+            raise PermissionError(_PLANT)
+        return real_mkdir(path, *a, **kw)
+
+    monkeypatch.setattr(mod.os, "mkdir", _mkdir)
+    with caplog.at_level(logging.ERROR, logger=mod.logger.name):
+        resp = client.post("/api/files/mkdir", params={"path": "workspace/new-folder"})
+    _check_files_500(resp, "Failed to create folder", caplog, "Folder create error")
+
+
+# ---------------------------------------------------------------------------
+# trinity#4284 — runtimes
+# ---------------------------------------------------------------------------
+
+
+def _runtime_records(caplog, logger_name):
+    return [r for r in caplog.records if r.name == logger_name]
+
+
+@pytest.mark.asyncio
+async def test_claude_chat_error_returns_the_class_name(monkeypatch, caplog):
+    from agent_server.services import claude_code
+
+    def _boom():
+        raise RuntimeError(_PLANT)
+
+    monkeypatch.setattr(claude_code, "_load_guardrails", _boom)
+    with caplog.at_level(logging.ERROR, logger=claude_code.logger.name):
+        with pytest.raises(HTTPException) as exc:
+            await claude_code._execute_claude_code_once(
+                "hi",
+                False,
+                None,
+                None,
+                "exec-s6",
+                None,
+            )
+    assert exc.value.status_code == 500
+    assert exc.value.detail == "Execution error: RuntimeError"
+    _assert_answer_clean(exc.value.detail, "RuntimeError")
+    _assert_log_scrubbed(
+        _runtime_records(caplog, claude_code.logger.name), "Claude Code execution error"
+    )
+
+
+@pytest.mark.asyncio
+async def test_gemini_chat_error_returns_the_class_name(monkeypatch, caplog):
+    from agent_server.services import gemini_runtime
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError(_PLANT)
+
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key-for-test")
+    monkeypatch.setattr(gemini_runtime, "build_chat_argv", _boom)
+    runtime = gemini_runtime.GeminiRuntime()
+    with caplog.at_level(logging.ERROR, logger=gemini_runtime.logger.name):
+        with pytest.raises(HTTPException) as exc:
+            await runtime._execute_chat_once("hi", None, None, "exec-s6", None)
+    assert exc.value.status_code == 500
+    assert exc.value.detail == "Execution error: RuntimeError"
+    _assert_answer_clean(exc.value.detail, "RuntimeError")
+    _assert_log_scrubbed(
+        _runtime_records(caplog, gemini_runtime.logger.name), "Gemini execution error"
+    )
+
+
+@pytest.mark.asyncio
+async def test_gemini_task_error_returns_the_class_name(monkeypatch, caplog):
+    from agent_server.services import gemini_runtime
+
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key-for-test")
+    runtime = gemini_runtime.GeminiRuntime()
+    monkeypatch.setattr(runtime, "is_available", lambda: True)
+
+    def _boom(*_a, **_kw):
+        raise RuntimeError(_PLANT)
+
+    monkeypatch.setattr(gemini_runtime.subprocess, "Popen", _boom)
+    with caplog.at_level(logging.ERROR, logger=gemini_runtime.logger.name):
+        with pytest.raises(HTTPException) as exc:
+            await runtime.execute_headless(prompt="hello")
+    assert exc.value.status_code == 500
+    assert exc.value.detail == "Task execution error: RuntimeError"
+    _assert_answer_clean(exc.value.detail, "RuntimeError")
+    _assert_log_scrubbed(
+        _runtime_records(caplog, gemini_runtime.logger.name), "Execution error"
+    )
+
+
+@pytest.fixture
+def headless(monkeypatch):
+    from agent_server.services import headless_executor as he
+
+    monkeypatch.setattr(he.agent_state, "claude_code_available", True)
+
+    class _Ctx:
+        task_session_id = "exec-s6"
+        effective_timeout = 10
+
+        def terminate(self):
+            return None
+
+    class _Registry:
+        def unregister(self, _id):
+            return None
+
+    monkeypatch.setattr(he, "_setup_headless_command", lambda **_kw: _Ctx())
+    monkeypatch.setattr(he, "get_process_registry", lambda: _Registry())
+    return he
+
+
+@pytest.mark.asyncio
+async def test_headless_task_error_returns_the_class_name(
+    headless, monkeypatch, caplog
+):
+    def _boom(_ctx):
+        raise RuntimeError(_PLANT)
+
+    monkeypatch.setattr(headless, "_run_headless_subprocess", _boom)
+    with caplog.at_level(logging.ERROR, logger=headless.logger.name):
+        with pytest.raises(HTTPException) as exc:
+            await headless.execute_headless_task(prompt="hello")
+    assert exc.value.status_code == 500
+    assert exc.value.detail == "Task execution error: RuntimeError"
+    _assert_answer_clean(exc.value.detail, "RuntimeError")
+    _assert_log_scrubbed(
+        _runtime_records(caplog, headless.logger.name), "Execution error"
+    )
+
+
+@pytest.mark.asyncio
+async def test_headless_permission_bypass_text_is_kept(headless, monkeypatch):
+    """Characterization: a message the agent server writes itself, matched by
+    the backend's `is_container_fault` ("permission bypass failed"), stays
+    verbatim."""
+    text = "Permission bypass failed: permissionMode=default. Try restarting the agent container."
+
+    def _boom(_ctx):
+        raise RuntimeError(text)
+
+    monkeypatch.setattr(headless, "_run_headless_subprocess", _boom)
+    with pytest.raises(HTTPException) as exc:
+        await headless.execute_headless_task(prompt="hello")
+    assert exc.value.status_code == 503
+    assert exc.value.detail == text
+
+
+@pytest.fixture
+def codex(monkeypatch):
+    from agent_server.services import codex_runtime
+
+    rt = codex_runtime.CodexRuntime()
+    monkeypatch.setattr(rt, "is_available", lambda: True)
+    return codex_runtime, rt
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("entry", "prefix", "needle"),
+    [
+        ("chat", "Execution error", "execution error"),
+        ("task", "Task execution error", "task execution error"),
+    ],
+)
+async def test_codex_error_returns_the_class_name(
+    codex, monkeypatch, caplog, entry, prefix, needle
+):
+    mod, rt = codex
+
+    async def _boom(**_kw):
+        raise RuntimeError(_PLANT)
+
+    monkeypatch.setattr(rt, "_execute_codex", _boom)
+    with caplog.at_level(logging.ERROR, logger=mod.logger.name):
+        with pytest.raises(HTTPException) as exc:
+            if entry == "chat":
+                await rt.execute("hi")
+            else:
+                await rt.execute_headless(prompt="hi")
+    assert exc.value.status_code == 500
+    assert exc.value.detail == f"{prefix}: RuntimeError"
+    _assert_answer_clean(exc.value.detail, "RuntimeError")
+    _assert_log_scrubbed(_runtime_records(caplog, mod.logger.name), needle)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["chat", "task"])
+async def test_codex_foreign_timeout_returns_the_class_name(
+    codex, monkeypatch, caplog, entry
+):
+    """Every timeout the Codex path owns is already a 504 HTTPException; a
+    TimeoutError reaching this arm is foreign, so its text is not ours to
+    return. "timed out" stays in the answer for the backend's text checks."""
+    mod, rt = codex
+
+    async def _boom(**_kw):
+        raise TimeoutError(_PLANT)
+
+    monkeypatch.setattr(rt, "_execute_codex", _boom)
+    with caplog.at_level(logging.ERROR, logger=mod.logger.name):
+        with pytest.raises(HTTPException) as exc:
+            if entry == "chat":
+                await rt.execute("hi")
+            else:
+                await rt.execute_headless(prompt="hi")
+    assert exc.value.status_code == 504
+    assert exc.value.detail == "Codex execution timed out (TimeoutError)"
+    _assert_answer_clean(exc.value.detail, "TimeoutError")
+    _assert_log_scrubbed(_runtime_records(caplog, mod.logger.name), "timeout")
+
+
+# ---------------------------------------------------------------------------
+# The backend reads agent detail text: the new fixed strings trip none of it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "Execution error: RuntimeError",
+        "Task execution error: RuntimeError",
+        "Task execution error: OSError",
+        "Codex execution timed out (TimeoutError)",
+        "Failed to read file: PermissionError",
+    ],
+)
+def test_new_detail_strings_trip_no_backend_classifier(detail):
+    """Characterization of the sweep: the backend's substring classifiers
+    (`failure_classifier`, used by SUB-003, `classify_switch_failure` and the
+    scheduler) read nothing from the fixed wording the agent now writes."""
+    fc = importlib.util.spec_from_file_location(
+        "_ent1117_s6_failure_classifier",
+        str(_REPO / "src/backend/services/failure_classifier.py"),
+    )
+    mod = importlib.util.module_from_spec(fc)
+    fc.loader.exec_module(mod)
+    assert not mod.is_auth_failure(detail)
+    assert not mod.is_turn_limit(detail)
+    assert not mod.is_container_fault(detail)
+    assert not mod.is_prompt_too_long(detail)
+    assert not mod.is_model_rejection(detail)
