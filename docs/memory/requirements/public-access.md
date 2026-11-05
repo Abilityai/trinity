@@ -665,7 +665,10 @@
     `delegation_active`, nothing upstream, no env read/write) → agent running
     (409 `agent_not_running`) → ONE Nevermined verify (404 → 422
     `delegation_not_found`; a present non-active status → 422
-    `delegation_inactive`; an absent status binds) → `.env` read → a
+    `delegation_inactive`; an absent status binds) → `.env` read (a file the
+    agent did not hand back as text — non-UTF-8, a read error, or an image too
+    old to report it absent — is 409 `env_unreadable`, no row and no write,
+    never read as empty: trinity-enterprise#1073) → a
     hand-set `NVM_API_KEY` (409 `agent_key_present`, no row, no write) → row insert
     (a concurrent bind tripping the partial unique index → 409
     `bind_in_progress`) → inject `NVM_DELEGATION_ID`/`NVM_API_KEY`/`NVM_ENVIRONMENT`
@@ -680,7 +683,9 @@
   - **DELETE** (`require_person` + owner tier): 404 `no_active_delegation`;
     revokes at Nevermined first (2xx/404 = revoked; else 503/502, nothing local
     changes), then the row, then best-effort env removal — agent down → 200
-    with `env_removed: false` and an `env_note`.
+    with `env_removed: false` and an `env_note`; a `.env` not readable as text
+    → 200, `env_removed: false`, the file left exactly as it is and an
+    `env_note` starting `env_unreadable` (trinity-enterprise#1073).
   - **MCP**: `get_agent_spending` (GET pass-through) and
     `revoke_agent_delegation` (DELETE; advertised to `user` keys only, the one
     key scope `require_person` admits — trinity-enterprise#719).

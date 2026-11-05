@@ -734,7 +734,7 @@ describe('ent#551 — background tasks', () => {
     // While the call is on, what lands in the thread is read, not unread: the
     // read cursor advances on spoken turns and task landings (no list refresh).
     const marker = conv.split("watch([() => voice.transcriptEntries.value.length, () => voice.panelVersion.value]")[1] || ''
-    expect(marker).toContain("store.markChatRead('thread', currentSessionId.value)")
+    expect(marker).toContain("store.markChatRead('thread', currentSessionId.value, READ_UP_TO_NOW)")
     expect(marker.slice(0, 700)).not.toContain("emit('sessions-changed'")
     expect(conv).toContain('data-testid="portal-voice-task-caption"')
     expect(conv).toContain('voiceTaskCaption(item.message)')

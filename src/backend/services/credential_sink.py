@@ -62,7 +62,7 @@ from typing import Any, Dict, Optional
 import httpx
 
 from redis_breaker_util import SingleFlightLock, get_breaker_redis
-from services import agent_env_patch, credential_ask_policy, credential_requirements_service
+from services import agent_env_patch, agent_env_read, credential_ask_policy, credential_requirements_service
 from services import runtime_secret_scrub
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container, get_agent_status_from_container
@@ -191,19 +191,12 @@ async def _read_env(client: httpx.AsyncClient, agent_name: str) -> str:
     if response.status_code != 200:
         raise _agent_unreachable("read")
     try:
-        body = response.json()
-        content = (body.get("files") or {}).get(".env")
-        binary = ".env" in (body.get("files_b64") or {})
-        missing = ".env" in (body.get("missing") or [])
-    except (ValueError, AttributeError, TypeError):
+        state, content = agent_env_read.classify_env_read(response.json())
+    except ValueError:
         raise _agent_unreachable("read") from None
-    if isinstance(content, str):
+    if state in (agent_env_read.TEXT, agent_env_read.ABSENT):
         return content
-    if binary:
-        raise _env_unreadable("not_utf8")
-    if missing:
-        return ""
-    raise _env_unreadable("unconfirmed")
+    raise _env_unreadable(state)  # "not_utf8" / "unconfirmed", as before
 
 
 async def _inject_env(client: httpx.AsyncClient, agent_name: str, env_text: str) -> None:
