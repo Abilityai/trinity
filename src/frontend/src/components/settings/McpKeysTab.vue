@@ -18,8 +18,47 @@
       </button>
     </div>
 
+    <!-- trinity-enterprise#1101 — External MCP access: whether clients outside
+         this server may reach /mcp at all. Agents are never affected (they
+         connect on the Docker network). Admins get the switch; everyone else
+         reads the state, because the snippet below depends on it. Rendered
+         once the state has loaded, so a fresh page never flashes "off". -->
+    <div v-if="externalAccess" class="mb-4 space-y-1">
+      <BaseToggle
+        v-if="isAdmin"
+        :model-value="externalAccess.enabled"
+        :disabled="externalAccessBusy"
+        label="External MCP access"
+        aria-label="External MCP access"
+        @update:model-value="setExternalAccess"
+      />
+      <p v-else class="text-sm font-medium scope-label">External MCP access</p>
+      <p class="text-sm scope-hint" data-testid="mcp-external-access-source">
+        <template v-if="externalAccess.enabled && externalAccess.source === 'environment'">
+          On — <code>MCP_EXTERNAL_ACCESS=true</code> in the environment; a value saved here overrides it
+        </template>
+        <template v-else>{{ externalAccessSourceText }}</template>
+      </p>
+      <div v-if="isAdmin && externalAccess.source === 'settings'" class="flex items-center gap-3">
+        <BaseButton variant="secondary" size="sm" :disabled="externalAccessBusy" @click="clearExternalAccess">Clear</BaseButton>
+        <span class="text-xs scope-hint">Removes the value saved here; the environment or the default then decides.</span>
+      </div>
+      <p v-if="externalAccessError" class="text-sm text-status-danger-700 dark:text-status-danger-400">{{ externalAccessError }}</p>
+    </div>
+
+    <!-- Off: an outside client would be refused, so no URL is offered. -->
+    <div
+      v-if="externalAccess && !externalAccess.enabled"
+      data-testid="mcp-external-access-off"
+      class="bg-status-warning-50 dark:bg-status-warning-900/30 border border-status-warning-200 dark:border-status-warning-800 rounded-lg p-4 mb-6 text-sm text-status-warning-800 dark:text-status-warning-300"
+    >
+      External MCP access is off: clients outside this server are refused with
+      <code>external_mcp_access_off</code>. Agents keep connecting on the Docker network.
+      To connect an outside client, an admin turns on External MCP access above.
+    </div>
+
     <!-- MCP Connection Info -->
-    <div class="bg-status-info-50 dark:bg-status-info-900/30 border border-status-info-200 dark:border-status-info-800 rounded-lg p-4 mb-6">
+    <div v-else-if="externalAccess" data-testid="mcp-connection-snippet" class="bg-status-info-50 dark:bg-status-info-900/30 border border-status-info-200 dark:border-status-info-800 rounded-lg p-4 mb-6">
       <div class="flex">
         <div class="flex-shrink-0">
           <svg class="h-5 w-5 text-status-info-400" fill="currentColor" viewBox="0 0 20 20">
@@ -404,6 +443,10 @@
                 <!-- #1925 triage — NOT a tab strip: a preformatted code block. Horizontal
                      scroll is correct here (wrapping a config snippet corrupts it). Left as-is
                      deliberately so a later audit does not re-flag it. -->
+                <p v-if="externalAccess && !externalAccess.enabled" class="mb-2 text-xs text-status-warning-800 dark:text-status-warning-300">
+                  External MCP access is off — a client outside this server is refused
+                  (<code>external_mcp_access_off</code>) until an admin turns it on.
+                </p>
                 <pre class="bg-gray-900 dark:bg-gray-950 rounded-lg p-4 text-xs overflow-x-auto text-status-success-400 font-mono border border-gray-700">{{ getMcpConfig(createdApiKey) }}</pre>
               </div>
 
@@ -485,7 +528,7 @@ import BaseTextarea from '../base/BaseTextarea.vue'
 // in Settings.vue are admin-only.
 
 import { ref, reactive, onMounted, computed, watch } from 'vue'
-import axios from 'axios'
+import api from '../../api'
 import ConfirmDialog from '../ConfirmDialog.vue'
 import { useAuthStore } from '../../stores/auth'
 import { useRole } from '../../composables/useRole'
@@ -522,32 +565,52 @@ const confirmDialog = reactive({
   onConfirm: () => {}
 })
 
-// MCP server URL: use admin-configured URL if set, otherwise auto-detect
-const configuredMcpUrl = ref(null)
+// trinity-enterprise#1101 — the external-access state and the URL the instance
+// advertises both come from GET /api/settings/mcp-external-access. The URL is
+// the server's `advertised_url` (the admin override, else the server's own
+// detection); this page no longer guesses a `:8080` URL of its own, which could
+// only disagree with it.
+const externalAccess = ref(null)
+const externalAccessBusy = ref(false)
+const externalAccessError = ref('')
 
-const mcpServerUrl = computed(() => {
-  if (configuredMcpUrl.value) {
-    return configuredMcpUrl.value
-  }
-  const host = window.location.hostname
-  if (host === 'localhost' || host === '127.0.0.1') {
-    return 'http://localhost:8080/mcp'
-  }
-  return `http://${host}:8080/mcp`
+const mcpServerUrl = computed(() => externalAccess.value?.advertised_url || '')
+
+const externalAccessSourceText = computed(() => {
+  const s = externalAccess.value
+  if (!s) return ''
+  if (s.enabled) return 'On — set here'
+  if (s.source === 'settings') return 'Off — set here; agents are unaffected'
+  return 'Off — default for a fresh install; agents are unaffected'
 })
 
-const fetchMcpUrl = async () => {
+const fetchExternalAccess = async () => {
   try {
-    const response = await axios.get('/api/settings/mcp-url')
-    // An https default_url means the server saw an HTTPS proxy, which this page
-    // cannot see (#2907). An http one is skipped: behind the Vite dev proxy the
-    // backend sees its own host, and the hostname fallback below is right.
-    const detected = response.data.default_url || ''
-    configuredMcpUrl.value = response.data.url || (detected.startsWith('https://') ? detected : null)
+    const { data } = await api.get('/api/settings/mcp-external-access')
+    externalAccess.value = data
   } catch (error) {
-    console.error('Failed to fetch MCP URL setting:', error)
+    console.error('Failed to fetch external MCP access:', error)
   }
 }
+
+const applyExternalAccess = async (request) => {
+  externalAccessBusy.value = true
+  externalAccessError.value = ''
+  try {
+    const { data } = await request()
+    externalAccess.value = data
+  } catch (error) {
+    externalAccessError.value = error.response?.data?.detail || 'Failed to update external MCP access.'
+  } finally {
+    externalAccessBusy.value = false
+  }
+}
+
+const setExternalAccess = (enabled) =>
+  applyExternalAccess(() => api.put('/api/settings/mcp-external-access', { enabled }))
+
+const clearExternalAccess = () =>
+  applyExternalAccess(() => api.delete('/api/settings/mcp-external-access'))
 
 // #2202 — the list rules are pure (`utils/mcpKeyList.js`) and unit-tested; this
 // component keeps only the wiring. Revoked keys are hidden by default: on a
@@ -786,7 +849,7 @@ const formatDate = (dateString) => {
 }
 
 onMounted(async () => {
-  await Promise.all([fetchMcpUrl(), fetchApiKeys()])
+  await Promise.all([fetchExternalAccess(), fetchApiKeys()])
   await ensureDefaultKey()
 })
 </script>
