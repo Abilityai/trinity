@@ -41,24 +41,30 @@ thread row: "NAME provided"
 
 ```
 agent ──ask_for_credential(name, why, destination={instance_url, agent_name, key_env})──▶ MCP
-        context.credential_destination ── _validated_ask → credential_destination.validate
-             (URL: validate_a2a_endpoint_url — HTTPS + public, or an admin-trusted network; no path;
-              agent: a slug; key_env: a variable NAME the policy allows) → stored normalised
+        context.credential_destination ── _validated_ask → credential_destination.validate(agent_name)
+             (URL: shape only, no resolver on the loop; the outbound A2A switch ON; the origin equal to
+              an endpoint in the admin's outbound A2A registry for THIS agent — destination_not_approved /
+              destination_outbound_disabled; agent: a slug; key_env: a variable NAME the policy allows)
+             → stored normalised (canonical host, default port dropped, IPv6 bracketed, scheme kept)
         receipt + Workspace projection: credential_destination {agent_name, host} — never key_env
 
 person's field: "Sent to the agent lopez-digest on the Trinity at member.example.com …"  (never "your")
         Send ─▶ provide_credential  (destination read from the STORED row, never the request)
              └─ credential_sink.set_env_value(..., destination)
                   stage_secret (fail closed)
-                  · _deliver_remote: the ASKING agent running → its .env read → the key by NAME
-                    (destination_key_missing) · URL validated again, connection pinned
-                    (a2a_client transport, Host + SNI = the registered host)
-                  · POST {instance}/api/agents/{agent}/credentials/inject
-                    {mode: "merge", env: {NAME: value}}  Authorization: Bearer <key>
+                  · _deliver_remote: the switch and the registry re-read (422 destination_outbound_disabled /
+                    destination_not_approved, nothing read) → the ASKING agent running → its .env read →
+                    the key by NAME (destination_key_missing; destination_key_invalid if not header-safe)
+                    · URL resolved OFF the loop (a2a_client.validate_endpoint), connection pinned
+                    (Host + SNI = the registered host) · audit credential_delivery_attempt BEFORE the POST
+                  · POST {instance}/api/agents/{agent}/credentials/inject through a2a_client._read_capped
+                    under _with_deadline — {mode: "merge", env: {NAME: value}}  Authorization: Bearer <key>
                   · 2xx → unstage (nothing rests here) → audit credential_delivered {host, agent_name}
                   · refusals: destination_unreachable (503; connect → unstaged, timeout → stays staged,
-                    may_have_written), destination_key_refused (401/403), destination_agent_missing (404),
-                    destination_refused (other) — all 409, ask pending, value in no log/audit/message
+                    may_have_written), destination_unconfirmed (503; a 5xx or an unreadable answer → stays
+                    staged, "may or may not"), destination_key_refused (401/403), destination_agent_missing
+                    (404), destination_refused (other, or a redirect) — 409, ask pending, value in no
+                    log/audit/message
              └─ ask_service.answer(response="provided", via_credential_sink=True)
                   └─ wake: "NAME was delivered to the agent X on the Trinity at host; it is not in
                      your environment"

@@ -214,7 +214,7 @@ const askForCredentialParameters = z.object({
     })
     .optional()
     .describe(
-      "trinity-enterprise#1109: where the value LANDS when that is not you — an agent on another Trinity you hold a key to. The person's field says so in plain words, the value is merged into that agent's .env there under your key, nothing is kept here, and your wake says it was delivered (it is never in your environment). Left out, the value is stored in your own environment as before. Refusals: 422 destination_url_invalid / destination_agent_invalid / destination_key_env_invalid (reason says which).",
+      "trinity-enterprise#1109: where the value LANDS when that is not you — an agent on another Trinity you hold a key to. The instance must be one an admin has registered as an outbound A2A endpoint on this Trinity (Settings → Integrations → Outbound A2A endpoints; scheme, host and port must match) and outbound A2A must be switched on. The person's field says so in plain words, the value is merged into that agent's .env there under your key, nothing is kept here, and your wake says it was delivered (it is never in your environment). Left out, the value is stored in your own environment as before. Refusals: 422 destination_not_approved / destination_outbound_disabled (ask an admin) / destination_url_invalid / destination_agent_invalid / destination_key_env_invalid (reason says which).",
     ),
 });
 

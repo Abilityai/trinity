@@ -56,18 +56,25 @@ The caller answers the ask afterwards, by name, through the ask sink.
 **A destination (trinity-enterprise#1109).** A credential ask may say the
 value is for an agent on ANOTHER Trinity (`context.credential_destination`,
 `services/credential_destination.py`). Then steps 3-5 are replaced by
-`_deliver_remote`: the asking agent must be running (its `.env` is read, by
-NAME, for the key it holds to that instance — `destination_key_missing` when
-it holds none), the URL is validated AGAIN at delivery time and the
-connection pinned to the address it resolved to (the A2A transport), and one
+`_deliver_remote`: the outbound A2A kill switch and the admin's outbound
+endpoint registry are re-checked first (`destination_outbound_disabled` /
+`destination_not_approved`, 422 — nothing read, nothing sent), the asking
+agent must be running (its `.env` is read, by NAME, for the key it holds to
+that instance — `destination_key_missing` when it holds none,
+`destination_key_invalid` when it cannot travel as a header value), the URL
+is resolved AGAIN at delivery time OFF the loop (`a2a_client.validate_endpoint`)
+and the connection pinned to the address it resolved to, the attempt is
+audited BEFORE the request leaves (`credential_delivery_attempt`), and one
 `POST {instance}/api/agents/{agent}/credentials/inject` with
-`{mode: "merge", env: {NAME: value}}` is sent under that key. Nothing is
-written on this instance; after a 2xx the staged value is removed — nothing
-rests here after delivery. Each failure is a named plain retry
-(`destination_unreachable`, `destination_key_refused`,
+`{mode: "merge", env: {NAME: value}}` is sent under that key through the A2A
+client's capped reader under its total wall-clock deadline (redirects
+refused, the error body never read). Nothing is written on this instance;
+after a 2xx the staged value is removed — nothing rests here after delivery.
+Each failure is a named plain retry (`destination_unreachable`,
+`destination_unconfirmed`, `destination_key_refused`,
 `destination_agent_missing`, `destination_refused`); a connect failure
-unstages, a timeout after the request left keeps the value staged and says
-so. The audit row is `credential_delivered` with the destination's host and
+unstages, a timeout after the request left or a 5xx keeps the value staged
+and says "may or may not". The audit rows carry the destination's host and
 agent — never the value, never the key.
 
 **The receiving side.** `merge_env_values` is the same read-patch-inject leaf

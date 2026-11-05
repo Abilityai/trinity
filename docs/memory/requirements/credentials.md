@@ -358,16 +358,23 @@ AES-256-GCM envelopes. What changed is how git *reads* one.
   must merge into that agent's `.env` (the owner inject is a whole-file write).
 - **Behaviour**:
   - `ask_for_credential(name, why, destination?)` — `destination` is
-    `{instance_url, agent_name, key_env}`: the other instance's base URL
-    (HTTPS and public, or a host the admin listed in the A2A trusted networks —
-    the one outbound-destination gate, `utils/url_validation.validate_a2a_endpoint_url`),
-    the agent there, and the NAME of the variable in the ASKING agent's own
-    `.env` that holds its key to that instance. The key itself never travels
-    through the tool call or the ask. Stored on the ask row as
-    `context.credential_destination`, validated at raise time with named 422s
-    (`destination_url_invalid`, `destination_agent_invalid`,
-    `destination_key_env_invalid`, each with a `reason`); a destination on any
-    other ask kind is refused (`destination_on_non_credential`).
+    `{instance_url, agent_name, key_env}`: the other instance's base URL —
+    **an instance an admin has approved**: its origin (scheme + host + port)
+    must match an endpoint in the outbound A2A endpoint registry (Settings →
+    Integrations → Outbound A2A endpoints; read through the effective
+    provider, so a module that scopes endpoints per agent counts) — the
+    agent there, and the NAME of the variable in the ASKING agent's own
+    `.env` that holds its key to that instance. The registry entry is the
+    approval only; its own credential is not used. The key itself never
+    travels through the tool call or the ask. **The outbound A2A kill switch
+    governs this path**: with outbound A2A off (default) a destination is
+    refused. Stored on the ask row as `context.credential_destination`,
+    validated at raise time with named 422s (`destination_url_invalid`,
+    `destination_agent_invalid`, `destination_key_env_invalid`,
+    `destination_not_approved`, `destination_outbound_disabled`, each with a
+    `reason`; the first two name where an admin registers the instance); no
+    resolver runs at raise time; a destination on any other ask kind is
+    refused (`destination_on_non_credential`).
   - The person sees the same masked field, with the destination in plain words
     ("for the agent lopez-digest on the Trinity at hub.example.com" — never
     "your": nothing here ties the host to the person; the admin's registry ties
@@ -377,23 +384,31 @@ AES-256-GCM envelopes. What changed is how git *reads* one.
   - On Send the sink (`services/credential_sink.py`) stages the value in the
     scrub as before, then: reads the asking agent's key BY NAME from its own
     `.env` through the agent's read endpoint (`destination_key_missing`, 409,
-    when the agent holds no such variable; the asking agent must be running),
-    re-validates the URL at delivery time and pins the connection to the
-    resolved address (the A2A transport), and POSTs
+    when the agent holds no such variable; `destination_key_invalid`, 409,
+    when it cannot travel as a header; the asking agent must be running),
+    re-checks the switch and the registry, resolves the URL off the loop at
+    delivery time and pins the connection to the resolved address (the A2A
+    transport: capped body, total deadline, redirects refused), audits the
+    attempt (`credential_delivery_attempt`) BEFORE the request leaves, and POSTs
     `POST {instance_url}/api/agents/{agent}/credentials/inject` with
     `{mode: "merge", env: {NAME: value}}` under `Authorization: Bearer <key>`.
     Nothing is written on the hub; after a 2xx the staged value is removed —
     nothing rests on the hub after delivery. Audit
     `credentials` / `credential_delivered` with the name, the ask id and the
     destination (host + agent), never the value or the key.
-  - Delivery failures are plain retries, each named: `destination_url_invalid`
-    (422, the URL no longer validates), `destination_unreachable` (503 —
-    connect failure: nothing was written; a timeout after the request left:
-    the value may have been written and stays staged), `destination_key_refused`
-    (409, the instance answered 401/403), `destination_agent_missing` (409, 404
-    there — no such agent, or one the key cannot reach), `destination_refused`
-    (409, any other non-2xx, with the status). A refusal that cannot have
-    written unstages the value, so "nothing was stored" holds for the scrub too.
+  - Delivery failures are plain retries, each named: `destination_outbound_disabled`
+    / `destination_not_approved` (422, the switch or the registry changed since
+    the ask), `destination_url_invalid` (422, the URL no longer validates),
+    `destination_unreachable` (503 — connect failure: nothing was written; a
+    timeout after the request left: the value may have been written and stays
+    staged), `destination_key_refused` (409, the instance answered 401/403),
+    `destination_agent_missing` (409, 404 there — no such agent, or one the key
+    cannot reach), `destination_unconfirmed` (503, a 5xx or an unreadable
+    answer — "may or may not have been stored", the value stays staged: the
+    receiving route's own 503 means exactly that), `destination_refused` (409,
+    any other non-2xx or a redirect, with the status). A refusal that cannot
+    have written unstages the value, so "nothing was stored" holds for the
+    scrub too.
   - The receiving instance's `POST /api/agents/{name}/credentials/inject` gains
     `mode: "merge"` with `env: {NAME: value}`: read `.env` through the agent
     (only a file the agent proves absent is empty), set the named lines in
