@@ -17,6 +17,7 @@ primitives.
 import io
 import json
 import logging
+import os
 import tarfile
 from fnmatch import fnmatch
 from pathlib import Path
@@ -147,7 +148,19 @@ async def snapshot_endpoint(body: dict):
     snapshot_path_str = ""
     backup_rel = body.get("backup_dir")
     if backup_rel:
-        backup_dir = (_HOME / backup_rel).resolve()
+        # A lexical barrier first (CodeQL py/path-injection): both sides are
+        # normalised in the same unresolved space and end in a separator, so
+        # `../home2` cannot pass as a prefix of `home/` and `.` (the home itself)
+        # still does. The `resolve()` + `relative_to` check below stays: it is
+        # the one that sees a link inside the home pointing out of it.
+        base = os.path.join(os.path.normpath(str(_HOME)), "")
+        full = os.path.join(os.path.normpath(os.path.join(base, backup_rel)), "")
+        if not full.startswith(base):
+            raise HTTPException(
+                status_code=400,
+                detail="backup_dir must be inside /home/developer",
+            )
+        backup_dir = Path(full).resolve()
         try:
             backup_dir.relative_to(_HOME.resolve())
         except ValueError as exc:
@@ -159,7 +172,7 @@ async def snapshot_endpoint(body: dict):
         (backup_dir / "snapshot.tar").write_bytes(tar_bytes)
         (backup_dir / "files.txt").write_text("\n".join(files) + "\n")
         snapshot_path_str = str(
-            (backup_dir / "snapshot.tar").relative_to(_HOME)
+            (backup_dir / "snapshot.tar").relative_to(_HOME.resolve())
         )
 
     return Response(
