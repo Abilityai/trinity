@@ -21,6 +21,7 @@ import axios from 'axios'
 import { notifyPlatformUnauthorized, setPlatformUnauthorizedHandler } from '@/utils/platformSession'
 import { isTermsRefusal, notifyTermsRefusal } from '@/utils/termsGate'
 import { useAuthStore } from './auth'
+import { laterInstant, READ_UP_TO_NOW } from '@/utils/readThrough'
 // A cycle by shape (that store reads this one's `clientEmail`), safe by use:
 // neither side touches the other at module evaluation, only inside actions.
 import { usePortalDraftsStore } from './portalDrafts'
@@ -364,6 +365,16 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // agentName, chatId, since }` — whose result the chat `chatId` is waiting
     // to show. Cleared when the result lands or the wait gives up.
     askResultWatch: null,
+    // trinity-enterprise#1010: the server's `as_of` for the newest chat-state
+    // read — the instant the badges on screen were read. A read write sends it
+    // back as `through` when nothing newer was rendered for that chat.
+    chatStateAsOf: null,
+    // trinity-enterprise#1010 (review of #4103): per `${kind}:${id}`, the
+    // instant the last read write for that chat covered — what a later load
+    // compares against (`heldPast`), not the newest `as_of`, which a poll can
+    // advance past an arrival the read never covered. A lower bound: a write
+    // with no body read "up to now", recorded as the `as_of` known when it left.
+    readCovered: {},
     // Where the user was when it expired, so re-authenticating returns them
     // there instead of the roster root.
     resumePath: null,
@@ -1647,6 +1658,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       })
       const out = {}
       const previews = {}
+      if (data && data.as_of) this.chatStateAsOf = laterInstant(this.chatStateAsOf, data.as_of)
       for (const c of data.chats || []) {
         if (!(c && c.kind && c.id)) continue
         const key = `${c.kind}:${c.id}`
@@ -1668,13 +1680,15 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // Fire-and-forget by design: a failed read marker leaves a stale badge,
     // which is not worth interrupting navigation over, and the next state fetch
     // corrects it.
-    async markChatRead(kind, chatId) {
+    //
+    // trinity-enterprise#1010: `through` is the newest instant this client held
+    // for the chat — the cursor moves there, not to the server's now, so an
+    // arrival after the last fetch still counts. Omitted, it falls back to the
+    // last chat-state `as_of`; with neither — or READ_UP_TO_NOW — no body, and
+    // the server reads up to now.
+    async markChatRead(kind, chatId, through) {
       try {
-        await portalHttp.post(
-          `/api/enterprise/client-portal/chat-state/${kind}/${encodeURIComponent(chatId)}/read`,
-          null,
-          { headers: this.authHeader },
-        )
+        await this.markChatReadStrict(kind, chatId, through)
       } catch { /* stale badge only */ }
     },
 
@@ -1682,10 +1696,19 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // read settles many of these and must report how many failed —
     // `markChatRead` swallows every error by design, so `Promise.allSettled`
     // over it would report zero failures even if all of them failed.
-    async markChatReadStrict(kind, chatId) {
+    //
+    // Before any chat state was read there is no `as_of`, and a `through` taken
+    // from one chat's rows would also be the viewer's FIRST read — the ent#557
+    // account baseline, set at that instant for every chat they never opened.
+    // So with no `as_of` yet, no body: the server reads up to now, as before #1010.
+    async markChatReadStrict(kind, chatId, through) {
+      const held = through === READ_UP_TO_NOW || !this.chatStateAsOf
+        ? null : laterInstant(this.chatStateAsOf, through)
+      const key = `${kind}:${chatId}`
+      this.readCovered = { ...this.readCovered, [key]: laterInstant(this.readCovered[key], held || this.chatStateAsOf) }
       await portalHttp.post(
         `/api/enterprise/client-portal/chat-state/${kind}/${encodeURIComponent(chatId)}/read`,
-        null,
+        held ? { through: held } : null,
         { headers: this.authHeader },
       )
     },

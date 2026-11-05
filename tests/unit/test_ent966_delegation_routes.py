@@ -510,6 +510,14 @@ def dlg_env(env, monkeypatch):
             raise agent["raise"]
         if request.url.path == "/api/credentials/read":
             agent["reads"] += 1
+            # ent#1073: an exact agent answer — per read from `read_bodies` (None
+            # = the default text answer), else `read_body` for every read.
+            if agent.get("read_bodies"):
+                queued = agent["read_bodies"].pop(0)
+                if queued is not None:
+                    return httpx.Response(agent["read_status"], json=queued)
+            elif agent.get("read_body") is not None:
+                return httpx.Response(agent["read_status"], json=agent["read_body"])
             return httpx.Response(agent["read_status"], json={"files": {".env": agent["env"]}})
         if request.url.path == "/api/credentials/inject":
             import json as _json
@@ -1138,6 +1146,58 @@ class TestRevoke:
         dlg_env.as_(**OPERATOR)
         r = dlg_env.client.delete(DLG_URL)
         assert r.status_code == 409 and r.json()["detail"]["code"] == "nevermined_not_configured"
+
+
+class TestEnvReadFailsClosed:
+    """trinity-enterprise#1073 — the bind and revoke rewrite the WHOLE `.env`, so
+    a file the agent did not hand back as text is never treated as empty: that
+    wrote back a file holding only the Nevermined keys, every other credential
+    gone, and reported success."""
+
+    UNREADABLE = {
+        "not_utf8": {"files": {}, "files_b64": {".env": "//79"}, "missing": []},
+        # a read error, or an image too old to report `missing`: the path is nowhere
+        "unconfirmed": {"files": {}},
+    }
+
+    @pytest.mark.parametrize("state", ["not_utf8", "unconfirmed"])
+    def test_bind_refuses_and_writes_nothing(self, dlg_env, state):
+        before = dlg_env.agent["env"]
+        dlg_env.agent["read_body"] = self.UNREADABLE[state]
+        r = dlg_env.client.post(DLG_URL, json=BIND_BODY)
+        assert r.status_code == 409, r.text
+        detail = r.json()["detail"]
+        assert detail["code"] == "env_unreadable" and state in detail["message"]
+        assert dlg_env.agent["injects"] == [] and dlg_env.agent["env"] == before
+        assert dlg_env.client.get(DLG_URL).json()["history"] == []   # no row either
+
+    def test_a_file_the_agent_proved_absent_still_binds(self, dlg_env):
+        dlg_env.agent["read_body"] = {"files": {}, "files_b64": {}, "missing": [".env"]}
+        r = dlg_env.client.post(DLG_URL, json=BIND_BODY)
+        assert r.status_code == 201, r.text
+        (written,) = dlg_env.agent["injects"]
+        assert set(_env_keys(written[".env"])) == {"NVM_DELEGATION_ID", "NVM_API_KEY", "NVM_ENVIRONMENT"}
+
+    def test_an_unreadable_file_between_read_and_write_compensates(self, dlg_env):
+        """The bind re-reads right before the write; an unreadable answer THERE
+        removes the row it inserted, and the file is still not written."""
+        dlg_env.agent["read_bodies"] = [None, self.UNREADABLE["unconfirmed"]]
+        r = dlg_env.client.post(DLG_URL, json=BIND_BODY)
+        assert r.status_code == 409 and r.json()["detail"]["code"] == "env_unreadable"
+        assert dlg_env.agent["reads"] == 2 and dlg_env.agent["injects"] == []
+        assert dlg_env.client.get(DLG_URL).json()["history"] == []
+
+    @pytest.mark.parametrize("state", ["not_utf8", "unconfirmed"])
+    def test_revoke_still_revokes_and_leaves_the_file_alone(self, dlg_env, state):
+        _bind_row(dlg_env)
+        before = dlg_env.agent["env"]
+        dlg_env.agent["read_body"] = self.UNREADABLE[state]
+        r = dlg_env.client.delete(DLG_URL)
+        assert r.status_code == 200, r.text
+        assert r.json()["revoked"] is True and r.json()["env_removed"] is False
+        assert r.json()["env_note"].startswith("env_unreadable")
+        assert dlg_env.agent["injects"] == [] and dlg_env.agent["env"] == before
+        assert dlg_env.client.get(DLG_URL).json()["funded"] is False
 
 
 class TestBindRevokeSecrets:
