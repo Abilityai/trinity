@@ -8,7 +8,7 @@ import { z } from "zod";
 import { askTrinity, fetchAgentGuide, MAX_QUESTION_CHARS } from "./client.js";
 
 export const SERVER_NAME = "trinity-docs";
-export const SERVER_VERSION = "0.1.0";
+export const SERVER_VERSION = "0.2.0";
 
 export function createServer(): McpServer {
   const server = new McpServer({
