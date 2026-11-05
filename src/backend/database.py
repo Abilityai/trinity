@@ -1791,8 +1791,10 @@ class DatabaseManager:
         """#1745: activate/deactivate an agent's per-agent MCP keys."""
         return self._mcp_key_ops.set_agent_keys_active(agent_name, active)
 
-    def deactivate_orphaned_agent_keys(self) -> int:
-        """#1745: deactivate per-agent keys whose agent is no longer live."""
+    def deactivate_orphaned_agent_keys(self) -> List[str]:
+        """#1745: deactivate per-agent keys whose agent is no longer live;
+        returns the agents whose keys were revoked (#4259 skips keys still
+        inside the start-up grace window)."""
         return self._mcp_key_ops.deactivate_orphaned_agent_keys()
 
     def delete_agent_mcp_api_key(self, agent_name: str):
@@ -4265,6 +4267,16 @@ class DatabaseManager:
 
     def set_operator_queue_delivery_state(self, item_id, state, detail, now):
         return self._operator_queue_ops.set_delivery_state(item_id, state, detail, now)
+
+    # abilityai/trinity-enterprise#1108 AC #4 — the answer wake's status
+    def set_operator_queue_wake_state(self, item_id, state):
+        return self._operator_queue_ops.set_wake_state(item_id, state)
+
+    def list_operator_queue_pending_wakes(self, agent_name):
+        return self._operator_queue_ops.list_pending_wakes_for_agent(agent_name)
+
+    def mark_operator_queue_wakes_woken(self, agent_name, request_ids):
+        return self._operator_queue_ops.mark_wakes_woken(agent_name, request_ids)
 
     def mark_operator_queue_unconfirmed(self, detail, now, agent_name=None, exclude_agents=None,
                                         exclude_request_id_prefixes=None):

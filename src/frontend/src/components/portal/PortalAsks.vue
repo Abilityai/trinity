@@ -150,6 +150,14 @@
           :title="withdrawReason(ask)"
           :data-testid="`${tid.prefix}-ending-reason`"
         >{{ withdrawReason(ask) }}</span>
+        <!-- abilityai/trinity-enterprise#1108 AC #4: the answer landed, the agent
+             was not running, and its next start picks it up — said plainly, so
+             "answered" never implies the agent is already on it. -->
+        <span
+          v-if="ask.wake_state === 'pending'"
+          class="mt-0.5 block"
+          :data-testid="`${tid.prefix}-wake-pending`"
+        >Agent not yet woken — it picks this up when it next runs.</span>
       </p>
       <!-- #3247: the agent's replacement names the ask it replaced, by
            request_id only — there is no deep link to a single item. -->

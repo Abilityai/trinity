@@ -122,10 +122,10 @@ agent_ownership = Table(
     Column("a2a_exposed", Integer),                # ent#157: A2A inbound-server exposure opt-in (default OFF)
     Column("a2a_scope", Text, server_default="public"),          # inert since ent#885; drop under #746
     Column("a2a_keyless_internal", Integer, server_default="1"),  # inert since ent#885; drop under #746
-    # ent#329: owner opt-in — an operator answer re-triggers the agent. Default OFF:
-    # a dispatch on respond spends money, so it is never unconditional. Per-AGENT and
-    # not per-request, so hosting asks cannot hand a client a spend button (ent#430 AC #3).
-    Column("operator_resume_enabled", Integer),
+    # ent#329: an operator answer re-triggers the agent. Per-AGENT and not
+    # per-request, so hosting asks cannot hand a client a spend button (ent#430
+    # AC #3). Default ON since abilityai/trinity-enterprise#1108; the owner's OFF is 0.
+    Column("operator_resume_enabled", Integer),         # tri-state since abilityai/trinity-enterprise#1108: NULL = platform default (on), 0 = owner OFF, 1 = owner ON
     Column("memory_opt_out", Integer),             # trinity-enterprise#1022: per-agent retrieval-memory opt-out (default 0)
     Column("tts_voice_replies_enabled", Integer),  # epic #24/#25: outbound voice-out toggle (shared agent-level)
     Column("tts_voice_id", Text),                  # epic #24/#25: ElevenLabs voice id for spoken replies
@@ -1643,6 +1643,10 @@ operator_queue = Table(
     # one locked transaction that ends the predecessor and inserts the successor.
     Column("replaces", Text),            # on the successor: the predecessor row's uuid
     Column("replaced_by", Text),         # on the predecessor: the successor row's uuid
+    # abilityai/trinity-enterprise#1108 AC #4: whether the answer wake produced a
+    # turn. NULL (no wake owed / before the column) | "pending" (the agent was not
+    # running — its next start re-dispatches) | "woken".
+    Column("wake_state", Text),
     Index(
         "uq_operator_queue_pending_subject",
         "agent_name", "subject",

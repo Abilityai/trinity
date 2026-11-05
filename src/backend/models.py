@@ -1434,8 +1434,9 @@ class BundledManifestSummary(BaseModel):
     templates: List[str] = []
     schedule_count: int = 0
     # True when the manifest carries a top-level `prompt:`, which OVERWRITES the
-    # platform-wide trinity_prompt for every agent. The UI gates deploy on an
-    # explicit acknowledgement for this.
+    # platform-wide trinity_prompt for every agent when an admin deploys it (#4025:
+    # anyone else's deploy leaves it alone and says so). A property of the manifest,
+    # not of the caller: the preview gives the caller-specific answer.
     sets_prompt: bool = False
     permissions_preset: Optional[str] = None
     # parse + validate + the same side-effect-free template/resource preflight the
@@ -2265,9 +2266,10 @@ class CircuitBreakerConfigUpdate(BaseModel):
 class OperatorResumeUpdate(BaseModel):
     """Body for PUT /api/agents/{name}/operator-resume (ent#329).
 
-    Per-agent opt-in: when enabled, answering one of this agent's parked
-    operator-queue items dispatches a turn so the agent acts on the answer
-    instead of waiting for a next tick it may never have.
+    Per-agent switch, on by default (abilityai/trinity-enterprise#1108): when
+    enabled, answering one of this agent's parked operator-queue items
+    dispatches a turn so the agent acts on the answer instead of waiting for a
+    next tick it may never have.
 
     Per-agent rather than per-item deliberately — a dispatch spends money, and an
     agent-declared per-item flag would let the agent make answering costly for

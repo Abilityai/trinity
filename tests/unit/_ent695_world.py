@@ -206,7 +206,7 @@ class LockRedis:
 
         def _run(keys=None, args=None, client=None):
             target = client if client is not None else self
-            key = (args or [None])[0]
+            key = (keys or [None])[0]
             target.commands.append(("script", "release" if is_delete else "refresh", key))
             if not is_delete and target.on_refresh is not None:
                 target.on_refresh(target, key)
@@ -243,7 +243,6 @@ def install_executor_seams(world: "World", monkeypatch) -> None:
     REAL reader and `crud.reconcile_declared_schedules`."""
     from fastapi import HTTPException
 
-    import redis_breaker_util
     from services.agent_service.capabilities import normalize_cpu, normalize_memory
     from services.template_schedules import normalize_declared_schedules
 
@@ -273,7 +272,6 @@ def install_executor_seams(world: "World", monkeypatch) -> None:
     world.create = create
     world.redis = LockRedis()
     monkeypatch.setattr(system_service, "get_breaker_redis", lambda: world.redis)
-    redis_breaker_util._ATOMIC_LEASE_SCRIPTS.reset()
 
     # Docker writes nobody may make on an existing member (P-A): recorded.
     from services import docker_utils

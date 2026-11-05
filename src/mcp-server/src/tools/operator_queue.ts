@@ -109,7 +109,7 @@ const askOperatorParameters = z.object({
     .max(256)
     .describe(
       "An id YOU choose for this ask: letters, digits, '.', '_', ':' or '-'. Raising again with the same id returns the first receipt as status replayed, with differs naming any field that is not the same, so a retry never makes a second ask; use a NEW request_id for a new ask. " +
-        "The receipt: status (created | replayed), id, to_role (the role it went to, never a person's email), resolved (true when a person's Workspace will show the ask — every person the role resolves to, when several fill it; false when nobody could be named and it went to the operators), ask_status, and wakes_on_ending (true when your owner has turned on waking you when your asks end).",
+        "The receipt: status (created | replayed), id, to_role (the role it went to, never a person's email), resolved (true when a person's Workspace will show the ask — every person the role resolves to, when several fill it; false when nobody could be named and it went to the operators), ask_status, and wakes_on_ending (true by default: a person's answer or cancel wakes you with one turn, so never ask the person to write to you again after answering; an expiry wakes nobody — read it on your next turn; false only when your owner switched the wake off).",
     ),
   title: z
     .string()
