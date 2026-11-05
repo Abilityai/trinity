@@ -268,7 +268,8 @@ async def test_a_non_object_json_line_reaps_the_child_before_raising(gemini, ref
         await gemini.run("3408-non-object", _NON_OBJECT_LINE)
 
     assert error.value.status_code == 500
-    assert "'list' object has no attribute 'get'" in error.value.detail, (
+    # The 500 names the class only (trinity#4284); the text stays in the log.
+    assert error.value.detail.endswith(": AttributeError"), (
         "control: a per-line error, not the timeout, ended the reader"
     )
     child = gemini.children[0]
