@@ -1726,6 +1726,10 @@ def _receipt(
         "replaces": replaces_request_id,
         "replaced_by": request_id_of(row.get("replaced_by")),
         "disposed_by": row.get("disposed_by"),
+        # abilityai/trinity-enterprise#1108 AC #4: `pending` = the answer landed
+        # but the agent was not running ("agent not yet woken" — its next start
+        # delivers it); `woken` = a turn carried it; None = no wake owed yet.
+        "wake_state": row.get("wake_state"),
         # trinity-enterprise#901: which ending the agent authored, if any —
         # derived here, once, never inferred client-side from `replaced_by`.
         "agent_ending": agent_ending_kind(row),
@@ -1817,7 +1821,8 @@ def _ended(
 
 
 def _opted_in(agent_name: str) -> bool:
-    """Has this agent's owner opted in to being woken by its asks' endings?
+    """Does this agent wake when its asks end? On unless its owner switched it
+    off (abilityai/trinity-enterprise#1108).
 
     Read ONCE per agent per event, before anything is scheduled, so an agent
     that has not opted in costs one flag read and nothing else (ent#329). The
@@ -1837,8 +1842,9 @@ def _wake_filer(event: EndingEvent) -> None:
     """The default observer — wake the agent that raised the ask (ent#329).
 
     An answer keeps its ent#329 resume, one per ask, framed with the answer. A
-    cancel or an expiry wakes the agent through `spawn_ending_dispatch`, one
-    dispatch per agent per event. Only agents whose owner opted in are woken.
+    cancel or a dismissal wakes the agent through `spawn_ending_dispatch`, one
+    dispatch per agent per event; an expiry wakes nobody (ent#1108 ruling).
+    Only agents whose owner has not switched the wake off are woken.
     A platform-minted row opened no loop for the agent to resume and carries text
     withheld from it by design (ent#499), so an answer to one never dispatches;
     the ending wake applies the same rule itself. An ending the agent authored
@@ -1864,6 +1870,14 @@ def _wake_filer(event: EndingEvent) -> None:
                 response_text=row.get("response_text"),
                 responded_by_email=event.actor_email,
             )
+        return
+    # abilityai/trinity-enterprise#1108 (merge-train ruling): an expiry wakes
+    # nobody. The wake is on by default now, and the sweep spending an owner's
+    # turn by default — for a timeout nobody chose — is out; the issue names
+    # answers and cancellations. The expired row is still committed, announced
+    # and read on the agent's next turn (the readback, the Execution Context
+    # line, `get_my_ask`), and the rider reaches it there.
+    if event.disposition == EXPIRED:
         return
     # #3247: an ending the agent authored itself (it replaced the ask) wakes
     # nobody — the agent holds the receipt in the same turn (ent#329's spend

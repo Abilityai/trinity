@@ -102,7 +102,7 @@ TABLES = {
             a2a_exposed INTEGER DEFAULT 0,
             a2a_scope TEXT DEFAULT 'public',  -- inert since ent#885; drop under #746
             a2a_keyless_internal INTEGER DEFAULT 1,  -- inert since ent#885; drop under #746
-            operator_resume_enabled INTEGER DEFAULT 0,
+            operator_resume_enabled INTEGER,  -- tri-state since ent#1108: NULL = platform default (on), 0 = owner OFF, 1 = owner ON
             memory_opt_out INTEGER DEFAULT 0,
             tts_voice_replies_enabled INTEGER DEFAULT 0,
             tts_voice_id TEXT,
@@ -1902,6 +1902,8 @@ TABLES = {
             last_seen_at TEXT,
             replaces TEXT,
             replaced_by TEXT,
+            -- abilityai/trinity-enterprise#1108 AC #4: NULL | 'pending' (agent not yet woken) | 'woken'
+            wake_state TEXT,
             FOREIGN KEY (responded_by_id) REFERENCES users(id)
         )
     """,

@@ -624,6 +624,10 @@ export interface OperatorAskReceipt {
   replaced_by?: string | null;   // #3247: request_id of the ask that replaced this one
   disposed_by?: string | null;
   agent_ending?: "replaced" | "withdrawn" | null;  // trinity-enterprise#901
+  // abilityai/trinity-enterprise#1108 AC #4: the answer wake's status — `pending`
+  // (answered, the agent was not running; its next start delivers it) | `woken` |
+  // null (no wake owed). On a `created` receipt it is null; a replay carries it.
+  wake_state?: "pending" | "woken" | null;
   differs?: string[];
 }
 

@@ -484,6 +484,10 @@ the composer of the conversation this issue rebuilt.
 and were read by nothing — a client answering on a resume-enabled agent saw
 exactly what they would see with the feature off: the ask disappeared. **Decision:
 render** (ent#468 Option A), recorded on the issue.
+- abilityai/trinity-enterprise#1108 AC #4: `WorkspaceAsk.wake_state` (`pending` | `woken` | null) is the
+  OUTCOME, read on every listing — `pending` means the answer landed but the agent was
+  not running ("Agent not yet woken — it picks this up when it next runs." on the
+  card); the agent's next start delivers it and the card's line goes.
 
 - `portalUtils.js::answerConfirmation(answered, agentLabel)` is the rule and
   consumes **both** fields, which is the AC's "either both or neither":
