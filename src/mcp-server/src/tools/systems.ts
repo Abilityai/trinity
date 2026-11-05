@@ -308,7 +308,7 @@ export function createSystemTools(
             "name: system-name\n" +
             "naming: bare  # optional: agent keys are full agent names; default prefixed ('{name}-{agent}')\n" +
             "description: System description\n" +
-            "prompt: System-wide instructions (optional)\n" +
+            "prompt: System-wide instructions (optional; applied for an admin only, skipped with a prompt_requires_admin warning for any other caller)\n" +
             "agents:\n" +
             "  orchestrator:\n" +
             "    template: github:Org/repo\n" +
