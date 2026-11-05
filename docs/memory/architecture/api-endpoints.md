@@ -231,7 +231,7 @@ Token lifecycle: `secrets.token_urlsafe(32)` stored in `agent_schedules.webhook_
 | Endpoint | Method | Gate | Purpose |
 |---|---|---|---|
 | `/api/terms/current` | GET | `require_person`, `@workspace_route` + `@terms_route` | `{required, version, title, text, is_default, accepted}` — the shipped default until replaced |
-| `/api/terms/accept` | POST | `require_interactive`, both marks | `{version}` → `{accepted, created, version, accepted_at}`; 409 `version_stale`; schedules the acceptance hooks after the response |
+| `/api/terms/accept` | POST | `require_interactive`, both marks | `{version}` → `{accepted, created, version, accepted_at}`; 403 `invite_expired`/`invite_revoked` when a registered provider's door is closed (`terms_gate.assert_door_open`); 409 `version_stale`; schedules the acceptance hooks after the response |
 | `/api/terms/acceptances` | GET | `require_admin` | the record: `?email=`, `?limit=` (≤1000) |
 | `/api/terms` | PUT | `require_admin` + interactive | any of `{title, text, required}`; a text/title save stamps a new version; 422 `terms_text_empty` / `terms_text_too_large` / `terms_title_too_long` |
 | `/api/terms/restore-default` | POST | `require_admin` + interactive | the one action that brings the shipped text back |

@@ -57,6 +57,10 @@ def current_terms(current_user: User = Depends(require_person)):
 @terms_route("accepting is what ends the refusal")
 async def accept_terms(body: TermsAccept, request: Request, background: BackgroundTasks,
                        current_user: User = Depends(require_interactive)):
+    # W2: the door the person came through must still be open — a provider
+    # naming a closed invitation refuses here with the same code the gate
+    # would, so the OSS route is not a way around the module's door.
+    terms_gate.assert_door_open(current_user)
     try:
         out = await terms_service.accept(
             current_user, body.version,

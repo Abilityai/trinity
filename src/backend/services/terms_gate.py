@@ -73,6 +73,9 @@ Protocol::
     }
     provider.door_for(user) -> str | None     # optional: the invitation id an
                                               # acceptance is bound to
+
+The accept route (``routers/terms.py``) calls ``assert_door_open(user)``
+first: a decision naming a closed door refuses the acceptance with that code.
 """
 from __future__ import annotations
 
@@ -181,6 +184,63 @@ def _is_visit(user: Any) -> bool:
     return scope is not None and is_workspace_only_role(getattr(user, "role", None))
 
 
+def _provider_decision(user: Any) -> Optional[dict]:
+    """The registered provider's answer under the gate's fault policy, or
+    ``None`` when there is no provider or (operator-and-above) its fault is
+    ignored. A Workspace-only person is REFUSED on a fault — fail closed: a
+    provider that raised, or answered nothing, has not admitted the invitee
+    it exists for. Shared by ``enforce`` and ``assert_door_open`` so the
+    accept route and the gate agree on what a broken module means."""
+    from dependencies import is_workspace_only_role
+
+    provider = _provider
+    if provider is None:
+        return None
+    workspace_only = is_workspace_only_role(getattr(user, "role", None))
+    answer: Any = _FAULT
+    try:
+        answer = provider.decision(user)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[terms_gate] provider.decision failed for user %s",
+            getattr(user, "id", None),
+        )
+    if isinstance(answer, dict):
+        return answer
+    if workspace_only:
+        logger.error(
+            "[terms_gate] provider answered %s for user %s; refusing (fail-closed)",
+            "a fault" if answer is _FAULT else repr(type(answer).__name__),
+            getattr(user, "id", None),
+        )
+        raise refusal(TERMS_REQUIRED, None)
+    # Operator and above: the door layer is ignored, the instance decision
+    # stands, so a broken module cannot lock them out.
+    logger.error(
+        "[terms_gate] provider answered %s for user %s; falling back to the "
+        "instance decision so an operator is not locked out",
+        "a fault" if answer is _FAULT else repr(type(answer).__name__),
+        getattr(user, "id", None),
+    )
+    return None
+
+
+def assert_door_open(user: Any) -> None:
+    """The accept route's check (W2 on ent#1107): a registered provider whose
+    decision names a CLOSED door — ``invite_expired`` / ``invite_revoked`` —
+    refuses the acceptance with that code, so a person whose invitation is no
+    longer live cannot accept through the OSS route and be admitted. A plain
+    ``terms_required`` is exactly what accepting answers, so it passes; no
+    provider passes. The provider's fault policy is ``_provider_decision``'s.
+    """
+    decision = _provider_decision(user)
+    if not decision or not decision.get("required"):
+        return
+    reason = str(decision.get("reason") or TERMS_REQUIRED)
+    if reason in REFUSAL_CODES and reason != TERMS_REQUIRED:
+        raise refusal(reason, decision.get("version"))
+
+
 def enforce(request: Any, user: Any) -> None:
     """Refuse ``user`` (403) while the terms are outstanding.
 
@@ -191,7 +251,7 @@ def enforce(request: Any, user: Any) -> None:
     ``@terms_route``.
     """
     # Late imports: `dependencies` imports this module.
-    from dependencies import TERMS_ROUTE_ATTR, is_workspace_only_role
+    from dependencies import TERMS_ROUTE_ATTR
     from services import terms_service
 
     if not _is_person(user):
@@ -202,38 +262,7 @@ def enforce(request: Any, user: Any) -> None:
     if getattr(getattr(route, "endpoint", None), TERMS_ROUTE_ATTR, None):
         return
 
-    provider = _provider
-    decision: Optional[dict] = None
-    if provider is not None:
-        workspace_only = is_workspace_only_role(getattr(user, "role", None))
-        answer: Any = _FAULT
-        try:
-            answer = provider.decision(user)
-        except Exception:  # noqa: BLE001
-            logger.exception(
-                "[terms_gate] provider.decision failed for user %s",
-                getattr(user, "id", None),
-            )
-        if isinstance(answer, dict):
-            decision = answer
-        elif workspace_only:
-            # Fail CLOSED: a provider that raised, or answered nothing, has
-            # not admitted the invitee it exists for.
-            logger.error(
-                "[terms_gate] provider answered %s for user %s; refusing (fail-closed)",
-                "a fault" if answer is _FAULT else repr(type(answer).__name__),
-                getattr(user, "id", None),
-            )
-            raise refusal(TERMS_REQUIRED, None)
-        else:
-            # Operator and above: the door layer is ignored, the instance
-            # decision stands, so a broken module cannot lock them out.
-            logger.error(
-                "[terms_gate] provider answered %s for user %s; falling back to the "
-                "instance decision so an operator is not locked out",
-                "a fault" if answer is _FAULT else repr(type(answer).__name__),
-                getattr(user, "id", None),
-            )
+    decision = _provider_decision(user)
     if decision is None:
         try:
             decision = terms_service.decision(user)

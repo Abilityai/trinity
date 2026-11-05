@@ -88,7 +88,10 @@ mirror the server's.
 
 `terms_gate.register_provider(provider)` — `provider.decision(user)` answers instead
 of the OSS decision (it decides its door and delegates to `terms_service.decision`);
-`provider.door_for(user)` names the invitation the OSS accept route stamps on the row.
+`provider.door_for(user)` names the invitation the OSS accept route stamps on the row;
+`terms_gate.assert_door_open(user)` runs first on the accept, so a decision naming a closed
+door (`invite_expired` / `invite_revoked`) refuses the acceptance with that code and the OSS
+route is not a way around the module's door (W2).
 `terms_service.register_acceptance_hook(fn)` — `fn(user_id, email, terms_version,
 accepted_at)` after a new row, scheduled after the response; a hook that raises is
 logged and audited (`terms_hook_failed`).

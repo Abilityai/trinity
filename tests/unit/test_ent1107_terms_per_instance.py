@@ -207,6 +207,75 @@ class TestTheWriterIsAtomic:
 
 
 # --------------------------------------------------------------------------- #
+# The accept route consults the provider's door (W2)
+# --------------------------------------------------------------------------- #
+
+class _DoorProvider:
+    """A stub provider: `answer` is what `decision` returns, or raises."""
+
+    def __init__(self, answer):
+        self.answer = answer
+
+    def decision(self, user):
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return self.answer
+
+    def door_for(self, user):
+        return "inv_1"
+
+
+class TestTheAcceptRouteConsultsTheDoor:
+    """W2 on ent#1107: the OSS accept route stamped the provider's `door_for`
+    on the row but never asked whether that door was OPEN, so a person whose
+    invitation was revoked could accept through the OSS route and be admitted.
+    `terms_gate.assert_door_open` is the seam: a provider decision naming a
+    closed door (`invite_expired` / `invite_revoked`) refuses the accept with
+    that code; a plain `terms_required` is what accepting answers."""
+
+    @pytest.mark.parametrize("code", ["invite_revoked", "invite_expired"])
+    def test_a_closed_door_refuses_the_accept_with_its_code(self, jwt_as, code):
+        from database import db
+        from services import terms_gate
+
+        terms_gate.register_provider(_DoorProvider({"required": True, "version": "default-1", "reason": code}))
+        client = _app()
+        token = jwt_as(MEMBER)
+        version = client.get("/api/terms/current", headers=_bearer(token)).json()["version"]
+        r = client.post("/api/terms/accept", json={"version": version}, headers=_bearer(token))
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"]["code"] == code
+        assert db.get_terms_acceptance(MEMBER["id"], version) is None
+
+    def test_an_open_door_lets_the_accept_through_and_stamps_it(self, jwt_as):
+        from database import db
+        from services import terms_gate
+
+        terms_gate.register_provider(_DoorProvider({"required": True, "version": "default-1", "reason": "terms_required"}))
+        client = _app()
+        token = jwt_as(MEMBER)
+        version = client.get("/api/terms/current", headers=_bearer(token)).json()["version"]
+        r = client.post("/api/terms/accept", json={"version": version}, headers=_bearer(token))
+        assert r.status_code == 200, r.text
+        assert db.get_terms_acceptance(MEMBER["id"], version)["door"] == "inv_1"
+
+    def test_a_broken_provider_refuses_a_workspace_only_persons_accept_and_not_an_admins(self, jwt_as):
+        """The gate's own fault policy, applied to the accept: fail closed for
+        the invitee the door is for, ignored for operator-and-above."""
+        from services import terms_gate
+
+        terms_gate.register_provider(_DoorProvider(RuntimeError("broken")))
+        client = _app()
+        member = jwt_as(MEMBER)
+        version = client.get("/api/terms/current", headers=_bearer(member)).json()["version"]
+        r = client.post("/api/terms/accept", json={"version": version}, headers=_bearer(member))
+        assert r.status_code == 403 and r.json()["detail"]["code"] == "terms_required"
+        admin = jwt_as(ADMIN)
+        r = client.post("/api/terms/accept", json={"version": version}, headers=_bearer(admin))
+        assert r.status_code == 200, r.text
+
+
+# --------------------------------------------------------------------------- #
 # The shipped default and the setting
 # --------------------------------------------------------------------------- #
 
