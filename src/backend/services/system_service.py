@@ -17,6 +17,7 @@ from utils.safe_yaml import (
 )
 import re
 import logging
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Set, Tuple, Optional
@@ -2211,6 +2212,18 @@ def _failure_reason(exc: Exception) -> Tuple[str, Optional[int]]:
     return reason[:_REASON_MAX_LEN], status_code
 
 
+def _scrubbed_traceback(exc: BaseException) -> str:
+    """The exception with its traceback, scrubbed the way `_failure_reason` is (#4284).
+
+    The deploy and apply catch-alls answer with the class name only; the full
+    text goes to the Vector-captured backend log. Git/GitHub errors can embed a
+    PAT-bearing remote URL (learnings 2026-07-14), so the log copy is scrubbed:
+    `exc_info=True` would write it raw.
+    """
+    text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    return sanitize_text(redact_url_userinfo(text))
+
+
 def _configured_preview(cfg: SystemAgentConfig) -> Dict[str, Any]:
     """trinity-enterprise#1030 CP6: what a created member is configured with
     after create — counts per group, for the preview's one line. Empty (no
@@ -2757,8 +2770,12 @@ async def deploy_manifest(
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception(f"System deployment failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Deployment failed: {str(e)}")
+        # #4284: the class name in the body, the scrubbed exception in the log.
+        logger.error("System deployment failed: %s", _scrubbed_traceback(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Deployment failed ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 # ============================================================================
@@ -4839,8 +4856,12 @@ async def apply_manifest(
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception(f"System apply failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Apply failed: {_failure_reason(e)[0]}")
+        # #4284: the class name in the body, the scrubbed exception in the log.
+        logger.error("System apply failed: %s", _scrubbed_traceback(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Apply failed ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 def _lock_blocker(state: LeaseState, system_name: str) -> "SystemApplyBlocker":

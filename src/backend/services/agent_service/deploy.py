@@ -11,6 +11,7 @@ import tarfile
 import tempfile
 import shutil
 import logging
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from io import BytesIO
@@ -37,6 +38,7 @@ from services.template_service import (
 from services.docker_service import get_agent_container
 from services.docker_utils import container_stop, container_start, agent_volume_labels
 from utils.helpers import sanitize_agent_name
+from utils.credential_sanitizer import redact_url_userinfo, sanitize_text
 from dependencies import agent_may_reach
 from services.settings_service import get_agent_quota_for_role
 from redis_breaker_util import SingleFlightLock  # #1920 shared single-flight lock
@@ -608,6 +610,18 @@ async def _restart_stopped_previous(previous_name: Optional[str]) -> None:
         )
 
 
+def _scrubbed_traceback(exc: BaseException) -> str:
+    """The exception with its traceback, credential-scrubbed, for the log (#4284).
+
+    The 500 bodies below carry only the class name; the full text goes to the
+    Vector-captured backend log instead. A deploy handles `.env` content and
+    template sources, so the text is scrubbed of URL userinfo and secret
+    shapes first: `exc_info=True` would write it raw.
+    """
+    text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    return sanitize_text(redact_url_userinfo(text))
+
+
 def _prepopulate_workspace_from_template(version_name: str, template_dir: Path) -> None:
     """Pre-populate `agent-{version_name}-workspace` with the template files (#950).
 
@@ -705,10 +719,18 @@ def _prepopulate_workspace_from_template(version_name: str, template_dir: Path) 
             f"Pre-populated workspace volume {workspace_vol} from {template_dir}"
         )
     except Exception as e:
+        # #4284: the class name in the body, the scrubbed exception in the log.
+        logger.error(
+            "Failed to pre-populate workspace for %s: %s",
+            version_name, _scrubbed_traceback(e),
+        )
         raise HTTPException(
             status_code=500,
             detail={
-                "error": f"Failed to pre-populate workspace for {version_name}: {e}",
+                "error": (
+                    f"Failed to pre-populate workspace for {version_name} "
+                    f"({e.__class__.__name__} — details in backend logs)"
+                ),
                 "code": "WORKSPACE_PREPOP_FAILED",
             },
         )
@@ -1427,10 +1449,12 @@ async def deploy_local_agent_logic(
         _remove_partial_deploy(dest_created)
         _cleanup_deploy_volume(volume_created)
         await _restart_stopped_previous(previous_stopped_name)
+        # #4284: the class name in the body, the scrubbed exception in the log.
+        logger.error("Local agent deploy failed: %s", _scrubbed_traceback(e))
         raise HTTPException(
             status_code=500,
             detail={
-                "error": f"Failed to deploy local agent: {str(e)}",
+                "error": f"Failed to deploy local agent ({e.__class__.__name__} — details in backend logs)",
                 "code": "DEPLOY_FAILED",
             }
         )
