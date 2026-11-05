@@ -300,6 +300,27 @@ class TestTheRedispatch:
 
 
 # ---------------------------------------------------------------------------
+# The readiness probe is lifecycle's own wait, verdict and all
+# ---------------------------------------------------------------------------
+
+class TestTheReadinessProbe:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verdict", [True, False])
+    async def test_agent_ready_hands_off_to_wait_for_agent_ready(self, ors, monkeypatch, verdict):
+        """`_agent_ready` is `lifecycle.wait_for_agent_ready` for this agent —
+        its verdict, both ways. A `return True` stand-in dispatches into a
+        container whose server is not up (a refused connection, then an ask
+        stamped `woken` under a completed key); this pins the hand-off."""
+        import importlib
+        from unittest.mock import AsyncMock
+        lifecycle = importlib.import_module("services.agent_service.lifecycle")
+        probe = AsyncMock(return_value=verdict)
+        monkeypatch.setattr(lifecycle, "wait_for_agent_ready", probe)
+        assert await ors._agent_ready("agent-w") is verdict
+        probe.assert_awaited_once_with("agent-w")
+
+
+# ---------------------------------------------------------------------------
 # The start hook (tdd question 4: delete the registration line → red)
 # ---------------------------------------------------------------------------
 
