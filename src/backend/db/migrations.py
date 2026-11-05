@@ -3047,6 +3047,75 @@ def _migrate_agent_ownership_operator_resume(cursor, conn):
     conn.commit()
 
 
+def _migrate_operator_resume_default_on(cursor, conn):
+    """Agents wake on an answered ask by default (abilityai/trinity-enterprise#1108), data only.
+
+    ``agent_ownership.operator_resume_enabled`` becomes tri-state: NULL is the
+    platform default — ON — 0 the owner's explicit OFF, 1 the owner's explicit
+    ON. The ent#329 column was added ``DEFAULT 0``, so every row holds 0
+    whether or not an owner ever touched it; the toggle is audited
+    (``audit_log`` ``operator_resume_config``, ``details.enabled``), so the
+    one explicit-OFF signal there is: an agent whose LATEST toggle said
+    ``false`` keeps its 0, every other 0 moves to NULL and inherits the
+    default. A DB with no ``audit_log`` yet has no signal, and every 0 moves.
+    Runs once (tracked in ``schema_migrations``); an owner's later OFF is then
+    the only writer of a 0. New rows pass NULL explicitly
+    (``register_agent_owner``) because SQLite keeps the baked ``DEFAULT 0``.
+
+    Mirrored by the Alembic revision 0116_operator_resume_default_on.
+    """
+    cursor.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='audit_log'"
+    )
+    if cursor.fetchone():
+        cursor.execute(
+            """
+            UPDATE agent_ownership SET operator_resume_enabled = NULL
+            WHERE operator_resume_enabled = 0
+              AND agent_name NOT IN (
+                  SELECT a.target_id FROM audit_log a
+                  WHERE a.event_action = 'operator_resume_config'
+                    AND a.target_type = 'agent'
+                    AND a.details LIKE '%"enabled": false%'
+                    AND a.timestamp = (
+                        SELECT MAX(b.timestamp) FROM audit_log b
+                        WHERE b.event_action = 'operator_resume_config'
+                          AND b.target_type = 'agent'
+                          AND b.target_id = a.target_id
+                    )
+              )
+            """
+        )
+    else:
+        cursor.execute(
+            "UPDATE agent_ownership SET operator_resume_enabled = NULL"
+            " WHERE operator_resume_enabled = 0"
+        )
+    conn.commit()
+
+
+def _migrate_operator_queue_wake_state(cursor, conn):
+    """abilityai/trinity-enterprise#1108 AC #4 — the answer wake's status on the ask.
+
+    One nullable TEXT column on `operator_queue`: `wake_state`. NULL on a row
+    that owes no wake (or predates the column), `pending` when the answer wake
+    found the agent stopped or missing ("agent not yet woken" — its next start
+    re-dispatches it once, `operator_resume_service.redispatch_pending_wakes`),
+    `woken` once a turn carried the ending. No default, no backfill: a wake
+    before this column either happened or was readable on the next turn
+    through the Execution Context line, which now marks `woken` too.
+    PostgreSQL twin: Alembic `0117_operator_queue_wake_state`.
+    """
+    _safe_add_column(
+        cursor,
+        "operator_queue",
+        "wake_state",
+        "ALTER TABLE operator_queue ADD COLUMN wake_state TEXT",
+        log_msg="Adding wake_state to operator_queue for the deferred answer wake (abilityai/trinity-enterprise#1108)",
+    )
+    conn.commit()
+
+
 def _migrate_agent_ownership_tts_voice(cursor, conn):
     """epic #24 / #25 — outbound voice replies (shared agent-level config).
 
@@ -6317,5 +6386,7 @@ MIGRATIONS = [
     ("seat_ask_class_state_table", _migrate_seat_ask_class_state_table),
     ("room_participant_visible_from", _migrate_room_participant_visible_from),
     ("access_requests_requester_identity", _migrate_access_requests_requester_identity),
+    ("operator_resume_default_on", _migrate_operator_resume_default_on),
+    ("operator_queue_wake_state", _migrate_operator_queue_wake_state),
     ("terms_acceptances_table", _migrate_terms_acceptances_table),
 ]

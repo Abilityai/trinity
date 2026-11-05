@@ -147,6 +147,12 @@ class AgentOperations(
                 is_system=1 if is_system else 0,
                 execution_timeout_seconds=3600,
                 require_email=1 if require_email else 0,
+                # abilityai/trinity-enterprise#1108: same reasoning again —
+                # the column is tri-state (NULL = platform default ON, 0 =
+                # the owner's OFF) and an upgraded SQLite instance keeps the
+                # ent#329 ``DEFAULT 0`` baked into the column, so an OMITTED
+                # column would stamp every new agent as an explicit OFF.
+                operator_resume_enabled=None,
             )
             if is_ephemeral:
                 values.update(

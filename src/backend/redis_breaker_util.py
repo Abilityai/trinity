@@ -110,9 +110,9 @@ def decode_pair(result: Any) -> Tuple[str, str]:
 def lock_token_matches(current: Any, token: str) -> bool:
     """True when a GET on a SETNX-token lock key returned OUR token (#1919).
 
-    The single ownership comparison for hand-rolled single-flight locks
-    (refresh and compare-and-delete release must use the same predicate or
-    they drift). `get_breaker_redis` sets decode_responses=True, so a live
+    The ownership comparison for the hand-rolled GET-then-DELETE releases that
+    sit outside `SingleFlightLock` (whose renew/release compare inside a Lua
+    script, trinity#4028). `get_breaker_redis` sets decode_responses=True, so a live
     read is always `str` — the bytes branch is belt-and-braces for a client
     configured without decoding, not a live path.
     """
@@ -125,21 +125,24 @@ def lock_token_matches(current: Any, token: str) -> bool:
 # idiom that was hand-rolled in seven sync sites with divergent (and in
 # system_seed / cornelius / compat_fix, buggy — a constant-"1" value + a
 # tokenless unconditional release could delete a *successor's* lock) behaviour.
-# Reuses `lock_token_matches` as the ownership
-# predicate. Release is GET-then-DELETE compare-and-delete — deliberately NOT
-# atomic-Lua: it stays fakeredis-unit-testable and ships the same accepted
-# GET→DELETE TOCTOU window `ops.py` already carried. The async `ResumeLock`
-# (`session_turn_service.py`) keeps its atomic Lua compare-and-delete and is a
-# deliberately-separate, stronger primitive — do NOT merge ResumeLock onto this.
+#
+# Renew and release are each ONE Lua script (trinity#4028): the token compare
+# and the mutation run inside Redis, so a holder whose lease lapsed can never
+# extend or delete its successor's lease. The GET-then-EXPIRE / GET-then-DELETE
+# pair this replaced did exactly that whenever a successor won `SET NX` between
+# the two commands. The async `ResumeLock` (`session_turn_service.py`) keeps
+# its own Lua and stays a separate primitive: it runs on an async client and
+# polls to acquire.
 
 
 class LeaseState(str, Enum):
-    """Outcome of `SingleFlightLock.refresh_if_owned` (only ops.py refreshes)."""
+    """Outcome of `SingleFlightLock.refresh_if_owned`."""
 
-    OWNED = "owned"           # still ours; lease TTL refreshed
-    REACQUIRED = "reacquired"  # lease had lapsed unclaimed; re-took it (same token)
-    LOST = "lost"             # foreign holder OR lost the re-acquire race — stop
-    DEGRADED = "degraded"     # Redis error / not held — fail open, proceed
+    OWNED = "owned"            # still ours; lease TTL refreshed
+    REACQUIRED = "reacquired"  # lapsed unclaimed and re-took it (same token);
+    #                            only with `retake_lapsed=True`
+    LOST = "lost"              # another token holds it, or (default) it lapsed — stop
+    DEGRADED = "degraded"      # not held / Redis error / unreadable reply — no proof of loss
 
 
 class SingleFlightLock:
@@ -160,11 +163,12 @@ class SingleFlightLock:
 
     Single-use state machine (total): `_held` is set exactly once on a real
     SETNX win and NEVER mutated afterwards — `refresh_if_owned` returning
-    LOST/DEGRADED must not clear it, or a caller that reclaims its own lock
-    after a stale-replica false-foreign read would abandon a live lock for the
-    full TTL (the ops `ops:fleet_restart` 2100s-wedge class). All mutable state
-    lives on the instance — no module-level state (pytest-randomly order-
-    independence).
+    LOST/DEGRADED must not clear it, or a caller that keeps going after a
+    Redis blip would abandon a live lock for the full TTL (the ops
+    `ops:fleet_restart` 2100s-wedge class). All mutable state lives on the
+    instance — no module-level state (pytest-randomly order-independence).
+    The lease scripts are registered on the injected client at each call, not
+    cached process-wide, for the same reason (trinity#4028).
     """
 
     def __init__(self, key: str, ttl_seconds: int, *, client: Optional[_redis.Redis]):
@@ -174,7 +178,6 @@ class SingleFlightLock:
         self._token = uuid.uuid4().hex   # unique per acquire — closes constant-"1"
         self._held = False               # True ONLY on a real SETNX win
         self._degraded = False           # True on fail-open (client None / error)
-        self._last_current = None        # last GET value → caller's foreign/absent WORD
 
     @property
     def held(self) -> bool:
@@ -184,12 +187,6 @@ class SingleFlightLock:
     @property
     def token(self) -> str:
         return self._token
-
-    @property
-    def last_current(self):
-        """The last value a refresh GET saw — for the caller's foreign (not
-        None) vs absent (None) log WORD. Never the raw token value itself."""
-        return self._last_current
 
     def acquire(self) -> bool:
         """Try to take the lock. Returns True when the caller may proceed
@@ -212,104 +209,111 @@ class SingleFlightLock:
             return True
         return False
 
-    def refresh_if_owned(self) -> LeaseState:
-        """Refresh our own lease before the next protected action. Silent (no
-        logging) — the sole caller (ops.py) owns its own warn-once. NEVER
-        mutates `_held`."""
-        if not self._held or self._client is None:
-            return LeaseState.DEGRADED
-        try:
-            current = self._client.get(self._key)
-            self._last_current = current
-            owned = lock_token_matches(current, self._token)
-            if owned and self._client.expire(self._key, self._ttl):
-                return LeaseState.OWNED
-            # Not owned, OR owned-but-the-key-vanished-in-the-GET→EXPIRE-sliver
-            # (EXPIRE falsy creates nothing): a vanished key is 'absent' and the
-            # same-token SETNX can re-take it; a live foreign token is real loss.
-            if owned:
-                current = None
-                self._last_current = None
-            if current is None:
-                if self._client.set(self._key, self._token, nx=True, ex=self._ttl):
-                    return LeaseState.REACQUIRED
-                return LeaseState.LOST
-            return LeaseState.LOST
-        except Exception:  # noqa: BLE001 — a Redis blip is NOT lease loss
-            return LeaseState.DEGRADED
+    def refresh_if_owned(self, *, retake_lapsed: bool = False) -> LeaseState:
+        """Renew our lease iff the stored token is still ours, in one script.
 
-    def release_if_owned(self) -> None:
-        """Compare-and-delete release. Gates on the STABLE acquire-time `_held`
-        (never on a refresh result), so it runs even after a detected LOST and
-        is foreign-safe by construction (GET-compare, deletes only on a token
-        match). Never raises."""
-        if not self._held or self._client is None:
-            return
-        try:
-            if lock_token_matches(self._client.get(self._key), self._token):
-                self._client.delete(self._key)
-        except Exception:  # noqa: BLE001 — TTL will expire it
-            pass
-
-    # ----- Atomic renew / release (trinity-enterprise#695) ------------------
-    #
-    # `refresh_if_owned` / `release_if_owned` above are GET-then-EXPIRE and
-    # GET-then-DELETE. If our lease lapses between the two calls and a
-    # successor wins `SET NX` in that sliver, the second call EXTENDS or
-    # DELETES the successor's lease: a stale holder keeps a lock alive that it
-    # no longer owns, or frees one a successor is working under, and two
-    # holders then run at once. They stay as they are for their existing
-    # callers (the ops loop, the seeder); moving those over is its own change.
-    #
-    # These two do the compare and the mutation in ONE Lua call, so neither can
-    # touch a lease it does not own: the canary leader lease's scripts
-    # (`canary_service._LEASE_*_LUA`), with one difference. The lock key travels
-    # as an ARGUMENT, not through the script's declared-key table, because this
-    # leaf module's guard (`test_1920_no_hand_rolled_single_flight.py`) refuses
-    # the uppercase spelling of the keyspace-scan command anywhere in the file,
-    # and that table shares it. On the single-node Redis Trinity runs this
-    # executes identically: declared keys only route a script in Cluster mode.
-    #
-    # A lapsed lease is LOST, never re-taken (unlike `refresh_if_owned`'s
-    # REACQUIRED): between the lapse and the re-take another holder may already
-    # have done work, so a caller relying on exclusion must stop.
-
-    def refresh_if_owned_atomic(self) -> LeaseState:
-        """Renew our lease iff the stored token is still ours, atomically.
-
-        OWNED: renewed. LOST: the key is gone or holds another token (never
-        re-taken). DEGRADED: no lease is held (`acquire` failed open) or Redis
-        errored. Never mutates `_held`, so the release below still runs.
+        OWNED: renewed. LOST: another token holds the key, or — by default —
+        the key is gone (a lapsed lease is never re-taken: another holder may
+        have worked inside the lapse, so a caller relying on exclusion stops).
+        `retake_lapsed=True` re-takes an ABSENT key with our token in the same
+        script (`SET NX`, so never over a successor) and answers REACQUIRED;
+        LOST then means another token holds it. DEGRADED: no lease is held
+        (`acquire` failed open), Redis errored, or the reply is not one of
+        the script's integers. Silent, and never mutates `_held`, so the
+        release below still runs.
         """
         if not self._held or self._client is None:
             return LeaseState.DEGRADED
+        src = LEASE_REFRESH_OR_RETAKE_LUA if retake_lapsed else LEASE_REFRESH_LUA
         try:
-            scripts = _ATOMIC_LEASE_SCRIPTS.ensure(self._client)
-            renewed = scripts["refresh"](
-                keys=[], args=[self._key, self._token, self._ttl], client=self._client
+            reply = self._client.register_script(src)(
+                keys=[self._key], args=[self._token, self._ttl], client=self._client
             )
         except Exception:  # noqa: BLE001 — a Redis error is not proof of loss
             return LeaseState.DEGRADED
-        try:
-            owned = int(decode_str(renewed) or 0) == 1
-        except (TypeError, ValueError):
-            owned = False
-        return LeaseState.OWNED if owned else LeaseState.LOST
+        code = _script_int(reply)
+        if code == 1:
+            return LeaseState.OWNED
+        if code == 0:
+            return LeaseState.LOST
+        if code == 2 and retake_lapsed:
+            return LeaseState.REACQUIRED
+        return LeaseState.DEGRADED
 
-    def release_if_owned_atomic(self) -> None:
-        """Delete our lease iff the stored token is still ours, atomically.
+    def release_if_owned(self) -> None:
+        """Delete our lease iff the stored token is still ours, in one script.
 
-        Gated on the stable acquire-time `_held`, like `release_if_owned`, so it
-        runs after a LOST refresh too and deletes nothing it does not own.
-        Never raises (the TTL expires a lease a failed release leaves behind).
+        Gates on the STABLE acquire-time `_held` (never on a refresh result),
+        so it runs after a LOST or DEGRADED refresh too, and deletes nothing it
+        does not own. Never raises (the TTL expires a lease a failed release
+        leaves behind).
         """
         if not self._held or self._client is None:
             return
         try:
-            scripts = _ATOMIC_LEASE_SCRIPTS.ensure(self._client)
-            scripts["release"](keys=[], args=[self._key, self._token], client=self._client)
+            self._client.register_script(LEASE_RELEASE_LUA)(
+                keys=[self._key], args=[self._token], client=self._client
+            )
         except Exception:  # noqa: BLE001 — TTL will expire it
             pass
+
+
+def _script_int(reply: Any) -> int | None:
+    """A lease script's integer reply, or None when the reply is not one.
+
+    Strict on purpose: `int(MagicMock())` is 1, so a coercing read would turn
+    a client that never executed the script into a held lease.
+    """
+    if isinstance(reply, bool):
+        return None
+    if isinstance(reply, int):
+        return reply
+    if isinstance(reply, bytes):
+        try:
+            reply = reply.decode("ascii")
+        except UnicodeDecodeError:
+            return None
+    # ASCII digits only: `str.isdigit` also accepts '²' and fullwidth digits,
+    # which `int()` then rejects or reads, and a refresh must never raise.
+    if isinstance(reply, str) and reply.isascii() and reply.isdigit():
+        return int(reply)
+    return None
+
+
+# ----- Lease scripts (trinity#4028) ------------------------------------------
+#
+# The one home of the compare-and-expire / compare-and-delete lease scripts.
+# `SingleFlightLock` and the canary leader lease (`canary_service`) both use
+# them. KEYS[1] is the lease key, ARGV[1] the holder's token, ARGV[2] the TTL
+# in seconds. Register them on the client you call them with
+# (`client.register_script(SRC)`); that builds a `Script` locally (a sha1, no
+# round-trip) and redis-py re-loads it on NOSCRIPT by itself.
+
+LEASE_REFRESH_LUA = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('expire', KEYS[1], ARGV[2])
+end
+return 0
+"""
+
+# Renew, or re-take an absent key with our token: 1 renewed, 2 re-taken,
+# 0 another token holds it. `NX` is what keeps the re-take off a successor.
+LEASE_REFRESH_OR_RETAKE_LUA = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('expire', KEYS[1], ARGV[2])
+end
+if redis.call('set', KEYS[1], ARGV[1], 'NX', 'EX', ARGV[2]) then
+    return 2
+end
+return 0
+"""
+
+LEASE_RELEASE_LUA = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('del', KEYS[1])
+end
+return 0
+"""
 
 
 # ----- Lua script cache -----------------------------------------------------
@@ -344,29 +348,6 @@ class ScriptCache:
     def reset(self) -> None:
         with self._lock:
             self._scripts = None
-
-
-# trinity-enterprise#695: the scripts behind `SingleFlightLock`'s atomic
-# renew/release. ARGV[1] is the lock key, ARGV[2] the holder's token, ARGV[3]
-# the TTL in seconds (see the comment above `refresh_if_owned_atomic`).
-_ATOMIC_REFRESH_LUA = """
-if redis.call('get', ARGV[1]) == ARGV[2] then
-    return redis.call('expire', ARGV[1], ARGV[3])
-end
-return 0
-"""
-
-_ATOMIC_RELEASE_LUA = """
-if redis.call('get', ARGV[1]) == ARGV[2] then
-    return redis.call('del', ARGV[1])
-end
-return 0
-"""
-
-_ATOMIC_LEASE_SCRIPTS = ScriptCache(
-    refresh=_ATOMIC_REFRESH_LUA,
-    release=_ATOMIC_RELEASE_LUA,
-)
 
 
 # ----- Fail-open wrapper ----------------------------------------------------

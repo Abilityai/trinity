@@ -1,16 +1,32 @@
 {
   "test_files": [
     {
-      "file": "unit/test_ent1107_terms_per_instance.py",
-      "feature": "trinity-enterprise#1107",
+      "file": "unit/test_ent1108_wake_default.py",
+      "feature": "trinity-enterprise#1108",
       "added": "2026-11-04",
       "categories": [
         "backend",
-        "auth",
-        "settings",
+        "database",
+        "migrations",
+        "operator-queue",
         "unit"
       ],
-      "description": "trinity-enterprise#1107: terms of use per instance. The shipped default is served when nothing is configured; PUT /api/terms saves and stamps a new version (the author has accepted it), empty/oversized text refused by name (422), restore-default is one action, the switch turns the gate off; an admin JWT with no acceptance is refused 403 terms_required on an ordinary route and admitted on a @terms_route; accepting records (version, time, account) and lifts the refusal; a new version asks everyone else again; a stale version is 409; an agent key is never gated; a registered provider still answers the invite door and a broken one cannot lock an admin out; the acceptance list is admin-gated; setup resolves no principal; main.py registers the router with its # mcp: none header. No Docker."
+      "description": "trinity-enterprise#1108: agents wake on an answered ask by default. agent_ownership.operator_resume_enabled is tri-state (NULL = platform default ON, 0 = owner OFF, 1 = owner ON): the getter reads NULL as on and an unknown or soft-deleted agent as off; register_agent_owner passes NULL explicitly so an upgraded SQLite column's baked DEFAULT 0 cannot stamp an explicit OFF on a new agent; the one-shot migration (SQLite operator_resume_default_on + Alembic 0116, same rows, idempotent, registered after the ent#329 column) moves never-toggled 0s to NULL and keeps an agent whose latest audited operator_resume_config toggle was OFF at 0, with no audit_log meaning no signal; the fresh DDL bakes no default; GET /operator-resume reports the honest status through the real handler."
+    },
+    {
+      "file": "unit/test_ent1108_deferred_wake.py",
+      "feature": "trinity-enterprise#1108",
+      "added": "2026-11-04",
+      "categories": [
+        "backend",
+        "database",
+        "migrations",
+        "operator-queue",
+        "agent-lifecycle",
+        "workspace",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1108 AC #4: an answered ask whose wake found the agent stopped is delivered when it is next able. operator_queue.wake_state (SQLite operator_queue_wake_state + Alembic 0117, chained on 0116): set_wake_state / list_pending_wakes_for_agent (this agent's answered asks still pending) / mark_wakes_woken over the real DDL; maybe_dispatch_resume stamps pending for a stopped/missing agent (audited skipped_not_running, no dispatch) or a dispatch that raised, woken when a turn ran, nothing for an owner-OFF agent; redispatch_pending_wakes dispatches each pending ask once and a second start with nothing pending dispatches nothing; the real start_agent_internal (the #421 harness) spawns it, with a source pin on the hook line; _resolve_ended_asks marks the answered asks it carries woken; the receipt and the WorkspaceAsk projection carry wake_state. The re-dispatch awaits agent-server readiness first (ordering pinned: ready-wait, list, dispatch); readiness that never arrives dispatches nothing and the rows stay pending; a network-class result (no turn ran) stays pending with the idempotency claim released, while a turn that ran and failed reads woken."
     },
     {
       "file": "unit/test_ent584_capability_descriptions.py",
@@ -8331,6 +8347,30 @@
         "workspace"
       ],
       "description": "#4157: Portal.vue holds the 409 hand-off in the auth store only (never URL or storage); Login.vue redeems it once at /api/auth/email/handoff and lands on the redirect, still shows 2FA, and falls back to the filled code form when refused or after a reload."
+    },
+    {
+      "file": "unit/test_4259_key_sweep_startup_grace.py",
+      "feature": "#4259",
+      "added": "2026-11-04",
+      "categories": [
+        "backend",
+        "cleanup",
+        "mcp",
+        "security"
+      ],
+      "description": "#4259: the orphaned-key sweep skips agent/connector keys younger than ORPHANED_KEY_GRACE_SECONDS (crud mints the key before the ownership row lands), still revokes older keys with no live row, never touches a key whose ownership row is live whatever its age, and the [Cleanup] log line names the revoked agents through the real _sweep_retention_772 hand-off."
+    },
+    {
+      "file": "unit/test_ent1107_terms_per_instance.py",
+      "feature": "trinity-enterprise#1107",
+      "added": "2026-11-04",
+      "categories": [
+        "backend",
+        "auth",
+        "settings",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1107: terms of use per instance. The shipped default is served when nothing is configured; PUT /api/terms saves and stamps a new version (the author has accepted it), empty/oversized text refused by name (422), restore-default is one action, the switch turns the gate off; an admin JWT with no acceptance is refused 403 terms_required on an ordinary route and admitted on a @terms_route; accepting records (version, time, account) and lifts the refusal; a new version asks everyone else again; a stale version is 409; an agent key is never gated; a registered provider still answers the invite door and a broken one cannot lock an admin out; the acceptance list is admin-gated; setup resolves no principal; main.py registers the router with its # mcp: none header. No Docker."
     }
   ]
 }
