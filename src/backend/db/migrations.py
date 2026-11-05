@@ -5980,6 +5980,59 @@ def _migrate_agent_memory_provenance(cursor, conn):
     )
     conn.commit()
     print("Created agent_memory_fact_events table and updated_by_execution_id (trinity-enterprise#1022)")
+
+def _migrate_terms_acceptances_table(cursor, conn):
+    """Terms of use per instance (trinity-enterprise#1107).
+
+    One row per (person, terms version) — which text they accepted and when.
+    The OSS home of the record the ent#1054 invite door kept privately; an
+    optional module's own migration copies its rows across. The text itself is
+    a `system_settings` row with a shipped default (`services/terms_defaults.py`),
+    so no seed is needed here. Schema is also in db/schema.py for fresh installs;
+    mirrored by Alembic revision 0119_terms_acceptances.
+
+    Ruling A(1): a Workspace portal session (the emailed-code sign-in) has no
+    `users` row, so `user_id` is nullable and a session row is keyed by
+    (email, version) through a partial unique index — UNIQUE(user_id, version)
+    alone treats two NULL user_ids as distinct. The entry shipped in no release
+    before this shape, so the DDL changed in place; a development database
+    that ran the earlier NOT NULL shape is rebuilt here (rows kept).
+    """
+    cursor.execute("PRAGMA table_info(terms_acceptances)")
+    cols = {row[1]: row for row in cursor.fetchall()}
+    create = """
+        CREATE TABLE IF NOT EXISTS {name} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            email TEXT,
+            terms_version TEXT NOT NULL,
+            accepted_at TEXT NOT NULL,
+            door TEXT,
+            actor_ip TEXT,
+            UNIQUE(user_id, terms_version)
+        )
+    """
+    indexes = (
+        "CREATE INDEX IF NOT EXISTS idx_terms_acceptances_email ON terms_acceptances(email)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_terms_acceptances_email_version "
+        "ON terms_acceptances(email, terms_version) WHERE user_id IS NULL",
+    )
+    if cols and cols["user_id"][3]:  # notnull: the pre-ruling shape — rebuild, rows kept
+        _atomic_rebuild(
+            cursor, conn, "terms_acceptances",
+            create.format(name="terms_acceptances_new"),
+            "INSERT INTO terms_acceptances_new (id, user_id, email, terms_version, accepted_at, door, actor_ip) "
+            "SELECT id, user_id, email, terms_version, accepted_at, door, actor_ip FROM terms_acceptances",
+            indexes=indexes,
+        )
+        print("Rebuilt terms_acceptances with a nullable user_id (trinity-enterprise#1107)")
+        return
+    cursor.execute(create.format(name="terms_acceptances"))
+    for sql in indexes:
+        cursor.execute(sql)
+    conn.commit()
+    print("Created terms_acceptances table (trinity-enterprise#1107)")
+
 def run_loop_runs_stale_cleanup(run, *, now_iso: str) -> int:
     """#4058 — close every `running` loop-run row no terminal can advance.
 
@@ -6383,4 +6436,5 @@ MIGRATIONS = [
     ("operator_resume_default_on", _migrate_operator_resume_default_on),
     ("operator_queue_wake_state", _migrate_operator_queue_wake_state),
     ("mcp_external_access_backfill", _migrate_mcp_external_access_backfill),
+    ("terms_acceptances_table", _migrate_terms_acceptances_table),
 ]

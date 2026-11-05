@@ -1471,6 +1471,15 @@ Example:
             </div>
           </div>
 
+          <!-- Terms of use (trinity-enterprise#1107) — the text every person
+               accepts once per version on their first visit, on any door. On
+               the Access tab because it is the first thing a person meets after
+               the door opens, beside who may sign in. Shown in every edition:
+               the shipped default is in force whether or not anyone edited it. -->
+          <div v-if="activeTab === 'access'" class="mb-6">
+            <TermsPanel />
+          </div>
+
           <!-- Email Whitelist Section (Phase 12.4) -->
           <div v-if="activeTab === 'access'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
@@ -2359,6 +2368,7 @@ import RoomBudgetDefaultsPanel from '../components/settings/RoomBudgetDefaultsPa
 import AutonomyDialPanel from '../components/settings/AutonomyDialPanel.vue'
 import BackupStatusPanel from '../components/settings/BackupStatusPanel.vue'
 import InvitesPanel from '../components/settings/InvitesPanel.vue'
+import TermsPanel from '../components/settings/TermsPanel.vue'
 import { SETTINGS_NUMBER_INPUT_CLASS, SETTINGS_TEXT_INPUT_CLASS } from '../components/settings/fieldStyles'
 // #2691: one home for what the Public URL buys, what must be true first, and
 // what saving it re-points — shared with the first-run step so the explanation

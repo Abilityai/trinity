@@ -326,9 +326,14 @@ class PortalAuthRequest(BaseModel):
 
 
 class PortalAuthVerify(BaseModel):
-    """Step 2: verify the code and receive a portal session token."""
+    """Step 2: verify the code and receive a portal session token.
+
+    `client` (trinity-enterprise#1107 ruling A): the Workspace SPA sends
+    `"web"`, and only then does the session carry the `interactive` claim the
+    terms gate asks; any other caller gets a bare session."""
     email: str
     code: str
+    client: Optional[str] = None
 
 
 class PortalSession(BaseModel):

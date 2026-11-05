@@ -29,6 +29,7 @@ from dependencies import (
     oauth2_scheme,
     decode_portal_session,
     is_person_principal,
+    portal_session_is_interactive,
     portal_session_minted_by,
     portal_session_needs_rotation,
     reject_agent_principal,
@@ -185,6 +186,17 @@ async def get_portal_principal(
     email = decode_portal_session(token)
     if email:
         _reject_if_blocked(email)
+        # trinity-enterprise#1107 ruling A(1): a portal session is a Workspace
+        # person, and is asked for the terms like every other visit — after
+        # the block (a blocked client is refused, not shown terms), before the
+        # slide (a refused session is not handed a fresh token). Asked only
+        # when the session carries the SPA's `interactive` claim (ruling A: a
+        # harness-minted or delegate-minted token is not a visit). The terms
+        # routes are marked `@terms_route` and accept this same token, so the
+        # refusal can be ended; sign-out is client-side and needs no route.
+        from services import terms_gate
+        terms_gate.enforce_portal_session(
+            request, email, interactive=portal_session_is_interactive(token))
         # Slide the session AFTER the block check, so a blocked client is never
         # handed a fresh token on its way out.
         _maybe_rotate(token, response)

@@ -226,11 +226,23 @@ Token lifecycle: `secrets.token_urlsafe(32)` stored in `agent_schedules.webhook_
 
 **Creation gate (#1445):** schedule *and* webhook creation require a **live owning agent** — `db.is_agent_live(name)` checks an `agent_ownership` row with `deleted_at IS NULL` (no `users` join, so it matches the token-lookup predicate exactly). A nonexistent / soft-deleted agent returns **404** (non-owners get a uniform **403** whether or not the agent exists — no enumeration oracle); enforced at both the router (`create_schedule`/`generate_webhook`) and the db chokepoint (`db/schedules.py:create_schedule` → `None`). This closes the orphan-schedule class (an admin's `can_user_access_agent` is unconditionally `True`, so admin callers could otherwise mint a schedule + real token on a never-created agent) so a webhook token always resolves to a schedule of a live agent — the invariant the #1423 token-lookup INNER JOIN assumes.
 
+### Terms of use (trinity-enterprise#1107, 5 endpoints)
+
+| Endpoint | Method | Gate | Purpose |
+|---|---|---|---|
+| `/api/terms/current` | GET | `require_person`, `@workspace_route` + `@terms_route` | `{required, version, title, text, is_default, accepted}` — the shipped default until replaced |
+| `/api/terms/accept` | POST | `require_interactive`, both marks | `{version}` → `{accepted, created, version, accepted_at}`; 403 `invite_expired`/`invite_revoked` when a registered provider's door is closed (`terms_gate.assert_door_open`); 409 `version_stale`; schedules the acceptance hooks after the response |
+| `/api/terms/acceptances` | GET | `require_admin` | the record: `?email=`, `?limit=` (≤1000) |
+| `/api/terms` | PUT | `require_admin` + interactive | any of `{title, text, required}`; a text/title save stamps a new version; 422 `terms_text_empty` / `terms_text_too_large` / `terms_title_too_long` |
+| `/api/terms/restore-default` | POST | `require_admin` + interactive | the one action that brings the shipped text back |
+
+The four `terms_*` keys are refused on `PUT` and `DELETE /api/settings/{key}` (422) so the validated route is the only writer; an identical text+title save stamps no version.
+
 ### Auth, Users & MCP (21 endpoints)
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/auth/mode` | Auth mode config (unauthenticated) |
-| POST | `/api/token` | Admin login — `username` accepts `admin` OR the admin's registered email + password (#82); form-encoded |
+| POST | `/api/token` | Admin login — `username` accepts `admin` OR the admin's registered email + password (#82); form-encoded. `client=web` (the SPA) mints `interactive: true`, the claim the terms gate asks (ent#1107); the CLI sends nothing |
 | POST | `/api/auth/email/request` / `/verify` | Request email code / verify and login |
 | POST | `/api/auth/logout` | Revoke the caller's JWT — blacklists its `jti` in Redis until the token's own expiry, so an exfiltrated 7-day token dies on logout (#187). Idempotent; MCP-key callers are a no-op (keys revoke via key management) |
 | GET | `/api/auth/validate` | Validate JWT (for nginx auth_request) — also rejects a `jti` revoked via logout (#187) |

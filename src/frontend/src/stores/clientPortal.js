@@ -21,6 +21,9 @@ import axios from 'axios'
 import { notifyPlatformUnauthorized, setPlatformUnauthorizedHandler } from '@/utils/platformSession'
 import { isTermsRefusal, notifyTermsRefusal } from '@/utils/termsGate'
 import { useAuthStore } from './auth'
+// The value the auth store sends on its own sign-in calls (`client: 'web'`),
+// spelled here rather than imported: specs mock the auth store whole.
+const SPA_CLIENT = 'web'
 import { laterInstant, READ_UP_TO_NOW } from '@/utils/readThrough'
 // A cycle by shape (that store reads this one's `clientEmail`), safe by use:
 // neither side touches the other at module evaluation, only inside actions.
@@ -414,6 +417,11 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // of `TERMS_REFUSAL_CODES`, or null. The stage names the state and links to
     // /terms; the HTTP interceptor stays the only thing that navigates there.
     termsRefusal: null,
+    // trinity-enterprise#1107 ruling A(1): the terms a portal session reads and
+    // accepts INSIDE the Workspace, on its own token (`loadTerms` /
+    // `acceptTerms`); `{ required, version, title, text, accepted, is_default }`
+    // or null. A platform session is sent to /terms instead (the interceptor).
+    terms: null,
 
     // #2198 — the last successfully-loaded thread list, and whether the most
     // recent attempt failed.
@@ -620,8 +628,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
     },
 
     // Step 2 — verify the code → portal session token (persisted).
+    // `client: 'web'` (trinity-enterprise#1107 ruling A): the Workspace declares
+    // the session interactive, which is what makes it one the terms gate asks.
     async verifyCode(email, code) {
-      const { data } = await portalHttp.post('/api/enterprise/client-portal/auth/verify', { email, code })
+      const { data } = await portalHttp.post('/api/enterprise/client-portal/auth/verify', { email, code, client: SPA_CLIENT })
       this.portalToken = data.token
       this.clientEmail = data.email
       // #2261 — a successful client sign-in is a new session in this tab, so the
@@ -632,6 +642,25 @@ export const useClientPortalStore = defineStore('clientPortal', {
       writeSuppressed(false)
       this.sessionExpired = false
       localStorage.setItem(PORTAL_TOKEN_KEY, data.token)
+      return data
+    },
+
+    // trinity-enterprise#1107 ruling A(1): the terms routes accept the portal
+    // token (`routers/terms.py::terms_caller`), so a client session reads and
+    // accepts here, on `portalHttp`, never through the platform `api` client.
+    async loadTerms() {
+      const { data } = await portalHttp.get('/api/terms/current', { headers: this.authHeader })
+      this.terms = data
+      return data
+    },
+
+    // Accept `version` — the one the person read. Rejects with the server's
+    // error (409 `version_stale`, 403 a closed invitation); on success the
+    // roster refusal is over and the shell re-bootstraps.
+    async acceptTerms(version) {
+      const { data } = await portalHttp.post('/api/terms/accept', { version }, { headers: this.authHeader })
+      if (this.terms) this.terms = { ...this.terms, version: data.version, accepted: true }
+      this.termsRefusal = null
       return data
     },
 
@@ -686,6 +715,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
       this.modelOptions = []
       this.rosterLoaded = false
       this.termsRefusal = null
+      this.terms = null
       // #3894: the no-email verdict is this session's roster refusal — the next
       // client signing in must not see the "Add an email" page before its own
       // roster answers.

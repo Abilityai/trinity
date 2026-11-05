@@ -497,6 +497,14 @@ class User(BaseModel):
     # agent created could reach `/task` looking like the admin in a browser.
     # `dependencies.is_person_principal` refuses it.
     is_event_loopback: bool = False
+    # trinity-enterprise#1107 (ruling A): True only on a JWT carrying the
+    # `interactive` claim — the session the SPA declared at sign-in
+    # (`client=web` on `/api/token`, `"client": "web"` on the email verify).
+    # The terms gate asks exactly these sessions; a token without the claim
+    # (the CLI, curl, a harness, a session minted before the claim existed) is
+    # never asked. A UX/record contract the client declares, not a security
+    # boundary — nothing is authorized by it. False on every other branch.
+    interactive_session: bool = False
     # trinity-enterprise#629 + #164: the agents a capability fence admitted an
     # agent key to on THIS request (`dependencies._admit_capability_reach`).
     # Private, so it is never serialized and never set from a token: the only
@@ -6335,3 +6343,45 @@ class NeverminedDelegationBind(BaseModel):
         if any(c in v for c in "\r\n"):
             raise ValueError("provider must be a single line")
         return v or None
+
+
+# --- Terms of use per instance (trinity-enterprise#1107) --------------------
+
+class TermsCurrent(BaseModel):
+    """What the terms screen and the Settings editor read."""
+    required: bool          # the gate's switch (on by default)
+    version: str            # the version a person accepts
+    title: str
+    text: str               # markdown — the shipped default until replaced
+    is_default: bool        # the shipped text is in force
+    accepted: bool          # the caller has an acceptance row for `version`
+
+
+class TermsAccept(BaseModel):
+    version: str = Field(..., max_length=100)
+
+
+class TermsAccepted(BaseModel):
+    accepted: bool
+    created: bool           # False when this person had already accepted this version
+    version: str
+    accepted_at: str
+
+
+class TermsUpdate(BaseModel):
+    """`PUT /api/terms` — any subset; a text or title save stamps a new version.
+    Validated at the boundary AND at the sink (`terms_service.validate_*`),
+    because the generic `PUT /api/settings/{key}` is refused for these keys."""
+    title: Optional[str] = None
+    text: Optional[str] = None
+    required: Optional[bool] = None
+
+
+class TermsAcceptance(BaseModel):
+    id: int
+    user_id: Optional[int] = None   # None: a Workspace portal session (ruling A(1))
+    email: Optional[str] = None
+    terms_version: str
+    accepted_at: str
+    door: Optional[str] = None
+    actor_ip: Optional[str] = None

@@ -114,6 +114,13 @@ from services.subscription_headroom_alerts import (
 )
 
 
+# trinity-enterprise#1107 — the terms of use are written only through
+# `PUT /api/terms` / `POST /api/terms/restore-default` (admin + interactive,
+# validated by name, audited by version). Blocked on the generic PUT so an
+# empty or oversized text, or a hand-typed version, cannot reach the sink.
+from services.terms_service import SETTING_KEYS as TERMS_SETTING_KEYS
+
+
 
 router = APIRouter()
 
@@ -217,6 +224,16 @@ async def update_setting(
         raise HTTPException(
             status_code=422,
             detail=f"{key} is recorded by the platform at boot and is not writable through the API.",
+        )
+
+    # trinity-enterprise#1107: the terms text, title, version and switch.
+    if key in TERMS_SETTING_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} is set via PUT /api/terms (admin + interactive-only, validated, "
+                "audit-logged; POST /api/terms/restore-default restores the shipped text)"
+            ),
         )
 
     # #506: the fleet ceiling must go through the dedicated range-validated
@@ -728,6 +745,19 @@ async def delete_setting(
             detail=(
                 f"{key} must be changed via PUT /api/settings/aauth "
                 "(admin + interactive-only, audit-logged)"
+            ),
+        )
+
+    # trinity-enterprise#1107: deleting `terms_version` alone would make the
+    # shipped version name a custom text (nobody asked again); deleting the
+    # text brings the default back without the audit row restore-default
+    # writes. The terms routes are the only writer on BOTH verbs.
+    if key in TERMS_SETTING_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} is set via PUT /api/terms (admin + interactive-only, validated, "
+                "audit-logged; POST /api/terms/restore-default restores the shipped text)"
             ),
         )
 

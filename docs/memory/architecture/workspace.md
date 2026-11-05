@@ -24,6 +24,17 @@ for a platform principal that is not a person: a system-scoped key reads here bu
 The field defaults to False, and the principal also carries `self_approves` + `credential` (#3404): a
 portal session token says how it was minted (`minted_by`: `otp` | `delegate`), and only a platform
 person or an `otp`-minted session may self-approve a gated skill — see `feature-flows/skill-gate.md`.
+**The portal-token branch is terms-gated (trinity-enterprise#1107, ruling A(1)):** after the
+client-block check and before the session slides, `get_portal_principal` calls
+`terms_gate.enforce_portal_session(request, email, interactive=portal_session_is_interactive(token))`
+— a portal session minted with the Workspace's `"client": "web"` declaration on `/auth/verify`
+carries `interactive: true` (carried across rotation) and is refused 403 `terms_required` until its
+address has an acceptance row for the current version; a bare or delegate-minted token is not a
+visit. The two terms routes accept the portal token (`routers/terms.py::terms_caller`), the record is
+a `terms_acceptances` row with `user_id` NULL keyed by (email, version), and the Workspace shell
+renders `components/portal/PortalTerms.vue` in place of the roster for such a session —
+`feature-flows/terms-of-use.md`. The order matters: a blocked client is refused, never shown
+terms, and a refused session is never handed a fresh token.
 
 **The `user` rung is Workspace-only (trinity-enterprise#837).** A platform account whose role is
 `user` is a member who works with agents here and nowhere else: `get_current_user` refuses it on

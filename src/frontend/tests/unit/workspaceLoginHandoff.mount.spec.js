@@ -132,7 +132,7 @@ describe('#4157 — /login redeems the hand-off instead of asking for a second c
     const { router, auth } = await bootLogin(QUERY)
 
     expect(axios.post).toHaveBeenCalledTimes(1)
-    expect(axios.post).toHaveBeenCalledWith('/api/auth/email/handoff', { email: 'member@example.com', token: TOKEN })
+    expect(axios.post).toHaveBeenCalledWith('/api/auth/email/handoff', { email: 'member@example.com', token: TOKEN, client: 'web' })
     expect(auth.isAuthenticated).toBe(true)
     expect(auth.workspaceHandoff).toBeNull()
     expect(router.currentRoute.value.fullPath).toBe('/workspace/a/scout')

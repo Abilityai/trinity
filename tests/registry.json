@@ -8394,6 +8394,18 @@
         "unit"
       ],
       "description": "External MCP access switch, backend half: the resolver (Settings row wins both directions, MCP_EXTERNAL_ACCESS env opt-in, default off, the tier named, read failure falls to env/default); GET/PUT/DELETE /api/settings/mcp-external-access on the real composed settings router (any-auth read with env_value and advertised URL, admin write and clear audited, non-admin and admin-owned agent keys refused, non-boolean 422, the generic PUT catch-all refuses the key); feature-flags carries mcp_external_access_enabled; GET /api/internal/mcp-external-access behind the internal secret; the advertised default URL (any forwarded scheme -> same origin, MCP_BIND_ADDRESS set -> host-local raw port, unset -> today's); ConnectorStatus.external_access."
+    },
+    {
+      "file": "unit/test_ent1107_terms_per_instance.py",
+      "feature": "trinity-enterprise#1107",
+      "added": "2026-11-04",
+      "categories": [
+        "backend",
+        "auth",
+        "settings",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1107: terms of use per instance. The shipped default is served when nothing is configured; PUT /api/terms saves and stamps a new version (the author has accepted it), empty/oversized text refused by name (422), restore-default is one action, the switch turns the gate off; an admin JWT with no acceptance is refused 403 terms_required on an ordinary route and admitted on a @terms_route; accepting records (version, time, account) and lifts the refusal; a new version asks everyone else again; a stale version is 409; an agent key is never gated; a registered provider still answers the invite door and a broken one cannot lock an admin out; the acceptance list is admin-gated; setup resolves no principal; main.py registers the router with its # mcp: none header. No Docker."
     }
   ]
 }

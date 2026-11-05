@@ -687,6 +687,22 @@ CREATE TABLE seat_ask_class_state (
 CREATE INDEX idx_seat_ask_class_state_seat ON seat_ask_class_state(agent_name, seat_email);
 ```
 Both tracks: SQLite `seat_ask_class_state_table`, Alembic `0113_seat_ask_class_state`
+
+**terms_acceptances** (trinity-enterprise#1107 — terms of use per instance):
+```sql
+CREATE TABLE terms_acceptances (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    email TEXT,
+    terms_version TEXT NOT NULL,
+    accepted_at TEXT NOT NULL,
+    door TEXT,                -- the invitation id an optional module binds the row to, else NULL
+    actor_ip TEXT,
+    UNIQUE(user_id, terms_version)
+);
+CREATE INDEX idx_terms_acceptances_email ON terms_acceptances(email);
+```
+One row per (person, terms version): the record of which text they accepted and when; a version bump asks again. The text itself is four `system_settings` rows (`terms_required`, `terms_title`, `terms_text`, `terms_version`) resolved with a shipped default — no seed row. `email` is nullable (an admin account may have none). Both tracks: SQLite `terms_acceptances_table`, Alembic `0119_terms_acceptances`. An optional module that kept its own record before copies it across through its own migration (an INSERT is data, never an ALTER).
 (← `0107_skill_sources_follow_bundled_pin`); `AgentRef(..., Policy.CASCADE)`. The row holds only what was EARNED —
 the instance level, the agent's autonomy switch and the clock are ANDed at read
 time (`services/autonomy_dial_service.live_verdict`), never materialised. The

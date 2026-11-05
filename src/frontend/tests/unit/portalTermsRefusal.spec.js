@@ -7,7 +7,7 @@
  * adapter, so its interceptor and its catch are what run. Before this, the
  * gate's `detail` object became `store.error` and the stage printed it.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { portalHttp, useClientPortalStore } from '../../src/stores/clientPortal'
 import { setTermsRefusalHandler } from '../../src/utils/termsGate'
@@ -88,5 +88,49 @@ describe('fetchRoster on a terms refusal', () => {
     await roster(403, { detail: TERMS })
     store.signOut()
     expect(store.termsRefusal).toBe(null)
+  })
+})
+
+describe('ruling A(1): the terms on a portal session', () => {
+  it('a refused roster on a portal session names the state and never reports to the /terms handler', async () => {
+    const handler = vi.fn()
+    setTermsRefusalHandler(handler)
+    await roster(403, { detail: TERMS })
+    expect(store.termsRefusal).toBe('terms_required')
+    expect(handler).not.toHaveBeenCalled()
+  })
+
+  it('loadTerms reads on the portal bearer; acceptTerms posts the version and clears the refusal', async () => {
+    const seen = []
+    portalHttp.defaults.adapter = async (config) => {
+      seen.push({ method: config.method, url: config.url, auth: config.headers?.Authorization, data: config.data })
+      const data = config.url.endsWith('/accept')
+        ? { accepted: true, created: true, version: '2026-11', accepted_at: 'x' }
+        : { required: true, version: '2026-11', title: 'T', text: 'body', accepted: false, is_default: true }
+      return { status: 200, data, headers: {}, config, statusText: 'OK' }
+    }
+    store.termsRefusal = 'terms_required'
+    const current = await store.loadTerms()
+    expect(current.version).toBe('2026-11')
+    expect(store.terms).toEqual(current)
+    expect(seen[0]).toMatchObject({ method: 'get', url: '/api/terms/current', auth: 'Bearer tok' })
+    const out = await store.acceptTerms('2026-11')
+    expect(out.accepted).toBe(true)
+    expect(seen[1]).toMatchObject({ method: 'post', url: '/api/terms/accept', auth: 'Bearer tok', data: JSON.stringify({ version: '2026-11' }) })
+    expect(store.termsRefusal).toBe(null)
+    expect(store.terms.accepted).toBe(true)
+  })
+
+  it('a refused accept rejects with the server error and keeps the refusal', async () => {
+    portalHttp.defaults.adapter = answer(409, { detail: { code: 'version_stale', version: '2026-12' } })
+    store.termsRefusal = 'terms_required'
+    await expect(store.acceptTerms('2026-11')).rejects.toMatchObject({ response: { status: 409 } })
+    expect(store.termsRefusal).toBe('terms_required')
+  })
+
+  it('sign-out drops the loaded terms with the session', async () => {
+    store.terms = { version: 'v' }
+    store.signOut()
+    expect(store.terms).toBe(null)
   })
 })

@@ -1961,3 +1961,24 @@ metric_points = Table(
     # lets ent#80 partition by month without a table rebuild.
     PrimaryKeyConstraint("agent_name", "ts", "idempotency_key"),
 )
+
+
+# Terms acceptances (trinity-enterprise#1107) — one row per (person, terms
+# version). `door` is the invitation id an optional module names, else NULL.
+terms_acceptances = Table(
+    "terms_acceptances",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    # NULL for a Workspace portal session (no `users` row, ruling A(1) on
+    # trinity-enterprise#1107): such a row is keyed by (email, version) below.
+    Column("user_id", Integer, nullable=True),
+    Column("email", Text),
+    Column("terms_version", Text, nullable=False),
+    Column("accepted_at", Text, nullable=False),
+    Column("door", Text),
+    Column("actor_ip", Text),
+    UniqueConstraint("user_id", "terms_version", name="uq_terms_acceptances_user_version"),
+    Index("idx_terms_acceptances_email", "email"),
+    Index("uq_terms_acceptances_email_version", "email", "terms_version", unique=True,
+          sqlite_where=text("user_id IS NULL"), postgresql_where=text("user_id IS NULL")),
+)
