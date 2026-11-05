@@ -194,7 +194,7 @@ describe('the wake setting says what it spends on (mounted)', () => {
     api.get.mockResolvedValue({ data: {} })
     const w = mount(ReliabilityPanel, { props: { agentName: 'agent-a' } })
     await new Promise((r) => setTimeout(r, 0))
-    expect(w.text()).toContain('when an ask it raised ends — answered, cancelled or expired')
+    expect(w.text()).toContain('When an ask this agent raised ends — answered, cancelled or expired')
     expect(w.text()).not.toContain('Each answer then costs one agent turn')
   })
 })

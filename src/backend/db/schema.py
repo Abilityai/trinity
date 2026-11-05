@@ -1902,7 +1902,8 @@ TABLES = {
             last_seen_at TEXT,
             replaces TEXT,
             replaced_by TEXT,
-            wake_state TEXT,  -- abilityai/trinity-enterprise#1108 AC #4: NULL | 'pending' (agent not yet woken) | 'woken'
+            -- abilityai/trinity-enterprise#1108 AC #4: NULL | 'pending' (agent not yet woken) | 'woken'
+            wake_state TEXT,
             FOREIGN KEY (responded_by_id) REFERENCES users(id)
         )
     """,
