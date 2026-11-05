@@ -24,7 +24,7 @@ Plain HTTP on a public IP with none of the above is the one combination to avoid
 | Public chat links (`/chat/*`) | Yes |
 | Nevermined paid chat (`/api/paid/*/chat`) | Yes |
 | Web UI access for team members off-VPN | Yes |
-| MCP access for Claude Code clients off-VPN (`/mcp`) | Yes |
+| MCP access for Claude Code clients off-VPN (`/mcp`) | Yes — and External MCP access turned on (**Settings → MCP Keys**) |
 
 If all your users and webhook sources can reach the server directly (e.g., via Tailscale), you do not need the Cloudflare Tunnel.
 
@@ -154,7 +154,7 @@ Copy the URL shown in the UI into the respective third-party dashboard (Telegram
 
 **Schedule webhook URLs and the auto-detected MCP URL follow the proxy, not `PUBLIC_CHAT_URL`.** Their host is the one you opened Trinity on, and their scheme comes from the `X-Forwarded-Proto` header the proxy in front of Trinity sends: a proxy that sends `https` (a Cloudflare Tunnel, or your own proxy configured as above) gets `https://<host>/api/webhooks/{token}` and `https://<host>/mcp`. A proxy that sends no such header, or Trinity opened directly on its own port, gets `http://` URLs. The scheme is only ever upgraded by that header, never downgraded. So open Trinity through its public address before you copy a schedule's webhook URL.
 
-MCP clients off-VPN connect to `{PUBLIC_CHAT_URL}/mcp` with an MCP API key (**Settings → MCP Keys**). The URL the UI shows to users is auto-detected the same way — `https://<host>/mcp` behind an HTTPS proxy, `http://<host>:8080/mcp` otherwise; **Settings → MCP Keys → MCP Server URL** overrides it.
+MCP clients off-VPN connect to `{PUBLIC_CHAT_URL}/mcp` with an MCP API key (**Settings → MCP Keys**). The MCP server treats everything arriving through the tunnel or the frontend as outside, so this works only while **External MCP access** is on — an admin turns it on on the same page; a fresh install starts with it off and refuses such clients with `403 external_mcp_access_off`. Agents are never affected. The tunnel cannot bypass the switch: a rule aimed straight at the MCP server container still arrives as an outside caller. The URL the UI shows to users is auto-detected the same way — `<origin>/mcp` through a proxy that sends `X-Forwarded-Proto`, the raw `:8080` port otherwise; **Settings → MCP Keys → MCP Server URL** overrides it. See [MCP Server — External MCP Access](../../integrations/mcp-server.md#external-mcp-access).
 
 ## Security Notes
 

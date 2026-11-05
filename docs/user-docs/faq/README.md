@@ -382,6 +382,7 @@
 - [What is the difference between user, agent, and system key scopes?](mcp-and-api.md#what-is-the-difference-between-user-agent-and-system-key-scopes)
 - [How do I connect Claude Code to Trinity?](mcp-and-api.md#how-do-i-connect-claude-code-to-trinity)
 - [Which URL should I point my MCP client at — port 8080 or my domain?](mcp-and-api.md#which-url-should-i-point-my-mcp-client-at--port-8080-or-my-domain)
+- [Why does my client get external_mcp_access_off?](mcp-and-api.md#why-does-my-client-get-external_mcp_access_off)
 - [How many MCP tools are there, and what can they do?](mcp-and-api.md#how-many-mcp-tools-are-there-and-what-can-they-do)
 - [How does an agent record a business metric over MCP?](mcp-and-api.md#how-does-an-agent-record-a-business-metric-over-mcp)
 - [Can I expose one of my agents as its own MCP tool?](mcp-and-api.md#can-i-expose-one-of-my-agents-as-its-own-mcp-tool)

@@ -56,10 +56,33 @@ Add Trinity as an MCP server in your Claude Code configuration:
 
 #### Which URL to use
 
-- **Local install:** `http://localhost:8080/mcp` — the MCP server's own published port.
+- **Local install:** `http://localhost:8080/mcp` — the MCP server's own published port. On a fresh install that port is published on `127.0.0.1` only, so it answers on the Trinity host itself.
 - **Production install behind the frontend (nginx):** `https://your-domain.com/mcp`. The frontend proxies `/mcp` to the MCP server, so an install that exposes only ports 80/443 (a firewalled host, a one-click cloud image) still serves MCP without opening port 8080.
 
-The URL Trinity advertises — in the MCP Keys page's connection snippet and in an exposed agent's **Copy connection config** — is auto-detected from the request: `https://<host>/mcp` when the proxy in front of Trinity sends `X-Forwarded-Proto: https` (the frontend serves `/mcp` on the same origin, so no `:8080`), otherwise `http://<host>:8080/mcp`. A Cloudflare Tunnel sends that header; if you run your own proxy, configure it to (see [Public Access](../guides/deploying/public-access.md#tls-is-terminated-outside-trinity)). When the detected URL is still wrong — an 80/443-only install whose proxy reports plain HTTP — an admin sets the real one under **Settings → MCP Keys → MCP Server URL** (it must end in `/mcp`); `Auto-detect` there shows what would be advertised otherwise.
+Either URL answers an outside client only while **External MCP access** is on — see below. A fresh install, local development included, starts with it off: turn it on once before Claude Code on your laptop connects.
+
+The URL Trinity advertises — in the MCP Keys page's connection snippet and in an exposed agent's **Copy connection config** — is auto-detected from the request. A request that came through a proxy (the bundled frontend always sends `X-Forwarded-Proto`; a Cloudflare Tunnel does too) gets `<origin>/mcp`, with no `:8080`, whatever the scheme — the frontend serves `/mcp` on the same origin. A request that reached the backend directly gets the raw port: `http://127.0.0.1:8080/mcp` when `MCP_BIND_ADDRESS` is set (the port answers only on that address), otherwise `http://<host>:8080/mcp`. If you run your own proxy, configure it to send `X-Forwarded-Proto` (see [Public Access](../guides/deploying/public-access.md#tls-is-terminated-outside-trinity)). When the detected URL is still wrong, an admin sets the real one under **Settings → MCP Keys → MCP Server URL** (it must end in `/mcp`); `Auto-detect` there shows what would be advertised otherwise.
+
+### External MCP Access
+
+**External MCP access** decides whether clients outside the Trinity server may reach `/mcp` at all. It is off on a fresh install. Agents running on the instance are never affected: they connect to the MCP server over the Docker network and keep working whatever the switch says.
+
+- **The switch:** **Settings → MCP Keys → External MCP access** (admins). Everyone else sees the current state on the same page. While it is off, the page shows a notice in place of the connection snippet, and an exposed agent's **Copy connection config** is disabled with the reason.
+- **Precedence:** a value saved in Settings wins, on or off. With nothing saved, `MCP_EXTERNAL_ACCESS=true` in the environment turns it on. Otherwise it is off. The page says which of the three is in effect, and **Clear** removes the saved value so the environment or the default decides again.
+- **Upgrades:** an install that already had users when it upgraded keeps external MCP access on — the upgrade saves that value for it once. Only new installs start off.
+
+**Who counts as outside.** The MCP server looks at where each connection comes from. Loopback inside its container and agents on the agent network are inside. Everything else is outside — the bundled web frontend's `/mcp`, a Cloudflare Tunnel, a reverse proxy on the host (Caddy included), and any client using the published port, even from the Trinity host itself. The only ways in from outside are the frontend's `/mcp` and the published `:8080` port, and the switch covers both. Docker daemons with IPv6 enabled are not supported by this check: their peers read as outside.
+
+**What a refused client sees.** Every request under `/mcp` except `DELETE` (so a client can still close its session) is answered with a JSON-RPC error rather than a dropped connection:
+
+| Status | `X-Trinity-Refusal` | Meaning | What to do |
+|--------|---------------------|---------|------------|
+| `403` | `external_mcp_access_off` | External MCP access is off on this instance | An admin turns it on under **Settings → MCP Keys** |
+| `503` (with `Retry-After: 5`) | `external_mcp_access_unverified` | The MCP server could not get the setting from the backend yet — it is still starting, or `INTERNAL_API_SECRET` is not set | Retry shortly; if it persists, check the backend and that `INTERNAL_API_SECRET` is set |
+
+The JSON-RPC error code is `-32003` for both. `/health` and other paths outside `/mcp` are never refused.
+
+**The published port — `MCP_BIND_ADDRESS`.** This `.env` key is the interface the MCP server's `:8080` port is published on. Fresh installs set `127.0.0.1`, so the port answers only on the Trinity host and outside clients use the frontend's `/mcp`. An upgraded `.env` that does not carry the key keeps publishing on every interface, as before. Empty means every interface. The key is read when the containers are created, so change it in `.env` and recreate the stack.
 
 ### Tool Categories
 
@@ -220,18 +243,24 @@ When the caller is an agent serving a Slack, Telegram or Workspace conversation,
 | `/api/mcp/keys/{key_id}/revoke` | POST | Deactivate a key; its record stays for audit |
 | `/api/mcp/keys/{key_id}` | DELETE | Permanently delete a key |
 | `/api/settings/mcp-url` | GET/PUT/DELETE | The advertised MCP URL: read the override (`url`, `null` when none) and the auto-detected value (`default_url`), set an override, or clear it (admin) |
+| `/api/settings/mcp-external-access` | GET | External MCP access: `enabled`, `source` (`settings`, `environment` or `default`), `env_value`, the `advertised_url` and `raw_port_bind_address` (any signed-in user) |
+| `/api/settings/mcp-external-access` | PUT | Turn it on or off (`{"enabled": true}`; admin, recorded in the audit log) |
+| `/api/settings/mcp-external-access` | DELETE | Clear the saved value so `MCP_EXTERNAL_ACCESS` or the default decides (admin) |
 
 ### MCP Endpoint
 
 | Endpoint | Transport | Description |
 |----------|-----------|-------------|
-| `http://localhost:8080/mcp` | Streamable HTTP | MCP tool server on its own port |
+| `http://localhost:8080/mcp` | Streamable HTTP | MCP tool server on its own port (published on `127.0.0.1` on a fresh install) |
 | `https://your-domain.com/mcp` | Streamable HTTP | The same server, proxied by the production frontend — the URL for an install that exposes only 80/443 |
+
+Both answer outside clients only while [External MCP access](#external-mcp-access) is on.
 
 ## Limitations
 
 - Agent-scoped keys cannot access tools outside their assigned agent (plus explicitly permitted agents).
 - MCP clients must be manually reconnected after a backend restart.
+- Outside clients are refused with `external_mcp_access_off` until an admin turns on External MCP access; a fresh install starts with it off.
 - `chat_with_agent` and `fan_out` sync modes cap at `MCP_CHAT_TIMEOUT_MS` (default 25s). Longer calls switch to poll-mode via the returned `execution_id` (or `fan_out_id`); a receipt is issued only when the running work can be attributed to your call unambiguously.
 - A `model` passed to `chat_with_agent` (it applies with `parallel=true`) must look like a model id — a short alias such as `sonnet` or a full id such as `claude-sonnet-4-6`. Anything else is refused with `422` before the task starts. See [Chat API](../api-reference/chat-api.md#model-override).
 - Fan-out is self-only: an agent fans out to itself, not to another agent.
