@@ -13,11 +13,13 @@ subscription is assigned, ANTHROPIC_API_KEY is removed from the container.
 import asyncio
 import logging
 import os
+import traceback
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from typing import Optional, List
 
 from models import SubscriptionHeadroomHistory, SubscriptionRegistration, SubscriptionTokenTest, User
 from database import db
+from utils.credential_sanitizer import redact_url_userinfo, sanitize_text
 from dependencies import (
     get_current_user, assert_admin, assert_agent_access, assert_agent_owner,
     is_fleet_admin, principal_reach, require_interactive, require_person,
@@ -158,8 +160,19 @@ async def register_subscription(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Failed to register subscription: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to register subscription: {str(e)}")
+        # #4284: the body carries the token, and a DB error can echo its bound
+        # parameters — mask it in the logged traceback (hence no exc_info).
+        trace = "".join(traceback.format_exception(e))
+        if payload.token:
+            trace = trace.replace(payload.token, "***")
+        logger.error(
+            "Failed to register subscription: %s",
+            sanitize_text(redact_url_userinfo(trace)),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to register subscription ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 @router.post("/test")
@@ -628,9 +641,17 @@ async def assign_subscription_to_agent(
                                 f"Restarted agent '{agent_name}' to apply subscription token"
                             )
                         except Exception as e:
-                            logger.error(f"Failed to restart agent '{agent_name}' for subscription: {e}")
-                            restart_result = f"failed: {e}"
-                            injection_result = {"status": "failed", "error": str(e)}
+                            logger.error(
+                                f"Failed to restart agent '{agent_name}' for subscription: {e}",
+                                exc_info=True,
+                            )
+                            # py/stack-trace-exposure (ent#1117): keep the
+                            # `failed:` prefix; the exception text is logged.
+                            restart_result = f"failed: {e.__class__.__name__} — details in backend logs"
+                            injection_result = {
+                                "status": "failed",
+                                "error": f"Agent restart failed ({e.__class__.__name__} — details in backend logs)",
+                            }
                     else:
                         injection_result = {"status": "agent_not_running"}
                 else:
@@ -702,8 +723,11 @@ async def clear_agent_subscription(
                 restart_result = "success"
                 logger.info(f"Restarted agent '{agent_name}' to restore API key after subscription removal")
             except Exception as e:
-                logger.error(f"Failed to restart agent '{agent_name}' after subscription removal: {e}")
-                restart_result = f"failed: {e}"
+                logger.error(
+                    f"Failed to restart agent '{agent_name}' after subscription removal: {e}",
+                    exc_info=True,
+                )
+                restart_result = f"failed: {e.__class__.__name__} — details in backend logs"
 
     return {
         "success": True,
@@ -732,8 +756,11 @@ async def get_agent_auth_status(
         from services.subscription_service import get_agent_auth_mode
         return await get_agent_auth_mode(agent_name)
     except Exception as e:
-        logger.error(f"Failed to get auth status for agent {agent_name}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Failed to get auth status for agent {agent_name}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get auth status ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 # =========================================================================

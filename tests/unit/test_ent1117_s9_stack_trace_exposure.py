@@ -283,3 +283,173 @@ def test_telegram_configure_502_detail_carries_no_raw_message_or_token(monkeypat
     assert "ConnectError" in detail
     logs = _log_text(caplog)
     assert SENTINEL in logs and BOT_TOKEN not in logs
+
+
+# ---------------------------------------------------------------------------
+# #50 #51 (+ #4284) routers/subscriptions.py, services/subscription_auto_switch.py
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def sub_env(monkeypatch):
+    """The subscription router with its db, audit and container seams stubbed.
+    `start_agent_internal` raises the sentinel, so every restart path fails."""
+    rs = _live("routers.subscriptions")
+    fake_db = MagicMock()
+    fake_db.can_user_share_agent.return_value = True
+    sub = MagicMock()
+    sub.id = "sub-b"
+    sub.name = "sub-B"
+    fake_db.get_subscription_by_name.return_value = sub
+    fake_db.get_agent_subscription.return_value = sub
+    monkeypatch.setattr(rs, "db", fake_db)
+    monkeypatch.setitem(rs.assert_agent_owner.__globals__, "db", fake_db)
+    monkeypatch.setattr(rs, "platform_audit_service", MagicMock(log=AsyncMock()))
+
+    docker_service = types.ModuleType("services.docker_service")
+    docker_service.get_agent_container = lambda name: object()
+    docker_service.get_agent_status_from_container = lambda c: SimpleNamespace(status="running")
+    monkeypatch.setitem(sys.modules, "services.docker_service", docker_service)
+    docker_utils = types.ModuleType("services.docker_utils")
+    docker_utils.container_stop = AsyncMock()
+    monkeypatch.setitem(sys.modules, "services.docker_utils", docker_utils)
+    agent_service = types.ModuleType("services.agent_service")
+
+    async def _start(name):
+        raise RuntimeError(SENTINEL)
+
+    agent_service.start_agent_internal = _start
+    monkeypatch.setitem(sys.modules, "services.agent_service", agent_service)
+
+    auto_switch = _live("services.subscription_auto_switch")
+
+    async def _lock(name):
+        return asyncio.Lock()
+
+    monkeypatch.setattr(auto_switch, "agent_switch_lock", _lock)
+    return SimpleNamespace(rs=rs, db=fake_db, auto_switch=auto_switch)
+
+
+def _owner():
+    u = _admin()
+    u.username = "owner"
+    u.role = "user"
+    return u
+
+
+def _assert_failed_restart(value: str):
+    # `failed:` is a contract: test_subscription_auto_switch_pingpong and the
+    # SUB-003 walk read the prefix; the class name keeps it diagnosable.
+    assert value.startswith("failed:"), value
+    assert SENTINEL not in value
+    assert "RuntimeError" in value
+
+
+def test_restart_agent_result_carries_no_raw_message(sub_env, caplog):
+    caplog.set_level(logging.ERROR)
+    out = _run(sub_env.auto_switch._restart_agent("a1"))
+    _assert_failed_restart(out)
+    assert SENTINEL in _log_text(caplog)
+
+
+def test_assign_mode_change_restart_failure_carries_no_raw_message(sub_env, caplog):
+    sub_env.db.get_agent_subscription_id.return_value = None  # api-key → subscription
+    caplog.set_level(logging.ERROR)
+
+    out = _run(sub_env.rs.assign_subscription_to_agent(
+        agent_name="a1", subscription_name="sub-B", current_user=_owner()))
+
+    assert SENTINEL not in _blob(out), out
+    _assert_failed_restart(out["restart_result"])
+    assert out["injection_result"]["status"] == "failed"
+    assert "RuntimeError" in out["injection_result"]["error"]
+    assert SENTINEL in _log_text(caplog)
+
+
+def test_assign_hot_reload_fallback_restart_failure_carries_no_raw_message(sub_env, monkeypatch, caplog):
+    """The second SARIF source of #50: sub→sub hot-reload falls back to
+    `_restart_agent`, whose result becomes both `restart_result` and
+    `injection_result.status`."""
+    sub_env.db.get_agent_subscription_id.return_value = "sub-a"  # sub → sub
+    real_restart = sub_env.auto_switch._restart_agent
+
+    async def _hot(name):  # the no-token / 404 / transport branches all do this
+        return await real_restart(name)
+
+    monkeypatch.setattr(sub_env.auto_switch, "_hot_reload_subscription_token", _hot)
+    caplog.set_level(logging.ERROR)
+
+    out = _run(sub_env.rs.assign_subscription_to_agent(
+        agent_name="a1", subscription_name="sub-B", current_user=_owner()))
+
+    assert SENTINEL not in _blob(out), out
+    _assert_failed_restart(out["restart_result"])
+    _assert_failed_restart(out["injection_result"]["status"])
+    assert SENTINEL in _log_text(caplog)
+
+
+def test_clear_restart_failure_carries_no_raw_message(sub_env, caplog):
+    caplog.set_level(logging.ERROR)
+
+    out = _run(sub_env.rs.clear_agent_subscription(agent_name="a1", current_user=_owner()))
+
+    assert SENTINEL not in _blob(out), out
+    _assert_failed_restart(out["restart_result"])
+    assert SENTINEL in _log_text(caplog)
+
+
+def test_register_500_detail_carries_no_raw_message_or_token(sub_env, monkeypatch, caplog):
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", "0" * 64)
+    sub_env.db.get_user_by_username.return_value = {"id": 1}
+    sub_env.db.create_subscription.side_effect = RuntimeError(
+        f"{SENTINEL} [parameters: ('s', '{SUB_TOKEN}')]")
+    ss = _live("services.subscription_service")
+    monkeypatch.setattr(ss, "is_claude_auth_configured", lambda: True)
+    db_models = _live("db_models")
+    payload = db_models.SubscriptionCredentialCreate(name="s", token=SUB_TOKEN)
+    caplog.set_level(logging.ERROR)
+
+    with pytest.raises(HTTPException) as ei:
+        _run(sub_env.rs.register_subscription(
+            payload=payload, http_request=MagicMock(), current_user=_admin()))
+
+    assert ei.value.status_code == 500
+    assert SENTINEL not in ei.value.detail and SUB_TOKEN not in ei.value.detail
+    assert ei.value.detail.startswith("Failed to register subscription")
+    assert "RuntimeError" in ei.value.detail
+    logs = _log_text(caplog)
+    assert SENTINEL in logs and SUB_TOKEN not in logs
+
+
+def test_register_value_error_stays_a_400_with_its_message(sub_env, monkeypatch):
+    """A deliberate domain message (ValueError → 400) is unchanged."""
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", "0" * 64)
+    sub_env.db.get_user_by_username.return_value = {"id": 1}
+    sub_env.db.create_subscription.side_effect = ValueError("name already taken")
+    ss = _live("services.subscription_service")
+    monkeypatch.setattr(ss, "is_claude_auth_configured", lambda: True)
+    db_models = _live("db_models")
+    payload = db_models.SubscriptionCredentialCreate(name="s", token=SUB_TOKEN)
+
+    with pytest.raises(HTTPException) as ei:
+        _run(sub_env.rs.register_subscription(
+            payload=payload, http_request=MagicMock(), current_user=_admin()))
+    assert (ei.value.status_code, ei.value.detail) == (400, "name already taken")
+
+
+def test_agent_auth_status_500_detail_carries_no_raw_message(sub_env, monkeypatch, caplog):
+    monkeypatch.setattr(sub_env.rs, "assert_agent_access", lambda *a, **k: None)
+    ss = _live("services.subscription_service")
+
+    async def _boom(name):
+        raise RuntimeError(SENTINEL)
+
+    monkeypatch.setattr(ss, "get_agent_auth_mode", _boom)
+    caplog.set_level(logging.ERROR)
+
+    with pytest.raises(HTTPException) as ei:
+        _run(sub_env.rs.get_agent_auth_status(agent_name="a1", current_user=_owner()))
+
+    assert ei.value.status_code == 500
+    assert SENTINEL not in ei.value.detail
+    assert "RuntimeError" in ei.value.detail
+    assert SENTINEL in _log_text(caplog)
