@@ -179,29 +179,59 @@ def test_the_in_loop_window_defaults_to_ninety_seconds():
     assert pull_worker._DELIVERY_IN_LOOP_SECONDS == 90.0
 
 
-def test_the_window_is_the_lesser_of_ninety_seconds_and_the_lease():
-    """A short lease must still bound delivery; the cap only ever shortens."""
-    lease_deadline = time.monotonic() + 10.0
-    bounded = min(lease_deadline,
-                  time.monotonic() + pull_worker._DELIVERY_IN_LOOP_SECONDS)
+def test_a_long_lease_is_cut_to_the_window():
+    """The real computation, on a fixed clock: 10 min of lease left, the
+    attempt still stops 90 s in, so the worker goes back to claiming."""
+    now = 1000.0
+    lease_deadline = now + 600.0
 
-    assert bounded == pytest.approx(lease_deadline, abs=0.5)
+    bound = pull_worker._delivery_deadline(
+        lease_deadline, persisted=True, now=now
+    )
+
+    assert bound == now + pull_worker._DELIVERY_IN_LOOP_SECONDS
+    assert bound < lease_deadline
+
+
+def test_a_lease_shorter_than_the_window_is_the_bound():
+    """The cap only ever SHORTENS. A 10 s lease must not be extended to 90 s —
+    delivering past the lease is writing against a claim someone else may
+    already hold."""
+    now = 1000.0
+    lease_deadline = now + 10.0
+
+    bound = pull_worker._delivery_deadline(
+        lease_deadline, persisted=True, now=now
+    )
+
+    assert bound == lease_deadline
+
+
+def test_the_two_bounds_do_not_coincide_at_the_values_tested():
+    """Guard against the one-value trap: a test where lease == window would
+    pass under either `min` or `max`."""
+    assert pull_worker._DELIVERY_IN_LOOP_SECONDS not in (10.0, 600.0)
 
 
 def test_an_unpersisted_terminal_keeps_the_full_lease_window():
     """Nothing on disk means giving up early would DROP spent work, so that
-    case must not be bounded — pinned on the call site's own expression."""
-    import ast
+    case is deliberately unbounded — asserted on the returned value, not on
+    the source text."""
+    now = 1000.0
+    lease_deadline = now + 600.0
 
-    src = (_AGENT_SERVER / "services" / "pull_worker.py").read_text()
-    tree = ast.parse(src)
-    ifexps = [
-        node for node in ast.walk(tree)
-        if isinstance(node, ast.IfExp)
-        and isinstance(node.test, ast.Name) and node.test.id == "persisted"
-        and isinstance(node.orelse, ast.Name) and node.orelse.id == "deadline"
-    ]
-    assert ifexps, "the delivery bound no longer depends on `persisted`"
+    assert pull_worker._delivery_deadline(
+        lease_deadline, persisted=False, now=now
+    ) == lease_deadline
+
+
+def test_the_delivery_call_site_uses_the_bound():
+    """The helper is only worth having if `_run_and_report` calls it: delete
+    the call and this goes red."""
+    import inspect
+
+    src = inspect.getsource(pull_worker._run_and_report)
+    assert "_delivery_deadline(deadline, persisted=persisted)" in src
 
 
 def test_the_resend_sweep_runs_periodically_not_only_at_boot():

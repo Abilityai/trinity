@@ -312,6 +312,25 @@ _DELIVERY_IN_LOOP_SECONDS = float(os.getenv("PULL_DELIVERY_IN_LOOP_SECONDS", "90
 _RESEND_TICK_SECONDS = float(os.getenv("PULL_RESEND_TICK_SECONDS", "60"))
 
 
+def _delivery_deadline(deadline: float, *, persisted: bool,
+                       now: Optional[float] = None) -> float:
+    """When the in-loop delivery attempt must stop (#4257).
+
+    ``deadline`` is the lease deadline the caller is already bound by, on the
+    `time.monotonic()` clock. The cap only ever SHORTENS it: a lease shorter
+    than `_DELIVERY_IN_LOOP_SECONDS` still ends the attempt at the lease, and
+    a long lease is cut to the window so the worker goes back to claiming.
+
+    ``persisted`` is the gate. Without a safe execution id nothing is on disk,
+    so giving up early WOULD drop spent work — that case keeps the full lease
+    window and is deliberately not bounded.
+    """
+    if not persisted:
+        return deadline
+    started = time.monotonic() if now is None else now
+    return min(deadline, started + _DELIVERY_IN_LOOP_SECONDS)
+
+
 # ---------------------------------------------------------------------------
 # Claim (GET /api/internal/next-task) — §3.1 / §3.2
 # ---------------------------------------------------------------------------
@@ -560,10 +579,7 @@ async def _run_and_report(
             # without a safe execution id nothing is on disk, and giving up
             # early there WOULD drop spent work — so that case keeps the full
             # lease-deadline window.
-            delivery_deadline = (
-                min(deadline, time.monotonic() + _DELIVERY_IN_LOOP_SECONDS)
-                if persisted else deadline
-            )
+            delivery_deadline = _delivery_deadline(deadline, persisted=persisted)
             delivered = await _deliver_result(
                 client, execution_id, body, backend_url, mcp_key, delivery_deadline,
                 reply_sink=replies,
