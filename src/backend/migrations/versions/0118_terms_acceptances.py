@@ -6,17 +6,19 @@ PostgreSQL half of the dual-track pair; the SQLite half is
 One row per (person, terms version): the record of which text they accepted
 and when. ``door`` names the invitation an optional module bound the
 acceptance to, else NULL. The text itself is a ``system_settings`` row with a
-shipped default, so nothing is seeded here. Chained after 0115 so the
-version-line keeps ONE head (#2068).
+shipped default, so nothing is seeded here. Chained after #4261's
+``0117_operator_queue_wake_state`` (which lands first) so the version-line
+keeps ONE head (#2068) — it was ``0116`` off 0115 until the merge train
+re-parented it.
 
-Revision ID: 0116_terms_acceptances
-Revises: 0115_access_requests_requester_identity
+Revision ID: 0118_terms_acceptances
+Revises: 0117_operator_queue_wake_state
 """
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0116_terms_acceptances"
-down_revision = "0115_access_requests_requester_identity"
+revision = "0118_terms_acceptances"
+down_revision = "0117_operator_queue_wake_state"
 branch_labels = None
 depends_on = None
 

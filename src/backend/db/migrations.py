@@ -5919,7 +5919,7 @@ def _migrate_terms_acceptances_table(cursor, conn):
     optional module's own migration copies its rows across. The text itself is
     a `system_settings` row with a shipped default (`services/terms_defaults.py`),
     so no seed is needed here. Schema is also in db/schema.py for fresh installs;
-    mirrored by Alembic revision 0116_terms_acceptances.
+    mirrored by Alembic revision 0118_terms_acceptances.
     """
     cursor.execute(
         """
