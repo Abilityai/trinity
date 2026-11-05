@@ -19,7 +19,7 @@ As a platform administrator, I want to log in with a password so that I can acce
 ## Entry Points
 
 - **UI**: `/login` route - Admin Login button at bottom of email login form
-- **API**: `POST /api/token` - OAuth2-compatible token endpoint
+- **API**: `POST /api/token` - OAuth2-compatible token endpoint; the SPA adds `client=web`, which mints the `interactive` claim the terms gate asks (ent#1107, `feature-flows/terms-of-use.md`)
 
 ## Prerequisites
 

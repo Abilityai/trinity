@@ -35,6 +35,7 @@ from dependencies import (
     require_interactive,
     require_person,
 )
+from services.tool_access_guard import assert_tool_allowed
 from models import (
     TelegramBindingResponse,
     TelegramConfigureRequest,
@@ -489,6 +490,7 @@ async def send_telegram_group_message(
     agent_name: OwnedAgentByName,
     chat_id: str,
     request: TelegramGroupMessageRequest,
+    current_user: User = Depends(get_current_user),
 ):
     """
     Send a proactive message to a Telegram group (Issue #349).
@@ -496,6 +498,8 @@ async def send_telegram_group_message(
     The agent must have an active binding for this group. Rate limited to
     prevent spam: 10 messages/hour/group and 100 messages/hour/agent.
     """
+    # trinity-enterprise#341: refused when this agent's tool access removes send_group_message.
+    assert_tool_allowed(current_user, "send_group_message", as_agent=agent_name)
     # Validate binding exists
     binding = db.get_telegram_binding(agent_name)
     if not binding:

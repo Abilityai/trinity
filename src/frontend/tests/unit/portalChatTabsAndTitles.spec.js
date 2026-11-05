@@ -317,10 +317,12 @@ describe('the strip is the primitive, and the editor has one home', () => {
       // (inlineCount starts at +Infinity, so every tab is inline before the
       // first measure). The mirror is `width: max-content` and never shrinks,
       // and getBoundingClientRect returns the border box, so it needs neither
-      // — nor the label span.
+      // — nor the label span. The nav's clip is no longer gated on
+      // `fixedWidth`: every strip clips, so a mis-measured row can never paint
+      // over its neighbour (`overflowTabsRealOverflow.mount.spec.js`).
       const { visible, mirror } = halves()
       expect(visible).toMatch(/\$\{FIXED_TAB_WIDTH\} shrink-0/)
-      expect(visible).toMatch(/fixedWidth \? 'overflow-hidden' : ''/)
+      expect(visible).toMatch(/<nav ref="visibleNav" class="-mb-px flex overflow-hidden">/)
       expect(visible).toMatch(/<span class="min-w-0 truncate">\{\{ tab\.label \}\}<\/span>/)
       // The mirror takes the width and nothing else. (`shrink-0` on its own
       // appears there on the pinned glyph, which both rows have always drawn —

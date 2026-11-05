@@ -55,7 +55,9 @@
               <!-- ent#380: hints can be full-sentence use-case prompts, not just
                    short playbook names — wrap to two lines instead of clipping. -->
               <div class="text-sm font-medium line-clamp-2 break-words">{{ p.title }}</div>
-              <div v-if="p.description" class="text-xs text-gray-500 dark:text-gray-400 mt-0.5 line-clamp-2">{{ p.description }}</div>
+              <!-- trinity-enterprise#584: a playbook shows its SKILL.md
+                   description or "No description yet"; a use case has no line. -->
+              <div v-if="hintLine(p)" class="text-xs text-gray-500 dark:text-gray-400 mt-0.5 line-clamp-2" :class="{ italic: hintLine(p).missing }">{{ hintLine(p).text }}</div>
             </div>
           </div>
         </button>
@@ -95,7 +97,7 @@
 import { computed, ref } from 'vue'
 import PortalAvatar from './PortalAvatar.vue'
 import PortalSkeleton from './PortalSkeleton.vue'
-import { planHintDisplay, starterFor } from './portalUtils'
+import { planHintDisplay, starterFor, hintLine } from './portalUtils'
 import { briefingZone } from './portalBriefingState'
 
 const props = defineProps({

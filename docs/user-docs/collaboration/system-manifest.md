@@ -47,7 +47,9 @@ when either applies:
 
 - **It replaces the global system prompt.** A top-level `prompt:` key overwrites the
   platform-wide instructions for **every agent on your instance**, not just the ones in
-  the manifest.
+  the manifest. Only an admin's deploy applies it. For anyone else the agents still
+  deploy, the prompt is left as it is, and the preview (and the result, once agents are
+  created) says so with a `prompt_requires_admin` note instead of asking you to confirm.
 - **It starts recurring schedules.** A schedule is enabled unless you write
   `enabled: false`, so those agents begin running on a timer as soon as they deploy —
   consuming API budget without anyone asking them to.

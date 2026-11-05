@@ -95,7 +95,9 @@
       >
         <p>
           <span class="font-medium">{{ askerLabel(ask) }}</span> is asking you for
-          <code class="font-mono">{{ ask.credential_name }}</code>.<template v-if="!ask.question"> It gave no reason.</template>
+          <code class="font-mono">{{ ask.credential_name }}</code><template v-if="ask.credential_destination">
+            <!-- trinity-enterprise#1109: the value lands elsewhere — say where, in plain words. Never "your": nothing here ties the host to the reader; an admin's registry ties it to the platform. -->
+            for the agent <span class="font-medium" :data-testid="`${tid.prefix}-destination-${ask.id}`">{{ ask.credential_destination.agent_name }}</span> on the Trinity at <span class="font-medium">{{ ask.credential_destination.host }}</span></template>.<template v-if="!ask.question"> It gave no reason.</template>
         </p>
         <figure v-if="ask.question" class="mt-1">
           <figcaption class="text-xs" :data-testid="`${tid.prefix}-why-by-${ask.id}`">In {{ askerLabel(ask) }}’s words:</figcaption>
@@ -148,6 +150,14 @@
           :title="withdrawReason(ask)"
           :data-testid="`${tid.prefix}-ending-reason`"
         >{{ withdrawReason(ask) }}</span>
+        <!-- abilityai/trinity-enterprise#1108 AC #4: the answer landed, the agent
+             was not running, and its next start picks it up — said plainly, so
+             "answered" never implies the agent is already on it. -->
+        <span
+          v-if="ask.wake_state === 'pending'"
+          class="mt-0.5 block"
+          :data-testid="`${tid.prefix}-wake-pending`"
+        >Agent not yet woken — it picks this up when it next runs.</span>
       </p>
       <!-- #3247: the agent's replacement names the ask it replaced, by
            request_id only — there is no deep link to a single item. -->

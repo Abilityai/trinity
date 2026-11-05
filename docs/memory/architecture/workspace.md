@@ -24,6 +24,17 @@ for a platform principal that is not a person: a system-scoped key reads here bu
 The field defaults to False, and the principal also carries `self_approves` + `credential` (#3404): a
 portal session token says how it was minted (`minted_by`: `otp` | `delegate`), and only a platform
 person or an `otp`-minted session may self-approve a gated skill — see `feature-flows/skill-gate.md`.
+**The portal-token branch is terms-gated (trinity-enterprise#1107, ruling A(1)):** after the
+client-block check and before the session slides, `get_portal_principal` calls
+`terms_gate.enforce_portal_session(request, email, interactive=portal_session_is_interactive(token))`
+— a portal session minted with the Workspace's `"client": "web"` declaration on `/auth/verify`
+carries `interactive: true` (carried across rotation) and is refused 403 `terms_required` until its
+address has an acceptance row for the current version; a bare or delegate-minted token is not a
+visit. The two terms routes accept the portal token (`routers/terms.py::terms_caller`), the record is
+a `terms_acceptances` row with `user_id` NULL keyed by (email, version), and the Workspace shell
+renders `components/portal/PortalTerms.vue` in place of the roster for such a session —
+`feature-flows/terms-of-use.md`. The order matters: a blocked client is refused, never shown
+terms, and a refused session is never handed a fresh token.
 
 **The `user` rung is Workspace-only (trinity-enterprise#837).** A platform account whose role is
 `user` is a member who works with agents here and nowhere else: `get_current_user` refuses it on
@@ -322,7 +333,15 @@ exposable-skills config (ent#178) slots into this same seam. A chat holds one ag
 or, where the capability below is present, several — and the picker starts a new chat
 either way, so hints scope to the active agent by construction. ent#380 also fixed the
 briefing's metadata read — #138 called a nonexistent agent `/info` route, so descriptions
-were silently always `None`.
+were silently always `None`. **Each hint says which tier it is (trinity-enterprise#584):**
+`PortalPlaybook.kind` is `playbook` (a capability, described by its SKILL.md
+`description:`, `null` → "No description yet") or `use_case` (rendered as "What you can
+ask", never as a capability missing a description); the typeahead copy carries it too, and
+the default keeps an older payload reading as a playbook. Descriptions are cleaned once,
+where they enter (`connector_service.resolve_exposed_playbooks` →
+`services/skill_packaging.py::clean_description`), not in `_agent_briefing`. `/page` carries
+`capabilities_state` (the card's `briefing_state`), so the rail's empty arm can tell
+"never answered" from "published nothing".
 
 **Briefing hint grid is bounded (#2101):** with no connector allow-list configured every
 `user_invocable` skill becomes a "Things you can ask" card, so the hint set is belted
@@ -380,6 +399,13 @@ chat. It is bound to the **Workspace thread**: `POST
 `client_portal/voice.py::start_workspace_voice`, which builds the context from the thread's
 recent rows and creates the session with `portal_session_id` + `client_email`,
 `canvas_audience="operator"` and `max_duration=WORKSPACE_VOICE_MAX_DURATION` (1800 s).
+The start response also carries the audio socket's single-use ticket (trinity-enterprise#595),
+minted in the router for the platform user it resolved — which must be an interactive
+session, so a Workspace-only account gets a call and an MCP key does not — and the client
+sends it as the socket's first frame. The ticket comes from the same `portalHttp` request the
+store's credential decision authorized; the composable never reads a session token for the
+socket, and `startWith` resolves (the orb shows *listening*) only after the server's
+`auth_ok` and a live mic. Protocol: [integrations.md → WebSocket auth](integrations.md#real-time-delivery-reliability-003-306).
 The transcript is **written turn by turn on the worker holding the live socket**
 (`persist_voice_turn`, called from the bridge's `on_turn`) as `enterprise_portal_messages`
 rows carrying `source='voice'` + `voice_call_id`; the call closes with one `system` label
@@ -1021,6 +1047,14 @@ agent itself (a human sharer's publish places no card at all), is stamped to the
 addressee's Main and that Main is touched (`added=0`). That is what makes the
 deliverable arm count it, gives the card an inline home and an anchor, and keeps
 the Main visible to `sidebarThreads` (which hides `is_main && !last_message_at`).
+
+**The read write covers what the client held; a room's cursor is per identity space
+(trinity-enterprise#1010, #1011).** `mark_chat_read(…, through=)` moves the cursor to the
+client's `through` (the later of `GET /chat-state`'s `as_of` and the newest row it rendered),
+clamped to now and never backwards, instead of to server time — so an arrival between the last
+fetch and the write stays unread. A room's cursor row is `chat_kind = 'room:<kind>'`
+(`db.room_cursor_kind`); the plain `room` row keeps the star and is every space's floor until
+that space writes its own. No schema change: `chat_kind` is free text in the existing PK.
 
 **A room's unread is the same cursor, read through membership (trinity-enterprise#959).**
 `db.unread_room_arrivals(email, kind, identity)` counts agent messages after the viewer's

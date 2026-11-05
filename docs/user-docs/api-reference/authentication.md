@@ -194,6 +194,7 @@ Two real-time endpoints, two credentials:
 | `/api/token` | POST | None | Admin login (form-encoded) |
 | `/api/auth/email/request` | POST | None | Request email verification code |
 | `/api/auth/email/verify` | POST | None | Verify email code, returns token |
+| `/api/auth/email/handoff` | POST | None | Finish a sign-in the Workspace code page started — body `{email, handoff}`. Redeems the one-time token the Workspace returns after a correct code for a platform account, in place of a second emailed code; otherwise the same checks, rate limits and 2FA step as `/api/auth/email/verify` |
 | `/api/auth/mode` | GET | None | Get auth mode configuration — `email_auth_enabled`, `email_code_login_enabled`, `email_delivery_available` (`false` when no email provider can send; the login page then says the code is in the backend log), `setup_completed` |
 | `/api/auth/logout` | POST | JWT | Revoke the current token immediately (idempotent; no-op for MCP keys) |
 | `/api/auth/validate` | GET | JWT | Validate current token (rejects revoked tokens) |
@@ -215,7 +216,7 @@ Two real-time endpoints, two credentials:
 ### Unauthenticated Endpoints
 
 The following endpoints do not require a Bearer token:
-`/api/auth/mode`, `/api/auth/email/request`, `/api/auth/email/verify`, `/api/access/request`, `/api/setup/status`, `/api/setup/admin-password`, `/api/token`, `/health`
+`/api/auth/mode`, `/api/auth/email/request`, `/api/auth/email/verify`, `/api/auth/email/handoff`, `/api/access/request`, `/api/setup/status`, `/api/setup/admin-password`, `/api/token`, `/health`
 
 ## See Also
 

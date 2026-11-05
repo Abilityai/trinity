@@ -7,6 +7,7 @@
 // would close one.
 import { draftedLandingFor } from './portalDrafts'
 import { capCount } from '@/utils/tabTitle'
+import { describeSkill } from '@/utils/skillDescription'
 
 // ent#621: the key map is the single declaration of every Workspace chord, so
 // the two hotkey helpers below delegate to it rather than keeping a second
@@ -1059,6 +1060,42 @@ export function isMentionable(name) {
 // reach it with a row from a roster that refreshed underneath it.
 export function starterFor(p) {
   return String(p?.starter_prompt ?? '').trim() || String(p?.title ?? '')
+}
+
+// ---------------------------------------------------------------------------
+// trinity-enterprise#584 — what an agent can do, and what you can ask it
+// ---------------------------------------------------------------------------
+//
+// The briefing's hints are one of two things, and say which (`kind`): a
+// `playbook` is a capability, described by its SKILL.md `description:`, and
+// shows "No description yet" without one; a `use_case` is a prompt from the
+// agent's template, shown under "What you can ask" and never as a capability
+// with a missing description. A payload from before `kind` reads as playbooks.
+
+const isUseCase = (h) => h?.kind === 'use_case'
+
+// The Workspace rail's Info tab. The ladder never mixes tiers (an exposed
+// playbook set wins outright), so one item decides the heading.
+export function capabilitySection(capabilities) {
+  const list = Array.isArray(capabilities) ? capabilities.filter(Boolean) : []
+  const tier = list.length && list.every(isUseCase) ? 'use_cases' : 'playbooks'
+  return {
+    tier,
+    items: list.map((c) => {
+      const line = tier === 'use_cases' ? null : describeSkill(c.description)
+      return {
+        title: c.title,
+        line: line ? line.text : null,
+        missing: line ? line.missing : false,
+        starter: c.starter_prompt,
+      }
+    }),
+  }
+}
+
+// A new-chat hint card's second line: `{ text, missing }`, or null for a use case.
+export function hintLine(h) {
+  return isUseCase(h) ? null : describeSkill(h?.description)
 }
 
 // Empty-state copy. Exported so a test pins WHICH condition selects which line,

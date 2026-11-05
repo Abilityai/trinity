@@ -1370,8 +1370,9 @@ class SkillService:
         Parse skill information from SKILL.md + directory metadata.
 
         Extracts the frontmatter contract (hardened, tolerant — see
-        skill_packaging) with a first-paragraph description fallback. The clone
-        is explicit for the same reason as `_skill_files`.
+        skill_packaging). A skill without a frontmatter `description:` has
+        none (trinity-enterprise#584). The clone is explicit for the same
+        reason as `_skill_files`.
         """
         # The SOURCE-layout root (ent#332) — display/provenance only; the
         # agent-side destination is always .claude/skills/<name>/. A None
@@ -1417,13 +1418,10 @@ class SkillService:
                 "category": contract["category"],
             })
 
-            # Fallback: first non-header paragraph
-            if not info["description"]:
-                for line in content.split("\n"):
-                    line = line.strip()
-                    if line and not line.startswith("#") and not line.startswith("---"):
-                        info["description"] = line[:200]  # Truncate
-                        break
+            # trinity-enterprise#584: no description is guessed from the body.
+            # The old first-line fallback disagreed with every other surface
+            # (the agent server has none) and, for frontmatter without a
+            # description, picked the frontmatter's own `name: x` line.
 
             files = self._skill_files(clone, skill_name)
             info["file_count"] = len(files)
