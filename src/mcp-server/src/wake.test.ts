@@ -12,7 +12,12 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
-import { resolveWake, wakeReceiptFields, type WakeInput } from "./tools/chat.js";
+import {
+  resolveWake,
+  wakePolicyFromAnswer,
+  wakeReceiptFields,
+  type WakeInput,
+} from "./tools/chat.js";
 
 /** A dispatch that would be woken: an agent caller, a receipt, policy on. */
 const dispatched: WakeInput = {
@@ -124,5 +129,64 @@ describe("ent#1102 wakeReceiptFields", () => {
 
   it("says nothing at all when the dispatch answer carried no policy", () => {
     assert.equal(wakeReceiptFields({ ...dispatched, policyEnabled: undefined }), undefined);
+  });
+});
+
+/**
+ * The live input. `resolveWake` above is pure, and every test of it hands the
+ * policy in by hand — which is exactly how the field shipped dead the first
+ * time: the resolver was green while NO backend path emitted the key it reads
+ * (reading review C1). These drive the real receipt shape the backend answers a
+ * delegation with, so the two halves are pinned against each other.
+ */
+describe("ent#1102 the policy comes off a real backend receipt", () => {
+  /** What `chat_execution_service._wake_on_ending_receipt` stamps. */
+  const receipt = (effective: boolean, source: string) => ({
+    status: "accepted",
+    execution_id: "exec-1",
+    agent_name: "callee",
+    message: "Task accepted.",
+    async_mode: true,
+    wake_on_ending: { effective, source },
+  });
+
+  it("promises the wake when the backend receipt says the caller is woken", () => {
+    assert.equal(wakePolicyFromAnswer(receipt(true, "instance")), true);
+    assert.deepEqual(
+      wakeReceiptFields({
+        outcome: "receipt",
+        hasCaller: true,
+        isSelfTask: false,
+        policyEnabled: wakePolicyFromAnswer(receipt(true, "instance")),
+      }),
+      { wake: "on_ending" },
+    );
+  });
+
+  it("corrects the caller when the backend receipt says the owner opted out", () => {
+    // The trap this closes: `{effective: false}` is a TRUTHY object, so reading
+    // the field itself rather than `effective` promises a turn that never comes.
+    assert.equal(wakePolicyFromAnswer(receipt(false, "agent")), false);
+    assert.deepEqual(
+      wakeReceiptFields({
+        outcome: "receipt",
+        hasCaller: true,
+        isSelfTask: false,
+        policyEnabled: wakePolicyFromAnswer(receipt(false, "agent")),
+      }),
+      { wake: "none", wake_reason: "opted_out" },
+    );
+  });
+
+  it("stays silent on a receipt that carries no policy at all", () => {
+    const { wake_on_ending: _omitted, ...bare } = receipt(true, "instance");
+    assert.equal(wakePolicyFromAnswer(bare), undefined);
+    assert.equal(wakePolicyFromAnswer(undefined), undefined);
+    assert.equal(wakePolicyFromAnswer("not an object"), undefined);
+  });
+
+  it("reads a flattened boolean too, so neither side can drift silently", () => {
+    assert.equal(wakePolicyFromAnswer({ wake_on_ending: true }), true);
+    assert.equal(wakePolicyFromAnswer({ wake_on_ending: false }), false);
   });
 });

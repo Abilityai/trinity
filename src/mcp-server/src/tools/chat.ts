@@ -487,6 +487,32 @@ export interface WakeInput {
   policyEnabled?: boolean;
 }
 
+/**
+ * ent#1102 — the policy out of a backend dispatch answer.
+ *
+ * The backend stamps `wake_on_ending: {effective, source}` on every receipt it
+ * answers a delegation with (`chat_execution_service._wake_on_ending_receipt`),
+ * the same shape `get_agent_info` publishes. An answer without the key carries
+ * no opinion — a human's call, a self-task, a receipt this MCP server
+ * synthesised itself when its own fetch timed out — and `undefined` keeps the
+ * receipt silent rather than guessing.
+ *
+ * A bare boolean is accepted as well: it is what a backend older than ent#1102
+ * would send if the field were ever flattened, and reading the object's
+ * truthiness instead of its `effective` would turn `{effective: false}` into a
+ * promised wake — the one misreading that costs the caller a turn it was told
+ * to expect and never gets.
+ */
+export function wakePolicyFromAnswer(answer?: unknown): boolean | undefined {
+  if (!answer || typeof answer !== "object") return undefined;
+  const raw = (answer as { wake_on_ending?: unknown }).wake_on_ending;
+  if (typeof raw === "boolean") return raw;
+  if (raw && typeof raw === "object" && "effective" in raw) {
+    return Boolean((raw as { effective?: unknown }).effective);
+  }
+  return undefined;
+}
+
 export function resolveWake(input: WakeInput): WakeFields | undefined {
   const no = (wake_reason: WakeReason): WakeFields => ({ wake: "none", wake_reason });
   if (!input.hasCaller) return no("no_caller");
@@ -638,10 +664,7 @@ export async function runAgentChat(
       outcome,
       hasCaller: sourceAgent !== undefined,
       isSelfTask,
-      policyEnabled:
-        answer && typeof answer === "object" && "wake_on_ending" in answer
-          ? Boolean((answer as { wake_on_ending?: unknown }).wake_on_ending)
-          : undefined,
+      policyEnabled: wakePolicyFromAnswer(answer),
     });
 
   // #946 pull pilot: route a SEQUENTIAL agent→agent call through the
