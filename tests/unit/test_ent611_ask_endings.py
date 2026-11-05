@@ -613,6 +613,13 @@ def _install_wake(monkeypatch, *, enabled=True, state="running", replay=False, r
 
     monkeypatch.setitem(sys.modules, "database", SimpleNamespace(
         db=SimpleNamespace(get_operator_resume_enabled=lambda name: enabled)))
+    # ent#1102: the gate now asks `wake_policy.resolve` rather than the ent#329
+    # column directly, so one owner decision covers the ask wake AND the
+    # delegated-run wake. The stub is the verdict, not the column.
+    _install_module("services.wake_policy", SimpleNamespace(
+        resolve=lambda name: SimpleNamespace(
+            enabled=enabled, source="agent" if enabled else "instance"),
+    ))
 
     def _begin(scope, key):
         keys.append((scope, key))
@@ -839,7 +846,10 @@ class TestWakeObserverRouting:
         def _boom(name):
             raise RuntimeError("db down")
 
-        monkeypatch.setattr(svc.db, "get_operator_resume_enabled", _boom)
+        # ent#1102: the resolver is the gate now, and it fails closed itself —
+        # this pins that `_opted_in` ALSO survives a resolver that raises,
+        # rather than relying on the layer below to have caught it.
+        monkeypatch.setattr(svc.wake_policy, "resolve", _boom)
         assert svc._opted_in("agent-w") is False
 
 

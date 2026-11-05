@@ -46,6 +46,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, 
 from database import db
 from db.operator_queue import OUTCOME_UNKNOWN
 from services import operator_resume_service
+from services import wake_policy
 from services.operator_queue_choices import (
     SOMETHING_ELSE,
     NotOffMenuError,
@@ -1826,7 +1827,7 @@ def _opted_in(agent_name: str) -> bool:
     Unreadable ⇒ not opted in: never "spend" on a flag nobody could read.
     """
     try:
-        return bool(db.get_operator_resume_enabled(agent_name))
+        return bool(wake_policy.resolve(agent_name).enabled)
     except Exception:  # noqa: BLE001
         logger.warning("[AskService] resume opt-in unreadable for %s; not waking it",
                        agent_name, exc_info=True)

@@ -222,6 +222,7 @@ async def maybe_dispatch_resume(
     problem.
     """
     from database import db
+    from services import wake_policy
     from services import idempotency_service
     from services.platform_audit_service import AuditEventType, platform_audit_service
     # `get_task_execution_service()`, not a module-level `task_execution_service`.
@@ -242,7 +243,7 @@ async def maybe_dispatch_resume(
         return None
 
     try:
-        if not db.get_operator_resume_enabled(agent_name):
+        if not wake_policy.resolve(agent_name).enabled:
             return None
     except Exception:
         # Fail-safe: an unreadable flag means "not opted in", never "spend".
@@ -407,6 +408,7 @@ async def maybe_dispatch_ending(
     Never raises — the ending is already recorded.
     """
     from database import db
+    from services import wake_policy
     from services import idempotency_service
     from services.docker_utils import agent_container_state_async
     from services.platform_audit_service import AuditEventType, platform_audit_service
@@ -422,7 +424,7 @@ async def maybe_dispatch_ending(
     item_ids = [i["id"] for i in items]
 
     try:
-        if not db.get_operator_resume_enabled(agent_name):
+        if not wake_policy.resolve(agent_name).enabled:
             return None
     except Exception:
         logger.exception(
