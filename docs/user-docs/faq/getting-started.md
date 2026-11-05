@@ -69,7 +69,7 @@ First check that Docker is actually running — Trinity can't start without it. 
 
 ## Where do I find the web UI, the API, and the interactive API docs?
 
-The web UI is at http://localhost, the backend API with interactive Swagger docs is at http://localhost:8000/docs, and the MCP server is at http://localhost:8080/mcp. Local and production deployments use the same ports; on a server install the production frontend also proxies `/mcp`, so MCP is reachable at the web UI's own hostname (`https://trinity.your-domain.com/mcp`). See [Setup](../getting-started/setup.md).
+The web UI is at http://localhost, the backend API with interactive Swagger docs is at http://localhost:8000/docs, and the MCP server is at http://localhost:8080/mcp. Local and production deployments use the same ports; on a server install the production frontend also proxies `/mcp`, so MCP is reachable at the web UI's own hostname (`https://trinity.your-domain.com/mcp`). Clients outside the Trinity server — Claude Code on your laptop included — are refused until an admin turns on **External MCP access** under Settings → MCP Keys; a fresh install starts with it off. See [Setup](../getting-started/setup.md) and [MCP Server](../integrations/mcp-server.md#external-mcp-access).
 
 ## How is the web UI organized?
 

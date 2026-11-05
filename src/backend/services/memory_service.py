@@ -717,7 +717,7 @@ def _release_lease(lock, key: Optional[str], token: Optional[str]) -> None:
     if lock is None or not token:
         return
     try:
-        lock.release_if_owned_atomic()
+        lock.release_if_owned()
     except Exception:  # noqa: BLE001
         pass
 

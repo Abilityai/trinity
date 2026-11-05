@@ -29,6 +29,7 @@ from utils.safe_yaml import (
     load_hardened_yaml,
 )
 
+from services.skill_packaging import clean_description
 from services.credential_charset import (
     CREDENTIAL_DETECTOR_NAME_RE,
     CREDENTIAL_DETECTOR_REF_RE,
@@ -585,12 +586,6 @@ def c_t010(snap):
     return _with_template(snap, f)
 
 
-def c_t011(snap):
-    return _with_template(snap, lambda d: _ok("capabilities present")
-                          if isinstance(d.get("capabilities"), list) and d.get("capabilities")
-                          else _fail("template.yaml 'capabilities' array is missing"))
-
-
 _CREDENTIAL_SECTION_KEYS = frozenset({"mcp_servers", "env_file", "config_files"})
 
 
@@ -808,7 +803,9 @@ def c_p002(snap):
             bad.append(rel)
             continue
         data, err = _parse_yaml(m.group(1))
-        if err or not isinstance(data, dict) or not data.get("name") or not data.get("description"):
+        # ent#584: one blank rule — a whitespace-only description is no description.
+        if (err or not isinstance(data, dict) or not data.get("name")
+                or not clean_description(data.get("description"))):
             bad.append(rel)
     if bad:
         return _fail("skill frontmatter missing name/description", {"files": bad[:25]})
@@ -1372,8 +1369,84 @@ def c_x003(snap):
                     existing.add(parts[-2])
         missing = [n for n in names if n and n not in existing]
         if missing:
-            return _fail("template.yaml declares skills with no SKILL.md", {"missing": missing})
+            return _fail(  # ent#584: the card shows the message, never `detail`, so name them
+                "template.yaml declares skills with no SKILL.md: " + _named(_clip(n) for n in missing),
+                {"missing": missing})
         return _ok("declared skills exist in .claude/skills/")
+    return _with_template(snap, f)
+
+
+# trinity-enterprise#584 — X-010. `capabilities:` are tags; a capability is
+# described once, in its skill's SKILL.md. These exact tags switch a feature on
+# (`brain-orb` gates the Brain Orb, matched verbatim by the frontend), so they
+# name no skill and are never a finding. Exact strings only: `brain_orb` gates
+# nothing, so normalising before the exemption would hide a real typo.
+_FEATURE_FLAG_TAGS = frozenset({"brain-orb"})
+# Exactly one level, as the agent server scans skills: a SKILL.md nested deeper
+# (a reference folder inside a skill) is not a skill.
+_SKILL_MD_RE = re.compile(r"^\.claude/skills/([^/]+)/SKILL\.md$")
+_X010_RANK = {"undescribed": 0, "unknown": 1, "described": 2}
+
+
+def _tag_key(text) -> str:
+    """`lead_triage`, `Lead-Triage` and `lead-triage` name the same skill."""
+    return str(text).strip().lower().replace("_", "-")
+
+
+def c_x010(snap):
+    def f(d):
+        raw = d.get("capabilities")
+        tags: List[str] = []
+        for entry in raw if isinstance(raw, list) else []:
+            name = entry.get("name") if isinstance(entry, dict) else entry
+            if isinstance(name, (str, int, float)) and not isinstance(name, bool):
+                text = str(name).strip()
+                if text and text not in _FEATURE_FLAG_TAGS and text not in tags:
+                    tags.append(text)
+        if not tags:
+            return _ok("no capabilities tags to check")
+
+        # What the snapshot can say about each skill, keyed by directory name
+        # and by frontmatter `name`. The directory listing is uncapped; the
+        # files are not (80 files, 2 MB), so a listed skill whose SKILL.md was
+        # not read, or was cut, is `unknown` — never a finding.
+        status: Dict[str, str] = {}
+
+        def _mark(key: str, value: str) -> None:
+            # Two skills can answer to one key; the best answer wins.
+            if _X010_RANK[value] >= _X010_RANK.get(status.get(key), -1):
+                status[key] = value
+
+        for rel, info in _skill_files(snap).items():
+            m = _SKILL_MD_RE.match(rel)
+            if not m:
+                continue
+            content = (info or {}).get("content")
+            if content is None or (info or {}).get("truncated"):
+                _mark(_tag_key(m.group(1)), "unknown")
+                continue
+            fm = _FRONTMATTER_RE.match(content)
+            data = _parse_yaml(fm.group(1))[0] if fm else None
+            data = data if isinstance(data, dict) else {}
+            value = "described" if clean_description(data.get("description")) else "undescribed"
+            _mark(_tag_key(m.group(1)), value)
+            if isinstance(data.get("name"), str) and data["name"].strip():
+                _mark(_tag_key(data["name"]), value)
+        # A listed skill the files above never answered for is unknown.
+        for name in _dir_list(snap, ".claude/skills") or []:
+            if isinstance(name, str):
+                status.setdefault(_tag_key(name), "unknown")
+
+        unmatched = [t for t in tags if _tag_key(t) not in status]
+        undescribed = [t for t in tags if status.get(_tag_key(t)) == "undescribed"]
+        if unmatched or undescribed:
+            flagged = [t for t in tags if t in unmatched or t in undescribed]
+            # The card shows the message, never `detail`: name what was found.
+            return _fail("capabilities tags with no described skill: " + _named(_clip(t) for t in flagged), {
+                "unmatched": [_clip(t, 80) for t in unmatched[:25]],
+                "undescribed": [_clip(t, 80) for t in undescribed[:25]],
+            })
+        return _ok("each capabilities tag names a described skill")
     return _with_template(snap, f)
 
 
@@ -1790,7 +1863,7 @@ STATIC_CHECKS = {
     "S-009": c_s009, "S-010": c_s010,
     "T-001": c_t001, "T-002": c_t002, "T-003": c_t003, "T-004": c_t004,
     "T-005": c_t005, "T-006": c_t006, "T-007": c_t007, "T-008": c_t008,
-    "T-010": c_t010, "T-011": c_t011, "T-015": c_t015, "T-018": c_t018,
+    "T-010": c_t010, "T-015": c_t015, "T-018": c_t018,
     "C-001": c_c001, "C-007": c_c007,
     "K-001": c_k001, "K-003": c_k003, "K-004": c_k004,
     "G-001": c_g001,
@@ -1798,7 +1871,7 @@ STATIC_CHECKS = {
     "A-001": c_a001, "A-002": c_a002, "A-004": c_a004,
     "D-001": c_d001, "D-002": c_d002, "D-003": c_d003, "D-004": c_d004,
     "D-005": c_d005, "D-008": c_d008, "D-009": c_d009, "D-010": c_d010,
-    "X-003": c_x003, "X-004": c_x004, "X-007": c_x007, "X-009": c_x009,
+    "X-003": c_x003, "X-004": c_x004, "X-007": c_x007, "X-009": c_x009, "X-010": c_x010,
     "I-006": c_i006,
     "DP-001": c_dp001, "DP-002": c_dp002, "DP-003": c_dp003,
     "DP-004": c_dp004,

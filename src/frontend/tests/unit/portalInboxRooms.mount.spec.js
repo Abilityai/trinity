@@ -262,7 +262,7 @@ describe('the open room reads what arrives in it', () => {
 
     vi.advanceTimersByTime(3100)                              // the poll brings m501, m502
     await flushPromises()
-    expect(wrapper.emitted('read')).toEqual([['r1']])
+    expect(wrapper.emitted('read')).toEqual([['r1', expect.any(String)]])
   })
 
   it('the read owed for an open survives a poll that brings no agent message', async () => {
@@ -278,7 +278,7 @@ describe('the open room reads what arrives in it', () => {
     expect(wrapper.emitted('read')).toBeUndefined()
     vi.advanceTimersByTime(3100)
     await flushPromises()
-    expect(wrapper.emitted('read')).toEqual([['r1']])
+    expect(wrapper.emitted('read')).toEqual([['r1', expect.any(String)]])
   })
 
   it('a CLOSED room longer than one page still catches up to its read', async () => {
@@ -294,7 +294,7 @@ describe('the open room reads what arrives in it', () => {
     expect(wrapper.emitted('read')).toBeUndefined()
     vi.advanceTimersByTime(3100)
     await flushPromises()
-    expect(wrapper.emitted('read')).toEqual([['r1']])
+    expect(wrapper.emitted('read')).toEqual([['r1', expect.any(String)]])
     const calls = store.fetchRoom.mock.calls.length
     vi.advanceTimersByTime(3100)                              // paid: a closed room stops loading
     await flushPromises()
@@ -318,7 +318,7 @@ describe('the open room reads what arrives in it', () => {
       attachTo: document.body,
     })
     await flushPromises()
-    expect(wrapper.emitted('read')).toEqual([['r1']])        // opening is reading
+    expect(wrapper.emitted('read')).toEqual([['r1', expect.any(String)]])        // opening is reading
 
     vi.advanceTimersByTime(3100)                              // a poll with nothing new
     await flushPromises()
@@ -327,6 +327,6 @@ describe('the open room reads what arrives in it', () => {
     messages = [...messages, msg('m4', 4, { sender_identity: 'bo' })]
     vi.advanceTimersByTime(3100)                              // an agent replies
     await flushPromises()
-    expect(wrapper.emitted('read')).toEqual([['r1'], ['r1']])
+    expect(wrapper.emitted('read')).toEqual([['r1', expect.any(String)], ['r1', expect.any(String)]])
   })
 })

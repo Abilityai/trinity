@@ -38,6 +38,10 @@ FRONTEND = REPO / "src" / "frontend" / "src"
 MARKED = frozenset({
     "main.py::get_current_user_info",
     "routers/auth.py::logout",
+    # trinity-enterprise#1107: the terms screen is a member page — the text is
+    # read and accepted before any Workspace route answers a person.
+    "routers/terms.py::current_terms",
+    "routers/terms.py::accept_terms",
     "routers/ws_tickets.py::create_ws_ticket",
     "routers/users.py::get_my_preferences",
     "routers/users.py::put_my_preference",

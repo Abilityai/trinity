@@ -128,3 +128,42 @@ describe('the file list says what it knows', () => {
     expect(w.find('[data-testid="credentials-empty"]').exists()).toBe(true)
   })
 })
+
+describe('a .env that is not UTF-8 text is never a write base (trinity-enterprise#1073)', () => {
+  // The files route decodes with errors="replace": UTF-16 or Latin-1 bytes
+  // arrive as a successful read carrying U+FFFD / NULs.
+  const GARBLED = '��O\u0000T\u0000H\u0000E\u0000R\u0000=\u0000k\u0000'
+
+  it('the checklist save refuses and writes nothing', async () => {
+    store.downloadAgentFile = vi.fn().mockResolvedValue(GARBLED)
+    store.injectCredentials = vi.fn().mockResolvedValue({})
+    const w = await mountPanel({ files: { '.env': { exists: true, size: 40, modified: '2026-11-04T00:00:00Z' } } })
+    w.findComponent({ name: 'CredentialSetupChecklist' }).vm.$emit('submit', { NEW_KEY: 'v' })
+    await flushPromises()
+    expect(store.downloadAgentFile).toHaveBeenCalledWith('atlas', '/home/developer/.env')
+    expect(store.injectCredentials).not.toHaveBeenCalled()
+    expect(w.findComponent({ name: 'CredentialSetupChecklist' }).props('saveResult')).toMatchObject({ success: false })
+    expect(w.findComponent({ name: 'CredentialSetupChecklist' }).props('saveResult').message).toContain('plain UTF-8 text')
+  })
+
+  it('a text .env still merges', async () => {
+    store.downloadAgentFile = vi.fn().mockResolvedValue('OLD_KEY="keep"\n')
+    store.injectCredentials = vi.fn().mockResolvedValue({})
+    store.getCredentialRequirements = vi.fn().mockResolvedValue(null)
+    const w = await mountPanel({ files: { '.env': { exists: true, size: 15, modified: '2026-11-04T00:00:00Z' } } })
+    w.findComponent({ name: 'CredentialSetupChecklist' }).vm.$emit('submit', { NEW_KEY: 'v' })
+    await flushPromises()
+    const written = store.injectCredentials.mock.calls[0][1]['.env']
+    expect(written).toContain('OLD_KEY="keep"')
+    expect(written).toContain('NEW_KEY="v"')
+  })
+
+  it('the editor does not open over a garbled read', async () => {
+    store.downloadAgentFile = vi.fn().mockResolvedValue(GARBLED)
+    const w = await mountPanel({ files: {} })
+    await w.find('[data-testid="credentials-empty-add-env"]').trigger('click')
+    await flushPromises()
+    expect(w.find('textarea[rows="20"]').exists()).toBe(false)
+    expect(w.text()).toContain("isn't plain UTF-8 text")
+  })
+})

@@ -1,9 +1,11 @@
 <!--
-  trinity-enterprise#1054 — the terms screen a person accepts once.
+  trinity-enterprise#1054, #1107 — the terms screen a person accepts once.
 
-  A Workspace-only person whose current terms version is not accepted gets
-  403 `terms_required` from every route until they accept here; the two terms
-  routes this page calls are exempt from that refusal. So the page:
+  Every person whose current terms version is not accepted — an admin on their
+  first visit included — gets 403 `terms_required` from every route until
+  they accept here; the two terms routes this page calls are exempt from that
+  refusal. The text is the instance's own (Settings › Access) or the shipped
+  default. So the page:
     - shows the text and its version, and one accept action that sends the
       version shown (a newer one is a 409 `version_stale`: reload, re-tick);
     - always offers a way out — declining signs out, on every branch;
@@ -15,7 +17,7 @@
   <div class="min-h-screen bg-gray-50 dark:bg-gray-900 flex items-start justify-center px-4 py-12">
     <BaseCard flush class="w-full max-w-2xl">
       <div class="px-6 py-5">
-        <h1 class="text-2xl font-bold text-gray-900 dark:text-gray-100">Terms of use</h1>
+        <h1 class="text-2xl font-bold text-gray-900 dark:text-gray-100" data-testid="terms-title">{{ terms.title || 'Terms of use' }}</h1>
 
         <!-- The invitation that opened this account is no longer live. -->
         <div v-if="closedMessage" class="mt-4" data-testid="terms-closed">
@@ -99,7 +101,7 @@
         <!-- The plain refusal path, on every branch: leave without accepting. -->
         <div class="mt-6 border-t border-gray-200 dark:border-gray-750 pt-4 flex items-center justify-between gap-4">
           <p class="text-xs text-gray-600 dark:text-gray-300">
-            {{ closedMessage ? '' : 'If you do not accept, you can sign out. Nothing is shared until you accept.' }}
+            {{ closedMessage ? '' : 'If you do not accept, you are signed out and nothing else changes. You can come back any time: sign in again and accept the terms.' }}
           </p>
           <BaseButton variant="ghost" size="sm" data-testid="terms-decline" @click="signOut">
             {{ closedMessage || view.state !== 'ready' || alreadyClear ? 'Sign out' : 'Decline and sign out' }}
