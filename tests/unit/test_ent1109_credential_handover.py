@@ -33,11 +33,14 @@ instance, DNS, Docker, Redis (fakeredis) and the audit sink are stood in for:
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import os
 import socket
+import ssl
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -138,35 +141,43 @@ class _AgentServer:
         return _Resp(200, {"status": "success", "files_written": [".env"]})
 
 
+def _streaming(resp: httpx.Response) -> httpx.Response:
+    """A buffered mock response rebuilt as a STREAMING one, so the sink's
+    capped reader (`aiter_raw`) sees it the way the wire would hand it over."""
+    if not resp.is_stream_consumed:
+        return resp
+    return httpx.Response(resp.status_code, headers=resp.headers, stream=httpx.ByteStream(resp.content))
+
+
 class _Instance:
     """The DESTINATION instance's backend as the sink reaches it over the
-    pinned transport. Records the request it saw; answers as told."""
+    pinned transport — a real `httpx.AsyncClient` over a `MockTransport`, so
+    the request the sink builds (pinned URL, Host, SNI, body) is what httpx
+    would put on the wire. Records the request it saw; answers as told."""
 
     def __init__(self):
         self.calls = []
         self.status = 200
         self.error = None
+        self.response = None
 
     def client(self, *a, **k):
         inst = self
 
-        class _Ctx:
-            async def __aenter__(self):
-                return inst
+        async def _handler(request):
+            inst.calls.append({"url": str(request.url),
+                               "json": json.loads(request.content or b"null"),
+                               "headers": request.headers,
+                               "extensions": dict(request.extensions)})
+            if inst.error:
+                raise inst.error
+            if inst.response is not None:
+                return _streaming(inst.response)
+            if inst.status != 200:
+                return _streaming(httpx.Response(inst.status, json={"detail": "nope"}))
+            return _streaming(httpx.Response(200, json={"status": "success", "files_written": [".env"]}))
 
-            async def __aexit__(self, *exc):
-                return False
-
-        return _Ctx()
-
-    async def post(self, url, json=None, headers=None, extensions=None, **kw):
-        self.calls.append({"url": url, "json": json, "headers": dict(headers or {}),
-                           "extensions": dict(extensions or {})})
-        if self.error:
-            raise self.error
-        if self.status != 200:
-            return _Resp(self.status, {"detail": "nope"})
-        return _Resp(200, {"status": "success", "files_written": [".env"]})
+        return httpx.AsyncClient(transport=httpx.MockTransport(_handler), follow_redirects=False)
 
 
 @pytest.fixture
@@ -183,8 +194,27 @@ def roster(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def dns(monkeypatch):
-    from services import credential_destination
-    monkeypatch.setattr(credential_destination, "_resolver", lambda: _resolver)
+    """The resolver the DELIVERY-time check uses (`a2a_client.validate_endpoint`,
+    off the loop). Raise time resolves nothing — pinned below."""
+    from services import a2a_client
+    from utils.url_validation import validate_a2a_endpoint_url
+    monkeypatch.setattr(a2a_client, "validate_a2a_endpoint_url",
+                        functools.partial(validate_a2a_endpoint_url, resolver=_resolver))
+
+
+@pytest.fixture(autouse=True)
+def approved(monkeypatch):
+    """The admin's outbound A2A endpoint registry (the OSS `system_settings`
+    list, read through the real provider seam) holds the member instance, and
+    the outbound switch is ON. A test flips either."""
+    from services import a2a_outbound, a2a_outbound_service
+    records = [{"id": "ep-member", "name": "member", "url": INSTANCE}]
+    switch = {"on": True}
+    a2a_outbound.clear_provider()
+    monkeypatch.setattr(a2a_outbound, "_load_endpoint_records", lambda: [dict(r) for r in records])
+    monkeypatch.setattr(a2a_outbound_service, "is_outbound_enabled", lambda: switch["on"])
+    yield SimpleNamespace(records=records, switch=switch)
+    a2a_outbound.clear_provider()
 
 
 class _FakeEnc:
@@ -351,19 +381,102 @@ class TestTheAsk:
         assert receipt["credential_destination"] is None
 
     @pytest.mark.parametrize("url,reason", [
-        (f"http://{HOST}", "endpoint_not_https"),
-        ("https://private.example.com", "endpoint_private_address"),
-        ("https://nowhere.invalid", "endpoint_dns_failure"),
-        (f"https://user:pw@{HOST}", "endpoint_invalid"),
+        (f"ftp://{HOST}", "scheme"),
+        (f"https://user:pw@{HOST}", "userinfo"),
         (f"{INSTANCE}/api", "path"),
+        (f"{INSTANCE}/?x=1", "path"),
+        ("https://", "missing_host"),
         ("", "missing"),
         (42, "not_a_string"),
+        ("https://" + "a" * 510, "too_long"),
     ])
     def test_a_bad_instance_url_is_refused_by_name(self, ask, url, reason):
         body = _body("d-url")
         body["context"]["credential_destination"]["instance_url"] = url
         e = _refused_raise(ask, body, "destination_url_invalid")
         assert e.extra.get("reason") == reason
+
+    # -- the operator's ruling: a destination is an instance an admin approved --
+
+    @pytest.mark.parametrize("url", [
+        "https://elsewhere.example.com",        # a public host nobody registered
+        f"http://{HOST}",                        # the registered host, another scheme
+        f"{INSTANCE}:8443",                      # the registered host, another port
+        "https://private.example.com",           # not registered; never resolved
+        "https://nowhere.invalid",               # not registered; never resolved
+    ])
+    def test_an_instance_no_admin_registered_is_refused_and_told_where_to_register(self, ask, url):
+        body = _body("d-unapproved")
+        body["context"]["credential_destination"]["instance_url"] = url
+        e = _refused_raise(ask, body, "destination_not_approved")
+        assert e.extra.get("reason") == "not_registered"
+        assert "Settings → Integrations → Outbound A2A endpoints" in e.message
+        assert "admin" in e.message
+
+    def test_the_approval_is_the_registered_origin_not_its_spelling(self, ask):
+        # default port, trailing dot, upper case, trailing slash: one origin
+        body = _body("d-origin")
+        body["context"]["credential_destination"]["instance_url"] = f"https://{HOST.upper()}.:443/"
+        receipt = _raise(ask, body)
+        row = ask.db.get_operator_queue_item(receipt["id"])
+        assert row["context"]["credential_destination"]["instance_url"] == INSTANCE
+
+    def test_the_registry_is_read_through_the_effective_provider(self, ask, approved):
+        """An endpoint a registered module scopes to THIS agent approves the
+        destination for this agent and nobody else; the OSS list is not
+        consulted while a provider is registered."""
+        from services import a2a_outbound
+
+        class _Scoped:
+            def resolve_endpoint(self, agent_name, ref):
+                return None
+
+            def list_endpoints(self, agent_name):
+                return ([{"id": "p1", "name": "partner", "url": "https://partner.example.com"}]
+                        if agent_name == ASKER else [])
+
+        a2a_outbound.register_provider(_Scoped())
+        body = _body("d-prov")
+        body["context"]["credential_destination"]["instance_url"] = "https://partner.example.com"
+        assert _raise(ask, body)["credential_destination"]["host"] == "partner.example.com"
+        # the OSS record is shadowed while the provider answers
+        _refused_raise(ask, _body("d-prov-2"), "destination_not_approved")
+        # another agent gets nothing from a per-agent provider
+        body = _body("d-prov-3")
+        body["context"]["credential_destination"]["instance_url"] = "https://partner.example.com"
+        with pytest.raises(ask.svc.AskRejected) as info:
+            _raise(ask, body, agent="other-agent")
+        assert info.value.code == "destination_not_approved"
+
+    def test_outbound_a2a_switched_off_refuses_the_destination_at_raise(self, ask, approved):
+        approved.switch["on"] = False
+        e = _refused_raise(ask, _body("d-off"), "destination_outbound_disabled")
+        assert e.extra.get("reason") == "outbound_disabled"
+        assert "Settings → Integrations → Outbound A2A endpoints" in e.message
+        # a plain credential ask is untouched by the switch
+        body = _body("d-off-plain")
+        body["context"].pop("credential_destination")
+        assert _raise(ask, body)["status"] == "created"
+
+    def test_raise_time_never_resolves_the_host(self, ask, monkeypatch):
+        """`raise_ask` is synchronous under an async route: a resolver call
+        here would block the worker's loop. The registry entry was resolved
+        when the admin registered it; delivery resolves again, off the loop."""
+        def _never(*a, **k):
+            raise AssertionError("getaddrinfo called at raise time")
+        monkeypatch.setattr(socket, "getaddrinfo", _never)
+        assert _raise(ask, _body("d-nodns"))["status"] == "created"
+
+    def test_an_ipv6_literal_stays_bracketed_and_a_trusted_http_scheme_is_kept(self, ask, approved):
+        approved.records.append({"id": "ep-6", "name": "six", "url": "https://[2001:db8::1]:8443"})
+        approved.records.append({"id": "ep-lan", "name": "lan", "url": "http://10.0.0.7:8000"})
+        for given, stored in [("https://[2001:DB8::1]:8443/", "https://[2001:db8::1]:8443"),
+                              ("http://10.0.0.7:8000", "http://10.0.0.7:8000")]:
+            body = _body(f"d-{stored[:5]}")
+            body["context"]["credential_destination"]["instance_url"] = given
+            receipt = _raise(ask, body)
+            row = ask.db.get_operator_queue_item(receipt["id"])
+            assert row["context"]["credential_destination"]["instance_url"] == stored
 
     @pytest.mark.parametrize("agent", ["", "../etc", "has space", "x" * 65, 7])
     def test_a_bad_agent_name_is_refused_by_name(self, ask, agent):
@@ -448,11 +561,19 @@ class TestDelivery:
         details = delivered[0]["details"]
         assert details["name"] == NAME and details["ask_id"] == uid
         assert details["destination"] == {"host": HOST, "agent_name": TARGET}
+        # the attempt was recorded BEFORE the request left, with the same names
+        actions = [a["event_action"] for a in world.audit
+                   if str(a.get("event_action", "")).startswith("credential_deliver")]
+        assert actions == ["credential_delivery_attempt", "credential_delivered"]
+        attempt = [a for a in world.audit if a["event_action"] == "credential_delivery_attempt"][0]["details"]
+        assert attempt["name"] == NAME and attempt["ask_id"] == uid
+        assert attempt["destination"] == {"host": HOST, "agent_name": TARGET}
         everything = caplog.text + json.dumps(world.audit, default=str) + json.dumps(row, default=str) \
             + json.dumps(out.model_dump(), default=str)
         assert VALUE not in everything and KEY not in everything and KEY_ENV not in json.dumps(out.model_dump())
 
-    def test_the_destination_is_read_from_the_stored_row_not_from_the_request(self, world):
+    def test_the_destination_is_read_from_the_stored_row_not_from_the_request(self, world, approved):
+        approved.records.append({"id": "ep-8443", "name": "member-alt", "url": f"https://{HOST}:8443"})
         uid = _pending(world.db, "del-2", destination={"instance_url": f"https://{HOST}:8443",
                                                          "agent_name": TARGET, "key_env": KEY_ENV})
         _provide(uid)
@@ -501,7 +622,7 @@ class TestDelivery:
     @pytest.mark.parametrize("status,code", [
         (401, "destination_key_refused"), (403, "destination_key_refused"),
         (404, "destination_agent_missing"), (400, "destination_refused"),
-        (500, "destination_refused"),
+        (409, "destination_refused"),
     ])
     def test_a_refusal_from_the_destination_is_named_and_unstaged(self, world, caplog, status, code):
         caplog.set_level(logging.DEBUG)
@@ -516,13 +637,128 @@ class TestDelivery:
         assert VALUE not in text and KEY not in text
         assert not [a for a in world.audit if a.get("event_action") == "credential_delivered"]
 
-    def test_a_url_that_no_longer_validates_at_delivery_time_is_refused(self, world, monkeypatch):
-        from services import credential_destination
-        monkeypatch.setattr(credential_destination, "_resolver",
-                            lambda: (lambda h, p, *a, **k: [_record("10.0.0.9", p)]))
+    @pytest.mark.parametrize("answer,reason", [
+        (lambda h, p, *a, **k: [_record("10.0.0.9", p)], "endpoint_private_address"),
+        (lambda h, p, *a, **k: _resolver("nowhere.invalid", p), "endpoint_dns_failure"),
+    ])
+    def test_a_url_that_no_longer_validates_at_delivery_time_is_refused(self, world, monkeypatch,
+                                                                         answer, reason):
+        from services import a2a_client
+        from utils.url_validation import validate_a2a_endpoint_url
+        monkeypatch.setattr(a2a_client, "validate_a2a_endpoint_url",
+                            functools.partial(validate_a2a_endpoint_url, resolver=answer))
         uid = _pending(world.db, "del-8")
-        _refused(uid, 422, "destination_url_invalid")
+        e = _refused(uid, 422, "destination_url_invalid")
+        assert e.data.get("reason") == reason
         assert world.instance.calls == [] and _staged(world) == 0
+
+    def test_delivery_resolves_the_host_off_the_event_loop(self, world, monkeypatch):
+        from services import a2a_client
+        from utils.url_validation import validate_a2a_endpoint_url
+        seen = {}
+
+        def _where(url, **kw):
+            seen["thread"] = threading.current_thread().name
+            try:
+                asyncio.get_running_loop()
+                seen["on_loop"] = True
+            except RuntimeError:
+                seen["on_loop"] = False
+            return validate_a2a_endpoint_url(url, resolver=_resolver, **kw)
+
+        monkeypatch.setattr(a2a_client, "validate_a2a_endpoint_url", _where)
+        _provide(_pending(world.db, "del-thread"))
+        assert seen["on_loop"] is False and len(world.instance.calls) == 1
+
+    # -- the operator's ruling, re-read at delivery --
+
+    def test_outbound_a2a_switched_off_at_delivery_refuses_before_anything_is_read(
+            self, world, approved):
+        approved.switch["on"] = False
+        uid = _pending(world.db, "del-off")
+        e = _refused(uid, 422, "destination_outbound_disabled")
+        assert "nothing was stored" in e.detail and "Settings → Integrations" in e.detail
+        assert world.asker.calls == [] and world.instance.calls == []
+        assert _staged(world) == 0
+        assert world.db.get_operator_queue_item(uid)["status"] == "pending"
+        assert not [a for a in world.audit if a.get("event_action", "").startswith("credential_deliver")]
+
+    def test_an_instance_removed_from_the_registry_is_refused_at_delivery(self, world, approved):
+        approved.records.clear()
+        uid = _pending(world.db, "del-unreg")
+        e = _refused(uid, 422, "destination_not_approved")
+        assert "nothing was stored" in e.detail and "admin" in e.detail
+        assert world.asker.calls == [] and world.instance.calls == []
+        assert _staged(world) == 0
+
+    # -- the transport --
+
+    def test_a_5xx_from_the_destination_may_or_may_not_have_stored_and_keeps_the_value_staged(
+            self, world, caplog):
+        """The receiving inject route answers 503 for exactly "the agent did
+        not confirm it stored the credential", so a 5xx is that sentence —
+        and the attempt row written before the request is the trace."""
+        caplog.set_level(logging.DEBUG)
+        for status in (500, 503):
+            world.instance.status = status
+            uid = _pending(world.db, f"del-5xx-{status}")
+            e = _refused(uid, 503, "destination_unconfirmed")
+            assert "may or may not" in e.detail and e.data.get("status") == status
+            assert e.data.get("may_have_written") is True
+            assert world.db.get_operator_queue_item(uid)["status"] == "pending"
+        assert _staged(world) == 1          # one value, staged once, kept
+        attempts = [a for a in world.audit if a.get("event_action") == "credential_delivery_attempt"]
+        assert len(attempts) == 2
+        assert not [a for a in world.audit if a.get("event_action") == "credential_delivered"]
+        text = f"{e.detail} {json.dumps(e.data, default=str)} {caplog.text} {json.dumps(world.audit, default=str)}"
+        assert VALUE not in text and KEY not in text
+
+    def test_a_redirect_from_the_destination_is_a_refusal_never_a_hop(self, world):
+        world.instance.response = httpx.Response(302, headers={"Location": "https://evil.example/"})
+        uid = _pending(world.db, "del-3xx")
+        e = _refused(uid, 409, "destination_refused")
+        assert e.data.get("reason") == "inject_redirect"
+        assert len(world.instance.calls) == 1 and _staged(world) == 0
+
+    def test_an_oversized_or_encoded_answer_is_unconfirmed_and_bounded(self, world):
+        big = b"x" * (world.sink.a2a_client.A2A_ERROR_BODY_MAX_BYTES + 100)
+        world.instance.response = httpx.Response(200, content=big)
+        uid = _pending(world.db, "del-big")
+        e = _refused(uid, 503, "destination_unconfirmed")
+        assert e.data.get("reason") == "inject_too_large" and _staged(world) == 1
+
+    def test_the_destination_transport_is_pinned(self):
+        """No redirects, no proxy env, a verifying TLS context — and the request
+        goes through the A2A client's capped reader under its total deadline.
+        Red if `follow_redirects` becomes True or `verify` becomes False."""
+        from services import credential_sink as sink
+        client = sink._destination_client()
+        try:
+            assert client.follow_redirects is False
+            assert client.trust_env is False
+            ctx = client._transport._pool._ssl_context
+            assert isinstance(ctx, ssl.SSLContext)
+            assert ctx.verify_mode == ssl.CERT_REQUIRED and ctx.check_hostname is True
+        finally:
+            asyncio.run(client.aclose())
+        src = (Path(_BACKEND) / "services" / "credential_sink.py").read_text(encoding="utf-8")
+        assert "a2a_client._with_deadline(a2a_client._read_capped(" in src
+        assert "max_bytes=a2a_client.A2A_ERROR_BODY_MAX_BYTES" in src
+
+    def test_a_key_that_cannot_travel_as_a_header_is_a_named_refusal(self, world, caplog):
+        """A non-ASCII (or whitespace-bearing) key in the asking agent's .env:
+        a named 409 before any request, never an encoding error that leaves
+        the value staged — and the key is in no text."""
+        caplog.set_level(logging.DEBUG)
+        bad = "trinity_mcp_kéy_with_umlaut"
+        world.asker.env_text = f'{KEY_ENV}="{bad}"\n'
+        uid = _pending(world.db, "del-key-ascii")
+        e = _refused(uid, 409, "destination_key_invalid")
+        assert "nothing was stored" in e.detail
+        assert world.instance.calls == [] and _staged(world) == 0
+        assert world.db.get_operator_queue_item(uid)["status"] == "pending"
+        assert bad not in f"{e.detail} {json.dumps(e.data)} {caplog.text}"
+        assert KEY_ENV not in f"{e.detail} {json.dumps(e.data)}"
 
     def test_the_scrub_is_armed_before_the_key_is_read(self, world, monkeypatch):
         monkeypatch.setattr(world.scrub, "get_breaker_redis", lambda: None)

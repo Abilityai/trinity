@@ -939,7 +939,7 @@ def raise_ask(
     pre = _named_addressees(addressees, to_role_override, raised_by, named)
     if raised_by != "gate" and (attach_chat is not True or platform_context is not None):
         raise ValueError("raise_ask: only a gate raise may skip the chat or attach platform context")
-    norm = _validated_ask(ask, oqs, raised_by=raised_by)
+    norm = _validated_ask(ask, oqs, raised_by=raised_by, agent_name=agent_name)
     existing = db.get_operator_queue_item_for_agent_by_request_id(agent_name, norm["request_id"])
     if existing:
         return _replay(existing, norm, oqs, raised_by)
@@ -1167,7 +1167,8 @@ def _too_large(field: str, limit: int, unit: str) -> AskRejected:
                        field=field, limit=limit, unit=unit)
 
 
-def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]:
+def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent",
+                   agent_name: str = "") -> Dict[str, Any]:
     """The static half of validation — nothing here depends on the clock or
     the database, so a replay is checked right after it.
 
@@ -1259,9 +1260,12 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]
                 reason=problem)
         if credential_destination.CONTEXT_KEY in context:
             # trinity-enterprise#1109: where the value lands when that is not
-            # this agent — validated here, by name, and stored normalised.
+            # this agent — validated here, by name (shape, the outbound A2A
+            # switch, the admin's endpoint registry for THIS agent; no
+            # resolver call on the loop), and stored normalised.
             try:
-                stored = credential_destination.validate(context[credential_destination.CONTEXT_KEY])
+                stored = credential_destination.validate(
+                    context[credential_destination.CONTEXT_KEY], agent_name=agent_name)
             except credential_destination.DestinationProblem as exc:
                 raise AskRejected(422, exc.code, exc.message, reason=exc.reason) from None
             context = {**context, credential_destination.CONTEXT_KEY: stored}

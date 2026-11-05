@@ -77,6 +77,7 @@ delivery lands as one line set in place, not a whole-file rewrite.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict, Optional
 
@@ -84,7 +85,7 @@ import httpx
 
 from redis_breaker_util import SingleFlightLock, get_breaker_redis
 from services import agent_env_patch, agent_env_read, credential_ask_policy, credential_requirements_service
-from services import a2a_client, credential_destination, runtime_secret_scrub
+from services import a2a_client, a2a_outbound, credential_destination, runtime_secret_scrub
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container, get_agent_status_from_container
 from services.platform_audit_service import AuditEventType, platform_audit_service
@@ -105,6 +106,8 @@ AGENT_HTTP_TIMEOUT_SECONDS = 30.0
 DESTINATION_HTTP_TIMEOUT_SECONDS = 30.0
 AUDIT_ACTION = "chat_provide"
 AUDIT_ACTION_DELIVERED = "credential_delivered"
+#: Written BEFORE the request to another Trinity leaves (trinity-enterprise#1109).
+AUDIT_ACTION_ATTEMPT = "credential_delivery_attempt"
 
 
 class CredentialSinkError(Exception):
@@ -274,9 +277,29 @@ async def set_env_value(
                        "(ask %s)", name, agent_name, ask_id)
         raise _store_unavailable("stage") from None
 
+    async def _audit(action: str, extra: Dict[str, Any]) -> None:
+        """One `credentials` audit row — names only — best-effort like every
+        other audit write: the delivery stands whether or not the row does."""
+        try:
+            await platform_audit_service.log(
+                event_type=AuditEventType.CREDENTIALS,
+                event_action=action,
+                source="api",
+                actor_email=actor_email,
+                actor_ip=actor_ip,
+                target_type="agent",
+                target_id=agent_name,
+                endpoint=endpoint,
+                request_id=request_id,
+                details={"name": name, "ask_id": ask_id, **extra},
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("[CredentialSink] audit row %s skipped for %s through ask %s",
+                           action, name, ask_id, exc_info=True)
+
     try:
         if destination is not None:
-            await _deliver_remote(agent_name, destination, name, value)
+            await _deliver_remote(agent_name, destination, name, value, audit=_audit)
         else:
             await _deliver(agent_name, {name: value})
     except CredentialSinkError as e:
@@ -300,24 +323,9 @@ async def set_env_value(
         view = credential_destination.public_view(destination) or {}
         logger.info("[CredentialSink] %s delivered to agent %s on %s through ask %s (asked by %s)",
                     name, view.get("agent_name"), view.get("host"), ask_id, agent_name)
-        try:
-            await platform_audit_service.log(
-                event_type=AuditEventType.CREDENTIALS,
-                event_action=AUDIT_ACTION_DELIVERED,
-                source="api",
-                actor_email=actor_email,
-                actor_ip=actor_ip,
-                target_type="agent",
-                target_id=agent_name,
-                endpoint=endpoint,
-                request_id=request_id,
-                details={"name": name, "ask_id": ask_id,
-                         "destination": {"host": view.get("host"),
-                                         "agent_name": view.get("agent_name")}},
-            )
-        except Exception:  # noqa: BLE001 — the delivery stands; audit is best-effort
-            logger.warning("[CredentialSink] audit row skipped for %s delivered through ask %s",
-                           name, ask_id, exc_info=True)
+        await _audit(AUDIT_ACTION_DELIVERED,
+                     {"destination": {"host": view.get("host"),
+                                      "agent_name": view.get("agent_name")}})
         return
 
     # 6. the record — names only — and the checklist cache
@@ -410,10 +418,12 @@ def _destination_failure(code: str, message: str, data: Optional[Dict[str, Any]]
 
 async def _read_key_by_name(agent_name: str, key_env: str) -> str:
     """The key ``agent_name`` holds under ``key_env`` in its own `.env`, read
-    through its own read endpoint. Absent → `destination_key_missing`. The
-    key's variable NAME is never in the refusal: it describes the asking
-    agent's environment, and the person is told what to do, not what it is
-    called."""
+    through its own read endpoint. Absent → `destination_key_missing`; one
+    that cannot travel as a header value (whitespace, control or non-ASCII
+    characters — h11 would refuse it by ECHOING it, the ent#109 class) →
+    `destination_key_invalid`. The key's variable NAME is never in the
+    refusal: it describes the asking agent's environment, and the person is
+    told what to do, not what it is called."""
     state = _running_state(agent_name)
     if state is not None:
         raise CredentialSinkError(
@@ -430,20 +440,55 @@ async def _read_key_by_name(agent_name: str, key_env: str) -> str:
             "destination_key_missing",
             "The agent that asked does not hold a key to that Trinity yet, so nothing was "
             "stored. Once it has one, send the credential again.")
+    if not a2a_outbound._HEADER_SAFE_CREDENTIAL.match(key):
+        raise _destination_failure(
+            "destination_key_invalid",
+            "The key the agent that asked holds for that Trinity cannot be sent as it is "
+            "(it contains whitespace, control or non-ASCII characters), so nothing was stored. "
+            "Once the key is fixed, send the credential again.")
     return key
 
 
+def _not_deliverable(exc: credential_destination.DestinationProblem) -> CredentialSinkError:
+    """The switch or the registry refused at delivery time: a 422 by the same
+    name the raise would have used, nothing stored."""
+    return CredentialSinkError(
+        422, exc.code,
+        ("Outbound A2A is switched off on this Trinity, so the credential was not sent and "
+         "nothing was stored. An admin can allow it under "
+         f"{credential_destination.REGISTRY_LOCATION}; then send the value again.")
+        if exc.code == "destination_outbound_disabled" else
+        ("That Trinity is not one an admin has approved for the agent that asked, so the "
+         "credential was not sent and nothing was stored. An admin registers it under "
+         f"{credential_destination.REGISTRY_LOCATION}; then send the value again."),
+        {"reason": exc.reason})
+
+
 async def _deliver_remote(agent_name: str, destination: Dict[str, str], name: str,
-                          value: str) -> None:
+                          value: str, *, audit) -> None:
     """trinity-enterprise#1109: one merge inject on the destination instance,
     under the key the asking agent holds for it. Every `CredentialSinkError`
-    raised before the request leaves says nothing was stored, and means it."""
+    raised before the request leaves says nothing was stored, and means it.
+
+    Order: the outbound A2A switch and the admin's endpoint registry (both
+    re-read now — an admin may have flipped or removed either since the ask
+    was raised), the asking agent's key by name, the URL resolved OFF the
+    loop (`a2a_client.validate_endpoint`), the attempt audited, then ONE
+    pinned request through the A2A client's capped reader under its total
+    wall-clock deadline — the error body is never read, a redirect is a
+    failure, the body ceiling is the client's own.
+    """
+    instance_url = destination["instance_url"]
+    try:
+        credential_destination.check_deliverable(agent_name, instance_url)
+    except credential_destination.DestinationProblem as exc:
+        raise _not_deliverable(exc) from None
     key = await _read_key_by_name(agent_name, destination["key_env"])
     try:
-        validated = credential_destination.validate_instance_url(destination["instance_url"])
-    except credential_destination.DestinationProblem as exc:
+        validated = await a2a_client.validate_endpoint(instance_url)
+    except a2a_client.A2ACallError as exc:
         raise CredentialSinkError(
-            422, exc.code,
+            422, "destination_url_invalid",
             "That Trinity's address no longer passes the platform's checks, so nothing was "
             "stored. Ask the agent to request the credential again.",
             {"reason": exc.reason}) from None
@@ -451,51 +496,94 @@ async def _deliver_remote(agent_name: str, destination: Dict[str, str], name: st
     route = f"{validated.url.rstrip('/')}/api/agents/{target_agent}/credentials/inject"
     pinned = a2a_client._pinned_url(route, validated.addresses[0])
     headers = {
-        "Host": a2a_client._host_header(validated),
         "Authorization": f"Bearer {key}",
-        "Accept-Encoding": "identity",
+        "Content-Type": "application/json",
     }
     # Built outside the call, so the value sits in a dict and nowhere else
     # (the AST guard reads every call the name `value` is an argument of).
     body = {"mode": "merge", "env": {name: value}}
+    content = json.dumps(body).encode("utf-8")
     view = credential_destination.public_view(destination) or {}
+    host = view.get("host")
+    # The attempt is recorded BEFORE the request leaves: a destination that
+    # stores the value and then answers 503 (its own "may or may not") must
+    # leave a trace here either way.
+    await audit(AUDIT_ACTION_ATTEMPT, {"destination": {"host": host,
+                                                       "agent_name": view.get("agent_name")}})
     try:
         async with _destination_client() as client:
-            response = await client.post(
-                pinned, json=body, headers=headers,
-                extensions={"sni_hostname": validated.hostname},
-            )
-    except (httpx.ConnectError, httpx.ConnectTimeout):
-        raise _destination_failure(
+            await a2a_client._with_deadline(a2a_client._read_capped(
+                client, "POST", pinned,
+                sni=validated.hostname,
+                host_header=a2a_client._host_header(validated),
+                max_bytes=a2a_client.A2A_ERROR_BODY_MAX_BYTES,
+                headers=headers,
+                content=content,
+                error_prefix="inject",
+                secret=key,
+            ))
+    except a2a_client.A2ACallError as exc:
+        raise _remote_failure(exc, host, target_agent) from None
+
+
+def _remote_failure(exc: "a2a_client.A2ACallError", host: Optional[str],
+                    target_agent: str) -> CredentialSinkError:
+    """The A2A client's named transport outcome → the person's named retry.
+    `exc.message` is never forwarded: it is built from a peer-controlled
+    string, and the person needs the host and what to do, not the wire."""
+    reason = exc.reason
+    status = getattr(exc, "remote_status", None)
+    if reason == "inject_unreachable":
+        return _destination_failure(
             "destination_unreachable",
-            f"Your Trinity at {view.get('host')} could not be reached, so nothing was stored. "
+            f"The Trinity at {host} could not be reached, so nothing was stored. "
             "Check it is up and send the credential again.",
-            status_code=503) from None
-    except httpx.RequestError:
-        raise _destination_failure(
+            {"reason": reason}, status_code=503)
+    if reason == "timeout":
+        return _destination_failure(
             "destination_unreachable",
-            f"Your Trinity at {view.get('host')} did not answer in time, so the credential may "
+            f"The Trinity at {host} did not answer in time, so the credential may "
             "or may not have been stored there. Check the agent there and send it again if "
             "it is missing.",
-            {"may_have_written": True}, status_code=503, may_have_written=True) from None
-    status = response.status_code
-    if 200 <= status < 300:
-        return
-    if status in (401, 403):
-        raise _destination_failure(
+            {"may_have_written": True, "reason": reason}, status_code=503, may_have_written=True)
+    if reason == "inject_http_error" and status in (401, 403):
+        return _destination_failure(
             "destination_key_refused",
-            f"Your Trinity at {view.get('host')} refused the key the agent that asked holds for "
+            f"The Trinity at {host} refused the key the agent that asked holds for "
             "it, so nothing was stored. Once the key is fixed, send the credential again.",
             {"status": status})
-    if status == 404:
-        raise _destination_failure(
+    if reason == "inject_http_error" and status == 404:
+        return _destination_failure(
             "destination_agent_missing",
-            f"Your Trinity at {view.get('host')} reports no agent named {target_agent} that this "
+            f"The Trinity at {host} reports no agent named {target_agent} that this "
             "key can reach, so nothing was stored. Once the agent exists there, send the "
             "credential again.",
             {"status": status})
-    raise _destination_failure(
+    if reason == "inject_http_error" and status is not None and status >= 500:
+        # The receiving inject route answers 503 for exactly "the agent did
+        # not confirm it stored the credential, so it may or may not be in
+        # its file" — a 5xx is that sentence, not a refusal.
+        return _destination_failure(
+            "destination_unconfirmed",
+            f"The Trinity at {host} did not confirm it stored the credential (HTTP {status}), "
+            "so it may or may not be in the agent's file there. Check the agent there and "
+            "send it again if it is missing.",
+            {"status": status, "may_have_written": True}, status_code=503, may_have_written=True)
+    if reason in ("inject_encoding", "inject_too_large"):
+        # An answer arrived that the capped reader would not take; what it said
+        # is unknown, so the value is treated as possibly stored.
+        return _destination_failure(
+            "destination_unconfirmed",
+            f"The Trinity at {host} answered in a form this platform does not read, so the "
+            "credential may or may not have been stored there. Check the agent there and "
+            "send it again if it is missing.",
+            {"reason": reason, "may_have_written": True}, status_code=503, may_have_written=True)
+    data: Dict[str, Any] = {"reason": reason}
+    if status is not None:
+        data["status"] = status
+    said = f"HTTP {status}" if status is not None else reason.replace("inject_", "")
+    return _destination_failure(
         "destination_refused",
-        f"Your Trinity at {view.get('host')} did not accept the credential (HTTP {status}), so "
+        f"The Trinity at {host} did not accept the credential ({said}), so "
         "nothing was stored there. Check the agent there is running and send it again.",
-        {"status": status})
+        data)
