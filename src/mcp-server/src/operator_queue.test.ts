@@ -788,9 +788,44 @@ describe("trinity-enterprise#1066 ask_for_credential", () => {
     assert.deepEqual(turns, ["exec-9"]);
   });
 
-  it("declares name, why, request_id and expires_at only — no value, no agent, no options", () => {
+  it("declares name, why, request_id, expires_at and destination only — no value, no agent, no options", () => {
     const keys = Object.keys(makeTool(raisingClient().fake).parameters.shape).sort();
-    assert.deepEqual(keys, ["expires_at", "name", "request_id", "why"]);
+    assert.deepEqual(keys, ["destination", "expires_at", "name", "request_id", "why"]);
+  });
+
+  // trinity-enterprise#1109 — a destination: the value lands on another
+  // instance, in the agent it is for, under the key the asking agent holds
+  // for it (named, never carried).
+  it("a destination travels as context.credential_destination with its three declared fields only", async () => {
+    const { fake, calls } = raisingClient({ status: "created", request_id: "cred-d" });
+    await makeTool(fake).execute(
+      {
+        name: "TELEGRAM_BOT_TOKEN", why: "For the digest.", request_id: "cred-d",
+        destination: { instance_url: "https://member.example.com", agent_name: "lopez-digest", key_env: "MEMBER_KEY", key: "trinity_mcp_leak" },
+      } as any,
+      agentCtx("self"),
+    );
+    assert.deepEqual(calls[0][1].context, {
+      credential_name: "TELEGRAM_BOT_TOKEN",
+      credential_destination: { instance_url: "https://member.example.com", agent_name: "lopez-digest", key_env: "MEMBER_KEY" },
+    });
+    assert.doesNotMatch(JSON.stringify(calls), /trinity_mcp_leak/);
+  });
+
+  it("without a destination the context carries the name only, as before", async () => {
+    const { fake, calls } = raisingClient();
+    await makeTool(fake).execute({ name: "API_KEY", why: "w" }, agentCtx("self"));
+    assert.deepEqual(calls[0][1].context, { credential_name: "API_KEY" });
+  });
+
+  it("the destination refusals come back named", async () => {
+    const detail = { code: "destination_url_invalid", message: "bad url", reason: "endpoint_not_https" };
+    const fake = { raiseAsk: async () => { throw new ApiError(422, JSON.stringify({ detail })); } } as Partial<TrinityClient>;
+    const out = JSON.parse(await makeTool(fake).execute(
+      { name: "API_KEY", why: "w", destination: { instance_url: "http://x", agent_name: "a", key_env: "K" } },
+      agentCtx("self"),
+    ));
+    assert.deepEqual(out, { success: false, status: 422, ...detail });
   });
 
   it("stray arguments never travel — a value smuggled in is dropped", async () => {

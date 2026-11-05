@@ -37,14 +37,15 @@ platform's baseline protections.
 
 ## Entry Points
 
-- **UI (Agent Detail)**: owner-only **Settings** tab (renamed from "Guardrails", #1108/#1122) — `GuardrailsPanel.vue` rendered unchanged as **section #1** inside `components/settings/SettingsPanel.vue`, wired in `AgentDetail.vue:187` (tab pushed at `647`, gated on `agent.can_share`). Old `?tab=guardrails` deep links resolve via `TAB_ALIASES` (`guardrails → settings`). Exposes `max_turns_chat` / `max_turns_task` only (#967 / #992).
+- **UI (Agent Detail)**: owner-only Settings › **Guardrails** pane (`components/agent-settings/GuardrailsPane.vue`, the one Settings home of trinity-enterprise#887/#3798). Its first section is **Tool access** (`agent-settings/ToolAccessSection.vue`, trinity-enterprise#341 — see [Tool-access profiles](#tool-access-profiles-guard-008-trinity-enterprise341)); the turn caps are edited in `GuardrailsPanel.vue` (embedded under "Guardrail rules"). Old `?tab=guardrails` deep links resolve via `LEGACY_TAB_SECTIONS`.
+- **API (tool access)**: `GET|PUT /api/agents/{name}/tool-access` — the profile that sets read-only mode and `disallowed_tools` together.
 - **API (read)**: `GET /api/agents/{name}/guardrails` — any authenticated user; 404 if no container.
 - **API (write)**: `PUT /api/agents/{name}/guardrails` — **owner-only** and **person-only** (`Depends(require_person)`, #2996: agent- and system-scoped keys get 403 `person_required`); empty body clears overrides. Requires agent restart to apply.
 - **Agent creation**: overrides serialized into the `AGENT_GUARDRAILS` env var (`crud.py`).
 - **Agent restart**: env var re-serialized from DB (`lifecycle.py`); runtime config regenerated at boot (`startup.sh` → `write-runtime-config.py`).
 - **Tool-call time**: Claude Code `PreToolUse` / `PostToolUse` hooks fire on every `Bash` / file-write tool call.
 
-> **UI scope is narrower than the API.** The Settings tab's Guardrails section only edits the two turn caps; `execution_timeout_sec` and the `extra_bash_deny` / `extra_path_deny` / `disallowed_tools` lists remain API-only and are *preserved* by the panel's whole-config PUT (see Frontend Layer).
+> **UI scope is narrower than the API.** The rules editor only edits the two turn caps; `execution_timeout_sec` and the `extra_bash_deny` / `extra_path_deny` lists remain API-only and are *preserved* by the panel's whole-config PUT. `disallowed_tools` is edited through **Tool access** (Custom) since trinity-enterprise#341; once a profile is stored the guardrails PUT neither writes it nor `tool_access`.
 
 ---
 
@@ -193,6 +194,53 @@ Goes through the single Axios client with the auth interceptor (Invariant #7); d
 | 187 | Tab content: `<SettingsPanel :agent-name :notify="showNotification" />` |
 
 The `can_share` gate matches the backend's owner-only `PUT` check, so a non-owner never sees the tab. Restart-required toast follows the same pattern as Read-Only and Resource-limit panels.
+
+---
+
+## Tool-access profiles (GUARD-008, trinity-enterprise#341)
+
+One owner-facing answer to "what may this agent do?". A profile is a fixed bundle that sets the read-only layer ([read-only-mode.md](read-only-mode.md)) and `disallowed_tools` together, so the two can no longer disagree; read-only mode IS the Strict read-only profile. Requirement: `requirements/security.md` §28.10.
+
+| Profile | Read-only layer | `disallowed_tools` | Codex `--sandbox` |
+|---|---|---|---|
+| Full access (default) | off | — | `danger-full-access` |
+| Workspace-only | off | the 7 send tools | `danger-full-access` |
+| Read-only + report | on | the 7 send tools | `read-only` |
+| Strict read-only | on | the 7 send tools + `mcp__trinity__report` | `read-only` |
+| Custom | owner's switch | owner's list (≤50, 1–256 chars) | per the switch |
+
+The send tools (`services/tool_access_profiles.py::SEND_TOOLS`, closed at seven): `send_message`, `send_group_message`, `send_notification`, `send_voice_reply`, `call_user`, `post_to_room`, `share_file`, named `mcp__trinity__<tool>` (pinned against the MCP server's registry and the `"trinity"` key in `trinity_mcp.py`).
+
+**Layers**
+- `services/tool_access_profiles.py` — pure policy: bundles, card copy, `resolve()` (stored or derived profile + `applied`), `plan_selection` / `plan_shortcut` / `merge_guardrails_put`, `denies_tool`, per-runtime `coverage_line`.
+- `services/agent_service/tool_access.py` — reads the row, applies the plan, writes it in ONE compare-and-set (`db.write_tool_access_row`: `guardrails_config` + `read_only_mode` + optional `read_only_config`, `WHERE` both unchanged → 409 on a lost race), applies the read-only layer live (`inject_/remove_read_only_hooks`) and then re-reads the row once, applying what is stored if a racing writer moved it, audits (`configuration` / `tool_access_change`, actor + before → after: profile, read-only, list), answers with `restart_required` (the container's `AGENT_GUARDRAILS` tool list differs from the stored one — the tool list only, so a pending turn-cap change is not named twice — or a running agent whose live apply failed). Limit: a failed live apply is reported by that save only; the next start re-syncs.
+- `services/tool_access_guard.py::assert_tool_allowed` — the send block refused by Trinity: the first action of the nine routes behind the send tools and `report` (messages, Telegram/Slack group posts, notifications, voice reply, VoIP call, room post, shared files, reports). An agent-scoped caller whose ENFORCED list names the tool gets 403 naming the tool and the profile; the four routes that send AS their path agent (`as_agent=`) check that agent's list too. People, the system key and Workspace visitors are never checked.
+
+**Storage — materialized.** `disallowed_tools` and the read-only columns stay exactly what is enforced, so the env injection (`crud.py`, `lifecycle.py` ×2) and `write-runtime-config.py` are unchanged — no base-image change. `guardrails_config.tool_access = {profile, custom: {read_only, disallowed_tools}, before_strict}` is bookkeeping: it rides in `AGENT_GUARDRAILS`, the container's whitelist drops it, and `check_guardrails_env_matches` ignores it on both sides, so a save whose enforced fields are unchanged never recreates.
+
+**Upgrade — nothing changes.** No row is written. A profile-less agent's profile is derived: read-only on and no list → Strict read-only with `applied: false` (the card reads "Send block not applied" + Apply); any list → Custom; else Full access.
+
+**Writers**
+| Route | What it does |
+|---|---|
+| `PUT /tool-access` `{profile, custom?}` | the one writer of the profile; gate = the composed routes' (`require_person_or_capability("agents.manage", self_person_only=True)` + `assert_agent_owner`); system agent 403 |
+| `PUT /read-only` `{enabled, config?}` | the header/list toggle = shortcut: ON → Strict (`before_strict` remembered), ON from a list that removes tools Strict allows → 409 naming them (never loosens silently), OFF from Strict → back (Full if none), OFF on another read-only profile → 409, already off → 200 unchanged |
+| `PUT /guardrails` | keeps the stored `tool_access` (never from the body); with a stored profile, `disallowed_tools` absent/`[]`/equal is kept and a different list is 409 naming `/tool-access`; profile-less agents unchanged |
+
+**Reads.** `GET /guardrails` (access tier) shows `tool_access` as `{profile}` only. `GET /tool-access` (owner tier — it shows Custom's remembered list): profile, `derived`, `applied`, the enforced layers, `custom`, `before_strict`, `runtime`, the five cards (bundle + statement + coverage line for the agent's runtime), `restart_required`. `GET /read-only` adds `profile`, `applied`, `read_only_layer`; its `enabled` is the toggle (Strict only). Agent detail and the fleet payload carry `tool_access_profile` (same resolver).
+
+**Per-runtime coverage** (one line per card for the agent's runtime):
+| | Claude Code | Codex | Gemini |
+|---|---|---|---|
+| Read-only layer | file tools can't write code/config files; shell commands aren't covered | the sandbox blocks every shell command, reads included | not enforced |
+| Send block | refused by Trinity + removed from the tool list | refused by Trinity | refused by Trinity |
+| Other removed tools | removed from the tool list | not enforced (`codex_runtime` logs them) | not enforced (`gemini_runtime` reads only the timeout) |
+
+**Frontend.** `ToolAccessSection.vue` (radio cards from the API, Customize → Custom pre-filled, named list errors from `utils/toolAccess.js` mirroring the backend, Apply on a not-applied profile, reports `tool-access` to `stores/agentRestart.js`, re-reads when the page's `tool_access_profile` moves); a save emits up through `GuardrailsPane` (`tool-access-saved`) so `AgentDetail` updates the header toggle; store actions `getToolAccess` / `setToolAccess` / `setReadOnly`; the header (`AgentHeader.vue`) and list (`AgentListPanel.vue`) toggles bind to `tool_access_profile === 'strict_read_only'` and send through `setReadOnly`. `GuardrailsPanel.vue` stops echoing `tool_access` / `disallowed_tools` once a profile is stored, and remounts after a Tool access save.
+
+**No MCP surface (deliberate boundary).** No MCP tool reads or writes a profile — it is the operator's choice about the agent, not the agent's (`# mcp:` header of `routers/agent_config.py`). Agent self-selection of its tool surface is a later, separately granted capability. An agent can only see the effect: the tools it is not offered, a 403 on a refused send, and the read-only refusals.
+
+**Tests.** `tests/unit/test_ent341_tool_access_profiles.py` (policy + name pins), `test_ent341_tool_access_routes.py` (real routes, CAS, shortcut, guardrails PUT, drift, payloads), `test_ent341_send_block.py` (helper + all nine routes + AST pin); frontend `toolAccess.spec.js`, `toolAccessSection.mount.spec.js`, `readOnlyShortcut.mount.spec.js`, `agentHeaderIdentityEdit.mount.spec.js`.
 
 ---
 

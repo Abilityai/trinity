@@ -333,7 +333,7 @@ describe('§3g S4 — a failed read write is rolled back', () => {
     // §3g S5: the Inbox receives the shell's markRead as a function prop.
     const settled = inbox.props('markRead')('thread', 't1')
     await flushPromises()
-    expect(store.markChatReadStrict).toHaveBeenCalledWith('thread', 't1')
+    expect(store.markChatReadStrict).toHaveBeenCalledWith('thread', 't1', undefined)
     expect(unreadOf()).toBe(3)
     await expect(settled).resolves.toBe(false)
   })
