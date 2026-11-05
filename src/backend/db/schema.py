@@ -1159,7 +1159,7 @@ TABLES = {
     "terms_acceptances": """
         CREATE TABLE IF NOT EXISTS terms_acceptances (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
+            user_id INTEGER,
             email TEXT,
             terms_version TEXT NOT NULL,
             accepted_at TEXT NOT NULL,
@@ -2281,6 +2281,11 @@ TABLES = {
 
 INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_terms_acceptances_email ON terms_acceptances(email)",
+    # trinity-enterprise#1107 ruling A(1): a Workspace portal session has no
+    # `users` row — its row is keyed by (email, version); UNIQUE(user_id, version)
+    # alone treats two NULL user_ids as distinct.
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_terms_acceptances_email_version "
+    "ON terms_acceptances(email, terms_version) WHERE user_id IS NULL",
     # Core indexes
     "CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)",
     "CREATE INDEX IF NOT EXISTS idx_users_auth0_sub ON users(auth0_sub)",

@@ -4736,7 +4736,7 @@ class DatabaseManager:
     # Terms acceptances (trinity-enterprise#1107 — delegated to db/terms.py)
     # =========================================================================
 
-    def insert_terms_acceptance(self, user_id: int, email, terms_version: str, accepted_at: str,
+    def insert_terms_acceptance(self, user_id, email, terms_version: str, accepted_at: str,
                                 *, door=None, actor_ip=None):
         return self._terms_ops.insert_terms_acceptance(
             user_id, email, terms_version, accepted_at, door=door, actor_ip=actor_ip
@@ -4744,6 +4744,9 @@ class DatabaseManager:
 
     def get_terms_acceptance(self, user_id: int, terms_version: str):
         return self._terms_ops.get_terms_acceptance(user_id, terms_version)
+
+    def get_terms_acceptance_by_email(self, email: str, terms_version: str):
+        return self._terms_ops.get_terms_acceptance_by_email(email, terms_version)
 
     def terms_acceptances_for_user(self, user_id: int):
         return self._terms_ops.terms_acceptances_for_user(user_id)

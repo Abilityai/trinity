@@ -6349,7 +6349,7 @@ class TermsUpdate(BaseModel):
 
 class TermsAcceptance(BaseModel):
     id: int
-    user_id: int
+    user_id: Optional[int] = None   # None: a Workspace portal session (ruling A(1))
     email: Optional[str] = None
     terms_version: str
     accepted_at: str

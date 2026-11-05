@@ -529,3 +529,79 @@ class TestWiring:
     def test_the_terms_router_declares_its_mcp_surface(self):
         first = (BACKEND / "routers/terms.py").read_text(encoding="utf-8").splitlines()[0]
         assert first.startswith("# mcp: none")
+
+
+class TestAPortalPersonIsRecorded:
+    """Ruling A(1): a Workspace portal session (the emailed-code sign-in) has no
+    `users` row, so its acceptance is a row with `user_id` NULL keyed by
+    (email, version); a platform account keeps (user_id, version)."""
+
+    def test_a_session_row_has_no_user_id_and_is_one_per_email_and_version(self):
+        from database import db
+
+        first = db.insert_terms_acceptance(None, "Client@Example.com", "v1", "2026-11-04T00:00:00Z",
+                                           actor_ip="10.0.0.9")
+        assert first is not None
+        # The second accept of the same version by the same address is a no-op
+        # (UNIQUE(user_id, version) alone treats two NULLs as distinct).
+        assert db.insert_terms_acceptance(None, "client@example.com", "v1", "2026-11-04T00:00:01Z") is None
+        assert db.insert_terms_acceptance(None, "client@example.com", "v2", "2026-11-04T00:00:02Z") is not None
+
+        row = db.get_terms_acceptance_by_email("CLIENT@example.com", "v1")
+        assert row is not None
+        assert row["user_id"] is None and row["email"] == "client@example.com"
+        assert row["door"] is None and row["actor_ip"] == "10.0.0.9"
+        assert db.get_terms_acceptance_by_email("client@example.com", "v3") is None
+
+    def test_a_platform_row_still_keys_on_the_account(self):
+        from database import db
+
+        assert db.insert_terms_acceptance(ADMIN["id"], ADMIN["email"], "v1", "2026-11-04T00:00:00Z") is not None
+        assert db.insert_terms_acceptance(ADMIN["id"], ADMIN["email"], "v1", "2026-11-04T00:00:01Z") is None
+        # The account's row answers an email lookup too: the same person.
+        assert db.get_terms_acceptance_by_email(ADMIN["email"], "v1")["user_id"] == ADMIN["id"]
+
+    def test_every_schema_home_declares_user_id_nullable_and_the_session_key(self):
+        """Both tracks are unshipped, so the DDL changed in place in all four homes."""
+        homes = {
+            "schema.py": (BACKEND / "db" / "schema.py").read_text(),
+            "migrations.py": (BACKEND / "db" / "migrations.py").read_text(),
+            "tables.py": (BACKEND / "db" / "tables.py").read_text(),
+            "0118": (BACKEND / "migrations" / "versions" / "0118_terms_acceptances.py").read_text(),
+        }
+        for name, src in homes.items():
+            body = src[src.index("terms_acceptances"):]
+            assert "uq_terms_acceptances_email_version" in body, name
+            assert "user_id IS NULL" in body, name
+        schema_table = homes["schema.py"][homes["schema.py"].index('"terms_acceptances": """'):]
+        assert "user_id INTEGER NOT NULL" not in schema_table[: schema_table.index('""",')]
+        entry = homes["migrations.py"][homes["migrations.py"].index("def _migrate_terms_acceptances_table"):]
+        assert "user_id INTEGER NOT NULL" not in entry[: entry.index("\ndef ")]
+        assert 'Column("user_id", Integer, nullable=True)' in homes["tables.py"][homes["tables.py"].index("terms_acceptances = Table"):]
+        assert 'sa.Column("user_id", sa.Integer(), nullable=True)' in homes["0118"]
+
+    def test_a_development_database_on_the_not_null_shape_is_rebuilt_with_its_rows(self, tmp_path):
+        import sqlite3
+        from db.migrations import _migrate_terms_acceptances_table
+
+        conn = sqlite3.connect(str(tmp_path / "old.db"))
+        cur = conn.cursor()
+        cur.execute("""CREATE TABLE terms_acceptances (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, email TEXT,
+            terms_version TEXT NOT NULL, accepted_at TEXT NOT NULL, door TEXT, actor_ip TEXT,
+            UNIQUE(user_id, terms_version))""")
+        cur.execute("INSERT INTO terms_acceptances (user_id, email, terms_version, accepted_at) "
+                    "VALUES (41, 'admin@example.com', 'default-1', '2026-11-04T00:00:00Z')")
+        conn.commit()
+        _migrate_terms_acceptances_table(cur, conn)
+        _migrate_terms_acceptances_table(cur, conn)  # idempotent on the new shape
+        cur.execute("PRAGMA table_info(terms_acceptances)")
+        assert {r[1]: r[3] for r in cur.fetchall()}["user_id"] == 0
+        cur.execute("INSERT INTO terms_acceptances (user_id, email, terms_version, accepted_at) "
+                    "VALUES (NULL, 'client@example.com', 'default-1', '2026-11-04T00:00:01Z')")
+        with pytest.raises(sqlite3.IntegrityError):
+            cur.execute("INSERT INTO terms_acceptances (user_id, email, terms_version, accepted_at) "
+                        "VALUES (NULL, 'client@example.com', 'default-1', '2026-11-04T00:00:02Z')")
+        cur.execute("SELECT user_id, email FROM terms_acceptances ORDER BY id")
+        assert cur.fetchall() == [(41, "admin@example.com"), (None, "client@example.com")]
+        conn.close()

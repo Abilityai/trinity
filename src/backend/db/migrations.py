@@ -5920,12 +5920,20 @@ def _migrate_terms_acceptances_table(cursor, conn):
     a `system_settings` row with a shipped default (`services/terms_defaults.py`),
     so no seed is needed here. Schema is also in db/schema.py for fresh installs;
     mirrored by Alembic revision 0118_terms_acceptances.
+
+    Ruling A(1): a Workspace portal session (the emailed-code sign-in) has no
+    `users` row, so `user_id` is nullable and a session row is keyed by
+    (email, version) through a partial unique index — UNIQUE(user_id, version)
+    alone treats two NULL user_ids as distinct. The entry shipped in no release
+    before this shape, so the DDL changed in place; a development database
+    that ran the earlier NOT NULL shape is rebuilt here (rows kept).
     """
-    cursor.execute(
-        """
-        CREATE TABLE IF NOT EXISTS terms_acceptances (
+    cursor.execute("PRAGMA table_info(terms_acceptances)")
+    cols = {row[1]: row for row in cursor.fetchall()}
+    create = """
+        CREATE TABLE IF NOT EXISTS {name} (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
+            user_id INTEGER,
             email TEXT,
             terms_version TEXT NOT NULL,
             accepted_at TEXT NOT NULL,
@@ -5933,11 +5941,25 @@ def _migrate_terms_acceptances_table(cursor, conn):
             actor_ip TEXT,
             UNIQUE(user_id, terms_version)
         )
-        """
+    """
+    indexes = (
+        "CREATE INDEX IF NOT EXISTS idx_terms_acceptances_email ON terms_acceptances(email)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_terms_acceptances_email_version "
+        "ON terms_acceptances(email, terms_version) WHERE user_id IS NULL",
     )
-    cursor.execute(
-        "CREATE INDEX IF NOT EXISTS idx_terms_acceptances_email ON terms_acceptances(email)"
-    )
+    if cols and cols["user_id"][3]:  # notnull: the pre-ruling shape — rebuild, rows kept
+        _atomic_rebuild(
+            cursor, conn, "terms_acceptances",
+            create.format(name="terms_acceptances_new"),
+            "INSERT INTO terms_acceptances_new (id, user_id, email, terms_version, accepted_at, door, actor_ip) "
+            "SELECT id, user_id, email, terms_version, accepted_at, door, actor_ip FROM terms_acceptances",
+            indexes=indexes,
+        )
+        print("Rebuilt terms_acceptances with a nullable user_id (trinity-enterprise#1107)")
+        return
+    cursor.execute(create.format(name="terms_acceptances"))
+    for sql in indexes:
+        cursor.execute(sql)
     conn.commit()
     print("Created terms_acceptances table (trinity-enterprise#1107)")
 
