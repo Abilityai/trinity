@@ -1,5 +1,5 @@
 /**
- * ent#1101 — off-box `/mcp` is refused while external MCP access is off.
+ * ent#1101 — every off-box request is refused while external MCP access is off.
  *
  * `classifyPeer` is the peer rule (loopback and the agent network minus its
  * gateway are on-box; everything else is off-box). `ExternalAccessGate` reads

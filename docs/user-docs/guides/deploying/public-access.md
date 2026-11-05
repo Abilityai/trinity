@@ -26,6 +26,8 @@ Plain HTTP on a public IP with none of the above is the one combination to avoid
 | Web UI access for team members off-VPN | Yes |
 | MCP access for Claude Code clients off-VPN (`/mcp`) | Yes — and External MCP access turned on (**Settings → MCP Keys**) |
 
+Every path and transport on the MCP port is behind that switch — `/mcp` in any spelling, the legacy `/sse` + `/messages` transport, and anything else the server answers — so while it is off an off-server client is refused whatever URL it tries; only the health probe answers.
+
 If all your users and webhook sources can reach the server directly (e.g., via Tailscale), you do not need the Cloudflare Tunnel.
 
 ## Cloudflare Tunnel Setup

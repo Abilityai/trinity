@@ -73,14 +73,14 @@ The URL Trinity advertises — in the MCP Keys page's connection snippet and in 
 
 **Who counts as outside.** The MCP server looks at where each connection comes from. Loopback inside its container and agents on the agent network are inside. Everything else is outside — the bundled web frontend's `/mcp`, a Cloudflare Tunnel, a reverse proxy on the host (Caddy included), and any client using the published port, even from the Trinity host itself. The only ways in from outside are the frontend's `/mcp` and the published `:8080` port, and the switch covers both. Docker daemons with IPv6 enabled are not supported by this check: their peers read as outside.
 
-**What a refused client sees.** Every request under `/mcp` except `DELETE` (so a client can still close its session) is answered with a JSON-RPC error rather than a dropped connection:
+**What a refused client sees.** Every request on the MCP port — `/mcp` in any spelling, the legacy `/sse` + `/messages` transport, any other path — is answered with a JSON-RPC error rather than a dropped connection, except `DELETE /mcp` (so a client can still close its session) and the `/health` probe:
 
 | Status | `X-Trinity-Refusal` | Meaning | What to do |
 |--------|---------------------|---------|------------|
 | `403` | `external_mcp_access_off` | External MCP access is off on this instance | An admin turns it on under **Settings → MCP Keys** |
 | `503` (with `Retry-After: 5`) | `external_mcp_access_unverified` | The MCP server could not get the setting from the backend yet — it is still starting, or `INTERNAL_API_SECRET` is not set | Retry shortly; if it persists, check the backend and that `INTERNAL_API_SECRET` is set |
 
-The JSON-RPC error code is `-32003` for both. `/health` and other paths outside `/mcp` are never refused.
+The JSON-RPC error code is `-32003` for both. Only `GET /health` (the container's own health probe) and `DELETE /mcp` are ever let through while the switch is off; there is no path or transport on the port that bypasses it.
 
 **The published port — `MCP_BIND_ADDRESS`.** This `.env` key is the interface the MCP server's `:8080` port is published on. Fresh installs set `127.0.0.1`, so the port answers only on the Trinity host and outside clients use the frontend's `/mcp`. An upgraded `.env` that does not carry the key keeps publishing on every interface, as before. Empty means every interface. The key is read when the containers are created, so change it in `.env` and recreate the stack.
 
