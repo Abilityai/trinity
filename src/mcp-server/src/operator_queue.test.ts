@@ -311,7 +311,8 @@ describe("trinity-enterprise#611 respond_to_operator_queue is person-only", () =
   it("the description says an agent's key cannot end an ask", () => {
     const tool = createOperatorQueueTools({} as unknown as TrinityClient, false).respondToOperatorQueue;
     assert.match(tool.description, /user-scoped/);
-    assert.match(tool.description, /agent- and system-scoped keys are refused/);
+    // abilityai/trinity-enterprise#719: those keys are not shown the tool either.
+    assert.match(tool.description, /Agent-scoped and system-scoped keys can never call it, so their sessions are not shown it/);
   });
 });
 

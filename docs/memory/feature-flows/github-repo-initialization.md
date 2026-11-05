@@ -737,7 +737,9 @@ initializeGithubSync: {
     "commits the current state, pushes to GitHub, and creates a working branch for sync. " +
     "Requires GitHub Personal Access Token (PAT) to be configured in system settings with 'repo' scope. " +
     "Note: Agents created from GitHub templates already have git sync enabled in source mode (pull-only). " +
-    "Agent must be running.",
+    "Agent must be running. " +
+    HUMAN_ONLY_WHO_MAY_CALL.person,
+  canAccess: humanOnlyToolAccess("person"),  // listed to user keys only (trinity-enterprise#719)
   parameters: z.object({
     agent_name: z.string().describe("The name of the agent to initialize GitHub sync for"),
     repo_owner: z.string().describe("GitHub username or organization name (e.g., 'your-username')"),
