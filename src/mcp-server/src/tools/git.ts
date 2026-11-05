@@ -191,7 +191,20 @@ export function createGitTools(client: TrinityClient, requireApiKey: boolean) {
       parameters: z.object({
         agent_name: z.string().min(1).describe("Agent to sync."),
         message: z.string().optional().describe("Custom commit message."),
-        paths: z.array(z.string()).optional().describe("Specific paths to sync (default: all changes)."),
+        // ent#1117: an agent on an older base image stages these with
+        // `git add <paths>` (no `--`), so an element starting with `-` is read
+        // as an option (`-f` force-stages an ignored `.env`, which is then
+        // pushed). Refused here and at the backend; a dash elsewhere is fine.
+        paths: z
+          .array(
+            z.string().regex(/^(?!-)/, {
+              error: (issue) =>
+                `'${String(issue.input)}' starts with '-' and would be read by git as an option; ` +
+                `name a file that starts with '-' as './${String(issue.input)}'`,
+            }),
+          )
+          .optional()
+          .describe("Specific paths to sync (default: all changes). An element may not start with '-'."),
         strategy: z
           .enum(["normal", "pull_first", "force_push"])
           .optional()
