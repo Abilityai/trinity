@@ -48,6 +48,7 @@ import hashlib
 import logging
 from typing import Any, Awaitable, Callable, Dict, Optional, Set
 
+from services.execution_envelope import TaskExecutionErrorCode
 from services.operator_queue_choices import SOMETHING_ELSE
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,24 @@ EXPIRY_RIDER = "Denied by timeout; do not re-ask the same action without new inf
 # A sweep can end many of one agent's asks; the turn lists a bounded number.
 ENDING_LIST_MAX = 25
 _TITLE_MAX_CHARS = 200
+
+# abilityai/trinity-enterprise#1108 AC #4: the failure classes in which NO turn
+# started on the agent, so the wake is still owed — `pending`, with the
+# idempotency claim released so the agent's next start re-dispatches it. The
+# platform never reached the container (`network`), never admitted the turn
+# (`capacity` — a full durable backlog too, `circuit_open`,
+# `ephemeral_exhausted`), or the agent could not start one (`auth`, `billing`).
+# Every other class is a turn that ran and ended badly, which its own execution
+# row reports: a `timeout` in particular means a turn ran. Spelled from the
+# enum so a renamed member fails at import, never silently stops matching.
+NO_TURN_ERROR_CODES = frozenset({
+    TaskExecutionErrorCode.NETWORK.value,
+    TaskExecutionErrorCode.CAPACITY.value,
+    TaskExecutionErrorCode.CIRCUIT_OPEN.value,
+    TaskExecutionErrorCode.BILLING.value,
+    TaskExecutionErrorCode.AUTH.value,
+    TaskExecutionErrorCode.EPHEMERAL_EXHAUSTED.value,
+})
 
 # Strong refs for background dispatches: a bare create_task can be garbage
 # collected mid-flight (the #1083 `_inflight` footgun).
@@ -318,6 +337,11 @@ async def maybe_dispatch_resume(
             # line; every other return path withholds the person (ent#715). Who
             # answered stays in the queue row and the audit row; the served seat
             # is read off the Workspace stamp (`served_person_for_row`).
+            # abilityai/trinity-enterprise#1108: at capacity the wake goes on the
+            # DURABLE backlog instead of being rejected — the drain runs it when
+            # a slot frees, and the adapter waits out the queue. A rejected wake
+            # was a FAILED row under a completed idempotency key: never retried.
+            queue_on_capacity=True,
             **destination,
         )
     except Exception as exc:
@@ -340,10 +364,10 @@ async def maybe_dispatch_resume(
         return None
 
     if _never_reached_the_agent(result):
-        # The platform's own `network` class — "HTTP/connection error to agent
-        # container": no turn ran, so the wake is still owed (ent#1108 AC #4).
-        # The idempotency claim is RELEASED, not completed: a completed key would
-        # make the next start's re-dispatch replay into nothing.
+        # A `NO_TURN_ERROR_CODES` class: no turn ran, so the wake is still owed
+        # (ent#1108 AC #4). The idempotency claim is RELEASED, not completed: a
+        # completed key would make the next start's re-dispatch replay into
+        # nothing.
         if idem is not None:
             try:
                 idempotency_service.fail(idem)
@@ -374,13 +398,13 @@ async def maybe_dispatch_resume(
 
 
 def _never_reached_the_agent(result) -> bool:
-    """A result whose failure is the `network` error class (ent#1108 AC #4):
-    the platform could not reach the agent container, so no turn ran. Read off
-    the result's own `error_code` (the enum or its value); any other failure
-    is a turn that ran and failed, which its execution row reports."""
+    """A result whose failure is one of `NO_TURN_ERROR_CODES` (ent#1108 AC #4):
+    no turn started on the agent, so the wake is still owed. Read off the
+    result's own `error_code` (the enum or its value); any other failure is a
+    turn that ran and failed, which its execution row reports."""
     code = getattr(result, "error_code", None)
     code = getattr(code, "value", code)
-    return code == "network"
+    return code in NO_TURN_ERROR_CODES
 
 
 def _set_wake_state(db, item_id: str, state: str) -> None:
@@ -588,6 +612,8 @@ async def maybe_dispatch_ending(
             triggered_by=TRIGGERED_BY_ENDING,
             # trinity-enterprise#886: no `source_user_email` — the canceller is
             # in `_audit_ending`, never in the agent's prompt (ent#715).
+            # ent#1108: the durable backlog at capacity, as for the answer wake.
+            queue_on_capacity=True,
         )
     except Exception as exc:
         if idem is not None:

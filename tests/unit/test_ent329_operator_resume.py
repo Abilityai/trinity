@@ -294,6 +294,9 @@ async def test_dispatch_goes_through_execute_task_not_a_bespoke_path(service, mo
         # trinity-enterprise#751: the person's own answer, for the skill gate —
         # not a second surface, the same `execute_task` reads it.
         "request_text",
+        # abilityai/trinity-enterprise#1108: the durable backlog at capacity — an
+        # admission choice inside the same `execute_task`, not a second path.
+        "queue_on_capacity",
     }
 
 

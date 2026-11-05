@@ -425,3 +425,95 @@ def test_the_fresh_ddl_carries_the_column():
     from db.tables import operator_queue
     assert "wake_state" in TABLES["operator_queue"]
     assert "wake_state" in operator_queue.c
+
+
+# ---------------------------------------------------------------------------
+# Which failures keep the wake owed (merge-train ruling on AC #4)
+# ---------------------------------------------------------------------------
+
+# No turn started on the agent: the platform never reached it (network), never
+# admitted the turn (capacity, circuit_open, ephemeral_exhausted) or the agent
+# could not start one (auth, billing). The wake is still owed.
+NO_TURN_CLASSES = ["network", "capacity", "circuit_open", "billing", "auth", "ephemeral_exhausted"]
+# A turn ran and ended badly — its own execution row says how. Not owed again.
+TURN_RAN_CLASSES = ["timeout", "agent_error", "max_turns", "skill_not_found",
+                    "model_unsupported", "turn_refused"]
+
+
+class TestWhichFailuresKeepTheWakeOwed:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("code", NO_TURN_CLASSES)
+    async def test_a_failure_before_any_turn_keeps_pending_and_releases_the_claim(
+            self, ors, monkeypatch, code):
+        w = _install(monkeypatch, result_status="failed", result_error_code=code)
+        assert await ors.maybe_dispatch_resume(ITEM, response="Build it") is None
+        assert w.wake_writes == [("item-1", "pending")]
+        assert w.idem == ["fail"], "a completed key would make the next start's re-dispatch replay into nothing"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("code", TURN_RAN_CLASSES)
+    async def test_a_turn_that_ran_and_failed_reads_woken_and_completes_the_claim(
+            self, ors, monkeypatch, code):
+        w = _install(monkeypatch, result_status="failed", result_error_code=code)
+        assert await ors.maybe_dispatch_resume(ITEM, response="Build it") == "exec-1"
+        assert w.wake_writes == [("item-1", "woken")]
+        assert w.idem == ["complete"]
+
+    @pytest.mark.asyncio
+    async def test_the_enum_member_is_read_like_its_value(self, ors, monkeypatch):
+        from services.execution_envelope import TaskExecutionErrorCode
+        w = _install(monkeypatch, result_status="failed",
+                     result_error_code=TaskExecutionErrorCode.CAPACITY)
+        assert await ors.maybe_dispatch_resume(ITEM, response="Build it") is None
+        assert w.wake_writes == [("item-1", "pending")]
+
+    def test_the_no_turn_set_is_spelled_from_the_enum(self, ors):
+        from services.execution_envelope import TaskExecutionErrorCode
+        values = {c.value for c in TaskExecutionErrorCode}
+        assert set(ors.NO_TURN_ERROR_CODES) == set(NO_TURN_CLASSES)
+        assert set(ors.NO_TURN_ERROR_CODES) <= values
+        assert "timeout" not in ors.NO_TURN_ERROR_CODES, "a timeout means a turn ran"
+
+
+# ---------------------------------------------------------------------------
+# At capacity the wake queues on the durable backlog instead of failing
+# ---------------------------------------------------------------------------
+
+class TestTheWakeQueuesAtCapacity:
+    """A wake rejected at capacity used to be a FAILED row and a completed
+    idempotency key — never retried. This producer now asks admission for the
+    durable backlog (`queue_persistent`), pilot or not, so the turn is drained
+    by the existing backlog machinery and `dispatch_and_await_terminal` waits
+    out the queue for the real terminal."""
+
+    @pytest.mark.asyncio
+    async def test_the_answer_wake_asks_for_the_durable_backlog(self, ors, monkeypatch):
+        w = _install(monkeypatch)
+        await ors.maybe_dispatch_resume(ITEM, response="Build it")
+        assert w.calls[0]["queue_on_capacity"] is True
+
+    @pytest.mark.asyncio
+    async def test_the_ending_wake_asks_for_the_durable_backlog(self, ors, monkeypatch):
+        w = _install(monkeypatch)
+        rows = [{"id": "e1", "request_id": "req-e1", "agent_name": "parked-agent", "title": "t"}]
+        await ors.maybe_dispatch_ending(rows, disposition="cancelled", disposed_by_email=None)
+        assert w.calls[0]["queue_on_capacity"] is True
+
+    def test_execute_task_accepts_the_producer_opt_in(self):
+        from services.task_execution_service import TaskExecutionService
+        params = inspect.signature(TaskExecutionService.execute_task).parameters
+        assert params["queue_on_capacity"].default is False
+
+    def test_the_opt_in_builds_the_payload_for_an_agent_outside_the_pilot(self, monkeypatch):
+        import services.task_execution_service as tes
+        monkeypatch.setattr(tes, "pull_owns_dispatch", lambda agent, trigger: False)
+        kwargs = dict(
+            agent_name="parked-agent", triggered_by=tes.__dict__.get("TRIGGERED_BY", "operator_response"),
+            execution_id="exec-1", message="m", model=None, allowed_tools=None, system_prompt=None,
+            timeout_seconds=300, resume_session_id=None, subscription_id=None, source_user_id=None,
+            source_user_email=None, source_agent_name=None, slot_already_held=False,
+        )
+        assert tes.build_pull_queue_payload(**kwargs) is None, "the #2391 default is unchanged"
+        payload = tes.build_pull_queue_payload(**kwargs, queue_on_capacity=True)
+        assert payload is not None and payload.triggered_by == "operator_response"
+        assert tes.build_pull_queue_payload(**{**kwargs, "execution_id": None}, queue_on_capacity=True) is None
