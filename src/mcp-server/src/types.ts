@@ -171,14 +171,24 @@ export interface AgentAccessCheckResult {
 
 /**
  * #2807: the outcome a tool RETURNED rather than threw, stamped on the
- * per-call tool context by `access.ts::accessDenied` and read by the audit
- * wrapper after `execute` — the same seam #905 uses for `requestId`. `denied`
- * is the only kind today; a returned non-denial failure is the registered
- * follow-up and adds a kind here, not a second field.
+ * per-call tool context and read by the audit wrapper after `execute` — the
+ * same seam #905 uses for `requestId`. Either kind makes the row
+ * `success: false` with `error: reason`.
+ *
+ * - `denied`: an AUTHORIZATION refusal, by the MCP gate or by the backend.
+ *   Stamped by `access.ts::accessDenied`; the row also says `denied: true`.
+ * - `failed` (#4026): any other failure the tool returned instead of throwing:
+ *   an operational refusal (a 409 blocker, a 503 retryable), a route this
+ *   build lacks, a rejected request, a lost connection. Stamped by
+ *   `audit.ts::toolFailed`; the row carries no `denied` key.
  */
 export interface ToolOutcome {
-  kind: "denied";
-  /** What the AUDIT row records — by default the reason the caller was given. */
+  kind: "denied" | "failed";
+  /**
+   * What the AUDIT row records as `error`. `toolFailed` never stamps an empty
+   * `failed` reason (an empty `error` is dropped from the row); `accessDenied`
+   * records the reason it is given, as it always has.
+   */
   reason: string;
 }
 

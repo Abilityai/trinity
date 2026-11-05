@@ -8347,6 +8347,18 @@
         "workspace"
       ],
       "description": "#4157: Portal.vue holds the 409 hand-off in the auth store only (never URL or storage); Login.vue redeems it once at /api/auth/email/handoff and lands on the redirect, still shows 2FA, and falls back to the filled code form when refused or after a reload."
+    },
+    {
+      "file": "unit/test_4259_key_sweep_startup_grace.py",
+      "feature": "#4259",
+      "added": "2026-11-04",
+      "categories": [
+        "backend",
+        "cleanup",
+        "mcp",
+        "security"
+      ],
+      "description": "#4259: the orphaned-key sweep skips agent/connector keys younger than ORPHANED_KEY_GRACE_SECONDS (crud mints the key before the ownership row lands), still revokes older keys with no live row, never touches a key whose ownership row is live whatever its age, and the [Cleanup] log line names the revoked agents through the real _sweep_retention_772 hand-off."
     }
   ]
 }
