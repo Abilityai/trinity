@@ -18,10 +18,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # `_ent695_lua`
+import _ent695_lua as lua  # noqa: E402
 
 
 def _run(coro):
@@ -320,21 +325,25 @@ def test_agent_scoped_principal_is_rejected_403(ops):
 # ---------------------------------------------------------------------------
 
 
-def _lock_client(set_result=True):
-    client = MagicMock()
-    store = {}
+_LOCK_KEY = "ops:fleet_restart"
 
-    def _set(key, val, nx=None, ex=None):
-        if set_result:
-            store[key] = val
-        return set_result
 
-    client.set.side_effect = _set
-    client.get.side_effect = lambda key: store.get(key)
-    # #1919: the backing dict, exposed so tests can simulate a takeover /
-    # expiry between iterations (store[key] = "foreign", store.pop(key)).
-    client.store = store
+def _lock_client(set_result=True, decode_responses=True):
+    """The fleet lock's Redis (trinity#4028): one store whose renew/release
+    scripts EXECUTE the production text (`_ent695_lua.LeaseRedis`).
+    `set_result=False` means another run already holds the lock."""
+    client = lua.LeaseRedis(decode_responses=decode_responses)
+    if not set_result:
+        client.store[_LOCK_KEY] = "another-run"
     return client
+
+
+def _scripts(client, kind):
+    return client.commands.count(("script", kind, _LOCK_KEY))
+
+
+def test_the_lock_key_is_the_one_these_tests_drive(ops):
+    assert ops._FLEET_RESTART_LOCK_KEY == _LOCK_KEY
 
 
 def test_concurrent_fleet_restart_is_refused_409(ops, monkeypatch):
@@ -349,6 +358,7 @@ def test_concurrent_fleet_restart_is_refused_409(ops, monkeypatch):
     ops.restart_agent_internal.assert_not_awaited()
     # A refused request did no work — it must not write a misleading audit row.
     ops.platform_audit_service.log.assert_not_awaited()
+    assert client.store[_LOCK_KEY] == "another-run"  # the holder's lock untouched
 
 
 def test_lock_is_acquired_refreshed_and_released_compare_and_delete(
@@ -359,10 +369,12 @@ def test_lock_is_acquired_refreshed_and_released_compare_and_delete(
 
     _call(ops)
 
-    client.set.assert_called_once()
-    assert client.set.call_args.kwargs.get("nx") is True
-    client.expire.assert_called()  # own-lease refresh inside the loop
-    client.delete.assert_called_once_with(ops._FLEET_RESTART_LOCK_KEY)
+    assert client.commands.count(("set", _LOCK_KEY)) == 1  # the SETNX acquire
+    assert _scripts(client, "retake") == 1  # own-lease refresh inside the loop
+    assert _scripts(client, "release") == 1
+    assert _LOCK_KEY not in client.store
+    # Every renew/release is a script: no client GET, EXPIRE or DELETE.
+    assert not any(c[0] in ("get", "expire", "delete") for c in client.commands)
 
 
 def test_redis_down_fails_open_and_still_restarts(ops, monkeypatch):
@@ -373,11 +385,12 @@ def test_redis_down_fails_open_and_still_restarts(ops, monkeypatch):
     out = _call(ops)
 
     assert out["summary"]["successes"] == 1
+    client.register_script.assert_not_called()
     client.delete.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
-# #1919 — ownership-checked lease refresh + loss detection
+# #1919 — ownership-checked lease refresh + loss detection (one script, #4028)
 # ---------------------------------------------------------------------------
 
 
@@ -392,8 +405,8 @@ def test_1919_two_agent_happy_path_refreshes_own_lease_each_iteration(
 ):
     """Baseline that makes a spurious break detectable: every prior lock test
     ran a 1-agent fleet, so 'loop completed' and 'loop broke after agent 1'
-    were indistinguishable. An implementation classifying every GET as foreign
-    passes all loss tests — but not this one."""
+    were indistinguishable. An implementation classifying every refresh as
+    lost passes all loss tests — but not this one."""
     _two_agents(ops, monkeypatch)
     client = _lock_client(set_result=True)
     monkeypatch.setattr(ops, "get_breaker_redis", lambda: client)
@@ -403,9 +416,11 @@ def test_1919_two_agent_happy_path_refreshes_own_lease_each_iteration(
     assert out["summary"]["successes"] == 2
     assert out["summary"]["processed"] == 2
     assert out["summary"]["stopped_early"] is None
-    assert client.expire.call_count == 2  # ownership-checked refresh per agent
-    client.set.assert_called_once()       # no re-acquire on the happy path
-    client.delete.assert_called_once_with(ops._FLEET_RESTART_LOCK_KEY)
+    assert _scripts(client, "retake") == 2  # ownership-checked refresh per agent
+    assert client.commands.count(("set", _LOCK_KEY)) == 1  # no client re-acquire
+    assert _LOCK_KEY not in client.store
+    details = ops.platform_audit_service.log.await_args.kwargs["details"]
+    assert details["lease_reacquired"] is None
 
 
 def test_1919_foreign_token_stops_loop_and_release_leaves_it(ops, monkeypatch):
@@ -418,7 +433,8 @@ def test_1919_foreign_token_stops_loop_and_release_leaves_it(ops, monkeypatch):
 
     def _restart_then_takeover(name):
         # Simulate TTL lapse + second caller acquiring while a1 restarts.
-        client.store[ops._FLEET_RESTART_LOCK_KEY] = "intruder-token"
+        client.store[_LOCK_KEY] = "intruder-token"
+        client.ttls[_LOCK_KEY] = 17
         return dict(_START_OK)
 
     monkeypatch.setattr(
@@ -433,23 +449,30 @@ def test_1919_foreign_token_stops_loop_and_release_leaves_it(ops, monkeypatch):
     assert out["summary"]["stopped_early"] == "lease_lost_foreign"
     assert [r["agent"] for r in out["results"]] == ["a1"]
     ops.restart_agent_internal.assert_awaited_once()
-    client.delete.assert_not_called()                # foreign token untouched
+    # The intruder's lease is neither renewed, re-taken nor deleted.
+    assert client.store[_LOCK_KEY] == "intruder-token"
+    assert client.ttls[_LOCK_KEY] == 17
     details = ops.platform_audit_service.log.await_args.kwargs["details"]
     assert details["stopped_early"] == "lease_lost_foreign"
     assert details["processed"] == 1
 
 
 def test_1919_absent_token_reacquires_and_continues(ops, monkeypatch):
-    """Lease lapsed but NOBODY took it: nothing is racing us, so the run
-    re-acquires with its own token and completes instead of aborting a
-    half-done destructive operation."""
+    """Lease lapsed and nobody holds it now: the run re-takes it with its own
+    token, in the refresh script, and completes instead of aborting a half-done
+    destructive operation (#1919). The re-take does not prove nobody ran
+    inside the lapse — only that nobody holds the lock at the refresh."""
     _two_agents(ops, monkeypatch)
     client = _lock_client(set_result=True)
     monkeypatch.setattr(ops, "get_breaker_redis", lambda: client)
+    seen = {}
 
     def _restart_then_expiry(name):
         if name == "a1":  # the lease lapses once, while a1 restarts
-            client.store.pop(ops._FLEET_RESTART_LOCK_KEY, None)
+            seen["token"] = client.store.pop(_LOCK_KEY)
+            client.ttls.pop(_LOCK_KEY, None)
+        else:
+            seen["retaken"] = (client.store.get(_LOCK_KEY), client.ttls.get(_LOCK_KEY))
         return dict(_START_OK)
 
     monkeypatch.setattr(
@@ -460,45 +483,37 @@ def test_1919_absent_token_reacquires_and_continues(ops, monkeypatch):
 
     assert out["summary"]["successes"] == 2
     assert out["summary"]["stopped_early"] is None
-    # initial acquire + one re-acquire, both SETNX
-    assert client.set.call_count == 2
-    assert all(c.kwargs.get("nx") is True for c in client.set.call_args_list)
+    # re-taken with the SAME token and the full TTL, by the script
+    assert seen["retaken"] == (seen["token"], ops._FLEET_RESTART_LOCK_TTL_SECONDS)
+    assert client.commands.count(("set", _LOCK_KEY)) == 1  # only the acquire
     details = ops.platform_audit_service.log.await_args.kwargs["details"]
     assert details["lease_reacquired"] is True
-    client.delete.assert_called_once_with(ops._FLEET_RESTART_LOCK_KEY)
+    assert _LOCK_KEY not in client.store  # and released at the end
 
 
-def test_1919_absent_token_losing_the_reacquire_race_stops(ops, monkeypatch):
-    """Absent at GET, but a second caller wins the SETNX between our read and
-    our re-acquire: that is a foreign holder — stop."""
+def test_1919_a_successor_inside_the_lapse_is_never_overwritten(ops, monkeypatch):
+    """The re-take is `SET NX` inside the script: a holder that took the key
+    during the lapse keeps it, and this run stops."""
     _two_agents(ops, monkeypatch)
     client = _lock_client(set_result=True)
     monkeypatch.setattr(ops, "get_breaker_redis", lambda: client)
 
-    set_calls = {"n": 0}
-
-    def _set_then_lose(key, val, nx=None, ex=None):
-        set_calls["n"] += 1
-        if set_calls["n"] == 1:      # initial acquire wins
-            client.store[key] = val
-            return True
-        return False                 # re-acquire loses the race
-
-    client.set.side_effect = _set_then_lose
-
-    def _restart_then_expiry(name):
-        client.store.pop(ops._FLEET_RESTART_LOCK_KEY, None)
+    def _lapse_then_successor(name):
+        client.store.pop(_LOCK_KEY)
+        client.set(_LOCK_KEY, "successor-token", nx=True, ex=900)
         return dict(_START_OK)
 
     monkeypatch.setattr(
-        ops, "restart_agent_internal", AsyncMock(side_effect=_restart_then_expiry)
+        ops, "restart_agent_internal", AsyncMock(side_effect=_lapse_then_successor)
     )
 
     out = _call(ops)
 
     assert out["summary"]["successes"] == 1
     assert out["summary"]["stopped_early"] == "lease_lost_foreign"
-    client.delete.assert_not_called()
+    assert client.store[_LOCK_KEY] == "successor-token"
+    details = ops.platform_audit_service.log.await_args.kwargs["details"]
+    assert details["lease_reacquired"] is None
 
 
 def test_1919_refresh_redis_error_fails_open_and_release_still_runs(
@@ -511,54 +526,48 @@ def test_1919_refresh_redis_error_fails_open_and_release_still_runs(
     _two_agents(ops, monkeypatch)
     client = _lock_client(set_result=True)
     monkeypatch.setattr(ops, "get_breaker_redis", lambda: client)
+    real_register = client.register_script
 
-    gate_gets = {"n": 0}
+    def _blipping_refresh(src):
+        run = real_register(src)
+        if lua.script_kind(src) != "retake":
+            return run
 
-    def _get_blipping(key):
-        gate_gets["n"] += 1
-        if gate_gets["n"] <= 2:      # the two in-loop gate reads fail
+        def _raise(**kwargs):
             raise RuntimeError("redis blip")
-        return client.store.get(key)  # the release read succeeds
+        return _raise
 
-    client.get.side_effect = _get_blipping
+    client.register_script = _blipping_refresh
 
     with caplog.at_level(logging.WARNING, logger="routers.ops"):
         out = _call(ops)
 
     assert out["summary"]["successes"] == 2
     assert out["summary"]["stopped_early"] is None
-    client.delete.assert_called_once_with(ops._FLEET_RESTART_LOCK_KEY)
+    assert _scripts(client, "release") == 1
+    assert _LOCK_KEY not in client.store
     warns = [r for r in caplog.records if "failing open" in r.message]
     assert len(warns) == 1  # throttled: one warning, not one per agent
 
 
-def test_1919_expire_returning_zero_is_treated_as_absent(ops, monkeypatch):
-    """Key vanished in the GET→EXPIRE sliver: EXPIRE returns 0 and creates
-    nothing — the gate must not sail on believing it holds a lock. Routed to
-    the absent path: re-acquire and continue."""
-    client = _lock_client(set_result=True)
-    monkeypatch.setattr(ops, "get_breaker_redis", lambda: client)
-    client.expire.return_value = 0
-
-    out = _call(ops)
-
-    assert out["summary"]["successes"] == 1
-    assert client.set.call_count == 2  # initial + re-acquire
-    details = ops.platform_audit_service.log.await_args.kwargs["details"]
-    assert details["lease_reacquired"] is True
-
-
-def test_1919_expire_raising_fails_open(ops, monkeypatch):
+def test_1919_unreadable_refresh_reply_fails_open_not_owned(ops, monkeypatch, caplog):
+    """A reply the script cannot have produced is DEGRADED (warned once), never
+    read as a held lease."""
     _two_agents(ops, monkeypatch)
     client = _lock_client(set_result=True)
     monkeypatch.setattr(ops, "get_breaker_redis", lambda: client)
-    client.expire.side_effect = RuntimeError("redis blip")
+    real_register = client.register_script
+    client.register_script = (
+        lambda src: real_register(src) if lua.script_kind(src) != "retake"
+        else (lambda **kwargs: MagicMock())
+    )
 
-    out = _call(ops)
+    with caplog.at_level(logging.WARNING, logger="routers.ops"):
+        out = _call(ops)
 
     assert out["summary"]["successes"] == 2
-    assert out["summary"]["stopped_early"] is None
-    client.delete.assert_called_once_with(ops._FLEET_RESTART_LOCK_KEY)
+    assert len([r for r in caplog.records if "failing open" in r.message]) == 1
+    assert _LOCK_KEY not in client.store
 
 
 def test_1919_foreign_token_on_first_iteration_processes_nothing(
@@ -566,7 +575,14 @@ def test_1919_foreign_token_on_first_iteration_processes_nothing(
 ):
     client = _lock_client(set_result=True)
     monkeypatch.setattr(ops, "get_breaker_redis", lambda: client)
-    client.get.side_effect = lambda key: "intruder-token"
+    real_set = client.set
+
+    def _set_then_lose(key, value, nx=False, ex=None):
+        won = real_set(key, value, nx=nx, ex=ex)
+        client.store[key] = "intruder-token"  # lapsed + taken before the loop
+        return won
+
+    client.set = _set_then_lose
 
     out = _call(ops)
 
@@ -575,33 +591,36 @@ def test_1919_foreign_token_on_first_iteration_processes_nothing(
     assert out["summary"]["total"] == 1
     assert out["summary"]["stopped_early"] == "lease_lost_foreign"
     ops.restart_agent_internal.assert_not_awaited()
-    client.delete.assert_not_called()
+    assert client.store[_LOCK_KEY] == "intruder-token"
 
 
 def test_1919_bytes_token_from_an_undecoded_client_still_matches(
     ops, monkeypatch
 ):
     """get_breaker_redis sets decode_responses=True, so bytes is not a live
-    path — but the shared helper keeps the shipped release comparison's
-    belt-and-braces bytes branch, and it must not be untested dead code."""
-    client = _lock_client(set_result=True)
+    path — but Redis compares bytes inside the script either way."""
+    client = _lock_client(set_result=True, decode_responses=False)
     monkeypatch.setattr(ops, "get_breaker_redis", lambda: client)
-    client.get.side_effect = lambda key: (
-        v.encode() if isinstance(v := client.store.get(key), str) else v
-    )
 
     out = _call(ops)
 
     assert out["summary"]["successes"] == 1
     assert out["summary"]["stopped_early"] is None
-    client.expire.assert_called_once()
-    client.delete.assert_called_once_with(ops._FLEET_RESTART_LOCK_KEY)
+    assert _scripts(client, "retake") == 1
+    assert _LOCK_KEY not in client.store
 
 
 def test_1919_loss_warning_names_state_not_token_values(ops, monkeypatch, caplog):
     client = _lock_client(set_result=True)
     monkeypatch.setattr(ops, "get_breaker_redis", lambda: client)
-    client.get.side_effect = lambda key: "intruder-secret-value"
+    real_set = client.set
+
+    def _set_then_lose(key, value, nx=False, ex=None):
+        won = real_set(key, value, nx=nx, ex=ex)
+        client.store[key] = "intruder-secret-value"
+        return won
+
+    client.set = _set_then_lose
 
     with caplog.at_level(logging.WARNING, logger="routers.ops"):
         _call(ops)
@@ -609,7 +628,7 @@ def test_1919_loss_warning_names_state_not_token_values(ops, monkeypatch, caplog
     loss_warns = [r for r in caplog.records if "lease lost" in r.message]
     assert len(loss_warns) == 1
     rendered = loss_warns[0].getMessage()
-    assert "token state: foreign" in rendered
+    assert "another token holds it" in rendered
     assert "intruder-secret-value" not in rendered
 
 
@@ -627,7 +646,8 @@ def test_1919_listing_failure_inside_try_still_releases_lock(ops, monkeypatch):
     with pytest.raises(RuntimeError):
         _call(ops)
 
-    client.delete.assert_called_once_with(ops._FLEET_RESTART_LOCK_KEY)
+    assert _scripts(client, "release") == 1
+    assert _LOCK_KEY not in client.store
     ops.invalidate_context_stats_cache.assert_called_once()
     details = ops.platform_audit_service.log.await_args.kwargs["details"]
     assert details["total"] == 0

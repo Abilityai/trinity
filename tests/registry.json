@@ -5067,16 +5067,6 @@
       "description": "Journey J12 (declared metrics): what my agent declares it measures is what Trinity knows — a `metrics:` block in `template.yaml` reaches the registry at creation, after a git pull, after a container restart and on an explicit refresh, and a malformed entry is named rather than silently dropped. A deliberate strict=True xfail skeleton standing in the tier until the values half ships (ent#478 points, ent#479 read surface); the shape #2350's Journey Impact gate accepts as a declared promise. Live-stack by necessity — every trigger except creation reads `template.yaml` out of a RUNNING container over the Docker socket, the leg the ent#477 unit suite declares as its own gap."
     },
     {
-      "file": "journeys/test_j24_external_mcp_access_journey.py",
-      "feature": "abilityai/trinity-enterprise#1101",
-      "added": "2026-11-05",
-      "categories": [
-        "journeys",
-        "integration"
-      ],
-      "description": "Journey J24 (External MCP access): from the host the stack runs on (an off-box peer to the MCP server), a fresh install refuses initialize with 403, X-Trinity-Refusal: external_mcp_access_off, JSON-RPC -32003 and a message naming Settings → MCP Keys, before any key is checked. After the admin turns External MCP access on, the same user-scoped client initializes with 200 and lists tools, and turning it off refuses it again within the gate's cache window. Each test restores the switch it found."
-    },
-    {
       "file": "journeys/test_j10_agent_calls_agent_journey.py",
       "feature": "#2349",
       "added": "2026-09-15",
@@ -8329,6 +8319,28 @@
         "workspace"
       ],
       "description": "#4157: Portal.vue holds the 409 hand-off in the auth store only (never URL or storage); Login.vue redeems it once at /api/auth/email/handoff and lands on the redirect, still shows 2FA, and falls back to the filled code form when refused or after a reload."
+    },
+    {
+      "file": "unit/test_4259_key_sweep_startup_grace.py",
+      "feature": "#4259",
+      "added": "2026-11-04",
+      "categories": [
+        "backend",
+        "cleanup",
+        "mcp",
+        "security"
+      ],
+      "description": "#4259: the orphaned-key sweep skips agent/connector keys younger than ORPHANED_KEY_GRACE_SECONDS (crud mints the key before the ownership row lands), still revokes older keys with no live row, never touches a key whose ownership row is live whatever its age, and the [Cleanup] log line names the revoked agents through the real _sweep_retention_772 hand-off."
+    },
+    {
+      "file": "journeys/test_j24_external_mcp_access_journey.py",
+      "feature": "abilityai/trinity-enterprise#1101",
+      "added": "2026-11-05",
+      "categories": [
+        "journeys",
+        "integration"
+      ],
+      "description": "Journey J24 (External MCP access): from the host the stack runs on (an off-box peer to the MCP server), a fresh install refuses initialize with 403, X-Trinity-Refusal: external_mcp_access_off, JSON-RPC -32003 and a message naming Settings → MCP Keys, before any key is checked. After the admin turns External MCP access on, the same user-scoped client initializes with 200 and lists tools, and turning it off refuses it again within the gate's cache window. Each test restores the switch it found."
     },
     {
       "file": "unit/test_ent1101_external_mcp_access.py",

@@ -60,6 +60,9 @@ _BACKEND = str(_REPO / "src" / "backend")
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # `_ent695_lua`
+import _ent695_lua as lua  # noqa: E402
+
 pytestmark = pytest.mark.unit
 
 OWNER = "owner-1066-sink@example.com"
@@ -154,7 +157,7 @@ def world(real_db, monkeypatch):
     import services.credential_sink as sink
     import services.runtime_secret_scrub as scrub
 
-    fake = fakeredis.FakeStrictRedis(decode_responses=True)
+    fake = lua.with_lua(fakeredis.FakeStrictRedis(decode_responses=True))
     monkeypatch.setattr(scrub, "get_breaker_redis", lambda: fake)
     monkeypatch.setattr(scrub, "_enc_svc", lambda: _FakeEnc())
     monkeypatch.setattr(scrub, "_redis_down_until", 0.0, raising=False)

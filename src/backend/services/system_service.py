@@ -2199,6 +2199,35 @@ def _configured_preview(cfg: SystemAgentConfig) -> Dict[str, Dict[str, int]]:
     return {"configured": counts} if counts else {}
 
 
+# #4025: what a caller `_caller_passes_admin_gate` refuses gets instead of
+# the write. In `warnings[]` because the response contract is pinned (the ent#695
+# create-mode golden), as #4130 did for `deploy: false`; the code is apply's.
+PROMPT_REQUIRES_ADMIN_WARNING = (
+    "prompt_requires_admin: this manifest's `prompt:` is not applied for this "
+    "caller. It replaces the platform-wide prompt every agent receives, so only "
+    "an admin may set it; the rest of the manifest is unaffected by this."
+)
+
+
+def _caller_passes_admin_gate(current_user: User) -> bool:
+    """Would this caller pass the settings route's admin gate, which guards `trinity_prompt`?
+
+    Exactly `assert_admin` with no scope opt-in (#4025): an admin JWT, or an
+    admin's `user` / `system` key. A creator, any agent key (one an admin owns
+    included: it carries the owner's role, which is how `require_role("creator")`
+    and `capability_fence("agents.manage")` admitted it to deploy), a connector
+    or a portal-delegate key may not. One predicate for deploy and apply, so the
+    two modes cannot disagree about who may change every agent's instructions.
+    """
+    from dependencies import assert_admin
+
+    try:
+        assert_admin(current_user)
+    except HTTPException:
+        return False
+    return True
+
+
 async def deploy_manifest(
     manifest_yaml: str,
     current_user: User,
@@ -2261,6 +2290,17 @@ async def deploy_manifest(
                 "creates nothing. Remove deploy: false from a member, or use apply to "
                 "report on them"))
         all_warnings = validation_warnings + name_warnings
+        # #4025: decided once, before the preview, so the preview predicts the write.
+        # The refusal is reported only when it withholds a change: a prompt that
+        # already matches is apply's `unchanged`, not a refusal. That tells a
+        # non-admin whether a guessed prompt matches, which apply's verdict already
+        # does, and every agent they own receives the prompt anyway.
+        may_set_prompt = _caller_passes_admin_gate(current_user)
+        prompt_refused = (
+            bool(manifest.prompt)
+            and not may_set_prompt
+            and db.get_setting_value("trinity_prompt") != manifest.prompt
+        )
         if declared_only:
             # The response contract is pinned (ent#695 AC6), so the skip is
             # listed where every caller already reads: the warnings.
@@ -2270,6 +2310,8 @@ async def deploy_manifest(
 
         # 4. If dry_run, return preview
         if dry_run:
+            if prompt_refused:
+                all_warnings.append(PROMPT_REQUIRES_ADMIN_WARNING)
             agents_to_create = [
                 {
                     "name": final_name,
@@ -2367,7 +2409,7 @@ async def deploy_manifest(
                 agents_created=[],
                 agents_to_create=agents_to_create,
                 agents_declared_only=declared_only,
-                prompt_updated=bool(manifest.prompt),
+                prompt_updated=bool(manifest.prompt) and may_set_prompt,
                 warnings=all_warnings,
                 failed=preview_failed,
                 permission_edges=dict(edges),
@@ -2464,11 +2506,18 @@ async def deploy_manifest(
         # 6b. Update trinity_prompt (if provided) — moved after the create loop
         # (trinity-enterprise#125) so a totally-failed deploy never mutates the
         # platform-wide prompt; injection happens at agent start (step 12).
+        # #4025: only for a caller the settings route's admin gate admits.
         prompt_updated = False
-        if manifest.prompt:
+        if manifest.prompt and may_set_prompt:
             db.set_setting("trinity_prompt", manifest.prompt)
             prompt_updated = True
             logger.info(f"Updated trinity_prompt for system '{manifest.name}'")
+        elif prompt_refused:
+            all_warnings.append(PROMPT_REQUIRES_ADMIN_WARNING)
+            logger.warning(
+                f"Not applying the prompt of system '{manifest.name}': "
+                f"'{current_user.username}' is not an admin (#4025)"
+            )
 
         # 6c. Scope post-create configuration to the agents that were actually
         # created (the config functions skip short_names missing from the map).
@@ -2948,7 +2997,7 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
     `member_name_unavailable`; free -> create. Never "absent -> create" for a
     taken name, so apply cannot suffix.
     """
-    from dependencies import agent_may_reach, assert_admin, is_interactive_admin
+    from dependencies import agent_may_reach, is_interactive_admin
 
     from services import docker_service
     from services.agent_service.crud import agent_name_is_taken
@@ -2956,11 +3005,7 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
     system = manifest.name
     blockers: List[SystemApplyBlocker] = []
 
-    try:
-        assert_admin(current_user)
-        caller_is_admin = True
-    except HTTPException:
-        caller_is_admin = False
+    caller_is_admin = _caller_passes_admin_gate(current_user)
 
     snapshot = ApplySnapshot(
         system_name=system,
@@ -3400,7 +3445,7 @@ APPLY_FIELD_CLASSES = frozenset({"reconciled", "report-only", "create-only", "in
 APPLY_FIELD_CLASSIFICATION: Dict[str, Tuple[str, str]] = {
     "SystemManifest.name": ("reconciled", "the system tag and every member's name"),
     "SystemManifest.description": ("inert", "neither mode stores it"),
-    "SystemManifest.prompt": ("reconciled", "admin only (P-F exception 3)"),
+    "SystemManifest.prompt": ("reconciled", "admin only, the same gate as deploy"),
     "SystemManifest.agents": ("reconciled", "absent -> create, present -> update"),
     "SystemManifest.permissions": ("reconciled", "edges added; extras reported, never removed"),
     "SystemManifest.default_tags": ("reconciled", "added, never replaced"),
@@ -4069,7 +4114,7 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
                         "removes it")
             drift.append(SystemApplyDrift(name=member, evidence=evidence, note=note))
 
-    # The platform prompt (P-F exception 3).
+    # The platform prompt: admin only, the same gate as deploy.
     prompt_op = None
     if not manifest.prompt:
         prompt = SystemApplyPromptVerdict(verdict="not_declared")
@@ -4230,7 +4275,7 @@ class ApplyLeaseKeeper:
 
     def _renew(self) -> LeaseState:
         issued = time.monotonic()
-        state = self._lock.refresh_if_owned_atomic()
+        state = self._lock.refresh_if_owned()
         if state is LeaseState.OWNED:
             self._deadline = issued + self._ttl - self._margin
         return state
@@ -4748,7 +4793,7 @@ async def apply_manifest(
             )
         finally:
             await lease.stop()
-            lock.release_if_owned_atomic()
+            lock.release_if_owned()
 
         if not outcome.failed:
             status = "applied"
