@@ -264,6 +264,13 @@ GATE_ASK_ID_PREFIX = "gate-"
 # / validation_service, plus this service's own alert id).
 _RESERVED_ID_PREFIXES = (
     "queue-flood-",      # this service's own flood alert
+    "queue-stall-",      # queue_stall_service stalled-head alert (#4257). The id
+                         # is `queue-stall-<agent>-<timestamp>`, so the stem is
+                         # guessable from the agent's own name — reserved for
+                         # the same reason as the flood alert above: an agent
+                         # must not be able to pre-create, and through
+                         # create_item's ON CONFLICT silently suppress, the row
+                         # that says its own queue is not moving
     "poison-",           # lease_reaper_service poison-park (#1402)
     "cb-dormant-",       # agent_client circuit-breaker-dormant alert
     "sync-failing-",     # sync_health_service

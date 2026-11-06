@@ -36,6 +36,14 @@ PULL_POLL_KEY_PREFIX = "agent:pull_poll:"
 # Hygiene only: B-08 measures silence from the later of this value and the
 # container start, so an expired key cannot fire on its own.
 PULL_POLL_TTL_SECONDS = 86400
+# Per-agent count of claims the BACKEND refused (#4257), stamped by
+# `routers/internal.py` on the `_pull_authorized` 403 branch. The twin of the
+# key above, and the half it cannot see: a pool that polls happily while every
+# claim is turned away looks alive to B-08 and empty to the worker, which is
+# exactly the state a queued row can hide in. Same 24 h window, so the two
+# ages read against each other.
+PULL_CLAIM_DENIED_KEY_PREFIX = "agent:pull_claim_denied:"
+PULL_CLAIM_DENIED_TTL_SECONDS = 86400
 
 
 def _pilot_allowlist() -> Set[str]:
