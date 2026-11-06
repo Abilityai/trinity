@@ -966,10 +966,11 @@ def _ensure_admin_user(cursor, conn):
             from utils.password_validation import validate_password_strength
             pw_errors = validate_password_strength(admin_password)
             if pw_errors:
-                print(f"WARNING: ADMIN_PASSWORD does not meet complexity requirements:")
-                for err in pw_errors:
-                    print(f"         - {err}")
-                print("         Recommended: 12+ chars with uppercase, lowercase, digits, and special characters")
+                # The rules, never which ones failed: the failures give away the
+                # password's length, its missing character classes and whether
+                # it is on the public common-password list (trinity-enterprise#1117).
+                print("WARNING: ADMIN_PASSWORD does not meet complexity requirements:")
+                print("         Rules: 12-128 characters; at least one uppercase, lowercase, digit and special character; not a common password")
         except ImportError:
             pass  # password_validation module not available during early init
 
