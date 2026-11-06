@@ -14,7 +14,9 @@ the properties that barrier has to hold:
   ``/``, ``..``, a backslash or a NUL cannot reach a file outside the store,
   and each route keeps its own 404 text and the WebP-before-PNG order;
 * ``sanitize_agent_name`` never returns a separator, ``.`` or ``..``;
-* ``a..b`` stays a valid agent name.
+* ``a..b`` stays a valid agent name;
+* a name longer than the filesystem allows gets the same answer on the four
+  public read routes as an unknown agent, not a 500.
 
 It also pins two responses that used to carry exception text: the Generate
 Default Avatars per-agent error, and the rename 500 (abilityai/trinity#4284).
@@ -549,3 +551,71 @@ def test_rename_500_carries_the_class_name_not_the_message(store, monkeypatch, c
     assert exc.value.detail.startswith("Failed to rename agent")
     logged = [r for r in caplog.records if r.exc_info and SENTINEL in str(r.exc_info[1])]
     assert logged, "the full exception must still reach the backend log"
+
+
+# =============================================================================
+# 10. Over-long names: refused like any other non-name, never a 500
+# =============================================================================
+# A path component longer than the filesystem allows makes `exists()` raise
+# ENAMETOOLONG. The helper refuses it first, so the four public read routes give
+# the over-long name exactly the answer they give any agent with no avatar.
+# Bytes count, not characters: 128 two-byte letters are already over the limit.
+
+_LONG_NAMES = ["a" * 240, "a" * 250, "a" * 256, "a" * 300, "a" * 5000, "é" * 128]
+
+
+def test_a_component_of_exactly_255_bytes_is_kept_and_one_more_is_refused(store):
+    name = "a" * (255 - len(".webp"))
+    assert avatar_paths.avatar_path_or_none(name, ".webp") == store / f"{name}.webp"
+    assert avatar_paths.avatar_path_or_none(name + "a", ".webp") is None
+    # 128 two-byte letters: 128 characters, 256 bytes.
+    assert avatar_paths.avatar_path_or_none("é" * 128, "") is None
+    assert avatar_paths.avatar_path_or_none("é" * 127, "") is not None
+
+
+@pytest.mark.parametrize("name", _LONG_NAMES, ids=lambda n: f"{len(n)}ch-{len(n.encode())}B")
+def test_get_avatar_answers_an_over_long_name_like_an_unknown_agent(store, name):
+    client = TestClient(_app_with_avatar_router(), raise_server_exceptions=False)
+    resp = client.get(f"/api/agents/{name}/avatar")
+    unknown = client.get("/api/agents/nobody/avatar")
+    assert resp.status_code == 404, resp.text
+    assert resp.json() == {"detail": "No avatar found"}
+    assert (resp.status_code, resp.json()) == (unknown.status_code, unknown.json())
+
+
+@pytest.mark.parametrize("name", _LONG_NAMES, ids=lambda n: f"{len(n)}ch-{len(n.encode())}B")
+def test_get_avatar_reference_answers_an_over_long_name_like_an_unknown_agent(store, name):
+    client = TestClient(_app_with_avatar_router(), raise_server_exceptions=False)
+    resp = client.get(f"/api/agents/{name}/avatar/reference")
+    unknown = client.get("/api/agents/nobody/avatar/reference")
+    assert resp.status_code == 404, resp.text
+    assert resp.json() == {"detail": "No reference image found"}
+    assert (resp.status_code, resp.json()) == (unknown.status_code, unknown.json())
+
+
+@pytest.mark.parametrize("name", _LONG_NAMES, ids=lambda n: f"{len(n)}ch-{len(n.encode())}B")
+def test_get_avatar_emotion_answers_an_over_long_name_like_an_unknown_agent(store, name):
+    client = TestClient(_app_with_avatar_router(), raise_server_exceptions=False)
+    resp = client.get(f"/api/agents/{name}/avatar/emotion/happy")
+    unknown = client.get("/api/agents/nobody/avatar/emotion/happy")
+    assert resp.status_code == 404, resp.text
+    assert resp.json() == {"detail": "Emotion variant not found"}
+    assert (resp.status_code, resp.json()) == (unknown.status_code, unknown.json())
+
+
+@pytest.mark.parametrize("name", _LONG_NAMES, ids=lambda n: f"{len(n)}ch-{len(n.encode())}B")
+def test_get_avatar_emotions_answers_an_over_long_name_like_an_unknown_agent(store, name):
+    client = TestClient(_app_with_avatar_router(), raise_server_exceptions=False)
+    resp = client.get(f"/api/agents/{name}/avatar/emotions")
+    unknown = client.get("/api/agents/nobody/avatar/emotions")
+    assert resp.status_code == 200, resp.text
+    body, unknown_body = resp.json(), unknown.json()
+    assert body.pop("agent_name") == name and unknown_body.pop("agent_name") == "nobody"
+    assert body == unknown_body == {"emotions": [], "version": "0"}
+
+
+def _app_with_avatar_router():
+    app = FastAPI()
+    app.include_router(avatar.router)
+    return app
+

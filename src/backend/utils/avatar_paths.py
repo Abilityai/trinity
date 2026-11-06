@@ -11,9 +11,18 @@ CodeQL's ``py/path-injection`` query recognises as a barrier:
   shares its prefix (``/data/avatars2``) is outside it, and a root written as
   ``./x`` or ``a//b`` still matches the normalised joined path;
 * the joined path is normalised and must start with that base;
-* a NUL byte is refused by name: it survives both steps above.
+* a NUL byte is refused by name: it survives both steps above;
+* a path component longer than ``NAME_MAX`` bytes is refused too. The
+  filesystem would refuse it anyway, but by raising ``ENAMETOOLONG`` from
+  ``exists()``/``stat()``, which is a 500 on the public read routes. No agent
+  with avatar files can have such a name, so a refusal hides nothing: the read
+  routes answer it exactly as they answer any agent with no avatar.
 
 Never add a ``".." in name`` check: ``a..b`` is a valid agent name.
+
+``AVATAR_DIR`` must be an absolute path. With a root of ``"."`` or ``""`` the
+base normalises to ``"./"`` while a joined name normalises to ``"x"``, so every
+name would be refused.
 
 ``AVATAR_DIR`` is read through this module at call time. Callers that need the
 directory itself (``mkdir``) use ``avatar_paths.AVATAR_DIR``, never a
@@ -28,6 +37,19 @@ from fastapi import HTTPException
 
 AVATAR_DIR = Path("/data/avatars")
 
+#: The longest single path component, in bytes, that Linux filesystems store
+#: (ext4, xfs, overlayfs, tmpfs). Bytes, not characters: a 128-character name
+#: of two-byte letters is already over it.
+NAME_MAX = 255
+
+
+def _component_too_long(relative: str) -> bool:
+    # surrogatepass: never raises, and only ever over-counts a lone surrogate.
+    return any(
+        len(part.encode("utf-8", "surrogatepass")) > NAME_MAX
+        for part in relative.split(os.sep)
+    )
+
 
 def avatar_path_or_none(agent_name: str, suffix: str) -> Optional[Path]:
     """``AVATAR_DIR/<agent_name><suffix>``, or ``None`` when it would leave the store."""
@@ -37,6 +59,8 @@ def avatar_path_or_none(agent_name: str, suffix: str) -> Optional[Path]:
     base = os.path.join(os.path.normpath(str(AVATAR_DIR)), "")
     fullpath = os.path.normpath(os.path.join(base, filename))
     if not fullpath.startswith(base):
+        return None
+    if _component_too_long(fullpath[len(base):]):
         return None
     return Path(fullpath)
 

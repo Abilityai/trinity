@@ -177,13 +177,13 @@ Prefix: `/api/agents`, Tags: `["avatars"]`
 - **Returns**: `FileResponse` — checks `.webp` first, falls back to `.png` for legacy avatars
 - **Content-Type**: `image/webp` (new avatars) or `image/png` (legacy fallback)
 - **Cache**: `Cache-Control: public, max-age=86400` (24 hours)
-- **Error**: 404 if neither `.webp` nor `.png` file exists
+- **Error**: 404 if neither `.webp` nor `.png` file exists. A name the avatar store's barrier refuses (`utils/avatar_paths.py`: it would leave the store, carries a NUL byte, or has a path component over 255 bytes) gets the same 404, so it reads exactly like a missing file
 
 #### Endpoint: GET `/{agent_name}/avatar/reference` (line 45)
 - **Auth**: None (public asset)
 - **Returns**: `FileResponse` with PNG from `/data/avatars/{agent_name}_ref.png`
 - **Cache**: `Cache-Control: no-cache` (always fresh -- reference may change on re-generate)
-- **Error**: 404 if no reference image exists
+- **Error**: 404 if no reference image exists, or the name is one the barrier refuses (same rule as above)
 
 #### Endpoint: GET `/{agent_name}/avatar/identity`
 - **Auth**: Required (access control check via `can_user_access_agent`)
