@@ -292,9 +292,13 @@ _AUTONOMOUS_TRIGGERS = frozenset(
     # named, into it after the fact), so no person reads it live. `skill_gate`
     # is the `operator_response` shape: the wake of a requester after someone
     # else decided its gated request, run with nobody reading its reply.
+    #
+    # trinity-enterprise#1102: `caller_wake` is the `operator_ending` shape for
+    # a delegation — the platform wakes the agent that delegated a run when
+    # that run ends, from the terminal fan-out, with nobody reading its reply.
     {"schedule", "webhook", "loop", "event", "fan_out", "agent", "reminder",
      "a2a", "operator_response", "operator_ending", "retry", "self_task",
-     "skill_gate"}
+     "skill_gate", "caller_wake"}
 )
 
 

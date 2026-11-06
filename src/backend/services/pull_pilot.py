@@ -135,6 +135,11 @@ def pull_queue_allowance(agent_name: str) -> int:
 # creates the row before the producer gate runs, and the caller ignores the
 # result, so it is as pullable as a cron fire.
 #
+# ``caller_wake`` (trinity-enterprise#1102) is the ``operator_ending`` shape for
+# a delegation: ``caller_wake_service`` wakes the agent that delegated a run
+# when that run ends, through the same ``dispatch_and_await_terminal`` adapter,
+# for the same receipt (the audit row records ``result.status``).
+#
 # **The set is currently equal to ``_AUTONOMOUS_TRIGGERS``, and it stays an
 # explicit allow-list anyway.** That is the point of it: a trigger added to the
 # autonomous set later must be reviewed against dispatch topology rather than
@@ -147,7 +152,7 @@ def pull_queue_allowance(agent_name: str) -> int:
 PULL_REACHABLE_TRIGGERS = frozenset(
     {"agent", "event", "schedule", "webhook", "reminder", "loop", "fan_out",
      "a2a", "operator_response", "operator_ending", "retry", "self_task",
-     "skill_gate"}
+     "skill_gate", "caller_wake"}
 )
 
 
