@@ -1,0 +1,97 @@
+[
+  {
+    "id": "plain",
+    "value": "sk-ant-abc123",
+    "line": "KEY=\"sk-ant-abc123\""
+  },
+  {
+    "id": "empty",
+    "value": "",
+    "line": "KEY=\"\""
+  },
+  {
+    "id": "embedded-quote",
+    "value": "a\"b",
+    "line": "KEY=\"a\\\"b\""
+  },
+  {
+    "id": "wrapped-in-quotes",
+    "value": "\"wrapped\"",
+    "line": "KEY=\"\\\"wrapped\\\"\""
+  },
+  {
+    "id": "ends-with-quote",
+    "value": "ends\"",
+    "line": "KEY=\"ends\\\"\""
+  },
+  {
+    "id": "trailing-backslash",
+    "value": "x\\",
+    "line": "KEY=\"x\\\\\""
+  },
+  {
+    "id": "windows-path",
+    "value": "C:\\path\\new",
+    "line": "KEY=\"C:\\\\path\\\\new\""
+  },
+  {
+    "id": "backslash-then-quote",
+    "value": "a\\\"b",
+    "line": "KEY=\"a\\\\\\\"b\""
+  },
+  {
+    "id": "double-backslash",
+    "value": "a\\\\b",
+    "line": "KEY=\"a\\\\\\\\b\""
+  },
+  {
+    "id": "only-one-backslash",
+    "value": "\\",
+    "line": "KEY=\"\\\\\""
+  },
+  {
+    "id": "only-two-backslashes",
+    "value": "\\\\",
+    "line": "KEY=\"\\\\\\\\\""
+  },
+  {
+    "id": "two-backslashes-then-quote",
+    "value": "\\\\\"",
+    "line": "KEY=\"\\\\\\\\\\\"\""
+  },
+  {
+    "id": "apostrophe",
+    "value": "it's",
+    "line": "KEY=\"it's\""
+  },
+  {
+    "id": "single-quoted-looking",
+    "value": "'x'",
+    "line": "KEY=\"'x'\""
+  },
+  {
+    "id": "inner-spaces",
+    "value": "with spaces inside",
+    "line": "KEY=\"with spaces inside\""
+  },
+  {
+    "id": "padded",
+    "value": " padded ",
+    "line": "KEY=\" padded \""
+  },
+  {
+    "id": "equals-signs",
+    "value": "a=b=c",
+    "line": "KEY=\"a=b=c\""
+  },
+  {
+    "id": "hash",
+    "value": "#not-a-comment",
+    "line": "KEY=\"#not-a-comment\""
+  },
+  {
+    "id": "non-ascii",
+    "value": "пароль✓",
+    "line": "KEY=\"пароль✓\""
+  }
+]
