@@ -1,9 +1,10 @@
 """WhatsApp markdown conversion runs in linear time (trinity-enterprise#1117).
 
 `WhatsAppAdapter._markdown_to_whatsapp` converts the agent's reply before it is
-split into 1600-char Twilio messages. The reply reaches it uncapped from the
-channel router and from proactive delivery, and the conversion is synchronous
-inside the async send path, so its cost is paid on the backend event loop.
+split into 1600-char Twilio messages. The reply reaches it from the channel
+router (with no length cap when the turn ran on the pull path) and from
+proactive delivery, and the conversion is synchronous inside the async send
+path, so its cost is paid on the backend event loop.
 
 Two of its regexes were quadratic in the reply length:
 
@@ -19,8 +20,8 @@ Measured on the old code: 8-11 s of CPU for one 64 KB reply. This module pins:
    strings CodeQL names plus the worst shapes measured, with a coarse absolute
    ceiling at 64 KB;
 2. links whose URL contains brackets still convert (IPv6 hosts, `?filter[]=`);
-3. the conversion entry clamps its regex input to the largest reply any caller
-   can hand it, and passes any excess through unchanged rather than dropping it;
+3. the conversion entry clamps its regex input at the result-callback cap, and
+   passes any excess through unchanged rather than dropping it;
 4. on realistic agent markdown the output equals the previous implementation;
    the only intentional differences are pinned by name;
 5. on random markdown over every kind of whitespace the output is exactly the
@@ -183,9 +184,11 @@ def _module_int_constant(path: Path, name: str) -> int:
 
 
 class TestConversionClamp:
-    def test_clamp_is_the_largest_reply_the_platform_accepts(self, wa):
-        """The largest agent response any path accepts is the result-callback
-        cap; the clamp is sized to it so no legitimate reply is affected."""
+    def test_clamp_equals_the_result_callback_cap(self, wa):
+        """The clamp is sized to the result-callback cap, the largest explicit
+        reply cap (the sync task path cuts at 10,000 chars, proactive text at
+        4,096). The pull result route sets none, so there the clamp is the only
+        bound on the regex work."""
         callback_cap = _module_int_constant(
             _BACKEND / "routers" / "agents.py", "_MAX_CALLBACK_RESPONSE_CHARS"
         )
@@ -200,7 +203,7 @@ class TestConversionClamp:
         assert out.endswith(tail)  # nothing past the clamp is dropped
 
     def test_reply_at_the_clamp_converts_in_bounded_time(self, wa):
-        """The clamp bounds the work, sized to the largest caller input. Gated
+        """The clamp bounds the work, at the result-callback cap. Gated
         on the 64 KB case first so a quadratic regression fails fast instead of
         running for hours at 4 M chars."""
         cap = wa._MARKDOWN_CONVERSION_MAX_CHARS
