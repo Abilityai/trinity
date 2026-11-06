@@ -184,6 +184,10 @@ def world(real_db, monkeypatch):
     monkeypatch.setattr(svc, "_websocket_manager", None)
     monkeypatch.setattr(svc, "_observers", [events.append])
     monkeypatch.setattr(real_db, "get_operator_resume_enabled", lambda a: False, raising=False)
+    # ent#1102: the wake is decided by `wake_policy.resolve`, whose first read
+    # is the tri-state column and whose instance default is ON — so "the owner
+    # has not opted in" is said as an explicit OFF there, or the sink wakes.
+    monkeypatch.setattr(real_db, "get_wake_on_ending", lambda a: False, raising=False)
 
     return SimpleNamespace(db=real_db, sink=sink, scrub=scrub, fake=fake, agent=agent,
                            status=status, audit=audit, events=events, invalidated=invalidated)

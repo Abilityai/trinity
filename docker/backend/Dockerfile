@@ -228,6 +228,9 @@ RUN mkdir -p /opt/trinity/models && \
     chown -R 1000:1000 /opt/trinity/models
 ENV HF_HUB_OFFLINE=1
 
+# #4175: refuse SQLite inside the image; db/engine.py reads this.
+ENV TRINITY_REQUIRE_POSTGRES=1
+
 # Ensure all files are readable
 RUN chmod -R 644 /app/*.py /app/alembic.ini && \
     chmod -R 755 /app/routers /app/services /app/adapters /app/utils /app/db /app/canary /app/migrations && \

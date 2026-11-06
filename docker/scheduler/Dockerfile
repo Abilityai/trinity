@@ -40,6 +40,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 
 # Default environment variables
 ENV DATABASE_PATH=/data/trinity.db
+ENV TRINITY_REQUIRE_POSTGRES=1
 ENV REDIS_URL=redis://redis:6379
 ENV HEALTH_PORT=8001
 ENV LOG_LEVEL=INFO

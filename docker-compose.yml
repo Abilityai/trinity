@@ -263,10 +263,11 @@ services:
       # container or the .env lever is inert (the #1056/#1039 packaging class).
       - SYNC_HEALTH_POLL_INTERVAL_SECONDS=${SYNC_HEALTH_POLL_INTERVAL_SECONDS:-60}  # seconds between fleet sync-health polls
       - TRINITY_DB_PATH=/data/trinity.db
-      # Configurable database backend (#300). Unset → SQLite at TRINITY_DB_PATH
-      # (default). Set to a postgresql:// URL (with the postgres profile up) to
-      # use PostgreSQL: postgresql://trinity:${POSTGRES_PASSWORD}@postgres:5432/trinity
-      - DATABASE_URL=${DATABASE_URL:-}
+      # #4175: unset resolves to the postgres service below. Set-but-empty selects
+      # SQLite, which the image refuses unless TRINITY_ALLOW_SQLITE=1.
+      - DATABASE_URL=${DATABASE_URL-postgresql://${POSTGRES_USER:-trinity}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-trinity}}
+      # #4175: time-boxed. With DATABASE_URL= (empty), keeps this release on SQLite.
+      - TRINITY_ALLOW_SQLITE=${TRINITY_ALLOW_SQLITE:-}
       - DB_POOL_SIZE=${DB_POOL_SIZE:-10}
       - DB_MAX_OVERFLOW=${DB_MAX_OVERFLOW:-20}
       # Credential Encryption
@@ -440,6 +441,8 @@ services:
       - trinity-logs:/data/logs  # rw: log_archive_service must delete archived originals (#1478); Vector is the sole writer of new lines
       - trinity-archives:/data/archives  # Log archives storage
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy   # Wait for ACL load + auth-aware healthcheck
       vector:
@@ -474,6 +477,13 @@ services:
     # believed in dev — Vite is not a trusted proxy, so requests are attributed
     # to their socket peer. Topology and trust are deliberately unchanged here.
     command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload --no-server-header --no-proxy-headers
+    healthcheck:
+      # The scheduler waits on this: on a fresh database the backend builds the schema (#4175).
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 30s
+      retries: 5
+      start_period: 120s
     mem_limit: 4g
     cpus: 4
 
@@ -681,9 +691,10 @@ services:
     restart: unless-stopped
     environment:
       - DATABASE_PATH=/data/trinity.db
-      # #300: when set to a postgresql:// URL the scheduler reads/writes Postgres
-      # (the same DB the backend uses); unset → shared SQLite at DATABASE_PATH.
-      - DATABASE_URL=${DATABASE_URL:-}
+      # #300/#4175: the same database the backend uses.
+      - DATABASE_URL=${DATABASE_URL-postgresql://${POSTGRES_USER:-trinity}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-trinity}}
+      # #4175: time-boxed. With DATABASE_URL= (empty), keeps this release on SQLite.
+      - TRINITY_ALLOW_SQLITE=${TRINITY_ALLOW_SQLITE:-}
       # Scheduler uses the same `backend` ACL user (identical access patterns).
       - "REDIS_URL=redis://backend:${REDIS_BACKEND_PASSWORD:?REDIS_BACKEND_PASSWORD must be set in .env}@redis:6379"
       - HEALTH_PORT=8001
@@ -700,10 +711,12 @@ services:
     volumes:
       - trinity-data:/data
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy   # Wait for ACL load + auth-aware healthcheck
       backend:
-        condition: service_started
+        condition: service_healthy  # #4175: the backend builds the schema on a fresh database
     networks:
       - trinity-platform   # Scheduler talks only to Redis + backend; never to agents
     security_opt:
@@ -828,25 +841,18 @@ services:
     cap_drop:
       - ALL
 
-  # PostgreSQL - optional production-grade database backend (#300).
-  # OFF by default: SQLite (trinity-data volume) remains the zero-config
-  # default. Opt in with `docker compose --profile postgres up`, then point
-  # the backend at it via DATABASE_URL in .env:
-  #   DATABASE_URL=postgresql://trinity:${POSTGRES_PASSWORD}@postgres:5432/trinity
+  # PostgreSQL - the database backend (#300, #4175). start.sh generates
+  # POSTGRES_PASSWORD; the file does not render without it.
   # Lives on the platform network only — agents NEVER reach it (Issue #589).
   postgres:
     image: postgres:16-alpine
     container_name: trinity-postgres
     logging: *default-logging
     restart: unless-stopped
-    profiles: ["postgres"]
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-trinity}
       POSTGRES_USER: ${POSTGRES_USER:-trinity}
-      # Default keeps `docker compose` parseable when the postgres profile is
-      # OFF (the common case) and POSTGRES_PASSWORD is unset. Operators enabling
-      # the profile should set a real POSTGRES_PASSWORD in .env.
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-trinity}
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env (generate with openssl rand -hex 24; start.sh does this). Existing SQLite install: see docs/migrations/SQLITE_TO_POSTGRES.md}"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks:
@@ -869,7 +875,7 @@ volumes:
   trinity-data:
   trinity-logs:  # Vector log storage
   trinity-archives:  # Compressed log archives
-  postgres-data:  # PostgreSQL data (only used with --profile postgres, #300)
+  postgres-data:  # PostgreSQL data (#300)
 
 networks:
   # Platform-internal network: Redis, scheduler, backend, mcp-server, vector, otel.

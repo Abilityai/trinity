@@ -71,7 +71,7 @@ _STRANDED: list = []
 # All of them, now.
 _REACHABLE = ["agent", "event", "schedule", "webhook", "reminder", "loop",
               "fan_out", "a2a", "operator_response", "operator_ending", "retry",
-              "self_task", "skill_gate"]
+              "self_task", "skill_gate", "caller_wake"]
 # Stands in for "a trigger somebody adds without classifying it", so the
 # diagnostic below is still covered now that nothing real trips it.
 _SYNTHETIC_STRANDED = "agent"
@@ -127,7 +127,9 @@ def test_reachable_set_is_what_the_two_queueing_producers_can_actually_emit():
     # the dispatch's return value. trinity-enterprise#611's `operator_ending`
     # (the wake for a cancelled or expired ask) records the same receipt the
     # same way.
-    adapter_served = {"a2a", "operator_response", "operator_ending"}
+    # trinity-enterprise#1102: `caller_wake` — the delegation-ending wake —
+    # is dispatched by `caller_wake_service` through the same adapter.
+    adapter_served = {"a2a", "operator_response", "operator_ending", "caller_wake"}
     # #4105: `skill_gate_service` wakes the requester through `execute_task`
     # and ignores the result, so nothing reads the dispatch's return value.
     result_ignored = {"skill_gate"}

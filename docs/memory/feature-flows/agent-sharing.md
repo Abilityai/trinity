@@ -153,6 +153,7 @@ All endpoints are gated by `OwnedAgentByName` (owner or admin).
 |------|----------|--------|---------|
 | 53-94 | `/api/agents/{agent_name}/share` | POST | Share agent with email |
 | 97-119 | `/api/agents/{agent_name}/share/{email}` | DELETE | Remove share |
+| | `/api/agents/{agent_name}/share/{email}/invite` | POST | Email a pending person their invitation again (trinity-enterprise#459) |
 | 122-133 | `/api/agents/{agent_name}/shares` | GET | List shares |
 | 140-146 | `/api/agents/{agent_name}/access-policy` | GET | Get `{require_email, open_access}` (Issue #311) |
 | 149-157 | `/api/agents/{agent_name}/access-policy` | PUT | Update policy (delegates to `db.set_access_policy`) |
@@ -391,6 +392,20 @@ def delete_agent_ownership(self, agent_name: str) -> bool:
 |-------|---------|
 | `agent_shared` | `{name, shared_with}` |
 | `agent_unshared` | `{name, removed_user}` |
+
+### Telling a pending person (trinity-enterprise#459)
+
+A share to an address with no account emails them, and **Resend invite** on their Pending row in `AccessPanel.vue` sends it again (`POST /api/agents/{name}/share/{email}/invite`). Both go through `services/agent_invite_service.py`:
+
+1. **Is it pending?** `get_agent_operator_access`. A person with an account gets no mail on share, and `not_pending` on resend.
+1. **Is it one address?** The share field is free text, and this makes it a recipient, so a list or a header is `invalid_address`. The share itself is unchanged.
+2. **Can it be delivered?** Email sign-in on, `email_service.can_deliver()` (so `console` is no), and `login_policy_gate.email_code_allowed_for(email)`. The same verdict reaches the roster as `invite_available`, which disables the button and states the reason.
+3. **Quota.** 3 an hour per (agent, address) and 30 an hour per inviter, in `rate_limiter`, shared by both paths. Steps 1 and 2 run first, so a refused call spends none.
+4. **Send.** `email_service.send_html`, bounded by a timeout. The mail names the inviter and agent, and links to `/workspace`. It has no code; the person requests one there.
+
+The share stands whatever happens to its mail: the response's `invitation` is `sent`, `not_needed`, `invalid_address`, `unavailable`, `rate_limited` or `failed`, and the panel says so. Every attempt writes an `agent_invite` audit row. Test: `tests/unit/test_ent459_operator_invite.py`.
+
+The access-request approval path (`decide_access_request_endpoint`) also writes a share and sends no invitation.
 
 ### No platform login (trinity-enterprise#837)
 Until #837, a share (and an access-request approval) also wrote a login whitelist row at

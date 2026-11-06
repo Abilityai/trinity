@@ -157,6 +157,36 @@ def _gate(agent_name: str, channel: str, text: str):
     return voice_id, None
 
 
+def _destination(execution) -> tuple:
+    """Where a turn's voice note would go: channel, chat and thread."""
+    channel = getattr(execution, "source_channel", None) or getattr(execution, "triggered_by", None)
+    return (channel, getattr(execution, "source_channel_chat_id", None),
+            getattr(execution, "source_channel_thread", None))
+
+
+def another_live_destination(agent_name: str, execution) -> bool:
+    """Whether a live turn on ``agent_name`` other than ``execution`` would
+    deliver somewhere else (trinity-enterprise#1062). Read from the ledger
+    (only ``running`` rows); a ledger that cannot be read counts as ambiguous.
+
+    The ent#926 rule the memory doors apply (`memory_service.another_live_scope`),
+    with the destination as the scope: nothing proves which turn a request comes
+    from, so while two live turns would speak into different conversations the
+    door cannot tell them apart, and the agent answers in text instead."""
+    mine = _destination(execution)
+    try:
+        for row in db.get_running_turn_attribution(agent_name):
+            if row["id"] == execution.id:
+                continue
+            other = db.get_execution(row["id"])
+            if other is not None and _destination(other) != mine:
+                return True
+        return False
+    except Exception as e:  # noqa: BLE001 — fail closed: an unreadable ledger is an unknown neighbour
+        logger.warning("[VoiceReply] live-turn ledger unreadable for %s: %s", agent_name, type(e).__name__)
+        return True
+
+
 async def send_voice_reply(
     agent_name: str,
     channel: str,
