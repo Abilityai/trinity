@@ -101,7 +101,7 @@
   - Periodic pruning of rate-limit buckets to prevent memory leaks
   - **Settings UI**: Socket Mode connect/disconnect, app token management, connection status badge
   - **Platform OAuth**: "Install to Workspace" from Settings page (no agent context needed)
-  - **Per-agent channel binding**: Standalone UI in Sharing tab to create/unbind Slack channels per agent
+  - **Per-agent channel binding**: Standalone UI in Channels tab to create/unbind Slack channels per agent
 - **Database Tables**:
   - `slack_workspaces` — Workspace connections (team_id, bot_token encrypted)
   - `slack_channel_agents` — Channel-to-agent bindings (multi-agent routing)
@@ -151,7 +151,7 @@
 - **Priority**: P2
 - **Description**: Per-agent Telegram bot integration. Each agent gets its own Telegram bot (1:1 via @BotFather), shareable via `t.me/BotUsername` links. Reuses the `ChannelAdapter` abstraction proven by SLACK-002.
 - **Key Features**:
-  - Frontend UI: `TelegramChannelPanel.vue` in Agent Detail → Sharing tab (connect, verify, disconnect, webhook warning)
+  - Frontend UI: `TelegramChannelPanel.vue` in Agent Detail → Channels tab (connect, verify, disconnect, webhook warning)
   - Per-agent bots (one bot per agent, token encrypted via AES-256-GCM)
   - Bidirectional text chat (users message bot → agent responds via HTML formatting)
   - Photo and document support (download, text extraction for plain text files)
@@ -355,7 +355,7 @@
 - **Description**: Per-agent WhatsApp integration via Twilio's Programmable Messaging API. Each agent owner brings their own Twilio account + WhatsApp sender number — no platform-level Twilio account required. Extends the `ChannelAdapter` abstraction from SLACK-002.
 - **Phase 1 (shipped — this PR)**:
   - Direct-message chat: inbound via Twilio webhook → agent → outbound via Twilio REST (`POST /Messages.json`)
-  - Frontend: `WhatsAppChannelPanel.vue` in Agent Detail → Sharing tab (connect form with AccountSid/AuthToken/from-number, sandbox detection, copy-webhook-URL button, disconnect/verify)
+  - Frontend: `WhatsAppChannelPanel.vue` in Agent Detail → Channels tab (connect form with AccountSid/AuthToken/from-number, sandbox detection, copy-webhook-URL button, disconnect/verify)
   - Credentials: AuthToken encrypted AES-256-GCM via `CredentialEncryptionService`; AccountSid plaintext (public identifier)
   - Webhook: dual-factor auth — URL `webhook_secret` routes to binding, `X-Twilio-Signature` HMAC-SHA1 validated via `twilio.request_validator.RequestValidator` (handles Twilio's empty-param inclusion gotcha)
   - Dedup by `MessageSid` (2048-entry in-memory ring) to absorb Twilio retries
@@ -816,14 +816,18 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
 
 ## 46. External Client Roster (Access/Sharing redesign — epic #16)
 
-### 46.1 Surface External Channel Clients on the Sharing Tab (#20)
+### 46.0 The tab is called Channels (trinity-enterprise#225)
 
-**Description**: The Sharing tab answers "who is actually talking to this agent
+The agent's external-client tab is **Channels**, id `channels`, renamed from Sharing by operator ruling on 2026-08-21: rename only, no extra top-level tabs. Old `?tab=sharing` links land on it. Settings › Channels stays too, for voice replies, and points at this tab until trinity-enterprise#340 moves the console there.
+
+### 46.1 Surface External Channel Clients on the Channels Tab (#20)
+
+**Description**: The Channels tab answers "who is actually talking to this agent
 through a channel?" with a read-only **client roster** — external users (no
 Trinity account) who have messaged the agent via a channel. Activity is already
 collected per channel link (`verified_email`, `message_count`, `last_active`)
-but was never surfaced. This is the read surface; per-client controls
-(block/revoke/approve) are a separate follow-up (#21).
+but was never surfaced. This is the read surface; the per-client controls on it
+are §46.2 (#21).
 
 - **FR-1 — Aggregated roster endpoint**: `GET /api/agents/{name}/clients`
   (owner/admin via `OwnedAgentByName`) returns one entry per external client
@@ -837,12 +841,57 @@ but was never surfaced. This is the read surface; per-client controls
   (verifications carry email but no activity counters) and VoIP (call logs) are
   additive follow-ups; the response model is channel-extensible so they slot in
   without a contract change.
-- **FR-3 — Read-only**: no write actions in this slice. The roster renders even
+- **FR-3 — DB-sourced**: no write actions in this slice (§46.2 adds them). The roster renders even
   when the agent container is stopped (DB-sourced). Empty roster renders an
   explicit empty state, not an error.
 - **FR-4 — Tenant boundary**: the endpoint is scoped to the path agent; the DB
   join filters by `agent_name` through the channel binding, so a client of
   another agent never appears.
+
+### 46.2 Per-Client Access Controls — Block / Revoke / Approve (trinity-enterprise#21)
+
+**Description**: The owner acts on one external client from the roster, not only
+through the agent-wide access policy. OSS-core, like the portal-client controls
+(ent#281) and the roster itself.
+
+- **FR-1 — Access state on the roster**: each entry also carries `client_id`
+  (the channel-native sender id the controls key on: Telegram user id, WhatsApp
+  `whatsapp:+…` phone) and `access` — `blocked` (with `blocked_at`,
+  `blocked_by_email`, `block_reason`), `granted` (their verified email is shared
+  on this agent), `pending` (with the `access_request_id` approve needs), or
+  `none` (the policy decides). A block outranks the other states.
+- **FR-2 — Block / unblock**: `POST /api/agents/{name}/clients/block`
+  (`{channel, client_id, reason?}`) and `…/clients/unblock`. Per agent and per
+  channel, keyed on the sender id, so a client who never verified an email is
+  blockable. Idempotent (the first block's time, actor and reason are kept).
+  A block keeps the client's share and history; unblocking restores exactly what
+  they had. Unblocking an unblocked client is 409.
+- **FR-3 — Enforcement**: the channel router drops a blocked sender's message
+  right after resolving the agent — before rate limiting, typing indicators,
+  the access policy, auth prompts or access requests — with **no reply**, in DMs
+  and groups alike, whatever the policy (open access included). The same holds
+  on every other way in: an observed group message is not recorded, a transport
+  command (`/login`, `/reset@bot`) is dropped before it is answered, and the
+  agent cannot send them a proactive message on that channel.
+- **FR-3a — Reachable on the roster**: a blocked client whose chat links are gone
+  (a bot unbind) and a client held at the gate who filed an access request (by
+  its `requester_channel_id`, §46.3) are listed too, so a block can always be
+  lifted and a held client can be blocked or approved.
+- **FR-4 — Revoke**: `POST /api/agents/{name}/clients/revoke` removes the
+  client's share on this agent (409 when there is none). Under a restricted
+  policy their next message files a fresh access request; under open access the
+  policy still admits them, so block is the control that always holds. A
+  blocked client can be revoked too.
+- **FR-5 — Approve**: the row's `access_request_id` drives the existing
+  `POST /api/agents/{name}/access-requests/{id}/decide`; no new route.
+- **FR-6 — Authority and audit**: owner or admin of the agent
+  (`OwnedAgentByName`) and a person (`require_person`, ent#719) — the unshare
+  gate, since revoke is an unshare and the effect is this agent only. Each
+  control writes an `authorization` audit row (`channel_client_block` /
+  `_unblock` / `_revoke`) naming channel and client. A control on a client that
+  never reached this agent is 404.
+- **FR-7 — Lifecycle**: `channel_client_blocks` is registered in the agent
+  cleanup registry (CASCADE): re-keyed on rename, removed on delete.
 
 ### 46.3 An Access Request Names Who Asked (trinity-enterprise#737)
 
@@ -874,7 +923,7 @@ shows that person, plus where the same channel identity has been seen before.
   or an email it verified on a Telegram/WhatsApp bot. It is limited to agents
   the viewer may manage (`can_user_share_agent`: owner or admin), excludes the
   request itself, and is capped at 10.
-- **FR-5 — UI**: the Sharing tab's pending list leads with the name (or
+- **FR-5 — UI**: the Channels tab's pending list leads with the name (or
   @handle, or the email), then the handle, the channel and its id, then the
   email. Up to three "seen before" chips are shown, with a counted rest. A
   public-link request reads "Email only — public link", and an older one reads
@@ -896,7 +945,7 @@ apply **only to public-facing conversations** — public links, channel chats
 (Slack/Telegram/WhatsApp), and x402 paid chat — without changing the agent's
 behavior in their own authenticated chats, scheduled runs, loops, or
 agent-to-agent calls. The text-surface counterpart of `voice_system_prompt`.
-Edited from the Sharing tab.
+Edited from the Channels tab.
 
 - **FR-1 — Storage**: `agent_ownership.public_channel_system_prompt TEXT`
   (versioned migration, Invariant #3). Unset/empty is the default.

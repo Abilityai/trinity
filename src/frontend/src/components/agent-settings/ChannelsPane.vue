@@ -3,7 +3,7 @@
     Settings › Channels — "Where outsiders reach it" (trinity#966 step 6,
     ent#340). This step only re-homes the Voice card from the old flat
     Settings list (migration map: Channels › How it speaks outside); the
-    channel console itself is still the Sharing tab until ent#340 moves it,
+    channel console itself is still the Channels tab until ent#340 moves it,
     and the row below says so and opens it rather than leaving a dead end.
   -->
   <div class="space-y-6">
@@ -17,13 +17,13 @@
       </div>
     </SettingsSection>
 
-    <SettingsSection v-if="hasSharingTab" title="Who can chat, and where">
+    <SettingsSection v-if="hasChannelsTab" title="Who can chat, and where">
       <SettingRow
         label="Chat policy, channels and public links"
-        hint="Who may chat, Slack, Telegram, WhatsApp, voice calls, public links and the client roster are on the Sharing tab for now."
+        hint="Who may chat, Slack, Telegram, WhatsApp, voice calls, public links and the client roster are on the Channels tab, not in this pane."
       >
         <template #action>
-          <BaseButton variant="secondary" size="sm" @click="$emit('navigate-tab', 'sharing')">Open Sharing</BaseButton>
+          <BaseButton variant="secondary" size="sm" @click="$emit('navigate-tab', 'channels')">Open the Channels tab</BaseButton>
         </template>
       </SettingRow>
     </SettingsSection>
@@ -38,7 +38,7 @@ import VoiceRepliesControl from '../VoiceRepliesControl.vue'
 
 defineProps({
   agentName: { type: String, required: true },
-  hasSharingTab: { type: Boolean, default: false },
+  hasChannelsTab: { type: Boolean, default: false },
 })
 defineEmits(['navigate-tab'])
 </script>

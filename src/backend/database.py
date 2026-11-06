@@ -162,6 +162,7 @@ from db.telegram_channels import TelegramChannelOperations
 from db.whatsapp_channels import WhatsAppChannelOperations
 from db.voip import VoipOperations
 from db.access_requests import AccessRequestOperations
+from db.channel_client_blocks import ChannelClientBlockOperations
 from db.audit import PlatformAuditOperations
 from db.canary import CanaryOperations
 from db.compatibility import CompatibilityOperations
@@ -1093,6 +1094,7 @@ class DatabaseManager:
         self._whatsapp_channel_ops = WhatsAppChannelOperations()
         self._voip_ops = VoipOperations()
         self._access_request_ops = AccessRequestOperations()
+        self._channel_client_block_ops = ChannelClientBlockOperations()
         self._audit_ops = PlatformAuditOperations()
         self._canary_ops = CanaryOperations()
         self._compatibility_ops = CompatibilityOperations()  # #668 agent compatibility
@@ -1217,6 +1219,10 @@ class DatabaseManager:
     def list_agents_spawned_by_key(self, agent_name: str, key_id: str) -> List[str]:
         """ent#629: live agents spawned by `agent_name` with key `key_id`."""
         return self._agent_ops.list_agents_spawned_by_key(agent_name, key_id)
+
+    def list_agent_created_agent_names(self) -> List[str]:
+        """ent#591: live agents another agent created (the bound's impact read)."""
+        return self._agent_ops.list_agent_created_agent_names()
 
     def purge_agent_ownership(self, agent_name: str):
         return self._agent_ops.purge_agent_ownership(agent_name)
@@ -1832,6 +1838,9 @@ class DatabaseManager:
         inside the start-up grace window)."""
         return self._mcp_key_ops.deactivate_orphaned_agent_keys()
 
+    def get_agent_name_for_agent_key(self, key_id: str):
+        return self._mcp_key_ops.get_agent_name_for_agent_key(key_id)
+
     def delete_agent_mcp_api_key(self, agent_name: str):
         return self._mcp_key_ops.delete_agent_mcp_api_key(agent_name)
 
@@ -2041,6 +2050,9 @@ class DatabaseManager:
 
     def get_execution_gate_state(self, execution_id: str):
         return self._schedule_ops.get_execution_gate_state(execution_id)
+
+    def get_execution_requester(self, execution_id: str):
+        return self._schedule_ops.get_execution_requester(execution_id)
 
     def get_execution_failure_stamp(self, execution_id: str):
         """`(status, error, completed_at)` or None — the #3245 liveness read."""
@@ -2997,6 +3009,9 @@ class DatabaseManager:
 
     def recent_peer_messages(self, caller_agent: str, target_agent: str, since: str, limit: int = 500):
         return self._peer_skill_grant_ops.recent_peer_messages(caller_agent, target_agent, since, limit)
+
+    def recent_in_container_peer_refusals(self, since: str, limit: int = 2000):
+        return self._peer_skill_grant_ops.recent_in_container_peer_refusals(since, limit)
 
     def delete_agent_peer_skill_grants(self, agent_name: str):
         return self._peer_skill_grant_ops.delete_agent_peer_skill_grants(agent_name)
@@ -4454,6 +4469,23 @@ class DatabaseManager:
 
     def delete_access_requests_for_agent(self, agent_name: str):
         return self._access_request_ops.delete_for_agent(agent_name)
+
+    # =========================================================================
+    # Channel client blocks (trinity-enterprise#21)
+    # =========================================================================
+
+    def block_channel_client(self, agent_name, channel, client_id, blocked_by_id, blocked_by_email, reason=None):
+        return self._channel_client_block_ops.block(
+            agent_name, channel, client_id, blocked_by_id, blocked_by_email, reason)
+
+    def unblock_channel_client(self, agent_name, channel, client_id):
+        return self._channel_client_block_ops.unblock(agent_name, channel, client_id)
+
+    def is_channel_client_blocked(self, agent_name, channel, client_id):
+        return self._channel_client_block_ops.is_blocked(agent_name, channel, client_id)
+
+    def list_channel_client_blocks(self, agent_name):
+        return self._channel_client_block_ops.list_for_agent(agent_name)
 
     # =========================================================================
     # Platform Audit Log (SEC-001 / Issue #20 — Phase 1)

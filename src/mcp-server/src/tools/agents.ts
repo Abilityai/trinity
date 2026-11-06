@@ -276,6 +276,7 @@ export function createAgentTools(
       description:
         "Create a new agent in the Trinity platform. " +
         "With an agent key, this needs the agent-management permission an instance admin grants (ephemeral helpers excepted); without it the call is refused with `agent_management_not_permitted`. " +
+        "If the instance limits agent-created agents to a list of template sources, a source outside it (or no template) is refused with `template_source_not_allowed`, whose body lists `allowed_sources`; list_templates marks each entry `allowed_for_agents`. A pinned entry (`github:owner/repo@ref`) admits only a pull-only create tracking that ref (source_mode false is refused against it). " +
         "You can create agents from: (1) any GitHub repo using 'github:owner/repo' format (PAT must have access), " +
         "(2) pre-defined templates from list_templates, or (3) local templates. " +
         "The agent will be started automatically after creation. " +
@@ -608,7 +609,8 @@ export function createAgentTools(
       description:
         "List all available agent templates. " +
         "Templates provide pre-configured agent setups with .claude directories, MCP servers, and custom instructions. " +
-        "Use a template ID with create_agent to quickly spin up a specialized agent.",
+        "Use a template ID with create_agent to quickly spin up a specialized agent. " +
+        "With an agent key, when the instance limits agent-created agents to a list of template sources, each entry carries `allowed_for_agents`.",
       parameters: z.object({}),
       execute: async (_params: unknown, context?: { session?: McpAuthContext }) => {
         const authContext = context?.session;
@@ -876,6 +878,7 @@ export function createAgentTools(
       description:
         "Deploy a Trinity-compatible local agent to the remote Trinity platform. " +
         "With an agent key, this needs the agent-management permission an instance admin grants (ephemeral helpers excepted); without it the call is refused with `agent_management_not_permitted`. " +
+        "While the instance limits agent-created agents to a list of template sources, an agent key cannot deploy an upload (`template_upload_not_allowed`). " +
         "IMPORTANT: package the directory locally AND embed an integrity manifest (.trinity-manifest.json, #2060) BEFORE calling — " +
         "follow the exact four steps in the `archive` parameter (manifest script, COPYFILE_DISABLE=1 tar with the same excludes, base64, call). " +
         "The backend verifies the extracted tree against the embedded manifest and REFUSES drift (400 MANIFEST_DRIFT naming missing/altered/extra paths) — a pruned or mangled archive can never deploy silently; a missing manifest is refused (MANIFEST_REQUIRED). " +

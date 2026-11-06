@@ -157,6 +157,10 @@ def _sig(route):
 # the guard worth keeping; the alternative (moving the pinned blob forward on
 # every merge) silently re-baselines whatever drifted in with it.
 _ADDED_SINCE_SPLIT = {
+    # trinity-enterprise#591 — template sources for agent-created agents (GET
+    # admin; PUT admin + interactive, validated, so the generic PUT refuses it).
+    ("/api/settings/agent-creation-allowlist", ("GET",), "get_agent_creation_allowlist"),
+    ("/api/settings/agent-creation-allowlist", ("PUT",), "update_agent_creation_allowlist"),
     # #4257 — the queue-stall alert threshold (admin; range-validated 5–1440,
     # which is why the generic `/{key}` PUT refuses the key).
     ("/api/settings/queue-stall-alert-minutes", ("GET",),

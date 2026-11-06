@@ -27,7 +27,7 @@ As an agent user (web, Slack, Telegram, WhatsApp), I want the agent to produce a
 ## Entry Points
 
 - **MCP tool**: `share_file({ filename, display_name?, expires_in?, execution_id?, audience_email?, dedup_label? })` — from inside any agent with file sharing enabled
-- **Owner UI**: Agent Detail → Sharing tab → File Sharing panel
+- **Owner UI**: Agent Detail → Channels tab → File Sharing panel
 - **Owner API**: `POST /api/agents/{name}/shared-files`
 - **Public download**: `GET /api/files/{file_id}?sig={token}`
 

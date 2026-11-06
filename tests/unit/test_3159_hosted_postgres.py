@@ -192,6 +192,20 @@ def test_pinned_sqlite_without_the_hatch_is_refused(tmp_path: Path) -> None:
 
 
 @_BASH
+def test_pinned_sqlite_refusal_says_to_remove_the_line_before_the_copy(tmp_path: Path) -> None:
+    """An earlier `start.sh --hosted` wrote `DATABASE_URL=` for these installs; the copy needs it gone."""
+    proc = _run(tmp_path, db_file=True, env_lines="DATABASE_URL=\n")
+    assert proc.returncode != 0
+    assert proc.stderr.index("Remove the DATABASE_URL= line") < proc.stderr.index("db.sqlite_to_postgres")
+
+
+@_BASH
+def test_refusal_without_the_line_does_not_mention_removing_it(tmp_path: Path) -> None:
+    proc = _run(tmp_path, db_file=True)
+    assert "Remove the DATABASE_URL= line" not in proc.stderr
+
+
+@_BASH
 def test_pinned_sqlite_with_the_hatch_stays(tmp_path: Path) -> None:
     proc = _run(tmp_path, db_file=True, env_lines="DATABASE_URL=\nTRINITY_ALLOW_SQLITE=1\n")
     assert proc.returncode == 0, proc.stderr

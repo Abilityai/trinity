@@ -2333,6 +2333,12 @@ async def deploy_manifest(
             and not may_set_prompt
             and db.get_setting_value("trinity_prompt") != manifest.prompt
         )
+        # trinity-enterprise#591: one validator for the preview and the write.
+        from services import template_source_policy
+        bound_refused, bound_allowed = template_source_policy.manifest_refusals(
+            current_user,
+            [(final, short, manifest.agents[short].template) for short, final in agent_names.items()],
+        )
         if declared_only:
             # The response contract is pinned (ent#695 AC6), so the skip is
             # listed where every caller already reads: the warnings.
@@ -2374,6 +2380,12 @@ async def deploy_manifest(
                     for short_name, final_name in agent_names.items()
                 ) if failure is not None
             ]
+            # trinity-enterprise#591: exactly the members the write refuses.
+            preview_failed.extend(
+                SystemDeployFailure(name=final, short_name=short, template=template or "",
+                                    reason=refusal.message, status_code=403)
+                for final, short, template, refusal in bound_refused
+            )
 
             # ent#126 (AC #2): the preview must show permission topology and
             # schedules, not just agent names. Both come from the pure resolvers
@@ -2452,6 +2464,22 @@ async def deploy_manifest(
                 # changing a shipped field's meaning would mislead any existing
                 # consumer. Callers count the new arrays instead.
             )
+
+        # trinity-enterprise#591: a refused member refuses the whole deploy,
+        # before anything is created (ruled 2026-11-06), naming every one.
+        if bound_refused:
+            await template_source_policy.audit_refusal(
+                request, current_user, code=template_source_policy.CODE_SOURCE,
+                members=[short for _, short, _, _ in bound_refused],
+            )
+            raise HTTPException(status_code=403, detail={
+                "code": template_source_policy.CODE_SOURCE,
+                "message": template_source_policy.manifest_message(bound_refused),
+                "members": [{"name": final, "short_name": short, "template": refusal.source}
+                            for final, short, _, refusal in bound_refused],
+                "allowed_sources": bound_allowed,
+                **({"list_unreadable": True} if bound_refused[0][3].list_unreadable else {}),
+            })
 
         # 5. Create all agents — best-effort by default (trinity-enterprise#125):
         # a per-agent failure is collected and the remaining agents still

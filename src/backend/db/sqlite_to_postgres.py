@@ -143,8 +143,44 @@ def prepare_snapshot(source: str) -> str:
         conn.close()
     if first_pending:
         _fail(EXIT_SCHEMA, f"SQLite schema stopped at {applied}/{expected}, pending: {first_pending}")
+    if _module_available("enterprise.backend"):
+        _apply_enterprise_sqlite_migrations(snapshot)
     print(f"Snapshot at this release's schema: {snapshot}")
     return snapshot
+
+
+def _apply_enterprise_sqlite_migrations(snapshot: str) -> None:
+    """Run the private module's SQLite schema and migrations on the snapshot.
+
+    A SQLite boot applies them inside register_enterprise. Alembic builds the
+    PostgreSQL side on an empty database, so a migration that moves data
+    would otherwise run on neither track.
+    """
+    from fastapi import FastAPI
+
+    from db import connection
+
+    enterprise = importlib.import_module("enterprise.backend")
+    # A module's register() imports `database`, whose SQLite branch refuses
+    # inside the image unless SQLite is allowed.
+    overrides = {"DATABASE_URL": "", "TRINITY_DB_PATH": snapshot, "TRINITY_ALLOW_SQLITE": "1"}
+    saved_env = {key: os.environ.get(key) for key in overrides}
+    saved_path = connection.DB_PATH
+    os.environ.update(overrides)
+    connection.DB_PATH = snapshot
+    try:
+        enterprise.register_enterprise(FastAPI())
+        failed = [name for name, _ in enterprise._FAILED]
+    finally:
+        connection.DB_PATH = saved_path
+        for key, value in saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    if failed:
+        _fail(EXIT_SCHEMA, f"enterprise modules failed on the SQLite snapshot: {', '.join(failed)}")
+    print("Enterprise SQLite migrations applied to the snapshot")
 
 
 def _module_available(name: str) -> bool:
@@ -288,6 +324,9 @@ def main() -> None:
     source = sqlite_db_path()
     url = resolve_database_url()
     if is_sqlite(url):
+        if "DATABASE_URL" in os.environ and not os.environ["DATABASE_URL"].strip():
+            _fail(EXIT_USAGE, "DATABASE_URL is empty, which selects SQLite. "
+                              "Remove the DATABASE_URL= line from .env and run this again.")
         _fail(EXIT_USAGE, "DATABASE_URL must be a postgresql:// URL")
     if not os.path.isfile(source) or os.path.getsize(source) == 0:
         _fail(EXIT_USAGE, f"no SQLite database at {source}")

@@ -137,7 +137,7 @@ permissions:
 ## Entry Points
 
 ### API Endpoints
-- **Deployment**: `POST /api/systems/deploy` - Deploy system from YAML
+- **Deployment**: `POST /api/systems/deploy` - Deploy system from YAML. With an agent key and the template-source allowlist set (trinity-enterprise#591), a member outside the list refuses the whole deploy (403 `template_source_not_allowed`, `members[]`) before any create, and the dry run lists the same members in `failed[]` — one validator (`template_source_policy.manifest_refusals`)
 - **Apply** (trinity-enterprise#695): `POST /api/systems/apply` - Reconcile a live system to
   its manifest (create the absent, update the declared fields of the present, report the
   undeclared as drift; never suffix, remove or restart). `dry_run` defaults to `true`;

@@ -512,7 +512,7 @@
                     Secure-by-default. When on, newly created agents require a verified email on
                     incoming DMs / public chat / shared access. Applies to <strong>new agents
                     only</strong> — existing agents keep their current setting, and owners can
-                    override per agent in the agent's Sharing tab.
+                    override per agent in the agent's Channels tab.
                   </p>
                 </div>
 
@@ -1307,7 +1307,7 @@
                     <p><strong>5.</strong> Subscribe to events: <code class="px-1 py-0.5 bg-gray-200 dark:bg-gray-600 rounded text-xs">message.im</code>, <code class="px-1 py-0.5 bg-gray-200 dark:bg-gray-600 rounded text-xs">app_mention</code></p>
                     <p><strong>6.</strong> Add OAuth Redirect URL: <code class="px-1 py-0.5 bg-gray-200 dark:bg-gray-600 rounded text-xs break-all">https://YOUR_DOMAIN/api/public/slack/oauth/callback</code></p>
                     <p><strong>7.</strong> Click <strong>Connect</strong> above to start receiving messages</p>
-                    <p><strong>8.</strong> Install the app to your workspace, then bind agents to channels from each agent's Sharing tab</p>
+                    <p><strong>8.</strong> Install the app to your workspace, then bind agents to channels from each agent's Channels tab</p>
                   </div>
                 </details>
               </div>
@@ -1967,6 +1967,10 @@ Example:
                so this view's raw-color count cannot move; the tag adds none. -->
           <TemplateRegistryPanel v-if="activeTab === 'agents'" />
 
+          <!-- Template sources for agent-created agents (trinity-enterprise#591):
+               beside the registry, because both decide where agents come FROM. -->
+          <AgentCreationAllowlistPanel v-if="activeTab === 'agents'" />
+
           <!-- SSH Access Section -->
           <div v-if="activeTab === 'access'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
@@ -2384,6 +2388,7 @@ import {
 } from '../components/onboarding/hardeningGuide'
 import { MODEL_CATALOG } from '../constants/modelCatalog'
 import TemplateRegistryPanel from '../components/settings/TemplateRegistryPanel.vue'
+import AgentCreationAllowlistPanel from '../components/settings/AgentCreationAllowlistPanel.vue'
 import AAuthPanel from '../components/settings/AAuthPanel.vue'
 import A2AEndpointsPanel from '../components/settings/A2AEndpointsPanel.vue'
 import NeverminedOrganizationPanel from '../components/settings/NeverminedOrganizationPanel.vue'

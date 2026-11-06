@@ -321,6 +321,12 @@
   "reason": "legacy",
   "tier": "accessor"
  },
+ "agent_files.py::get_agent_peer_skill_enforcement": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/peer-skills/enforcement",
+  "reason": "abilityai/trinity-enterprise#925: the Permissions panel's 'not enforced in-container' line. Anyone who can open the agent may call it; only a person who may manage its skills gets an answer (everyone else, a shared viewer included, gets nulls and causes no probe)",
+  "tier": "accessor"
+ },
  "agent_files.py::get_agent_peer_skills": {
   "method": "GET",
   "path": "/api/agents/{agent_name}/peer-skills",
@@ -1556,6 +1562,11 @@
   "reason": "legacy",
   "tier": "accessor"
  },
+ "sharing.py::block_channel_client_endpoint": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/clients/block",
+  "tier": "owner"
+ },
  "sharing.py::decide_access_request_endpoint": {
   "method": "POST",
   "path": "/api/agents/{agent_name}/access-requests/{request_id}/decide",
@@ -1596,6 +1607,11 @@
   "path": "/api/agents/{agent_name}/share/{email}/invite",
   "tier": "owner"
  },
+ "sharing.py::revoke_channel_client_endpoint": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/clients/revoke",
+  "tier": "owner"
+ },
  "sharing.py::set_public_channel_prompt_endpoint": {
   "method": "PUT",
   "path": "/api/agents/{agent_name}/public-prompt",
@@ -1604,6 +1620,11 @@
  "sharing.py::share_agent_endpoint": {
   "method": "POST",
   "path": "/api/agents/{agent_name}/share",
+  "tier": "owner"
+ },
+ "sharing.py::unblock_channel_client_endpoint": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/clients/unblock",
   "tier": "owner"
  },
  "sharing.py::unshare_agent_endpoint": {

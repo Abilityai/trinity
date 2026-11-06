@@ -1994,6 +1994,27 @@ class ClientRosterEntry(BaseModel):
     verified_email: Optional[str] = None
     message_count: int = 0
     last_active: Optional[str] = None
+    # trinity-enterprise#21 — the per-client controls. `client_id` is the
+    # channel-native sender id the controls key on. `access`: `blocked` (the
+    # owner blocked this client on this agent), `granted` (their verified email
+    # is shared on this agent — revocable), `pending` (an access request awaits
+    # a decision, `access_request_id`), else `none` (the agent's policy decides).
+    client_id: str = ""
+    access: str = "none"
+    access_request_id: Optional[str] = None
+    blocked_at: Optional[str] = None
+    blocked_by_email: Optional[str] = None
+    block_reason: Optional[str] = None
+
+
+class ChannelClientRef(BaseModel):
+    """One external channel client on one agent (trinity-enterprise#21)."""
+    channel: str = Field(..., max_length=32)
+    client_id: str = Field(..., min_length=1, max_length=256)
+
+
+class ChannelClientBlockRequest(ChannelClientRef):
+    reason: Optional[str] = Field(None, max_length=500)
 
 
 class AgentDataImportResponse(BaseModel):
@@ -4404,6 +4425,17 @@ class SkillGateCheckResponse(BaseModel):
     message: Optional[str] = None
 
 
+class PeerSkillEnforcementResponse(BaseModel):
+    """`GET /api/agents/{agent_name}/peer-skills/enforcement`
+    (abilityai/trinity-enterprise#925): does the agent enforce peer skill
+    grants inside itself? `reachable` — a peer could reach one of its library
+    skills without a grant; `hook` — the ent#754 hook state, read only when
+    reachable. Both null for anyone but a person who may manage the agent's
+    skills."""
+    reachable: Optional[bool] = None
+    hook: Optional[str] = None
+
+
 class SkillGateSetRequest(BaseModel):
     """`PUT /api/agents/{agent_name}/skill-gates/{skill_name}` (trinity-enterprise#753).
 
@@ -4917,6 +4949,17 @@ class TemplateRegistryUpdate(BaseModel):
     """
     url: Optional[str] = None
     enabled: Optional[bool] = None
+
+
+class AgentCreationAllowlistUpdate(BaseModel):
+    """PUT body for `/api/settings/agent-creation-allowlist` (trinity-enterprise#591).
+
+    The whole list, replacing the saved one; `[]` clears it (unbounded). Items
+    are typed `Any` on purpose: every entry is judged by
+    `template_source_policy.parse_entries`, so a non-string gets the same named,
+    per-entry reason as a malformed source instead of Pydantic's generic 422.
+    """
+    entries: List[Any]
 
 
 class AAuthSettingsUpdate(BaseModel):

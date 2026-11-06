@@ -54,7 +54,8 @@ a release that has both. The release notes name the last one.
    ```bash
    docker compose <your -f files> run --rm backend python -m db.sqlite_to_postgres
    ```
-   This takes a snapshot beside `trinity.db`, brings the snapshot to this release's schema, builds
+   This takes a snapshot beside `trinity.db`, brings the snapshot to this release's schema (with the
+   enterprise module mounted, its SQLite migrations too, as a SQLite boot would), builds
    the PostgreSQL schema with Alembic, copies every table in one transaction, resets sequences and
    verifies rowcounts. If it fails, no rows are committed and you can run it again. On success it writes
    `trinity.db.copied-to-postgres` beside the file, which tells `start.sh` the copy is done.
@@ -74,7 +75,7 @@ exist only in PostgreSQL.
 |---|---|---|
 | 1 | No source file, `DATABASE_URL` is not PostgreSQL, the SQLite database has no users, or the enterprise module cannot read a URL containing `%` | Fix `.env`. With no users there is nothing to copy: move `trinity.db` aside and start the stack. For `%`, update the enterprise module or use a password that needs no URL encoding |
 | 2 | Rowcounts differ | Investigate before starting the stack |
-| 3 | SQLite holds data PostgreSQL has no place for, or its schema stopped short | Investigate; a table or column left over from an old release is the usual cause |
+| 3 | SQLite holds data PostgreSQL has no place for, or its schema stopped short, or an enterprise module failed on the snapshot | Investigate; a table or column left over from an old release is the usual cause |
 | 4 | Load error, a NUL byte in a text value, or the target already holds data | The message names the table and row. Remove the NUL byte from `trinity.db` and run it again |
 
 **Starting fresh instead:** move `trinity.db` aside and start the stack.
