@@ -53,13 +53,18 @@ describe('vendored DOMPurify (brain-orb)', () => {
     // `overrides.dompurify` in package.json is what keeps it that way:
     // monaco-editor pins an exact older DOMPurify, and without the override
     // npm nests that copy (inside the vulnerable ranges) under monaco-editor.
-    const copies = Object.keys(lock.packages).filter(
-      (key) => key === 'node_modules/dompurify' || key.endsWith('/node_modules/dompurify'),
-    )
+    // An npm-alias install ("x": "npm:dompurify@<old>") sits under another key
+    // but records the real package name, so it is counted by `name` too.
+    const copies = Object.entries(lock.packages)
+      .filter(([key, entry]) =>
+        key === 'node_modules/dompurify' ||
+        key.endsWith('/node_modules/dompurify') ||
+        entry.name === 'dompurify')
+      .map(([key]) => key)
     expect(
       copies,
-      'package-lock.json holds a second dompurify; keep overrides.dompurify in package.json ' +
-        'at the same range as the dependency',
+      'package-lock.json holds a second dompurify (nested or npm-aliased); keep ' +
+        'overrides.dompurify in package.json at the same range as the dependency',
     ).toEqual(['node_modules/dompurify'])
   })
 
