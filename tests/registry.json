@@ -8406,6 +8406,30 @@
         "unit"
       ],
       "description": "trinity-enterprise#1107: terms of use per instance. The shipped default is served when nothing is configured; PUT /api/terms saves and stamps a new version (the author has accepted it), empty/oversized text refused by name (422), restore-default is one action, the switch turns the gate off; an admin JWT with no acceptance is refused 403 terms_required on an ordinary route and admitted on a @terms_route; accepting records (version, time, account) and lifts the refusal; a new version asks everyone else again; a stale version is 409; an agent key is never gated; a registered provider still answers the invite door and a broken one cannot lock an admin out; the acceptance list is admin-gated; setup resolves no principal; main.py registers the router with its # mcp: none header. No Docker."
+    },
+    {
+      "file": "unit/test_ent1111_reserve_id_prefix.py",
+      "feature": "trinity-enterprise#1111",
+      "added": "2026-11-06",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1111 (T4): a platform alert kind can reserve its own operator-queue id prefix. reserve_id_prefix makes a prefix reserved at every reader seam (is_platform_minted, raise_ask's refusal, both ingest hijack guards, the cap/exclusion reads) because they all call reserved_id_prefixes(); the OSS literal tuple is never mutated (the frozen migration heal list is pinned against it); re-reserving is idempotent and a malformed prefix (no terminator, upper-case, not id-shaped, non-string) is refused; platform_alerts.register now verifies a kind's prefix is reserved, a longer id under a reserved family is accepted, and a duplicate name is still refused. An AST guard fails the build if any reader outside the registry's own module goes back to the literal."
+    },
+    {
+      "file": "unit/test_ent1111_rename_agent_now.py",
+      "feature": "trinity-enterprise#1111",
+      "added": "2026-11-06",
+      "categories": [
+        "backend",
+        "agents",
+        "lifecycle",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1111 (T3): the agent rename as a service primitive. rename_agent_now runs the route's steps in the route's order (stop, container rename, db.rename_agent cascade, gate cancel, Redis sweep of BOTH names, avatar files, WS agent_renamed, audit), audits source=system with no request to dereference when actor is None and source=api with the actor_ip/endpoint/request_id ctx when a person asks, reports was_running, leaves the agent stopped, renames the container BACK when db.rename_agent returns False or raises, refuses a system agent before any side effect, raises AgentContainerMissing when there is no container, and swallows each best-effort step's failure. The route delegates with every status code and response field unchanged (403 agent principal / system / permission, the four name 400s, 409 name taken, 409 claimed volume base before the primitive is entered, 404 missing container, the 500 DB text, the generic 500), and an AST guard fails the build if the route keeps a copy of the mutation steps."
     }
   ]
 }
