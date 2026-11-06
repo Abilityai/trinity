@@ -6248,6 +6248,17 @@ def _migrate_mcp_external_access_backfill(cursor, conn):
         logger.info("Existing install: external MCP access kept on (ent#1101)")
 
 
+def _migrate_public_user_memory_writes_section(cursor, conn):
+    """trinity-enterprise#962 — the write history records which half of the
+    memory blob a row changed: `notes` (every row before this migration) or
+    `summary` (the background summarizer, now recorded). Schema is also in
+    db/schema.py for fresh installs; mirrored by Alembic revision
+    0120_public_user_memory_writes_section.
+    """
+    _safe_add_column(cursor, "public_user_memory_writes", "section",
+                     "ALTER TABLE public_user_memory_writes ADD COLUMN section TEXT NOT NULL DEFAULT 'notes'")
+
+
 MIGRATIONS = [
     ("agent_sharing", _migrate_agent_sharing_table),
     ("schedule_executions_observability", _migrate_schedule_executions_observability),
@@ -6437,4 +6448,5 @@ MIGRATIONS = [
     ("operator_queue_wake_state", _migrate_operator_queue_wake_state),
     ("mcp_external_access_backfill", _migrate_mcp_external_access_backfill),
     ("terms_acceptances_table", _migrate_terms_acceptances_table),
+    ("public_user_memory_writes_section", _migrate_public_user_memory_writes_section),
 ]

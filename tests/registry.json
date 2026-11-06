@@ -8428,6 +8428,109 @@
         "unit"
       ],
       "description": "trinity-enterprise#1107: terms of use per instance. The shipped default is served when nothing is configured; PUT /api/terms saves and stamps a new version (the author has accepted it), empty/oversized text refused by name (422), restore-default is one action, the switch turns the gate off; an admin JWT with no acceptance is refused 403 terms_required on an ordinary route and admitted on a @terms_route; accepting records (version, time, account) and lifts the refusal; a new version asks everyone else again; a stale version is 409; an agent key is never gated; a registered provider still answers the invite door and a broken one cannot lock an admin out; the acceptance list is admin-gated; setup resolves no principal; main.py registers the router with its # mcp: none header. No Docker."
+    },
+    {
+      "file": "integration/test_ent1062_live_turn_doors.py",
+      "feature": "trinity-enterprise#1062",
+      "added": "2026-11-03",
+      "categories": [
+        "integration",
+        "auth"
+      ],
+      "description": "The same rule over the network on a sibling stack, with a real agent key seeded inside the backend: the live turn records and reads its seat, a finished run records and reads nothing, two live people refuse each other, a human session and a user key are sent away, voice never reaches a finished run and is ambiguous beside another live conversation."
+    },
+    {
+      "file": "unit/test_ent1062_live_turn_doors.py",
+      "feature": "trinity-enterprise#1062",
+      "added": "2026-11-03",
+      "categories": [
+        "backend",
+        "unit",
+        "auth"
+      ],
+      "description": "The seat-decision and voice-reply doors serve the turn the agent is in, over the real routes with a real agent key: a finished run is refused (decision_turn_not_live / turn_not_live) and nothing is stored, returned or sent; another live turn resolving to a different scope or destination refuses (decision_turn_ambiguous / turn_ambiguous), an unreadable ledger fails closed; the decision doors are agents-only (agent_only for the owner's session and a user key)."
+    },
+    {
+      "file": "unit/test_ent1063_agent_schedule_recipient.py",
+      "feature": "trinity-enterprise#1063",
+      "added": "2026-11-03",
+      "categories": [
+        "backend",
+        "unit",
+        "schedules",
+        "security"
+      ],
+      "description": "An agent's own key may deliver a schedule only to its owner: a third-party deliver_to_workspace_email is refused agent_cannot_address_another_person on create and update, and an owner-made colleague schedule is refused to the agent on update/trigger/enable/disable/delete/webhook; the owner keeps every control."
+    },
+    {
+      "file": "unit/test_ent736_deprecated_skill_markers.py",
+      "feature": "abilityai/trinity-enterprise#736",
+      "added": "2026-11-04",
+      "categories": [
+        "backend",
+        "skills",
+        "cli",
+        "unit"
+      ],
+      "description": "Deprecated library skills on the set surfaces and the CLI (ent#736): GET /skills/library/sets members carry `deprecated` through the response model, read from the listing at display time (an unreadable listing reads false and is never remembered; the cached library_sets dict is never decorated); an agent's set status members carry `deprecated` + the ent#672 `deprecation` code (one listing read), so the POST set-assign status names a deprecated member on a re-assign with delivery None; `trinity skills list` rows (stdlib skill_rows, run by path) gain the `deprecated` column (yes / -> successor / blank, category None -> blank), the command builds them through that rule, and Rich cells are Text so author `[/]` never raises MarkupError (click/rich cases importorskip)."
+    },
+    {
+      "file": "unit/test_3136_assign_dependency_warnings.py",
+      "feature": "#3136",
+      "added": "2026-11-04",
+      "categories": [
+        "backend",
+        "skills",
+        "unit"
+      ],
+      "description": "Assign keeps the injection's warnings (#3136): _deliver_assigned carries public codes (missing_binary / missing_env / packages_not_checked, ...) for injected / fallback / unchanged, dropping free-text details by the #2991 rule shared with public_skills_result (skill_packaging.public_warnings); the ent#672 deprecation stamp merges (one lifecycle code first) instead of overwriting; the whole chain through the real injection + dependency probe and the POST assign route body; regression guards: a clean skill's report is byte-identical, conflict / failed / unassigned_meanwhile / stopped carry no injection codes."
+    },
+    {
+      "file": "unit/test_ent459_operator_invite.py",
+      "feature": "trinity-enterprise#459",
+      "added": "2026-11-05",
+      "categories": [
+        "backend",
+        "unit",
+        "access-control",
+        "email"
+      ],
+      "description": "A pending person is told an agent was shared with them, through the real sharing router over the unit DB: owner and admin send, a shared user and a stranger get the uniform 404, every key is refused; not_shared, not_pending, invite_unavailable (no provider, email sign-in off, policy) and invite_not_sent are named, send nothing and spend no quota; the mail names inviter and agent, points at the Workspace, escapes what it quotes and carries no code; share and resend spend the same per-address and per-inviter windows; a share stands whatever happens to its mail and reports the outcome."
+    },
+    {
+      "file": "../src/frontend/tests/unit/accessPanelInvite.mount.spec.js",
+      "feature": "trinity-enterprise#459",
+      "added": "2026-11-05",
+      "categories": [
+        "frontend",
+        "unit",
+        "access-control"
+      ],
+      "description": "Agent Detail > Access, mounted: Resend invite only on pending rows; disabled with a stated reason when the server says nothing can be sent; in-flight, sent and failed states; a refusal's message shown on its row; Add person says what happened to the invitation."
+    },
+    {
+      "file": "unit/test_ent962_person_memory_owner_view.py",
+      "feature": "trinity-enterprise#962",
+      "added": "2026-11-04",
+      "categories": [
+        "backend",
+        "memory",
+        "auth",
+        "unit"
+      ],
+      "description": "trinity-enterprise#962: the owner's view of a person's memory. Readers rule through the real dependency chain (owner and admin read; a shared user and an approver get the uniform 404; agent, system and connector keys get 403 before any lookup; a user-scoped key reads as on the facts routes); summarizer writes recorded as `summary` rows only on change, with a compare-and-set that survives an undo during the model call (driven through summarize_user_memory_background); undo latest-first per section through the one primitive the Workspace shares, the operator stamped and the person told without who; keyset paging; the people union and its last-change rule; non-creating reads; channel identity; the live route table; the dual-track migration."
+    },
+    {
+      "file": "unit/test_ent962_memory_row_lock.py",
+      "feature": "trinity-enterprise#962",
+      "added": "2026-11-05",
+      "categories": [
+        "backend",
+        "memory",
+        "postgres",
+        "unit"
+      ],
+      "description": "trinity-enterprise#962: the per-person memory blob is read-modify-written under a row lock on BOTH backends (requires_postgres; schema-parity's PostgreSQL tier runs it). Each writer is held inside its critical section, so without the lock the interleaving is forced: a concurrent notes write and summary write keep both halves, and an undo racing a summary write keeps the undo and the new summary."
     }
   ]
 }
