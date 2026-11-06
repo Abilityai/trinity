@@ -45,6 +45,7 @@ import routers.avatar as avatar
 from models import AgentConfig, AvatarGenerateRequest, User
 from services import template_service
 from services.agent_service import crud
+from services.agent_service import rename as rename_service
 from utils import avatar_paths
 from utils.helpers import sanitize_agent_name
 
@@ -346,22 +347,28 @@ def test_bundled_avatar_install_reads_the_same_constant(tmp_path, monkeypatch):
 # =============================================================================
 # 6. Agent rename moves the avatar files through the same barrier
 # =============================================================================
+# The route keeps the gates and the new-name checks; the moves happen in the
+# rename primitive, `services/agent_service/rename.py::rename_agent_now`. Both
+# modules' collaborators are faked, so these tests drive the real route into
+# the real primitive.
 
 
 def _rename_env(monkeypatch, *, rename_side_effect=None):
     container = MagicMock(status="exited")
     db = MagicMock()
     db.can_user_rename_agent.return_value = True
+    db.is_system_agent.return_value = False
     db.is_volume_base_reserved.return_value = False
     db.rename_agent.return_value = True
-    monkeypatch.setattr(agent_rename, "db", db)
-    monkeypatch.setattr(
-        agent_rename, "get_agent_container",
-        lambda name: None if name == "new-name" else container,
-    )
-    monkeypatch.setattr(agent_rename, "container_stop", AsyncMock())
-    monkeypatch.setattr(agent_rename, "container_rename", AsyncMock(side_effect=rename_side_effect))
-    monkeypatch.setattr(agent_rename.platform_audit_service, "log", AsyncMock())
+    for module in (agent_rename, rename_service):
+        monkeypatch.setattr(module, "db", db)
+        monkeypatch.setattr(
+            module, "get_agent_container",
+            lambda name: None if name == "new-name" else container,
+        )
+    monkeypatch.setattr(rename_service, "container_stop", AsyncMock())
+    monkeypatch.setattr(rename_service, "container_rename", AsyncMock(side_effect=rename_side_effect))
+    monkeypatch.setattr(rename_service.platform_audit_service, "log", AsyncMock())
     monkeypatch.setattr("services.agent_runtime_state.clear_agent_runtime_state", AsyncMock())
     monkeypatch.setattr("services.skill_gate_service.cancel_pending_for_agent", AsyncMock())
     monkeypatch.setattr(agent_rename, "manager", None)
@@ -382,6 +389,13 @@ def test_rename_moves_avatar_files_inside_the_patched_store(store, monkeypatch):
     assert body["new_name"] == "new-name"
     assert sorted(p.name for p in store.iterdir()) == [
         "new-name.webp", "new-name_emotion_happy.webp", "new-name_ref.png"]
+
+
+def test_rename_reads_the_same_constant():
+    """The rename primitive has no avatar constant or barrier of its own."""
+    assert not hasattr(rename_service, "AVATAR_DIR")
+    assert not hasattr(rename_service, "_avatar_path_or_none")
+    assert rename_service.avatar_paths is avatar_paths
 
 
 def test_rename_of_an_escaping_old_name_moves_nothing_outside_the_store(store, monkeypatch, tmp_path):
@@ -769,8 +783,8 @@ def test_move_avatar_file_treats_a_refused_name_as_nothing_to_move(store):
     """The contract its docstring states: a refused name is a quiet no-op. If it
     raised instead, the rename's broad `except` would abort the remaining moves."""
     (store / "old.webp").write_bytes(b"F")
-    assert agent_rename._move_avatar_file("../avatars2/x", "new", ".webp") is None
-    assert agent_rename._move_avatar_file("old", "../avatars2/x", ".webp") is None
+    assert rename_service._move_avatar_file("../avatars2/x", "new", ".webp") is None
+    assert rename_service._move_avatar_file("old", "../avatars2/x", ".webp") is None
     assert (store / "old.webp").read_bytes() == b"F"
     assert (store.parent / "avatars2" / "x.webp").read_bytes() == SECRET
 
