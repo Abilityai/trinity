@@ -177,7 +177,7 @@ Settings → Agents → AgentCreationAllowlistPanel.vue
   PUT  /api/settings/agent-creation-allowlist   (assert_interactive_admin; 422 invalid_template_sources)
         └─ routers/settings/templates.py → services/template_source_policy.py
               parse_entries → write_entries → system_settings['agent_creation_allowlist']
-              describe(): entries, bounded, stored_invalid, not_bundled, in_use
+              describe(): entries, bounded, stored_invalid, not_bundled, hidden, in_use
 
 POST /api/agents ─ _require_create_capability (agents.manage, durable only)
                  ─ template_source_policy.enforce(request, user, config)   ← before the idempotency claim
@@ -207,8 +207,10 @@ GET /api/templates ─ annotate_templates(): allowed_for_agents per entry (bound
   key id, the sanitised slug as target (`None` for a ghost; its base name rides in
   `details.requested_name`).
 - **Stored row**: no row or `[]` = unbounded; a non-list bounds agents to nothing;
-  a list with bad entries keeps the valid ones; both set `stored_invalid`. The
-  generic `PUT`/`DELETE /api/settings/{key}` refuse the key.
+  a list with bad entries keeps the valid ones; both set `stored_invalid`, and a
+  refusal then says the list could not be read (`list_unreadable: true`). The
+  generic `PUT`/`DELETE /api/settings/{key}` refuse the key. `hidden` names listed
+  bundled templates marked `hidden: true` (creatable, but not in `GET /api/templates`).
 - **Impact read**: `in_use` = distinct `trinity.template` labels of live agents with
   `spawned_by_agent` set (`db.list_agent_created_agent_names` + `list_all_agents_fast`),
   each allowed or refused under the saved list; `None` when unreadable.

@@ -130,6 +130,13 @@ describe('AgentCreationAllowlistPanel', () => {
     expect($('allowlist-in-use-none').exists()).toBe(false)
   })
 
+  it('names listed bundled templates that the template list hides', async () => {
+    await render({ ...UNBOUNDED, bounded: true, entries: ['local:default'], hidden: ['local:default'] })
+    expect($('allowlist-hidden').text()).toContain('local:default')
+    expect($('allowlist-hidden').text()).toContain('agents can still create from it')
+    expect($('allowlist-not-bundled').exists()).toBe(false)
+  })
+
   it('names listed local templates that are not bundled', async () => {
     await render({ ...UNBOUNDED, bounded: true, entries: ['local:uploaded'], not_bundled: ['local:uploaded'] })
     expect($('allowlist-not-bundled').text()).toContain('local:uploaded')

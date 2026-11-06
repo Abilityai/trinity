@@ -273,6 +273,21 @@ def is_bundled(name: str) -> bool:
         return False
 
 
+def is_hidden(name: str) -> bool:
+    """Is the bundled `local:<name>` marked `hidden: true`? Such a template is
+    creatable by id but absent from `GET /api/templates` (#1513), so an agent
+    reading `allowed_for_agents` never sees it. Read with the hardened loader;
+    an unreadable file reads as not hidden (this only labels the admin view)."""
+    if not is_bundled(name):
+        return False
+    try:
+        from utils.safe_yaml import load_template_yaml
+        data = load_template_yaml((_bundled_root() / name / "template.yaml").read_text())
+    except Exception:  # noqa: BLE001
+        return False
+    return isinstance(data, dict) and bool(data.get("hidden"))
+
+
 def allows(entries: Iterable[Entry], source: Source, ref: Optional[str]) -> bool:
     if source.kind == "local":
         return (any(e.kind == "local" and e.name == source.name for e in entries)
@@ -306,11 +321,14 @@ class Refusal:
     message: str
     source: Optional[str]
     allowed_sources: List[str]
+    list_unreadable: bool = False   # the stored row is damaged (fail closed)
 
     def detail(self, **extra) -> dict:
         body = {"code": self.code, "message": self.message, "allowed_sources": self.allowed_sources}
         if self.code == CODE_SOURCE:
             body["template"] = self.source
+        if self.list_unreadable:
+            body["list_unreadable"] = True
         body.update(extra)
         return body
 
@@ -330,6 +348,19 @@ def _source_message(source: Source) -> str:
             f"can change the list ({_SETTINGS_PATH}).")
 
 
+def _unreadable_message(allowed: List[str]) -> str:
+    """A damaged row: never "X is not on the list", which would send the agent
+    hunting for a source while the real cause is the list itself."""
+    if allowed:
+        return (f"{_LEAD}, but the saved list could not be read in full, so agents are limited "
+                f"to allowed_sources, the entries that could be read, until an instance admin "
+                f"saves it again ({_SETTINGS_PATH}). Create the agent from one of them, or ask a "
+                f"person to create it: people are not limited by this list.")
+    return (f"{_LEAD}, but the saved list could not be read, so agents may not create agents "
+            f"from any template until an instance admin saves it again ({_SETTINGS_PATH}). Ask "
+            f"a person to create the agent meanwhile: people are not limited by this list.")
+
+
 UPLOAD_MESSAGE = (
     f"{_LEAD}, so an agent cannot deploy an uploaded archive: an upload is never on the list. "
     "Create the agent from one of allowed_sources, or ask a person to deploy it."
@@ -347,7 +378,7 @@ def refusal_for(current_user: Any, config: Any = None, *, upload: bool = False,
         return None
     allowed = stored.texts
     if upload:
-        return Refusal(CODE_UPLOAD, UPLOAD_MESSAGE, None, allowed)
+        return Refusal(CODE_UPLOAD, UPLOAD_MESSAGE, None, allowed, stored.invalid)
     source = source_of(getattr(config, "template", None))
     ref = effective_ref(
         source,
@@ -357,7 +388,8 @@ def refusal_for(current_user: Any, config: Any = None, *, upload: bool = False,
     )
     if allows(stored.entries, source, ref):
         return None
-    return Refusal(CODE_SOURCE, _source_message(source), source.text, allowed)
+    message = _unreadable_message(allowed) if stored.invalid else _source_message(source)
+    return Refusal(CODE_SOURCE, message, source.text, allowed, stored.invalid)
 
 
 def manifest_refusals(current_user: Any, members: Iterable[Tuple[str, str, Optional[str]]]
@@ -391,6 +423,12 @@ class _MemberConfig:
 def manifest_message(refused: List[Tuple[str, str, Optional[str], Refusal]]) -> str:
     listed = ", ".join(f"{short}={r.source or ('no template' if not t else 'unrecognised')}"
                        for _, short, t, r in refused)
+    if refused and refused[0][3].list_unreadable:
+        in_full = " in full" if refused[0][3].allowed_sources else ""
+        return (f"{_LEAD}, but the saved list could not be read{in_full}, so nothing was "
+                f"deployed: {len(refused)} member(s) of this manifest use a template agents may "
+                f"not use until an instance admin saves the list again ({_SETTINGS_PATH}): "
+                f"{listed}. Ask a person to deploy the manifest meanwhile.")
     return (f"{_LEAD}. {len(refused)} member(s) of this manifest use a template that is not on "
             f"the list, so nothing was deployed: {listed}. Change those templates to allowed "
             "sources, or ask a person to deploy the manifest.")
@@ -508,6 +546,7 @@ def describe() -> dict:
         "bounded": stored.bounded,
         "stored_invalid": stored.invalid,
         "not_bundled": [e.text for e in stored.entries if e.kind == "local" and not is_bundled(e.name)],
+        "hidden": [e.text for e in stored.entries if e.kind == "local" and is_hidden(e.name)],
         "in_use": usage,
         "max_entries": MAX_ENTRIES,
     }

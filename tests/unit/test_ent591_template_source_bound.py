@@ -65,10 +65,13 @@ def _config(template="local:scout", name="new-one", **kw):
 
 @pytest.fixture
 def bundled(monkeypatch, tmp_path):
-    """A bundled catalog holding `scout` and `writer`."""
+    """A bundled catalog holding `scout` and `writer`, and `quiet`, which is
+    `hidden: true` (creatable by id, absent from the template list)."""
     for name in ("scout", "writer"):
         (tmp_path / name).mkdir()
         (tmp_path / name / "template.yaml").write_text("name: x\n")
+    (tmp_path / "quiet").mkdir()
+    (tmp_path / "quiet" / "template.yaml").write_text("name: quiet\nhidden: true\n")
     monkeypatch.setattr(_tsp(), "_bundled_root", lambda: tmp_path)
     return tmp_path
 
@@ -732,3 +735,60 @@ def test_the_template_annotation_never_mutates_the_catalog(bundled, allowlist):
     catalog = [{"id": "local:scout"}]
     out = _tsp().annotate_templates(_principal(), catalog)
     assert out[0]["allowed_for_agents"] is True and "allowed_for_agents" not in catalog[0]
+
+
+# ===========================================================================
+# 11. Eyeball findings (2026-11-06)
+# ===========================================================================
+
+def test_a_hidden_bundled_entry_is_named_in_the_admin_view(settings_client):
+    """`local:default` is `hidden: true`: agents may create from it, but the
+    template list never shows it, so no entry reads `allowed_for_agents: true`.
+    The admin view names such entries, beside the not-bundled ones."""
+    c = settings_client
+    c.who["user"] = _admin()
+    body = c.client.put(URL, json={"entries": ["local:scout", "local:quiet", "local:nope"]}).json()
+    assert body["hidden"] == ["local:quiet"]
+    assert body["not_bundled"] == ["local:nope"]
+    assert c.client.get(URL).json()["hidden"] == ["local:quiet"]
+
+
+def test_a_hidden_bundled_entry_still_admits_the_create(bundled, allowlist):
+    allowlist(["local:quiet"])
+    assert _tsp().refusal_for(_principal(), _config("local:quiet")) is None
+
+
+@pytest.mark.parametrize("raw,allowed,limited", [
+    ("not json", [], "may not create agents from any template"),
+    ('["local:scout", "bad"]', ["local:scout"], "limited to allowed_sources"),
+])
+def test_an_unreadable_list_says_so_in_the_refusal(bundled, allowlist, raw, allowed, limited):
+    """A damaged row must not read as "X is not on the list": the agent is told
+    the saved list could not be read and stays limited until an admin saves it."""
+    allowlist(raw)
+    detail = _tsp().refusal_for(_principal(), _config("local:writer")).detail()
+    assert detail["code"] == "template_source_not_allowed"
+    assert detail["allowed_sources"] == allowed
+    assert detail["list_unreadable"] is True
+    message = detail["message"]
+    assert "is not on the list" not in message
+    assert "the saved list could not be read" in message
+    assert limited in message
+    assert "until an instance admin saves it again" in message
+
+
+def test_a_readable_list_carries_no_unreadable_flag(bundled, allowlist):
+    allowlist(["local:scout"])
+    assert "list_unreadable" not in _tsp().refusal_for(_principal(), _config("local:writer")).detail()
+
+
+def test_a_system_deploy_against_an_unreadable_list_says_so(bundled, allowlist, audit, deploy_env):
+    allowlist("not json")
+    create = AsyncMock(return_value={"status": "created"})
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(deploy_env.deploy_manifest(
+            MANIFEST, _principal(), _request("/api/systems/deploy"), create_agent_fn=create))
+    assert "the saved list could not be read" in e.value.detail["message"]
+    assert "not on the list" not in e.value.detail["message"]
+    assert e.value.detail["list_unreadable"] is True
+    create.assert_not_awaited()

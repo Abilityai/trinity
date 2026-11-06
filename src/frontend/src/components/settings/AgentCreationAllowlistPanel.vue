@@ -111,6 +111,18 @@
             Not a bundled template, so agents are refused it:
             <span class="font-mono">{{ config.not_bundled.join(', ') }}</span>
           </p>
+          <!-- A `hidden: true` bundled template is creatable by id but absent
+               from GET /api/templates, so no entry there reads
+               allowed_for_agents: true for it. -->
+          <p
+            v-if="config.hidden.length && !dirty"
+            class="mt-2 text-sm text-gray-600 dark:text-gray-300 break-words"
+            data-testid="allowlist-hidden"
+          >
+            Hidden from the template list: agents can still create from it, but won't see it
+            when they list templates:
+            <span class="font-mono">{{ config.hidden.join(', ') }}</span>
+          </p>
           <div class="mt-3 flex items-center gap-2">
             <BaseButton
               :disabled="saving || !dirty"
@@ -208,6 +220,7 @@ const config = ref({
   bounded: false,
   stored_invalid: false,
   not_bundled: [],
+  hidden: [],
   in_use: [],
 })
 const draft = ref('')
@@ -247,6 +260,7 @@ function apply(data) {
     bounded: !!data.bounded,
     stored_invalid: !!data.stored_invalid,
     not_bundled: data.not_bundled || [],
+    hidden: data.hidden || [],
     in_use: data.in_use === undefined ? [] : data.in_use,
   }
   draft.value = config.value.entries.join('\n')

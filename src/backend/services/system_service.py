@@ -2477,6 +2477,7 @@ async def deploy_manifest(
                 "members": [{"name": final, "short_name": short, "template": refusal.source}
                             for final, short, _, refusal in bound_refused],
                 "allowed_sources": bound_allowed,
+                **({"list_unreadable": True} if bound_refused[0][3].list_unreadable else {}),
             })
 
         # 5. Create all agents — best-effort by default (trinity-enterprise#125):
