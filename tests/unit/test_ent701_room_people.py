@@ -406,3 +406,85 @@ def test_a_mention_that_cannot_be_tagged_never_fails_the_message(rooms_db, monke
     monkeypatch.setattr(rooms, "_after_landing", _no_wakes)
     out = _run(rooms.post_message(ALICE, room["id"], "@bob ping"))
     assert out["seq"] and out["tags"] == []
+
+
+# A moderator removing someone is an ordinary action, and it can happen during the
+# turn that person woke. The reply is already paid for, so it must still land.
+def test_a_reply_lands_after_its_waker_was_removed(rooms_db):
+    room_id = _room(rooms_db)["id"]
+    _seat(rooms_db, room_id, "bob")
+    assert rooms_db.db.remove_participant(room_id, "user", "bob", "t")
+    _run(rooms_db.post_message(BOB, room_id, "the paid reply", _sender_override=("agent", "agent-a")))
+    contents = [m["content"] for m in rooms_db.get_room(ALICE, room_id)["messages"]]
+    assert "the paid reply" in contents
+
+
+def test_the_removed_person_still_cannot_read_after_that(rooms_db):
+    room_id = _room(rooms_db)["id"]
+    _seat(rooms_db, room_id, "bob")
+    rooms_db.db.remove_participant(room_id, "user", "bob", "t")
+    _run(rooms_db.post_message(BOB, room_id, "the paid reply", _sender_override=("agent", "agent-a")))
+    with pytest.raises(rooms_db.RoomError) as ei:
+        rooms_db.get_room(BOB, room_id)
+    assert ei.value.status_code == 404
+    with pytest.raises(rooms_db.RoomError) as ei:
+        _run(rooms_db.post_message(BOB, room_id, "a person's own post"))
+    assert ei.value.status_code == 404
+
+
+class TestWhatACollaboratorReads:
+    """Ruling 2 on #701: cost, execution detail and queue plumbing never reach a
+    lower-privilege reader."""
+
+    def _room_with_a_turn(self, rooms):
+        from utils.helpers import utc_now_iso
+        import uuid
+
+        room_id = _room(rooms)["id"]
+        rooms.db.append_message(uuid.uuid4().hex, room_id, "agent", "agent-a", "reply", [], "message",
+                                "exec-secret", utc_now_iso())
+        _seat(rooms, room_id, "bob", floor=0)
+        return room_id
+
+    def test_a_collaborator_gets_none_of_it(self, rooms_db):
+        room_id = self._room_with_a_turn(rooms_db)
+        room = rooms_db.get_room(BOB, room_id)
+        assert "cost" not in room and "max_cost_usd" not in room
+        assert "reply" in [m["content"] for m in room["messages"]]
+        assert all("execution_id" not in m for m in room["messages"])
+        others = [p for p in room["participants"] if p["identity"] != "bob"]
+        assert others
+        for field in ("cached_session_id", "last_read_seq", "visible_from_seq", "consecutive_resume_failures"):
+            assert all(field not in p for p in others), field
+
+    def test_a_collaborator_keeps_their_own_cursor(self, rooms_db):
+        room_id = self._room_with_a_turn(rooms_db)
+        room = rooms_db.get_room(BOB, room_id)
+        mine = next(p for p in room["participants"] if p["identity"] == "bob")
+        assert "last_read_seq" in mine and "visible_from_seq" in mine
+
+    def test_the_moderator_keeps_it(self, rooms_db):
+        room_id = self._room_with_a_turn(rooms_db)
+        room = rooms_db.get_room(ALICE, room_id)
+        assert "cost" in room and "max_cost_usd" in room
+        assert "exec-secret" in [m["execution_id"] for m in room["messages"]]
+
+    def test_an_admin_keeps_it(self, rooms_db):
+        room_id = self._room_with_a_turn(rooms_db)
+        room = rooms_db.get_room(_person("bob", role="admin"), room_id)  # seated, and an admin
+        assert "cost" in room
+        assert "exec-secret" in [m["execution_id"] for m in room["messages"]]
+
+    def test_an_agent_keeps_it(self, rooms_db, monkeypatch):
+        room_id = self._room_with_a_turn(rooms_db)
+        monkeypatch.setattr(rooms_db.db, "gate_held_seqs", lambda *a, **k: set())
+        from models import User
+        agent = User(id=1, username="alice", role="operator", agent_name="agent-a", mcp_scope="agent")
+        assert "cost" in rooms_db.get_room(agent, room_id)
+
+    def test_the_room_list_drops_the_budget_too(self, rooms_db):
+        room_id = self._room_with_a_turn(rooms_db)
+        theirs = next(r for r in rooms_db.list_rooms(BOB)["rooms"] if r["id"] == room_id)
+        mine = next(r for r in rooms_db.list_rooms(ALICE)["rooms"] if r["id"] == room_id)
+        assert "max_cost_usd" not in theirs
+        assert "max_cost_usd" in mine

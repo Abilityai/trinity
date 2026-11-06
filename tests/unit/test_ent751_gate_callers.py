@@ -907,7 +907,8 @@ class TestVoiceTool:
 
         assert out == "done"
         get_client.assert_called_once_with(AGENT)
-        client.task.assert_awaited_once_with("please run /pay-invoice 100 EUR", timeout=28.0)
+        client.task.assert_awaited_once_with("please run /pay-invoice 100 EUR", timeout=28.0,
+                                             disable_auto_memory=True)  # #4156
 
 
 # ---------------------------------------------------------------------------

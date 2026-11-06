@@ -1485,7 +1485,9 @@ class GeminiVoiceService:
             return str(e)
         try:
             client = get_agent_client(agent_name)
-            response = await client.task(prompt, timeout=28.0)
+            # #4156: the prompt is the caller's speech, and this path has no
+            # execution row for the rule to read, so auto-memory is always off.
+            response = await client.task(prompt, timeout=28.0, disable_auto_memory=True)
             return response.response_text or "Task completed with no response."
         except AgentNotReachableError:
             return f"Agent {agent_name!r} is not currently running."

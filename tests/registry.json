@@ -1,6 +1,28 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4156_agent_auto_memory_spawn.py",
+      "feature": "#4156",
+      "added": "2026-11-02",
+      "categories": [
+        "agent",
+        "unit",
+        "security"
+      ],
+      "description": "#4156: a turn the backend marked `disable_auto_memory` spawns `claude` with CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 on both spawn paths (headless /api/task and /api/chat), measured at the Popen env; the owner's spawn is unchanged; a falsy value in `.env` cannot turn it back on; only a runtime with the switch (Claude) gets the keyword; /api/chat, /api/task, the #1083 async path and the pull worker all forward it."
+    },
+    {
+      "file": "unit/test_4156_auto_memory_person_turns.py",
+      "feature": "#4156",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "unit",
+        "security"
+      ],
+      "description": "#4156: which turns spawn with Claude Code's shared auto-memory off. `memory_subject.keeps_shared_auto_memory` keeps it on only for the agent's own scope (a headless run, or the owner's turn); a non-owner person, an anonymous visitor, a channel group, a seat run for someone else and any trigger off the allowlist get it off. The flag `disable_auto_memory` reaches the push /api/task payload, the /api/chat payload and the pull claim envelope for a non-owner turn and is absent for the owner's; an unreadable row fails closed (off)."
+    },
+    {
       "file": "unit/test_ent1108_wake_default.py",
       "feature": "trinity-enterprise#1108",
       "added": "2026-11-04",
@@ -8406,6 +8428,167 @@
         "unit"
       ],
       "description": "trinity-enterprise#1107: terms of use per instance. The shipped default is served when nothing is configured; PUT /api/terms saves and stamps a new version (the author has accepted it), empty/oversized text refused by name (422), restore-default is one action, the switch turns the gate off; an admin JWT with no acceptance is refused 403 terms_required on an ordinary route and admitted on a @terms_route; accepting records (version, time, account) and lifts the refusal; a new version asks everyone else again; a stale version is 409; an agent key is never gated; a registered provider still answers the invite door and a broken one cannot lock an admin out; the acceptance list is admin-gated; setup resolves no principal; main.py registers the router with its # mcp: none header. No Docker."
+    },
+    {
+      "file": "unit/test_ent1024_admin_acts_as_agent.py",
+      "feature": "abilityai/trinity-enterprise#1024",
+      "added": "2026-10-30",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "An admin's user MCP key acts on behalf of an agent through X-Trinity-Act-As-Agent: admit_act_as admits it only for a user-scoped key whose user is an admin and writes one acted_as_agent audit row naming the acting user and the agent; every other principal (non-admin user key, creator, agent, system, connector, portal_delegate, ops, a browser session) is a named 403 act_as_not_permitted and writes nothing; blank/oversize names are 400; a failed audit write never fails the request; no header changes nothing. get_self_acting_agent admits the admitted agent on its own path only and tells an un-admitted admin to pass agent_name; agent keys still act only as themselves; assert_own_agent holds the admitted agent to its path. An on-behalf raise records acted_by: user:<id>; an agent's own ask does not. Mutations (no admin check, ask gate or own-agent gate ignoring act-as, any scope admitted, no acted_by) each turn it red."
+    },
+    {
+      "file": "../src/mcp-server/src/act_as_agent.test.ts",
+      "feature": "abilityai/trinity-enterprise#1024",
+      "added": "2026-10-30",
+      "categories": [
+        "mcp",
+        "security",
+        "unit"
+      ],
+      "description": "resolveActingAgent's scope matrix with agent_name (agent/system act as themselves and may not name another; a user key acts for the named agent or is told to pass agent_name; connector/portal_delegate/ops/anonymous refused naming the key); TrinityClient.asAgent adds X-Trinity-Act-As-Agent on a clone only and a per-call header cannot override it; ask_operator, report, record_metrics, set_canvas and the project tools (create_project, create_project_task) send the header for a user key with agent_name, never put agent_name in a body, refuse a user key without it and a connector key with it, and leave an agent key's call unchanged."
+    },
+    {
+      "file": "integration/test_ent1062_live_turn_doors.py",
+      "feature": "trinity-enterprise#1062",
+      "added": "2026-11-03",
+      "categories": [
+        "integration",
+        "auth"
+      ],
+      "description": "The same rule over the network on a sibling stack, with a real agent key seeded inside the backend: the live turn records and reads its seat, a finished run records and reads nothing, two live people refuse each other, a human session and a user key are sent away, voice never reaches a finished run and is ambiguous beside another live conversation."
+    },
+    {
+      "file": "unit/test_ent1062_live_turn_doors.py",
+      "feature": "trinity-enterprise#1062",
+      "added": "2026-11-03",
+      "categories": [
+        "backend",
+        "unit",
+        "auth"
+      ],
+      "description": "The seat-decision and voice-reply doors serve the turn the agent is in, over the real routes with a real agent key: a finished run is refused (decision_turn_not_live / turn_not_live) and nothing is stored, returned or sent; another live turn resolving to a different scope or destination refuses (decision_turn_ambiguous / turn_ambiguous), an unreadable ledger fails closed; the decision doors are agents-only (agent_only for the owner's session and a user key)."
+    },
+    {
+      "file": "unit/test_ent1063_agent_schedule_recipient.py",
+      "feature": "trinity-enterprise#1063",
+      "added": "2026-11-03",
+      "categories": [
+        "backend",
+        "unit",
+        "schedules",
+        "security"
+      ],
+      "description": "An agent's own key may deliver a schedule only to its owner: a third-party deliver_to_workspace_email is refused agent_cannot_address_another_person on create and update, and an owner-made colleague schedule is refused to the agent on update/trigger/enable/disable/delete/webhook; the owner keeps every control."
+    },
+    {
+      "file": "unit/test_ent736_deprecated_skill_markers.py",
+      "feature": "abilityai/trinity-enterprise#736",
+      "added": "2026-11-04",
+      "categories": [
+        "backend",
+        "skills",
+        "cli",
+        "unit"
+      ],
+      "description": "Deprecated library skills on the set surfaces and the CLI (ent#736): GET /skills/library/sets members carry `deprecated` through the response model, read from the listing at display time (an unreadable listing reads false and is never remembered; the cached library_sets dict is never decorated); an agent's set status members carry `deprecated` + the ent#672 `deprecation` code (one listing read), so the POST set-assign status names a deprecated member on a re-assign with delivery None; `trinity skills list` rows (stdlib skill_rows, run by path) gain the `deprecated` column (yes / -> successor / blank, category None -> blank), the command builds them through that rule, and Rich cells are Text so author `[/]` never raises MarkupError (click/rich cases importorskip)."
+    },
+    {
+      "file": "unit/test_3136_assign_dependency_warnings.py",
+      "feature": "#3136",
+      "added": "2026-11-04",
+      "categories": [
+        "backend",
+        "skills",
+        "unit"
+      ],
+      "description": "Assign keeps the injection's warnings (#3136): _deliver_assigned carries public codes (missing_binary / missing_env / packages_not_checked, ...) for injected / fallback / unchanged, dropping free-text details by the #2991 rule shared with public_skills_result (skill_packaging.public_warnings); the ent#672 deprecation stamp merges (one lifecycle code first) instead of overwriting; the whole chain through the real injection + dependency probe and the POST assign route body; regression guards: a clean skill's report is byte-identical, conflict / failed / unassigned_meanwhile / stopped carry no injection codes."
+    },
+    {
+      "file": "unit/test_ent459_operator_invite.py",
+      "feature": "trinity-enterprise#459",
+      "added": "2026-11-05",
+      "categories": [
+        "backend",
+        "unit",
+        "access-control",
+        "email"
+      ],
+      "description": "A pending person is told an agent was shared with them, through the real sharing router over the unit DB: owner and admin send, a shared user and a stranger get the uniform 404, every key is refused; not_shared, not_pending, invite_unavailable (no provider, email sign-in off, policy) and invite_not_sent are named, send nothing and spend no quota; the mail names inviter and agent, points at the Workspace, escapes what it quotes and carries no code; share and resend spend the same per-address and per-inviter windows; a share stands whatever happens to its mail and reports the outcome."
+    },
+    {
+      "file": "../src/frontend/tests/unit/accessPanelInvite.mount.spec.js",
+      "feature": "trinity-enterprise#459",
+      "added": "2026-11-05",
+      "categories": [
+        "frontend",
+        "unit",
+        "access-control"
+      ],
+      "description": "Agent Detail > Access, mounted: Resend invite only on pending rows; disabled with a stated reason when the server says nothing can be sent; in-flight, sent and failed states; a refusal's message shown on its row; Add person says what happened to the invitation."
+    },
+    {
+      "file": "unit/test_ent962_person_memory_owner_view.py",
+      "feature": "trinity-enterprise#962",
+      "added": "2026-11-04",
+      "categories": [
+        "backend",
+        "memory",
+        "auth",
+        "unit"
+      ],
+      "description": "trinity-enterprise#962: the owner's view of a person's memory. Readers rule through the real dependency chain (owner and admin read; a shared user and an approver get the uniform 404; agent, system and connector keys get 403 before any lookup; a user-scoped key reads as on the facts routes); summarizer writes recorded as `summary` rows only on change, with a compare-and-set that survives an undo during the model call (driven through summarize_user_memory_background); undo latest-first per section through the one primitive the Workspace shares, the operator stamped and the person told without who; keyset paging; the people union and its last-change rule; non-creating reads; channel identity; the live route table; the dual-track migration."
+    },
+    {
+      "file": "unit/test_ent962_memory_row_lock.py",
+      "feature": "trinity-enterprise#962",
+      "added": "2026-11-05",
+      "categories": [
+        "backend",
+        "memory",
+        "postgres",
+        "unit"
+      ],
+      "description": "trinity-enterprise#962: the per-person memory blob is read-modify-written under a row lock on BOTH backends (requires_postgres; schema-parity's PostgreSQL tier runs it). Each writer is held inside its critical section, so without the lock the interleaving is forced: a concurrent notes write and summary write keep both halves, and an undo racing a summary write keeps the undo and the new summary."
+    },
+    {
+      "file": "unit/test_ent1111_reserve_id_prefix.py",
+      "feature": "trinity-enterprise#1111",
+      "added": "2026-11-06",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1111 (T4): a platform alert kind can reserve its own operator-queue id prefix. reserve_id_prefix makes a prefix reserved at every reader seam (is_platform_minted, raise_ask's refusal, both ingest hijack guards, the cap/exclusion reads) because they all call reserved_id_prefixes(); the OSS literal tuple is never mutated (the frozen migration heal list is pinned against it); re-reserving is idempotent and a malformed prefix (no terminator, upper-case, not id-shaped, non-string) is refused; platform_alerts.register now verifies a kind's prefix is reserved, a longer id under a reserved family is accepted, and a duplicate name is still refused. An AST guard fails the build if any reader outside the registry's own module goes back to the literal."
+    },
+    {
+      "file": "unit/test_ent1111_rename_agent_now.py",
+      "feature": "trinity-enterprise#1111",
+      "added": "2026-11-06",
+      "categories": [
+        "backend",
+        "agents",
+        "lifecycle",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1111 (T3): the agent rename as a service primitive. rename_agent_now runs the route's steps in the route's order (stop, container rename, db.rename_agent cascade, gate cancel, Redis sweep of BOTH names, avatar files, WS agent_renamed, audit), audits source=system with no request to dereference when actor is None and source=api with the actor_ip/endpoint/request_id ctx when a person asks, reports was_running, leaves the agent stopped, renames the container BACK when db.rename_agent returns False or raises, refuses a system agent before any side effect, raises AgentContainerMissing when there is no container, and swallows each best-effort step's failure. The route delegates with every status code and response field unchanged (403 agent principal / system / permission, the four name 400s, 409 name taken, 409 claimed volume base before the primitive is entered, 404 missing container, the 500 DB text, the generic 500), and an AST guard fails the build if the route keeps a copy of the mutation steps."
+    },
+    {
+      "file": "unit/test_ent1111_terms_inline_hooks.py",
+      "feature": "trinity-enterprise#1111",
+      "added": "2026-11-06",
+      "categories": [
+        "backend",
+        "auth",
+        "settings",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1111 (T1): acceptance consumers that run BEFORE the response. register_acceptance_hook(fn, inline=True) keeps a separate list (registration idempotent, one clear drops both); run_inline_acceptance_hooks awaits them under ONE ceiling per acceptance (TERMS_INLINE_HOOK_BUDGET_S = 5). In time: the hook's work is done before the route's return value exists while the background hook is only scheduled, and through the real route inline precedes background; a sync hook is tolerated; a repeat acceptance (created=False) runs neither kind. Past the ceiling: the runner stops waiting, the route still answers 200, terms_hook_slow is audited, three slow hooks share one ceiling rather than three — and the hook is NEVER cancelled (shielded task), which is the property a wait_for over the work itself would break mid-mutation. It raises: logged, audited terms_hook_failed with the error type, the next hook still runs, the acceptance still succeeds."
     },
     {
       "file": "unit/test_ent1117_s6a_git_add_option_injection.py",

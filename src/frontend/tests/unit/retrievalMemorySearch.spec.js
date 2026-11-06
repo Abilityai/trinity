@@ -38,6 +38,15 @@ async function search(w, q) {
 describe('RetrievalMemorySearch (agent settings → Memory)', () => {
   beforeEach(() => vi.clearAllMocks())
 
+  it('the Search button is the normal size, stretched to the text field (ent#962 ruling 12)', () => {
+    const w = mount(RetrievalMemorySearch, { props: { agentName: 'analyst' } })
+    expect(w.get('form').classes()).toContain('items-stretch')
+    expect(w.get('form').classes()).not.toContain('items-start')
+    const button = w.findComponent({ name: 'BaseButton' })
+    expect(button.props('size')).toBe('md')
+    expect(button.classes()).not.toContain('mt-px')
+  })
+
   it('renders the idle copy before any search and makes no request', () => {
     const w = mount(RetrievalMemorySearch, { props: { agentName: 'analyst' } })
     expect(w.find('[data-testid="retrieval-memory-search-idle"]').exists()).toBe(true)

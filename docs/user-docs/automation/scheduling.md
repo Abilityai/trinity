@@ -131,7 +131,13 @@ hours later on the first fire.
 **Who can set it.** You can always name yourself. Naming anyone else takes the agent's
 owner or an admin — on create and on update alike — so that someone the agent is merely
 shared with cannot put a recurring message of their choosing into a colleague's chat.
-Clearing the address is never restricted.
+A person may always clear the address.
+
+**What an agent can do.** With its own key, an agent can only address its owner. It can't
+point a schedule at anyone else. On a schedule that already delivers to someone else, it
+can't change, clear, enable, disable, trigger or delete it, or manage its webhook. It's
+refused with `agent_cannot_address_another_person`, even with the schedule-management
+permission. Who an agent speaks to unprompted is the owner's decision.
 
 **When it shows up.** The message is saved as soon as the run finishes, but the
 Workspace does not poll a conversation you already have open. So it appears the

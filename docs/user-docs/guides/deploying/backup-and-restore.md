@@ -127,7 +127,7 @@ the prefix differs — check with `docker volume ls | grep trinity`.
 **PostgreSQL** (`DATABASE_URL` set):
 
 ```bash
-# Bundled container (hosted installs, or dev with --profile postgres)
+# Bundled container
 docker exec trinity-postgres pg_dump -U trinity -Fc trinity \
   > ~/backups/trinity-pg-$(date +%Y%m%d-%H%M%S).dump
 # Managed/external PostgreSQL: use your provider's snapshot tooling,

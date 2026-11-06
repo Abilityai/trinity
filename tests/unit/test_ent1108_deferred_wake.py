@@ -148,6 +148,14 @@ def _install(monkeypatch, *, state="running", enabled=True, pending=None, raises
         list_operator_queue_pending_wakes=lambda name: list(pending or []),
     )
     monkeypatch.setitem(sys.modules, "database", SimpleNamespace(db=fake_db))
+    # ent#1102: the gate is `wake_policy.resolve`, which binds its own `db` at
+    # import — a fake swapped into `sys.modules` never reaches it. The owner's
+    # switch is the verdict here, so the resolver is told it directly.
+    import services.wake_policy as wake_policy
+    monkeypatch.setattr(
+        wake_policy, "resolve",
+        lambda name: wake_policy.WakeVerdict(enabled=bool(enabled), source="agent"),
+    )
     _mod("services.idempotency_service", SimpleNamespace(
         begin=lambda scope, key: SimpleNamespace(replay=False, in_flight=False),
         complete=lambda *a, **k: idem.append("complete"),
