@@ -148,6 +148,32 @@ def test_snapshot_backup_dir_is_accepted_under_a_linked_home(
     assert (real / expected).is_file()
 
 
+def test_snapshot_backup_dir_with_exactly_two_leading_slashes_is_refused(snapshot):
+    """Behaviour change, kept on purpose. `//<home>/x` used to be accepted,
+    because `resolve()` collapses the double slash. The barrier compares the
+    `os.path.normpath` form, and POSIX `normpath` keeps exactly two leading
+    slashes (that prefix is implementation-defined), so the path no longer
+    starts with the home and is refused. Nothing sends `backup_dir` today, and
+    refusing is the safe direction."""
+    mod, home = snapshot
+    with pytest.raises(HTTPException) as exc:
+        _snap(mod, "/" + str(home) + "/x")
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "backup_dir must be inside /home/developer"
+    assert not list(home.parent.glob("**/snapshot.tar"))
+
+
+@pytest.mark.parametrize("prefix", ["", "//"], ids=["one-slash", "three-slashes"])
+def test_snapshot_backup_dir_absolute_inside_home_is_accepted(snapshot, prefix):
+    """Characterization: an absolute path inside the home is accepted, before
+    and after the barrier. Three leading slashes normalise to one, so only the
+    exact two-slash form above is refused."""
+    mod, home = snapshot
+    resp = _snap(mod, prefix + str(home) + "/x")
+    assert (home / "x" / "snapshot.tar").is_file()
+    assert resp.headers["X-Snapshot-Path"] == "x/snapshot.tar"
+
+
 def test_snapshot_barrier_precedes_resolve():
     """Structural pin for the CodeQL py/path-injection barrier (#153): a
     normalised, separator-terminated base and its own `startswith` test come
@@ -258,19 +284,24 @@ def test_dashboard_unreadable_file_names_the_failure(dashboard, caplog):
     assert any("dashboard.yaml" in r.getMessage() for r in caplog.records)
 
 
-def test_dashboard_permission_denied_names_the_failure(dashboard, monkeypatch):
+def test_dashboard_permission_denied_names_the_failure(dashboard, monkeypatch, caplog):
+    """The OSError arm names the class; the error's own text (here a filename
+    carrying a planted credential) reaches the log only through the sanitizer."""
     mod, path = dashboard
     path.write_text("title: T\n")
 
     def _denied(self, *a, **kw):
-        raise PermissionError(13, "Permission denied", str(self))
+        raise PermissionError(13, "Permission denied", _PLANT)
 
     monkeypatch.setattr(type(path), "read_text", _denied)
-    out = _dash(mod)
+    with caplog.at_level(logging.ERROR, logger=mod.logger.name):
+        out = _dash(mod)
     assert (
         out["error"]
         == "Failed to read dashboard.yaml: the file could not be read (PermissionError)"
     )
+    _assert_answer_clean(out["error"], "PermissionError")
+    _assert_log_scrubbed(caplog.records, "dashboard.yaml")
 
 
 def test_dashboard_non_utf8_file_names_the_failure(dashboard):
@@ -422,6 +453,36 @@ def test_files_mkdir_error_returns_the_class_name(files, monkeypatch, caplog):
     with caplog.at_level(logging.ERROR, logger=mod.logger.name):
         resp = client.post("/api/files/mkdir", params={"path": "workspace/new-folder"})
     _check_files_500(resp, "Failed to create folder", caplog, "Folder create error")
+
+
+def test_files_error_through_the_package_import_is_scrubbed(
+    tmp_path, monkeypatch, caplog
+):
+    """The production load path. The agent server imports this router as
+    `agent_server.routers.files`, so `_log_failure` takes its package branch
+    (`from ..utils.credential_sanitizer import sanitize_text`). The other files
+    tests load the router by file path and take the by-path branch instead, so
+    a broken package import would pass them all."""
+    import importlib
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    monkeypatch.syspath_prepend(str(_REPO / "docker" / "base-image"))
+    mod = importlib.import_module("agent_server.routers.files")
+    assert mod.__package__ == "agent_server.routers"  # the branch under test
+    home = (tmp_path / "home").resolve()
+    (home / "workspace").mkdir(parents=True)
+    (home / "workspace" / "a.txt").write_text("hello")
+    monkeypatch.setattr(mod, "_HOME", home)
+    monkeypatch.setattr(mod.os, "unlink", _raise_plant)
+    app = FastAPI()
+    app.include_router(mod.router)
+    client = TestClient(app, raise_server_exceptions=True)
+    with caplog.at_level(logging.ERROR, logger=mod.logger.name):
+        resp = client.delete("/api/files", params={"path": "workspace/a.txt"})
+    _check_files_500(resp, "Failed to delete", caplog, "File delete error")
+    assert any(r.name == "agent_server.routers.files" for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
