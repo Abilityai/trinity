@@ -319,6 +319,18 @@ class TestEquivalence:
         assert _convert_unclamped(text) == before
         assert _convert(wa, text) == after
 
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            ("# a", "*a*"),
+            ("###### a", "*a*"),
+            ("####### a", "####### a"),  # seven marks: not a header
+        ],
+    )
+    def test_header_takes_one_to_six_marks(self, wa, text, expected):
+        assert _convert_unclamped(text) == expected
+        assert _convert(wa, text) == expected
+
 
 # ---------------------------------------------------------------------------
 # The declared differences are the only ones
@@ -376,7 +388,7 @@ _WHITESPACE = "".join(
 _TOKENS = (
     list("#[]()*_~a\n")
     + list(_WHITESPACE)
-    + ["# ", "## ", "\n# ", "\n#\t", "](", "[a](", "**", "__", "~~"]
+    + ["# ", "## ", "###### ", "####### ", "\n# ", "\n#\t", "](", "[a](", "**", "__", "~~"]
 )
 
 
