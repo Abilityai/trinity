@@ -54,7 +54,7 @@ def is_platform_minted(item) -> bool:
         candidate = item.get("request_id") or item.get("id") or ""
     else:
         candidate = getattr(item, "request_id", "") or getattr(item, "id", "") or ""
-    return str(candidate).strip().lower().startswith(_oq._RESERVED_ID_PREFIXES)
+    return str(candidate).strip().lower().startswith(_oq.reserved_id_prefixes())
 
 
 def is_person_tag(item: Optional[dict]) -> bool:

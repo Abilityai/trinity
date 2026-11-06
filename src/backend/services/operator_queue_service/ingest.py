@@ -108,7 +108,7 @@ class IngestMixin:
                 try:
                     if deps.db.mark_operator_queue_unconfirmed(
                         filechannel._read_failure_detail(result), now, agent_name=agent_name,
-                        exclude_request_id_prefixes=_oq._RESERVED_ID_PREFIXES,
+                        exclude_request_id_prefixes=_oq.reserved_id_prefixes(),
                     ):
                         self._changed_this_cycle = True
                 except Exception as e:
@@ -133,7 +133,7 @@ class IngestMixin:
             try:
                 if deps.db.mark_operator_queue_unconfirmed(
                     "oversize_file", now, agent_name=agent_name,
-                    exclude_request_id_prefixes=_oq._RESERVED_ID_PREFIXES,
+                    exclude_request_id_prefixes=_oq.reserved_id_prefixes(),
                 ):
                     self._changed_this_cycle = True
             except Exception as e:
@@ -154,7 +154,7 @@ class IngestMixin:
                 try:
                     if deps.db.mark_operator_queue_unconfirmed(
                         "invalid_json", now, agent_name=agent_name,
-                        exclude_request_id_prefixes=_oq._RESERVED_ID_PREFIXES,
+                        exclude_request_id_prefixes=_oq.reserved_id_prefixes(),
                     ):
                         self._changed_this_cycle = True
                 except Exception as e:
@@ -168,7 +168,7 @@ class IngestMixin:
                 try:
                     if deps.db.mark_operator_queue_unconfirmed(
                         "wrong_shape", now, agent_name=agent_name,
-                        exclude_request_id_prefixes=_oq._RESERVED_ID_PREFIXES,
+                        exclude_request_id_prefixes=_oq.reserved_id_prefixes(),
                     ):
                         self._changed_this_cycle = True
                 except Exception as e:
@@ -214,7 +214,7 @@ class IngestMixin:
         # #3130: the agent's OWN rows only — a platform row about the agent (its
         # flood alarm above all) never spends the agent's budget.
         pending_count = deps.db.count_operator_queue_pending_for_agent(
-            agent_name, exclude_request_id_prefixes=_oq._RESERVED_ID_PREFIXES,
+            agent_name, exclude_request_id_prefixes=_oq.reserved_id_prefixes(),
         )
         admitted = 0
         held = 0
@@ -254,7 +254,7 @@ class IngestMixin:
             # prefixes lowercase and unpadded, so a normalized id that matches can
             # only be an impersonation attempt.
             if isinstance(req_id, str) and req_id.strip().lower().startswith(
-                _oq._RESERVED_ID_PREFIXES
+                _oq.reserved_id_prefixes()
             ):
                 key = (agent_name, req_id)
                 # #2372: only a PENDING entry can pre-create (and so suppress)
