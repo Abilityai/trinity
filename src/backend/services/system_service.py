@@ -2187,11 +2187,18 @@ def _preflight_template(
     return None
 
 
-def _platform_refusals() -> Tuple[type, ...]:
-    """The apply steps' refusal classes: each is raised only with the
-    platform's own ``<code>: <message>`` (lazy: these modules import this one)."""
+def _platform_worded() -> Tuple[type, ...]:
+    """The classes a deploy or apply step raises with the platform's own words
+    only: the apply steps' refusals (``<code>: <message>``) and the sentences
+    the create path and apply's writes raise past their own catch-alls (lazy:
+    the apply modules import this one)."""
+    from services.agent_auth import AgentAuthSecretMissing
+    from services.assignment_provider import SeatWriterUnavailable
+    from services.git_service.provisioning import GitInstanceReservationError
+    from services.skill_assignment_service import SkillSetUnresolved
     from services.system_apply import gates, grants, seats
-    return (gates._Refused, grants._Refused, seats._Refused)
+    return (gates._Refused, grants._Refused, seats._Refused, AgentAuthSecretMissing,
+            GitInstanceReservationError, SeatWriterUnavailable, SkillSetUnresolved)
 
 
 def _failure_reason(exc: Exception) -> Tuple[str, Optional[int]]:
@@ -2203,17 +2210,26 @@ def _failure_reason(exc: Exception) -> Tuple[str, Optional[int]]:
     URLs (learnings 2026-07-14) and the deploy report is a durable response
     surface (trinity-enterprise#125).
 
-    Three kinds of exception keep their words (abilityai/trinity#4284): an
-    HTTPException, whose detail the platform wrote where it raised it; a
-    ValueError, the validation class (``ManifestError``, ``normalize_cpu`` /
-    ``normalize_memory``, pydantic's ``ValidationError`` from
-    ``ScheduleCreate``) whose text tells the manifest's author what to change;
-    and the apply steps' own refusals (``_platform_refusals``), whose
-    ``<code>: <message>`` the report's readers branch on. Anything else is an
-    unforeseen failure (Docker, the database, the filesystem, a library) and
-    answers its class name only: the report is the body of a 500 when every
-    member fails (``routers/systems.py``), and that text belongs in the log,
-    which gets it here, masked.
+    Three kinds of exception keep their words (abilityai/trinity#4284):
+
+    - an HTTPException, whose detail the platform wrote where it raised it;
+    - any ValueError. The validators raise one (``ManifestError``,
+      ``ScheduleValidationError``, ``normalize_cpu`` / ``normalize_memory``,
+      pydantic's ``ValidationError`` from ``ScheduleCreate``) and its text
+      tells the manifest's author what to change. A library's ValueError keeps
+      its text too (requests' ``InvalidURL`` carries the URL, and
+      ``ScheduleValidationError`` quotes croniter's error): the type cannot
+      tell the two apart, so that text is only sanitized, redacted and capped
+      below, like every reason;
+    - the classes in ``_platform_worded``, raised only with the platform's own
+      sentences: the apply steps' refusals, whose ``<code>: <message>`` the
+      report's readers branch on, and the sentences create and apply's writes
+      raise past their own catch-alls.
+
+    Anything else is an unforeseen failure (Docker, the database, the
+    filesystem, a library) and answers its class name only: the report is the
+    body of a 500 when every member fails (``routers/systems.py``), and that
+    text belongs in the log, which gets it here, masked.
     """
     status_code: Optional[int] = None
     if isinstance(exc, HTTPException):
@@ -2225,7 +2241,7 @@ def _failure_reason(exc: Exception) -> Tuple[str, Optional[int]]:
                 reason = json.dumps(detail, default=str)
         else:
             reason = str(detail)
-    elif isinstance(exc, (ValueError,) + _platform_refusals()):
+    elif isinstance(exc, (ValueError,) + _platform_worded()):
         reason = str(exc)
     else:
         logger.warning("System manifest step failed: %s", masked_traceback(exc))

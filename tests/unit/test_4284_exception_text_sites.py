@@ -501,6 +501,68 @@ def test_failure_reason_keeps_platform_words(build, expected):
     assert expected in reason
 
 
+def _agent_auth_secret_missing(monkeypatch):
+    from services import agent_auth
+    monkeypatch.delenv("AGENT_AUTH_SECRET", raising=False)
+    with pytest.raises(RuntimeError) as exc:
+        agent_auth.derive_agent_token("a1")
+    return exc.value
+
+
+def _git_reservation(monkeypatch, create_git_config):
+    from unittest.mock import MagicMock
+    from services.git_service import provisioning
+    monkeypatch.setattr(provisioning, "db", MagicMock(create_git_config=create_git_config))
+    monkeypatch.setattr(provisioning, "check_remote_branch_exists", AsyncMock(return_value=False))
+    with pytest.raises(RuntimeError) as exc:
+        asyncio.run(provisioning.reserve_and_generate_instance_id("a1", "acme/repo"))
+    return exc.value
+
+
+def _git_config_exists(monkeypatch):
+    return _git_reservation(monkeypatch, lambda **kw: None)
+
+
+def _git_reservation_exhausted(monkeypatch):
+    from sqlalchemy.exc import IntegrityError
+
+    def collide(**kw):
+        raise IntegrityError(_PLANT, {"token": _TOKEN}, Exception(_PLANT))
+    return _git_reservation(monkeypatch, collide)
+
+
+def _seat_writer_missing(monkeypatch):
+    from services import assignment_provider
+    monkeypatch.setattr(assignment_provider, "_provider", None)
+    with pytest.raises(RuntimeError) as exc:
+        assignment_provider.write_seat("a1", "lead", None)
+    return exc.value
+
+
+def _skill_set_unresolved(monkeypatch):
+    from services.skill_assignment_service import SkillSetUnresolved
+    return SkillSetUnresolved("weekly-report")
+
+
+@pytest.mark.parametrize("raised, expected", [
+    (_agent_auth_secret_missing, "AGENT_AUTH_SECRET is not set. The backend cannot derive"),
+    (_git_config_exists, "agent_git_config already exists for agent 'a1'"),
+    (_git_reservation_exhausted,
+     "could not reserve a fresh working branch for 'a1' in 'acme/repo' after 5 retries"),
+    (_seat_writer_missing, "no seat writer is installed"),
+    (_skill_set_unresolved, "weekly-report"),
+], ids=["agent-auth-secret", "git-config-exists", "git-reservation-exhausted",
+        "seat-writer", "skill-set-unresolved"])
+def test_failure_reason_keeps_a_platform_sentence(monkeypatch, raised, expected):
+    """The platform's own sentences that reach a deploy or apply report
+    unwrapped: create builds the agent's env and reserves its git branch before
+    its catch-all, and apply's seat and unassign writes raise these. The words
+    stay; no exception text comes with them."""
+    from services.system_service import _failure_reason
+    reason, _ = _failure_reason(raised(monkeypatch))
+    _assert_answer_clean(reason, expected)
+
+
 @pytest.mark.parametrize("module", ["gates", "grants", "seats"])
 def test_failure_reason_keeps_an_apply_refusal(module):
     """The `<code>: <message>` an apply step refuses with is what the report's

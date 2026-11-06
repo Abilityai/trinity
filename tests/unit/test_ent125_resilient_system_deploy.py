@@ -258,6 +258,24 @@ def test_total_failure_returns_500_with_report(env):
     assert data["prompt_updated"] is False
 
 
+def test_total_failure_keeps_the_create_paths_own_sentence(env, monkeypatch):
+    """abilityai/trinity#4284: create builds the agent's env before its own
+    catch-all, so an install without AGENT_AUTH_SECRET fails every member with
+    the platform's remediation sentence, and the 500's report keeps it."""
+    monkeypatch.delenv("AGENT_AUTH_SECRET", raising=False)
+
+    async def create(config, current_user, request, **kwargs):
+        crud._apply_mcp_and_auth_env(config, {}, None, "http://mcp-server:8080/mcp")
+    env.m.create_agent.side_effect = create
+
+    resp = _deploy(env, TWO_AGENT_MANIFEST)
+
+    assert resp.status_code == 500
+    reasons = [f["reason"] for f in resp.json()["failed"]]
+    assert len(reasons) == 2
+    assert all(r.startswith("AGENT_AUTH_SECRET is not set.") for r in reasons), reasons
+
+
 def test_total_failure_never_writes_trinity_prompt(env):
     manifest = TWO_AGENT_MANIFEST + "prompt: system-wide instructions\n"
     env.m.create_agent.side_effect = Exception("docker down")
