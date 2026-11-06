@@ -15,10 +15,12 @@ export const SERVER_NAME = "trinity-docs";
  * version into that field before it builds, so serverInfo and the startup log
  * always name the version that is actually running.
  */
-export const SERVER_VERSION: string = readPackageVersion();
+export const SERVER_VERSION: string = readPackageVersion(
+  new URL("../package.json", import.meta.url),
+);
 
-function readPackageVersion(): string {
-  const url = new URL("../package.json", import.meta.url);
+/** Exported for tests: a manifest without a usable version must stop startup. */
+export function readPackageVersion(url: URL): string {
   const { version } = JSON.parse(readFileSync(url, "utf8")) as { version?: unknown };
   if (typeof version !== "string" || version === "") {
     throw new Error(`${SERVER_NAME}: package.json at ${url.pathname} has no version`);

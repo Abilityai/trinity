@@ -12,10 +12,13 @@
  */
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createServer, SERVER_VERSION } from "./server.js";
+import { createServer, readPackageVersion, SERVER_VERSION } from "./server.js";
 
 function readJson(relative: string): Record<string, unknown> {
   return JSON.parse(readFileSync(new URL(relative, import.meta.url), "utf8")) as Record<
@@ -56,6 +59,32 @@ describe("release facts (ent1117-s2)", () => {
     await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
     assert.equal(client.getServerVersion()?.version, pkg.version);
   });
+
+  // A manifest without a usable version must stop the server at startup,
+  // never let it report a made-up or empty version.
+  const manifests: Array<{ name: string; body: string; ok?: string }> = [
+    { name: "a valid version", body: '{"version":"1.2.3"}', ok: "1.2.3" },
+    { name: "no version field", body: '{"name":"trinity-docs-mcp"}' },
+    { name: "an empty version", body: '{"version":""}' },
+    { name: "a numeric version", body: '{"version":1}' },
+  ];
+  for (const { name, body, ok } of manifests) {
+    test(`readPackageVersion with ${name} ${ok ? "returns it" : "throws"}`, () => {
+      const dir = mkdtempSync(join(tmpdir(), "ent1117-s2-"));
+      try {
+        const file = join(dir, "package.json");
+        writeFileSync(file, body);
+        const url = pathToFileURL(file);
+        if (ok) {
+          assert.equal(readPackageVersion(url), ok);
+        } else {
+          assert.throws(() => readPackageVersion(url), /^Error: trinity-docs: package\.json at .* has no version$/);
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
 
   // First patched versions, from the Dependabot alerts this package carried.
   const patched: Array<{ name: string; floor: string; direct: boolean }> = [
