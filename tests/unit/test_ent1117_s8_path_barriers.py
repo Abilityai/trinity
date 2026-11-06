@@ -85,7 +85,7 @@ def test_sibling_prefix_escape_is_refused(store, suffix):
     the string ``<root>``. Only a base with a trailing separator refuses it."""
     assert avatar_paths.avatar_path_or_none("../avatars2/x", suffix) is None
     with pytest.raises(HTTPException) as exc:
-        avatar_paths.avatar_path("../avatars2/x", suffix)
+        avatar._avatar_path("../avatars2/x", suffix)
     assert (exc.value.status_code, exc.value.detail) == (404, "Agent not found")
 
 
@@ -94,13 +94,28 @@ def test_nul_byte_is_refused(store, name):
     """A NUL survives normpath and the prefix check, so it is refused by name."""
     assert avatar_paths.avatar_path_or_none(name, ".webp") is None
     with pytest.raises(HTTPException) as exc:
-        avatar_paths.avatar_path(name, ".webp")
+        avatar._avatar_path(name, ".webp")
     assert (exc.value.status_code, exc.value.detail) == (404, "Agent not found")
+
+
+def test_the_avatar_store_module_holds_no_http_concerns():
+    """Invariant #1: the `utils/` leaf answers `None` for a refused name, and
+    the router maps that to its 404."""
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(avatar_paths))
+    imported = {a.name.split(".")[0] for n in ast.walk(tree)
+                if isinstance(n, ast.Import) for a in n.names}
+    imported |= {n.module.split(".")[0] for n in ast.walk(tree)
+                 if isinstance(n, ast.ImportFrom) and n.module}
+    assert "fastapi" not in imported
+    assert not hasattr(avatar_paths, "avatar_path")
 
 
 def test_escape_uses_the_callers_detail(store):
     with pytest.raises(HTTPException) as exc:
-        avatar_paths.avatar_path("../secret", ".webp", detail="No avatar found")
+        avatar._avatar_path("../secret", ".webp", detail="No avatar found")
     assert (exc.value.status_code, exc.value.detail) == (404, "No avatar found")
 
 
@@ -133,7 +148,7 @@ def test_legitimate_names_resolve_under_every_root_spelling(tmp_path, monkeypatc
     legitimate name is refused under a ``./`` or ``//`` root."""
     real, roots = _roots(tmp_path, monkeypatch)
     monkeypatch.setattr(avatar_paths, "AVATAR_DIR", roots[kind])
-    path = avatar_paths.avatar_path(name, ".webp")
+    path = avatar._avatar_path(name, ".webp")
     path.write_bytes(b"ok")
     assert (real / f"{name}.webp").read_bytes() == b"ok"
 
@@ -149,8 +164,8 @@ def test_legitimate_name_is_served_under_every_root_spelling(tmp_path, monkeypat
 
 
 def test_valid_name_builds_the_expected_path(store):
-    assert avatar_paths.avatar_path("my-agent_1.2", "_ref.png") == store / "my-agent_1.2_ref.png"
-    assert avatar_paths.avatar_path("a..b", ".webp") == store / "a..b.webp"
+    assert avatar._avatar_path("my-agent_1.2", "_ref.png") == store / "my-agent_1.2_ref.png"
+    assert avatar._avatar_path("a..b", ".webp") == store / "a..b.webp"
 
 
 # =============================================================================
@@ -175,7 +190,7 @@ def test_sanitized_names_stay_direct_children_of_the_store(raw):
     if not out:
         return
     root = Path("/data/avatars")
-    path = avatar_paths.avatar_path(out, ".webp")
+    path = avatar._avatar_path(out, ".webp")
     assert path.parent == root and path.name == f"{out}.webp"
 
 

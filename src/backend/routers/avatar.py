@@ -8,6 +8,7 @@ REST endpoints for AI-generated agent avatars and emotion variants.
 import asyncio
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -26,9 +27,21 @@ router = APIRouter(prefix="/api/agents", tags=["avatars"])
 logger = logging.getLogger(__name__)
 
 # Every path under the avatar store is built by `utils.avatar_paths` (one
-# directory, one barrier). The owner routes take its default uniform 404 (#186);
-# the public read routes pass their own not-found text, so a refused name
-# answers exactly like a missing file.
+# directory, one barrier). The leaf answers `None` for a name it refuses; the
+# HTTP answer to that is this router's (Invariant #1).
+
+
+def _avatar_path(agent_name: str, suffix: str, *, detail: str = "Agent not found") -> Path:
+    """The checked path for `<agent_name><suffix>`, or a 404 carrying `detail`.
+
+    The default text keeps the #186 uniform-404 contract of the owner routes; a
+    read route passes its own not-found text, so a refused name answers exactly
+    like a missing file and the refusal is not an oracle.
+    """
+    path = avatar_paths.avatar_path_or_none(agent_name, suffix)
+    if path is None:
+        raise HTTPException(status_code=404, detail=detail)
+    return path
 
 
 def _avatar_exists(agent_name: str, suffix: str) -> bool:
@@ -207,7 +220,7 @@ async def generate_default_avatars(
                 continue
 
             # Save optimized WebP (no reference image, no emotion variants for defaults)
-            avatar_path = avatar_paths.avatar_path(agent_name, ".webp")
+            avatar_path = _avatar_path(agent_name, ".webp")
             avatar_path.write_bytes(optimize_avatar(result.image_data))
 
             now = datetime.now(timezone.utc).isoformat()
@@ -247,8 +260,8 @@ async def generate_default_avatars(
 @router.get("/{agent_name}/avatar")
 async def get_avatar(agent_name: str):
     """Serve cached avatar for an agent. No auth required — avatars are public assets."""
-    webp_path = avatar_paths.avatar_path(agent_name, ".webp", detail="No avatar found")
-    png_path = avatar_paths.avatar_path(agent_name, ".png", detail="No avatar found")
+    webp_path = _avatar_path(agent_name, ".webp", detail="No avatar found")
+    png_path = _avatar_path(agent_name, ".png", detail="No avatar found")
 
     if webp_path.exists():
         return FileResponse(
@@ -269,7 +282,7 @@ async def get_avatar(agent_name: str):
 @router.get("/{agent_name}/avatar/reference")
 async def get_avatar_reference(agent_name: str):
     """Serve reference avatar PNG for an agent. No auth required — avatars are public assets."""
-    ref_path = avatar_paths.avatar_path(
+    ref_path = _avatar_path(
         agent_name, "_ref.png", detail="No reference image found"
     )
     if not ref_path.exists():
@@ -315,7 +328,7 @@ async def _generate_emotions_background(
     mid-loop the task aborts.
     """
     service = get_image_generation_service()
-    ref_path = avatar_paths.avatar_path(agent_name, "_ref.png")
+    ref_path = _avatar_path(agent_name, "_ref.png")
 
     logger.info(f"[AVATAR-002] Starting background emotion generation for {agent_name}")
 
@@ -343,7 +356,7 @@ async def _generate_emotions_background(
                 agent_name=agent_name,
             )
             if result.success and result.image_data:
-                emotion_path = avatar_paths.avatar_path(agent_name, f"_emotion_{emotion}.webp")
+                emotion_path = _avatar_path(agent_name, f"_emotion_{emotion}.webp")
                 emotion_path.write_bytes(optimize_avatar(result.image_data))
                 logger.info(
                     f"[AVATAR-002] Saved emotion '{emotion}' for {agent_name}: "
@@ -417,10 +430,10 @@ async def get_avatar_emotion(agent_name: str, emotion: str):
             detail=f"Invalid emotion. Must be one of: {AVATAR_EMOTIONS}",
         )
 
-    webp_path = avatar_paths.avatar_path(
+    webp_path = _avatar_path(
         agent_name, f"_emotion_{emotion}.webp", detail="Emotion variant not found"
     )
-    png_path = avatar_paths.avatar_path(
+    png_path = _avatar_path(
         agent_name, f"_emotion_{emotion}.png", detail="Emotion variant not found"
     )
 
@@ -476,20 +489,20 @@ async def generate_avatar(
 
     # Save optimized display avatar (.webp) and full-quality reference (.png)
     avatar_paths.AVATAR_DIR.mkdir(parents=True, exist_ok=True)
-    avatar_path = avatar_paths.avatar_path(agent_name, ".webp")
-    ref_path = avatar_paths.avatar_path(agent_name, "_ref.png")
+    avatar_path = _avatar_path(agent_name, ".webp")
+    ref_path = _avatar_path(agent_name, "_ref.png")
     avatar_path.write_bytes(optimize_avatar(result.image_data))
     ref_path.write_bytes(result.image_data)  # Full quality PNG for Gemini input
 
     # Remove legacy .png display avatar if present
-    legacy_avatar = avatar_paths.avatar_path(agent_name, ".png")
+    legacy_avatar = _avatar_path(agent_name, ".png")
     if legacy_avatar.exists():
         legacy_avatar.unlink()
 
     # Delete any existing emotion files (AVATAR-002) — new reference invalidates them
     for emotion in AVATAR_EMOTIONS:
         for ext in (".webp", ".png"):
-            ep = avatar_paths.avatar_path(agent_name, f"_emotion_{emotion}{ext}")
+            ep = _avatar_path(agent_name, f"_emotion_{emotion}{ext}")
             if ep.exists():
                 ep.unlink()
 
@@ -521,7 +534,7 @@ async def regenerate_avatar(
     Owner/admin only via OwnedAgentByName — uniform 404, no existence oracle (#186).
     """
     # Need a reference image and stored prompt
-    ref_path = avatar_paths.avatar_path(agent_name, "_ref.png")
+    ref_path = _avatar_path(agent_name, "_ref.png")
     if not ref_path.exists():
         raise HTTPException(status_code=404, detail="No reference image found. Generate an avatar first.")
 
@@ -547,7 +560,7 @@ async def regenerate_avatar(
         raise HTTPException(status_code=status, detail=detail)
 
     # Save as optimized display avatar only (reference stays the same)
-    avatar_path = avatar_paths.avatar_path(agent_name, ".webp")
+    avatar_path = _avatar_path(agent_name, ".webp")
     avatar_path.write_bytes(optimize_avatar(result.image_data))
 
     now = datetime.now(timezone.utc).isoformat()
@@ -572,15 +585,15 @@ async def delete_avatar(
     """
     # Delete files (display + reference + emotion variants, both formats)
     for ext in (".webp", ".png"):
-        p = avatar_paths.avatar_path(agent_name, ext)
+        p = _avatar_path(agent_name, ext)
         if p.exists():
             p.unlink()
-    ref_path = avatar_paths.avatar_path(agent_name, "_ref.png")
+    ref_path = _avatar_path(agent_name, "_ref.png")
     if ref_path.exists():
         ref_path.unlink()
     for emotion in AVATAR_EMOTIONS:
         for ext in (".webp", ".png"):
-            ep = avatar_paths.avatar_path(agent_name, f"_emotion_{emotion}{ext}")
+            ep = _avatar_path(agent_name, f"_emotion_{emotion}{ext}")
             if ep.exists():
                 ep.unlink()
 

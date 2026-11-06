@@ -33,8 +33,6 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from fastapi import HTTPException
-
 AVATAR_DIR = Path("/data/avatars")
 
 #: The longest single path component, in bytes, that Linux filesystems store
@@ -63,16 +61,3 @@ def avatar_path_or_none(agent_name: str, suffix: str) -> Optional[Path]:
     if _component_too_long(fullpath[len(base):]):
         return None
     return Path(fullpath)
-
-
-def avatar_path(agent_name: str, suffix: str, *, detail: str = "Agent not found") -> Path:
-    """As ``avatar_path_or_none``, but a refusal is a 404 carrying ``detail``.
-
-    The default text keeps the #186 uniform-404 contract of the owner routes; a
-    read route passes its own not-found text, so a refused name answers exactly
-    like a missing file and the refusal is not an oracle.
-    """
-    path = avatar_path_or_none(agent_name, suffix)
-    if path is None:
-        raise HTTPException(status_code=404, detail=detail)
-    return path
