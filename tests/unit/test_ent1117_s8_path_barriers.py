@@ -19,6 +19,8 @@ the properties that barrier has to hold:
   public read routes as an unknown agent, not a 500;
 * every sink (read, write, move, staging) uses the normalised path the barrier
   checked, not one rebuilt from the raw root.
+* the three staging names always get the same verdict, so a refused name
+  leaves the staging root untouched.
 
 It also pins two responses that used to carry exception text: the Generate
 Default Avatars per-agent error, and the rename 500 (abilityai/trinity#4284).
@@ -35,7 +37,7 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.testclient import TestClient
-from hypothesis import HealthCheck, given, settings
+from hypothesis import HealthCheck, example, given, settings
 from hypothesis import strategies as st
 
 import routers.agent_rename as agent_rename
@@ -875,3 +877,78 @@ def test_bundled_avatar_install_writes_nothing_for_an_escaping_name(store, monke
     crud._install_bundled_avatar(AgentConfig(name="../avatars2/x", template="local:avtpl"))
     assert (store.parent / "avatars2" / "x.webp").read_bytes() == SECRET
     assert list(store.iterdir()) == []
+
+
+# =============================================================================
+# 13. The three staging checks always agree, so a refusal comes before any write
+# =============================================================================
+# `_stage_config_files` checks its three staging names before the first `mkdir`.
+# That order is only observable if the three verdicts can disagree. They cannot
+# while every suffix is separator-free: the three paths then share every
+# directory component. These tests read the suffixes from the real code (a spy
+# on `_staging_path`), so they fail the day a suffix gains a separator, and pin
+# that a refused name leaves the staging root exactly as it was.
+
+_STAGING_NAME_PARTS = ["a", "q", ".", "/", "-", "\x00", "..", "/..", "../", "tmp", "_", "\u00e9", "agent-"]
+_staging_names = st.lists(st.sampled_from(_STAGING_NAME_PARTS), max_size=10).map("".join)
+
+
+@pytest.fixture
+def staging_suffixes(staging, monkeypatch):
+    """The suffixes `_stage_config_files` appends to `agent-<name>`, as the code
+    spells them today."""
+    seen = []
+    real = crud._staging_path
+
+    def spy(filename):
+        seen.append(filename)
+        return real(filename)
+
+    monkeypatch.setattr(crud, "_staging_path", spy)
+    try:
+        crud._stage_config_files(AgentConfig(name="probe-agent"), {}, None)
+    except OSError:
+        # The names are recorded before any write; a suffix naming a directory
+        # that does not exist must still reach the agreement check below.
+        pass
+    monkeypatch.setattr(crud, "_staging_path", real)
+    prefix = "agent-probe-agent"
+    assert len(seen) == 3 and all(f.startswith(prefix) for f in seen), seen
+    return [f[len(prefix):] for f in seen]
+
+
+def _staging_verdict(filename):
+    try:
+        crud._staging_path(filename)
+    except HTTPException:
+        return False
+    return True
+
+
+@settings(max_examples=3000, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@example(name="q/../..")
+@given(name=_staging_names)
+def test_the_three_staging_verdicts_always_agree(staging, staging_suffixes, monkeypatch, name):
+    for root in (str(staging), f"{staging}/", "/" + str(staging), f"{staging}/./"):
+        monkeypatch.setattr(crud, "_STAGING_ROOT", root)
+        verdicts = [_staging_verdict(f"agent-{name}{s}") for s in staging_suffixes]
+        assert len(set(verdicts)) == 1, (root, name, staging_suffixes, verdicts)
+
+
+@settings(max_examples=500, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+@example(name="q/../..")
+@given(name=_staging_names)
+def test_a_refused_staging_name_creates_nothing(staging, tmp_path, name):
+    before = set(tmp_path.rglob("*"))
+    try:
+        crud._stage_config_files(AgentConfig(name=name), {}, None)
+    except HTTPException as exc:
+        assert exc.detail["code"] == "INVALID_AGENT_NAME"
+        assert set(tmp_path.rglob("*")) == before, name
+    except OSError:
+        # Not a refusal: a name like "/" names a missing parent directory.
+        pass
+    finally:
+        # Undo an accepted name's files so every example starts from the same tree.
+        for path in sorted(set(tmp_path.rglob("*")) - before, reverse=True):
+            path.rmdir() if path.is_dir() else path.unlink()
