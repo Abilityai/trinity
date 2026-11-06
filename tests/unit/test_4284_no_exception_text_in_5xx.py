@@ -1319,13 +1319,6 @@ _ALLOWED: Tuple[_Allowed, ...] = (
         "the agent's home, which the caller owns.",
     ),
     _Allowed(
-        _AS + "services/gemini_runtime.py", "GeminiRuntime.execute_headless",
-        "HTTPException", frozenset({"e"}),
-        "Narrow TimeoutError whose only raisers are the platform's own "
-        "`exceeded {n}s timeout` / `Task execution timed out after {n} seconds`, "
-        "and the backend's failure classifiers key on 'timed out'.",
-    ),
-    _Allowed(
         _AS + "services/headless_executor.py", "execute_headless_task", "HTTPException",
         frozenset({"e"}),
         "Narrow RuntimeError filtered on its text; its only source is the platform's "
