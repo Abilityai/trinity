@@ -63,14 +63,23 @@ BACKEND = REPO / "src" / "backend"
 # a raw exception message reached the caller.
 SENTINEL = "s13-sekrit-internal-host-10.0.0.7:5432"
 
-# Credential-shaped payloads for the scrubbed-log sites. The PAT sits in a git
-# remote URL's userinfo (learnings 2026-07-14) and the second rides a KEY=value.
+# Credential payloads for the scrubbed-log sites. The PAT sits in a git remote
+# URL's userinfo (learnings 2026-07-14) and the second rides a KEY=value; both
+# have a shape `sanitize_text` knows. The third is a plain `user:password@` in a
+# remote URL, which no shape pattern recognises: only the URL-userinfo pass
+# removes it (pinned by `test_url_only_password_has_no_known_shape`), so it is
+# what proves that pass is applied.
 PAT = "ghp_S13sentinelPATaaaaaaaaaaaaaaaaaaaaaaaaaa"
 KV_SECRET = "s13-kv-secret-value-9f8e7d"
+URL_ONLY_PW = "s13UrlOnlyPw0rd"
+URL_ONLY_REMOTE = f"https://deploy:{URL_ONLY_PW}@git.example.com/acme/x.git"
 CREDENTIAL_TEXT = (
     f"{SENTINEL} clone of https://x-access-token:{PAT}@github.com/acme/private.git "
-    f"failed; API_KEY={KV_SECRET}"
+    f"failed; API_KEY={KV_SECRET}; mirror {URL_ONLY_REMOTE} refused"
 )
+# A value staged for identity scrubbing (services/runtime_secret_scrub.py). It
+# has no shape either; only the staged-value mask removes it.
+STAGED_VALUE = "s13StagedQwertyValue77"
 
 
 def _run(coro):
@@ -103,11 +112,30 @@ def _assert_logged_raw(caplog) -> None:
     assert SENTINEL in _log_text(caplog), "the full exception must reach the backend log"
 
 
-def _assert_logged_scrubbed(caplog) -> None:
+def _assert_logged_scrubbed(caplog, *, traceback: bool = False) -> None:
     text = _log_text(caplog)
     assert "RuntimeError" in text, "the failure must still be logged"
+    assert SENTINEL in text, "the non-credential details must still be logged"
     assert PAT not in text, f"the PAT reached the log: {text}"
     assert KV_SECRET not in text, f"the KEY=value secret reached the log: {text}"
+    assert URL_ONLY_PW not in text, f"the URL userinfo password reached the log: {text}"
+    assert "git.example.com/acme/x.git" in text, "only the userinfo is redacted, not the URL"
+    if traceback:
+        assert "Traceback (most recent call last)" in text, (
+            f"the scrubbed traceback must reach the log: {text}"
+        )
+
+
+def test_url_only_password_has_no_known_shape():
+    """The test values prove what they are used for: the shape pass alone keeps
+    the URL password and the staged value, so a log without them shows that the
+    URL-userinfo pass and the staged-value mask ran."""
+    from utils.credential_sanitizer import redact_url_userinfo, sanitize_text
+
+    assert URL_ONLY_PW in sanitize_text(CREDENTIAL_TEXT)
+    assert URL_ONLY_PW not in redact_url_userinfo(CREDENTIAL_TEXT)
+    staged = f"agent said {STAGED_VALUE}"
+    assert STAGED_VALUE in sanitize_text(redact_url_userinfo(staged))
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +284,7 @@ def test_deploy_local_catch_all_carries_class_and_scrubs_the_log(deploy_env, cap
     assert exc.value.detail["code"] == "DEPLOY_FAILED"
     _assert_class_not_text(exc.value.detail)
     assert PAT not in _blob(exc.value.detail)
-    _assert_logged_scrubbed(caplog)
+    _assert_logged_scrubbed(caplog, traceback=True)
 
 
 def test_workspace_prepop_failure_carries_class_and_scrubs_the_log(tmp_path, monkeypatch, caplog):
@@ -277,7 +305,7 @@ def test_workspace_prepop_failure_carries_class_and_scrubs_the_log(tmp_path, mon
     assert "s13agent" in exc.value.detail["error"]  # the platform's own name stays
     _assert_class_not_text(exc.value.detail)
     assert PAT not in _blob(exc.value.detail)
-    _assert_logged_scrubbed(caplog)
+    _assert_logged_scrubbed(caplog, traceback=True)
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +332,7 @@ def test_system_catch_all_carries_class_and_scrubs_the_log(monkeypatch, caplog, 
     assert exc.value.status_code == 500
     _assert_class_not_text(exc.value.detail)
     assert PAT not in _blob(exc.value.detail)
-    _assert_logged_scrubbed(caplog)
+    _assert_logged_scrubbed(caplog, traceback=True)
 
 
 # ---------------------------------------------------------------------------
@@ -376,13 +404,13 @@ def test_data_import_502_carries_class_not_text(data_client, monkeypatch, caplog
 # routers/internal.py — scheduler execute-task (sync) and MCP audit ingest
 # ---------------------------------------------------------------------------
 
-def test_internal_execute_task_500_carries_class_and_scrubs_the_log(monkeypatch, caplog):
-
-    caplog.set_level(logging.DEBUG)
+def _execute_task_failing_with(monkeypatch, text: str) -> MagicMock:
+    """Route the sync execute-task branch into a failure carrying ``text``;
+    returns the idempotency ``fail`` spy."""
 
     class _Svc:
         async def execute_task(self, **kw):
-            raise RuntimeError(CREDENTIAL_TEXT)
+            raise RuntimeError(text)
 
     # The route imports the gate at call time, so patch the module sys.modules holds.
     monkeypatch.setattr("services.cleanup_service.is_startup_recovery_complete", lambda: True)
@@ -394,15 +422,60 @@ def test_internal_execute_task_500_carries_class_and_scrubs_the_log(monkeypatch,
     failed = MagicMock()
     monkeypatch.setattr(internal.idempotency_service, "fail", failed)
     monkeypatch.setattr(internal.platform_audit_service, "log", AsyncMock())
+    return failed
 
+
+def _call_execute_task():
     req = InternalTaskExecutionRequest(agent_name="analyst", message="go", triggered_by="manual",
                                        execution_id="e1")
     with pytest.raises(HTTPException) as exc:
         _run(internal.execute_task_internal(req, idempotency_key=None))
-    assert exc.value.status_code == 500
-    _assert_class_not_text(exc.value.detail)
+    return exc.value
+
+
+def test_internal_execute_task_500_carries_class_and_scrubs_the_log(monkeypatch, caplog):
+
+    caplog.set_level(logging.DEBUG)
+    failed = _execute_task_failing_with(monkeypatch, CREDENTIAL_TEXT)
+    exc = _call_execute_task()
+    assert exc.status_code == 500
+    _assert_class_not_text(exc.detail)
     assert failed.called, "the idempotency claim must still be released"
     _assert_logged_scrubbed(caplog)
+
+
+def test_internal_execute_task_log_masks_staged_values(monkeypatch, caplog):
+    """An execution error can echo agent output, and agent output can carry a
+    value the platform staged for scrubbing (one with no credential shape). The
+    log copy masks it the way the persisted copies of that output are masked."""
+
+    caplog.set_level(logging.DEBUG)
+    failed = _execute_task_failing_with(monkeypatch, f"{SENTINEL} agent echoed {STAGED_VALUE}")
+    monkeypatch.setattr(internal, "get_staged_values", lambda: [STAGED_VALUE])
+    exc = _call_execute_task()
+    assert exc.status_code == 500
+    assert failed.called, "the idempotency claim must still be released"
+    text = _log_text(caplog)
+    assert SENTINEL in text, "the rest of the error must still be logged"
+    assert STAGED_VALUE not in text, f"a staged value reached the log: {text}"
+
+
+def test_internal_execute_task_releases_the_claim_when_the_staged_read_fails(monkeypatch):
+    """The claim release does not depend on the log scrub: a staged-set read
+    that raises still leaves the claim released, so a resend is not refused as
+    in flight for the claim's lifetime."""
+
+    failed = _execute_task_failing_with(monkeypatch, SENTINEL)
+
+    def _boom():
+        raise RuntimeError("staged store unreadable")
+
+    monkeypatch.setattr(internal, "get_staged_values", _boom)
+    req = InternalTaskExecutionRequest(agent_name="analyst", message="go", triggered_by="manual",
+                                       execution_id="e1")
+    with pytest.raises(Exception):
+        _run(internal.execute_task_internal(req, idempotency_key=None))
+    assert failed.called, "the idempotency claim must be released before the log scrub"
 
 
 def test_internal_audit_500_carries_class_and_scrubs_the_log(monkeypatch, caplog):
@@ -422,7 +495,9 @@ def test_internal_audit_500_carries_class_and_scrubs_the_log(monkeypatch, caplog
 # routers/ws_tickets.py — WebSocket ticket mint
 # ---------------------------------------------------------------------------
 
-def test_ws_ticket_503_carries_fixed_text_not_the_exception(monkeypatch):
+def test_ws_ticket_503_carries_fixed_text_not_the_exception(monkeypatch, caplog):
+
+    caplog.set_level(logging.DEBUG)
 
     def _boom(*a, **kw):
         raise RuntimeError(SENTINEL)
@@ -434,6 +509,11 @@ def test_ws_ticket_503_carries_fixed_text_not_the_exception(monkeypatch):
     assert SENTINEL not in _blob(exc.value.detail)
     # The text a client sees when the store is down is unchanged.
     assert exc.value.detail == "Redis unavailable — cannot mint WebSocket ticket"
+    # The log names the class only, as the ticket service does: a store error's
+    # text can carry the store URL, and nothing here scrubs it.
+    text = _log_text(caplog)
+    assert "RuntimeError" in text, "the failure must still be logged"
+    assert SENTINEL not in text, f"the exception text reached the log: {text}"
 
 
 # ---------------------------------------------------------------------------
