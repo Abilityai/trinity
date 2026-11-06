@@ -615,3 +615,95 @@ def test_terminate_keeps_the_agents_own_sentences(monkeypatch, status, detail):
     """Characterization: the agent's own 5xx sentences and any 4xx go on."""
     err = _terminate_against(monkeypatch, status, detail)
     assert (err.status_code, err.detail) == (status, detail)
+
+
+# ---------------------------------------------------------------------------
+# services/task_execution_service.py: the execution's error, which the sync
+# /task route answers at 503/504 and the session route at 502
+# ---------------------------------------------------------------------------
+
+def _execute_with(agent_error: BaseException, timeout_seconds: int = 3600):
+    from unittest.mock import MagicMock, patch
+    from services.task_execution_service import TaskExecutionService
+
+    mock_db = MagicMock()
+    mock_db.get_execution_timeout.return_value = timeout_seconds
+    mock_db.create_task_execution.return_value = MagicMock(id="exec-4284")
+    mock_capacity = MagicMock(acquire=AsyncMock(return_value=MagicMock(state="admitted")),
+                              release=AsyncMock())
+    mock_activity = MagicMock(track_activity=AsyncMock(return_value="act-4284"))
+
+    async def boom(*args, **kwargs):
+        raise agent_error
+
+    p = "services.task_execution_service."
+    with (
+        patch(p + "db", mock_db),
+        patch(p + "get_capacity_manager", return_value=mock_capacity),
+        patch(p + "activity_service", mock_activity),
+        patch(p + "dispatch_breaker_active", return_value=False),
+        patch(p + "dispatch_async_eligible", return_value=False),
+        patch(p + "note_unreachable_pull_trigger"),
+        patch(p + "settings_service.get_platform_default_model", return_value="sonnet"),
+        patch(p + "CircuitState", return_value=MagicMock(allow_request=lambda: True)),
+        patch(p + "_resolve_agent_runtime", return_value="claude"),
+        patch(p + "compose_system_prompt", return_value="prompt"),
+        patch(p + "is_execution_context_enabled", return_value=False),
+        patch(p + "agent_post_with_retry", side_effect=boom),
+        patch(p + "terminate_execution_on_agent", new=AsyncMock()),
+        patch(p + "_write_terminal_and_gate", new=AsyncMock()),
+    ):
+        return asyncio.run(TaskExecutionService().execute_task(
+            agent_name="test-agent", message="do the thing", triggered_by="schedule",
+            timeout_seconds=timeout_seconds))
+
+
+def test_execute_task_unexpected_error_names_the_class(caplog):
+    caplog.set_level(logging.ERROR)
+    result = _execute_with(RuntimeError(_PLANT))
+    assert result.status == "failed"
+    _assert_answer_clean(result.error, "Task execution failed (RuntimeError — details in backend logs)")
+    _assert_log_keeps_text(caplog.records, "Unexpected error executing task")
+
+
+def test_execute_task_unexpected_timeout_keeps_timed_out():
+    """The sync /task mapper answers 504 on "timed out": that word survives,
+    the rest of the text does not."""
+    result = _execute_with(RuntimeError(f"{_PLANT} Read timed out. (read timeout=60)"))
+    _assert_answer_clean(
+        result.error, "Task execution failed (RuntimeError: timed out — details in backend logs)")
+
+
+def test_execute_task_short_timeout_names_the_class(caplog):
+    caplog.set_level(logging.ERROR)
+    result = _execute_with(httpx.ReadTimeout(f"{_PLANT} The read operation timed out"))
+    assert result.error_code == "network"
+    _assert_answer_clean(result.error, "(ReadTimeout: timed out)")
+    _assert_log_keeps_text(caplog.records, "TIMEOUT on test-agent")
+
+
+def test_slot_admission_error_names_the_conflict_class():
+    """The admission give-up's text reaches the same execution error."""
+    import redis
+    from services import slot_service
+
+    class _Pipe:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def watch(self, *keys):
+            raise redis.WatchError(_PLANT)
+
+        def reset(self):
+            pass
+
+    svc = slot_service.SlotService.__new__(slot_service.SlotService)
+    svc.redis = SimpleNamespace(pipeline=lambda: _Pipe())
+    svc.slots_prefix, svc.metadata_prefix = "agent:slots:", "agent:slot:"
+    svc._cleanup_stale_slots_for_agent = AsyncMock()
+    with pytest.raises(slot_service.SlotAdmissionError) as exc:
+        asyncio.run(svc.acquire_slot("a1", "e-1", 1, "msg", 60))
+    _assert_answer_clean(str(exc.value), "(WatchError)")

@@ -197,7 +197,7 @@ class SlotService:
             raise SlotAdmissionError(
                 f"Slot admission for execution {execution_id} on agent "
                 f"'{agent_name}' undecided after {MAX_ADMISSION_ATTEMPTS} "
-                f"attempts: {last_conflict}"
+                f"attempts ({type(last_conflict).__name__})"
             ) from last_conflict
 
         logger.info(

@@ -67,6 +67,7 @@ from utils.credential_sanitizer import sanitize_dict, sanitize_execution_log, sa
 from services.runtime_secret_scrub import get_staged_values, scrub_obj, scrub_text
 from services.tool_call_summary import extract_tool_calls
 from utils.helpers import utc_now_iso
+from utils.log_masking import masked_text, masked_traceback
 # #2314 — the execution result vocabulary lives in its own module now (pure
 # dataclasses + enum, zero collaborators, so anything may import it without a
 # cycle). Re-exported here because ~80 call sites and 83 test files say
@@ -1495,6 +1496,17 @@ def _with_switch(
 _TIMEOUT_ATTRIBUTION_GRACE_S = 30
 
 
+def _exception_words(exc: BaseException) -> str:
+    """The class of ``exc``, plus "timed out" when its text says so.
+
+    The text itself stays in the log (abilityai/trinity#4284): this message is
+    the execution's error, which the sync routes answer at 5xx. "timed out"
+    survives because the sync /task mapper answers 504 on it.
+    """
+    said = ": timed out" if "timed out" in str(exc).lower() else ""
+    return f"{type(exc).__name__}{said}"
+
+
 def _classify_timeout_failure(
     elapsed_s: int,
     timeout_seconds: Optional[int],
@@ -1522,7 +1534,7 @@ def _classify_timeout_failure(
     limit_desc = (
         f"{timeout_seconds} seconds" if timeout_seconds is not None else "unset"
     )
-    detail = f" ({type(exc).__name__}: {exc})" if exc is not None else ""
+    detail = f" ({_exception_words(exc)})" if exc is not None else ""
     return (
         f"Task execution aborted after {elapsed_s}s of {limit_desc} allowed{detail}",
         TaskExecutionErrorCode.NETWORK,
@@ -2064,8 +2076,11 @@ class TaskExecutionService:
             raise
 
         except Exception as e:
-            error_msg = str(e)
-            logger.error(f"[TaskExecService] Unexpected error executing task on {agent_name}: {error_msg}")
+            error_msg = f"Task execution failed ({_exception_words(e)} — details in backend logs)"
+            logger.error(
+                "[TaskExecService] Unexpected error executing task on %s: %s",
+                agent_name, masked_traceback(e),
+            )
             # #671/H4: CAS-gate the terminal write; complete the activity only
             # if we won.
             await _write_terminal_and_gate(
@@ -3089,7 +3104,8 @@ class TaskExecutionService:
         )
         logger.error(
             f"[TaskExecService] TIMEOUT on {agent_name} after {elapsed}s "
-            f"(limit={effective_limit}s, configured={timeout_seconds}s): {error_msg}"
+            f"(limit={effective_limit}s, configured={timeout_seconds}s): {error_msg}; "
+            f"{masked_text(str(exc)) if exc is not None else ''}"
         )
 
         # Issue #61: Terminate the execution on the agent to prevent orphaned
