@@ -765,10 +765,50 @@ def _case_connect_slack(cr, monkeypatch):
     return cr.connect_slack_transport(request=request, body=body, current_user=_admin()), SLACK_APP_TOKEN, "Failed to connect"
 
 
+def _slack_connect_with(cr, monkeypatch, *, mode, held, body):
+    """connect_slack_transport whose transport start echoes ``held``: the
+    value the handler read from settings, not one the request carried."""
+    monkeypatch.setattr(cr, "set_secret_setting", lambda k, v: None)
+    ss = _live("services.settings_service")
+    monkeypatch.setattr(ss, "get_slack_transport_mode", lambda: mode)
+    monkeypatch.setattr(ss, "get_slack_app_token", lambda: held)
+    monkeypatch.setattr(ss, "get_slack_signing_secret", lambda: held)
+    kind = "socket" if mode == "socket" else "webhook"
+    for name in ("adapters.slack_adapter", "adapters.message_router", f"adapters.transports.slack_{kind}"):
+        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+    sys.modules["adapters.slack_adapter"].SlackAdapter = MagicMock
+    sys.modules["adapters.message_router"].message_router = MagicMock()
+
+    class _Transport:
+        def __init__(self, *a):
+            pass
+
+        async def start(self):
+            raise RuntimeError(f"{SENTINEL} {held}")
+
+    setattr(sys.modules[f"adapters.transports.slack_{kind}"],
+            "SlackSocketTransport" if kind == "socket" else "SlackWebhookTransport", _Transport)
+    request = _request()
+    request.app.state = SimpleNamespace(slack_transport=None)
+    return cr.connect_slack_transport(request=request, body=body, current_user=_admin()), held, "Failed to connect"
+
+
+def _case_reconnect_slack_stored_app_token(cr, monkeypatch):
+    # Reconnect: the body carries no token, so only the stored one is held.
+    return _slack_connect_with(cr, monkeypatch, mode="socket", held=SLACK_APP_TOKEN,
+                               body=cr.SlackConnectRequest())
+
+
+def _case_connect_slack_webhook_signing_secret(cr, monkeypatch):
+    return _slack_connect_with(cr, monkeypatch, mode="webhook", held=SLACK_SIGNING,
+                               body=cr.SlackConnectRequest(transport_mode=None))
+
+
 @pytest.mark.parametrize("case", [
     _case_api_keys_status, _case_update_anthropic, _case_delete_anthropic,
     _case_update_github, _case_delete_github, _case_get_slack,
     _case_update_slack, _case_delete_slack, _case_connect_slack,
+    _case_reconnect_slack_stored_app_token, _case_connect_slack_webhook_signing_secret,
 ], ids=lambda f: f.__name__[len("_case_"):])
 def test_settings_credentials_500_detail_carries_no_raw_message(cr, monkeypatch, caplog, case):
     coro, held, prefix = case(cr, monkeypatch)
