@@ -41,9 +41,9 @@ logger = logging.getLogger(__name__)
 TWILIO_WHATSAPP_MAX_LENGTH = 1600
 
 # The most text `_markdown_to_whatsapp` runs its regexes over, synchronously on
-# the event loop. Reply caps differ by path: sync task 10,000 chars, proactive
-# 4,096, the async result callback routers/agents.py::_MAX_CALLBACK_RESPONSE_CHARS
-# and the pull result route none. Sized to the callback cap; anything past it is
+# the event loop. A channel reply reaches it with no length cap (push: the
+# inline /api/task response; pull: the result route), so this is the only bound.
+# Sized to routers/agents.py::_MAX_CALLBACK_RESPONSE_CHARS; anything past it is
 # passed through unconverted.
 _MARKDOWN_CONVERSION_MAX_CHARS = 4_000_000
 

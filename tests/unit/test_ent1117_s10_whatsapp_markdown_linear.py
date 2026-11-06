@@ -1,9 +1,9 @@
 """WhatsApp markdown conversion runs in linear time (trinity-enterprise#1117).
 
 `WhatsAppAdapter._markdown_to_whatsapp` converts the agent's reply before it is
-split into 1600-char Twilio messages. The reply reaches it from the channel
-router (with no length cap when the turn ran on the pull path) and from
-proactive delivery, and the conversion is synchronous inside the async send
+split into 1600-char Twilio messages. A channel reply reaches it with no length
+cap, on the push path (the inline /api/task response) and the pull path (the
+result route) alike, and the conversion is synchronous inside the async send
 path, so its cost is paid on the backend event loop.
 
 Two of its regexes were quadratic in the reply length:
@@ -185,10 +185,9 @@ def _module_int_constant(path: Path, name: str) -> int:
 
 class TestConversionClamp:
     def test_clamp_equals_the_result_callback_cap(self, wa):
-        """The clamp is sized to the result-callback cap, the largest explicit
-        reply cap (the sync task path cuts at 10,000 chars, proactive text at
-        4,096). The pull result route sets none, so there the clamp is the only
-        bound on the regex work."""
+        """The clamp is sized to the result-callback cap. A channel reply has no
+        length cap of its own on either the push or the pull path, so the clamp
+        is the only bound on the regex work."""
         callback_cap = _module_int_constant(
             _BACKEND / "routers" / "agents.py", "_MAX_CALLBACK_RESPONSE_CHARS"
         )
