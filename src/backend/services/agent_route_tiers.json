@@ -1297,6 +1297,26 @@
   "reason": "payment-gated public surface (x402 / Nevermined)",
   "tier": "public"
  },
+ "person_memory.py::get_person_memory": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/person-memory/person",
+  "tier": "owner"
+ },
+ "person_memory.py::list_person_memory_people": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/person-memory",
+  "tier": "owner"
+ },
+ "person_memory.py::list_person_memory_writes": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/person-memory/writes",
+  "tier": "owner"
+ },
+ "person_memory.py::undo_person_memory_write": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/person-memory/writes/{write_id}/undo",
+  "tier": "owner"
+ },
  "public_links.py::create_public_link": {
   "method": "POST",
   "path": "/api/agents/{agent_name}/public-links",

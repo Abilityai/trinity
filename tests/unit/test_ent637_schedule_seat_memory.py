@@ -302,7 +302,10 @@ def test_the_person_sees_a_run_now_fire_as_a_scheduled_run(monkeypatch):
     from client_portal import agent_page
     monkeypatch.setattr(agent_page.db, "get_or_create_public_user_memory",
                         lambda a, e: {"agent_notes": "v2", "updated_at": "t2"})
-    monkeypatch.setattr(agent_page.db, "list_public_user_memory_writes", lambda a, e, n: [
+    # ent#962: the page reads one page past the limit, with a cursor and the
+    # notes section, and decides `undoable` from the store's latest open write.
+    monkeypatch.setattr(agent_page.db, "latest_open_public_user_memory_writes", lambda a, e: {"notes": "w2"})
+    monkeypatch.setattr(agent_page.db, "list_public_user_memory_writes", lambda a, e, n, **k: [
         {"id": "w2", "execution_id": "e2", "triggered_by": "manual", "schedule_id": "sch-1",
          "previous_notes": "v1", "new_notes": "v2", "written_at": "t2", "undone_at": None},
         {"id": "w1", "execution_id": "e1", "triggered_by": "public", "schedule_id": None,

@@ -2145,7 +2145,10 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   is tuned against (90-day retention per agent).
 - **Owner view**: `GET/DELETE /api/agents/{name}/retrieval-memory/facts…` and
   `GET …/retrieval-memory/events` (owner + human-only); forget is a recorded
-  soft delete.
+  soft delete. A person's facts are browsed per person in Agent Settings →
+  Person memory (trinity-enterprise#962, MEM-001's owner view): their live
+  facts, each fact's journal (`events?fact_id=`), Forget behind a confirm, and
+  the owner search scoped to that person (`user_email`).
 - **Flow**: `docs/memory/feature-flows/retrieval-memory.md`
 
 ## 6. Activity Monitoring
