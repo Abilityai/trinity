@@ -18,6 +18,7 @@ from services.docker_service import get_agent_container
 from services.agent_service.rename import (
     AgentContainerMissing,
     RenameRefused,
+    SystemAgentRefused,
     rename_agent_now,
 )
 
@@ -145,6 +146,8 @@ async def rename_agent_endpoint(
             ws_manager=manager,
             filtered_ws_manager=filtered_manager,
         )
+    except SystemAgentRefused:
+        raise HTTPException(status_code=403, detail="System agents cannot be renamed")
     except AgentContainerMissing:
         raise HTTPException(status_code=404, detail="Agent not found")
     except RenameRefused:

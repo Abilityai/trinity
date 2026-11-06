@@ -25,8 +25,10 @@ What stays with the ROUTE, deliberately:
   both of which must fire before anything is touched.
 
 Three refusals come out of here, each mapped by the route to the code it
-answered before: `HTTPException(403)` for a system agent, `AgentContainerMissing`
-→ 404, and `RenameRefused` → 500. The rename leaves the agent STOPPED; the next
+answered before: `SystemAgentRefused` → 403, `AgentContainerMissing` → 404, and
+`RenameRefused` → 500. None of them is a FastAPI error: a service holds no HTTP
+concerns (Invariant #1), and a platform caller with no route needs the refusal,
+not a status code. The rename leaves the agent STOPPED; the next
 `start_agent_internal` recreate is what re-bakes `AGENT_NAME`, the
 `trinity.agent-name` label and `TRINITY_AGENT_AUTH_TOKEN`.
 """
@@ -37,8 +39,6 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional
-
-from fastapi import HTTPException
 
 from database import db
 from models import User
@@ -73,6 +73,15 @@ class RenameRefused(Exception):
     """
 
 
+class SystemAgentRefused(Exception):
+    """The agent is a system agent, which is never renamed.
+
+    Raised before any side effect. The route answers it 403 with the text it
+    always had; the user-facing route refuses a system agent itself, earlier,
+    so this is the floor for a platform caller that has no gate above it.
+    """
+
+
 class AgentContainerMissing(Exception):
     """There is no container for the agent, so there is nothing to rename.
 
@@ -101,12 +110,12 @@ async def rename_agent_now(
     (`create_agent_internal`'s shape): a caller with none broadcasts nothing
     rather than reaching back into a router for a global.
 
-    Raises `HTTPException(403)` for a system agent, `AgentContainerMissing`
+    Raises `SystemAgentRefused` for a system agent, `AgentContainerMissing`
     when there is no container, `RenameRefused` when the DB will not take the
     name, and propagates a Docker fault to the caller.
     """
     if db.is_system_agent(old_name):
-        raise HTTPException(status_code=403, detail="System agents cannot be renamed")
+        raise SystemAgentRefused(old_name)
 
     container = get_agent_container(old_name)
     if not container:

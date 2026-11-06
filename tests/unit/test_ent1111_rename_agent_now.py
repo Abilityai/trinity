@@ -14,7 +14,9 @@ This file pins both halves:
   * the route — it delegates, and every status code and response field it
     answered before is unchanged.
 """
+import ast
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -24,6 +26,7 @@ from services.agent_service import rename as rename_mod
 from services.agent_service.rename import (
     AgentContainerMissing,
     RenameRefused,
+    SystemAgentRefused,
     rename_agent_now,
 )
 
@@ -192,15 +195,28 @@ class TestRenameAgentNow:
     # -- refusals ---------------------------------------------------------
 
     async def test_a_system_agent_is_refused_before_any_side_effect(self, env):
+        """A domain refusal, never an HTTPException: a service holds no HTTP
+        concerns (Invariant #1), and the route owns the status code."""
         env["db"].is_system_agent.return_value = True
 
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(SystemAgentRefused) as exc:
             await rename_agent_now("trinity-system", "mine", actor=None)
 
-        assert exc.value.status_code == 403
-        assert exc.value.detail == "System agents cannot be renamed"
+        assert not isinstance(exc.value, HTTPException)
+        assert "trinity-system" in str(exc.value)
         assert env["order"] == []
         env["db"].rename_agent.assert_not_called()
+
+    async def test_the_module_imports_nothing_from_fastapi(self):
+        """The one FastAPI import was the 403 above (I3). Invariant #1: the
+        HTTP mapping belongs to the route, so the primitive must not grow a
+        second way to answer a request."""
+        tree = ast.parse(Path(rename_mod.__file__).read_text())
+        fastapi = [n for n in ast.walk(tree)
+                   if isinstance(n, ast.ImportFrom) and (n.module or "").startswith("fastapi")]
+        fastapi += [a.name for n in ast.walk(tree) if isinstance(n, ast.Import)
+                    for a in n.names if a.name.startswith("fastapi")]
+        assert fastapi == []
 
     async def test_a_missing_container_is_its_own_refusal(self, env, monkeypatch):
         monkeypatch.setattr(rename_mod, "get_agent_container",
@@ -407,6 +423,19 @@ class TestRouteDelegates:
                 "staging", MagicMock(new_name="prod"), _request(), _person())
 
         assert (exc.value.status_code, exc.value.detail) == (404, "Agent not found")
+
+    async def test_a_system_agent_refusal_from_the_primitive_still_403s(self, route):
+        """The route refuses a system agent itself, earlier (the test above), so
+        this arm is the floor for anything that slips past it — and it answers
+        the same body the primitive's own HTTPException used to carry."""
+        route.primitive.side_effect = SystemAgentRefused("trinity-system")
+
+        with pytest.raises(HTTPException) as exc:
+            await route.mod.rename_agent_endpoint(
+                "staging", MagicMock(new_name="prod"), _request(), _person())
+
+        assert (exc.value.status_code, exc.value.detail) == (
+            403, "System agents cannot be renamed")
 
     async def test_a_db_refusal_still_500s_with_the_same_text(self, route):
         route.primitive.side_effect = RenameRefused("staging -> prod")
