@@ -69,11 +69,11 @@ User pastes KEY=VALUE text, which gets merged into the agent's `.env` file.
 ### Frontend (`src/frontend/src/components/CredentialsPanel.vue`)
 
 > **Doc correction (ent#127).** This section previously cited
-> `composables/useAgentCredentials.js:177-237`. That file still exists and is
-> re-exported from `composables/index.js`, but **no component imports it** — the
-> live implementation is `CredentialsPanel.vue`, and the composable is a dead
-> duplicate carrying the pre-ent#127 versions of both defects fixed below. Do
-> not "restore" the live path from it.
+> `composables/useAgentCredentials.js:177-237`. Nothing imported that
+> composable; it was a dead duplicate carrying the pre-ent#127 versions of both
+> defects fixed below, and it was deleted with its `composables/index.js`
+> re-export (trinity-enterprise#1117). The live implementation is
+> `CredentialsPanel.vue`, with the value encoding in `utils/envFile.js`.
 
 ```javascript
 // Parse .env-style text to key-value pairs
@@ -94,19 +94,37 @@ const envContent = formatEnvContent(merged)
 await agentsStore.injectCredentials(props.agentName, { '.env': envContent })
 ```
 
-**Round-trip (ent#127).** `formatEnvContent` writes `${key}="${value}"` with `"`
-escaped as `\"`; `parseEnvText` strips the surrounding quotes **and unescapes**.
-Before ent#127 it did not, so a value containing a quote grew one backslash per
-submit — for every other credential in the file, not just the one being edited.
-Latent while Quick Inject was a rare bulk paste; the ent#127 per-row checklist
-makes read-merge-write the normal interaction, which is why both defects were
-fixed there.
+**Round-trip (ent#127, trinity-enterprise#1117).** `formatEnvContent` writes
+each line with `utils/envFile.js::formatEnvLine`, the agent's own encoding
+(#2023, `execution_env.format_env_line`): `KEY="value"` with `\` escaped as
+`\\` and then `"` as `\"`, backslash first. `parseEnvText` reads each value with
+`unquoteEnvValue`: one matched pair of double quotes is stripped and both
+escapes are reversed in a single scan; a single-quoted value is taken
+literally; anything else is kept as written. Before ent#127 the reader did not
+unescape, so a value containing a quote grew one backslash per submit — for
+every other credential in the file, not just the one being edited. Until
+trinity-enterprise#1117 the writer escaped only `"`, so a value containing `\\`
+lost a backslash on the next save of any credential in the file. The ent#127
+per-row checklist makes read-merge-write the normal interaction, which is why
+both halves matter.
 
-**Residual, deliberately unchanged:** the AGENT's own reader strips quote
-characters and does not unescape, so a value containing `"` reaches the agent
-with the backslash. Escaping for a format nobody unescapes is a pre-existing
-defect in its own right; widening the escaping would make the agent-side
-mismatch worse. `formatEnvContent` also still drops author comments.
+Every reader that hands on arbitrary values decodes the same way: the agent's
+`execution_env.unquote_env_value` (what executions receive), the backend's
+`agent_env_patch` mirror, and `agent_server/mcp_template.py`, which renders
+`.mcp.json.template` from `.env` at every container start (it reversed only
+`\"` until trinity-enterprise#1117). Three single-key readers only strip quote
+characters and never unescape: `codex_runtime._parse_env_value` (the
+OpenAI/Codex key) and the `GITHUB_PAT` lookups in `startup.sh` and
+`git-credential-trinity.sh`; neither kind of key contains `\` or `"`.
+`tests/fixtures/ent1117-env-escape-cases.json`
+holds the encoding (values → lines, generated from the agent's encoder) and
+`tests/fixtures/ent1117-env-legacy-reads.json` holds lines this writer never
+produced (the previous writer's output, hand edits, pastes) with the values
+each reader must keep returning; the only difference between the panel and the
+agent is a lone `'`, which the panel reads as empty. Both fixtures are run by
+`tests/unit/test_ent1117_s11_env_escape_table.py` and
+`src/frontend/tests/unit/ent1117EnvEscape.spec.js`. `formatEnvContent` still
+drops author comments.
 
 ### Store Action (`src/frontend/src/stores/agents.js`)
 ```javascript
