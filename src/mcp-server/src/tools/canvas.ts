@@ -22,7 +22,7 @@
 import { z } from "zod";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
-import { resolveActingAgent } from "../access.js";
+import { ACT_AS_PARAM_DESCRIPTION, actingClient, resolveActingAgent } from "../access.js";
 
 /**
  * Which canvas a call acts on (ent#555).
@@ -142,8 +142,8 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
   /** The canvas is written AS the calling agent — there is no target parameter,
    * so the identity comes from the key (`resolveActingAgent`, #2975: an
    * agent-scoped key, or the orchestrator's system-scoped one). */
-  const getAgentName = (authContext: McpAuthContext | undefined): string =>
-    resolveActingAgent(authContext, "The canvas tools");
+  const getAgentName = (authContext: McpAuthContext | undefined, requested?: string): string =>
+    resolveActingAgent(authContext, "The canvas tools", requested);
 
   const fail = (error: unknown) =>
     JSON.stringify(
@@ -175,6 +175,7 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
         "chose does not reach the person in this conversation, and `visibility_note` says what to do " +
         "about it. null means it could not be determined — not that they cannot see it.",
       parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         canvas_id: z.string().optional().describe(
           "The canvas to write. Omit for your default canvas 'main'; name another (e.g. 'pipeline', " +
           "'weekly') to keep a separate surface. 1-64 characters of letters, digits, dot, dash or " +
@@ -212,6 +213,7 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
       }),
       execute: async (
         params: {
+          agent_name?: string;
           canvas_id?: string;
           title?: string;
           blocks: Array<{ id?: string; kind: string; title?: string; slot?: string; payload?: unknown }>;
@@ -222,13 +224,14 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
         context?: { session?: McpAuthContext },
       ) => {
         const authContext = context?.session;
-        const apiClient = getClient(authContext);
+        let apiClient = getClient(authContext);
         let agentName: string;
         try {
-          agentName = getAgentName(authContext);
+          agentName = getAgentName(authContext, params.agent_name);
         } catch (error) {
           return fail(error);
         }
+        apiClient = actingClient(apiClient, authContext, agentName);
         try {
           const targetId = await resolveCanvasId(apiClient, agentName, params.canvas_id, params.execution_id);
           const result = await apiClient.writeCanvas(agentName, targetId, {
@@ -262,6 +265,7 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
         "payload), so resend the title you want kept (block titles too: short, no provenance suffixes). " +
         "Last write wins if two turns patch at once.",
       parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         canvas_id: z.string().optional().describe(
           "The canvas to patch. Omit to patch the canvas the user has OPEN (what they mean " +
           "by \"this\"), falling back to your default 'main'."),
@@ -275,6 +279,7 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
       }),
       execute: async (
         params: {
+          agent_name?: string;
           canvas_id?: string;
           blocks: Array<{ id: string; kind: string; title?: string; slot?: string; payload?: unknown }>;
           execution_id?: string;
@@ -282,13 +287,14 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
         context?: { session?: McpAuthContext },
       ) => {
         const authContext = context?.session;
-        const apiClient = getClient(authContext);
+        let apiClient = getClient(authContext);
         let agentName: string;
         try {
-          agentName = getAgentName(authContext);
+          agentName = getAgentName(authContext, params.agent_name);
         } catch (error) {
           return fail(error);
         }
+        apiClient = actingClient(apiClient, authContext, agentName);
         try {
           const targetId = await resolveCanvasId(apiClient, agentName, params.canvas_id, params.execution_id);
           const result = await apiClient.patchCanvas(agentName, targetId, {
@@ -316,6 +322,7 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
         "was written', which counts the run that wrote it. The header does not render it; it shows " +
         "`updated_at` and `agent_last_run_at` and draws no conclusion. Judge for yourself from those.",
       parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         canvas_id: z.string().optional().describe(
           "The canvas to read. Omit to read the canvas the user currently has OPEN — " +
           "that is what they mean by \"this\" — falling back to your default 'main'."),
@@ -324,17 +331,18 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
           "omitting canvas_id reads whatever canvas the user is looking at."),
       }),
       execute: async (
-        params: { canvas_id?: string; execution_id?: string },
+        params: { agent_name?: string; canvas_id?: string; execution_id?: string },
         context?: { session?: McpAuthContext },
       ) => {
         const authContext = context?.session;
-        const apiClient = getClient(authContext);
+        let apiClient = getClient(authContext);
         let agentName: string;
         try {
-          agentName = getAgentName(authContext);
+          agentName = getAgentName(authContext, params.agent_name);
         } catch (error) {
           return fail(error);
         }
+        apiClient = actingClient(apiClient, authContext, agentName);
         try {
           return JSON.stringify(
             { success: true, canvas: await apiClient.getCanvas(
@@ -359,16 +367,19 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
         "finished a run (`agent_last_run_at`, the same for every row). Metadata only; use " +
         "get_canvas for the content. The `stale` flag is a legacy derived value that counts the " +
         "run that wrote the canvas and is not what the header shows — read the two timestamps instead.",
-      parameters: z.object({}),
-      execute: async (_params: unknown, context?: { session?: McpAuthContext }) => {
+      parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
+      }),
+      execute: async (params: { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         const authContext = context?.session;
-        const apiClient = getClient(authContext);
+        let apiClient = getClient(authContext);
         let agentName: string;
         try {
-          agentName = getAgentName(authContext);
+          agentName = getAgentName(authContext, params.agent_name);
         } catch (error) {
           return fail(error);
         }
+        apiClient = actingClient(apiClient, authContext, agentName);
         try {
           const rows = await apiClient.listCanvases(agentName);
           // Self-scoped by construction (the path agent IS the caller), so the
@@ -397,20 +408,22 @@ export function createCanvasTools(client: TrinityClient, requireApiKey: boolean)
         "is what exhausts it — prefer rewriting one durable surface per topic to creating " +
         "'report-2026-09-08'-style ids, and clear the ones whose job is done.",
       parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         canvas_id: z.string().describe("The canvas to remove."),
       }),
       execute: async (
-        params: { canvas_id: string },
+        params: { agent_name?: string; canvas_id: string },
         context?: { session?: McpAuthContext },
       ) => {
         const authContext = context?.session;
-        const apiClient = getClient(authContext);
+        let apiClient = getClient(authContext);
         let agentName: string;
         try {
-          agentName = getAgentName(authContext);
+          agentName = getAgentName(authContext, params.agent_name);
         } catch (error) {
           return fail(error);
         }
+        apiClient = actingClient(apiClient, authContext, agentName);
         try {
           return JSON.stringify(
             { success: true, result: await apiClient.clearCanvas(agentName, params.canvas_id) },

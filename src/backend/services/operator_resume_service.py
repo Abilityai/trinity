@@ -10,8 +10,11 @@ gating request; this module is the platform-side fix.
 
 Shape, and why:
 
-* **Opt-in, per agent.** A dispatch spends money. Unconditional respond→resume
-  turns a respond-storm into an execution storm, so the flag defaults OFF. It
+* **A per-agent switch, on by default.** A dispatch spends money, so the OWNER
+  holds the switch (a respond-storm is an execution storm, and an owner can
+  turn that off for an agent). Default ON since abilityai/trinity-enterprise#1108
+  — before it, an approval in the Inbox moved nothing until the person wrote
+  "go ahead" in the chat. It
   lives on the AGENT rather than on the item because a per-request
   ``resume: true`` the agent sets itself would let the agent decide that
   answering costs the answerer money — unacceptable once the answerer is an
@@ -30,21 +33,26 @@ The caller invokes this only on a CAS-*won* respond (the item actually moved
 ``pending → responded``), mirroring the #1083 rule that side effects hang off the
 CAS result and never off a lost race.
 
-**Any ending, not only an answer (trinity-enterprise#611).** A cancelled or an
-expired ask is an ending the agent is waiting on too — without a wake it waits
-for an answer that will never come. ``maybe_dispatch_ending`` wakes it under the
-same opt-in, through the same dispatch surface, with its own trigger
-(``operator_ending``), ONE turn per agent per ending event (a bulk sweep of 25 of
-one agent's asks is one turn, not 25). Both are called only from the ask sink
-(``services/ask_service.py``), which hands them only the rows its
-compare-and-set won.
+**A person's ending, not only an answer (trinity-enterprise#611).** A cancelled
+or a dismissed ask is an ending the agent is waiting on too — without a wake it
+waits for an answer that will never come. ``maybe_dispatch_ending`` wakes it
+under the same switch, through the same dispatch surface, with its own trigger
+(``operator_ending``), ONE turn per agent per ending event (a bulk cancel of 25
+of one agent's asks is one turn, not 25). An EXPIRY wakes nobody (ruled on
+abilityai/trinity-enterprise#1108: the wake is on by default, and the sweep
+must not spend an owner's turn for a timeout nobody chose) — the ask sink
+returns before the spawn, and the agent reads the timeout on its next turn.
+Both are called only from the ask sink (``services/ask_service.py``), which
+hands them only the rows its compare-and-set won.
 """
 
 import asyncio
 import hashlib
 import logging
-from typing import Any, Awaitable, Callable, Dict, Optional, Set
+from collections import OrderedDict
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
+from services.execution_envelope import TaskExecutionErrorCode
 from services.operator_queue_choices import SOMETHING_ELSE
 
 logger = logging.getLogger(__name__)
@@ -56,9 +64,9 @@ RESPONSE_MAX_CHARS = 4000
 
 TRIGGERED_BY = "operator_response"
 
-# trinity-enterprise#611: a cancel or an expiry wakes the agent that raised the
-# ask. Its own trigger, so Executions never records a timeout as an operator's
-# response.
+# trinity-enterprise#611: a cancel or a dismissal wakes the agent that raised
+# the ask. Its own trigger, so Executions never records an ending as an
+# operator's response. (An expiry no longer dispatches — ent#1108 ruling.)
 TRIGGERED_BY_ENDING = "operator_ending"
 
 # The rider on an expiry (trinity-enterprise#611, operator ruling): a timeout is
@@ -68,6 +76,24 @@ EXPIRY_RIDER = "Denied by timeout; do not re-ask the same action without new inf
 # A sweep can end many of one agent's asks; the turn lists a bounded number.
 ENDING_LIST_MAX = 25
 _TITLE_MAX_CHARS = 200
+
+# abilityai/trinity-enterprise#1108 AC #4: the failure classes in which NO turn
+# started on the agent, so the wake is still owed — `pending`, with the
+# idempotency claim released so the agent's next start re-dispatches it. The
+# platform never reached the container (`network`), never admitted the turn
+# (`capacity` — a full durable backlog too, `circuit_open`,
+# `ephemeral_exhausted`), or the agent could not start one (`auth`, `billing`).
+# Every other class is a turn that ran and ended badly, which its own execution
+# row reports: a `timeout` in particular means a turn ran. Spelled from the
+# enum so a renamed member fails at import, never silently stops matching.
+NO_TURN_ERROR_CODES = frozenset({
+    TaskExecutionErrorCode.NETWORK.value,
+    TaskExecutionErrorCode.CAPACITY.value,
+    TaskExecutionErrorCode.CIRCUIT_OPEN.value,
+    TaskExecutionErrorCode.BILLING.value,
+    TaskExecutionErrorCode.AUTH.value,
+    TaskExecutionErrorCode.EPHEMERAL_EXHAUSTED.value,
+})
 
 # Strong refs for background dispatches: a bare create_task can be garbage
 # collected mid-flight (the #1083 `_inflight` footgun).
@@ -127,8 +153,23 @@ def _framed_message(
         # row's answer is the word `provided`; the wake names the VARIABLE and
         # tells the agent where to read it — the value is in its environment
         # and nowhere else, and `response_text` is never set for this kind.
+        from services import credential_destination
         from services.credential_ask_policy import credential_name_of
         name = credential_name_of(item.get("context")) or "the credential"
+        destination = credential_destination.destination_of(item.get("context"))
+        if destination is not None:
+            # trinity-enterprise#1109: delivered elsewhere — this agent never
+            # held it and must not go looking for it.
+            where = credential_destination.plain_words(destination)
+            lines += [
+                "---",
+                label,
+                f"answer: {answer} — {name} was delivered to {where}; it is not in your "
+                "environment, you never see its value, and the agent there reads it from "
+                "its own.",
+                "---",
+            ]
+            return "\n".join(lines)
         lines += [
             "---",
             label,
@@ -235,6 +276,7 @@ async def maybe_dispatch_resume(
     # DEFINED `task_execution_service` — manufacturing the very symbol whose
     # absence was the bug. Verified against a live instance: flag on, answer
     # recorded, zero executions created.
+    from services.docker_utils import agent_container_state_async
     from services.task_execution_service import dispatch_and_await_terminal
 
     agent_name = item.get("agent_name")
@@ -250,6 +292,26 @@ async def maybe_dispatch_resume(
         logger.exception(
             "operator-resume: opt-in unreadable for agent=%s item=%s — not dispatching",
             agent_name, item_id,
+        )
+        return None
+
+    # abilityai/trinity-enterprise#1108 AC #4: nothing auto-starts an agent, so a
+    # wake for a stopped one is a FAILED execution and nothing else. Skipped and
+    # said so — the ask reads "agent not yet woken" (`wake_state = pending`) and
+    # the agent's next start re-dispatches it once (`redispatch_pending_wakes`).
+    # `None` means Docker could not be asked — attempt it, the dispatch path
+    # records its own failure. Read off the event loop (#2196), like the ending
+    # wake below.
+    try:
+        state = await agent_container_state_async(agent_name)
+    except Exception:  # noqa: BLE001 — "could not ask" is None, never a raise
+        state = None
+    if state in ("stopped", "missing"):
+        _set_wake_state(db, item_id, "pending")
+        await _audit(
+            platform_audit_service, AuditEventType,
+            agent_name, item_id, responded_by_email,
+            execution_id=None, status="skipped_not_running", error=None,
         )
         return None
 
@@ -295,6 +357,11 @@ async def maybe_dispatch_resume(
             # line; every other return path withholds the person (ent#715). Who
             # answered stays in the queue row and the audit row; the served seat
             # is read off the Workspace stamp (`served_person_for_row`).
+            # abilityai/trinity-enterprise#1108: at capacity the wake goes on the
+            # DURABLE backlog instead of being rejected — the drain runs it when
+            # a slot frees, and the adapter waits out the queue. A rejected wake
+            # was a FAILED row under a completed idempotency key: never retried.
+            queue_on_capacity=True,
             **destination,
         )
     except Exception as exc:
@@ -311,6 +378,27 @@ async def maybe_dispatch_resume(
             agent_name, item_id, responded_by_email,
             execution_id=None, status="dispatch_error", error=type(exc).__name__,
         )
+        # No turn ran, so the wake is still owed (ent#1108 AC #4): the next
+        # start tries once more, under a fresh idempotency claim (released above).
+        _set_wake_state(db, item_id, "pending")
+        return None
+
+    if _never_reached_the_agent(result):
+        # A `NO_TURN_ERROR_CODES` class: no turn ran, so the wake is still owed
+        # (ent#1108 AC #4). The idempotency claim is RELEASED, not completed: a
+        # completed key would make the next start's re-dispatch replay into
+        # nothing.
+        if idem is not None:
+            try:
+                idempotency_service.fail(idem)
+            except Exception:
+                logger.exception("operator-resume: idempotency release failed")
+        _set_wake_state(db, item_id, "pending")
+        await _audit(
+            platform_audit_service, AuditEventType,
+            agent_name, item_id, responded_by_email,
+            execution_id=result.execution_id, status=result.status, error=result.error,
+        )
         return None
 
     if idem is not None:
@@ -319,12 +407,132 @@ async def maybe_dispatch_resume(
         except Exception:
             logger.exception("operator-resume: idempotency complete failed")
 
+    # A turn ran (its own row says how it went): the wake is no longer owed.
+    _set_wake_state(db, item_id, "woken")
     await _audit(
         platform_audit_service, AuditEventType,
         agent_name, item_id, responded_by_email,
         execution_id=result.execution_id, status=result.status, error=result.error,
     )
     return result.execution_id
+
+
+def _never_reached_the_agent(result) -> bool:
+    """A result whose failure is one of `NO_TURN_ERROR_CODES` (ent#1108 AC #4):
+    no turn started on the agent, so the wake is still owed. Read off the
+    result's own `error_code` (the enum or its value); any other failure is a
+    turn that ran and failed, which its execution row reports."""
+    code = getattr(result, "error_code", None)
+    code = getattr(code, "value", code)
+    return code in NO_TURN_ERROR_CODES
+
+
+def _set_wake_state(db, item_id: str, state: str) -> None:
+    """Record the answer wake's status on the ask (ent#1108 AC #4). Best-effort:
+    the status must never decide whether the wake itself happens."""
+    try:
+        db.set_operator_queue_wake_state(item_id, state)
+    except Exception:  # noqa: BLE001
+        logger.warning("operator-resume: wake_state=%s not recorded for item=%s",
+                       state, item_id, exc_info=True)
+
+
+# abilityai/trinity-enterprise#1108 AC #4: the answer wakes a composed turn
+# carries in its Execution Context line, keyed by execution id, marked `woken`
+# when THAT execution's SUCCESS terminal lands (`mark_carried_wakes`, hung off
+# `event_dispatch_service.spawn_task_terminal_event` — the one fan-out every
+# CAS-won terminal writer calls). Process-local by design: the compose and the
+# terminal of a push turn run in one coroutine. Where they can land on
+# different uvicorn workers (a #1083 callback, a pull claim's result) the entry
+# is missed and the row stays `pending`, which the agent's next start
+# re-dispatches once — a duplicate turn, never a silently dropped wake, which
+# is the direction AC #4 requires. Bounded; an entry a terminal never claims
+# (the sync `/chat` route emits no terminal event) is evicted oldest-first.
+_carried_wakes: "OrderedDict[str, Tuple[str, Tuple[str, ...]]]" = OrderedDict()
+_CARRIED_WAKES_MAX = 1024
+
+
+def note_carried_wakes(execution_id: str, agent_name: str, request_ids: List[str]) -> None:
+    """Record the answers an execution's composed prompt lists (the compose
+    step calls this; `platform_prompt_service.carried_answer_wakes` decides
+    which). A re-composed execution — a pull re-delivery — replaces its entry."""
+    ids = tuple(r for r in (request_ids or []) if r)
+    if not execution_id or not agent_name or not ids:
+        return
+    _carried_wakes[execution_id] = (agent_name, ids)
+    _carried_wakes.move_to_end(execution_id)
+    while len(_carried_wakes) > _CARRIED_WAKES_MAX:
+        _carried_wakes.popitem(last=False)
+
+
+async def mark_carried_wakes(execution_id: Optional[str], terminal_status: Any) -> None:
+    """The terminal side of `note_carried_wakes`: on SUCCESS the carried
+    answers are no longer owed a wake (`pending` → `woken`); any other terminal
+    drops the entry and leaves the rows `pending` for the next start. Never
+    raises — it runs on the path of an already-billed terminal."""
+    if not execution_id:
+        return
+    entry = _carried_wakes.pop(execution_id, None)
+    if entry is None:
+        return
+    status = getattr(terminal_status, "value", terminal_status)
+    if status != "success":
+        return
+    agent_name, ids = entry
+    try:
+        from database import db
+        db.mark_operator_queue_wakes_woken(agent_name, list(ids))
+    except Exception:  # noqa: BLE001
+        logger.warning("operator-resume: carried wakes not marked woken for execution=%s",
+                       execution_id, exc_info=True)
+
+
+async def redispatch_pending_wakes(agent_name: str) -> int:
+    """Deliver the answer wakes this agent missed while it was not running
+    (abilityai/trinity-enterprise#1108 AC #4) — once each, through the same
+    path, now that it runs. Called from the agent-start hook. Returns how many
+    turns were dispatched. Never raises; a row that still cannot be woken stays
+    `pending` for the start after this one."""
+    from database import db
+
+    # The container is "running" the moment it is started, but the agent server
+    # is not up yet: a dispatch now fails on a refused connection, and would
+    # stamp the ask `woken` under a completed idempotency key. Gated on
+    # agent-server readiness like the #2069 merge; a start that never becomes
+    # ready leaves every row `pending` for the next one.
+    try:
+        ready = await _agent_ready(agent_name)
+    except Exception:  # noqa: BLE001 — the probe never raises; belt and braces
+        logger.exception("operator-resume: readiness probe raised for agent=%s", agent_name)
+        ready = False
+    if not ready:
+        logger.warning("operator-resume: agent=%s did not become ready; its pending wakes stay "
+                       "pending until its next start", agent_name)
+        return 0
+
+    try:
+        rows = db.list_operator_queue_pending_wakes(agent_name) or []
+    except Exception:  # noqa: BLE001
+        logger.exception("operator-resume: pending wakes unreadable for agent=%s", agent_name)
+        return 0
+    woken = 0
+    for row in rows:
+        try:
+            execution_id = await maybe_dispatch_resume(
+                row,
+                response=row.get("response") or "",
+                response_text=row.get("response_text"),
+                responded_by_email=row.get("responded_by_email"),
+            )
+        except Exception:  # noqa: BLE001 — `maybe_dispatch_resume` never raises; belt and braces
+            logger.exception("operator-resume: re-dispatch raised for item=%s", row.get("id"))
+            continue
+        if execution_id:
+            woken += 1
+    if rows:
+        logger.info("operator-resume: re-dispatched %d of %d pending wake(s) for agent=%s on start",
+                    woken, len(rows), agent_name)
+    return woken
 
 
 def _framed_ending(items, disposition: str, reason: Optional[str]) -> str:
@@ -400,7 +608,9 @@ async def maybe_dispatch_ending(
     reason: Optional[str] = None,
     batch_id: Optional[str] = None,
 ) -> Optional[str]:
-    """Wake ONE agent, once, for asks of its that were cancelled or expired.
+    """Wake ONE agent, once, for asks of its that a person ended without an
+    answer (cancelled, dismissed). The `expired` framing is kept for the
+    readback's rider, but the ask sink no longer dispatches an expiry.
 
     `items` are one agent's CAS-won rows from a single ending event. Returns the
     execution id, or None when nothing is owed a wake, the agent has not opted
@@ -475,6 +685,8 @@ async def maybe_dispatch_ending(
             triggered_by=TRIGGERED_BY_ENDING,
             # trinity-enterprise#886: no `source_user_email` — the canceller is
             # in `_audit_ending`, never in the agent's prompt (ent#715).
+            # ent#1108: the durable backlog at capacity, as for the answer wake.
+            queue_on_capacity=True,
         )
     except Exception as exc:
         if idem is not None:
@@ -673,6 +885,20 @@ def spawn_resume_dispatch(item: Dict[str, Any], **kwargs) -> None:
     (`spawn_on_loop`).
     """
     spawn_on_loop(lambda: maybe_dispatch_resume(item, **kwargs))
+
+
+async def _agent_ready(agent_name: str) -> bool:
+    """Wait for the agent server's `/health` (lifecycle's own probe and timeout,
+    `AGENT_READINESS_TIMEOUT_S`). Late import: lifecycle is a heavy module and
+    this service is imported by the ask sink."""
+    from services.agent_service.lifecycle import wait_for_agent_ready
+    return await wait_for_agent_ready(agent_name)
+
+
+def spawn_pending_wakes(agent_name: str) -> None:
+    """Fire `redispatch_pending_wakes` in the background from the agent-start
+    path (ent#1108 AC #4). Callable from a sync or an async caller."""
+    spawn_on_loop(lambda: redispatch_pending_wakes(agent_name))
 
 
 def spawn_ending_dispatch(rows, **kwargs) -> None:

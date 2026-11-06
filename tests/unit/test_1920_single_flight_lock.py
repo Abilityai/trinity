@@ -1,27 +1,35 @@
-"""#1920 — behaviour of the shared ``SingleFlightLock`` primitive.
+"""#1920 / trinity#4028 — behaviour of the shared ``SingleFlightLock`` primitive.
 
 `redis_breaker_util.SingleFlightLock` consolidates the SETNX single-flight lock
 idiom that was hand-rolled in seven sync sites (ops, ephemeral, skill×2,
 system_seed, cornelius, compat_fix) with divergent — and, in the
 system_seed/cornelius/compat_fix constant-"1" case, buggy — behaviour.
-This suite pins the primitive's contract against **fakeredis** (a real Redis
-data model with no server) plus MagicMock clients for the error-injection and
-call-count cases fakeredis can't force.
 
-The headline property is `test_release_never_deletes_a_successor_lock` — the
-exact #1920 bug: a slow holder whose TTL lapsed must never delete the successor
-that re-took the key. Everything else exists so a future refactor of the
-primitive can't silently regress one of the sites that now depends on it.
+Since trinity#4028 every renew and release is ONE Lua script (compare and
+mutate inside Redis), so a holder whose lease lapsed between two client
+commands can never extend or delete its successor's lease. fakeredis here has
+no Lua, so the clients are `_ent695_lua.LeaseRedis` (a store whose race hook
+fires only on CLIENT commands, never inside a script) and fakeredis behind
+`_ent695_lua.with_lua` (its real data model, scripts executed against it).
+Both execute the production script TEXT, so a mutated script turns these red.
 """
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import fakeredis
 import pytest
 
-from redis_breaker_util import LeaseState, SingleFlightLock, reset_breaker_redis_client
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # `_ent695_lua`
+import _ent695_lua as lua  # noqa: E402
+from redis_breaker_util import (
+    LeaseState,
+    SingleFlightLock,
+    reset_breaker_redis_client,
+)  # noqa: E402
 
 KEY = "test:single_flight"
 TTL = 60
@@ -30,11 +38,28 @@ TTL = 60
 @pytest.fixture
 def r():
     """A fresh fakeredis client per test (decode_responses=True, like the live
-    breaker client). Never touches the module-cached client."""
-    client = fakeredis.FakeStrictRedis(decode_responses=True)
+    breaker client) with an executing `register_script`."""
+    client = lua.with_lua(fakeredis.FakeStrictRedis(decode_responses=True))
     yield client
-    # Belt: nothing here uses the cached client, but keep teardown honest.
     reset_breaker_redis_client()
+
+
+def _lapse_and_succeed(r: lua.LeaseRedis) -> SingleFlightLock:
+    """Our lease lapses (TTL expiry, modelled as the key vanishing) and a
+    successor wins SET NX with its own token."""
+    r.store.pop(KEY, None)
+    r.ttls.pop(KEY, None)
+    successor = SingleFlightLock(KEY, TTL, client=r)
+    assert successor.acquire() and successor.held
+    r.ttls[KEY] = 17  # a marker: any renewal by the stale holder would move it
+    return successor
+
+
+def _refresh(lock: SingleFlightLock, retake: bool) -> LeaseState:
+    """The default refresh is called WITHOUT the keyword, as its callers do."""
+    return (
+        lock.refresh_if_owned(retake_lapsed=True) if retake else lock.refresh_if_owned()
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -73,10 +98,11 @@ def test_client_none_fails_open_degraded_and_noops():
     assert lock.acquire() is True
     assert lock.held is False
     assert lock.refresh_if_owned() is LeaseState.DEGRADED
+    assert lock.refresh_if_owned(retake_lapsed=True) is LeaseState.DEGRADED
     lock.release_if_owned()  # no raise, no client call
 
 
-def test_acquire_setnx_error_fails_open(caplog):
+def test_acquire_setnx_error_fails_open():
     client = MagicMock()
     client.set.side_effect = RuntimeError("redis down")
     lock = SingleFlightLock(KEY, TTL, client=client)
@@ -85,113 +111,235 @@ def test_acquire_setnx_error_fails_open(caplog):
     # refresh/release are no-ops (held is False) — never call the broken client.
     assert lock.refresh_if_owned() is LeaseState.DEGRADED
     lock.release_if_owned()
+    client.register_script.assert_not_called()
     client.get.assert_not_called()
     client.delete.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
-# refresh_if_owned  (only ops.py refreshes)
+# refresh_if_owned — default: never re-takes (system_apply's contract)
 # ---------------------------------------------------------------------------
 
 
-def test_refresh_owned_extends_the_lease(r):
+def test_refresh_owned_extends_the_lease():
+    r = lua.LeaseRedis()
     lock = SingleFlightLock(KEY, TTL, client=r)
     lock.acquire()
+    r.ttls[KEY] = 5
     assert lock.refresh_if_owned() is LeaseState.OWNED
-    assert r.get(KEY) == lock.token  # still ours
+    assert r.store[KEY] == lock.token and r.ttls[KEY] == TTL
 
 
-def test_refresh_absent_reacquires_same_token(r):
+def test_refresh_absent_is_lost_and_never_retaken_by_default():
+    """Someone may have held the lock inside the lapse, so a caller relying on
+    exclusion (system apply) must stop: LOST, and the key stays absent."""
+    r = lua.LeaseRedis()
     lock = SingleFlightLock(KEY, TTL, client=r)
     lock.acquire()
-    r.delete(KEY)  # lease lapsed, nobody racing us
-    assert lock.refresh_if_owned() is LeaseState.REACQUIRED
-    assert r.get(KEY) == lock.token  # re-took it with the SAME token
+    r.store.pop(KEY)
+    assert lock.refresh_if_owned() is LeaseState.LOST
+    assert KEY not in r.store
 
 
-def test_refresh_foreign_token_is_lost(r):
+def test_refresh_foreign_token_is_lost_and_left_alone():
+    r = lua.LeaseRedis()
     lock = SingleFlightLock(KEY, TTL, client=r)
     lock.acquire()
-    r.set(KEY, "intruder-token")  # a concurrent holder took over
+    successor = _lapse_and_succeed(r)
     assert lock.refresh_if_owned() is LeaseState.LOST
-    assert lock.last_current == "intruder-token"  # for the caller's foreign WORD
+    assert r.store[KEY] == successor.token and r.ttls[KEY] == 17
 
 
-def test_refresh_absent_losing_the_reacquire_race_is_lost():
-    """Absent at GET, but a second caller wins the SETNX between our read and
-    our re-acquire → that is a foreign holder: LOST."""
-    client = MagicMock()
-    client.set.side_effect = [True, None]  # acquire wins, re-acquire loses
-    client.get.return_value = None  # absent at refresh
-    lock = SingleFlightLock(KEY, TTL, client=client)
-    assert lock.acquire() is True
-    assert lock.refresh_if_owned() is LeaseState.LOST
-    assert lock.last_current is None  # renders as 'absent', not 'foreign'
+# ---------------------------------------------------------------------------
+# refresh_if_owned(retake_lapsed=True) — the fleet restart's contract
+# ---------------------------------------------------------------------------
 
 
-def test_refresh_error_is_degraded_and_does_not_clear_held(r):
+def test_retake_owned_extends_the_lease():
+    r = lua.LeaseRedis()
+    lock = SingleFlightLock(KEY, TTL, client=r)
+    lock.acquire()
+    r.ttls[KEY] = 5
+    assert lock.refresh_if_owned(retake_lapsed=True) is LeaseState.OWNED
+    assert r.ttls[KEY] == TTL
+
+
+def test_retake_absent_reacquires_with_the_same_token_and_ttl():
+    r = lua.LeaseRedis()
+    lock = SingleFlightLock(KEY, TTL, client=r)
+    lock.acquire()
+    r.store.pop(KEY)
+    r.ttls.pop(KEY)
+    assert lock.refresh_if_owned(retake_lapsed=True) is LeaseState.REACQUIRED
+    assert r.store[KEY] == lock.token and r.ttls[KEY] == TTL
+
+
+def test_retake_never_overwrites_a_foreign_holder():
+    """The re-take is `SET NX` inside the script: a successor's lease is LOST
+    to us, never replaced by our token."""
+    r = lua.LeaseRedis()
+    lock = SingleFlightLock(KEY, TTL, client=r)
+    lock.acquire()
+    successor = _lapse_and_succeed(r)
+    assert lock.refresh_if_owned(retake_lapsed=True) is LeaseState.LOST
+    assert r.store[KEY] == successor.token and r.ttls[KEY] == 17
+
+
+@pytest.mark.parametrize("retake", [False, True])
+def test_refresh_issues_one_script_and_no_client_command(retake):
+    r = lua.LeaseRedis()
+    lock = SingleFlightLock(KEY, TTL, client=r)
+    lock.acquire()
+    r.commands.clear()
+    lock.refresh_if_owned(retake_lapsed=retake)
+    assert r.commands == [("script", "retake" if retake else "refresh", KEY)]
+
+
+# ---------------------------------------------------------------------------
+# THE #4028 property — a successor that wins inside a client-side GET
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("retake", [False, True])
+def test_a_successor_in_the_get_expire_sliver_is_not_renewed(retake):
+    """The race the GET-then-EXPIRE refresh had: its GET sees OUR token, the
+    lease lapses and a successor wins, then its EXPIRE lands on the successor's
+    key. `race_on_get` fires inside the first CLIENT GET; the script issues
+    none, so the window does not exist."""
+    r = lua.LeaseRedis()
+    stale = SingleFlightLock(KEY, TTL, client=r)
+    assert stale.acquire()
+    holder: dict = {}
+    r.race_on_get = lambda: holder.setdefault("b", _lapse_and_succeed(r))
+
+    _refresh(stale, retake)
+
+    successor = holder.get("b") or _lapse_and_succeed(r)
+    assert r.store[KEY] == successor.token
+    assert r.ttls[KEY] == 17, "the stale holder re-armed the successor's lease"
+    assert _refresh(stale, retake) is LeaseState.LOST
+
+
+def test_a_successor_in_the_get_delete_sliver_is_not_deleted():
+    r = lua.LeaseRedis()
+    stale = SingleFlightLock(KEY, TTL, client=r)
+    assert stale.acquire()
+    holder: dict = {}
+    r.race_on_get = lambda: holder.setdefault("b", _lapse_and_succeed(r))
+
+    stale.release_if_owned()
+
+    successor = holder.get("b")
+    if successor is None:  # no client GET happened, so lapse now and re-release
+        successor = _lapse_and_succeed(r)
+        stale.release_if_owned()
+    assert (
+        r.store.get(KEY) == successor.token
+    ), "the stale holder deleted the successor's lease"
+
+
+# ---------------------------------------------------------------------------
+# refresh — Redis errors and replies that are not Redis replies
+# ---------------------------------------------------------------------------
+
+
+def test_refresh_error_is_degraded_and_does_not_clear_held():
     """A Redis blip mid-refresh is NOT lease loss: DEGRADED, and — critically —
-    it must NOT clear the acquire-time `held`, or a caller that reclaims its own
-    lock after a stale false-foreign read would abandon a live lock for the full
-    TTL (the ops 2100s-wedge class)."""
+    it must NOT clear the acquire-time `held`, or a caller that keeps going after
+    a blip would abandon a live lock for the full TTL (the ops 2100s-wedge
+    class)."""
+    r = lua.LeaseRedis()
+    lock = SingleFlightLock(KEY, TTL, client=r)
+    assert lock.acquire() is True
+    r.fail_scripts = True
+    assert lock.refresh_if_owned() is LeaseState.DEGRADED
+    assert lock.refresh_if_owned(retake_lapsed=True) is LeaseState.DEGRADED
+    assert lock.held is True  # NOT cleared
+
+    r.fail_scripts = False  # the blip clears; release still deletes OUR lock
+    lock.release_if_owned()
+    assert KEY not in r.store
+
+
+def test_refresh_before_acquire_is_degraded():
+    r = lua.LeaseRedis()
+    lock = SingleFlightLock(KEY, TTL, client=r)
+    assert lock.refresh_if_owned() is LeaseState.DEGRADED  # never held → no-op
+    assert r.commands == []
+
+
+def test_a_mock_reply_is_degraded_never_owned():
+    """`int(MagicMock())` is 1: a client whose `register_script` does not
+    execute anything must not read as a held lease."""
     client = MagicMock()
     client.set.return_value = True
-    client.get.side_effect = RuntimeError("redis blip")
     lock = SingleFlightLock(KEY, TTL, client=client)
     assert lock.acquire() is True
     assert lock.refresh_if_owned() is LeaseState.DEGRADED
-    assert lock.held is True  # NOT cleared
-
-    # Now the blip clears and our token is actually still there → release must
-    # still delete OUR live lock (proves held was preserved).
-    store = {KEY: lock.token}
-    client.get.side_effect = lambda k: store.get(k)
-    client.delete.side_effect = lambda k: store.pop(k, None)
-    lock.release_if_owned()
-    client.delete.assert_called_once_with(KEY)
+    assert lock.refresh_if_owned(retake_lapsed=True) is LeaseState.DEGRADED
 
 
-def test_refresh_before_acquire_is_degraded(r):
-    lock = SingleFlightLock(KEY, TTL, client=r)
-    assert lock.refresh_if_owned() is LeaseState.DEGRADED  # never held → no-op
+@pytest.mark.parametrize(
+    "reply,state",
+    [
+        (1, LeaseState.OWNED),
+        (b"1", LeaseState.OWNED),
+        ("1", LeaseState.OWNED),
+        (0, LeaseState.LOST),
+        (b"0", LeaseState.LOST),
+        (None, LeaseState.DEGRADED),
+        (True, LeaseState.DEGRADED),
+        (b"OK", LeaseState.DEGRADED),
+        (7, LeaseState.DEGRADED),
+        (-1, LeaseState.DEGRADED),
+        ([1], LeaseState.DEGRADED),
+        # never raised out of a refresh: `isdigit` accepts these, `int` does not
+        ("²", LeaseState.DEGRADED),
+        (b"\xff", LeaseState.DEGRADED),
+        ("１", LeaseState.DEGRADED),
+    ],
+)
+def test_refresh_reads_only_integer_replies(reply, state):
+    client = MagicMock()
+    client.set.return_value = True
+    client.register_script.return_value = MagicMock(return_value=reply)
+    lock = SingleFlightLock(KEY, TTL, client=client)
+    lock.acquire()
+    assert lock.refresh_if_owned() is state
+
+
+def test_the_retake_code_is_reacquired_only_when_asked_for():
+    client = MagicMock()
+    client.set.return_value = True
+    client.register_script.return_value = MagicMock(return_value=2)
+    lock = SingleFlightLock(KEY, TTL, client=client)
+    lock.acquire()
+    assert lock.refresh_if_owned(retake_lapsed=True) is LeaseState.REACQUIRED
+    assert lock.refresh_if_owned() is LeaseState.DEGRADED  # 2 is not a refresh reply
 
 
 # ---------------------------------------------------------------------------
-# refresh — the vanished-key sliver (matches ops's get/set call-counts)
+# Scripts are registered on the injected client, per call
 # ---------------------------------------------------------------------------
 
 
-def test_vanished_key_expire_zero_goes_straight_to_setnx_no_reget():
-    """GET says ours, but EXPIRE returns 0 (the key vanished in the GET→EXPIRE
-    sliver, creating nothing): fall STRAIGHT to the same-token SETNX — no second
-    GET — matching ops's call-counts."""
-    client = MagicMock()
-    client.set.return_value = True  # acquire + reacquire both win
-    client.get.return_value = None  # GET value doesn't matter here...
-    lock = SingleFlightLock(KEY, TTL, client=client)
-    lock.acquire()
+def test_each_lock_runs_its_scripts_on_its_own_client():
+    """A process-wide script cache would keep the FIRST client's script objects;
+    a double that ignores `client=` (a MagicMock) would then become every later
+    lock's Redis. Registration is per call, on the lock's own client."""
+    first, second = lua.LeaseRedis(), lua.LeaseRedis()
+    a = SingleFlightLock(KEY, TTL, client=first)
+    a.acquire()
+    a.refresh_if_owned()
+    b = SingleFlightLock(KEY, TTL, client=second)
+    b.acquire()
+    second.commands.clear()
+    first.commands.clear()
 
-    # ...override GET to return our token so refresh sees 'owned', then EXPIRE 0.
-    client.get.return_value = lock.token
-    client.expire.return_value = 0
-    client.get.reset_mock()
-    client.set.reset_mock()
-
-    assert lock.refresh_if_owned() is LeaseState.REACQUIRED
-    client.get.assert_called_once()  # exactly ONE GET, no re-GET
-    client.set.assert_called_once()  # the same-token SETNX
-    assert client.set.call_args.kwargs.get("nx") is True
-
-
-def test_vanished_key_then_setnx_loses_is_lost():
-    client = MagicMock()
-    client.set.side_effect = [True, None]  # acquire wins, reacquire loses
-    lock = SingleFlightLock(KEY, TTL, client=client)
-    lock.acquire()
-    client.get.return_value = lock.token
-    client.expire.return_value = 0  # vanished
-    assert lock.refresh_if_owned() is LeaseState.LOST
-    assert lock.last_current is None  # vanished == absent
+    assert b.refresh_if_owned() is LeaseState.OWNED
+    b.release_if_owned()
+    assert [c[1] for c in second.commands] == ["refresh", "release"]
+    assert first.commands == [] and first.store[KEY] == a.token
 
 
 # ---------------------------------------------------------------------------
@@ -199,16 +347,25 @@ def test_vanished_key_then_setnx_loses_is_lost():
 # ---------------------------------------------------------------------------
 
 
-def test_bytes_token_matches_via_lock_token_matches():
-    """`get_breaker_redis` sets decode_responses=True so bytes is not a live
-    path — but the helper compares via `lock_token_matches`, whose bytes branch
-    must not be untested dead code (a bare `==` would fail here)."""
-    client = fakeredis.FakeStrictRedis(decode_responses=False)  # GET returns bytes
+def test_bytes_client_renews_and_releases_its_own_lease():
+    """`get_breaker_redis` sets decode_responses=True, so bytes is not a live
+    path, but Redis compares bytes in the script either way."""
+    client = lua.with_lua(fakeredis.FakeStrictRedis(decode_responses=False))
     lock = SingleFlightLock(KEY, TTL, client=client)
     assert lock.acquire() is True
-    assert lock.refresh_if_owned() is LeaseState.OWNED  # bytes token still owned
+    assert lock.refresh_if_owned() is LeaseState.OWNED
     lock.release_if_owned()
-    assert client.get(KEY) is None  # released via bytes match
+    assert client.get(KEY) is None
+
+
+def test_bytes_store_still_refuses_a_foreign_token():
+    r = lua.LeaseRedis(decode_responses=False)
+    lock = SingleFlightLock(KEY, TTL, client=r)
+    lock.acquire()
+    r.store[KEY] = b"someone-else"
+    assert lock.refresh_if_owned() is LeaseState.LOST
+    lock.release_if_owned()
+    assert r.store[KEY] == b"someone-else"
 
 
 # ---------------------------------------------------------------------------
@@ -231,21 +388,44 @@ def test_release_never_touches_a_foreign_token(r):
     assert r.get(KEY) == "someone-else"  # foreign token untouched
 
 
+def test_release_issues_one_script_and_no_client_command():
+    r = lua.LeaseRedis()
+    lock = SingleFlightLock(KEY, TTL, client=r)
+    lock.acquire()
+    r.commands.clear()
+    lock.release_if_owned()
+    assert r.commands == [("script", "release", KEY)]
+
+
 def test_release_before_acquire_is_a_noop():
     client = MagicMock()
     lock = SingleFlightLock(KEY, TTL, client=client)
     lock.release_if_owned()  # never held → no Redis calls
+    client.register_script.assert_not_called()
     client.get.assert_not_called()
     client.delete.assert_not_called()
 
 
-def test_release_swallows_redis_errors(r):
-    client = MagicMock()
-    client.set.return_value = True
-    client.get.side_effect = RuntimeError("redis down")
-    lock = SingleFlightLock(KEY, TTL, client=client)
+def test_release_swallows_redis_errors():
+    r = lua.LeaseRedis()
+    lock = SingleFlightLock(KEY, TTL, client=r)
     lock.acquire()
+    r.fail = True
     lock.release_if_owned()  # must not raise; TTL expires it
+
+
+def test_release_swallows_a_client_without_scripting():
+    """A client that cannot register a script at all fails like a Redis error:
+    the release never raises (the TTL expires the lease)."""
+
+    class _NoScripts:
+        def set(self, *a, **k):
+            return True
+
+    lock = SingleFlightLock(KEY, TTL, client=_NoScripts())
+    lock.acquire()
+    lock.release_if_owned()
+    assert lock.refresh_if_owned() is LeaseState.DEGRADED
 
 
 # ---------------------------------------------------------------------------
@@ -256,27 +436,22 @@ def test_release_swallows_redis_errors(r):
 def test_release_never_deletes_a_successor_lock(r):
     """The exact bug #1920 fixes: worker A acquires, A's TTL lapses, worker B
     SETNX-acquires a FRESH token, A finishes and releases — A's ownership-checked
-    release must leave B's live lock intact. The pre-#1920 tokenless delete (and
-    a naive compare-and-delete against a constant "1") removed it."""
+    release must leave B's live lock intact."""
     a = SingleFlightLock(KEY, TTL, client=r)
     assert a.acquire() is True
 
-    # A's lease TTL-expires (simulate via delete — fakeredis won't wall-clock
-    # expire reliably) and worker B acquires a fresh lock with a DIFFERENT token.
-    r.delete(KEY)
+    r.delete(KEY)  # A's lease lapses
     b = SingleFlightLock(KEY, TTL, client=r)
     assert b.acquire() is True
     assert b.token != a.token
 
-    # A finishes and releases — must NOT delete B's successor lock.
     a.release_if_owned()
     assert r.get(KEY) == b.token  # B's lock survives A's release
 
 
 def test_unique_token_per_acquire_closes_the_constant_one_bug(r):
     """Two locks over the same key mint DISTINCT tokens — the property a naive
-    compare-and-delete against a constant "1" lacks (both would store "1", so A's
-    release would match B's lock)."""
+    compare-and-delete against a constant "1" lacks."""
     a = SingleFlightLock(KEY, TTL, client=r)
     b = SingleFlightLock(KEY, TTL, client=r)
     assert a.token != b.token

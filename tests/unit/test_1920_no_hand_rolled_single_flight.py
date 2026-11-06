@@ -55,7 +55,10 @@ admin-gate spelling, #1891 python-version parity).
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
+
+import pytest
 
 _REPO = Path(__file__).resolve().parents[2]
 _BACKEND = _REPO / "src" / "backend"
@@ -223,16 +226,64 @@ def test_allowlist_has_no_stale_entries():
     )
 
 
+# The keyspace-scan COMMAND in the spellings the leaf could issue it: an
+# attribute call (`.keys(`, `.scan (`, `.scan_iter(`), the command name as a
+# string literal in any case (`execute_command('keys')`, `redis.pcall('SCAN')`,
+# `getattr(client, 'keys')`), and the bare uppercase words. A Lua script's
+# declared-key table `KEYS[n]` is not the command: it is how a script names the
+# keys it touches (trinity#4028 moved the lease scripts onto it), so the bare
+# word is refused only when no `[` follows. Dynamic dispatch built from pieces
+# (`getattr(c, "ke" + "ys")`) is out of reach of any text guard.
+_SCAN_SPELLINGS = (
+    ("a .keys() / .scan() / .scan_iter() call",
+     re.compile(r"\.(keys|scan|scan_iter)\s*\(")),
+    ("a keys/scan command name as a string",
+     re.compile(r"['\"](keys|scan|scan_iter)['\"]", re.IGNORECASE)),
+    ("the word SCAN", re.compile(r"SCAN")),
+    ("the word KEYS (not a script's KEYS[n])", re.compile(r"KEYS(?!\[)")),
+)
+
+
+def _scan_spellings(src: str) -> list:
+    return [name for name, pattern in _SCAN_SPELLINGS if pattern.search(src)]
+
+
 def test_helper_has_no_KEYS_or_scan():
     """The backend Redis ACL is `-@dangerous`: `KEYS`/`SCAN` raise at runtime
     and a stubbed client hides it. The single-flight lock uses single fixed
     keys, so the leaf helper must never introduce a keyspace scan."""
     src = (_BACKEND / "redis_breaker_util.py").read_text(encoding="utf-8")
-    for needle in (".keys(", "KEYS", ".scan(", ".scan_iter(", "SCAN"):
-        assert needle not in src, (
-            f"redis_breaker_util.py must not use {needle!r} — the ACL blocks "
-            "KEYS/SCAN and the locks are single fixed keys (no scan needed)."
-        )
+    found = _scan_spellings(src)
+    assert not found, (
+        f"redis_breaker_util.py must not use {found} — the ACL blocks "
+        "KEYS/SCAN and the locks are single fixed keys (no scan needed)."
+    )
+
+
+@pytest.mark.parametrize("spelling", [
+    "client.keys('agent:*')",
+    "client.scan(0, match='x')",
+    "client.scan_iter('x')",
+    "client.execute_command('SCAN', 0)",
+    "client.execute_command('KEYS', '*')",
+    "redis.call('keys', '*')",
+    "redis.call( \"SCAN\", 0)",
+    "client.execute_command('keys', '*')",
+    "client.execute_command('scan', 0)",
+    "client.keys ('*')",
+    "client.scan_iter ('x')",
+    "getattr(client, 'keys')('*')",
+    "redis.pcall('keys', KEYS[1])",
+    "redis.call ('keys', '*')",
+])
+def test_every_scan_spelling_is_still_refused(spelling):
+    """Narrowing the guard to admit `KEYS[1]` must not let the command through
+    (the review-found spellings at the bottom were missed by the old guard too)."""
+    assert _scan_spellings(f"x = 1\n{spelling}\n"), spelling
+
+
+def test_a_scripts_declared_key_is_not_a_scan():
+    assert _scan_spellings("if redis.call('get', KEYS[1]) == ARGV[1] then") == []
 
 
 def test_both_trees_are_actually_walked():

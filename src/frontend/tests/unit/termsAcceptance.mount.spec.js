@@ -26,8 +26,9 @@ vi.mock('axios', () => ({ default: ax }))
 import TermsAcceptance from '@/views/TermsAcceptance.vue'
 import { useAuthStore } from '@/stores/auth'
 
-const CURRENT_URL = '/api/enterprise/user-management/terms/current'
-const ACCEPT_URL = '/api/enterprise/user-management/terms/accept'
+// trinity-enterprise#1107: the routes are OSS — every Trinity serves its terms.
+const CURRENT_URL = '/api/terms/current'
+const ACCEPT_URL = '/api/terms/accept'
 
 const Blank = { template: '<div />' }
 
@@ -44,7 +45,7 @@ function makeRouter() {
 }
 
 function current(over = {}) {
-  return { data: { required: true, version: '2026-11', text: '## Terms\n\nBe kind.', accepted: false, ...over } }
+  return { data: { required: true, version: '2026-11', title: 'House rules', text: '## Terms\n\nBe kind.', accepted: false, is_default: false, ...over } }
 }
 
 function refusal(status, detail) {

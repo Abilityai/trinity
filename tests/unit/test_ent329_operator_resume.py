@@ -91,14 +91,17 @@ def _seed(conn, name: str, *, enabled=None, deleted_at=None):
     conn.commit()
 
 
-def test_default_is_off_for_a_row_that_predates_the_column(mixin, tmp_db_conn):
-    """A NULL column — every agent that existed before the migration — reads False.
+def test_default_is_on_for_a_row_the_owner_never_touched(mixin, tmp_db_conn):
+    """A NULL column — an agent whose owner never said — reads True.
 
-    This is the whole safety story for the upgrade: nobody starts paying for
-    dispatches they never asked for.
+    The ent#329 default was OFF ("nobody starts paying for dispatches they
+    never asked for"); abilityai/trinity-enterprise#1108 reversed it by
+    operator ruling (an approval in the Inbox moved nothing until the person
+    wrote again in the chat). The owner's explicit OFF (0) is still honoured —
+    `test_disable_is_honoured` below.
     """
     _seed(tmp_db_conn, "legacy-agent", enabled=None)
-    assert mixin.get_operator_resume_enabled("legacy-agent") is False
+    assert mixin.get_operator_resume_enabled("legacy-agent") is True
 
 
 def test_unknown_agent_reads_off(mixin):
@@ -243,6 +246,15 @@ def _install(monkeypatch, *, enabled=True, recorder=None, flag_raises=False, rep
             dispatch_and_await_terminal=_adapter,
         ),
     )
+    # abilityai/trinity-enterprise#1108 AC #4: the answer wake asks Docker whether
+    # the agent runs (a stopped one reads "agent not yet woken" instead of a
+    # FAILED execution). `docker_utils` is loaded for real first (the ent#611
+    # note), then the state is stubbed as running.
+    import services.docker_utils  # noqa: F401
+    _install_module(
+        "services.docker_service",
+        SimpleNamespace(agent_container_state=lambda name: "running"),
+    )
     return recorder, audit
 
 
@@ -294,6 +306,9 @@ async def test_dispatch_goes_through_execute_task_not_a_bespoke_path(service, mo
         # trinity-enterprise#751: the person's own answer, for the skill gate —
         # not a second surface, the same `execute_task` reads it.
         "request_text",
+        # abilityai/trinity-enterprise#1108: the durable backlog at capacity — an
+        # admission choice inside the same `execute_task`, not a second path.
+        "queue_on_capacity",
     }
 
 

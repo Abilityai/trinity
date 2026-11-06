@@ -168,6 +168,7 @@ from db.compatibility import CompatibilityOperations
 from db.metric_definitions import MetricDefinitionOperations
 from db.metric_points import MetricPointOperations
 from db.sync_state import SyncStateOperations
+from db.terms import TermsOperations  # trinity-enterprise#1107 terms acceptances
 from db.idempotency import IdempotencyOperations
 from db.loops import LoopOperations
 
@@ -1096,6 +1097,7 @@ class DatabaseManager:
         self._sync_state_ops = SyncStateOperations()  # #389 sync health
         self._idempotency_ops = IdempotencyOperations()  # RELIABILITY-006, #525
         self._loop_ops = LoopOperations()  # #740 sequential agent loops
+        self._terms_ops = TermsOperations()  # trinity-enterprise#1107 terms acceptances
 
     # =========================================================================
     # User Management (delegated to db/users.py)
@@ -1801,8 +1803,10 @@ class DatabaseManager:
         """#1745: activate/deactivate an agent's per-agent MCP keys."""
         return self._mcp_key_ops.set_agent_keys_active(agent_name, active)
 
-    def deactivate_orphaned_agent_keys(self) -> int:
-        """#1745: deactivate per-agent keys whose agent is no longer live."""
+    def deactivate_orphaned_agent_keys(self) -> List[str]:
+        """#1745: deactivate per-agent keys whose agent is no longer live;
+        returns the agents whose keys were revoked (#4259 skips keys still
+        inside the start-up grace window)."""
         return self._mcp_key_ops.deactivate_orphaned_agent_keys()
 
     def delete_agent_mcp_api_key(self, agent_name: str):
@@ -3241,11 +3245,16 @@ class DatabaseManager:
     def get_public_user_memory_agent_notes(self, agent_name: str, user_email: str) -> str:
         return self._public_link_ops.get_user_memory_agent_notes(agent_name, user_email)
 
+    def get_public_user_memory(self, agent_name: str, user_email: str):
+        # ent#962: a read that never creates the row (the owner's view).
+        return self._public_link_ops.get_user_memory(agent_name, user_email)
+
     def update_public_user_memory_conversation_summary(
-        self, agent_name: str, user_email: str, conversation_summary: str
+        self, agent_name: str, user_email: str, conversation_summary: str,
+        *, expected_previous: str = None,
     ) -> bool:
         return self._public_link_ops.update_user_memory_conversation_summary(
-            agent_name, user_email, conversation_summary
+            agent_name, user_email, conversation_summary, expected_previous=expected_previous
         )
 
     # ent#637: the write boundary records history; the person reads + undoes it.
@@ -3304,15 +3313,23 @@ class DatabaseManager:
     def prune_memory_fact_events(self, agent_name: str, *, before_iso: str) -> int:
         return self._memory_fact_ops.prune_memory_fact_events(agent_name, before_iso=before_iso)
 
-    def list_public_user_memory_writes(self, agent_name: str, user_email: str, limit: int = 20) -> list:
-        return self._public_link_ops.list_user_memory_writes(agent_name, user_email, limit)
+    def list_public_user_memory_writes(self, agent_name: str, user_email: str, limit: int = 20, **kwargs) -> list:
+        # ent#962: `before=` (keyset cursor) and `section=` (default `notes`).
+        return self._public_link_ops.list_user_memory_writes(agent_name, user_email, limit, **kwargs)
+
+    def latest_open_public_user_memory_writes(self, agent_name: str, user_email: str) -> dict:
+        return self._public_link_ops.latest_open_user_memory_writes(agent_name, user_email)
 
     def undo_public_user_memory_write(
-        self, agent_name: str, user_email: str, write_id: str, *, undone_by: str
+        self, agent_name: str, user_email: str, write_id: str, *, undone_by: str, section: str = None
     ) -> str:
         return self._public_link_ops.undo_user_memory_write(
-            agent_name, user_email, write_id, undone_by=undone_by
+            agent_name, user_email, write_id, undone_by=undone_by, section=section
         )
+
+    def list_public_user_memory_people(self, agent_name: str, *, limit: int = 50, offset: int = 0) -> dict:
+        # ent#962: everyone with memory on the agent, for the owner's view.
+        return self._public_link_ops.list_user_memory_people(agent_name, limit=limit, offset=offset)
 
     # =========================================================================
     # Agent Tags (delegated to db/tags.py) - ORG-001
@@ -4282,6 +4299,16 @@ class DatabaseManager:
     def set_operator_queue_delivery_state(self, item_id, state, detail, now):
         return self._operator_queue_ops.set_delivery_state(item_id, state, detail, now)
 
+    # abilityai/trinity-enterprise#1108 AC #4 — the answer wake's status
+    def set_operator_queue_wake_state(self, item_id, state):
+        return self._operator_queue_ops.set_wake_state(item_id, state)
+
+    def list_operator_queue_pending_wakes(self, agent_name):
+        return self._operator_queue_ops.list_pending_wakes_for_agent(agent_name)
+
+    def mark_operator_queue_wakes_woken(self, agent_name, request_ids):
+        return self._operator_queue_ops.mark_wakes_woken(agent_name, request_ids)
+
     def mark_operator_queue_unconfirmed(self, detail, now, agent_name=None, exclude_agents=None,
                                         exclude_request_id_prefixes=None):
         return self._operator_queue_ops.mark_unconfirmed(
@@ -4744,6 +4771,32 @@ class DatabaseManager:
 
     def list_due_loops(self, now: str, *, limit: int = 100):
         return self._loop_ops.list_due_loops(now, limit=limit)
+
+
+    # =========================================================================
+    # Terms acceptances (trinity-enterprise#1107 — delegated to db/terms.py)
+    # =========================================================================
+
+    def insert_terms_acceptance(self, user_id, email, terms_version: str, accepted_at: str,
+                                *, door=None, actor_ip=None):
+        return self._terms_ops.insert_terms_acceptance(
+            user_id, email, terms_version, accepted_at, door=door, actor_ip=actor_ip
+        )
+
+    def get_terms_acceptance(self, user_id: int, terms_version: str):
+        return self._terms_ops.get_terms_acceptance(user_id, terms_version)
+
+    def get_terms_acceptance_by_email(self, email: str, terms_version: str):
+        return self._terms_ops.get_terms_acceptance_by_email(email, terms_version)
+
+    def terms_acceptances_for_user(self, user_id: int):
+        return self._terms_ops.terms_acceptances_for_user(user_id)
+
+    def terms_acceptances_for_email(self, email: str):
+        return self._terms_ops.terms_acceptances_for_email(email)
+
+    def list_terms_acceptances(self, limit: int = 200):
+        return self._terms_ops.list_terms_acceptances(limit)
 
 
 # Global database manager instance

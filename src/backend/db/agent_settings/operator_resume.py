@@ -6,10 +6,16 @@ turn. An agent with no schedule and no heartbeat has no next turn, so an
 approved action silently never executes until somebody re-triggers the agent by
 hand. This flag lets the owner say "an answer should wake this agent".
 
-Default OFF, and the switch is per-AGENT rather than per-request:
+Default ON since abilityai/trinity-enterprise#1108 (the operator's ruling after
+the 2026-11-05 film: a person who approved in her Inbox had to write "go
+ahead" in the chat before anything moved). The column is tri-state: NULL is
+the platform default (on), 0 the owner's explicit OFF, 1 the owner's explicit
+ON — so an owner's choice is still told apart from "never said", and the
+switch stays per-AGENT rather than per-request:
 
-* a dispatch on respond spends money, so it must never be unconditional — a
-  respond-storm would otherwise fan out one execution per answer;
+* a dispatch on respond spends money, so the OWNER keeps the switch — a
+  respond-storm still fans out one execution per answer, and the owner can
+  turn that off for an agent that must not spend on answers;
 * an agent-declared ``resume: true`` on the item would let the agent decide that
   answering costs the answerer money, which is exactly what ent#430 AC #3 rules
   out for Workspace clients.
@@ -42,15 +48,16 @@ class OperatorResumeMixin:
     """Mixin for the per-agent respond→resume opt-in toggle (ent#329)."""
 
     def get_operator_resume_enabled(self, agent_name: str) -> bool:
-        """Whether an operator answer should re-trigger this agent. Default: False.
+        """Whether an operator answer should re-trigger this agent. Default: True.
 
-        Fail-safe by construction: a missing row, a soft-deleted agent, or a NULL
-        column (every row that existed before the migration) all read as False,
-        so the dispatch stays off for everyone who did not ask for it.
+        NULL — the owner never said — reads as the platform default, ON
+        (abilityai/trinity-enterprise#1108); 0 is the owner's explicit OFF. A
+        missing row or a soft-deleted agent still reads False: a wake for an
+        agent nobody owns is spend on nothing.
         """
         stmt = select(
             func.coalesce(
-                agent_ownership.c.operator_resume_enabled, 0
+                agent_ownership.c.operator_resume_enabled, 1
             ).label("operator_resume_enabled")
         ).where(
             and_(

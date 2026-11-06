@@ -79,6 +79,10 @@
 
 | GET | `/api/agents/{name}/retrieval-memory/search` | Owner search over one scope (`q`, `k≤50`, `user_email` omitted = the agent scope): ranked hits with the rendered line, relevance, score and provenance; 422 `query_empty`/`invalid_email`/`memory_off`, 503 `memory_unavailable` (owner + human-only, trinity-enterprise#1028) |
 | POST | `/api/agents/{name}/retrieval-memory/search` | The agent door behind MCP `search_memory`: `{execution_id, query, k}`, scope resolved from the execution by the whose-memory rule (never from the caller); the agent's own key only — an agent key searches only its own agent and a human is refused 403 `agent_only` (owner door above); the named run must be `running` (422 `memory_turn_not_live`) and the only live scope on the agent (422 `memory_turn_ambiguous`); 422 `memory_no_subject` with the reason; every search journaled with the query, hits or none (trinity-enterprise#1028) |
+| GET | `/api/agents/{name}/person-memory` | Everyone with memory on the agent — notes or summary, any history row, or live person-scope facts — newest change first, with channel identity and counts (MEM-001 owner view, trinity-enterprise#962; owner/admin + `require_person`) |
+| GET | `/api/agents/{name}/person-memory/person` | One person (`user_email`): notes, summary, identity, first history page; never creates the row, 404 `person_not_found` |
+| GET | `/api/agents/{name}/person-memory/writes` | A page of one person's write history, both sections (`user_email`, `before` keyset cursor, 422 `invalid_cursor`) |
+| POST | `/api/agents/{name}/person-memory/writes/{write_id}/undo` | Undo one write `{user_email}` — the person's primitive, latest-first per section, `undone_by` = the operator; `409 not_latest` / `already_undone`, audit `person_memory_undo` |
 | POST | `/api/agents/{name}/user-memory` | The agent door behind MCP `write_user_memory`: write per-user memory blob; email resolved from execution_id server-side (MEM-001, #888) — user-facing triggers, or a `schedule` run addressed to a seat via ent#498's stamp (ent#637); the agent's own key only — a human past the operator floor is refused 403 `agent_only`; the named run must be `running` (422 `memory_turn_not_live`) and the only live scope on the agent (422 `memory_turn_ambiguous`, #4121); every write records a `public_user_memory_writes` row |
 | POST | `/api/agents/{name}/decisions` | Record a seat decision — why a thing was approved/deferred/killed — for the seat the execution serves (seat from `execution_id`, never sent; `Idempotency-Key` honoured; grammar receipts `decision_prose_only` / `decision_is_a_note` / `unknown_citation`; `scope: direction` → kept as `routed` with the canon hint). No person email in the answer (trinity-enterprise#638) |
 | GET | `/api/agents/{name}/decisions?execution_id=` | The seat's standing decisions (criterion first, active by default, `include_history`) + evidence stats; email-free (trinity-enterprise#638) |
@@ -195,6 +199,7 @@ The per-agent VoIP config + voice-picker UI lives in the agent Settings/Sharing 
 |--------|------|-------------|
 | POST | `/api/agents/{name}/share` | Share agent |
 | DELETE | `/api/agents/{name}/share/{email}` | Remove share |
+| POST | `/api/agents/{name}/share/{email}/invite` | Email a pending person their invitation again (trinity-enterprise#459). Share itself also sends it |
 | GET | `/api/agents/{name}/shares` | List shares |
 | GET | `/api/agents/{name}/access` | Operator (Trinity-user) access roster for the **Access tab** (trinity-enterprise#17). Resolves each `agent_sharing` allow-list email against `users`: resolved → **active** operator (`username`/`role`/`last_active`), unresolved → **pending** invite. Read-only typed view over `agent_sharing`; add/remove reuse `/share` + `/share/{email}`. Drawing the operator-vs-client line on the read path is this endpoint's job (strict client roster is the Sharing redesign #18/#20) |
 | GET | `/api/agents/{name}/clients` | External-client roster: channel users who've messaged the agent, aggregated across Telegram + WhatsApp, sorted by `last_active` desc (never-active last). Owner-only, read-only, DB-sourced (renders when agent stopped). Slack/VoIP additive (#20) |
@@ -226,11 +231,23 @@ Token lifecycle: `secrets.token_urlsafe(32)` stored in `agent_schedules.webhook_
 
 **Creation gate (#1445):** schedule *and* webhook creation require a **live owning agent** — `db.is_agent_live(name)` checks an `agent_ownership` row with `deleted_at IS NULL` (no `users` join, so it matches the token-lookup predicate exactly). A nonexistent / soft-deleted agent returns **404** (non-owners get a uniform **403** whether or not the agent exists — no enumeration oracle); enforced at both the router (`create_schedule`/`generate_webhook`) and the db chokepoint (`db/schedules.py:create_schedule` → `None`). This closes the orphan-schedule class (an admin's `can_user_access_agent` is unconditionally `True`, so admin callers could otherwise mint a schedule + real token on a never-created agent) so a webhook token always resolves to a schedule of a live agent — the invariant the #1423 token-lookup INNER JOIN assumes.
 
+### Terms of use (trinity-enterprise#1107, 5 endpoints)
+
+| Endpoint | Method | Gate | Purpose |
+|---|---|---|---|
+| `/api/terms/current` | GET | `require_person`, `@workspace_route` + `@terms_route` | `{required, version, title, text, is_default, accepted}` — the shipped default until replaced |
+| `/api/terms/accept` | POST | `require_interactive`, both marks | `{version}` → `{accepted, created, version, accepted_at}`; 403 `invite_expired`/`invite_revoked` when a registered provider's door is closed (`terms_gate.assert_door_open`); 409 `version_stale`; schedules the acceptance hooks after the response |
+| `/api/terms/acceptances` | GET | `require_admin` | the record: `?email=`, `?limit=` (≤1000) |
+| `/api/terms` | PUT | `require_admin` + interactive | any of `{title, text, required}`; a text/title save stamps a new version; 422 `terms_text_empty` / `terms_text_too_large` / `terms_title_too_long` |
+| `/api/terms/restore-default` | POST | `require_admin` + interactive | the one action that brings the shipped text back |
+
+The four `terms_*` keys are refused on `PUT` and `DELETE /api/settings/{key}` (422) so the validated route is the only writer; an identical text+title save stamps no version.
+
 ### Auth, Users & MCP (21 endpoints)
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/auth/mode` | Auth mode config (unauthenticated) |
-| POST | `/api/token` | Admin login — `username` accepts `admin` OR the admin's registered email + password (#82); form-encoded |
+| POST | `/api/token` | Admin login — `username` accepts `admin` OR the admin's registered email + password (#82); form-encoded. `client=web` (the SPA) mints `interactive: true`, the claim the terms gate asks (ent#1107); the CLI sends nothing |
 | POST | `/api/auth/email/request` / `/verify` | Request email code / verify and login |
 | POST | `/api/auth/logout` | Revoke the caller's JWT — blacklists its `jti` in Redis until the token's own expiry, so an exfiltrated 7-day token dies on logout (#187). Idempotent; MCP-key callers are a no-op (keys revoke via key management) |
 | GET | `/api/auth/validate` | Validate JWT (for nginx auth_request) — also rejects a `jti` revoked via logout (#187) |

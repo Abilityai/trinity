@@ -259,6 +259,8 @@ class OperatorQueueOperations:
             # #3247 — the replace link, one uuid each way
             "replaces": row["replaces"],
             "replaced_by": row["replaced_by"],
+            # abilityai/trinity-enterprise#1108 AC #4 — the answer wake's status
+            "wake_state": row["wake_state"],
         }
 
     # Columns selected for a full queue-item record, in the canonical order.
@@ -308,6 +310,7 @@ class OperatorQueueOperations:
         operator_queue.c.last_seen_at,
         operator_queue.c.replaces,  # #3247 — the replace link
         operator_queue.c.replaced_by,
+        operator_queue.c.wake_state,  # abilityai/trinity-enterprise#1108 AC #4
     )
 
     def create_item(
@@ -2567,6 +2570,64 @@ class OperatorQueueOperations:
                 .values(delivery_state=state, delivery_detail=detail, delivery_updated_at=now)
             )
             return result.rowcount > 0
+
+    # --- abilityai/trinity-enterprise#1108 AC #4: the answer wake's status -------
+
+    def set_wake_state(self, item_id: str, state: str) -> bool:
+        """Record whether the answer wake produced a turn: `pending` (the agent
+        was not running — "agent not yet woken") or `woken`. True iff a row
+        was written."""
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(operator_queue)
+                .where(operator_queue.c.id == item_id)
+                .values(wake_state=state)
+            )
+            return result.rowcount > 0
+
+    def list_pending_wakes_for_agent(self, agent_name: str) -> List[Dict]:
+        """This agent's ANSWERED asks whose wake is still owed, oldest answer
+        first — what its next start re-dispatches. An ask that ended another
+        way never reads `pending` (only the answer wake writes it), and the
+        predicate says so anyway."""
+        stmt = (
+            select(*self._SELECT_COLS)
+            .where(
+                and_(
+                    operator_queue.c.agent_name == agent_name,
+                    operator_queue.c.wake_state == "pending",
+                    or_(
+                        operator_queue.c.disposition == "answered",
+                        operator_queue.c.status.in_(("responded", "acknowledged")),
+                    ),
+                )
+            )
+            .order_by(operator_queue.c.responded_at, operator_queue.c.created_at)
+        )
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [self._row_to_item(row) for row in rows]
+
+    def mark_wakes_woken(self, agent_name: str, request_ids) -> int:
+        """`pending` → `woken` for the named asks of this agent — a turn was
+        composed with them in its Execution Context line, so the status must
+        not keep claiming a wake is owed. Returns how many flipped."""
+        ids = [r for r in (request_ids or []) if r]
+        if not ids:
+            return 0
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(operator_queue)
+                .where(
+                    and_(
+                        operator_queue.c.agent_name == agent_name,
+                        operator_queue.c.wake_state == "pending",
+                        operator_queue.c.request_id.in_(ids),
+                    )
+                )
+                .values(wake_state="woken")
+            )
+            return result.rowcount or 0
 
     @staticmethod
     def _file_contract():

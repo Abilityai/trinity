@@ -165,6 +165,15 @@
         </div>
       </div>
     </div>
+    <!-- trinity-enterprise#1107 ruling A(1): a PORTAL session the terms gate
+         refused accepts here, on its own token — it holds no platform
+         credential, so /terms is not a page it can open. A platform session
+         keeps the stage link to /terms below. -->
+    <PortalTerms
+      v-else-if="store.termsRefusal && store.portalToken"
+      @accepted="bootstrap()"
+      @decline="onSignOut()"
+    />
     <div v-else class="flex-1 flex min-h-0" :style="columns.gridStyle.value">
       <!-- Sidebar: persistent on desktop, drawer on mobile -->
       <div class="hidden sm:flex shrink-0 min-w-0 overflow-hidden sm:w-[var(--ws-sidebar,18rem)]">
@@ -982,6 +991,7 @@ import { threadKey, shouldAutoFocusComposer } from '@/components/portal/portalDr
 import { safeStorage } from '@/utils/safeStorage'
 import PortalSidebar from '@/components/portal/PortalSidebar.vue'
 import PortalBrand from '@/components/portal/PortalBrand.vue'
+import PortalTerms from '@/components/portal/PortalTerms.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import PortalConversation from '@/components/portal/PortalConversation.vue'
 import PortalBriefing from '@/components/portal/PortalBriefing.vue'

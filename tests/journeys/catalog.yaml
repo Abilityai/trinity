@@ -416,3 +416,19 @@ journeys:
     owner: trinity
     # Skeleton: NOT RUN — no platform writer joins a gate request to a project (ent#880).
     invariants: []
+
+  - id: J24
+    issue: "abilityai/trinity-enterprise#1101"
+    promise: "My fresh install does not serve MCP to clients outside the machine until I turn it on, and a refused client is told why."
+    actor: operator
+    lanes: [local]
+    # journey-smoke: credential-free, no agent, no Docker socket. It dials the
+    # MCP port from the host the stack runs on, which the gate reads as an
+    # off-box peer. The harness asserts the whole promise.
+    tier: journey-smoke
+    harness: tests/journeys/test_j24_external_mcp_access_journey.py
+    built: true
+    owner: operator
+    # No catalog invariant covers "the perimeter is closed by default" yet. An
+    # empty list, not an invented id.
+    invariants: []

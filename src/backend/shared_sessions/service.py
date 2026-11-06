@@ -368,12 +368,11 @@ def _require_membership(room_id: str, current_user, *, allow_departed: bool = Fa
         raise RoomError(404, "room_not_found", "Room not found")
     if is_admin:
         return room
+    # trinity-enterprise#701: anyone who left, or was removed, no longer sees the
+    # room — the same uniform 404 as never having been in it. An engine reply
+    # passes `allow_departed`: it was dispatched while its waker was a member and
+    # is already paid for, so it lands. No read path passes it.
     if not participant or (participant.get("left_at") and not allow_departed):
-        raise RoomError(404, "room_not_found", "Room not found")
-    # trinity-enterprise#701: a person who left, or was removed, no longer sees
-    # the room — the same uniform 404 as never having been in it. Agents keep
-    # their own rules (a removed agent is simply never woken).
-    if kind in PEOPLE_KINDS and participant.get("left_at"):
         raise RoomError(404, "room_not_found", "Room not found")
     return room
 
@@ -672,7 +671,7 @@ def get_room(current_user, room_id: str, since_seq: int = 0) -> dict:
             raise RoomError(503, "room_unavailable", "Couldn't read the room right now.") from e
         messages = [m for m in messages if m["seq"] not in held]
     own_tags = _annotate_own_tags(current_user, room_id, messages)
-    return {
+    return _project_for_reader(current_user, kind, identity, {
         **room,
         "participants": participants,
         # trinity-enterprise#701: who is reading — so the Workspace can tell the
@@ -690,7 +689,42 @@ def get_room(current_user, room_id: str, since_seq: int = 0) -> dict:
         "cost": db.room_cost(room_id),
         # Who is mid-turn, so a client that reloaded can show it again.
         "working": working_agents(room_id, participants),
-    }
+    })
+
+
+# trinity-enterprise#701 ruling 2: internal-only facts never reach a lower-privilege
+# reader. A collaborator reads and talks; these are the moderator's and an admin's.
+_COLLABORATOR_HIDDEN_ROOM_FIELDS = ("cost", "max_cost_usd")
+_COLLABORATOR_HIDDEN_MESSAGE_FIELDS = ("execution_id",)
+_COLLABORATOR_HIDDEN_PARTICIPANT_FIELDS = (
+    "cached_session_id", "last_read_seq", "visible_from_seq", "consecutive_resume_failures",
+)
+
+
+def _is_collaborator_reader(current_user, kind: str, identity: str, participants: list[dict]) -> bool:
+    # Only a person is ever seated as a collaborator (`seat_person`).
+    if getattr(current_user, "role", None) == "admin":
+        return False
+    return any(p.get("kind") == kind and p.get("identity") == identity
+               and p.get("role") == COLLABORATOR_ROLE for p in participants)
+
+
+def _without(row: dict, fields: tuple) -> dict:
+    return {k: v for k, v in row.items() if k not in fields}
+
+
+def _project_for_reader(current_user, kind: str, identity: str, payload: dict) -> dict:
+    """A room as this reader may see it. A collaborator keeps their own cursor."""
+    if not _is_collaborator_reader(current_user, kind, identity, payload["participants"]):
+        return payload
+    out = _without(payload, _COLLABORATOR_HIDDEN_ROOM_FIELDS)
+    out["messages"] = [_without(m, _COLLABORATOR_HIDDEN_MESSAGE_FIELDS) for m in payload["messages"]]
+    out["participants"] = [
+        p if (p.get("kind") == kind and p.get("identity") == identity)
+        else _without(p, _COLLABORATOR_HIDDEN_PARTICIPANT_FIELDS)
+        for p in payload["participants"]
+    ]
+    return out
 
 
 def list_rooms(current_user) -> dict:
@@ -715,6 +749,9 @@ def list_rooms(current_user) -> dict:
 
     for r in rooms:
         participants = participants_by_room.get(r["id"], [])
+        if _is_collaborator_reader(current_user, kind, identity, participants):
+            for field in _COLLABORATOR_HIDDEN_ROOM_FIELDS:
+                r.pop(field, None)
         # trinity-enterprise#959: is the CALLER actively in this room? Off the
         # admin path the list is ACTIVE membership (`list_rooms_for_participant`
         # drops a room the caller left), so it is true there; an admin lists

@@ -611,6 +611,17 @@ def spawn_task_terminal_event(
         ),
     )
     _spawn_named("#2523/#2524", _terminal_side_effects(execution_id))
+    # abilityai/trinity-enterprise#1108 AC #4: the answer wakes this turn's
+    # prompt carried are owed no longer once the turn SUCCEEDED — marked here,
+    # at the terminal, never at compose time. A sibling for the same reason as
+    # the side effects above; fail-open like them.
+    try:
+        from services import operator_resume_service
+        _spawn_named(
+            "ent#1108", operator_resume_service.mark_carried_wakes(execution_id, terminal_status),
+        )
+    except Exception as e:  # noqa: BLE001 — never affect the billed terminal
+        logger.debug("ent#1108 carried-wake mark not spawned for %s: %s", execution_id, e)
     # trinity-enterprise#1022: retrieval memory capture — a sibling for the same
     # reason as the side effects above, never nested inside the emit. The
     # service decides whose memory from the row, and is a cheap no-op while the

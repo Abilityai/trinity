@@ -502,6 +502,17 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
+    // trinity-enterprise#459: email a pending person their invitation again.
+    async resendInvite(name, email) {
+      const authStore = useAuthStore()
+      const response = await axios.post(
+        `/api/agents/${name}/share/${encodeURIComponent(email)}/invite`,
+        null,
+        { headers: authStore.authHeader }
+      )
+      return response.data
+    },
+
     async unshareAgent(name, email) {
       const authStore = useAuthStore()
       await axios.delete(`/api/agents/${name}/share/${encodeURIComponent(email)}`, {
