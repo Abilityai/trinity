@@ -112,6 +112,13 @@ class SchedulerDatabase:
         if _scheduler_pg_url():
             logger.info("Scheduler database: PostgreSQL (via DATABASE_URL)")
         else:
+            # #4175: mirrors db/engine.py::refuse_sqlite_backend. Connecting would
+            # create an empty file that later reads as an existing install.
+            if os.getenv("TRINITY_REQUIRE_POSTGRES") == "1" and os.getenv("TRINITY_ALLOW_SQLITE") != "1":
+                raise RuntimeError(
+                    "Refusing to start: no PostgreSQL DATABASE_URL, and SQLite reached end-of-support "
+                    "on 2026-09-01. See docs/migrations/SQLITE_TO_POSTGRES.md."
+                )
             logger.info(f"Scheduler database initialized: {self.database_path}")
 
     @contextmanager

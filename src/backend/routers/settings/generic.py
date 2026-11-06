@@ -71,6 +71,7 @@ from services.settings_service import (
     AGENT_DEFAULT_REQUIRE_EMAIL,
     get_agent_default_require_email,
     MAX_PARALLEL_TASKS_CEILING_KEY,
+    QUEUE_STALL_ALERT_MINUTES_KEY,
     MAX_PARALLEL_TASKS_CEILING_DEFAULT,
     MAX_PARALLEL_TASKS_CEILING_MIN,
     MAX_PARALLEL_TASKS_CEILING_MAX,
@@ -239,6 +240,19 @@ async def update_setting(
     # #506: the fleet ceiling must go through the dedicated range-validated
     # route; block the generic PUT so it can't be written to junk/out-of-range
     # (same pattern as the skills_library_url SSRF special-case below).
+    # #4257: same reason as the ceiling below — the generic PUT takes an
+    # unvalidated string, and a junk threshold here either silences the stall
+    # monitor or makes it file on every tick. The getter clamps as a backstop,
+    # but the named 422 is what tells a caller where the validated route is.
+    if key == QUEUE_STALL_ALERT_MINUTES_KEY:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "queue_stall_alert_minutes must be set via "
+                "PUT /api/settings/queue-stall-alert-minutes (range-validated 5–1440)"
+            ),
+        )
+
     if key == MAX_PARALLEL_TASKS_CEILING_KEY:
         raise HTTPException(
             status_code=422,

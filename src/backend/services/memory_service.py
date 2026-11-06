@@ -204,6 +204,17 @@ def owner_email(agent_name: str) -> Optional[str]:
         return None
 
 
+def owner_id(agent_name: str) -> Optional[int]:
+    """The agent owner's user id, or None (#4156: compares a turn's driver by id,
+    so an owner with no email — the built-in admin — is still the owner)."""
+    try:
+        owner = db.get_agent_owner(agent_name)
+        raw = owner.get("owner_id") if isinstance(owner, dict) else None
+        return int(raw) if raw is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def scope_for(agent_name: str, user_email: Optional[str]) -> str:
     """The scope key for a person's turn: the agent scope when the person is
     the agent's owner, otherwise their own address."""
@@ -231,6 +242,32 @@ def another_live_scope(agent_name: str, execution_id: str, scope: str) -> bool:
             other_subject = memory_subject.resolve(other)
             other_scope = scope_for(agent_name, other_subject.user_email) if other_subject.kind != memory_subject.SKIP else None
             if other_scope != scope:
+                return True
+        return False
+    except Exception as e:  # noqa: BLE001 — fail closed: an unreadable ledger is an unknown neighbour
+        logger.warning("[memory] live-turn ledger unreadable for %s: %s", agent_name, type(e).__name__)
+        return True
+
+
+def another_live_turn_not_serving(agent_name: str, execution_id: str, person_email: str) -> bool:
+    """Whether a live turn on ``agent_name`` other than ``execution_id`` serves
+    anyone but ``person_email`` — a headless run included (trinity-enterprise#1062).
+
+    ``another_live_scope`` folds the owner and a headless run into one scope,
+    which is right for memory (the owner shares the agent's) and wrong for a
+    decision, which belongs to ONE person: a cron turn naming the owner's live
+    run would otherwise record under the owner's seat. Same ledger, same
+    fail-closed read."""
+    person = (person_email or "").strip().lower()
+    try:
+        for row in db.get_running_turn_attribution(agent_name):
+            if row["id"] == execution_id:
+                continue
+            other = db.get_execution(row["id"])
+            if other is None:
+                continue
+            subject = memory_subject.resolve(other)
+            if subject.kind != memory_subject.PERSON or subject.user_email != person:
                 return True
         return False
     except Exception as e:  # noqa: BLE001 — fail closed: an unreadable ledger is an unknown neighbour

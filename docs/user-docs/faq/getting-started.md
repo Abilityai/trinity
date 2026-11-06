@@ -109,7 +109,7 @@ It is the system agent, a platform orchestrator Trinity deploys for you. It is d
 
 ## Which database does a new install use?
 
-A local install from `./scripts/deploy/start.sh` runs on SQLite. SQLite reached end-of-support on 2026-09-01, and PostgreSQL is now the supported backend. A fresh server or one-click install (`start.sh --hosted`) starts on a bundled PostgreSQL automatically, while an existing SQLite install stays on SQLite until you migrate it. See [Setup → Prerequisites](../getting-started/setup.md#prerequisites) and the [Deployment FAQ](deployment-and-upgrades.md).
+Every install starts on a bundled PostgreSQL. SQLite reached end-of-support on 2026-09-01, and an existing SQLite install refuses to start until you copy its data. See [Setup → Prerequisites](../getting-started/setup.md#prerequisites) and the [Deployment FAQ](deployment-and-upgrades.md).
 
 ## What is a template?
 

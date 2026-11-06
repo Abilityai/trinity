@@ -761,6 +761,8 @@ $(sed 's/^/     /' "$WORK/config.err")"
             printf '   If it failed after pulling, new images may have run a migration. To return, run\n' >&2
             printf '       ./scripts/deploy/update.sh --rollback\n' >&2
             printf '   which checks the schema first. Starting the old images directly does not.\n' >&2
+            printf '   If it refused a SQLite database, this checkout is back on the old release, which has no\n' >&2
+            printf '   copy command. Follow docs/migrations/SQLITE_TO_POSTGRES.md from the target release.\n' >&2
             exit 1
         fi
     else
