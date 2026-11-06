@@ -329,62 +329,6 @@ _RESERVED_ID_PREFIXES = (
     "mention-",
 )
 
-# trinity-enterprise#1111 (T4): prefixes reserved at RUNTIME by a module the
-# platform registers — today the enterprise `platform_alerts` emitters, which
-# live outside this repo and so cannot add a line to the literal above.
-#
-# The literal stays IMMUTABLE for two reasons. `db.migrations`'s frozen
-# `PLATFORM_ALERT_HEAL_PREFIXES` is pinned against it member-for-member
-# (`tests/unit/test_2372_platform_alert_ack.py`), so a tuple that grows at
-# import time would make that one-time heal's list look incomplete; and a paid
-# feature's name does not belong in an OSS literal. Every reader therefore
-# calls `reserved_id_prefixes()`, never the literal — a reservation only some
-# seams honour is not a reservation.
-_EXTRA_RESERVED_ID_PREFIXES: Tuple[str, ...] = ()
-
-# A reservable prefix: id-shaped (the `_ID_RE` alphabet), already lower-case and
-# unpadded — every reader normalizes the CANDIDATE that way before the
-# `startswith`, so an upper-case reservation would silently never match — and
-# ending in the family separator with at least one character before it (a bare
-# `-` would reserve every id that starts with one).
-_RESERVABLE_PREFIX_RE = re.compile(r"^[a-z0-9._:-]*[a-z0-9][a-z0-9._:-]*[-_]$")
-
-
-def reserve_id_prefix(prefix: str) -> None:
-    """Reserve an operator-queue id prefix so no agent can author a row under it.
-
-    An unreserved prefix is one an agent CAN author, which means it can
-    pre-create the deterministic id of the platform alert about itself and
-    swallow it through `create_item`'s ON CONFLICT DO NOTHING (#1632, #2744).
-    A module that raises platform rows — `platform_alerts.register(Kind)`
-    verifies it — calls this at registration time.
-
-    Idempotent: re-reserving, or reserving a prefix the literal already
-    carries, is a no-op. A malformed prefix raises `ValueError` rather than
-    being normalized: a reservation that does not match the ids it was meant to
-    cover is worse than no reservation, because it reads as protection.
-    """
-    global _EXTRA_RESERVED_ID_PREFIXES
-    if not isinstance(prefix, str) or not _RESERVABLE_PREFIX_RE.match(prefix):
-        raise ValueError(
-            f"reserved id prefix must be lower-case, id-shaped and end in '-' or "
-            f"'_': {prefix!r}")
-    if prefix in _RESERVED_ID_PREFIXES or prefix in _EXTRA_RESERVED_ID_PREFIXES:
-        return
-    _EXTRA_RESERVED_ID_PREFIXES = _EXTRA_RESERVED_ID_PREFIXES + (prefix,)
-
-
-def reserved_id_prefixes() -> Tuple[str, ...]:
-    """Every platform-reserved id prefix: the literal plus what was reserved.
-
-    The single read surface for the ~11 reader seams (both ingest hijack
-    guards, `is_platform_minted`, `raise_ask`'s refusal, and the cap /
-    exclusion reads). Returns a tuple so it can be passed straight to
-    `str.startswith`.
-    """
-    return _RESERVED_ID_PREFIXES + _EXTRA_RESERVED_ID_PREFIXES
-
-
 # Agent ids must be id-shaped: a create PK can't be safely rewritten, so a
 # malformed / oversize id is rejected rather than clamped (C4).
 _ID_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
@@ -707,6 +651,12 @@ from . import write_back  # noqa: E402
 from . import alerts  # noqa: E402,F401 — loads the submodule here, in G6 order
 from . import flood  # noqa: E402
 
+# trinity-enterprise#1111 (T4): the runtime id-prefix reservation registry —
+# mutable state with two public functions, in its own module so `__init__`
+# stays under the #3785 G1 cap. Reads `_oq._RESERVED_ID_PREFIXES` at call
+# time only.
+from . import reserved  # noqa: E402
+
 
 class OperatorQueueSyncService(poller.PollerCoreMixin, ingest.IngestMixin, write_back.WriteBackMixin,
                               flood.FloodAlertMixin):
@@ -793,4 +743,10 @@ from .alerts import (  # noqa: E402,F401
     ALERT_REFUSED_UNREGISTERED,
     create_bounded_alert,
     create_bounded_alert_outcome,
+)
+# reserved: the ent#1111 registry, which `platform_alerts.register`, the ask
+# sink and the enterprise emitters read through the package.
+from .reserved import (  # noqa: E402,F401
+    reserve_id_prefix,
+    reserved_id_prefixes,
 )

@@ -22,7 +22,7 @@ from typing import Optional
 from services import operator_queue_service as _oq
 from utils.helpers import parse_iso_timestamp, to_utc_iso
 
-from . import deps
+from . import deps, reserved
 
 logger = logging.getLogger("services.operator_queue_service")
 
@@ -54,7 +54,7 @@ def is_platform_minted(item) -> bool:
         candidate = item.get("request_id") or item.get("id") or ""
     else:
         candidate = getattr(item, "request_id", "") or getattr(item, "id", "") or ""
-    return str(candidate).strip().lower().startswith(_oq.reserved_id_prefixes())
+    return str(candidate).strip().lower().startswith(reserved.reserved_id_prefixes())
 
 
 def is_person_tag(item: Optional[dict]) -> bool:
