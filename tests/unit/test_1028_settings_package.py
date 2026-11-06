@@ -203,6 +203,13 @@ _ADDED_SINCE_SPLIT = {
     # write; the generic catch-all refuses those keys.
     ("/api/settings/aauth", ("GET",), "get_aauth_settings"),
     ("/api/settings/aauth", ("PUT",), "update_aauth_settings"),
+    # Abilityai/lilu#653 — the platform OpenCode provider tier (OpenRouter key,
+    # default Ollama base URL), in `provider_keys` beside its key siblings.
+    ("/api/settings/opencode-provider", ("GET",), "get_opencode_provider_settings"),
+    ("/api/settings/api-keys/openrouter", ("PUT",), "update_openrouter_key"),
+    ("/api/settings/api-keys/openrouter", ("DELETE",), "delete_openrouter_key"),
+    ("/api/settings/opencode-provider/base-url", ("PUT",),
+     "update_opencode_default_base_url"),
     # trinity-enterprise#1101 — the external-MCP-access switch: any-auth read,
     # admin write and clear; the generic catch-all refuses the key. In
     # `mcp_url`, above the catch-all (Invariant #4).

@@ -13,6 +13,7 @@ path) can import it without a circular dependency.
 from __future__ import annotations
 
 import json
+import os
 
 _GUARDRAILS_RUNTIME_PATH = "/opt/trinity/guardrails-runtime.json"
 _GUARDRAILS_BASELINE_PATH = "/opt/trinity/guardrails-baseline.json"
@@ -241,3 +242,112 @@ def merged_disallowed_tools(guardrails: dict) -> list:
         seen.add(cleaned)
         merged.append(cleaned)
     return merged
+
+
+# Claude Code tool name → the OpenCode tool ids that carry the same capability
+# (Abilityai/lilu#654). The single translation for `merged_disallowed_tools`
+# on an OpenCode agent. Every id on the right was MEASURED on the pinned CLI
+# (opencode-ai 1.18.32) as a tool it offers the model, and each deny was proven
+# by a real turn against a local fake model: `tools: {"<id>": false}` removes
+# the tool from the request and a model call to it comes back as OpenCode's
+# "unavailable tool" error. Ids were not read off the config schema, which
+# already flags `tools`/`permission` deprecated and is renamed in later
+# releases — bump this table together with the CLI pin.
+#
+# A name absent from this table is UNMAPPED and is surfaced, never silently
+# dropped (the Codex `_surface_unmapped_guardrails` precedent). The one
+# deliberate exception is PLATFORM_DENIED_TOOLS: those are Claude-harness
+# promise tools OpenCode does not have at all, so the absence IS the deny.
+OPENCODE_TOOL_IDS = {
+    "Bash": ("bash",),
+    "Write": ("write",),
+    "Edit": ("edit",),
+    "MultiEdit": ("edit",),
+    "Read": ("read",),
+    "Glob": ("glob",),
+    "Grep": ("grep",),
+    "WebFetch": ("webfetch",),
+    # Not offered by default on 1.18.32 (it is provider/flag-gated); denying
+    # it anyway is a no-op today and correct the day it is enabled.
+    "WebSearch": ("websearch",),
+    "Task": ("task",),
+    "Agent": ("task",),
+    "TodoWrite": ("todowrite",),
+    "Skill": ("skill",),
+}
+
+
+def map_disallowed_to_opencode(disallowed) -> tuple:
+    """Split a Claude disallow list into ``(opencode_ids, unmapped_names)``.
+
+    Both lists are order-stable and de-duplicated. ``PLATFORM_DENIED_TOOLS``
+    never reach ``unmapped`` (see the table's comment); every other name with
+    no entry does, so the caller can say which guardrails it could not honour.
+    """
+    ids: list = []
+    unmapped: list = []
+    for name in disallowed or ():
+        if not isinstance(name, str) or not name.strip():
+            continue
+        name = name.strip()
+        mapped = OPENCODE_TOOL_IDS.get(name)
+        if mapped:
+            for tool_id in mapped:
+                if tool_id not in ids:
+                    ids.append(tool_id)
+        elif name not in PLATFORM_DENIED_TOOLS and name not in unmapped:
+            unmapped.append(name)
+    return ids, unmapped
+
+
+# Abilityai/lilu#660: does an image attached to an OpenCode turn reach the
+# model? The pinned 1.18.32 binary decides per MODEL, from
+# `capabilities.input.image`, which for a model declared in opencode.json is
+# `modalities.input` includes "image", else the models.dev entry, else false —
+# and an image part on a model without it is replaced by an
+# "ERROR: Cannot read … (this model does not support image input)" text part.
+# A provider OpenCode only knows from config (Ollama, any URL-declared
+# OpenAI-compatible endpoint) therefore defaults to NO images; a models.dev
+# provider (openrouter/anthropic/openai) defaults to yes and the binary's own
+# per-model gate still applies. `OPENCODE_PROVIDER_<ID>_IMAGES` overrides both.
+OPENCODE_IMAGES_ENV_SUFFIX = "_IMAGES"
+OPENCODE_IMAGES_DEFAULT_OFF = frozenset({"ollama"})
+_MODELS_DEV_PROVIDERS = frozenset({"openrouter", "anthropic", "openai"})
+_TRUE = frozenset({"1", "true", "yes", "on"})
+_FALSE = frozenset({"0", "false", "no", "off"})
+
+
+def opencode_images_env_name(provider_id: str) -> str:
+    """``"ollama"`` -> ``OPENCODE_PROVIDER_OLLAMA_IMAGES``."""
+    return f"OPENCODE_PROVIDER_{provider_id.upper()}{OPENCODE_IMAGES_ENV_SUFFIX}"
+
+
+def opencode_images_override(provider_id, env=None):
+    """The explicit ``OPENCODE_PROVIDER_<ID>_IMAGES`` value, or ``None``."""
+    if not provider_id:
+        return None
+    source = os.environ if env is None else env
+    raw = (source.get(opencode_images_env_name(provider_id)) or "").strip().lower()
+    if raw in _TRUE:
+        return True
+    if raw in _FALSE:
+        return False
+    return None
+
+
+def opencode_provider_images(provider_id, env=None) -> bool:
+    """Whether ``provider_id`` is configured to receive image input.
+
+    Explicit env first, then the default above. ``None`` (no provider pinned:
+    OpenCode picks its own) is True — the binary's per-model gate decides.
+    """
+    override = opencode_images_override(provider_id, env)
+    if override is not None:
+        return override
+    if not provider_id:
+        return True
+    if provider_id in OPENCODE_IMAGES_DEFAULT_OFF:
+        return False
+    source = os.environ if env is None else env
+    declared_by_url = (source.get(f"OPENCODE_PROVIDER_{provider_id.upper()}_BASE_URL") or "").strip()
+    return provider_id in _MODELS_DEV_PROVIDERS or not declared_by_url

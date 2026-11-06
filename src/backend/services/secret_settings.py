@@ -70,6 +70,10 @@ SECRET_SETTING_KEYS = frozenset({
     "anthropic_api_key",
     "github_pat",
     "google_api_key",
+    # Abilityai/lilu#653: the platform OpenRouter key, injected as
+    # OPENROUTER_API_KEY into `runtime == opencode` agents only. New, so no
+    # cleartext row can predate it.
+    "openrouter_api_key",
     # ent#582: the email-provider key, configurable from the first-run flow.
     # Env-only (`RESEND_API_KEY`) until then, so no cleartext row can predate it.
     "resend_api_key",

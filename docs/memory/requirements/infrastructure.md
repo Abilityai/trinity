@@ -981,7 +981,7 @@
     "edition": "oss",
     "enterprise_features": [],
     "components": { … },
-    "runtimes": ["claude-code", "gemini-cli", "codex"],
+    "runtimes": ["claude-code", "gemini-cli", "codex", "opencode"],
     "build_date": "2026-05-25T14:00:00Z",
     "git_commit": "f1ba610fab…full sha…",
     "git_commit_short": "f1ba610f",

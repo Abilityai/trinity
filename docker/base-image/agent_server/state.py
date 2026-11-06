@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from .models import ChatMessage
 from .model_context import resolve_context_window
+from .runtime_names import is_claude_runtime, normalize_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,13 @@ class AgentState:
         # Check if the configured runtime is available
         self.runtime_available = self._check_runtime_available()
         # Backward compatibility alias
-        self.claude_code_available = self.runtime_available if self.agent_runtime == "claude-code" else self._check_claude_code()
+        # Backward-compatibility alias: "is the CLAUDE CLI here", which for a
+        # Claude agent is the same question runtime_available already answered.
+        self.claude_code_available = (
+            self.runtime_available
+            if is_claude_runtime(self.agent_runtime)
+            else self._check_claude_code()
+        )
         self.session_started = False  # Track if we've started a conversation
         # #2958: the Claude chat path resumes ONLY its own session. The id is
         # captured after a successful chat turn (never before the subprocess
@@ -59,6 +66,11 @@ class AgentState:
         self.chat_session_id: Optional[str] = None
         self.chat_session_model: Optional[str] = None
         self.chat_session_generation: int = 0
+        # OpenCode chat session tracking — mirrors the Claude fields above.
+        # reset_session() clears these so a DELETE /api/chat/history does not
+        # silently resume the "cleared" conversation (Abilityai/lilu#651).
+        self.opencode_chat_session_id: Optional[str] = None
+        self.opencode_chat_session_model: Optional[str] = None
         # Session-level token tracking
         self.session_total_cost: float = 0.0
         self.session_total_output_tokens: int = 0
@@ -123,25 +135,57 @@ class AgentState:
         """
         return resolve_context_window(self.current_model or self.agent_runtime)
 
-    def _check_runtime_available(self) -> bool:
-        """Check if the configured runtime CLI is available"""
-        if self.agent_runtime == "gemini-cli" or self.agent_runtime == "gemini":
-            return self._check_gemini_cli()
-        return self._check_claude_code()
+    # Abilityai/lilu#257: one CLI per runtime, table-driven. The previous shape
+    # was `if gemini: … else: claude`, so a CODEX agent's availability probe ran
+    # `claude --version` — reporting "available" from a binary the runtime never
+    # invokes, and (worse) reporting "unavailable" for a perfectly healthy Codex
+    # container if the Claude CLI were ever absent. That latent Codex bug is
+    # fixed here along with adding opencode; the lookup is keyed on the
+    # NORMALIZED name, so `AGENT_RUNTIME=Codex` probes codex (#1187 casing trap).
+    _RUNTIME_PROBE_BINARY = {
+        "claude-code": "claude",
+        "claude": "claude",
+        "gemini-cli": "gemini",
+        "gemini": "gemini",
+        "codex": "codex",
+        "opencode": "opencode",
+    }
 
-    def _check_gemini_cli(self) -> bool:
-        """Check if Gemini CLI is available"""
+    def _check_runtime_available(self) -> bool:
+        """Check whether THIS runtime's CLI is available."""
+        binary = self._RUNTIME_PROBE_BINARY.get(
+            normalize_runtime(self.agent_runtime)
+        )
+        if binary is None:
+            # An unknown runtime is not silently treated as Claude. get_runtime()
+            # raises on it at dispatch; here we simply report it unavailable, so
+            # /health and the info endpoint tell the truth instead of probing an
+            # unrelated binary.
+            logger.error(
+                "Unknown AGENT_RUNTIME=%r — no CLI to probe; reporting unavailable",
+                self.agent_runtime,
+            )
+            return False
+        return self._check_cli(binary)
+
+    @staticmethod
+    def _check_cli(binary: str) -> bool:
+        """Does ``<binary> --version`` answer?"""
         try:
             result = subprocess.run(
-                ["gemini", "--version"],
+                [binary, "--version"],
                 capture_output=True,
                 text=True,
                 timeout=5
             )
             return result.returncode == 0
         except Exception as e:
-            logger.error(f"Gemini CLI check failed: {e}")
+            logger.error(f"{binary} CLI check failed: {e}")
             return False
+
+    def _check_gemini_cli(self) -> bool:
+        """Back-compat alias — kept because tests and callers reference it."""
+        return self._check_cli("gemini")
 
     def _create_empty_activity(self) -> Dict:
         """Create empty session activity structure"""
@@ -200,6 +244,8 @@ class AgentState:
         self.chat_session_id = None
         self.chat_session_model = None
         self.chat_session_generation += 1
+        self.opencode_chat_session_id = None
+        self.opencode_chat_session_model = None
         from .services import chat_session_marker  # lazy: avoids an import cycle
         chat_session_marker.clear()
         self.session_total_cost = 0.0

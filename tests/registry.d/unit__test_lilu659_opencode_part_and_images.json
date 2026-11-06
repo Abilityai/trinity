@@ -1,0 +1,7 @@
+{
+  "file": "unit/test_lilu659_opencode_part_and_images.py",
+  "feature": "Abilityai/lilu#659",
+  "added": "2026-11-02",
+  "categories": ["agents", "docker"],
+  "description": "OpenCode telemetry under `part` (Abilityai/lilu#659) and the per-provider images capability (Abilityai/lilu#660). #659: the pinned 1.18.32 binary nests step/tool payloads under `part`; a REAL step_finish line captured on the DGX must read input 56913 / output 63 / cost 0.0, a 4-step tool turn must report the LAST step's input (57229, not the sum) and the real tool id `bash` (never \"Tool\"), and the legacy flat shape must still parse. Cost decision: a native `cost: 0` stays 0.0; None only when no cost field arrived. #660: 1.18.32 swaps an image part for an \"ERROR: Cannot read …\" text part unless the model's `modalities.input` lists \"image\"; `OPENCODE_PROVIDER_<ID>_IMAGES` defaults off for ollama / URL-declared OpenAI-compatible providers and on for openrouter/anthropic/openai, is surfaced as `capabilities().image_input`, writes `modalities` (with \"text\" kept) into the provider block when true, and an undeliverable image is never a silent text-only turn: no `-f`, the model is told, a `metadata.warnings` entry, a sentence prepended to the response, and a log line."
+}

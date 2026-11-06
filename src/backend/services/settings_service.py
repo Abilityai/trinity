@@ -25,6 +25,12 @@ PLATFORM_DEFAULT_MODEL_VALUE = "claude-sonnet-4-6"
 _platform_model_cache: Optional[str] = None
 _platform_model_cache_ts: float = 0.0
 _PLATFORM_MODEL_CACHE_TTL = 60.0
+# Abilityai/lilu#652: OpenCode's platform default is its own setting, because
+# the fleet default above is a bare Claude id OpenCode refuses ("missing a
+# provider prefix"). NO code default on purpose: unset means "send no model and
+# let the agent's own `get_default_model()` decide" — a hardcoded local-model
+# id here would be wrong on every install that does not run that model.
+PLATFORM_DEFAULT_MODEL_OPENCODE_KEY = "platform_default_model_opencode"
 
 # #894: current-gen models an agent owner may select as a per-agent override for
 # public-facing channels. Derived from the single source of truth,
@@ -294,6 +300,29 @@ class SettingsService:
     def get_google_api_key(self) -> str:
         """Get Google API key: encrypted setting → legacy → env → ''."""
         return self._resolve_secret_setting('google_api_key', 'GOOGLE_API_KEY')
+
+    # =========================================================================
+    # OpenCode provider tier (Abilityai/lilu#653)
+    # =========================================================================
+    #
+    # Injected into the container env of `runtime == opencode` agents ONLY, at
+    # create/recreate. They are the PLATFORM tier: the agent's `.env` and its
+    # `template.yaml runtime.env` both sit above the container baseline in the
+    # agent-server spawn env, so a per-agent value always wins.
+
+    def get_openrouter_api_key(self) -> str:
+        """Platform OpenRouter key: encrypted setting → legacy → env → ''."""
+        return self._resolve_secret_setting('openrouter_api_key', 'OPENROUTER_API_KEY')
+
+    def get_opencode_default_provider_base_url(self) -> str:
+        """Platform Ollama base URL for OpenCode agents: setting → env → ''.
+
+        Not a credential (a URL), so a plain setting.
+        """
+        return (
+            self.get_setting('opencode_default_provider_base_url')
+            or os.getenv('OPENCODE_DEFAULT_PROVIDER_BASE_URL', '')
+        ).strip()
 
     # =========================================================================
     # Platform keys configurable from the first-run flow (trinity-enterprise#582)
@@ -967,13 +996,21 @@ class SettingsService:
         """
         db.set_setting(TEMPLATE_REGISTRY_LKG_KEY, json.dumps(payload))
 
-    def get_platform_default_model(self) -> str:
+    def get_platform_default_model(self, runtime: Optional[str] = None) -> Optional[str]:
         """
-        Return the platform-wide default Claude model (#831).
+        Return the platform-wide default model for ``runtime`` (#831, lilu#652).
 
         Resolution: system_settings.platform_default_model → PLATFORM_DEFAULT_MODEL_VALUE.
         Result is cached for 60 s to avoid per-turn SQLite reads during burst drain.
+
+        ``runtime="opencode"`` resolves ``platform_default_model_opencode``
+        instead, and returns ``None`` when it is unset (never the Claude
+        default, which OpenCode cannot run). Uncached, so an operator's write
+        applies on the next turn with no invalidation hook.
         """
+        if runtime == "opencode":
+            value = self.get_setting(PLATFORM_DEFAULT_MODEL_OPENCODE_KEY, None)
+            return (value or "").strip() or None
         global _platform_model_cache, _platform_model_cache_ts
         now = time.monotonic()
         if _platform_model_cache is not None and (now - _platform_model_cache_ts) < _PLATFORM_MODEL_CACHE_TTL:
@@ -1033,6 +1070,43 @@ settings_service = SettingsService()
 def get_anthropic_api_key() -> str:
     """Get Anthropic API key from settings, fallback to env var."""
     return settings_service.get_anthropic_api_key()
+
+
+def get_opencode_provider_env() -> dict:
+    """Container env for a `runtime == opencode` agent's platform provider tier.
+
+    Only non-empty values: an unset setting must not plant an empty
+    `OPENROUTER_API_KEY` that a turn would read as "configured".
+    """
+    env = {}
+    key = settings_service.get_openrouter_api_key()
+    if key:
+        env['OPENROUTER_API_KEY'] = key
+    base_url = settings_service.get_opencode_default_provider_base_url()
+    if base_url:
+        env['OPENCODE_DEFAULT_PROVIDER_BASE_URL'] = base_url
+    return env
+
+
+#: Every env key `get_opencode_provider_env` may emit — the set a recreate
+#: clears before re-deriving, so a removed setting stops applying.
+OPENCODE_PROVIDER_ENV_KEYS = ('OPENROUTER_API_KEY', 'OPENCODE_DEFAULT_PROVIDER_BASE_URL')
+
+
+def apply_opencode_provider_env(env_vars: dict, runtime) -> None:
+    """Re-derive the platform provider tier into ``env_vars`` — OpenCode only.
+
+    The single writer for create (``crud._build_base_env``) and both rebuild
+    paths in ``lifecycle``, mirroring how ``ANTHROPIC_API_KEY`` follows the
+    platform setting. Any other runtime returns WITHOUT touching
+    ``env_vars``: a Claude agent's container env is byte-identical with or
+    without this feature, and must not grow a second provider's key.
+    """
+    if (runtime or '').strip().lower() != 'opencode':
+        return
+    for key in OPENCODE_PROVIDER_ENV_KEYS:
+        env_vars.pop(key, None)
+    env_vars.update(get_opencode_provider_env())
 
 
 def get_github_pat() -> str:
@@ -1730,6 +1804,6 @@ def is_template_registry_enabled() -> bool:
     return settings_service.is_template_registry_enabled()
 
 
-def get_platform_default_model() -> str:
-    """Return the platform-wide default Claude model (#831)."""
-    return settings_service.get_platform_default_model()
+def get_platform_default_model(runtime: Optional[str] = None) -> Optional[str]:
+    """Return the platform-wide default model for ``runtime`` (#831, lilu#652)."""
+    return settings_service.get_platform_default_model(runtime)

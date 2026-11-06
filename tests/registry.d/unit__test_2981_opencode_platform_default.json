@@ -1,0 +1,7 @@
+{
+  "file": "unit/test_2981_opencode_platform_default.py",
+  "feature": "#2981",
+  "added": "2026-11-02",
+  "categories": ["agents", "backend"],
+  "description": "An OpenCode agent gets its own platform default model, never the Claude fleet default (ported from Abilityai/lilu#652). `settings_service.get_platform_default_model(runtime=\"opencode\")` reads `platform_default_model_opencode`, returns None when unset or blank, and applies a write on the next call (uncached). `task_execution_service._default_model_for` returns the OpenCode default for an OpenCode agent and None when it is unset (the regression: it returned the bare Claude id, which OpenCode refuses); Claude Code keeps the fleet default and Codex/Gemini keep None."
+}

@@ -27,7 +27,7 @@ from dependencies import (
     viewer_row_scope,
 )
 from services.agent_auth import agent_httpx_client
-from services.docker_service import get_agent_container
+from services.docker_service import get_agent_container, get_agent_runtime
 from services import sync_waiter
 from services.pull_pilot import is_pull_pilot_agent, pull_queue_allowance
 from services.model_catalog import InvalidModelError, validate_dispatch_model
@@ -230,8 +230,11 @@ async def chat_with_agent(
     # after that point would burn the key (the RD11 upload-path quirk this
     # deliberately does not repeat). Normalised in place so the execution row
     # and the dispatch payload cannot disagree about the value.
+    # Abilityai/lilu#652: runtime-aware — an OpenCode agent takes `provider/model`.
     try:
-        request.model = validate_dispatch_model(request.model)
+        request.model = validate_dispatch_model(
+            request.model, runtime=get_agent_runtime(name)
+        )
     except InvalidModelError as e:
         raise HTTPException(status_code=422, detail=str(e))
 
@@ -464,8 +467,11 @@ async def execute_parallel_task(
     # the Chat tab actually posts to, and its `model` reaches the runtime as a
     # `--model` argv element by the same path. Normalised in place, exactly like
     # the timeout below.
+    # Abilityai/lilu#652: runtime-aware — an OpenCode agent takes `provider/model`.
     try:
-        request.model = validate_dispatch_model(request.model)
+        request.model = validate_dispatch_model(
+            request.model, runtime=get_agent_runtime(name)
+        )
     except InvalidModelError as e:
         raise HTTPException(status_code=422, detail=str(e))
 

@@ -39,9 +39,47 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
     apt-get install -y nodejs && \
     rm -rf /var/lib/apt/lists/*
 
-RUN wget -q https://go.dev/dl/go1.23.4.linux-amd64.tar.gz && \
-    tar -C /usr/local -xzf go1.23.4.linux-amd64.tar.gz && \
-    rm go1.23.4.linux-amd64.tar.gz
+# Go toolchain — resolve the tarball's architecture at build time
+# (Abilityai/lilu#263).
+#
+# Was hardcoded `go1.23.4.linux-amd64.tar.gz`. On the arm64 DGX that URL exists,
+# downloads, and untars WITHOUT ERROR — 641 s of build time installing a
+# toolchain that cannot execute on the host. Nothing fails, so nothing reports
+# it. That is the more dangerous half of the #263 pair, and it is exactly the
+# defect the lilu#20 out-of-scope note further down predicted.
+#
+# `uname -m`, NOT `TARGETARCH`. All three `docker build` call sites
+# (scripts/deploy/build-base-image.sh and the two in scripts/deploy/gcp-deploy.sh)
+# invoke the builder with no `--platform` and no `buildx`, so this image is
+# always built NATIVELY and `uname -m` is the ground truth. `TARGETARCH` would
+# be worse on three counts: it needs a bare `ARG TARGETARCH` redeclaration
+# in-stage, it expands to the EMPTY STRING under the classic builder
+# (DOCKER_BUILDKIT=0) — an empty arch being precisely the silently-wrong-artifact
+# class this change closes — and that ARG would have to sit above this layer,
+# busting the cached layers 1-14 that make the DGX retry cheap.
+#
+# The `go version` assertion is IN THIS RUN LAYER and greps for the resolved
+# `linux/${goarch}`: a tarball built for the wrong architecture untars perfectly
+# happily, so only running the binary distinguishes a correct install from
+# #263's silence. A separate layer would still cache and publish a bad install.
+RUN set -eu; \
+    case "$(uname -m)" in \
+        x86_64)  goarch=amd64 ;; \
+        aarch64) goarch=arm64 ;; \
+        *) echo "[base-image] FATAL: unsupported build architecture '$(uname -m)' — no Go tarball mapping. Add it above." >&2; \
+           exit 1 ;; \
+    esac; \
+    echo "[base-image] go tarball arch: ${goarch}"; \
+    wget -q "https://go.dev/dl/go1.23.4.linux-${goarch}.tar.gz"; \
+    tar -C /usr/local -xzf "go1.23.4.linux-${goarch}.tar.gz"; \
+    rm "go1.23.4.linux-${goarch}.tar.gz"; \
+    installed="$(/usr/local/go/bin/go version)"; \
+    echo "[base-image] ${installed}"; \
+    case "$installed" in \
+        *"linux/${goarch}"*) : ;; \
+        *) echo "[base-image] FATAL: go reports '${installed}', expected linux/${goarch}." >&2; \
+           exit 1 ;; \
+    esac
 
 # Docker apt repo for debian (was linux/ubuntu when the base was ubuntu:22.04).
 RUN curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /usr/share/keyrings/docker-archive-keyring.gpg && \
@@ -158,7 +196,8 @@ RUN git config --system gc.auto 0 && \
 # Related, deliberately NOT changed here (out of scope for Abilityai/lilu#20):
 # `@google/gemini-cli` and `@openai/codex` below resolve their binaries through
 # the same optional-dependency mechanism and carry the same silent-failure risk,
-# and the Go tarball above is hardcoded to linux-amd64.
+# the Go tarball and the OpenCode install resolve their architecture at build
+# time and assert it (#2981).
 #
 # Pinned, never `@latest` (#3012). Docker caches a RUN layer by its text, so
 # `@latest` is resolved once and then reused by every rebuild: an instance
@@ -193,9 +232,92 @@ RUN npm install -g @google/gemini-cli@0.62.0
 # Install OpenAI Codex CLI for multi-runtime support (#1187).
 # Pinned (not @latest) so base-image rebuilds are reproducible and a
 # breaking Codex release can't silently change the agent runtime. The npm
-# package resolves the platform-specific Rust binary via optional deps;
-# the linux-x64 build lands here. Bump deliberately after testing.
+# package resolves the platform-specific Rust binary via optional deps, and
+# publishes both `@openai/codex-linux-{x64,arm64}` at this pin — so unlike the
+# two layers Abilityai/lilu#263 fixed, this one needs no arch literal. It keeps
+# the silent-optional risk the Claude Code block above documents (no in-layer
+# assertion), which is deliberately still out of scope. Bump after testing.
 RUN npm install -g @openai/codex@0.147.0
+
+# Install OpenCode CLI for multi-runtime support (Abilityai/lilu#257).
+#
+# `npm i -g opencode-ai@1.18.32` FAILS on this glibc image and installs NOTHING.
+# Measured, not inferred: npm's optional-dependency resolution selects
+# `opencode-linux-x64-musl`, whose postinstall aborts with
+#     notsup … Valid libc: musl / Actual libc: glibc
+# and the top-level install still exits 0 — the #2537 class (which arrived on
+# arm64) landing again on x64. So the platform package is named EXPLICITLY
+# alongside the wrapper rather than left to optional-dependency resolution.
+#
+# That explicit naming is kept — but the package NAME is now resolved at build
+# time rather than pinned to x64 (Abilityai/lilu#263). Pinned, it made the image
+# unbuildable on the arm64 DGX: npm refuses a directly-named package whose `cpu`
+# does not match — `npm error code EBADPLATFORM`, 4.8 s into step 11/40. Being a
+# direct target is what makes that fatal instead of a warning, which is the
+# property we want; it just has to name the RIGHT package. `uname -m` is mapped
+# using npm's own arch spelling (x86_64 -> x64, aarch64 -> arm64), and an
+# unmapped machine fails loudly rather than falling through to a default.
+# Rationale for `uname -m` over `TARGETARCH` is on the Go layer above.
+#
+# The `opencode --version` assertion is IN THE SAME RUN LAYER and compares
+# against the pin, which is the whole point: an install that silently lands no
+# binary, or lands a different version, must fail the BUILD rather than ship an
+# image whose agents 503 at their first turn (the Abilityai/lilu#19 symptom).
+# That one assertion also covers the architecture, and no second check is added
+# for it: `opencode --version` EXECUTES the platform binary, so on a mismatched
+# arch it could not run at all (ENOEXEC -> 126, and `set -eu` aborts the layer).
+# A second "is it arm64?" check would only restate the mapping this layer just
+# computed, and would prove nothing the successful run does not already prove.
+#
+# Pinned (not @latest) so rebuilds are reproducible and a breaking OpenCode
+# release can't silently change the agent runtime. Bump deliberately, together
+# with the parser — the JSON event stream is this pin's real contract.
+ARG OPENCODE_VERSION=1.18.32
+RUN set -eu; \
+    case "$(uname -m)" in \
+        x86_64)  ocarch=x64 ;; \
+        aarch64) ocarch=arm64 ;; \
+        *) echo "[base-image] FATAL: unsupported build architecture '$(uname -m)' — no OpenCode platform package mapping. Add it above." >&2; \
+           exit 1 ;; \
+    esac; \
+    echo "[base-image] opencode platform package: opencode-linux-${ocarch}@${OPENCODE_VERSION}"; \
+    npm install -g --no-ignore-scripts \
+        "opencode-ai@${OPENCODE_VERSION}" \
+        "opencode-linux-${ocarch}@${OPENCODE_VERSION}"; \
+    installed="$(opencode --version 2>&1 | tr -d '\r' | tail -n1)"; \
+    echo "[base-image] opencode --version: ${installed}"; \
+    case "$installed" in \
+        *"${OPENCODE_VERSION}"*) : ;; \
+        *) echo "[base-image] FATAL: opencode reports '${installed}', expected ${OPENCODE_VERSION}." >&2; \
+           echo "[base-image] The usual cause is npm resolving the musl platform package on glibc and installing no binary at all." >&2; \
+           exit 1 ;; \
+    esac
+
+# Pre-seed OpenCode's provider packages into the image (Abilityai/lilu#257).
+#
+# OpenCode installs provider npm packages at RUNTIME into
+# `$XDG_CONFIG_HOME/opencode/node_modules` — a cold start writes package.json,
+# package-lock.json and a full dependency tree. That is a live npm-registry
+# dependency on EVERY cold container: startup latency, an air-gap failure, and
+# a supply-chain fetch outside the image's control. Measured: the
+# custom-provider package the Ollama/Replicate path needs
+# (`@ai-sdk/openai-compatible`) was not fetched automatically at all and had to
+# be installed by hand.
+#
+# startup.sh copies this tree into the agent's XDG config dir, and each turn's
+# private config dir copies it again (ent#819: no links, Abilityai/lilu#627),
+# so no turn ever resolves from the
+# network. Root-owned and read-only to the agent by construction.
+RUN set -eu; \
+    mkdir -p /opt/trinity/opencode; \
+    cd /opt/trinity/opencode; \
+    npm init -y >/dev/null; \
+    npm install --no-audit --no-fund \
+        @ai-sdk/openai-compatible \
+        @ai-sdk/anthropic \
+        @ai-sdk/openai; \
+    test -d node_modules/@ai-sdk/openai-compatible; \
+    chmod -R a+rX /opt/trinity/opencode
 
 RUN useradd -m -s /bin/bash -u 1000 developer && \
     echo "developer:developer" | chpasswd && \

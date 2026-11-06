@@ -42,13 +42,15 @@ logger = logging.getLogger(__name__)
 # #1187 Phase H: runtimes whose turns must NOT use the cached-UUID `--resume`
 # machinery. They support plain chat continuity but not the Claude-JSONL
 # resume/fallback/reaping model, so we run a stateless turn for them instead.
+# OpenCode left this set in Abilityai/lilu#655: `resume_session_id` reaches
+# `opencode run --session <id>` and its sessions persist in the shared data dir.
 # ONE backend constant — keep in sync with the agent-side
 # `RuntimeCapabilities.session_tab_resume`.
 RUNTIMES_WITHOUT_SESSION_TAB_RESUME = {"codex"}
 
 
 def supports_session_resume(agent_name: str) -> bool:
-    """False for runtimes (e.g. Codex) that lack the cached-UUID `--resume`
+    """False for runtimes (Codex) that lack the cached-UUID `--resume`
     machinery. Defaults to True on any lookup failure — assume Claude-like
     so a transient Docker hiccup never silently downgrades a real session."""
     try:

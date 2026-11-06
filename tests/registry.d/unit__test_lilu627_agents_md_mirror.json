@@ -1,0 +1,7 @@
+{
+  "file": "unit/test_lilu627_agents_md_mirror.py",
+  "feature": "Abilityai/lilu#627",
+  "added": "2026-10-26",
+  "categories": ["agents", "docker"],
+  "description": "AGENTS.md is a refreshed copy of CLAUDE.md, not a link (ent#819 forbids links in an agent home). Codex and OpenCode refresh it at every turn; a sha256 provenance record decides ours-vs-authored: no file is copied, our stale copy is refreshed, an authored (or author-edited) file is never overwritten, a leftover lilu#257 symlink becomes a copy."
+}

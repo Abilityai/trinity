@@ -15,6 +15,7 @@ from fastapi.responses import JSONResponse
 from ..models import AgentInfo
 from ..safe_yaml import AliasPolicy, load_hardened_yaml
 from ..state import agent_state
+from ..runtime_names import is_claude_runtime
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -128,6 +129,16 @@ def _guardrails_registration() -> str:
     return "ok"
 
 
+def _read_only_enforcement() -> dict:
+    """Abilityai/lilu#654: OpenCode enforces read-only mode through the
+    per-turn ``opencode.json`` (``permission`` denies on ``edit`` and
+    ``bash``), not through a Claude hook — so it reports ``"config"``. Other
+    runtimes report nothing here (their payload is unchanged)."""
+    if str(agent_state.agent_runtime or "").lower() == "opencode":
+        return {"read_only_enforcement": "config"}
+    return {}
+
+
 SKILL_GATE_REGISTRATION = "/etc/claude-code/managed-settings.d/50-skill-gate.json"
 SKILL_GATE_HOOK_FILES = ("/opt/trinity/hooks/skill-gate.py", "/opt/trinity/hooks/_skill_gate.py")
 
@@ -209,7 +220,12 @@ async def get_agent_info():
     return AgentInfo(
         name=agent_state.agent_name,
         status="running",
-        claude_version=runtime_version if agent_state.agent_runtime == "claude-code" else None,
+        # Abilityai/lilu#257: the field is Claude-named for wire compatibility,
+        # but the QUESTION is "is this agent's runtime CLI present". The old
+        # literal `== "claude-code"` also excluded the equally-valid `claude`
+        # alias, so an agent created with `runtime: claude` reported null here
+        # while being a perfectly healthy Claude agent.
+        claude_version=runtime_version if is_claude_runtime(agent_state.agent_runtime) else None,
         mcp_servers=mcp_servers,
         uptime=None  # TODO: Calculate uptime
     )
@@ -250,6 +266,9 @@ async def health_check():
         # trinity-enterprise#752: the same, for the gated-skill hook, plus
         # "unsupported_runtime" (no hooks on Codex / Gemini).
         "skill_gate_hook": _skill_gate_hook(),
+        # Abilityai/lilu#654: how read-only mode is enforced, emitted for
+        # OpenCode only so the Claude/Codex payloads stay byte-identical.
+        **_read_only_enforcement(),
         "diagnostics": _diagnostics(),
     }
 

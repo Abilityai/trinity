@@ -38,6 +38,7 @@ from fastapi import HTTPException
 
 from ..state import agent_state
 from .process_registry import get_process_registry
+from .runtime_adapter import is_claude_runtime as _is_claude_runtime
 
 logger = logging.getLogger(__name__)
 
@@ -91,8 +92,32 @@ _inflight: "Set[asyncio.Task[Any]]" = set()
 
 def is_claude_runtime() -> bool:
     """v1 async dispatch is Claude-runtime only (decision 5): the typed
-    terminal-reason envelope is Claude-specific."""
-    return agent_state.agent_runtime in ("claude-code", "claude")
+    terminal-reason envelope is Claude-specific.
+
+    Delegates to the canonical predicate in ``runtime_adapter`` (the module
+    that owns ``_CLAUDE_RUNTIMES``) rather than re-spelling the membership
+    test — the local spelling was also case-SENSITIVE, so ``AGENT_RUNTIME``
+    set to ``Claude-Code`` disabled async dispatch on a Claude agent (the
+    #1187 casing trap, one layer down).
+    """
+    return _is_claude_runtime(agent_state.agent_runtime)
+
+
+def runtime_supports_async() -> bool:
+    """Claude by name, plus any runtime whose ``capabilities()`` declares
+    ``async_dispatch`` (Abilityai/lilu#655: OpenCode). The envelope is built
+    from ``execute_headless``'s runtime-agnostic return, so the Claude-only
+    rule of decision 5 was a gate on the name, not on what the path needs.
+    A runtime that cannot be resolved runs sync — the safe fallback."""
+    if is_claude_runtime():
+        return True
+    try:
+        from .runtime_adapter import get_runtime
+
+        return bool(get_runtime().capabilities().async_dispatch)
+    except Exception:  # noqa: BLE001 — an unresolvable runtime runs sync
+        logger.debug("[#1083] runtime capability lookup failed", exc_info=True)
+        return False
 
 
 def _callbacks_configured() -> bool:
@@ -386,13 +411,14 @@ async def _run_and_report(request, backend_url: str, mcp_key: str, dispatch_mono
 
 def try_spawn_async(request) -> bool:
     """Spawn the detached run+report for an async dispatch. Returns True (caller
-    answers 202) only when eligible: async requested, Claude runtime, an
+    answers 202) only when eligible: async requested, an async-capable runtime
+    (Claude, or ``capabilities().async_dispatch``), an
     execution_id to key the callback, and callback creds present. Otherwise
     returns False and the caller runs the turn synchronously (the non-202
     fallback that keeps mixed image versions + non-Claude runtimes working)."""
     if not getattr(request, "async_result", False):
         return False
-    if not is_claude_runtime():
+    if not runtime_supports_async():
         logger.info("[#1083] async_result requested but runtime is %s — running sync",
                     agent_state.agent_runtime)
         return False

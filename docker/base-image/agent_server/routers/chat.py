@@ -13,6 +13,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 
 from ..models import ChatRequest, ModelRequest, ParallelTaskRequest
 from ..state import agent_state
+from ..runtime_names import normalize_runtime
 from ..services.claude_code import get_execution_lock
 from ..services.execution_env import AUTH_OVERRIDE_HEADER, auto_memory_spawn_kwargs
 from ..services.runtime_adapter import get_runtime
@@ -372,25 +373,121 @@ async def get_session_info():
     }
 
 
+# Abilityai/lilu#257: per-runtime model surfaces, keyed on the NORMALIZED name.
+# The previous shape was `if gemini: … else: <Claude>`, so a CODEX agent was
+# offered Claude aliases on GET and had `-m gpt-5.6-sol` REJECTED on PUT as an
+# "Invalid Claude model" — a latent Codex bug, fixed here rather than worked
+# around, because adding a fourth runtime to the same `else` would have made it
+# two.
+_GEMINI_MODELS = ["gemini-3-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash"]
+_CLAUDE_ALIASES = ["sonnet", "opus", "haiku", "fable"]
+
+
+def _model_surface(runtime: str) -> dict:
+    """``{available_models, note, validate}`` for one runtime.
+
+    ``validate`` returns ``None`` when the id is acceptable, or the operator-
+    facing reason it is not — a NAMED 400, never a generic reject.
+    """
+    if runtime in ("gemini-cli", "gemini"):
+        return {
+            "available_models": _GEMINI_MODELS,
+            "note": "Gemini models. 3-pro is the most capable; 3-flash is the fast default.",
+            "validate": lambda m: None if (m in _GEMINI_MODELS or m.startswith("gemini-"))
+            else f"Invalid Gemini model: {m}. Use: {', '.join(_GEMINI_MODELS)}.",
+        }
+    if runtime == "codex":
+        return {
+            "available_models": ["gpt-5.6-sol"],
+            "note": "OpenAI Codex model ids (e.g. gpt-5.6-sol). Any id the pinned "
+                    "Codex CLI accepts is allowed.",
+            # Codex ids are an OpenAI-side catalog that moves faster than this
+            # file; validating the SHAPE (non-empty, no leading '-') is honest,
+            # whereas an allowlist here would reject tomorrow's model.
+            "validate": lambda m: None if (m and not m.startswith("-"))
+            else f"Invalid Codex model: {m!r}. Expected an OpenAI model id.",
+        }
+    if runtime == "opencode":
+        return {
+            "available_models": _opencode_available_models(),
+            "note": "OpenCode takes a 'provider/model' id (e.g. "
+                    "anthropic/claude-sonnet-5, ollama/qwen3.6:27b, "
+                    "openrouter/<model>). Listed: the agent's pinned model plus "
+                    "every model declared by opencode.json or an "
+                    "OPENCODE_PROVIDER_<ID>_MODELS setting.",
+            "validate": _validate_opencode_model,
+        }
+    return {
+        "available_models": _CLAUDE_ALIASES,
+        "note": "Claude model aliases (Anthropic API): sonnet (Sonnet 5), opus (Opus 4.8), haiku (Haiku 4.5), fable (Fable 5). Add [1m] suffix for the 1M extended-context beta (e.g. sonnet[1m]).",
+        "validate": lambda m: None if (
+            m in ["sonnet", "opus", "haiku", "sonnet[1m]", "opus[1m]", "haiku[1m]"]
+            or m.startswith("claude-")
+        ) else f"Invalid Claude model: {m}. Use aliases (sonnet, opus, haiku) or full model names.",
+    }
+
+
+def _opencode_available_models() -> list:
+    """``provider/model`` ids from the provider map a turn would generate now.
+
+    Built from the same spawn env and shared config a turn uses
+    (Abilityai/lilu#653), so the list is what the next turn can route — not a
+    second catalog. A provider declaration that cannot be built yields an
+    empty list here (the turn itself reports the named reason); a read must
+    never 500 on configuration.
+    """
+    from ..services.execution_env import build_execution_env
+    from ..services.opencode_provider import (
+        ENV_RUNTIME_MODEL,
+        OpenCodeProviderConfigError,
+        apply_provider_config,
+        configured_models,
+    )
+    from ..services.opencode_runtime import _load_shared_config
+
+    env = build_execution_env()
+    try:
+        config = apply_provider_config(
+            _load_shared_config(), model=agent_state.current_model, env=env
+        )
+    except OpenCodeProviderConfigError as exc:
+        logger.warning("[OpenCode] available_models: provider config unbuildable: %s", exc)
+        return []
+    models = configured_models(config)
+    pinned = (env.get(ENV_RUNTIME_MODEL) or "").strip()
+    if pinned and "/" in pinned and pinned not in models:
+        models.insert(0, pinned)
+    return models
+
+
+def _validate_opencode_model(model: str):
+    """Shape-check a `provider/model` id, returning the named reason on reject.
+
+    Imported lazily: the runtime module pulls in the subprocess/parsing stack,
+    and this router is imported on every agent boot regardless of runtime.
+    """
+    from ..services.opencode_runtime import (
+        OpenCodeModelShapeError,
+        validate_provider_model,
+    )
+    try:
+        validate_provider_model(model)
+    except OpenCodeModelShapeError as exc:
+        return str(exc)
+    return None
+
+
 @router.get("/api/model")
 async def get_model():
     """Get the current model being used"""
-    runtime = agent_state.agent_runtime
-
-    if runtime == "gemini-cli" or runtime == "gemini":
-        return {
-            "model": agent_state.current_model,
-            "runtime": runtime,
-            "available_models": ["gemini-3-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash"],
-            "note": "Gemini models. 3-pro is the most capable; 3-flash is the fast default."
-        }
-    else:
-        return {
-            "model": agent_state.current_model,
-            "runtime": runtime,
-            "available_models": ["sonnet", "opus", "haiku", "fable"],
-            "note": "Claude model aliases (Anthropic API): each resolves to the current generation of its family — today sonnet (Sonnet 5), opus (Opus 5.5), haiku (Haiku 4.5), fable (Fable 5.1). Add [1m] suffix for the 1M extended-context beta (e.g. sonnet[1m])."
-        }
+    runtime = normalize_runtime(agent_state.agent_runtime)
+    surface = _model_surface(runtime)
+    return {
+        "model": agent_state.current_model,
+        "runtime": agent_state.agent_runtime,
+        "available_models": surface["available_models"],
+        "note": surface["note"],
+    }
 
 
 @router.put("/api/model")
@@ -398,41 +495,18 @@ async def set_model(request: ModelRequest):
     """Set the model to use for subsequent messages"""
     from fastapi import HTTPException
 
-    runtime = agent_state.agent_runtime
+    runtime = normalize_runtime(agent_state.agent_runtime)
+    reason = _model_surface(runtime)["validate"](request.model or "")
+    if reason:
+        raise HTTPException(status_code=400, detail=reason)
 
-    # Validate based on runtime
-    if runtime == "gemini-cli" or runtime == "gemini":
-        valid_models = ["gemini-3-pro", "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash"]
-        if request.model in valid_models or request.model.startswith("gemini-"):
-            agent_state.current_model = request.model
-            logger.info(f"Model changed to: {request.model}")
-            return {
-                "status": "success",
-                "model": agent_state.current_model,
-                "note": "Model will be used for subsequent messages"
-            }
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid Gemini model: {request.model}. Use: gemini-3-pro, gemini-3-flash, gemini-2.5-pro, gemini-2.5-flash."
-            )
-    else:
-        # Claude Code validation
-        valid_aliases = ["sonnet", "opus", "haiku", "fable",
-                         "sonnet[1m]", "opus[1m]", "haiku[1m]", "fable[1m]"]
-        if request.model in valid_aliases or request.model.startswith("claude-"):
-            agent_state.current_model = request.model
-            logger.info(f"Model changed to: {request.model}")
-            return {
-                "status": "success",
-                "model": agent_state.current_model,
-                "note": "Model will be used for subsequent messages"
-            }
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid Claude model: {request.model}. Use aliases (sonnet, opus, haiku, fable) or full model names."
-            )
+    agent_state.current_model = request.model
+    logger.info(f"Model changed to: {request.model}")
+    return {
+        "status": "success",
+        "model": agent_state.current_model,
+        "note": "Model will be used for subsequent messages"
+    }
 
 
 @router.delete("/api/chat/history")

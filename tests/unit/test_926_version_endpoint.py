@@ -182,7 +182,7 @@ def test_version_payload_runtimes_lists_all_shipped_runtimes():
     (missing codex). Keep it matching the shipped runtime set."""
     build = _load_builder()
     payload = build(voice_enabled=False, edition="oss", enterprise_features=[])
-    assert payload["runtimes"] == ["claude-code", "gemini-cli", "codex"]
+    assert payload["runtimes"] == ["claude-code", "gemini-cli", "codex", "opencode"]
 
 
 def test_version_handler_imports_entitlement_service_function_locally():
