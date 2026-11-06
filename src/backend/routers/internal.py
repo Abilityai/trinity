@@ -34,6 +34,7 @@ from services import (
 )
 from services.runtime_secret_scrub import get_staged_values, scrub_text
 from utils.credential_sanitizer import redact_url_userinfo, sanitize_text
+from utils.log_masking import mask_held_values
 from db.write_params import ExecutionResult
 
 logger = logging.getLogger(__name__)
@@ -563,14 +564,20 @@ async def execute_task_internal(
         return result_payload
 
     except Exception as e:
+        # The claim is released first: the log scrub below reads the staged
+        # set, and releasing the claim must not depend on that read.
+        idempotency_service.fail(idem)
         # #4284: the class name in the body, the scrubbed text in the log: an
         # execution error can echo agent output, which can hold a credential.
+        # The staged values are masked by identity (as the persisted copies
+        # are), then URL userinfo and the known credential shapes.
         logger.error(
             "Internal task execution failed for %s (%s): %s",
             request.agent_name, type(e).__name__,
-            sanitize_text(redact_url_userinfo(str(e))),
+            sanitize_text(redact_url_userinfo(
+                mask_held_values(str(e), *get_staged_values())
+            )),
         )
-        idempotency_service.fail(idem)
         raise HTTPException(
             status_code=500,
             detail=f"Internal task execution failed ({e.__class__.__name__} — details in backend logs)",
