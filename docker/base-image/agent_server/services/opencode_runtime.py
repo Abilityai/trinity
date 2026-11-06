@@ -400,7 +400,8 @@ def _prepare_turn_config(
     A copy, not a link, because ent#819 forbids the platform creating links
     under the agent home (Abilityai/lilu#627; measured ~21 MB, ~0.5 s/turn).
     """
-    turn_dir = os.path.join(_opencode_root(), "turns", _safe_token(execution_id))
+    turns_root = os.path.join(_opencode_root(), "turns")
+    turn_dir = _ensure_within(turns_root, os.path.join(turns_root, _safe_token(execution_id)))
     config_dir = os.path.join(turn_dir, "opencode")
     os.makedirs(config_dir, exist_ok=True)
 
@@ -672,6 +673,21 @@ def _safe_token(execution_id: str) -> str:
     '..' cannot escape the turn root."""
     token = re.sub(r"[^A-Za-z0-9_.-]", "_", os.path.basename(execution_id or ""))
     return token or "opencode"
+
+
+def _ensure_within(base: str, path: str) -> str:
+    """Resolve ``path`` and confirm it stays strictly inside ``base``; raise
+    otherwise. Defense-in-depth at the turn root, the Codex ``_ensure_within``
+    precedent (CSO #1187 finding 2): ``_safe_token`` already leaves nothing
+    that can traverse, so this never trips in practice, but anchoring a
+    realpath containment check where the per-turn tree is rooted keeps the
+    property local to the code that derives a path from ``execution_id`` —
+    and is the normalise-then-``startswith`` shape static analysis recognises."""
+    base_real = os.path.realpath(base)
+    target = os.path.realpath(path)
+    if not target.startswith(base_real + os.sep):
+        raise ValueError(f"turn dir escapes the OpenCode turns root: {path!r}")
+    return target
 
 
 def _cleanup_turn_dir(turn_dir: str) -> None:
