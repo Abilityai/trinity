@@ -566,3 +566,52 @@ def test_aauth_egress_unreachable_names_the_class_not_the_text(monkeypatch, capl
         exc.value.detail,
         "The person server could not be reached (ConnectError — details in backend logs).")
     _assert_log_keeps_text(caplog.records, "could not be reached")
+
+
+# ---------------------------------------------------------------------------
+# services/chat_execution_service.py: an agent's terminate 5xx
+# ---------------------------------------------------------------------------
+
+def _terminate_against(monkeypatch, status: int, detail: str):
+    """The real proxy, against an agent that answers ``status`` / ``detail``."""
+    import services.chat_execution_service as ces
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, *a, **kw):
+            return httpx.Response(status, json={"detail": detail})
+
+    monkeypatch.setattr(ces, "agent_httpx_client", lambda name, **kw: _Client())
+    with pytest.raises(ces.ChatDispatchError) as exc:
+        asyncio.run(ces._proxy_terminate_and_finalize("a1", "e-1", None, None))
+    return exc.value
+
+
+@pytest.mark.parametrize("status", [500, 503])
+def test_terminate_answers_a_fixed_sentence_for_an_older_agents_5xx(monkeypatch, caplog, status):
+    """An agent from before the agent-server fix answered the registry's raw
+    exception text as its terminate 500."""
+    caplog.set_level(logging.WARNING)
+    err = _terminate_against(monkeypatch, status, f"Failed: {_PLANT}")
+    assert err.status_code == status
+    _assert_answer_clean(
+        err.detail, f"Termination failed (the agent answered {status} — details in backend logs)")
+    _assert_log_keeps_text(caplog.records, "[Terminate]")
+
+
+@pytest.mark.parametrize("status, detail", [
+    (500, "termination_unconfirmed: execution e-1 did not exit after SIGINT and SIGKILL; "
+          "it remains registered and termination can be retried"),
+    (500, "Termination failed: PermissionError"),
+    (500, "Termination failed"),
+    (409, "Execution already finishing"),
+], ids=["unconfirmed", "registry-class", "registry-default", "agent-4xx"])
+def test_terminate_keeps_the_agents_own_sentences(monkeypatch, status, detail):
+    """Characterization: the agent's own 5xx sentences and any 4xx go on."""
+    err = _terminate_against(monkeypatch, status, detail)
+    assert (err.status_code, err.detail) == (status, detail)
