@@ -11,6 +11,7 @@ Falls back to SECRET_KEY if INTERNAL_API_SECRET is not set.
 import asyncio
 import os
 import hmac
+import re
 from fastapi import APIRouter, HTTPException, Depends, Request, Header
 from typing import Optional, Dict
 import logging
@@ -121,6 +122,64 @@ def _pull_authorized(request: Request, agent_name: str) -> bool:
     return heartbeat_service.authorize_heartbeat(_validated_agent_key(request), agent_name)
 
 
+_CLAIM_DENIED_NOTED: set = set()
+
+# The Docker container-naming shape `sanitize_agent_name` (utils/helpers.py)
+# produces: lowercase, alphanumeric first character, then `[a-z0-9_.-]`. Every
+# stored agent name has passed through it, so a name that does not match it
+# cannot be one — and must never become a Redis key or a log component.
+_AGENT_NAME_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,62}")
+
+
+def _note_claim_denied(agent_name: str, validation: Optional[Dict]) -> None:
+    """Count a refused `/next-task` claim for this agent (#4257).
+
+    Gated on what the request PROVED, never on the refusal itself. The branch
+    this hangs off is reached before any credential is read (`_pull_authorized`
+    answers False for a non-pilot name first), so an unauthenticated caller
+    could otherwise mint a 24 h Redis key, an unbounded in-process set entry and
+    a WARNING line per name of its choosing. ``validation`` is the caller's
+    already-validated MCP key; the counter runs only when it is the agent's OWN
+    key (``heartbeat_service.authorize_heartbeat`` — the same self-binding rule
+    that gates the seam), which is exactly the case the diagnostic exists for: a
+    live worker holding a valid key that the pilot allowlist now turns away.
+    The name is additionally shape-checked before it is used as a key or a log
+    argument, so nothing attacker-shaped reaches Redis or the log pipeline.
+
+    Best-effort: a Redis failure must never change the answer the caller gets,
+    and the counter is observability only. The WARNING is once per agent per
+    process — the refusal repeats every poll (≤15 s), and a log line per poll
+    would bury the one thing worth reading.
+    """
+    if not heartbeat_service.authorize_heartbeat(validation, agent_name):
+        return
+    if not _AGENT_NAME_RE.fullmatch(agent_name):
+        return
+    try:
+        from services.pull_pilot import (
+            PULL_CLAIM_DENIED_KEY_PREFIX,
+            PULL_CLAIM_DENIED_TTL_SECONDS,
+        )
+        from services.slot_service import get_slot_service
+
+        key = f"{PULL_CLAIM_DENIED_KEY_PREFIX}{agent_name}"
+        redis = get_slot_service().redis
+        redis.incr(key)
+        redis.expire(key, PULL_CLAIM_DENIED_TTL_SECONDS)
+    except Exception:  # noqa: BLE001
+        logger.debug("[#4257] could not count a denied claim for %s",
+                     agent_name, exc_info=True)
+    if agent_name not in _CLAIM_DENIED_NOTED:
+        _CLAIM_DENIED_NOTED.add(agent_name)
+        logger.warning(
+            "[#4257] refusing pull claims for '%s' — it is not in "
+            "PULL_MODE_PILOT_AGENTS, or its key does not authorize it. Its "
+            "queued rows will not move until this agrees with the container's "
+            "TRINITY_PULL_MODE (logged once per process)",
+            agent_name,
+        )
+
+
 # =============================================================================
 # Pull / work-stealing coordination (#1081 Phase 2)
 # =============================================================================
@@ -149,6 +208,16 @@ async def internal_next_task(request: Request, agent_name: str, worker_id: str):
     chosen so a drained poll and a real claim are one unambiguous 200 shape).
     """
     if not _pull_authorized(request, agent_name):
+        # #4257: the backend is the party that ISSUED this refusal, and the
+        # worker swallows it — `pull_worker._claim_once` treats any non-200 as
+        # "queue empty" and goes back to sleep. So a disagreement between
+        # `PULL_MODE_PILOT_AGENTS` here and the container's `TRINITY_PULL_MODE`
+        # parks every row silently, with a live pool that B-08 reads as healthy.
+        # Count it where it happens, so the stall alert can say "alive and being
+        # turned away" rather than only "nothing has run". The counter is gated
+        # on the caller's own validated key inside `_note_claim_denied` — the
+        # refusal alone proves nothing about who asked.
+        _note_claim_denied(agent_name, _validated_agent_key(request))
         raise HTTPException(status_code=403, detail=_PULL_AUTH_DENIED)
 
     from services import pull_coordination_service

@@ -474,6 +474,8 @@ export const useClientPortalStore = defineStore('clientPortal', {
     memoryError: null,
     memoryUndoError: null,   // the failed verb's home, next to the control (contract #18)
     memoryUndoing: null,     // write id in flight
+    memoryLoadingMore: false, // ent#962: "Load more" in flight
+    memoryMoreError: null,
     // ent#527 — the role card: a projection of the agent's own files, plus the
     // owner's readiness stamp. Same generation guard as reports.
     roleAgent: null,
@@ -1183,23 +1185,62 @@ export const useClientPortalStore = defineStore('clientPortal', {
       this.memoryError = null
       this.memoryUndoError = null
       this.memoryUndoing = null
+      this.memoryLoadingMore = false
+      this.memoryMoreError = null
     },
 
-    async loadAgentMemory(agentName) {
+    /**
+     * Read the viewer's memory. `keepRows` (ent#962) re-reads at least that
+     * many history rows, following the cursor, so a refresh after Undo keeps
+     * the list as long as it was and every Undo flag comes from one read.
+     */
+    async loadAgentMemory(agentName, { keepRows = 0 } = {}) {
       if (this.memoryAgent !== agentName) this.resetAgentMemory(agentName)
       const gen = this._memoryGeneration
       this.memoryError = null
+      const url = `/api/enterprise/client-portal/agents/${agentName}/memory`
       try {
-        const { data } = await portalHttp.get(
-          `/api/enterprise/client-portal/agents/${agentName}/memory`,
-          { headers: this.authHeader },
-        )
+        const { data } = await portalHttp.get(url, { headers: this.authHeader })
         if (gen !== this._memoryGeneration) return
-        this.memory = data
+        let writes = data?.writes || []
+        let cursor = data?.next_before || null
+        while (cursor && writes.length < keepRows) {
+          const page = await portalHttp.get(url, { headers: this.authHeader, params: { before: cursor } })
+          if (gen !== this._memoryGeneration) return
+          writes = writes.concat(page.data?.writes || [])
+          cursor = page.data?.next_before || null
+        }
+        this.memory = { ...data, writes, next_before: cursor }
         this.memoryLoaded = true
       } catch {
         if (gen !== this._memoryGeneration) return
         this.memoryError = 'The request failed. Check your connection and try again.'
+      }
+    },
+
+    /** The next page of the viewer's memory history (ent#962), by cursor. */
+    async loadMoreAgentMemory(agentName) {
+      if (this.memoryAgent !== agentName || !this.memory?.next_before || this.memoryLoadingMore) return
+      const gen = this._memoryGeneration
+      this.memoryLoadingMore = true
+      this.memoryMoreError = null
+      try {
+        const { data } = await portalHttp.get(
+          `/api/enterprise/client-portal/agents/${agentName}/memory`,
+          { headers: this.authHeader, params: { before: this.memory.next_before } },
+        )
+        if (gen !== this._memoryGeneration) return
+        const seen = new Set((this.memory.writes || []).map((w) => w.id))
+        this.memory = {
+          ...this.memory,
+          writes: (this.memory.writes || []).concat((data?.writes || []).filter((w) => !seen.has(w.id))),
+          next_before: data?.next_before || null,
+        }
+      } catch {
+        if (gen !== this._memoryGeneration) return
+        this.memoryMoreError = 'Could not load more changes. Try again.'
+      } finally {
+        if (gen === this._memoryGeneration) this.memoryLoadingMore = false
       }
     },
 
@@ -1220,7 +1261,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
           null, { headers: this.authHeader },
         )
         if (gen !== this._memoryGeneration) return true
-        await this.loadAgentMemory(agentName)
+        await this.loadAgentMemory(agentName, { keepRows: (this.memory?.writes || []).length })
         return true
       } catch (e) {
         if (gen !== this._memoryGeneration) return false
