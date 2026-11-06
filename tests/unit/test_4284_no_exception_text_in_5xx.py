@@ -818,6 +818,22 @@ class _Index:
         self._calls: Optional[Dict[str, List[Tuple[int, ast.Call]]]] = None
         self._taints: Dict[int, Dict[str, "_Taint"]] = {}
         self._ctx: Dict[int, Dict[int, _Ctx]] = {}
+        # Platform classes whose text the scan let through at a dynamic status;
+        # ``test_classes_answered_at_a_dynamic_status_carry_no_exception_text``
+        # checks each one where it is built.
+        self.dynamic_exempt: Set[str] = set()
+
+    def exempt(self, taint: "_Taint", frs: FrozenSet[Frag], ctx: _Ctx) -> FrozenSet[Frag]:
+        """Drop the platform-class fragments from exception text at a dynamic
+        status, remembering the classes they came from."""
+        for text, foreign in frs:
+            if foreign:
+                continue
+            root = _Taint._root_name(ast.parse(text, mode="eval").body)
+            entry = taint._exc_entry(root, ctx) if root else None
+            if entry is not None:
+                self.dynamic_exempt.update(c for c in entry[1] if c not in self.tree.http)
+        return frozenset(f for f in frs if f[1])
 
     def scope(self, mi: int, fn: ast.AST, qual: str, is_method: bool) -> _Scope:
         key = id(fn)
@@ -1016,9 +1032,11 @@ def _status_names(scope: _Scope) -> Tuple[Set[str], Set[str], Set[str], bool]:
     return status5_names, static_names, dyn_names, sets_5xx_status
 
 
-def _scan(mods: List[_Module]) -> List[Finding]:
+def _scan(mods: List[_Module], dynamic_exempt: Optional[Set[str]] = None) -> List[Finding]:
     tree = _tree(mods)
     index = _Index(mods, tree)
+    if dynamic_exempt is not None:
+        index.dynamic_exempt = dynamic_exempt
     findings: List[Finding] = []
     for mi, (mod, facts) in enumerate(zip(mods, tree.per_module)):
         lines = {line for line, name in facts.calls if name in tree.carriers}
@@ -1069,7 +1087,7 @@ def _scan_scope(index: _Index, mi: int, scope: _Scope) -> List[Finding]:
         for fam in ("exception", "upstream body"):
             frs = taints[fam]._union(texts, ctx)
             if mode == "dynamic" and fam == "exception":
-                frs = frozenset(f for f in frs if f[1])
+                frs = index.exempt(taints[fam], frs, ctx)
             if frs:
                 out.append(Finding(rel, line, scope.qualname, sink, fam,
                                    ast.unparse(status), frozenset(f[0] for f in frs)))
@@ -1130,7 +1148,7 @@ def _through_callers(index: _Index, mi: int, scope: _Scope, frags: FrozenSet[Fra
             for fam in ("exception", "upstream body") if depth == 1 else ("exception",):
                 frs = ctaints[fam].frags(expr, cctx)
                 if cmode == "dynamic" and fam == "exception":
-                    frs = frozenset(f for f in frs if f[1])
+                    frs = index.exempt(ctaints[fam], frs, cctx)
                 if frs:
                     out.append((fam, via, text))
             if depth < _MAX_CALL_DEPTH:
@@ -1148,8 +1166,14 @@ def scan_sources(sources: Dict[str, str]) -> List[Finding]:
 
 
 @functools.lru_cache(maxsize=1)
+def _real_scan() -> Tuple[Tuple[Finding, ...], FrozenSet[str]]:
+    exempt: Set[str] = set()
+    findings = _scan(list(_real_modules()), exempt)
+    return tuple(findings), frozenset(exempt)
+
+
 def _real_findings() -> Tuple[Finding, ...]:
-    return tuple(_scan(list(_real_modules())))
+    return _real_scan()[0]
 
 
 # ---------------------------------------------------------------------------
@@ -1164,7 +1188,10 @@ _Pin = Tuple[str, str, str, FrozenSet[str]]
 
 def _constructions_with_foreign_text(mods: List[_Module], classes: Set[str],
                                      pins: FrozenSet[_Pin] = frozenset(), *,
-                                     strict: bool = True) -> List[str]:
+                                     strict: bool = True,
+                                     answers_only: bool = False,
+                                     reviewed: FrozenSet[Tuple[str, str, str]] = frozenset(),
+                                     ) -> List[str]:
     """Every call that builds one of ``classes`` (or a subclass defined in the
     trees) from anything but platform text.
 
@@ -1178,6 +1205,11 @@ def _constructions_with_foreign_text(mods: List[_Module], classes: Set[str],
     ``strict=False`` is the weaker "no exception text" check: an upstream
     body and a parameter whose callers cannot be seen are allowed, and only
     exception text (followed through the callers that can be seen) counts.
+
+    ``answers_only`` skips a carrier built at a status fixed below 500, which
+    no forwarder can answer at 5xx, and the (file, function, class) sites in
+    ``reviewed``: constructions the scan itself finds at 5xx, which an
+    ``_ALLOWED`` entry holds by their exact fragments.
     """
     tree = _tree(mods)
     index = _Index(mods, tree)
@@ -1202,6 +1234,13 @@ def _constructions_with_foreign_text(mods: List[_Module], classes: Set[str],
             if ctx is None:
                 continue
             built = _callee(call.func) or "?"
+            if answers_only:
+                if (mods[mi].rel, scope.qualname, built) in reviewed:
+                    continue
+                if built in tree.carriers:
+                    status, _kw, _pos = _status_of(call, tree.carriers[built])
+                    if status is not None and _is_static_below_500(status):
+                        continue
             args: List[ast.AST] = list(call.args) + [k.value for k in call.keywords]
             bad = _foreign_in(index, mi, scope, ctx, args, names, 1, strict)
             if not bad:
@@ -1587,6 +1626,24 @@ def test_listed_carriers_carry_no_exception_text():
         "A class an _ALLOWED reason says carries no exception text is built from "
         "it (directly, or through a parameter a caller fills with it):\n  "
         + "\n  ".join(bad)
+    )
+
+
+def test_classes_answered_at_a_dynamic_status_carry_no_exception_text():
+    """What the dynamic-status exemption rests on: every platform class whose
+    text the trees answer at a status computed at run time (``e.status_code``,
+    a status parameter) is checked where it is built, carriers and non-carriers
+    alike."""
+    classes = set(_real_scan()[1])
+    assert classes, "the exemption let no class through: the collection is broken"
+    pins = frozenset(p for a in _ALLOWED for p in a.pins)
+    reviewed = frozenset((a.path, a.function, a.sink) for a in _ALLOWED)
+    bad = _constructions_with_foreign_text(list(_real_modules()), classes, pins, strict=False,
+                                           answers_only=True, reviewed=reviewed)
+    assert not bad, (
+        "A platform class whose text a route answers at a dynamic status (exempt "
+        "there, as a carrier checked where it is built) is built from exception "
+        "text:\n  " + "\n  ".join(bad)
     )
 
 
@@ -2111,3 +2168,57 @@ def test_the_slack_hold_ends_after_2026_11_19():
     assert _expired_holds(datetime.date(2026, 11, 19)) == []
     assert _expired_holds(datetime.date(2026, 11, 20)) == [
         "src/backend/routers/slack.py connect_slack: held until 2026-11-19"]
+
+
+# ---------------------------------------------------------------------------
+# the dynamic-status exemption, checked where the exempted class is built
+# ---------------------------------------------------------------------------
+
+_FORWARDED = (
+    "class Upstream(Exception):\n"
+    "    def __init__(self, message):\n"
+    "        super().__init__(message)\n"
+    "        self.status = 502\n"
+    "def service():\n"
+    "    try:\n"
+    "        work()\n"
+    "    except Exception as e:\n"
+    "        {build}\n"
+    "def route():\n"
+    "    try:\n"
+    "        service()\n"
+    "    except {caught} as e:\n"
+    "        raise HTTPException(status_code=e.{status}, detail=e.{text})\n"
+)
+
+
+def _exempted(build: str, caught: str, status: str = "status", text: str = "args",
+              **kw: bool) -> Tuple[Set[str], List[str]]:
+    src = _HEAD + _FORWARDED.format(build=build, caught=caught, status=status, text=text)
+    mods = _iter_modules({"src/backend/routers/sample.py": src})
+    exempt: Set[str] = set()
+    assert not _scan(mods, exempt)
+    return exempt, _constructions_with_foreign_text(mods, exempt, strict=False,
+                                                    answers_only=kw.get("answers_only", True))
+
+
+def test_a_class_forwarded_at_its_own_status_is_checked_where_it_is_built():
+    exempt, bad = _exempted("raise Upstream(f'upstream: {e}')", "Upstream")
+    assert exempt == {"Upstream"}
+    assert bad and "builds Upstream from e" in bad[0], bad
+
+
+def test_a_class_forwarded_at_its_own_status_passes_with_platform_text():
+    exempt, bad = _exempted("raise Upstream('the upstream refused')", "Upstream")
+    assert exempt == {"Upstream"} and not bad, bad
+
+
+def test_a_carrier_built_below_500_is_not_an_answer_at_5xx():
+    """A carrier built at a fixed 4xx reaches no 5xx through its forwarder, so
+    the answers-only check leaves it; the plain check does not."""
+    build = "raise BindError(409, 'BIND_CONFLICT', f'conflict: {e}')"
+    exempt, bad = _exempted(build, "BindError", status="status_code", text="message")
+    assert exempt == {"BindError"} and not bad, bad
+    _exempt, plain = _exempted(build, "BindError", status="status_code", text="message",
+                               answers_only=False)
+    assert plain, "the fixed-4xx skip is the only reason the construction passes"
