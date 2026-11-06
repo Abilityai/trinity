@@ -1,25 +1,26 @@
 {
   "test_files": [
     {
-      "file": "integration/test_ent1062_live_turn_doors.py",
-      "feature": "trinity-enterprise#1062",
-      "added": "2026-11-03",
-      "categories": [
-        "integration",
-        "auth"
-      ],
-      "description": "The same rule over the network on a sibling stack, with a real agent key seeded inside the backend: the live turn records and reads its seat, a finished run records and reads nothing, two live people refuse each other, a human session and a user key are sent away, voice never reaches a finished run and is ambiguous beside another live conversation."
-    },
-    {
-      "file": "unit/test_ent1062_live_turn_doors.py",
-      "feature": "trinity-enterprise#1062",
-      "added": "2026-11-03",
+      "file": "unit/test_ent1024_admin_acts_as_agent.py",
+      "feature": "abilityai/trinity-enterprise#1024",
+      "added": "2026-10-30",
       "categories": [
         "backend",
-        "unit",
-        "auth"
+        "security",
+        "unit"
       ],
-      "description": "The seat-decision and voice-reply doors serve the turn the agent is in, over the real routes with a real agent key: a finished run is refused (decision_turn_not_live / turn_not_live) and nothing is stored, returned or sent; another live turn resolving to a different scope or destination refuses (decision_turn_ambiguous / turn_ambiguous), an unreadable ledger fails closed; the decision doors are agents-only (agent_only for the owner's session and a user key)."
+      "description": "An admin's user MCP key acts on behalf of an agent through X-Trinity-Act-As-Agent: admit_act_as admits it only for a user-scoped key whose user is an admin and writes one acted_as_agent audit row naming the acting user and the agent; every other principal (non-admin user key, creator, agent, system, connector, portal_delegate, ops, a browser session) is a named 403 act_as_not_permitted and writes nothing; blank/oversize names are 400; a failed audit write never fails the request; no header changes nothing. get_self_acting_agent admits the admitted agent on its own path only and tells an un-admitted admin to pass agent_name; agent keys still act only as themselves; assert_own_agent holds the admitted agent to its path. An on-behalf raise records acted_by: user:<id>; an agent's own ask does not. Mutations (no admin check, ask gate or own-agent gate ignoring act-as, any scope admitted, no acted_by) each turn it red."
+    },
+    {
+      "file": "../src/mcp-server/src/act_as_agent.test.ts",
+      "feature": "abilityai/trinity-enterprise#1024",
+      "added": "2026-10-30",
+      "categories": [
+        "mcp",
+        "security",
+        "unit"
+      ],
+      "description": "resolveActingAgent's scope matrix with agent_name (agent/system act as themselves and may not name another; a user key acts for the named agent or is told to pass agent_name; connector/portal_delegate/ops/anonymous refused naming the key); TrinityClient.asAgent adds X-Trinity-Act-As-Agent on a clone only and a per-call header cannot override it; ask_operator, report, record_metrics, set_canvas and the project tools (create_project, create_project_task) send the header for a user key with agent_name, never put agent_name in a body, refuse a user key without it and a connector key with it, and leave an agent key's call unchanged."
     },
     {
       "file": "unit/test_ent1108_wake_default.py",
@@ -8427,6 +8428,27 @@
         "unit"
       ],
       "description": "trinity-enterprise#1107: terms of use per instance. The shipped default is served when nothing is configured; PUT /api/terms saves and stamps a new version (the author has accepted it), empty/oversized text refused by name (422), restore-default is one action, the switch turns the gate off; an admin JWT with no acceptance is refused 403 terms_required on an ordinary route and admitted on a @terms_route; accepting records (version, time, account) and lifts the refusal; a new version asks everyone else again; a stale version is 409; an agent key is never gated; a registered provider still answers the invite door and a broken one cannot lock an admin out; the acceptance list is admin-gated; setup resolves no principal; main.py registers the router with its # mcp: none header. No Docker."
+    },
+    {
+      "file": "integration/test_ent1062_live_turn_doors.py",
+      "feature": "trinity-enterprise#1062",
+      "added": "2026-11-03",
+      "categories": [
+        "integration",
+        "auth"
+      ],
+      "description": "The same rule over the network on a sibling stack, with a real agent key seeded inside the backend: the live turn records and reads its seat, a finished run records and reads nothing, two live people refuse each other, a human session and a user key are sent away, voice never reaches a finished run and is ambiguous beside another live conversation."
+    },
+    {
+      "file": "unit/test_ent1062_live_turn_doors.py",
+      "feature": "trinity-enterprise#1062",
+      "added": "2026-11-03",
+      "categories": [
+        "backend",
+        "unit",
+        "auth"
+      ],
+      "description": "The seat-decision and voice-reply doors serve the turn the agent is in, over the real routes with a real agent key: a finished run is refused (decision_turn_not_live / turn_not_live) and nothing is stored, returned or sent; another live turn resolving to a different scope or destination refuses (decision_turn_ambiguous / turn_ambiguous), an unreadable ledger fails closed; the decision doors are agents-only (agent_only for the owner's session and a user key)."
     },
     {
       "file": "unit/test_ent1063_agent_schedule_recipient.py",
