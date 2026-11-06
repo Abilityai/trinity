@@ -9,7 +9,7 @@ echo that credential, and the log must not carry it.
 The pattern pass in ``utils.credential_sanitizer.sanitize_text`` only knows
 credential SHAPES. A held value is known by IDENTITY, and is masked here.
 
-What is masked, in this order (``mask_held_values``):
+What is masked (``mask_held_values``; steps run 1, 3, 2, see below):
 
 1. Whole renderings of each held value: raw; stripped; the inside of its
    ``str`` repr (``'a\\nb'``); the inside of its ``bytes`` repr (h11 / httpx:
@@ -28,7 +28,11 @@ What is masked, in this order (``mask_held_values``):
    ``input_value='head...tail'``, ``reprlib``, a prefix-only echo, line
    wrapping and header folding, a value split across two strings.
 
-Steps 1 and 2 replace longest first, so a whole value becomes one ``***``.
+Step 1 runs first, then step 3, then step 2. Step 2 runs last because its
+pieces are a value's SHORTEST runs (see the bounds below): replaced before
+step 3, a piece that is part of a longer run would cut that run into parts
+under 16 characters, which step 3 then skips. Steps 1 and 2 each replace
+longest first, so a whole value becomes one ``***``.
 
 What is NOT masked, by design:
 
@@ -37,8 +41,9 @@ What is NOT masked, by design:
   garble every word that contains it. No credential these routes accept is
   that short. In a rendering that is not whole, the value's runs under 8
   therefore stay visible, with the ``+``, ``/`` or other characters between
-  them (a PEM key with its line breaks dropped shows such stretches of up to
-  15 characters).
+  them: a PEM key with its line breaks dropped shows such stretches (up to 33
+  characters, measured on 60 RSA keys of 2048-8192 bits), and one re-wrapped
+  at another width can show a whole line.
 - A visible stretch of a cut run that is shorter than 16 characters (for
   example the 10-character tail a wrapped line leaves on its own), unless it
   is a whole 8+ piece.
@@ -48,18 +53,21 @@ What is NOT masked, by design:
   password-like value) is therefore recoverable from such renderings; no
   credential these routes accept has that shape.
 - Overlap of two held values in the text: the longer is replaced first and a
-  remainder of the shorter under 16 characters can stay visible.
+  remainder of the shorter under 16 characters can stay visible; and a short
+  held value that is part of another held value's longer run can cut that
+  run before step 3 sees it.
 - Past the cost caps below, in any rendering that does not show the value
   whole (step 1): a run of 8-15 characters that is not among the value's
-  ``MAX_PIECES`` shortest runs (step 3 catches one of 12-15 only when a sample
-  lands in it), and a stretch of a run past the first ``MAX_WINDOW_SOURCE``
+  ``MAX_PIECES`` shortest runs (step 3 catches one of 12-15 characters only
+  inside a longer run of the text, and only when a sample lands in it), and a stretch of a run past the first ``MAX_WINDOW_SOURCE``
   characters of the value's runs, counted longest run first, unless that run
   is a kept piece shown whole. The first exists only for a value with more
   than ``MAX_PIECES`` distinct runs of 8-15 characters, the second only for
   one with more than ``MAX_WINDOW_SOURCE`` characters in its distinct runs of
   12+. A PEM private key up to 8192-bit RSA, alone or inside a
-  service-account JSON, is within both (measured: at most 80 runs of 8-15
-  characters and under 6,000 characters of runs of 12+).
+  service-account JSON, is within both (measured on 60 RSA keys of
+  2048-8192 bits: at most about 90 runs of 8-15 characters and about 6,000
+  characters of runs of 12+, against 128 and 65,536).
 
 Bounds, so a crafted value cannot cost seconds on the event loop. Per held
 value, step 2 keeps at most ``MAX_PIECES`` pieces, the value's SHORTEST runs:
@@ -196,6 +204,7 @@ def mask_held_values(text: str, *held: Optional[str], min_length: int = MIN_HELD
     if not text:
         return text
     forms: set[str] = set()
+    pieces: set[str] = set()
     windows: set[str] = set()
     for value in held:
         if value is None or value == "":
@@ -206,12 +215,14 @@ def mask_held_values(text: str, *held: Optional[str], min_length: int = MIN_HELD
             continue
         runs = _runs(value, min_length)
         forms.update(form for form in _renderings(value) if len(form) >= min_length)
-        forms.update(_pieces(runs))
+        pieces.update(_pieces(runs))
         windows.update(_windows(runs))
     for form in sorted(forms, key=lambda f: (len(f), f), reverse=True):
         text = text.replace(form, MASK)
     if windows:
         text = _mask_cut_runs(text, windows)
+    for piece in sorted(pieces, key=lambda f: (len(f), f), reverse=True):
+        text = text.replace(piece, MASK)
     return text
 
 

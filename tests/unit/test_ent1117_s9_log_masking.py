@@ -371,6 +371,25 @@ def test_a_long_single_run_value_is_masked_in_cut_renderings_to_its_end(render):
     assert set(lines) == {MASK}, [line[:20] for line in lines if line != MASK][:3]
 
 
+def test_a_kept_piece_inside_a_longer_run_does_not_cut_that_run():
+    """The piece pass runs after the cut-rendering pass. A kept piece is one of
+    the value's shortest runs; replaced first, one that is part of a longer run
+    of the same value would cut that run's occurrence into parts under 16
+    characters, which the cut-rendering pass skips."""
+    import random
+
+    rng = random.Random(5)
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+
+    def run(n):
+        return "".join(rng.choice(alphabet) for _ in range(n))
+
+    short = run(8)
+    long_run = run(10) + short + run(12)  # 30 characters, containing `short`
+    value = "\n".join([short] + [run(9) for _ in range(140)] + [long_run])
+    assert mask_held_values(f"x {long_run} y", value) == f"x {MASK} y"
+
+
 def test_the_piece_cap_keeps_the_shortest_runs():
     """Runs under 12 characters have no stretches, so only step 2 masks them
     in a rendering that is not whole. With one run more than the cap, the
