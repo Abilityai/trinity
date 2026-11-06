@@ -582,9 +582,12 @@ async def _read_capped(
     except httpx.TimeoutException:
         raise A2ACallError("timeout", "The A2A endpoint timed out.") from None
     except httpx.HTTPError as exc:
-        # This is the ONE place a foreign string becomes an error the calling
-        # LLM reads (through the 502 body) and the backend logs, so it gets the
-        # same treatment as the response body — exact-value first.
+        # This is the ONE place a foreign string meets an error the calling LLM
+        # reads (through the 502 body), so the answer names the transport
+        # error's class only (abilityai/trinity#4284): httpx's text carries the
+        # resolved address, the errno and, below, possibly a credential. The
+        # text goes to the backend log, with the same treatment as the response
+        # body — exact-value first.
         #
         # "it never carries the credential (that is a header)" was wrong: h11
         # rejects an illegal header value by ECHOING it
@@ -604,9 +607,10 @@ async def _read_capped(
             if item:
                 detail = scrub_secret_and_urls(detail, item)
         detail = redact_url_userinfo(sanitize_text(detail))
+        logger.warning("A2A endpoint could not be reached (%s): %s", type(exc).__name__, detail)
         raise A2ACallError(
             f"{error_prefix}_unreachable",
-            f"The A2A endpoint could not be reached: {detail}",
+            f"The A2A endpoint could not be reached ({type(exc).__name__} — details in backend logs).",
         ) from None
 
 

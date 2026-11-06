@@ -510,3 +510,59 @@ def test_failure_reason_keeps_an_apply_refusal(module):
     refused = importlib.import_module(f"services.system_apply.{module}")._Refused
     reason, _ = _failure_reason(refused("calibrating_agent: the companion is calibrating"))
     assert reason.split(":")[0] == "calibrating_agent"
+
+
+# ---------------------------------------------------------------------------
+# A2A outbound and AAuth egress: a transport failure at 502
+# ---------------------------------------------------------------------------
+
+def _refusing_transport():
+    def handler(request):
+        raise httpx.ConnectError(f"{_PLANT} [Errno 111] Connection refused to 203.0.113.7:5432")
+    return httpx.MockTransport(handler)
+
+
+def test_a2a_unreachable_502_names_the_class_not_the_text(caplog):
+    from services import a2a_client
+    from routers.a2a import _map_call_error
+
+    async def run():
+        async with httpx.AsyncClient(transport=_refusing_transport()) as client:
+            await a2a_client._read_capped(
+                client, "POST", "https://203.0.113.5/rpc", sni="peer.example.com",
+                host_header="peer.example.com", max_bytes=1000, headers={},
+                error_prefix="call", secret=_TOKEN)
+
+    caplog.set_level(logging.WARNING)
+    with pytest.raises(a2a_client.A2ACallError) as exc:
+        asyncio.run(run())
+    answer = _map_call_error(exc.value)
+    assert answer.status_code == 502
+    assert answer.detail["reason"] == "call_unreachable"
+    _assert_answer_clean(
+        answer.detail, "The A2A endpoint could not be reached (ConnectError — details in backend logs).")
+    _assert_log_keeps_text(caplog.records, "A2A endpoint could not be reached")
+
+
+def test_aauth_egress_unreachable_names_the_class_not_the_text(monkeypatch, caplog):
+    from services import a2a_client
+    from services.aauth import egress
+
+    async def validated(url):
+        return SimpleNamespace(url=url, hostname="ps.example.com", addresses=["203.0.113.8"])
+
+    monkeypatch.setattr(a2a_client, "validate_endpoint", validated)
+
+    async def run():
+        async with httpx.AsyncClient(transport=_refusing_transport()) as client:
+            await egress.request_capped(client, "POST", "https://ps.example.com/token",
+                                        max_bytes=1000, headers={}, secret=_TOKEN)
+
+    caplog.set_level(logging.WARNING)
+    with pytest.raises(egress.EgressError) as exc:
+        asyncio.run(run())
+    assert exc.value.code == "unreachable"
+    _assert_answer_clean(
+        exc.value.detail,
+        "The person server could not be reached (ConnectError — details in backend logs).")
+    _assert_log_keeps_text(caplog.records, "could not be reached")

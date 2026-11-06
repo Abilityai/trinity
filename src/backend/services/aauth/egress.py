@@ -112,8 +112,15 @@ async def request_capped(
     except httpx.TimeoutException:
         raise EgressError("timeout", f"The {peer} timed out.") from None
     except httpx.HTTPError as exc:
+        # The class only in the error (abilityai/trinity#4284): its detail is
+        # answered at 502 by the routes that relay a refusal, and httpx's text
+        # carries the resolved address, the errno and an echoed header value.
         detail = str(exc)
         if secret:
             detail = a2a_client.scrub_secret_and_urls(detail, secret)
         detail = a2a_client.redact_url_userinfo(a2a_client.sanitize_text(detail))
-        raise EgressError("unreachable", f"The {peer} could not be reached: {detail}") from None
+        logger.warning("[aauth] the %s could not be reached (%s): %s", peer, type(exc).__name__, detail)
+        raise EgressError(
+            "unreachable",
+            f"The {peer} could not be reached ({type(exc).__name__} — details in backend logs).",
+        ) from None
