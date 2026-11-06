@@ -100,7 +100,7 @@ def test_shared_table_covers_both_decisions_and_the_divergence_edges():
     which a multiline `^` accepts)."""
     accepted = {c["path"] for c in _CASES if c["accept"]}
     rejected = {c["path"] for c in _CASES if not c["accept"]}
-    assert {"-f", "--force", "-", "-f\nx"} <= rejected
+    assert {"-f", "--force", "-", "-f\nx", "-\ud800"} <= rejected
     assert {" -f", "\t-f", "\n-f", "x\n-f", "", "./-x", "\ufeff-f"} <= accepted
     # Every Unicode dash already probed against git, so a check that also
     # refused one of them (on either side) fails a shared row.
@@ -192,6 +192,40 @@ def test_route_answers_422_naming_the_element_and_never_calls_the_agent():
         d["msg"].startswith("Value error, paths[0] '-f' starts with '-'") for d in detail
     ), detail
     assert all("input" not in d for d in detail), "the 422 handler must still drop `input`"
+    sync_mock.assert_not_awaited()
+
+
+_SURROGATE_ELEMENTS = [
+    "-\ud800",
+    "-ab\udc00cd",
+    "-" + "a" * 150 + "\ud800",  # inside the 200-char echo
+    "-" + "a" * 250 + "\ud800",  # past the cap
+]
+
+
+@pytest.mark.parametrize("bad", _SURROGATE_ELEMENTS, ids=["first", "middle", "at-150", "past-cap"])
+def test_route_refuses_an_element_carrying_a_lone_surrogate_with_a_valid_422(bad):
+    """A JSON body may carry an unpaired surrogate as an escape (`"\\ud800"`).
+    Refusing it must still be a 422 whose body is valid UTF-8 JSON. An
+    unescaped echo makes pydantic-core fail to encode the message, which
+    surfaces as a 500 before the 422 handler runs."""
+    from fastapi.testclient import TestClient
+
+    sync_mock = AsyncMock(return_value=_ok_result())
+    client, patches = _client(sync_mock)
+    client = TestClient(client.app, raise_server_exceptions=False)
+    body = json.dumps({"paths": [bad]}).encode("ascii")  # the surrogate stays an escape
+    with patches[0], patches[1], patches[2]:
+        resp = client.post(
+            "/api/agents/alpha/git/sync",
+            content=body,
+            headers={"content-type": "application/json"},
+        )
+
+    assert resp.status_code == 422, resp.text[:300]
+    detail = json.loads(resp.content.decode("utf-8", errors="strict"))["detail"]
+    shown = bad if len(bad) <= 200 else bad[:200] + "\u2026"
+    assert detail[0]["msg"].startswith(f"Value error, paths[0] {shown!r} starts with '-'"), detail
     sync_mock.assert_not_awaited()
 
 

@@ -93,6 +93,18 @@ describe("ent#1117 git_sync — a paths element starting with '-' is a schema er
     });
   }
 
+  // A lone surrogate is legal in a JSON request as an escape. The refusal must
+  // still serialise to valid UTF-8 JSON, which is what reaches the caller.
+  for (const bad of ["-\ud800", "-ab\udc00cd", "-" + "a".repeat(150) + "\ud800"]) {
+    it(`refuses ${JSON.stringify(bad).slice(0, 40)} with an error that is valid UTF-8 JSON`, async () => {
+      const result = await validate({ agent_name: "alpha", paths: [bad] });
+      assert.ok(result.issues && result.issues.length === 1, "expected one schema error");
+      const wire = Buffer.from(JSON.stringify({ message: result.issues[0].message }), "utf8");
+      const decoded = new TextDecoder("utf-8", { fatal: true }).decode(wire);
+      assert.equal(JSON.parse(decoded).message, result.issues[0].message);
+    });
+  }
+
   it("caps a long element in the message", async () => {
     const bad = "-" + "a".repeat(10_000);
     const result = await validate({ agent_name: "alpha", paths: [bad] });

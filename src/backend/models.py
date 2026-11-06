@@ -3634,14 +3634,17 @@ class GitSyncRequest(BaseModel):
         # as `.env`, which the sync then pushes (ent#1117). Refuse it here, at
         # the edge every caller crosses. A dash elsewhere (`sub/-x.md`) is fine.
         # The element is echoed so the caller can find it (the 422 handler
-        # drops `input`), but capped: the request body bounds nothing.
+        # drops `input`), but capped: the request body bounds nothing. Both
+        # echoes go through repr(): a raw lone surrogate (legal as a JSON
+        # escape) cannot be UTF-8 encoded, and pydantic-core then raises
+        # while building the error, which is a 500 instead of this 422.
         for i, path in enumerate(v or []):
             if path.startswith("-"):
                 shown = path if len(path) <= 200 else path[:200] + "\u2026"
                 raise ValueError(
                     f"paths[{i}] {shown!r} starts with '-' and would be read by "
                     "git as an option; name a file that starts with '-' as "
-                    f"'./{shown}'"
+                    f"{'./' + shown!r}"
                 )
         return v
 

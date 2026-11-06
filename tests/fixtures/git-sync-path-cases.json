@@ -7,6 +7,8 @@
   {"path": "-\u0000", "accept": false, "note": "dash then NUL"},
   {"path": "-f\nx", "accept": false, "note": "dash first, newline later: a multiline regex would accept it"},
   {"path": "--force\nx", "accept": false, "note": "long option, newline later"},
+  {"path": "-\ud800", "accept": false, "note": "dash then a lone surrogate: must be a 422, not a 500"},
+  {"path": "-ab\udc00cd", "accept": false, "note": "lone low surrogate inside a refused element"},
   {"path": " -f", "accept": true, "note": "leading space: git reads a pathspec, not an option"},
   {"path": "\t-f", "accept": true, "note": "leading tab"},
   {"path": "\n-f", "accept": true, "note": "leading newline"},
@@ -25,5 +27,6 @@
   {"path": "\u00ad-f", "accept": true, "note": "U+00AD soft hyphen before a dash"},
   {"path": "\ufeff-f", "accept": true, "note": "U+FEFF BOM before a dash (JS \\s matches it, Python str.strip does not)"},
   {"path": "\u200b-f", "accept": true, "note": "U+200B zero-width space before a dash"},
+  {"path": "x\ud800", "accept": true, "note": "a lone surrogate with no leading dash is an ordinary path"},
   {"path": ":(top).env", "accept": true, "note": "pathspec magic; without -f git still refuses an ignored file"}
 ]
