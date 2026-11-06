@@ -515,7 +515,7 @@ sections:
   "status": "running",
   "error": null,
   "stale": true,
-  "stale_reason": "YAML parse error at line 5, column 3: mapping values are not allowed here"
+  "stale_reason": "workspace_yaml_yaml_invalid: YAML parse error: mapping values are not allowed here ..."
 }
 ```
 
@@ -569,10 +569,13 @@ sections:
 | Agent not found | 404 | Agent not found |
 | Agent not running | 200 | `error: "Agent must be running to read dashboard"` |
 | No dashboard.yaml | 200 | `error: "No dashboard.yaml found..."` |
-| YAML parse error (no cache) | 200 | `error: "YAML parse error at line X, column Y: ..."` |
-| YAML parse error (cached) | 200 | `stale: true, stale_reason: "YAML parse error..."` |
+| YAML parse error (no cache) | 200 | `error: "workspace_yaml_yaml_invalid: YAML parse error: ..."` (the hardened loader's named refusal, #1965) |
+| YAML parse error (cached) | 200 | `stale: true, stale_reason: "workspace_yaml_yaml_invalid: ..."` |
 | Validation error (no cache) | 200 | `error: "Validation errors: ..."` |
 | Validation error (cached) | 200 | `stale: true, stale_reason: "Validation errors..."` |
+| Top level, a section or a widget is not a mapping (no cache) | 200 | `error: "dashboard.yaml must be a mapping (key: value pairs) at the top level"`, or `"dashboard.yaml: section N[, widget M] must be a mapping (key: value pairs)"` |
+| File unreadable / not UTF-8 (no cache) | 200 | `error: "Failed to read dashboard.yaml: the file could not be read (<ErrorClass>)"` / `"...: the file is not valid UTF-8 text"` |
+| Any other failure (no cache) | 200 | `error: "Failed to read dashboard.yaml: <ErrorClass>"`; the exception text goes only to the agent log, credential-scrubbed (trinity#4284). With a cache, each of these three is served as `stale: true` with the same text as `stale_reason` |
 | Agent timeout (no cache) | 200 | `error: "Agent is starting up, please try again"` |
 | Agent timeout (cached) | 200 | `stale: true, stale_reason: "Agent is starting up..."` |
 
