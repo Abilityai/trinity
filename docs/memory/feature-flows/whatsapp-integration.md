@@ -198,6 +198,20 @@ correctly. Conversions:
 Implemented as a pure static method on `WhatsAppAdapter`; also exposed via
 `format_response` for non-send callsites (e.g. proactive delivery).
 
+**Linear by construction (abilityai/trinity-enterprise#1117).** The conversion
+runs synchronously on the event loop over a reply with no length cap of its
+own, so every rule is linear in the reply length. A header title must start and
+end on a non-space. Link text may not contain brackets, and a URL may contain
+anything except `)` and the `](` that starts the next link. The regexes run over
+at most `_MARKDOWN_CONVERSION_MAX_CHARS` (4,000,000, sized to the result-callback
+cap); text past it is appended unconverted, never dropped. Four inputs convert
+differently from before:
+
+- link text containing `[`: `[a [b](u)` becomes `[a b (u)`;
+- a URL containing `](` stops at that point;
+- a blank header (`#` and whitespace only) stays as written;
+- a title starting with a non-ASCII space (NBSP, U+3000) keeps its `#` marks.
+
 ## Flow: Outbound media attachments (#1315)
 
 Agents can attach files to a reply. `ChannelMessageRouter._extract_outbound_files`

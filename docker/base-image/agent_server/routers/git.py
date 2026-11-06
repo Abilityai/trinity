@@ -2354,9 +2354,11 @@ async def sync_to_github(request: GitSyncRequest):
 
         # 1. Stage changes
         if request.paths:
-            # Stage specific paths (single git add call for all paths)
+            # Stage specific paths (single git add call for all paths).
+            # `--` ends option parsing, so an element like `-f` is a pathspec,
+            # never an option that force-stages an ignored file (ent#1117).
             add_result = subprocess.run(
-                ["git", "add"] + list(request.paths),
+                ["git", "add", "--", *request.paths],
                 capture_output=True,
                 text=True,
                 cwd=str(home_dir),

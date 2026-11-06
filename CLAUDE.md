@@ -322,7 +322,7 @@ curl -X POST http://localhost:8000/api/agents \
 ### Credential Pattern
 ```
 .env                    # Source of truth (KEY=VALUE)
-.mcp.json.template      # Template with ${VAR} placeholders (rendering is #2007, not yet live)
+.mcp.json.template      # Template with ${VAR} placeholders, rendered from .env into .mcp.json at every agent start (#2007)
 .mcp.json               # Written by credential injection
 ```
 
