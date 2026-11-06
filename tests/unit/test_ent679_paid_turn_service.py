@@ -513,7 +513,7 @@ async def test_execution_exception_releases_the_claim_and_charges_nothing():
 async def test_execution_exception_answer_names_the_class_not_the_text(caplog):
     """abilityai/trinity#4284: the paid route returns this payload as its 500
     body, to a payer. The exception's text stays in the log."""
-    marker = "internal-host-10.0.0.7-marker-4284"
+    marker = "internal-host-203.0.113.7-marker-4284"
 
     async def _boom():
         raise RuntimeError(marker)

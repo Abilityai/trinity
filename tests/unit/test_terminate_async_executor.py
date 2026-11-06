@@ -206,7 +206,7 @@ def live_child():
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_signal_error_keeps_the_generic_500_with_its_text(
+async def test_signal_error_keeps_the_generic_500_naming_the_class(
     real_registry, live_child, monkeypatch
 ):
     """reason "error" (the stop could not even be sent) keeps the generic 500,

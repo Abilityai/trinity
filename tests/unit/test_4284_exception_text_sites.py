@@ -35,7 +35,7 @@ _REPO = Path(__file__).resolve().parents[2]
 _BASE_IMAGE = _REPO / "docker" / "base-image"
 
 # Built by concatenation so no source line, and so no traceback frame, holds it.
-_TOKEN = "ghp_" + "S14SENTINEL" + "a" * 25
+_TOKEN = "ghp_" + "PLANTEDTOKEN" + "a" * 24
 _MARKER = "boom-marker-4284"
 _PLANT = (
     f"{_MARKER} https://x-access-token:{_TOKEN}@github.com/acme/repo.git "
@@ -299,7 +299,7 @@ def test_repo_binding_destination_check_502_names_the_class(monkeypatch, caplog)
 
 
 # ---------------------------------------------------------------------------
-# Relays of an agent's own answer (G3): an agent on an older base image still
+# Relays of an agent's own answer: an agent on an older base image still
 # answers its 500s with its exception text, and the backend's relay is the only
 # thing between that text and the caller. At an agent 5xx the backend answers
 # a fixed sentence with the agent's status; a 4xx is the agent's refusal and is
