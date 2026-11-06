@@ -133,3 +133,102 @@ def test_the_static_routes_precede_the_key_catch_all():
     agent_defaults_at = init.index("agent_defaults")
     generic_at = init.rindex("generic")
     assert agent_defaults_at < generic_at
+
+
+# ---------------------------------------------------------------------------
+# The routes, executed (review I3): the source pins above say the branches
+# exist; these say what they DO at the edges of the range. A `<` / `<=` slip
+# in the 5–1440 comparison ships green against a substring match.
+# ---------------------------------------------------------------------------
+
+
+def _admin():
+    from unittest.mock import MagicMock
+
+    admin = MagicMock()
+    admin.role = "admin"
+    admin.connector_agent = None   # #1310: not a connector principal
+    admin.agent_name = None        # ent#293: not an agent-scoped key
+    admin.mcp_scope = None         # #2323: an interactive human
+    return admin
+
+
+def _request(path):
+    from unittest.mock import MagicMock
+
+    req = MagicMock()
+    req.client = None
+    req.scope = {"path": path}
+    req.state.request_id = None
+    return req
+
+
+def _put_threshold(monkeypatch, value):
+    """Drive the real dedicated PUT with only its sinks stubbed."""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from models import QueueStallAlertMinutesUpdate
+    from routers.settings import agent_defaults as mod
+
+    written: dict = {}
+
+    async def _noop_audit(**_kwargs):
+        return None
+
+    monkeypatch.setattr(mod.db, "set_setting", lambda k, v: written.__setitem__(k, v))
+    monkeypatch.setattr(mod.platform_audit_service, "log", _noop_audit)
+    monkeypatch.setattr(
+        mod, "get_queue_stall_alert_minutes",
+        lambda: int(written.get(ss.QUEUE_STALL_ALERT_MINUTES_KEY, 30)),
+    )
+
+    try:
+        result = asyncio.run(mod.update_queue_stall_alert_minutes_setting(
+            QueueStallAlertMinutesUpdate(value=value),
+            _request("/api/settings/queue-stall-alert-minutes"),
+            _admin(),
+        ))
+    except HTTPException as exc:
+        return exc.status_code, exc.detail, written
+    return 200, result, written
+
+
+@pytest.mark.parametrize("value", [4, 1441, 0, -5])
+def test_the_dedicated_put_refuses_an_out_of_range_value_with_a_named_400(monkeypatch, value):
+    status, detail, written = _put_threshold(monkeypatch, value)
+    assert status == 400
+    assert "queue_stall_alert_minutes must be an integer between 5 and 1440" in detail
+    assert written == {}, "a refused value must not reach system_settings"
+
+
+@pytest.mark.parametrize("value", [5, 1440, 30])
+def test_the_dedicated_put_accepts_the_bounds_inclusive_and_writes_the_string(monkeypatch, value):
+    status, result, written = _put_threshold(monkeypatch, value)
+    assert status == 200
+    assert written == {ss.QUEUE_STALL_ALERT_MINUTES_KEY: str(value)}
+    assert result["value"] == value
+    assert (result["min"], result["max"]) == (5, 1440)
+
+
+def test_the_generic_put_actually_refuses_the_key_with_a_422_pointer():
+    """The AST pin above proves the comparison exists; this proves the branch
+    is reachable and names the validated route."""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from database import SystemSettingUpdate
+    from routers.settings import generic as mod
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(mod.update_setting(
+            key=ss.QUEUE_STALL_ALERT_MINUTES_KEY,
+            body=SystemSettingUpdate(value="0"),
+            request=_request(f"/api/settings/{ss.QUEUE_STALL_ALERT_MINUTES_KEY}"),
+            current_user=_admin(),
+        ))
+
+    assert exc.value.status_code == 422
+    assert "PUT /api/settings/queue-stall-alert-minutes" in exc.value.detail

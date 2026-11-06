@@ -253,3 +253,67 @@ def test_the_resend_sweep_runs_periodically_not_only_at_boot():
 
 async def _no_sleep(_seconds):
     return None
+
+
+# ---------------------------------------------------------------------------
+# The resend tick, executed (review I2): the name pin above cannot tell a
+# `while True: sleep` from a tick that runs the sweep, survives a failing
+# sweep, and dies on cancel.
+# ---------------------------------------------------------------------------
+
+
+class _FakeApp:
+    """Captures the `@app.on_event` handlers the way FastAPI would."""
+
+    def __init__(self):
+        self.handlers: Dict[str, Any] = {}
+
+    def on_event(self, name):
+        def _register(fn):
+            self.handlers[name] = fn
+            return fn
+        return _register
+
+
+def test_the_resend_tick_sweeps_repeatedly_survives_a_blip_and_stops_on_shutdown(monkeypatch):
+    calls: list = []
+
+    async def _sweep():
+        calls.append(len(calls))
+        if len(calls) == 2:          # the first TICK (index 1) blows up
+            raise RuntimeError("backend blip")
+
+    monkeypatch.setattr(pull_worker, "resend_pending_pull_results", _sweep)
+    monkeypatch.setattr(pull_worker, "_RESEND_TICK_SECONDS", 0.0)
+    monkeypatch.setattr(pull_worker, "_worker_creds_present", lambda: True)
+    pull_worker._RESEND_TASKS.clear()
+
+    app = _FakeApp()
+    pull_worker.schedule_pending_pull_result_resend(app)
+    assert {"startup", "shutdown"} <= set(app.handlers)
+
+    async def _drive():
+        await app.handlers["startup"]()            # boot sweep + spawns the tick
+        assert len(pull_worker._RESEND_TASKS) == 1
+        task = pull_worker._RESEND_TASKS[0]
+        for _ in range(200):
+            await asyncio.sleep(0)
+            if len(calls) >= 4:
+                break
+        assert not task.done(), "a failing sweep must not kill the tick"
+        await app.handlers["shutdown"]()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert pull_worker._RESEND_TASKS == []
+
+    asyncio.run(_drive())
+    # boot (0), the failing tick (1), and at least two more ticks after it
+    assert len(calls) >= 4
+
+
+def test_the_tick_is_not_installed_without_worker_credentials(monkeypatch):
+    """No worker, no pending files, nothing to re-send — and no stray task."""
+    monkeypatch.setattr(pull_worker, "_worker_creds_present", lambda: False)
+    app = _FakeApp()
+    pull_worker.schedule_pending_pull_result_resend(app)
+    assert app.handlers == {}
