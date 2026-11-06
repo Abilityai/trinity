@@ -444,6 +444,21 @@
   - Identity captured at enqueue and replayed at drain (no re-auth, matches scheduler pattern)
 - **Flow**: `docs/memory/feature-flows/persistent-task-backlog.md`
 
+### 10.8.2 The Queue Wait Is Measurable and a Stuck Queue Alerts (#4257)
+- **Status**: ✅ Implemented (2026-11-05)
+- **Requirement ID**: QUEUE-STALL-001
+- **GitHub Issue**: #4257
+- **Description**: An async `/task` on an idle pull pilot sat `queued` for hours and nothing in the product could say why — the claim NULLed `queued_at`, so the wait was unmeasurable, and every refusal on the claim path was silent. A queued row now carries its real wait, the caller's receipt explains it, and a head that stops moving raises one operator alert per agent.
+- **Key Features**:
+  - `queued_at` survives a claim; `release_claim_to_queued` coalesces it, so a released claim keeps its FIFO place. `requeue_expired_lease` still restamps, so "wait" means this attempt's wait. Readers filter on `status='queued'` — `queued_at IS NOT NULL` is **not** a queued predicate
+  - Both queued receipts (async, and the sync backlog timeout) carry `queued_at`, `queue_position` and `wait_reason` ∈ `capacity` / `backlog_drain` / `agent_busy` / `worker_claim` / `conversation_busy`. `agent_busy` is reused from #3244 as a *value* in a new field, never as a `status`
+  - `services/queue_stall_service.py` runs from `capacity_manager.run_maintenance` (the existing 60 s tick) and files one `dispatch_queue_stalled` platform alert per agent past the threshold; convergence across uvicorn workers is the `uq_operator_queue_pending_subject` unique index. The alert ends itself when the head moves
+  - `queue_stall_alert_minutes`: admin-only, default 30, range 5–1440, named 400 outside it; dedicated `GET/PUT /api/settings/queue-stall-alert-minutes` and a 422 pointer from the generic `/{key}` PUT. No migration (`system_settings` row)
+  - Worker side: a non-200 claim is warned once per status per process instead of being read as "queue empty"; in-loop delivery is bounded to 90 s or the lease, whichever is shorter, with the envelope already on disk and a 60 s resend tick to finish it — a parked worker no longer looks alive and claims nothing
+  - The push stall verdict reads the live slot meter (`SlotService.active_slot_count`), never an assumption: a full meter on a long turn is `capacity`, an expected wait, not a drain the backend owes
+  - The `/next-task` claim-denied counter is gated on the caller's own validated agent key and a shape-checked name — the 403 branch is reached before any credential is read, so the refusal alone authorizes nothing
+- **Not included**: `GET /api/executions/{id}` and the MCP `get_execution_result` read surface do not yet carry the three fields; they reach MCP callers on the dispatch receipt only.
+
 ### 10.8.1 Fleet-Wide Parallel-Capacity Ceiling (#506)
 - **Status**: ✅ Implemented (2026-06-29)
 - **GitHub Issue**: #506
