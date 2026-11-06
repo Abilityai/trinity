@@ -628,7 +628,12 @@ async def list_agent_files_logic(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list files: {str(e)}")
+        # #4284: the #1917 pattern — class name out, full exception to the log.
+        logger.error("Failed to list files for agent %s", agent_name, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to list files ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 async def download_agent_file_logic(
@@ -691,7 +696,12 @@ async def download_agent_file_logic(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to download file: {str(e)}")
+        # #4284: the #1917 pattern — class name out, full exception to the log.
+        logger.error("Failed to download file for agent %s", agent_name, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to download file ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 async def delete_agent_file_logic(
@@ -766,7 +776,12 @@ async def delete_agent_file_logic(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete file: {str(e)}")
+        # #4284: the #1917 pattern — class name out, full exception to the log.
+        logger.error("Failed to delete file for agent %s", agent_name, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete file ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 async def preview_agent_file_logic(
@@ -838,7 +853,12 @@ async def preview_agent_file_logic(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to preview file: {str(e)}")
+        # #4284: the #1917 pattern — class name out, full exception to the log.
+        logger.error("Failed to preview file for agent %s", agent_name, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to preview file ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 async def update_agent_file_logic(
@@ -923,7 +943,12 @@ async def update_agent_file_logic(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update file: {str(e)}")
+        # #4284: the #1917 pattern — class name out, full exception to the log.
+        logger.error("Failed to update file for agent %s", agent_name, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update file ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 async def create_agent_folder_logic(
@@ -1006,4 +1031,9 @@ async def create_agent_folder_logic(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create folder: {str(e)}")
+        # #4284: the #1917 pattern — class name out, full exception to the log.
+        logger.error("Failed to create folder for agent %s", agent_name, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create folder ({e.__class__.__name__} — details in backend logs)",
+        )
