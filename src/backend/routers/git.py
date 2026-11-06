@@ -53,8 +53,9 @@ def _log_redacted_failure(what: str, agent_name: str, e: Exception, held: str) -
     echoes `Bearer <token>`) or a credentialed remote URL. The caller returns
     the class name only, so the detail moves here, and it must not carry the
     credential with it. `exc_info=True` would render the raw message, so the
-    traceback goes through the shared mask instead (`utils.log_masking`): the
-    token this handler holds in every form an exception renders it (its
+    traceback goes through the shared mask instead (`utils.log_masking`, whose
+    docstring states what it does not mask): the token this handler holds,
+    whole and in its escaped, encoded and cut renderings (its
     `x-access-token:` base64 form included), then any URL userinfo (a stale
     baked token is not the held one), then the known credential shapes.
     """

@@ -109,6 +109,11 @@ def _assert_logged(caplog):
     log = _log_text(caplog)
     assert SENTINEL in log, "the exception detail was lost, not moved to the log"
     assert "Traceback (most recent call last)" in log, f"no traceback in the log: {log}"
+    fmt = logging.Formatter("%(message)s")
+    levels = [r.levelno for r in caplog.records if SENTINEL in fmt.format(r)]
+    assert any(level >= logging.WARNING for level in levels), (
+        f"the detail is logged below WARNING (levels {levels}), so a production log at INFO drops it"
+    )
 
 
 # ---------------------------------------------------------------------------
