@@ -4404,6 +4404,17 @@ class SkillGateCheckResponse(BaseModel):
     message: Optional[str] = None
 
 
+class PeerSkillEnforcementResponse(BaseModel):
+    """`GET /api/agents/{agent_name}/peer-skills/enforcement`
+    (abilityai/trinity-enterprise#925): does the agent enforce peer skill
+    grants inside itself? `reachable` — a peer could reach one of its library
+    skills without a grant; `hook` — the ent#754 hook state, read only when
+    reachable. Both null for anyone but a person who may manage the agent's
+    skills."""
+    reachable: Optional[bool] = None
+    hook: Optional[str] = None
+
+
 class SkillGateSetRequest(BaseModel):
     """`PUT /api/agents/{agent_name}/skill-gates/{skill_name}` (trinity-enterprise#753).
 

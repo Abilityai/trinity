@@ -339,15 +339,36 @@ peer agent B ──/task, /chat, fan-out, event──▶ backend
 | `GET /api/agents/{caller}/peer-skills` | `AuthorizedAgentByName` | per permitted target the viewer may open (and an agent key may reach): library skills, `granted` + who/when, `individual`, `assigned_by`, `not_granted` count — also the upgrade report |
 | `PUT /api/agents/{caller}/peer-skills/{target}/{skill}` | `require_admin` + `reject_non_interactive_principal` | grant; 422 `skill_not_assigned` / `self_grant` / `system_agent_not_grantable`, 404 unknown agent; returns `consent` |
 | `DELETE …/peer-skills/{target}/{skill}` | same | revoke; always allowed |
-| `GET /api/skills/peer-grants/drift` | `require_admin` | the honest upgrade: (caller, target, skill) pairs USED in the last 30 days (execution ledger × gate matcher) and now refused; `uses`, `last_used_at` |
+| `GET /api/skills/peer-grants/drift` | `require_admin` | the honest upgrade: (caller, target, skill) pairs USED in the last 30 days (execution ledger × gate matcher, plus in-container refusals from the audit log, ent#925) and now refused; `uses`, `last_used_at` |
+| `GET /api/agents/{name}/peer-skills/enforcement` | `AuthorizedAgentByName`; answered only for a person who may manage the agent's skills (`is_person_principal` + `can_manage_agent_skills`), nulls otherwise | ent#925: `reachable` (`peer_skill_policy.could_reach` — an inbound edge or an event source it subscribes to lacks a grant for one of its library skills; not itself, `trinity-system` or its spawner) and `hook` (`skill_gate_map_service.hook_status`, one `/health` read, only when reachable) |
 
 A grant goes with its edge: `db/permissions.py` `remove_permission` / `set_permissions` delete the grants on the edges they drop. Settings → Agents shows `PeerSkillDriftNotice.vue` (Grant per pair) while the report is non-empty; the per-agent list shows `last_used_at` and marks a spawned target (no grant needed).
 
-**Known gap**: matching reads the request text, so a peer that asks in prose without naming the skill is not caught (follow-up abilityai/trinity-enterprise#925: runtime skill-origin marker, #2914).
+**Who asked** (ent#925): `peer_skill_policy.requesting_agent` — the agent of an agent-scoped key that made the request first (`db.get_agent_name_for_agent_key`, active or not), then the stamped source agent. `enforce` reads it whenever the requester is an agent OR carries a key, so a fan-out sent without `X-Source-Agent` (stamped with the callee itself) and an A2A call made with an agent key are a peer's.
 
-**Frontend**: `PermissionsPanel.vue` renders `PeerSkillGrants.vue` under the edge list (store `getAgentPeerSkills` / `setAgentPeerSkillGrant`); an admin gets one `BaseToggle` per skill, everyone else a Granted / Not granted badge. It reloads after **Save Permissions**.
+**In-container (ent#925)**: a peer that asks in prose never names the skill, so the skill a peer's run LOADS is checked at load. The ent#752 hook already asks `POST /api/skill-gate/check` for every `Skill` load and subagent preload; `skill_gate_service.check_invocation` runs `_peer_verdict` before the gate logic:
 
-**Tests**: `tests/unit/test_ent662_peer_skill_surface.py`, `src/frontend/tests/unit/peerSkillGrants.spec.js`, `src/mcp-server/src/tools/skills.test.ts` (`peer_needs_grant`).
+```
+check_invocation(agent, via, invoked, names, resolved, subagent, execution_id)
+  read_gates + _heal_marker                       (unchanged; 503 only for the gate map)
+  _peer_verdict  — no run / "manual" → skip (the agent's own session)
+    row = db.get_execution_requester(run)         (one read for every id)
+    caller = peer_skill_policy.run_requester(agent, row)
+             row must be this agent's, ANY status; key's agent first, then source_agent_name
+    refused, unsure = peer_skill_policy.check_load(agent, caller, names, invoked, resolved)
+             library ∩ names (casefold) → spawned? (strict) → minus grants (exact name)
+             resolved=False + some ungranted library skill → "could not tell"
+    SQLAlchemyError anywhere above → log, peer rule silent (fail OPEN); other errors propagate
+    refusal → audit_in_container_refusal (throttled per run+skills, 20 per callee×caller / 10 min)
+            → {"allowed": false, "gated": false, "message": peer_hook_refusal_text(...)}
+  gate logic (unchanged, with its own reads — never this fail-open one)
+```
+
+The hook relays `message` to the model on exit 2 — no `docker/base-image/` change. Limits that stay the gateway's: a `/name` prompt expansion (no tool call), runtimes without the hook, a nested CLI, work the callee sends itself from a peer turn, room turns.
+
+**Frontend**: `PermissionsPanel.vue` renders `PeerSkillGrants.vue` under the edge list (store `getAgentPeerSkills` / `setAgentPeerSkillGrant`); an admin gets one `BaseToggle` per skill, everyone else a Granted / Not granted badge. It reloads after **Save Permissions**. Under it, `PeerSkillEnforcementLine.vue` (store `getAgentPeerSkillEnforcement`) shows one warning line — the Skills tab's treatment, worded for inbound callers — when `reachable` and the hook state is not `ok`/`unknown`; it reloads on agent change and on start/stop, and a failed read shows nothing.
+
+**Tests**: `tests/unit/test_ent662_peer_skill_surface.py`, `tests/unit/test_ent925_peer_skill_in_container.py`, `tests/unit/test_ent925_peer_skill_enforcement_route.py`, `src/frontend/tests/unit/peerSkillGrants.spec.js`, `src/frontend/tests/unit/peerSkillEnforcementLine.spec.js`, `src/mcp-server/src/tools/skills.test.ts` (`peer_needs_grant`).
 
 ---
 

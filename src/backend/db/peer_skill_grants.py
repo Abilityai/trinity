@@ -8,13 +8,14 @@ edge exists: the edge still decides reach, this decides what the edge exposes.
 
 SQLAlchemy Core, so it runs unchanged on SQLite and PostgreSQL.
 """
+import json
 from typing import Dict, List, Set
 
 from sqlalchemy import and_, delete, insert, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from .engine import get_engine
-from .tables import agent_peer_skill_grants as grants, schedule_executions
+from .tables import agent_peer_skill_grants as grants, audit_log, schedule_executions
 from utils.helpers import utc_now_iso
 
 
@@ -87,3 +88,36 @@ class PeerSkillGrantOperations:
         )
         with get_engine().connect() as conn:
             return [dict(r) for r in conn.execute(stmt).mappings()]
+
+    def recent_in_container_peer_refusals(self, since: str, limit: int = 2000) -> List[dict]:
+        """The in-container peer-skill refusals audited since `since` (ISO-Z),
+        newest first: ``{caller, target, skills, at}`` (abilityai/trinity-enterprise#925).
+
+        The upgrade report's second ledger: a peer that asked in prose never
+        named the skill, so its message cannot show the use — the refusal at
+        load does. A gateway refusal (no `via`) is left out: its request text
+        is already in the execution ledger `recent_peer_messages` reads."""
+        stmt = (
+            select(audit_log.c.actor_id, audit_log.c.target_id, audit_log.c.details,
+                   audit_log.c.timestamp)
+            .where(and_(
+                audit_log.c.event_action == "peer_skill_refused",
+                audit_log.c.timestamp >= since,
+            ))
+            .order_by(audit_log.c.timestamp.desc())
+            .limit(limit)
+        )
+        out: List[dict] = []
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        for row in rows:
+            try:
+                details = json.loads(row["details"] or "{}")
+            except (TypeError, ValueError):
+                continue
+            skills = details.get("skills") if isinstance(details, dict) else None
+            if not details.get("via") or not isinstance(skills, list):
+                continue
+            out.append({"caller": row["actor_id"], "target": row["target_id"],
+                        "skills": [s for s in skills if isinstance(s, str)], "at": row["timestamp"]})
+        return out

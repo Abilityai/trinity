@@ -321,6 +321,12 @@
   "reason": "legacy",
   "tier": "accessor"
  },
+ "agent_files.py::get_agent_peer_skill_enforcement": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/peer-skills/enforcement",
+  "reason": "abilityai/trinity-enterprise#925: the Permissions panel's 'not enforced in-container' line. Anyone who can open the agent may call it; only a person who may manage its skills gets an answer (everyone else, a shared viewer included, gets nulls and causes no probe)",
+  "tier": "accessor"
+ },
  "agent_files.py::get_agent_peer_skills": {
   "method": "GET",
   "path": "/api/agents/{agent_name}/peer-skills",
