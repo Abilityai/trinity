@@ -1023,18 +1023,6 @@ function formatLastExecution(timestamp) {
   return `${Math.floor(diff / 86400000)}d ago`
 }
 
-function formatGithubRepo(repo) {
-  if (!repo) return ''
-  if (repo.startsWith('github:')) {
-    return repo.substring(7)
-  }
-  if (repo.includes('github.com/')) {
-    const parts = repo.split('github.com/')[1]
-    return parts.replace(/\.git$/, '')
-  }
-  return repo
-}
-
 function getArrowHead(arrow) {
   const size = 4  // Subtle arrowhead
   const x = arrow.x
