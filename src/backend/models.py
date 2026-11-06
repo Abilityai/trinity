@@ -16,6 +16,7 @@ from utils.helpers import parse_iso_timestamp, to_utc_iso
 from utils.addressee import normalize_addressee_email
 from db_models import WebFileUpload  # noqa: F401 — re-exported for router imports
 from db_models import SubscriptionCredential
+from db_models import AgentShare
 
 
 # Fork-to-own destination: "owner/name". Owner per GitHub rules (alphanumeric +
@@ -6385,3 +6386,14 @@ class TermsAcceptance(BaseModel):
     accepted_at: str
     door: Optional[str] = None
     actor_ip: Optional[str] = None
+
+
+class AgentShareResult(AgentShare):
+    """A new share, and whether its invitation went out (trinity-enterprise#459)."""
+    # sent | not_needed | invalid_address | unavailable | rate_limited | failed
+    invitation: str = "not_needed"
+
+
+class AgentInviteResult(BaseModel):
+    email: str
+    sent: bool = True

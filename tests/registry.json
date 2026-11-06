@@ -7035,6 +7035,29 @@
       "description": "A `dims:` tile reads its own series (#3293): against the real store, a quiet series beside a busy one holding more than 200 newer points binds with its own latest point, freshness and history; a series whose last point is older than the tile's window still shows its number with an empty history; stored key order and a busier wider series (`channel=google, geo=us`) neither hide nor crowd out the exact one; a series that never reported, a partial selector and a series silent for longer than the 90-day lookback are refused `metric_series_not_found` and never show the fold; a store fault on the per-series read refuses that one tile with `metric_store_unavailable`; the unselected tile still equals `latest_by_metric`; and the store read itself is newest-first, bounded by `since` and `limit`, exact on dims and scoped to the agent."
     },
     {
+      "file": "unit/test_ent459_operator_invite.py",
+      "feature": "trinity-enterprise#459",
+      "added": "2026-11-05",
+      "categories": [
+        "backend",
+        "unit",
+        "access-control",
+        "email"
+      ],
+      "description": "A pending person is told an agent was shared with them, through the real sharing router over the unit DB: owner and admin send, a shared user and a stranger get the uniform 404, every key is refused; not_shared, not_pending, invite_unavailable (no provider, email sign-in off, policy) and invite_not_sent are named, send nothing and spend no quota; the mail names inviter and agent, points at the Workspace, escapes what it quotes and carries no code; share and resend spend the same per-address and per-inviter windows; a share stands whatever happens to its mail and reports the outcome."
+    },
+    {
+      "file": "../src/frontend/tests/unit/accessPanelInvite.mount.spec.js",
+      "feature": "trinity-enterprise#459",
+      "added": "2026-11-05",
+      "categories": [
+        "frontend",
+        "unit",
+        "access-control"
+      ],
+      "description": "Agent Detail > Access, mounted: Resend invite only on pending rows; disabled with a stated reason when the server says nothing can be sent; in-flight, sent and failed states; a refusal's message shown on its row; Add person says what happened to the invitation."
+    },
+    {
       "file": "unit/test_837_workspace_only_floor.py",
       "feature": "trinity-enterprise#837",
       "added": "2026-10-09",

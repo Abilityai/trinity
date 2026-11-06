@@ -43,6 +43,11 @@
   - **Agent keys** keep their capability path (`instructions.manage` ent#164, `skills.manage` ent#596) and are refused files that run code.
   - Below the owner tier the list withholds hidden files and flags each node with the verbs the caller cannot use; every write, delete and mkdir writes an audit row.
   - The Access tab states the grant in one sentence.
+- **Telling a pending person (trinity-enterprise#459, OSS-core)**: a share to an address with no account emails that person, and **Resend invite** on a Pending row sends it again. A share to someone with an account sends nothing.
+  - The mail names who invited them and which agent, and points at the Workspace sign-in. It carries no code and no secret; they request their own code there.
+  - Owner or admin, signed-in session only (`require_interactive`), matching share. Named refusals: `not_shared` (404), `not_pending` (409), `invalid_address` (422, anything but one plain address), `invite_unavailable` (409, no real provider or emailed codes are off for them), `invite_rate_limited` (429), `invite_not_sent` (502).
+  - Limits, shared by both paths: 3 an hour per (agent, address) and 30 an hour per inviter, since sharing can now mail an address the owner typed. A refused call spends none.
+  - A share always stands if the mail doesn't go: the response's `invitation` says `sent`, `not_needed`, `invalid_address`, `unavailable`, `rate_limited` or `failed`, and the panel says so. `console` counts as unavailable. Every attempt is audit-logged.
 
 ### 2.5 User Role Model (ROLE-001)
 - **Status**: ✅ Implemented (2026-03-20)
