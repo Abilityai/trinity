@@ -105,6 +105,12 @@ def _install(monkeypatch, *, respond_result, enabled=True):
         },
         respond_to_operator_queue_item=lambda **kw: respond_result,
         get_operator_resume_enabled=lambda a: enabled,
+        # ent#1102: the gate is `wake_policy.resolve`, whose first read is the
+        # tri-state column. `enabled` is the OWNER's decision either way now —
+        # the instance default is ON (ruling D4), so the absence of ent#329's
+        # opt-in no longer means "off" and cannot express this test's premise.
+        get_wake_on_ending=lambda a: 1 if enabled else 0,
+        get_setting_value=lambda key, default=None: default,
     )
     # trinity-enterprise#611: `answer_ask` reads through its own `db`, and ends
     # the ask through the ask sink, which writes, reads the opt-in and spawns
@@ -113,6 +119,10 @@ def _install(monkeypatch, *, respond_result, enabled=True):
     # `sys.modules` or the `services` package attribute would not reach it.
     monkeypatch.setattr(svc, "db", fake_db, raising=False)
     monkeypatch.setattr(sink, "db", fake_db)
+    # ent#1102: the resolver reads through its own module-level `db`, so the
+    # fake has to be installed there too or the decision never sees it.
+    import services.wake_policy as wake_policy
+    monkeypatch.setattr(wake_policy, "db", fake_db)
     stub = SimpleNamespace(
         spawn_resume_dispatch=lambda item, **kw: calls.append(item),
         spawn_on_loop=lambda factory: None,   # the audit/broadcast hop: not under test here

@@ -38,7 +38,7 @@ Open **Agent → Schedules**, expand a schedule, and click **Webhook**:
 1. **Enable webhook** mints the URL. Use **Reveal** / **Copy URL** and the ready-to-paste **Example request** (`curl`) to wire up your caller.
 2. **Rotate URL** issues a new token (the old URL 404s immediately); **Revoke** turns the webhook off entirely.
 
-Access follows the schedule-management model — any user who can manage the agent's schedules can mint/rotate/revoke a webhook. An agent's own key can manage a webhook, on its own schedules too, only with the **Change other agents' schedules** permission (`schedules.manage`); the system agent's key cannot manage one.
+Access follows the schedule-management model — any user who can manage the agent's schedules can mint/rotate/revoke a webhook. An agent's own key can't touch the webhook of a schedule that delivers to someone other than its owner, even with the permission below. An agent's own key can manage a webhook, on its own schedules too, only with the **Change other agents' schedules** permission (`schedules.manage`); the system agent's key cannot manage one.
 
 ### Securing a webhook with a signature (recommended)
 

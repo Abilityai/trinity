@@ -238,6 +238,8 @@ const GRANTS_OWNER_TIER =
   "backend fence: agent_config.py OwnedAgentByName — an agent key reads itself or an agent it spawned, never through a permission edge; a person key only as owner or admin (ent#164, ent#756). An `enforce` row would admit an edge peer the route refuses (trinity-enterprise#991)";
 const A2A_CALL_SELF = "a2a_call.ts checkSelf — self-only by design (an agent spends only its own endpoint credential)";
 const AGENTS_INLINE = "agents.ts inline getPermittedAgents filter ({self} ∪ permitted)";
+const ACT_AS =
+  "self-acting (resolveActingAgent): an agent or system key acts as itself and an agent_name naming another agent is refused; a user key's agent_name rides X-Trinity-Act-As-Agent, which the backend admits only for an admin's user key and holds to that one agent (dependencies.admit_act_as / get_self_acting_agent / assert_own_agent, trinity-enterprise#1024)";
 const LOOP_RESOLVE =
   "resolves the loop's agent (GET /api/loops/{id}) then checkAgentEdge; compound uniform denial (ent#628)";
 
@@ -334,22 +336,22 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   // --- notifications.ts ---
   send_notification: { kind: "none", why: "no agent target" },
   // --- reports.ts ---
-  report: { kind: "none", why: "self-published; the backend self-gates the path agent (#918)" },
-  record_metrics: { kind: "none", why: "self-recorded; the backend self-gates the path agent (ent#478)" },
-  refresh_metric_definitions: { kind: "none", why: "self-scoped; reconciles the calling agent's own template (ent#478)" },
+  report: { kind: "in-tool", how: ACT_AS + " — self-published; the backend self-gates the path agent (#918)" },
+  record_metrics: { kind: "in-tool", how: ACT_AS + " — self-recorded; the backend self-gates the path agent (ent#478)" },
+  refresh_metric_definitions: { kind: "in-tool", how: ACT_AS + " — self-scoped; reconciles the calling agent's own template (ent#478)" },
   // ent#727: `agent` is the cross-agent read. Unlike the `baselined` rows, the
   // backend RE-CHECKS this edge (routers/agent_files.py `_metric_read_gate`),
   // so this route is closed for ent#629's purposes, not on its work list.
   get_metrics: { kind: "enforce", param: "agent" },
-  get_objectives: { kind: "none", why: "self-scoped read; the backend self-gates the path agent (ent#666)" },
+  get_objectives: { kind: "in-tool", how: ACT_AS + " — self-scoped read; the backend self-gates the path agent (ent#666)" },
   list_reports: { kind: "in-tool", how: REPORTS_GATE },
   get_report: { kind: "in-tool", how: "reports.ts resolves the report's agent, then " + REPORTS_GATE },
   // --- canvas.ts ---
-  set_canvas: { kind: "none", why: "the calling agent's own canvas (ent#438)" },
-  patch_canvas: { kind: "none", why: "the calling agent's own canvas (ent#438)" },
-  get_canvas: { kind: "none", why: "the calling agent's own canvas (ent#438)" },
-  list_canvases: { kind: "none", why: "the calling agent's own canvases (ent#438)" },
-  clear_canvas: { kind: "none", why: "the calling agent's own canvas (ent#438)" },
+  set_canvas: { kind: "in-tool", how: ACT_AS + " — the calling agent's own canvas (ent#438)" },
+  patch_canvas: { kind: "in-tool", how: ACT_AS + " — the calling agent's own canvas (ent#438)" },
+  get_canvas: { kind: "in-tool", how: ACT_AS + " — the calling agent's own canvas (ent#438)" },
+  list_canvases: { kind: "in-tool", how: ACT_AS + " — the calling agent's own canvases (ent#438)" },
+  clear_canvas: { kind: "in-tool", how: ACT_AS + " — the calling agent's own canvas (ent#438)" },
   // --- files.ts ---
   share_file: { kind: "none", why: "the calling agent's own public folder (FILES-001)" },
   // --- pipelines.ts ---
@@ -425,9 +427,9 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
       "operator_queue.ts resolves the item's agent, then " + OPERATOR_QUEUE_GATE +
       "; the backend then refuses every key but a person's (reject_non_person_principal, trinity-enterprise#611)",
   },
-  get_my_ask: { kind: "none", why: "self-acting: the agent comes from the key (resolveActingAgent); the backend re-checks identity (trinity-enterprise#611)" },
-  ask_operator: { kind: "none", why: "self-acting: the agent comes from the key (resolveActingAgent), `to` is a role and never an agent; the backend re-checks identity (trinity-enterprise#611)" },
-  withdraw_ask: { kind: "none", why: "self-acting: the agent comes from the key (resolveActingAgent), request_id names one of its own asks; the backend re-checks identity and ownership (trinity-enterprise#901)" },
+  get_my_ask: { kind: "in-tool", how: ACT_AS + " — self-acting: the agent comes from the key (resolveActingAgent); the backend re-checks identity (trinity-enterprise#611)" },
+  ask_operator: { kind: "in-tool", how: ACT_AS + " — self-acting: the agent comes from the key (resolveActingAgent), `to` is a role and never an agent; the backend re-checks identity (trinity-enterprise#611)" },
+  withdraw_ask: { kind: "in-tool", how: ACT_AS + " — self-acting: the agent comes from the key (resolveActingAgent), request_id names one of its own asks; the backend re-checks identity and ownership (trinity-enterprise#901)" },
   ask_for_credential: { kind: "none", why: "self-acting: the agent comes from the key (resolveActingAgent), the ask goes to its own primary person; the backend re-checks identity (trinity-enterprise#1066)" },
   // --- git.ts ---
   get_git_status: { kind: "in-tool", how: GIT_GATE },
@@ -466,19 +468,19 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   list_available_credentials: { kind: "none", why: "the calling agent's own grants (ent#279)" },
   fetch_credential: { kind: "none", why: "`name` is a credential; the backend scopes it to the calling agent (ent#279)" },
   // --- projects.ts ---
-  list_projects: { kind: "none", why: "the calling agent's own active projects (ent#661)" },
-  get_project: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
-  list_project_tasks: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
-  create_project_task: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
-  update_project_task: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
-  add_project_task_note: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
-  get_project_log: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
-  add_project_log_entry: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
-  link_to_project: { kind: "none", why: "a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
-  get_steward_digest: { kind: "none", why: "the calling agent's own stewarded projects (ent#661 v3)" },
-  set_project_health: { kind: "none", why: "a project id; the backend answers only when the calling agent is its active steward (ent#661 v3)" },
-  create_project: { kind: "none", why: "creates on the calling agent's OWN owner's behalf; the backend gates it on projects.manage (ent#588)" },
-  import_project: { kind: "none", why: "a path in the calling agent's OWN files; the backend gates it on projects.manage (ent#588)" },
+  list_projects: { kind: "in-tool", how: ACT_AS + " — the calling agent's own active projects (ent#661)" },
+  get_project: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  list_project_tasks: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  create_project_task: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  update_project_task: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  add_project_task_note: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  get_project_log: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  add_project_log_entry: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  link_to_project: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  get_steward_digest: { kind: "in-tool", how: ACT_AS + " — the calling agent's own stewarded projects (ent#661 v3)" },
+  set_project_health: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only when the calling agent is its active steward (ent#661 v3)" },
+  create_project: { kind: "in-tool", how: ACT_AS + " — creates on the calling agent's OWN owner's behalf; the backend gates it on projects.manage (ent#588)" },
+  import_project: { kind: "in-tool", how: ACT_AS + " — a path in the calling agent's OWN files; the backend gates it on projects.manage (ent#588)" },
   // `agents` are never acted on by the caller: the backend checks each against the rosters of
   // the agent's primary contacts, nothing happens until one of them approves, and adding one
   // someone else owns still raises that owner's consent ask (R39). The gate is projects.manage.
@@ -611,8 +613,10 @@ export function withAgentAccess<P extends Record<string, unknown>>(
  *     carries one. The name comes from the key row, never from a parameter,
  *     so this widens identity by exactly zero: a system key already reaches
  *     every agent's data on the read surfaces.
- *   - everything else — `user`, `connector`, `portal_delegate`, `ops`,
- *     `anonymous`, and whatever ships next — is refused. `connector` is the
+ *   - `user`   → the agent named by `requested` (trinity-enterprise#1024). The
+ *     backend decides whether this key may: only an admin's is admitted.
+ *   - everything else — `connector`, `portal_delegate`, `ops`, `anonymous`,
+ *     and whatever ships next — is refused. `connector` is the
  *     one worth naming: it carries an `agentName` too (it is bound to one
  *     agent), and it is an END USER's consumption key. Letting it through
  *     would let a client publish reports as the agent serving them.
@@ -626,16 +630,54 @@ export const SELF_ACTING_SCOPES: ReadonlySet<string> = new Set(["agent", "system
 export function resolveActingAgent(
   authContext: McpAuthContext | undefined,
   what: string,
+  requested?: string,
 ): string {
   const scope = authContext?.scope;
   const agentName = authContext?.agentName;
+  const target = typeof requested === "string" && requested.trim() ? requested.trim() : undefined;
   if (scope !== undefined && SELF_ACTING_SCOPES.has(scope) && agentName) {
+    // An agent's own key acts as that agent only; naming itself is harmless.
+    if (target !== undefined && target !== agentName) {
+      throw new Error(
+        `${what}: this key acts only as '${agentName}' and cannot act as '${target}'. ` +
+          `Omit agent_name.`,
+      );
+    }
     return agentName;
+  }
+  // trinity-enterprise#1024: a user-scoped key may name the agent it acts for.
+  // The BACKEND decides whether this key may (only an admin's user key is
+  // admitted, `dependencies.admit_act_as`); this layer only asks.
+  if (scope === "user") {
+    if (target !== undefined) return target;
+    throw new Error(
+      `${what}: this call requires a key that carries an agent identity (an ` +
+        `agent-scoped key), or agent_name. This key is 'user'-scoped: pass agent_name — ` +
+        `an admin's user key can act on behalf of any agent it administers.`,
+    );
   }
   throw new Error(
     `${what}: this call requires a key that carries an agent identity — an ` +
-      `agent-scoped key, or the platform orchestrator's system-scoped key. ` +
-      `This key is ${scope ? `'${scope}'-scoped` : "unscoped"}` +
+      `agent-scoped key, the platform orchestrator's system-scoped key, or an ` +
+      `admin's user key with agent_name. This key is ${scope ? `'${scope}'-scoped` : "unscoped"}` +
       `${agentName ? "" : " and names no agent"}.`,
   );
 }
+
+/**
+ * trinity-enterprise#1024: the client a self-acting tool calls with. For a
+ * user-scoped key the requests carry `X-Trinity-Act-As-Agent` (an admin acting
+ * on behalf of `agentName`); for an agent or system key, the client unchanged.
+ */
+export function actingClient(
+  client: TrinityClient,
+  authContext: McpAuthContext | undefined,
+  agentName: string,
+): TrinityClient {
+  return authContext?.scope === "user" ? client.asAgent(agentName) : client;
+}
+
+/** The parameter every self-acting tool takes (ent#1024), one description. */
+export const ACT_AS_PARAM_DESCRIPTION =
+  "Only for an admin's user key: the agent to act on behalf of. An agent's own key " +
+  "always acts as itself — omit this.";

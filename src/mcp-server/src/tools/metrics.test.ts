@@ -147,10 +147,10 @@ test("record_metrics records as the key's own agent, with no target parameter", 
 
   await t.recordMetrics.execute(ONE_POINT, { session: AGENT_AUTH });
   assert.equal(seenAgent, "metrics-agent");
-  assert.ok(
-    !("agent_name" in t.recordMetrics.parameters.shape),
-    "an agent-acting tool must expose no agent target to spoof",
-  );
+  // ent#1024: `agent_name` exists only as the act-as parameter for an admin's
+  // user key; an agent key naming another agent is refused (act_as_agent.test.ts).
+  const targets = Object.keys(t.recordMetrics.parameters.shape).filter((k) => /agent/.test(k));
+  assert.deepEqual(targets, ["agent_name"], "the only agent-shaped parameter is the act-as one");
 });
 
 test("refresh_metric_definitions is agent-scoped too", async () => {
@@ -621,7 +621,8 @@ test("get_objectives takes no agent parameter — it reads the caller's own", as
   await t.getObjectives.execute({}, { session: AGENT_AUTH });
 
   assert.equal(asked, "metrics-agent");
-  assert.deepEqual(Object.keys(t.getObjectives.parameters.shape ?? {}), []);
+  // ent#1024: the act-as parameter is the only one.
+  assert.deepEqual(Object.keys(t.getObjectives.parameters.shape ?? {}), ["agent_name"]);
 });
 
 test("get_objectives passes the backend body through verbatim — the shape IS the contract", async () => {

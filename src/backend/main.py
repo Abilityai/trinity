@@ -125,6 +125,7 @@ from routers.admin_recovery import router as admin_recovery_router  # #834 Phase
 from routers.messages import router as messages_router  # Proactive Messaging (#321)
 from routers.public_memory import router as public_memory_router  # MEM-001 write path (#888)
 from routers.agent_memory import router as agent_memory_router  # MEM-002 retrieval memory (trinity-enterprise#1022)
+from routers.person_memory import router as person_memory_router  # MEM-001 owner view of a person's memory (trinity-enterprise#962)
 from routers.seat_decisions import router as seat_decisions_router  # ent#638 seat decision record
 from routers.loops import (
     agent_router as loops_agent_router,
@@ -1434,6 +1435,7 @@ app.include_router(agent_mcp_key_router)  # Per-agent Trinity MCP key: read/veri
 app.include_router(messages_router)  # Proactive Messaging (#321)
 app.include_router(public_memory_router)  # MEM-001 write path (#888)
 app.include_router(agent_memory_router)  # MEM-002 retrieval memory (trinity-enterprise#1022)
+app.include_router(person_memory_router)  # MEM-001 owner view of a person's memory (trinity-enterprise#962)
 app.include_router(seat_decisions_router)  # ent#638 seat decision record
 app.include_router(subscriptions_router)  # Subscription Management (SUB-001)
 app.include_router(monitoring_router)  # Agent Monitoring (MON-001)

@@ -17,6 +17,7 @@ the real-router matrix is `test_ent719_own_settings_identity_git_human_only.py`.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 import inspect
 import sys
 from pathlib import Path
@@ -95,6 +96,14 @@ class TestOperatorResumeToggleIsHumanOnly:
         writes: list = []
         monkeypatch.setattr(agents_router.db, "set_operator_resume_enabled",
                             lambda name, enabled: writes.append((name, enabled)) or True, raising=False)
+        # ent#1102: a legacy `enabled` body also records the owner's opinion in
+        # the tri-state column, and the answer now names the resolved policy.
+        monkeypatch.setattr(agents_router.db, "set_wake_on_ending",
+                            lambda name, enabled: writes.append((name, "tristate", enabled)) or True,
+                            raising=False)
+        monkeypatch.setattr(agents_router.wake_policy, "resolve",
+                            lambda name: SimpleNamespace(enabled=True, source="agent"),
+                            raising=False)
 
         async def _log(**kw):
             writes.append(("audit", kw["event_action"]))
@@ -103,8 +112,15 @@ class TestOperatorResumeToggleIsHumanOnly:
         human = User(id=1, username="owner", role="user")
         out = asyncio.run(agents_router.set_operator_resume_endpoint(
             agent_name="sidekick", body=OperatorResumeUpdate(enabled=True), current_user=human))
-        assert out == {"agent_name": "sidekick", "enabled": True}
-        assert writes == [("sidekick", True), ("audit", "operator_resume_config")]
+        assert out == {
+            "agent_name": "sidekick", "enabled": True,
+            "mode": "on", "effective": True, "source": "agent",
+        }
+        assert writes == [
+            ("sidekick", "tristate", True),
+            ("sidekick", True),
+            ("audit", "operator_resume_config"),
+        ]
 
     def test_the_read_stays_agent_reachable(self):
         """GET is a *use* (an agent may read whether its answers resume it); only

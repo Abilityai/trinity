@@ -171,7 +171,8 @@ async def list_skill_sets(current_user: User = Depends(get_current_user)):
     can discover what exists.
     """
     from services import skill_set_service
-    return list((await asyncio.to_thread(skill_set_service.library_sets)).values())
+    # ent#736: members carry `deprecated` — added on a copy, at display time.
+    return await asyncio.to_thread(skill_set_service.library_sets_with_lifecycle)
 
 
 @router.get("/skills/library/{skill_name}")

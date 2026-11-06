@@ -4,6 +4,7 @@ import click
 
 from ..client import TrinityClient
 from ..output import format_output
+from ..skill_rows import skill_table_rows
 
 
 @click.group()
@@ -19,15 +20,7 @@ def list_skills(fmt):
     client = TrinityClient()
     data = client.get("/api/skills/library")
     if fmt == "table" and isinstance(data, list):
-        rows = [
-            {
-                "name": s.get("name", ""),
-                "description": (s.get("description", "") or "")[:60],
-                "category": s.get("category", ""),
-            }
-            for s in data
-        ]
-        format_output(rows, fmt)
+        format_output(skill_table_rows(data), fmt)
     else:
         format_output(data, fmt)
 
