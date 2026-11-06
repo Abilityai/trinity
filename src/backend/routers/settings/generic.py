@@ -71,6 +71,7 @@ from services.settings_service import (
     AGENT_DEFAULT_REQUIRE_EMAIL,
     get_agent_default_require_email,
     MAX_PARALLEL_TASKS_CEILING_KEY,
+    QUEUE_STALL_ALERT_MINUTES_KEY,
     MAX_PARALLEL_TASKS_CEILING_DEFAULT,
     MAX_PARALLEL_TASKS_CEILING_MIN,
     MAX_PARALLEL_TASKS_CEILING_MAX,
@@ -112,6 +113,13 @@ from services.subscription_headroom_alerts import (
     MIN_THRESHOLD_PCT as HEADROOM_THRESHOLD_MIN,
     MAX_THRESHOLD_PCT as HEADROOM_THRESHOLD_MAX,
 )
+
+
+# trinity-enterprise#1107 — the terms of use are written only through
+# `PUT /api/terms` / `POST /api/terms/restore-default` (admin + interactive,
+# validated by name, audited by version). Blocked on the generic PUT so an
+# empty or oversized text, or a hand-typed version, cannot reach the sink.
+from services.terms_service import SETTING_KEYS as TERMS_SETTING_KEYS
 
 
 
@@ -219,9 +227,32 @@ async def update_setting(
             detail=f"{key} is recorded by the platform at boot and is not writable through the API.",
         )
 
+    # trinity-enterprise#1107: the terms text, title, version and switch.
+    if key in TERMS_SETTING_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} is set via PUT /api/terms (admin + interactive-only, validated, "
+                "audit-logged; POST /api/terms/restore-default restores the shipped text)"
+            ),
+        )
+
     # #506: the fleet ceiling must go through the dedicated range-validated
     # route; block the generic PUT so it can't be written to junk/out-of-range
     # (same pattern as the skills_library_url SSRF special-case below).
+    # #4257: same reason as the ceiling below — the generic PUT takes an
+    # unvalidated string, and a junk threshold here either silences the stall
+    # monitor or makes it file on every tick. The getter clamps as a backstop,
+    # but the named 422 is what tells a caller where the validated route is.
+    if key == QUEUE_STALL_ALERT_MINUTES_KEY:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "queue_stall_alert_minutes must be set via "
+                "PUT /api/settings/queue-stall-alert-minutes (range-validated 5–1440)"
+            ),
+        )
+
     if key == MAX_PARALLEL_TASKS_CEILING_KEY:
         raise HTTPException(
             status_code=422,
@@ -466,6 +497,20 @@ async def update_setting(
             detail=(
                 f"{key} must be set via PUT /api/settings/aauth "
                 "(admin + interactive-only, issuer validated, audit-logged)"
+            ),
+        )
+
+    # trinity-enterprise#1101: the external-MCP-access switch moves the
+    # instance's perimeter, so it has one write path — the typed, audited
+    # route — and the catch-all cannot store a value it would not validate.
+    from services.settings_service import MCP_EXTERNAL_ACCESS_KEY
+
+    if key == MCP_EXTERNAL_ACCESS_KEY:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} must be set via PUT /api/settings/mcp-external-access "
+                "(admin, boolean, audit-logged)"
             ),
         )
 
@@ -714,6 +759,19 @@ async def delete_setting(
             detail=(
                 f"{key} must be changed via PUT /api/settings/aauth "
                 "(admin + interactive-only, audit-logged)"
+            ),
+        )
+
+    # trinity-enterprise#1107: deleting `terms_version` alone would make the
+    # shipped version name a custom text (nobody asked again); deleting the
+    # text brings the default back without the audit row restore-default
+    # writes. The terms routes are the only writer on BOTH verbs.
+    if key in TERMS_SETTING_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} is set via PUT /api/terms (admin + interactive-only, validated, "
+                "audit-logged; POST /api/terms/restore-default restores the shipped text)"
             ),
         )
 

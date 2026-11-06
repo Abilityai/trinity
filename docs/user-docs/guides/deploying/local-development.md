@@ -132,7 +132,7 @@ Log in with username `admin` and the `ADMIN_PASSWORD` from `.env`. There is no s
 |---|---|
 | http://localhost | Web UI |
 | http://localhost:8000/docs | Backend API (Swagger) |
-| http://localhost:8080/mcp | MCP Server endpoint (the dev Vite server does not proxy `/mcp`; that route exists on the production nginx only) |
+| http://localhost:8080/mcp | MCP Server endpoint (the dev Vite server does not proxy `/mcp`; that route exists on the production nginx only). Claude Code on your machine is refused with `external_mcp_access_off` until you turn on **External MCP access** once under Settings → MCP Keys |
 | http://localhost:8686/health | Vector log aggregator health |
 
 ## Hot Reload

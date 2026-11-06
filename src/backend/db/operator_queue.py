@@ -15,6 +15,7 @@ unchanged.
 import hashlib
 import json
 import logging
+import re
 import uuid
 from typing import Callable, Optional, List, Dict, Set, Tuple
 from datetime import datetime, timezone
@@ -54,7 +55,7 @@ def _note_commit_lag(stamp: str) -> None:
 
 
 # #1632: generous hard "belt" caps enforced at the DB sink itself. The agent
-# ingestion boundary (services/operator_queue_service.py) clamps to far smaller
+# ingestion boundary (services/operator_queue_service/filechannel.py) clamps to far smaller
 # service caps *before* calling create_item, so a clamped agent item never trips
 # these; platform items are small and never trip them either. They exist only as
 # a second layer (#1525's validate-at-boundary-AND-at-sink philosophy) so the
@@ -73,6 +74,13 @@ _DB_BELT_TYPE_MAX_BYTES = 1024
 # native ask cap nor the file poller's #1632 depth cap. The gate caps its own
 # raises. NULL `raised_by` is a legacy or file row, so it counts.
 _NOT_A_GATE_ROW = or_(operator_queue.c.raised_by.is_(None), operator_queue.c.raised_by != "gate")
+
+# trinity-enterprise#1095: the id shape `skill_gate_service._request_id` mints
+# for a gated-skill approval — `gate-` + 40 hex. A re-address moves a gate row
+# only in this shape: every other `gate-*` family names its addressee
+# (a gate note, a project consent card, a reach row — ent#661), and a named
+# person was never the role's to move.
+_GATE_APPROVAL_ID = re.compile(r"gate-[0-9a-f]{40}")
 
 # trinity-enterprise#844: what the clock writes as `disposition_reason` when it
 # ends a pending ask. A gated-skill approval (`raised_by='gate'`) is the one
@@ -251,6 +259,8 @@ class OperatorQueueOperations:
             # #3247 — the replace link, one uuid each way
             "replaces": row["replaces"],
             "replaced_by": row["replaced_by"],
+            # abilityai/trinity-enterprise#1108 AC #4 — the answer wake's status
+            "wake_state": row["wake_state"],
         }
 
     # Columns selected for a full queue-item record, in the canonical order.
@@ -300,6 +310,7 @@ class OperatorQueueOperations:
         operator_queue.c.last_seen_at,
         operator_queue.c.replaces,  # #3247 — the replace link
         operator_queue.c.replaced_by,
+        operator_queue.c.wake_state,  # abilityai/trinity-enterprise#1108 AC #4
     )
 
     def create_item(
@@ -766,7 +777,7 @@ class OperatorQueueOperations:
             channel=channel,
             raised_by=raised_by,
             # ent#364: already validated against the agent's roster by
-            # `operator_queue_service._validated_addressee`. This layer stores it;
+            # `operator_queue_service.filechannel._validated_addressee`. This layer stores it;
             # it does not decide it, and it must never derive it from `context`
             # (which is agent-authored).
             addressed_to_email=item.get("addressed_to_email"),
@@ -1148,6 +1159,31 @@ class OperatorQueueOperations:
         )
         with get_engine().connect() as conn:
             return [dict(r) for r in conn.execute(stmt).mappings().all()]
+
+    def list_pending_ask_ids_for_execution(self, execution_id: str, limit: int):
+        """The request ids one execution parked and never got answered (ent#1102).
+
+        The wake's "it stopped at an ask" signal: a run can reach a normal
+        terminal with its asks still pending, and a caller told only "ended
+        successfully" would read that as finished work. Ids only — never a
+        title, a question or anything a person wrote.
+        """
+        if not execution_id:
+            return []
+        stmt = (
+            select(operator_queue.c.request_id)
+            .where(
+                and_(
+                    operator_queue.c.execution_id == execution_id,
+                    operator_queue.c.status == "pending",
+                    _NOT_A_GATE_ROW,
+                )
+            )
+            .order_by(operator_queue.c.created_at.asc(), operator_queue.c.request_id.asc())
+            .limit(limit)
+        )
+        with get_engine().connect() as conn:
+            return [r["request_id"] for r in conn.execute(stmt).mappings().all()]
 
     def list_recent_endings_for_agent(
         self,
@@ -1854,6 +1890,100 @@ class OperatorQueueOperations:
                 )
         return self.get_item(item_id)
 
+    # trinity-enterprise#1095 — the platform re-addresses a pending row it
+    # addressed BY ROLE. The three address columns are read RAW (the stored
+    # text) so the compare-and-set below matches byte for byte what was read.
+    _ADDRESS_KEYS = ("id", "agent_name", "request_id", "status", "raised_by", "type",
+                     "to_role", "expires_at", "addressed_to_email", "resolved_to", "context")
+
+    @classmethod
+    def _address_cols(cls):
+        return [getattr(operator_queue.c, k) for k in cls._ADDRESS_KEYS]
+
+    @classmethod
+    def _address_row(cls, row) -> Dict:
+        return {k: row[k] for k in cls._ADDRESS_KEYS}
+
+    def read_address(self, item_id: str) -> Optional[Dict]:
+        """One row's address as stored (`resolved_to` and `context` as raw
+        text), with the columns a re-address decides on; None for no row."""
+        with get_engine().connect() as conn:
+            row = conn.execute(
+                select(*self._address_cols()).where(operator_queue.c.id == item_id)
+            ).mappings().first()
+        return self._address_row(row) if row else None
+
+    def list_pending_role_addressed(self, agent_name: str, to_role: str) -> List[Dict]:
+        """This agent's pending rows addressed to `to_role` BY ROLE — the rows
+        a change of who fills the role moves (trinity-enterprise#1095).
+
+        An ALLOWLIST, never a denylist: the agent's own raises (`raised_by =
+        'agent'`), and a gated-skill approval (`raised_by = 'gate'`, type
+        `approval`, id `gate-` + 40 hex). A row the platform addressed to a
+        named person defaults `to_role` to the same role but is never listed:
+        a new named family then stays where it was rather than moving with the
+        role silently. A row past its deadline the sweep has not ended yet is
+        left out too — a new holder is never handed an ask that ends a minute
+        later. Same raw shape as `read_address`.
+        """
+        now = utc_now_iso()
+        with get_engine().connect() as conn:
+            rows = conn.execute(
+                select(*self._address_cols())
+                .where(and_(
+                    operator_queue.c.agent_name == agent_name,
+                    operator_queue.c.status == "pending",
+                    operator_queue.c.to_role == to_role,
+                    or_(operator_queue.c.expires_at.is_(None), operator_queue.c.expires_at > now),
+                    or_(operator_queue.c.raised_by == "agent",
+                        and_(operator_queue.c.raised_by == "gate",
+                             operator_queue.c.type == "approval")),
+                ))
+                .order_by(operator_queue.c.created_at, operator_queue.c.id)
+            ).mappings().all()
+        return [self._address_row(r) for r in rows
+                if r["raised_by"] == "agent" or _GATE_APPROVAL_ID.fullmatch(r["request_id"] or "")]
+
+    def readdress(
+        self,
+        item_id: str,
+        people: List[str],
+        single: Optional[str],
+        *,
+        expect_single: Optional[str],
+        expect_resolved_raw: Optional[str],
+        context: Optional[Dict] = None,
+        expect_context_raw: Optional[str] = None,
+    ) -> bool:
+        """Rewrite a PENDING row's audience (trinity-enterprise#1095):
+        `resolved_to` becomes `people`, `addressed_to_email` becomes `single`,
+        and — when `context` is given — the stored context becomes it.
+
+        Compare-and-set on `status = 'pending'` and on each rewritten column as
+        the caller read it (`expect_*`, the `drop_addressee` shape), so a row
+        answered, cancelled, dropped or discussed between the read and this
+        write is never overwritten. Returns whether a row changed.
+        """
+        def _same(col, raw):
+            return col.is_(None) if raw is None else col == raw
+
+        conds = [
+            operator_queue.c.id == item_id,
+            operator_queue.c.status == "pending",
+            _same(operator_queue.c.addressed_to_email, expect_single),
+            _same(operator_queue.c.resolved_to, expect_resolved_raw),
+        ]
+        values = {
+            "addressed_to_email": single,
+            "resolved_to": json.dumps(list(people)) if people else None,
+        }
+        if context is not None:
+            conds.append(_same(operator_queue.c.context, expect_context_raw))
+            values["context"] = json.dumps(context) if context else None
+        with get_engine().begin() as conn:
+            result = conn.execute(update(operator_queue).where(and_(*conds)).values(**values))
+            return result.rowcount > 0
+
     def bulk_cancel_items(
         self,
         ids: List[str],
@@ -2440,6 +2570,64 @@ class OperatorQueueOperations:
                 .values(delivery_state=state, delivery_detail=detail, delivery_updated_at=now)
             )
             return result.rowcount > 0
+
+    # --- abilityai/trinity-enterprise#1108 AC #4: the answer wake's status -------
+
+    def set_wake_state(self, item_id: str, state: str) -> bool:
+        """Record whether the answer wake produced a turn: `pending` (the agent
+        was not running — "agent not yet woken") or `woken`. True iff a row
+        was written."""
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(operator_queue)
+                .where(operator_queue.c.id == item_id)
+                .values(wake_state=state)
+            )
+            return result.rowcount > 0
+
+    def list_pending_wakes_for_agent(self, agent_name: str) -> List[Dict]:
+        """This agent's ANSWERED asks whose wake is still owed, oldest answer
+        first — what its next start re-dispatches. An ask that ended another
+        way never reads `pending` (only the answer wake writes it), and the
+        predicate says so anyway."""
+        stmt = (
+            select(*self._SELECT_COLS)
+            .where(
+                and_(
+                    operator_queue.c.agent_name == agent_name,
+                    operator_queue.c.wake_state == "pending",
+                    or_(
+                        operator_queue.c.disposition == "answered",
+                        operator_queue.c.status.in_(("responded", "acknowledged")),
+                    ),
+                )
+            )
+            .order_by(operator_queue.c.responded_at, operator_queue.c.created_at)
+        )
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return [self._row_to_item(row) for row in rows]
+
+    def mark_wakes_woken(self, agent_name: str, request_ids) -> int:
+        """`pending` → `woken` for the named asks of this agent — a turn was
+        composed with them in its Execution Context line, so the status must
+        not keep claiming a wake is owed. Returns how many flipped."""
+        ids = [r for r in (request_ids or []) if r]
+        if not ids:
+            return 0
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(operator_queue)
+                .where(
+                    and_(
+                        operator_queue.c.agent_name == agent_name,
+                        operator_queue.c.wake_state == "pending",
+                        operator_queue.c.request_id.in_(ids),
+                    )
+                )
+                .values(wake_state="woken")
+            )
+            return result.rowcount or 0
 
     @staticmethod
     def _file_contract():

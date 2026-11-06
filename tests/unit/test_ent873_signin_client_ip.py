@@ -300,6 +300,7 @@ def consumers(monkeypatch, tmp_path):
 
 _CONSUMERS = [
     ("POST", "/api/auth/email/verify", {"json": {"email": "v@example.com", "code": "123456"}}),
+    ("POST", "/api/auth/email/handoff", {"json": {"email": "v@example.com", "token": "not-a-real-token"}}),
     ("POST", "/api/access/request", {"json": {"email": "r@example.com"}}),
     ("POST", "/api/enterprise/client-portal/auth/request", {"json": {"email": "p@example.com"}}),
     ("POST", "/api/enterprise/client-portal/auth/verify", {"json": {"email": "p@example.com", "code": "123456"}}),

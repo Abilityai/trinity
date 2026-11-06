@@ -153,6 +153,38 @@ def _served_person_for(execution_id: Optional[str], triggered_by: Optional[str])
         return None
 
 
+def auto_memory_off_for_row(agent_name: str, row: Any) -> bool:
+    """#4156: whether the agent must spawn this turn with Claude Code's shared
+    auto-memory off — ``memory_subject.keeps_shared_auto_memory``, negated.
+
+    Read off the row (the ORM-ish row or a pull claim's dict), so the push, the
+    `/api/chat` and the pull wire agree. Fail-CLOSED: a row that is missing or
+    cannot be judged turns it off — a wrong "off" costs one turn the agent's
+    own auto-memory notes, a wrong "on" is the cross-user leak."""
+    from services import memory_service, memory_subject
+
+    if row is None:
+        return True
+    try:
+        return not memory_subject.keeps_shared_auto_memory(
+            row, memory_service.owner_email(agent_name), memory_service.owner_id(agent_name))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[#4156] auto-memory rule failed for {agent_name}, turning it off: {type(e).__name__}")
+        return True
+
+
+def auto_memory_off_for(agent_name: str, execution_id: Optional[str]) -> bool:
+    """`auto_memory_off_for_row` for a dispatch that holds only the id."""
+    if not execution_id:
+        return True
+    try:
+        row = db.get_execution(execution_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[#4156] execution {execution_id} unreadable, auto-memory off: {type(e).__name__}")
+        return True
+    return auto_memory_off_for_row(agent_name, row)
+
+
 def _default_model_for(agent_name: str) -> Optional[str]:
     """The model a turn with no explicit model runs on.
 
@@ -292,9 +324,13 @@ _AUTONOMOUS_TRIGGERS = frozenset(
     # named, into it after the fact), so no person reads it live. `skill_gate`
     # is the `operator_response` shape: the wake of a requester after someone
     # else decided its gated request, run with nobody reading its reply.
+    #
+    # trinity-enterprise#1102: `caller_wake` is the `operator_ending` shape for
+    # a delegation — the platform wakes the agent that delegated a run when
+    # that run ends, from the terminal fan-out, with nobody reading its reply.
     {"schedule", "webhook", "loop", "event", "fan_out", "agent", "reminder",
      "a2a", "operator_response", "operator_ending", "retry", "self_task",
-     "skill_gate"}
+     "skill_gate", "caller_wake"}
 )
 
 
@@ -708,9 +744,19 @@ def build_pull_queue_payload(
     images: Optional[list] = None,
     collaboration_activity_id: Optional[str] = None,
     max_turns: Optional[int] = None,
+    queue_on_capacity: bool = False,
 ) -> Optional[PersistentTaskPayload]:
     """The #2391 producer gate: the overflow payload that lets THIS producer put
     a row on the durable queue, or ``None`` to keep today's ``"reject"`` policy.
+
+    ``queue_on_capacity`` (abilityai/trinity-enterprise#1108) is a caller's
+    explicit opt-in to the durable backlog for ONE dispatch, pilot or not — the
+    operator-queue wakes (`operator_resume_service`), whose rejected turn was a
+    FAILED row under a completed idempotency key and so never retried. On a
+    non-pilot the payload is only the overflow: admission still takes a free
+    slot first, and only at capacity does `capacity_manager.acquire` hand the
+    row to `BacklogService`, where the push drain runs it when a slot frees.
+    The default keeps the pull predicate the sole widening, as #2391 pinned.
 
     Until #2391 this producer dispatched with ``overflow_policy="reject"``
     unconditionally, so the scheduler's traffic — all cron, plus webhooks and
@@ -765,7 +811,7 @@ def build_pull_queue_payload(
     """
     if slot_already_held or not execution_id:
         return None
-    if not pull_owns_dispatch(agent_name, triggered_by):
+    if not queue_on_capacity and not pull_owns_dispatch(agent_name, triggered_by):
         return None
 
     # Lazy: several unit suites stub `models` with a partial module, and a
@@ -1646,6 +1692,11 @@ class TaskExecutionService:
         # to the agent, which applies it to `--max-turns`; None ⇒ the agent's
         # own guardrail. Queued for a pull pilot, frozen by the skill gate.
         max_turns: Optional[int] = None,
+        # abilityai/trinity-enterprise#1108: this producer's explicit opt-in to
+        # the durable backlog at capacity (`overflow_policy="queue_persistent"`),
+        # whether or not the agent is a pull pilot. Off, the #2391 pilot gate
+        # alone decides. See `build_pull_queue_payload`.
+        queue_on_capacity: bool = False,
     ) -> TaskExecutionResult:
         """
         Execute a task on an agent container with full lifecycle management.
@@ -1777,6 +1828,7 @@ class TaskExecutionService:
             images=images,
             collaboration_activity_id=collaboration_activity_id,
             max_turns=max_turns,
+            queue_on_capacity=queue_on_capacity,
         )
 
         # Wrap entire execution flow to ensure execution status is updated on any failure.
@@ -1923,6 +1975,11 @@ class TaskExecutionService:
                 # payload (`{**payload, ...}`), so they keep it too.
                 "max_turns": max_turns,
             }
+            # #4156: a turn serving someone other than the owner spawns with
+            # Claude Code's shared auto-memory off. Sent only when set, so an
+            # owner / headless turn's payload is unchanged.
+            if auto_memory_off_for(agent_name, execution_id):
+                payload["disable_auto_memory"] = True
 
             response = await self._call_agent_with_retries(
                 agent_name=agent_name,

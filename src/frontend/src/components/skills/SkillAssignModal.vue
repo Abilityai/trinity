@@ -112,7 +112,8 @@
               >deprecated</BaseBadge>
               <SkillContractChips :skill="s" />
             </div>
-            <p v-if="s.description" class="mt-1 text-[12.5px] text-gray-600 dark:text-gray-300">{{ s.description }}</p>
+            <!-- trinity-enterprise#584: the one empty state. -->
+            <p class="mt-1 text-[12.5px] text-gray-600 dark:text-gray-300" :class="{ italic: describeSkill(s.description).missing }">{{ describeSkill(s.description).text }}</p>
             <p
               v-if="supersededLine(s)"
               :title="supersededLine(s)"
@@ -178,6 +179,11 @@
       :class="noticeClass(notice.tone)"
     >{{ notice.text }}</p>
     <p
+      v-if="notice && notice.text && notice.dependencies"
+      data-testid="skills-saved-dependencies"
+      class="mt-1 text-[12.5px] text-status-warning-700 dark:text-status-warning-400"
+    >{{ notice.dependencies }}</p>
+    <p
       v-if="notice && notice.text && notice.deprecation"
       data-testid="skills-saved-deprecation"
       class="mt-1 text-[12.5px] text-status-warning-700 dark:text-status-warning-400"
@@ -200,6 +206,7 @@
 
 <script setup>
 import { computed, ref, watch } from 'vue'
+import { describeSkill } from '../../utils/skillDescription'
 import BaseBadge from '../base/BaseBadge.vue'
 import BaseButton from '../base/BaseButton.vue'
 import BaseModal from '../base/BaseModal.vue'
@@ -210,7 +217,7 @@ import { deps, supersededLine, DEPRECATED_TITLE } from './contract'
 import { useSkillFilter } from '../../composables/useSkillFilter'
 import { useSkillsStore } from '../../stores/skills'
 import { useSkillGatesStore } from '../../stores/skillGates'
-import { deliveryText, deprecationText } from '../../utils/skillDelivery'
+import { deliveryText, deprecationText, dependencyText } from '../../utils/skillDelivery'
 import {
   bulkSelection, withSelectAll, withDeselectAll, removedNames, gatedRemovals, removalConfirm, REMOVAL_CONFIRM_TEXT,
   pendingChanges, pendingLine, pendingMarks, keptTitle,
@@ -218,7 +225,7 @@ import {
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
-  // The tab's shared notice ({text, tone, deprecation}), so a sync on the tab
+  // The tab's shared notice ({text, tone, dependencies, deprecation}), so a sync on the tab
   // clears the note here too — one note, one owner.
   notice: { type: Object, default: null },
 })
@@ -405,6 +412,7 @@ async function onSave() {
       text: verdict.text,
       tone: verdict.tone,
       needsSync: verdict.needsSync,
+      dependencies: dependencyText(store.lastDelivery) || '',
       deprecation: deprecationText(store.lastDelivery) || '',
     })
   }

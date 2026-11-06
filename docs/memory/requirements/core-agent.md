@@ -2145,7 +2145,10 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   is tuned against (90-day retention per agent).
 - **Owner view**: `GET/DELETE /api/agents/{name}/retrieval-memory/facts…` and
   `GET …/retrieval-memory/events` (owner + human-only); forget is a recorded
-  soft delete.
+  soft delete. A person's facts are browsed per person in Agent Settings →
+  Person memory (trinity-enterprise#962, MEM-001's owner view): their live
+  facts, each fact's journal (`events?fact_id=`), Forget behind a confirm, and
+  the owner search scoped to that person (`user_email`).
 - **Flow**: `docs/memory/feature-flows/retrieval-memory.md`
 
 ## 6. Activity Monitoring
@@ -3997,6 +4000,13 @@ to localStorage in the clear.
     them. The rooms list marks each room `member` (an admin lists every room); the Inbox draws
     a room only when `member` is true, and a deep link to another room resolves to nothing. A
     platform admin keeps their own starred rows for rooms they are not in, at a count of 0.
+  - *Read only what I saw (trinity-enterprise#1010, chats too)*: marking a chat or room read
+    covers what the client actually held — its last fetch, or the newest message on screen —
+    never the server's current time, so a message that lands while I am opening it still
+    counts as new. Existing cursors and the ent#557 baseline keep their meaning.
+  - *Each identity reads separately (trinity-enterprise#1011)*: the same email seated in a
+    room as a platform account and as a Workspace identity keeps two read states; reading
+    as one leaves the other's count alone.
   - *Reading it*: opening a room row shows its new messages in the pane (the room's own
     membership-scoped read), then reads it — after the render, like a chat; **Open in chat**
     opens the room. The room on screen reads itself on open and whenever an agent message
@@ -4187,7 +4197,9 @@ to localStorage in the clear.
   platform-stamped `X-Trinity-Execution-Id` (#2392, which MCP `record_decision`
   forwards and the model cannot set; `manual` or absent is refused) — else 422
   `not_this_turn` — and that execution must be `running`, else 422
-  `turn_not_running`. A person's own record keeps its path. And when **every** record
+  `decision_turn_not_live` (trinity-enterprise#1062, which also made these doors the
+  agent's own: a person is refused `agent_only` and decides through the client-portal
+  routes). And when **every** record
   in a class's window is agent-written (no person-written record), the evidence must
   span **`STABLE_MIN_DAYS` (3) distinct days** of `created_at`, else the class is
   blocked `agent_only_evidence_too_recent`, so one burst of turns (or self-tasks)
@@ -4437,3 +4449,5 @@ to localStorage in the clear.
   which `room_is_user_facing` counts as internal (#363).
 - **FR-7 — "New room" is its own door.** Beside New chat; it opens the agent picker in room
   words and always creates a room, even with one agent.
+- **What a collaborator reads**: the room payload and list drop `cost`, `max_cost_usd`, each message's `execution_id`, and other participants' session and cursor fields. A moderator, an admin and an agent keep them. A collaborator keeps their own cursor.
+- **A reply outlives its waker**: an engine reply lands even if the person who woke it has since left or been removed. That person still cannot read the room.

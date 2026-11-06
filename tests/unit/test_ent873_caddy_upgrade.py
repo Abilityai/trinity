@@ -257,6 +257,25 @@ DOCKER_GID=999
 """
 
 
+# What a pre-#4149 install's Caddyfile looks like: only Trinity's own blocks, no
+# recorded checksum. A placeholder that is not a Caddyfile at all would read as
+# someone else's file and be refused (#4149).
+PRIOR_CADDYFILE = """{
+    default_sni 203.0.113.10
+}
+
+https://203.0.113.10 {
+    reverse_proxy 127.0.0.1:8081 {
+        flush_interval -1
+    }
+}
+
+http:// {
+    redir https://{host}{uri} permanent
+}
+"""
+
+
 class Run:
     def __init__(self, proc, root):
         self.proc, self.root = proc, root
@@ -296,7 +315,7 @@ def _scratch(tmp_path: Path) -> Path:
     return root
 
 
-def _install(tmp_path, *args, managed=True, prior_caddyfile="previous\n", dotenv_extra="",
+def _install(tmp_path, *args, managed=True, prior_caddyfile=PRIOR_CADDYFILE, dotenv_extra="",
              env=None, root=None) -> Run:
     root = root or _scratch(tmp_path)
     state = root / "etc-trinity"
@@ -402,7 +421,7 @@ def test_an_unhealthy_stack_leaves_caddy_alone(tmp_path, listener):
     r = _install(tmp_path, "--hosted", "--unattended",
                  env={"HEALTH_OK": "0", "CADDY_PROXY_PORT": str(srv.port),
                       "DOCKER_PORT_OUT": f"127.0.0.1:{srv.port}"})
-    assert r.caddyfile == "previous\n"
+    assert r.caddyfile == PRIOR_CADDYFILE
     assert "caddy validate" not in r.calls
     assert "Caddy left as it was" in r.proc.stderr
 
@@ -412,7 +431,7 @@ def test_a_web_container_that_never_answers_leaves_caddy_alone(tmp_path, listene
     r = _install(tmp_path, "--hosted", "--unattended",
                  env={"WEB_OK": "0", "CADDY_PROXY_PORT": str(srv.port),
                       "DOCKER_PORT_OUT": f"127.0.0.1:{srv.port}"})
-    assert r.caddyfile == "previous\n" and "caddy validate" not in r.calls
+    assert r.caddyfile == PRIOR_CADDYFILE and "caddy validate" not in r.calls
 
 
 def test_a_failed_validation_keeps_the_running_config(tmp_path, listener):
@@ -421,7 +440,7 @@ def test_a_failed_validation_keeps_the_running_config(tmp_path, listener):
                  env={"CADDY_VALIDATE_RC": "1", "CADDY_PROXY_PORT": str(srv.port),
                       "DOCKER_PORT_OUT": f"127.0.0.1:{srv.port}"})
     assert r.proc.returncode == 0
-    assert r.caddyfile == "previous\n"
+    assert r.caddyfile == PRIOR_CADDYFILE
     assert "systemctl restart caddy" not in r.calls
     assert "previous configuration is still serving" in r.proc.stderr
 
@@ -434,7 +453,7 @@ def test_a_host_trinity_did_not_provision_gets_no_caddy_and_no_lock(tmp_path, li
         env["CADDY_UNIT"] = "0"
     r = _install(tmp_path, "--hosted", "--unattended", managed=(missing != "public-ip"), env=env)
     assert r.proc.returncode == 0, r.proc.stderr[-2000:]
-    assert r.caddyfile == "previous\n"
+    assert r.caddyfile == PRIOR_CADDYFILE
     assert "caddy validate" not in r.calls and "flock" not in r.calls
     assert "FRONTEND_BIND_ADDRESS=127.0.0.1" not in r.dotenv
 
@@ -451,7 +470,7 @@ def test_a_development_run_never_renders_caddy(tmp_path, listener):
     srv = listener("proxy-200")
     r = _install(tmp_path, "--unattended",
                  env={"CADDY_PROXY_PORT": str(srv.port), "DOCKER_PORT_OUT": f"127.0.0.1:{srv.port}"})
-    assert r.caddyfile == "previous\n" and "caddy validate" not in r.calls
+    assert r.caddyfile == PRIOR_CADDYFILE and "caddy validate" not in r.calls
 
 
 def test_an_ip_refresh_against_an_older_web_image_keeps_the_ordinary_listener(tmp_path):
@@ -554,7 +573,7 @@ def test_a_refresh_during_an_upgrade_exits_without_touching_anything(tmp_path):
     root = _scratch(tmp_path)
     (root / "etc-trinity").mkdir()
     (root / "etc-trinity" / "public-ip").write_text("198.51.100.1\n")
-    (root / "etc-caddy" / "Caddyfile").write_text("previous\n")
+    (root / "etc-caddy" / "Caddyfile").write_text(PRIOR_CADDYFILE)
     holder = subprocess.Popen([_REAL_FLOCK, str(root / "provision.lock"), "sleep", "20"])
     time.sleep(0.5)
     try:
@@ -566,7 +585,7 @@ def test_a_refresh_during_an_upgrade_exits_without_touching_anything(tmp_path):
     assert r.proc.returncode == 0, r.proc.stderr
     # It got as far as the lock (the address DID change) and stopped there.
     assert "flock -n 9" in r.calls
-    assert r.caddyfile == "previous\n"
+    assert r.caddyfile == PRIOR_CADDYFILE
     assert "docker compose" not in r.calls and "systemctl restart" not in r.calls
     assert (root / "etc-trinity" / "public-ip").read_text() == "198.51.100.1\n"
 

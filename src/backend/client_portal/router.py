@@ -34,6 +34,7 @@ from dependencies import (
     get_current_user,
     oauth2_scheme,
     require_admin,
+    require_interactive,
     require_person,
     resolve_platform_user_unfloored,
 )
@@ -93,6 +94,7 @@ from .models import (
     PortalAutonomyGuard,
     PortalAutonomyResult,
     PortalAgentReports,
+    PortalChatRead,
     PortalChatState,
     PortalSessionSummary,
     PortalMainReset,
@@ -315,16 +317,37 @@ def portal_auth_verify(body: PortalAuthVerify, request: Request):
                          detail="Too many sign-in attempts.")
     check_otp_rate_limit(otp_scope)  # raises 429 past the cap, before any comparison
 
-    token = service.portal_signin_verify(email, body.code)
+    from routers.auth import SPA_CLIENT  # the one spelling of the SPA's declaration
+    token = service.portal_signin_verify(email, body.code, interactive=body.client == SPA_CLIENT)
     if not token:
         record_otp_attempt(otp_scope, success=False)
+        # #4157: a correct code here now leads to a platform session (via the
+        # hand-off), so a wrong guess also spends the address's PLATFORM budget —
+        # the guesses `/login` would have counted. For EVERY address, account or
+        # not: spending it only for platform accounts made those buckets an
+        # oracle (5 wrong portal codes, then one wrong `/api/auth/email/verify`:
+        # 429 for an account, 401 for an outsider). Not a new lockout: the
+        # platform route already spends both buckets for any address an
+        # unauthenticated caller names (`_email_login_failed`), so the ent#311
+        # isolation never protected them from a deliberate guesser.
+        if email:
+            from routers.auth import record_login_attempt_account_only
+            record_login_attempt_account_only(email, success=False)
+            record_otp_attempt(email, success=False)
         raise HTTPException(status_code=401, detail="Invalid or expired code")
 
     record_otp_attempt(otp_scope, success=True)
     if token is service.PLATFORM_LOGIN_REQUIRED:
         # #3922: the code was right, but this is a platform account. It signs in
         # at `/login`, so it gets the team view, not a client session.
-        raise HTTPException(status_code=409, detail={"reason": "platform_login_required"})
+        # #4157: with a one-time hand-off `/login` redeems, so the correct code
+        # just spent here is the only one the person enters. Only reached after
+        # the code verified, so the token reveals nothing to a guesser (#186).
+        detail = {"reason": "platform_login_required"}
+        handoff = service.platform_login_handoff(email)
+        if handoff:
+            detail["handoff"] = handoff
+        raise HTTPException(status_code=409, detail=detail)
     return PortalSession(token=token, email=email)
 
 
@@ -763,14 +786,18 @@ def portal_unstar_chat(chat_kind: str, chat_id: str,
 
 @router.post("/chat-state/{chat_kind}/{chat_id}/read", status_code=204)
 def portal_mark_chat_read(chat_kind: str, chat_id: str,
+                          body: Optional[PortalChatRead] = None,
                           principal: PortalPrincipal = Depends(get_portal_principal)):
     """Advance this viewer's read cursor — clears the chat's unread count and
-    its share of the agent row's badge. A room's cursor moves only for a
-    credential actively in the room (trinity-enterprise#959); otherwise the
-    same 204, with nothing written."""
+    its share of the agent row's badge, up to ``body.through``: what the client
+    held (trinity-enterprise#1010; no body = up to now). A room's cursor moves
+    only for a credential actively in the room (trinity-enterprise#959), and
+    only in that credential's identity space (#1011); otherwise the same 204,
+    with nothing written."""
     try:
         service.mark_chat_read(principal.email, chat_kind, chat_id,
-                               room_reader=service.room_reader_of(principal))
+                               room_reader=service.room_reader_of(principal),
+                               through=body.through if body else None)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     return Response(status_code=204)
@@ -817,6 +844,8 @@ async def portal_agent_page(
 @router.get("/agents/{agent_name}/memory", response_model=PortalAgentMemory)
 def portal_agent_memory(
     agent_name: str,
+    before: Optional[str] = Query(default=None, max_length=200,
+                                  description="Cursor from the previous page's next_before (ent#962)"),
     principal: PortalPrincipal = Depends(get_portal_principal),
 ):
     """What this agent remembers about YOU, and what changed it (ent#637).
@@ -828,7 +857,11 @@ def portal_agent_memory(
     """
     email = principal.email
     _require_roster(agent_name, email, principal.is_platform)
-    return agent_page.memory(agent_name, email)
+    try:
+        return agent_page.memory(agent_name, email, before=before)
+    except agent_page.InvalidMemoryCursor:
+        raise HTTPException(status_code=422, detail={"code": "invalid_cursor",
+                                                     "message": "That page cursor is not valid. Reload the memory view."})
 
 
 @router.post("/agents/{agent_name}/memory/writes/{write_id}/undo",
@@ -1595,14 +1628,18 @@ async def portal_voice_start(
     agent_name: str,
     body: PortalVoiceStartRequest,
     request: Request,
+    response: Response,
     principal: PortalPrincipal = Depends(get_portal_principal),
     token: str = Depends(oauth2_scheme),
 ):
     """Start a real-time voice call bound to a Workspace thread (ent#534).
 
-    Platform principals only — the audio WebSocket (`/ws/voice/{id}`, OSS)
-    authenticates with the platform JWT, which a portal-token client does not
-    hold, so for them this is a uniform 404 like any agent off their roster.
+    Platform principals only — the audio WebSocket (`/ws/voice/{id}`, OSS) is
+    bound to a platform user id, which a portal-token client does not have, so
+    for them this is a uniform 404 like any agent off their roster. The
+    response carries the socket's single-use ticket (trinity-enterprise#595),
+    minted only for an interactive session: a Workspace-only account gets a
+    call, an MCP key does not.
     Under the portal principal rather than the OSS `voice/start` deliberately:
     every Workspace gate (agent-key rejection, the blocked-client check, the
     roster union for owners) is inherited here instead of re-spelled.
@@ -1622,6 +1659,12 @@ async def portal_voice_start(
     # session must carry it — resolved from the same token the principal came
     # from, the way `get_portal_principal` itself does.
     user = await resolve_platform_user_unfloored(request, token)  # past the floor: a Workspace door (ent#837)
+    # trinity-enterprise#595: the response mints a credential, so the resolved
+    # user must be an interactive session (§2.8) — every MCP key scope is refused.
+    require_interactive(user)
+    from services.voice_auth_service import (
+        ORIGIN_WORKSPACE, START_UNAVAILABLE_DETAIL, VoiceTicketIssueError, issue_voice_ticket,
+    )
     from . import voice as workspace_voice
     try:
         result = await workspace_voice.start_workspace_voice(
@@ -1636,12 +1679,30 @@ async def portal_voice_start(
         )
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
-    except RuntimeError as e:
+    except RuntimeError:
         # The voice service could not persist the session (Redis down) — say
-        # so rather than hand out an id the WebSocket will refuse.
-        logger.error("workspace voice start failed for %s: %s", agent_name, e)
-        raise HTTPException(status_code=503, detail="Voice is unavailable right now. Try again shortly.")
-    return PortalVoiceStartResponse(**result)
+        # so rather than hand out an id the WebSocket will refuse. Fixed words:
+        # the exception text can name the store.
+        logger.error("workspace voice start: the session could not be stored for %s", agent_name)
+        raise HTTPException(status_code=503, detail=START_UNAVAILABLE_DETAIL)
+    from services import direct_voice_service
+    from services.gemini_voice import voice_service
+
+    async def _remove_direct_session(session_id: str) -> None:
+        direct_voice_service.discard_session(session_id)
+
+    # trinity-enterprise#1046: a Direct call's session lives in its own store.
+    remove_session = (_remove_direct_session if result.get("mode") == "direct"
+                      else voice_service.remove_session)
+    try:
+        credential = await issue_voice_ticket(
+            user, result["voice_session_id"],
+            origin=ORIGIN_WORKSPACE, remove_session=remove_session,
+        )
+    except VoiceTicketIssueError:
+        raise HTTPException(status_code=503, detail=START_UNAVAILABLE_DETAIL)
+    response.headers["Cache-Control"] = "no-store"
+    return PortalVoiceStartResponse(**result, **credential)
 
 
 @router.post("/agents/{agent_name}/stt")

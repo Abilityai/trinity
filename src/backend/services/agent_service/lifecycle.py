@@ -30,6 +30,7 @@ from services.docker_utils import (
 from services.agent_service.helpers import validate_base_image
 from services.agent_runtime_state import clear_agent_breakers
 from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, get_agent_default_resources
+from services import skill_packaging
 from services.skill_service import skill_service
 from .helpers import check_shared_folder_mounts_match, check_api_key_env_matches, check_github_pat_env_matches, check_resource_limits_match, check_full_capabilities_match, check_guardrails_env_matches, check_agent_auth_token_env_matches, check_agent_name_env_matches, check_pull_mode_env_matches, check_agent_mcp_key_matches, check_base_image_matches, is_claude_runtime, is_system_agent_name
 from services.agent_auth import derive_agent_token
@@ -289,11 +290,9 @@ async def inject_assigned_skills(agent_name: str) -> dict:
 # endpoint returns it to REST and MCP callers, so it carries NAMES, STATUSES and
 # CODES only (the ent#334 projection rule): a per-skill `error` is free text
 # that can hold an exception string, a transport URL or a path, and is reduced
-# to a code here, never passed through.
-_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
-# `deprecated:<successor>` (#672) joins the two dep codes: its detail is a skill
-# name by construction (`skill_packaging.deprecation_warning`), never prose.
-_WARNING_RE = re.compile(r"^(missing_binary|missing_env|deprecated):[A-Za-z0-9_.+-]{1,128}$")
+# to a code here, never passed through. The code grammar and the warning rule
+# live in `skill_packaging` (#3136): the assign report projects the same
+# warnings and must keep exactly what this body keeps.
 _SKILL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _PROSE_ERRORS = {
     "Skill not found in library": "not_in_library",
@@ -311,7 +310,7 @@ def _error_code(error) -> Optional[str]:
     if text in _PROSE_ERRORS:
         return _PROSE_ERRORS[text]
     head = text.split(":", 1)[0].strip()
-    return head if _CODE_RE.match(head) else "error"
+    return head if skill_packaging.PUBLIC_CODE_RE.match(head) else "error"
 
 
 def public_skills_result(raw) -> dict:
@@ -340,8 +339,7 @@ def public_skills_result(raw) -> dict:
         code = _error_code(r.get("error"))
         if code:
             entry["code"] = code
-        warnings = [w for w in (r.get("warnings") or []) if isinstance(w, str)
-                    and (_WARNING_RE.match(w) or _CODE_RE.match(w))]
+        warnings = skill_packaging.public_warnings(r.get("warnings"))
         if warnings:
             entry["warnings"] = warnings
         skills[name] = entry
@@ -689,6 +687,22 @@ async def start_agent_internal(agent_name: str, *, allow_key_mint: bool = True) 
     except Exception as e:
         logger.warning(
             "[ent#477] failed to spawn the metric registry refresh for %s on "
+            "start: %s",
+            agent_name,
+            e,
+        )
+
+    # abilityai/trinity-enterprise#1108 AC #4: an answered ask whose wake found
+    # this agent stopped reads "agent not yet woken" (`operator_queue.wake_state
+    # = pending`). Now that it runs, re-dispatch each ONCE through the ent#329
+    # path (the idempotency key is the ask's); a second start finds nothing
+    # pending. Fire-and-forget like the spawns above: zero added start latency.
+    try:
+        from services import operator_resume_service
+        operator_resume_service.spawn_pending_wakes(agent_name)
+    except Exception as e:
+        logger.warning(
+            "[ent#1108] failed to spawn the pending-wake re-dispatch for %s on "
             "start: %s",
             agent_name,
             e,

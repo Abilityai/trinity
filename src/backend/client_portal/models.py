@@ -35,10 +35,18 @@ class PortalPlaybook(BaseModel):
     instead, so the chat surface renders one hint set either way.
     ``starter_prompt`` pre-fills the composer — it never auto-runs; the client
     completes/edits and sends it.
+
+    ``kind`` says which of the two it is (trinity-enterprise#584): a
+    ``playbook`` is a capability, described by its SKILL.md ``description:``
+    (``None`` reads "No description yet"); a ``use_case`` is a prompt the
+    template suggests, rendered as "What you can ask" and never as a capability
+    with a missing description. The default keeps an older payload reading as
+    the playbook it was.
     """
     title: str
     description: Optional[str] = None
     starter_prompt: str
+    kind: Literal["playbook", "use_case"] = "playbook"
 
 
 class PortalModelOption(BaseModel):
@@ -270,6 +278,10 @@ class PortalVoiceStartResponse(BaseModel):
     websocket_url: str
     portal_session_id: str
     max_duration_seconds: int
+    # trinity-enterprise#595: the voice socket's single-use credential, sent as
+    # its first frame; `websocket_url` never carries one.
+    websocket_ticket: str
+    websocket_ticket_expires_in: int
     # trinity-enterprise#1046: Direct only. `early_speech` is False on a runtime that
     # speaks only once its turn has finished, and the status line says so.
     mode: str = "live"
@@ -314,9 +326,14 @@ class PortalAuthRequest(BaseModel):
 
 
 class PortalAuthVerify(BaseModel):
-    """Step 2: verify the code and receive a portal session token."""
+    """Step 2: verify the code and receive a portal session token.
+
+    `client` (trinity-enterprise#1107 ruling A): the Workspace SPA sends
+    `"web"`, and only then does the session carry the `interactive` claim the
+    terms gate asks; any other caller gets a bare session."""
     email: str
     code: str
+    client: Optional[str] = None
 
 
 class PortalSession(BaseModel):
@@ -624,6 +641,9 @@ class PortalMemoryWrite(BaseModel):
     schedule_name: Optional[str] = None
     written_at: str
     undone_at: Optional[str] = None
+    # trinity-enterprise#962: someone other than the viewer undid it (the agent's
+    # owner or an admin). Never WHO — one line for both, no role disclosed.
+    undone_by_operator: bool = False
     undoable: bool = False
     notes: str = ""
     previous_notes: str = ""
@@ -638,6 +658,9 @@ class PortalAgentMemory(BaseModel):
     notes: str = ""
     updated_at: Optional[str] = None
     writes: list[PortalMemoryWrite] = Field(default_factory=list)
+    # trinity-enterprise#962: the keyset cursor for the next page (`?before=`),
+    # or None when this page is the last.
+    next_before: Optional[str] = None
 
 
 class PortalMemoryUndo(BaseModel):
@@ -927,6 +950,10 @@ class PortalAgentPage(BaseModel):
     agent_name: str
     header: PortalAgentHeader
     capabilities: list[PortalPlaybook] = Field(default_factory=list)
+    # trinity-enterprise#584: `unavailable` when the briefing never got an
+    # answer out of the agent (#2163), so an empty `capabilities` is not read as
+    # "this agent has published nothing".
+    capabilities_state: Literal["ready", "unavailable"] = "ready"
     stats: PortalAgentStats
     recent_work: list[PortalAgentWork] = Field(default_factory=list)
     # ent#366 — raw up/down counts (never a percentage). `unavailable` keeps an
@@ -994,6 +1021,20 @@ class PortalChatState(BaseModel):
     order them together.
     """
     chats: list[PortalChatStateEntry] = []
+    # trinity-enterprise#1010: the instant this state was read. The client sends
+    # it back as the read write's `through` when it has rendered nothing newer.
+    as_of: Optional[str] = None
+
+
+class PortalChatRead(BaseModel):
+    """Body of `POST /chat-state/{kind}/{id}/read` (trinity-enterprise#1010).
+
+    ``through`` is the newest instant the client actually held for this chat —
+    the `as_of` of the state it was shown, or the newest message it rendered.
+    The cursor moves there (clamped to now, never backwards), so an arrival
+    after the client's last fetch still counts as unread. Omitted, or no body,
+    the cursor moves to now: the meaning before #1010."""
+    through: Optional[str] = None
 
 
 class PortalSearchResult(BaseModel):

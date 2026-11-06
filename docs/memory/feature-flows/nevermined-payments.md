@@ -116,7 +116,8 @@ Owner (ent#967 panel)
     ├─ delegation_slot() → ONE Nevermined GET /api/v1/delegation/{id}/transactions
     │     404 → 422 delegation_not_found · non-active status → 422 delegation_inactive
     │     absent status → bind proceeds (live.status "unknown") · timeout → 503 nevermined_unreachable
-    ├─ agent GET /api/credentials/read (.env) → any NVM_API_KEY value in it that is not the
+    ├─ agent GET /api/credentials/read (.env) — not text (non-UTF-8, read error, image too old
+    │     to report absence) → 409 env_unreadable, no row, no write (ent#1073) — → any NVM_API_KEY value in it that is not the
     │     organization's agent key (every line, parsed as the agent's reader parses it,
     │     constant-time) → 409 agent_key_present — no row, no write (R9: Trinity never
     │     overwrites a key it did not write; its own left-behind key passes)
@@ -139,7 +140,8 @@ Owner, shared user, or the agent itself (self only)
     ├─ delegation_slot() → Nevermined DELETE /api/v1/delegation/{id}  (2xx/404 = revoked;
     │     else 503/502 and nothing local changes)
     ├─ row revoked_at/by → best-effort env: remove NVM_DELEGATION_ID (+ NVM_API_KEY,
-    │     NVM_ENVIRONMENT only if a bind introduced them); agent down → env_removed:false + env_note
+    │     NVM_ENVIRONMENT only if a bind introduced them); agent down → env_removed:false + env_note;
+    │     .env not text → env_removed:false, file untouched, env_note "env_unreadable — …" (ent#1073)
     │     (the delegation id left behind is inert; the organization's agent key is live until the
     │     next bind rewrites it or a person removes it)
     └─ audit nevermined_delegation_revoke → 200 {revoked, delegation_id, env_removed, env_note}
@@ -148,6 +150,45 @@ Owner, shared user, or the agent itself (self only)
 The delegation gate (`NEVERMINED_DELEGATION_MAX_INFLIGHT`, default 4) is its own
 semaphore: a polling panel can never hold a slot the paid-chat verify/settle
 path needs.
+
+## Flow: Spending panel and organization form (ent#967)
+
+Frontend only; every call is one of the ent#966 routes above. Nevermined holds
+the card and the mandate; the panel shows Nevermined's card form and records
+the mandate id Nevermined returns.
+
+```
+Settings › Integrations (admin)  components/settings/NeverminedOrganizationPanel.vue
+    GET /api/nevermined/organization → configured / not configured (never a secret)
+    Save → PUT {org_id, environment, widget_secret?, agent_api_key?}
+           not configured: both secrets required · configured: an empty field is omitted (kept)
+           environment change → ConfirmDialog; Cancel resets the select
+    Remove → ConfirmDialog (danger) → DELETE · 409 delegations_active names the count
+
+Agent › Payments  components/NeverminedSpendingPanel.vue  (rules: utils/neverminedSpending.js)
+    GET …/delegation → loading | failed | not_configured | not_funded | funded | funded_unavailable
+    not_funded + owner + running → Enroll
+      POST …/widget-session → unwrapSession → NeverminedWidgets.initialize (SDK 1.80.0, dynamic import)
+        → hasValidSession (one re-mint) → delegations.setupCard
+           inline in a stable slot (≥ 440 px) | SDK fullscreen overlay (narrower; Esc closes)
+        never booted in 8 s → fallback offer · frame-src CSP violation → offer ("browser blocked")
+        booted, not ready in 15 s → InlineError naming the widget key's allowed origins (no offer)
+      onSuccess {result, handle} → pending persisted (sessionStorage nvm-pending:<agent>)
+        → POST …/delegation → 201 renders FUNDED (no re-read) → handle.close() → destroy
+        refused → pending kept; Retry bind (same ids, form not remounted);
+                  429/503 → Retry bind disabled for Retry-After seconds
+    fallback "Continue on Nevermined" → fresh widget-session → nonce (sessionStorage nvm-redirect:<agent>)
+        → embed.nevermined.app/cards/setup?sessionToken&returnUrl=<origin>/agents/<name>&state&provider=stripe
+    redirect return (?paymentMethodId&delegationId&state; AgentDetail maps it to the Payments tab)
+        → state = this tab's nonce (≤ 30 min) → bind as above; else "Nothing was bound"
+        → router.replace strips the three keys (explicit undefined), tab untouched
+    funded → Nevermined's live numbers; Revoke → ConfirmDialog → DELETE → env_note verbatim → re-read
+```
+
+CSP: `frame-src` lists `https://embed.nevermined.app`; `connect-src` lists both
+Nevermined API hosts (the SDK refreshes its session with a browser fetch). Both
+header copies (`vite.config.js`, `security-headers.conf`) are pinned equal by
+`tests/unit/cspMirrors.spec.js`; `Permissions-Policy: payment=()` stays.
 
 ## Files
 
@@ -176,6 +217,9 @@ path needs.
 | File | Purpose |
 |------|---------|
 | `src/frontend/src/components/NeverminedPanel.vue` | Payments tab component |
+| `src/frontend/src/components/NeverminedSpendingPanel.vue` | Payments tab › Spending: enroll a card with Nevermined, bind, retry, revoke (ent#967) |
+| `src/frontend/src/utils/neverminedSpending.js` | The panel's pure rules: state, recovery by code, money, redirect URL + nonce, copy |
+| `src/frontend/src/components/settings/NeverminedOrganizationPanel.vue` | Settings › Integrations: the instance's Nevermined organization (admin) |
 | `src/frontend/src/views/AgentDetail.vue` | Tab registration |
 
 ### MCP

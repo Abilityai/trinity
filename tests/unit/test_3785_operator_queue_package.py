@@ -35,6 +35,7 @@ import json
 import logging
 import subprocess
 import sys
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -50,9 +51,10 @@ pytestmark = pytest.mark.unit
 # `operator_queue` pre-filter seeing every module.
 _LOGGER = "services.operator_queue_service"
 
-# `__init__` still holds the pre-split file; the slice that brings it under the
-# threshold drops this entry (the staleness check below fails until it does).
-_OVER_THRESHOLD_EXEMPT = {"__init__.py": "the pre-split module, emptied slice by slice (#3785)"}
+# No module is exempt: #3785 S6 brought `__init__` under the threshold and
+# dropped its entry. A future exemption carries its reason here, and the
+# staleness check below fails once the module is back under the threshold.
+_OVER_THRESHOLD_EXEMPT: dict = {}
 
 # O1(d): import bindings the package OWNS — production code outside reads them
 # through the package (ask_service: `oqs.rate_limiter.check`), so a submodule
@@ -718,6 +720,50 @@ def test_the_consumer_list_holds_the_known_ones():
         "services.operator_resume_service", "services.platform_prompt_service",
         "services.task_execution_service", "client_portal.service", "client_portal.asks.service",
     }
+
+
+def test_the_consumer_walk_skips_test_directories():
+    """The walk's scope is product modules (`_consumers`' own docstring), and the
+    enterprise submodule is mounted INSIDE `src/backend`, so without this a
+    `src/backend/enterprise/tests/` file joins the consumer list and the
+    fresh-install case imports it outside pytest — where its bare
+    sibling-fixture import (the sanctioned enterprise idiom) cannot resolve
+    (trinity-enterprise#1111). Both halves matter: a `tests` directory below
+    the root is out, and a root that IS `tests` still yields its own files, or
+    the three `scan.TESTS` walks above would silently empty."""
+    def tree(root: Path, *rel: str):
+        for r in rel:
+            path = root / r
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("import services.operator_queue_service as oqs\n")
+        return root
+
+    with tempfile.TemporaryDirectory() as td:
+        backend = tree(Path(td) / "backend",
+                       "enterprise/backend/member_agents/adoption.py",
+                       "enterprise/tests/test_1111_spare_adoption.py",
+                       "services/ask_service.py")
+        tests = tree(Path(td) / "tests", "unit/test_3785_operator_queue_package.py")
+
+        under_backend = {p.relative_to(backend).as_posix() for p in scan.files_naming_the_package(backend)}
+        assert under_backend == {"enterprise/backend/member_agents/adoption.py", "services/ask_service.py"}, (
+            "a product module under enterprise/backend/ must stay enumerated and an "
+            f"enterprise/tests/ file must not: {sorted(under_backend)}")
+
+        under_tests = {p.relative_to(tests).as_posix() for p in scan.files_naming_the_package(tests)}
+        assert under_tests == {"unit/test_3785_operator_queue_package.py"}, (
+            f"a root named `tests` must still yield its own files: {sorted(under_tests)}")
+
+
+def test_no_consumer_is_a_test_module():
+    """The live tree, so the guard bites on whatever is mounted here. With the
+    enterprise submodule checked out, its one product consumer is enumerated;
+    on public CI (`update = none`) the directory is empty and only the
+    no-test-module half has anything to say."""
+    assert [c for c in _consumers() if "tests" in c.split(".")] == []
+    adoption = scan.BACKEND / "enterprise" / "backend" / "member_agents" / "adoption.py"
+    if adoption.exists():
+        assert "enterprise.backend.member_agents.adoption" in _consumers()
 
 
 def test_each_consumer_imported_first_on_a_fresh_install_can_raise_an_alert():

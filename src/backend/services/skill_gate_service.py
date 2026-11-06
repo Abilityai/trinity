@@ -1382,6 +1382,11 @@ DISPATCH_FIELDS: Dict[str, str] = {
     "images": DROP,
     "open_canvas_id": DROP,
     "conversation_key": DROP,
+    # abilityai/trinity-enterprise#1108: an answer wake asks to queue on the
+    # durable backlog rather than fail at capacity. That is the wake producer's
+    # choice for its own dispatch; an approved run is the requester's request
+    # replayed later, and keeps every producer's default admission.
+    "queue_on_capacity": DROP,
     "execution_id": RESET,
     "slot_already_held": RESET,
     "attempt": RESET,
@@ -1636,8 +1641,10 @@ async def _end_not_run(record, decider, why: str) -> str:
 
 
 #: The ask-resume and ask-ending wakes (ent#329, ent#611) — mirrors
-#: `operator_resume_service.TRIGGERED_BY{,_ENDING}`.
-_PERSONLESS_REPLAY_TRIGGERS = frozenset({"operator_response", "operator_ending"})
+#: `operator_resume_service.TRIGGERED_BY{,_ENDING}` — and the delegation-ending
+#: wake (trinity-enterprise#1102, `caller_wake_service.TRIGGERED_BY_CALLER_WAKE`):
+#: all three are platform-framed turns no person wrote.
+_PERSONLESS_REPLAY_TRIGGERS = frozenset({"operator_response", "operator_ending", "caller_wake"})
 
 
 async def _dispatch_approved(record: Dict[str, Any], execution_id: str) -> str:

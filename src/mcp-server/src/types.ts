@@ -171,14 +171,24 @@ export interface AgentAccessCheckResult {
 
 /**
  * #2807: the outcome a tool RETURNED rather than threw, stamped on the
- * per-call tool context by `access.ts::accessDenied` and read by the audit
- * wrapper after `execute` — the same seam #905 uses for `requestId`. `denied`
- * is the only kind today; a returned non-denial failure is the registered
- * follow-up and adds a kind here, not a second field.
+ * per-call tool context and read by the audit wrapper after `execute` — the
+ * same seam #905 uses for `requestId`. Either kind makes the row
+ * `success: false` with `error: reason`.
+ *
+ * - `denied`: an AUTHORIZATION refusal, by the MCP gate or by the backend.
+ *   Stamped by `access.ts::accessDenied`; the row also says `denied: true`.
+ * - `failed` (#4026): any other failure the tool returned instead of throwing:
+ *   an operational refusal (a 409 blocker, a 503 retryable), a route this
+ *   build lacks, a rejected request, a lost connection. Stamped by
+ *   `audit.ts::toolFailed`; the row carries no `denied` key.
  */
 export interface ToolOutcome {
-  kind: "denied";
-  /** What the AUDIT row records — by default the reason the caller was given. */
+  kind: "denied" | "failed";
+  /**
+   * What the AUDIT row records as `error`. `toolFailed` never stamps an empty
+   * `failed` reason (an empty `error` is dropped from the row); `accessDenied`
+   * records the reason it is given, as it always has.
+   */
   reason: string;
 }
 
@@ -224,6 +234,18 @@ export interface AgentTemplateInfo {
   skills?: string[];
   use_cases?: string[];
   status?: "running" | "stopped";
+  /**
+   * ent#1102: whether a delegated run's ending wakes this agent, and which
+   * layer decided — the standing policy behind a receipt's `wake` field.
+   * `source`: "agent" (the owner's own tri-state), "legacy_resume" (ent#329's
+   * pre-tri-state opt-in), "instance" (the instance default), "unreadable"
+   * (fail-closed: the flag could not be read, so no turn is spent) or
+   * "no_owner" (no live ownership row — nobody to bill, so no turn is spent).
+   */
+  wake_on_ending?: {
+    effective: boolean;
+    source: "agent" | "legacy_resume" | "instance" | "unreadable" | "no_owner";
+  };
 }
 
 // SSH Access Types
@@ -614,6 +636,13 @@ export interface OperatorAskReceipt {
   replaced_by?: string | null;   // #3247: request_id of the ask that replaced this one
   disposed_by?: string | null;
   agent_ending?: "replaced" | "withdrawn" | null;  // trinity-enterprise#901
+  // abilityai/trinity-enterprise#1108 AC #4: the answer wake's status — `pending`
+  // (answered, the agent was not running; its next start delivers it) | `woken` |
+  // null (no wake owed). On a `created` receipt it is null; a replay carries it.
+  wake_state?: "pending" | "woken" | null;
+  // trinity-enterprise#1109: where a credential lands when that is not the
+  // asking agent — the agent and the host, never the key's variable name.
+  credential_destination?: { agent_name: string; host: string } | null;
   differs?: string[];
 }
 

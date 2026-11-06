@@ -10,6 +10,7 @@ from sqlalchemy.exc import DBAPIError, OperationalError
 from models import User
 from database import db
 from dependencies import get_current_user, AuthorizedAgentByName, OwnedAgentByName, require_person_or_capability, reject_agent_principal, assert_agent_owner, assert_own_agent, is_interactive_principal, require_admin, reject_non_interactive_principal, require_person
+from services.tool_access_guard import assert_tool_allowed
 from services.agent_auth import agent_httpx_client
 from services import (
     agent_skills_listing,
@@ -20,6 +21,7 @@ from services import (
     objectives_read_budget,
     peer_skill_policy,
     rate_limiter,
+    wake_policy,
 )
 from services.docker_service import get_agent_container, kind_from_labels
 from services.docker_utils import container_reload
@@ -112,7 +114,22 @@ async def get_agent_info_endpoint(
     agent_name: AuthorizedAgentByName,
     request: Request
 ):
-    """Get template info and metadata for an agent."""
+    """Get template info and metadata for an agent, plus its wake policy.
+
+    ent#1102: the `wake_on_ending` block is stamped on EVERY answer, including
+    the stopped-agent and degraded-template branches below. The policy is a
+    platform fact that does not depend on the container being up — and a
+    stopped agent is exactly the state an owner is in when they are wondering
+    why nothing woke up.
+    """
+    info = await _agent_template_info(agent_name, request)
+    verdict = wake_policy.resolve(agent_name)
+    info["wake_on_ending"] = {"effective": verdict.enabled, "source": verdict.source}
+    return info
+
+
+async def _agent_template_info(agent_name: str, request: Request) -> dict:
+    """The template metadata itself, from the agent server or from the labels."""
     import httpx
 
     container = get_agent_container(agent_name)
@@ -1033,6 +1050,8 @@ async def share_agent_file(
     # reach since ent#629) would refuse a sibling too, less specifically.
     assert_own_agent(current_user, agent_name,
                      detail="Agent-scoped MCP key cannot share files for a different agent.")
+    # trinity-enterprise#341: refused when this agent's tool access removes share_file.
+    assert_tool_allowed(current_user, "share_file")
     actor_agent = getattr(current_user, "agent_name", None)
 
     # Owner gate (the agent's owner always passes)

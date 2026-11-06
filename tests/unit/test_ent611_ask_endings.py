@@ -613,6 +613,13 @@ def _install_wake(monkeypatch, *, enabled=True, state="running", replay=False, r
 
     monkeypatch.setitem(sys.modules, "database", SimpleNamespace(
         db=SimpleNamespace(get_operator_resume_enabled=lambda name: enabled)))
+    # ent#1102: the gate now asks `wake_policy.resolve` rather than the ent#329
+    # column directly, so one owner decision covers the ask wake AND the
+    # delegated-run wake. The stub is the verdict, not the column.
+    _install_module("services.wake_policy", SimpleNamespace(
+        resolve=lambda name: SimpleNamespace(
+            enabled=enabled, source="agent" if enabled else "instance"),
+    ))
 
     def _begin(scope, key):
         keys.append((scope, key))
@@ -804,8 +811,8 @@ class TestWakeObserverRouting:
             ("ans-1", "approve", "op@example.com")]
         assert ending == []
 
-    @pytest.mark.parametrize("disposition", ["cancelled", "expired"])
-    def test_a_cancel_or_an_expiry_is_one_ending_dispatch_call(self, monkeypatch, disposition):
+    @pytest.mark.parametrize("disposition", ["cancelled", "dismissed"])
+    def test_a_cancel_or_a_dismissal_is_one_ending_dispatch_call(self, monkeypatch, disposition):
         import services.ask_service as svc
         resume, ending = self._spawners(monkeypatch)
         rows = (_ending_row("e1"), _ending_row("e2", agent="agent-other"))
@@ -814,6 +821,17 @@ class TestWakeObserverRouting:
         got_rows, kw = ending[0]
         assert [r["request_id"] for r in got_rows] == ["e1", "e2"]
         assert kw == {"disposition": disposition, "disposed_by_email": None, "reason": "r", "batch_id": "b-1"}
+
+    def test_an_expiry_wakes_nobody(self, monkeypatch):
+        """abilityai/trinity-enterprise#1108 (merge-train ruling): the sweep
+        spends no owner's turn. An expiry is still recorded, announced and read
+        on the agent's next turn (the readback, the Execution Context line) —
+        it just dispatches no wake, on by default or not."""
+        import services.ask_service as svc
+        resume, ending = self._spawners(monkeypatch)
+        rows = (_ending_row("x1"), _ending_row("x2", agent="agent-other"))
+        svc._wake_filer(svc.EndingEvent("expired", rows, None, reason=None, batch_id="sweep-1"))
+        assert resume == [] and ending == []
 
     def test_an_agent_that_has_not_opted_in_is_never_handed_to_a_spawner(self, monkeypatch):
         import services.ask_service as svc
@@ -829,7 +847,7 @@ class TestWakeObserverRouting:
         import services.ask_service as svc
         reads = []
         self._spawners(monkeypatch, opted_in=lambda agent: reads.append(agent) or True)
-        svc._wake_filer(svc.EndingEvent("expired", (
+        svc._wake_filer(svc.EndingEvent("cancelled", (
             _ending_row("x1"), _ending_row("x2"), _ending_row("y1", agent="agent-y")), None))
         assert sorted(reads) == ["agent-w", "agent-y"]
 
@@ -839,7 +857,10 @@ class TestWakeObserverRouting:
         def _boom(name):
             raise RuntimeError("db down")
 
-        monkeypatch.setattr(svc.db, "get_operator_resume_enabled", _boom)
+        # ent#1102: the resolver is the gate now, and it fails closed itself —
+        # this pins that `_opted_in` ALSO survives a resolver that raises,
+        # rather than relying on the layer below to have caught it.
+        monkeypatch.setattr(svc.wake_policy, "resolve", _boom)
         assert svc._opted_in("agent-w") is False
 
 
@@ -1119,6 +1140,7 @@ class TestSelfReadback:
         "raised_by", "channel", "to_role", "proposal", "supersedes_expired",
         "replaces", "replaced_by",  # #3247
         "agent_ending",  # trinity-enterprise#901 — replaced | withdrawn | None
+        "wake_state",  # abilityai/trinity-enterprise#1108 AC #4 — pending (agent not yet woken) | woken | None
     }
 
     def test_an_agent_reads_its_own_ask_through_a_redacted_projection(self, routes, agent_exists):

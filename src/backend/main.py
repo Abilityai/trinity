@@ -43,6 +43,7 @@ from opentelemetry.instrumentation.redis import RedisInstrumentor
 
 # Import routers
 from routers.auth import router as auth_router
+from routers.terms import router as terms_router  # trinity-enterprise#1107 terms of use
 from routers.agents import router as agents_router, set_websocket_manager as set_agents_ws_manager, set_filtered_websocket_manager as set_agents_filtered_ws_manager
 from routers.agent_config import router as agent_config_router
 from routers.agent_data import router as agent_data_router
@@ -124,6 +125,7 @@ from routers.admin_recovery import router as admin_recovery_router  # #834 Phase
 from routers.messages import router as messages_router  # Proactive Messaging (#321)
 from routers.public_memory import router as public_memory_router  # MEM-001 write path (#888)
 from routers.agent_memory import router as agent_memory_router  # MEM-002 retrieval memory (trinity-enterprise#1022)
+from routers.person_memory import router as person_memory_router  # MEM-001 owner view of a person's memory (trinity-enterprise#962)
 from routers.seat_decisions import router as seat_decisions_router  # ent#638 seat decision record
 from routers.loops import (
     agent_router as loops_agent_router,
@@ -1373,6 +1375,7 @@ app.add_middleware(HostHeaderGuard)
 
 # Include all routers
 app.include_router(auth_router)
+app.include_router(terms_router)  # trinity-enterprise#1107: /api/terms/*
 app.include_router(agents_router)
 app.include_router(agent_config_router)
 app.include_router(agent_data_router)  # #1169: data export/import
@@ -1432,6 +1435,7 @@ app.include_router(agent_mcp_key_router)  # Per-agent Trinity MCP key: read/veri
 app.include_router(messages_router)  # Proactive Messaging (#321)
 app.include_router(public_memory_router)  # MEM-001 write path (#888)
 app.include_router(agent_memory_router)  # MEM-002 retrieval memory (trinity-enterprise#1022)
+app.include_router(person_memory_router)  # MEM-001 owner view of a person's memory (trinity-enterprise#962)
 app.include_router(seat_decisions_router)  # ent#638 seat decision record
 app.include_router(subscriptions_router)  # Subscription Management (SUB-001)
 app.include_router(monitoring_router)  # Agent Monitoring (MON-001)
@@ -1603,7 +1607,10 @@ async def websocket_endpoint(
         await websocket.close(code=4001, reason="Authentication required: provide ?ticket=<opaque>")
         return
 
-    payload = consume_ticket(ticket)
+    # trinity-enterprise#595: `/ws` accepts only a `user` ticket. A voice or
+    # VoIP ticket is consumed and refused here by its scope, never by an
+    # accident of its subject's shape.
+    payload = consume_ticket(ticket, scope="user")
     if not payload or not payload.get("sub"):
         await websocket.close(code=4001, reason="Invalid or expired WebSocket ticket")
         return
@@ -1612,9 +1619,9 @@ async def websocket_endpoint(
     # now scoped to the agents this user may see. Fails CLOSED: a ticket whose
     # subject is not a resolvable Trinity user is refused rather than
     # registered with an empty roster, so an identity we cannot establish
-    # never becomes a silently-degraded connection nobody notices. This also
-    # incidentally refuses a VoIP-scoped ticket (`subject` there is a numeric
-    # user id, not a username) on a surface it was never minted for.
+    # never becomes a silently-degraded connection nobody notices. (A ticket
+    # minted for another surface never reaches this point: the scope check in
+    # `consume_ticket` above refuses it.)
     try:
         identity = resolve_ws_identity(str(payload.get("sub")))
     except Exception:

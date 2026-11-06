@@ -2,7 +2,9 @@
   <!--
     Settings › Guardrails — "What it may do" (trinity-enterprise#890).
 
-    Everything that bounds the agent, read in one place: the guardrail rules
+    Everything that bounds the agent, read in one place: its tool access
+    (trinity-enterprise#341 — the profile that sets read-only mode and the tools
+    it can't use together), the guardrail rules
     and the self-change grants (ent#756) that used to head the flat Settings
     list, a count of the approval gates set on the Skills tab (ent#754) so the
     bound is visible where bounds are read, the autonomy switch, cross-model
@@ -14,6 +16,15 @@
     switch and points at the header chip, which stays the control.
   -->
   <div class="space-y-6">
+    <!-- trinity-enterprise#341: which tools it may use — read-only mode is one profile. -->
+    <ToolAccessSection
+      :agent-name="agentName"
+      :is-system="isSystem"
+      :notify="notify"
+      :current-profile="toolAccessProfile"
+      @saved="onToolAccessSaved"
+    />
+
     <SettingsSection title="Bounds">
       <SettingRow
         label="Guardrail rules"
@@ -31,7 +42,7 @@
           </BaseButton>
         </template>
         <template v-if="rulesOpen" #editor>
-          <GuardrailsPanel :agent-name="agentName" :notify="notify" embedded @saved="onRulesSaved" />
+          <GuardrailsPanel :key="rulesKey" :agent-name="agentName" :notify="notify" embedded @saved="onRulesSaved" />
         </template>
       </SettingRow>
 
@@ -108,6 +119,10 @@
       <div class="px-4 py-3">
         <RetrievalMemorySearch :agent-name="agentName" :notify="notify" />
       </div>
+      <!-- trinity-enterprise#962: what the agent remembers about each person, with Undo. -->
+      <div class="px-4 py-3">
+        <PersonMemorySection :agent-name="agentName" :notify="notify" />
+      </div>
     </SettingsSection>
   </div>
 </template>
@@ -123,9 +138,11 @@ import SettingsSection from './SettingsSection.vue'
 import SettingRow from './SettingRow.vue'
 import RetrievalMemoryToggle from './RetrievalMemoryToggle.vue'
 import RetrievalMemorySearch from './RetrievalMemorySearch.vue'
+import PersonMemorySection from './PersonMemorySection.vue'
 import BaseButton from '../base/BaseButton.vue'
 import BaseBadge from '../base/BaseBadge.vue'
 import GuardrailsPanel from '../GuardrailsPanel.vue'
+import ToolAccessSection from './ToolAccessSection.vue'
 import SelfChangePermissionsPanel from '../settings/SelfChangePermissionsPanel.vue'
 import CrossModelValidationPanel from '../CrossModelValidationPanel.vue'
 import ReliabilityPanel from '../ReliabilityPanel.vue'
@@ -135,8 +152,10 @@ const props = defineProps({
   autonomyEnabled: { type: Boolean, default: false },
   isSystem: { type: Boolean, default: false },
   notify: { type: Function, default: null },
+  // trinity-enterprise#341: the page's copy of the profile (the header toggle).
+  toolAccessProfile: { type: String, default: '' },
 })
-defineEmits(['navigate-tab'])
+const emit = defineEmits(['navigate-tab', 'tool-access-saved'])
 
 const agentsStore = useAgentsStore()
 const grantsStore = useCapabilityGrantsStore()
@@ -171,6 +190,17 @@ function onRulesSaved(payload) {
   // The runtime reads guardrails at start, so the save waits for a restart —
   // which the page's one banner now says, instead of a line in this card.
   restartStore.report(props.agentName, 'guardrails', 'Guardrail rules', true)
+}
+
+// ---- tool access (trinity-enterprise#341) ------------------------------------
+// The rules editor holds a copy of the stored guardrails from when it opened;
+// a tool-access save rewrites that row, so the editor re-reads it.
+const rulesKey = ref(0)
+function onToolAccessSaved(view) {
+  rulesKey.value += 1
+  loadRules()
+  // The page header's Read-only toggle reads the profile off the agent.
+  emit('tool-access-saved', view)
 }
 
 // ---- gated skills (ent#754) ------------------------------------------------

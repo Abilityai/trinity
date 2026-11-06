@@ -245,11 +245,11 @@ Then connect from your Claude Code session:
 ```bash
 /trinity:connect
 # URL: https://trinity.your-domain.com/mcp   (the production frontend proxies /mcp to the MCP server)
-#      or http://your-server:8080/mcp        (the MCP server's own port, where it is reachable)
+#      or http://your-server:8080/mcp        (the MCP server's own port, where it is reachable — a fresh install publishes it on 127.0.0.1 only)
 # API Key: (your MCP API key)
 ```
 
-The `/mcp` proxy on the production nginx means an install that exposes only ports 80/443 — a tunnel, a reverse proxy, the DigitalOcean 1-Click — still serves MCP at the same hostname as the web UI. **Settings → MCP Keys → MCP Server URL** sets the URL the UI shows to users; leave it empty to derive it from the hostname.
+The `/mcp` proxy on the production nginx means an install that exposes only ports 80/443 — a tunnel, a reverse proxy, the DigitalOcean 1-Click — still serves MCP at the same hostname as the web UI. It answers clients outside the server only while **External MCP access** is on (**Settings → MCP Keys**, admin); a fresh install starts with it off, so turn it on before you connect — see [MCP Server](../../integrations/mcp-server.md#external-mcp-access). **Settings → MCP Keys → MCP Server URL** sets the URL the UI shows to users; leave it empty to derive it from the hostname.
 
 ## Restart vs. Down
 

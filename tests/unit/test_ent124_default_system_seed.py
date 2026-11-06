@@ -44,6 +44,9 @@ from services.system_seed_service import (
 )
 from models import SystemDeployFailure, SystemDeployResponse
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # `_ent695_lua`
+import _ent695_lua as lua  # noqa: E402
+
 pytestmark = pytest.mark.unit
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -452,6 +455,10 @@ def _store_backed_redis():
     redis.get.side_effect = lambda key: store.get(key)
     redis.delete.side_effect = lambda key: store.pop(key, None)
     redis.store = store
+    # trinity#4028: the lock renews/releases through a Lua script; this one
+    # EXECUTES the production script text against the same dict.
+    redis.scripts = []
+    redis.register_script.side_effect = lua.dict_register_script(store, log=redis.scripts)
     return redis
 
 
@@ -464,8 +471,8 @@ def test_lock_winner_deploys_and_releases(env):
     result = _run()
 
     env.deploy.assert_awaited_once()
-    # The SETNX stored a real uuid token; the release GET matched it -> DELETE.
-    redis.delete.assert_called_once_with(sss._PROVISION_LOCK_KEY)
+    # The SETNX stored a real uuid token; the release script matched it and deleted.
+    assert redis.scripts == [("release", sss._PROVISION_LOCK_KEY)]
     assert result["action"] == "created"
     assert redis.store.get(sss._PROVISION_LOCK_KEY) is None  # lock is free again
 
@@ -519,7 +526,7 @@ def test_two_overlapping_in_process_passes_do_not_leak(env):
     # A finishes and releases its OWN lock — the key is freed exactly once.
     svc._release_lock(lock_a)
     svc._release_lock(lock_b)  # no-op: B never held anything
-    redis.delete.assert_called_once_with(sss._PROVISION_LOCK_KEY)
+    assert redis.scripts == [("release", sss._PROVISION_LOCK_KEY)]
     assert redis.store.get(sss._PROVISION_LOCK_KEY) is None
 
 
@@ -647,7 +654,7 @@ def pass_redis(orch):
     SETNX + compare-and-delete semantics are exercised, not stubbed."""
     import fakeredis
 
-    r = fakeredis.FakeStrictRedis(decode_responses=True)
+    r = lua.with_lua(fakeredis.FakeStrictRedis(decode_responses=True))
     orch.env.monkeypatch.setattr(sss, "get_breaker_redis", lambda: r)
     return r
 

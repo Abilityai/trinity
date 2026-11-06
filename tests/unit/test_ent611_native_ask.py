@@ -278,7 +278,9 @@ RECEIPT_KEYS = {"status", "id", "request_id", "raised_by", "channel", "type", "t
                 "resolved", "ask_status", "disposition", "disposed_at", "expires_at",
                 "wakes_on_ending", "supersedes_expired",
                 "replaces", "replaced_by", "disposed_by",  # #3247
-                "agent_ending"}  # trinity-enterprise#901 — replaced | withdrawn | None
+                "agent_ending",  # trinity-enterprise#901 — replaced | withdrawn | None
+                "wake_state",  # abilityai/trinity-enterprise#1108 AC #4 — pending (agent not yet woken) | woken | None
+                "credential_destination"}  # trinity-enterprise#1109 — {agent_name, host} | None
 
 
 def _in(minutes):
@@ -332,6 +334,10 @@ def ask(real_db, monkeypatch):
     monkeypatch.setattr(svc, "_owner_email", lambda agent: state["owner"])
     monkeypatch.setattr(oqs, "_workspace_attachment", lambda agent, email, **_: (f"thread-{email}", False))
     monkeypatch.setattr(real_db, "get_operator_resume_enabled", lambda agent: state["opted_in"], raising=False)
+    # ent#1102: the gate is `wake_policy.resolve`, which reads the tri-state column first and
+    # fails closed for an agent with no ownership row — the fixture agent has none, so the
+    # owner's switch is stated there explicitly (True = on, False = off).
+    monkeypatch.setattr(real_db, "get_wake_on_ending", lambda agent: bool(state["opted_in"]), raising=False)
     monkeypatch.setattr(oqs.rate_limiter, "check",
                         lambda *a, **k: RateLimitResult(state["rate_ok"], 10, 0, 60))
     assignment_provider.clear_provider()

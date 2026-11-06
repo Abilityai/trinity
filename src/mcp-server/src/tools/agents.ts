@@ -167,11 +167,14 @@ export function createAgentTools(
     getAgentInfo: {
       name: "get_agent_info",
       description:
-        "Get full template metadata and capabilities for an agent. " +
+        "Get full template metadata for an agent. " +
         "Returns detailed information from the agent's template.yaml including: " +
-        "display name, description, version, author, capabilities, available commands, " +
-        "MCP servers, tools, skills, and example use cases, plus the create-time kind " +
-        "('agent' | 'deployment', null when unknown). " +
+        "display name, description, version, author, capabilities (template tags, not skill " +
+        "descriptions), available commands, MCP servers, tools, declared skills, and example " +
+        "use cases, plus the create-time kind ('agent' | 'deployment', null when unknown) and "
+        + "`wake_on_ending` ({effective, source}) — whether a delegated run's ending wakes "
+        + "that agent, and which layer decided. " +
+        "What a skill does is its own SKILL.md description:, not anything in template.yaml. " +
         "Useful for understanding what an agent can do before interacting with it. " +
         "Access control: agents can only get info about agents they have permission to call.",
       parameters: z.object({

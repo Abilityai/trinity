@@ -255,16 +255,19 @@ async def restart_fleet_impl(
 
             # Pre-action ownership gate (#1919): refresh our own lease ONLY
             # while the stored token is still ours, immediately before each
-            # destructive restart. Foreign token ⇒ our lease lapsed and a
-            # concurrent fleet restart now holds the lock — stop (continuing
-            # would interleave stop/start with the new holder, and a bare
-            # EXPIRE would extend THEIR lease). Absent token ⇒ the lease
-            # lapsed with nobody racing us — re-acquire and continue; abort
-            # only if the re-acquire loses. Detection latency is one in-flight
-            # agent restart: this shrinks the dual-run window, it cannot
-            # eliminate it (per-agent start locks are #1817).
+            # destructive restart. One script decides (trinity#4028), so the
+            # renewal can never land on a successor's lease. Foreign token ⇒
+            # our lease lapsed and a concurrent fleet restart now holds the
+            # lock — stop (continuing would interleave stop/start with the new
+            # holder). Absent token ⇒ the lease lapsed and nobody holds it NOW
+            # — re-take it in the same script and continue. That is not proof
+            # nobody ran inside the lapse (a run could acquire, work and
+            # release within it); it is the #1919 choice to finish a half-done
+            # destructive run rather than abandon it. Detection latency is one
+            # in-flight agent restart: this shrinks the dual-run window, it
+            # cannot eliminate it (per-agent start locks are #1817).
             if lock.held:
-                state = lock.refresh_if_owned()
+                state = lock.refresh_if_owned(retake_lapsed=True)
                 if state is LeaseState.REACQUIRED:
                     lease_reacquired = True
                     logger.warning(
@@ -277,11 +280,10 @@ async def restart_fleet_impl(
                     stopped_early = "lease_lost_foreign"
                     logger.warning(
                         "Fleet restart: lock lease lost to a concurrent "
-                        "caller after %d of %d agents (token state: %s) "
-                        "— stopping this run; already-completed restarts "
+                        "caller after %d of %d agents (another token holds "
+                        "it) — stopping this run; already-completed restarts "
                         "stand and are audited",
                         len(results), len(agents),
-                        "foreign" if lock.last_current is not None else "absent",
                     )
                     break
                 elif state is LeaseState.DEGRADED:
@@ -293,7 +295,7 @@ async def restart_fleet_impl(
                         refresh_warned = True
                         logger.warning(
                             "Fleet restart: lease refresh failing open (Redis "
-                            "error) — continuing; single-flight is best-effort "
+                            "error or unreadable reply) — continuing; single-flight is best-effort "
                             "until Redis recovers",
                         )
                 # OWNED → fall through and restart this agent.

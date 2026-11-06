@@ -387,6 +387,13 @@ services:
       # (no env_file merge), so without this the .env lever never reaches the
       # container and the feature is un-flippable (#1056/#1039 class).
       - MCP_INLINE_AUTH_ENABLED=${MCP_INLINE_AUTH_ENABLED:-false}
+      # ent#1101 external MCP access. MCP_BIND_ADDRESS is the interface the MCP
+      # server's raw :8080 is published on (see mcp-server); the backend reads it
+      # so the advertised URL and the status payload are honest about that port.
+      # MCP_EXTERNAL_ACCESS is the env opt-in under the Settings → MCP Keys
+      # switch (the backend is its only resolver). Wired here or both are inert.
+      - MCP_BIND_ADDRESS=${MCP_BIND_ADDRESS:-}
+      - MCP_EXTERNAL_ACCESS=${MCP_EXTERNAL_ACCESS:-}
       # Pull / work-stealing pilot opt-in (#1081 Phase 2) + lease-reaper poison
       # cap (#429/#1402). Backend-only, process-env (needs a backend restart).
       # PULL_MODE_PILOT_AGENTS empty = pull fully dark; MAX_REDELIVERY default 3.
@@ -906,7 +913,9 @@ services:
     logging: *default-logging
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      # ent#1101: MCP_BIND_ADDRESS unset publishes on every interface, as
+      # before; fresh installs set 127.0.0.1 (.env.example, provision_site).
+      - "${MCP_BIND_ADDRESS:+${MCP_BIND_ADDRESS}:}8080:8080"
     environment:
       - NODE_ENV=production
       - MCP_PORT=8080
@@ -962,11 +971,15 @@ services:
     networks:
       # MCP server straddles both networks: agents call http://mcp-server:8080/mcp
       # via Docker DNS on the agent network; backend reaches it on platform network.
-      - trinity-platform
-      - trinity-agent
+      trinity-platform:
+      trinity-agent:
       # trinity-enterprise#873: nginx proxies /mcp here over the ingress network
-      # (dynamic address from its pool; never a trusted forwarder).
-      - trinity-proxy
+      # (never a trusted forwarder). ent#1101: a reserved address, outside the
+      # dynamic pool, that cloudflared's host mappings point at — so a tunnel
+      # rule aimed straight at this container arrives over the ingress network
+      # (an off-box caller) rather than over the agent network.
+      trinity-proxy:
+        ipv4_address: ${TRINITY_PROXY_PREFIX:-172.30.0}.5
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -1004,6 +1017,9 @@ services:
     extra_hosts:
       - "backend:${TRINITY_PROXY_PREFIX:-172.30.0}.4"
       - "trinity-backend:${TRINITY_PROXY_PREFIX:-172.30.0}.4"
+      # ent#1101: the same for a rule aimed at the MCP server.
+      - "mcp-server:${TRINITY_PROXY_PREFIX:-172.30.0}.5"
+      - "trinity-mcp-server:${TRINITY_PROXY_PREFIX:-172.30.0}.5"
     depends_on:
       frontend:
         condition: service_healthy

@@ -36,6 +36,14 @@ PULL_POLL_KEY_PREFIX = "agent:pull_poll:"
 # Hygiene only: B-08 measures silence from the later of this value and the
 # container start, so an expired key cannot fire on its own.
 PULL_POLL_TTL_SECONDS = 86400
+# Per-agent count of claims the BACKEND refused (#4257), stamped by
+# `routers/internal.py` on the `_pull_authorized` 403 branch. The twin of the
+# key above, and the half it cannot see: a pool that polls happily while every
+# claim is turned away looks alive to B-08 and empty to the worker, which is
+# exactly the state a queued row can hide in. Same 24 h window, so the two
+# ages read against each other.
+PULL_CLAIM_DENIED_KEY_PREFIX = "agent:pull_claim_denied:"
+PULL_CLAIM_DENIED_TTL_SECONDS = 86400
 
 
 def _pilot_allowlist() -> Set[str]:
@@ -76,7 +84,8 @@ def pull_queue_allowance(agent_name: str) -> int:
 #
 #   task_execution_service   → "reject" | "queue_persistent"  ← #2391, pilot-gated
 #                              scheduler/ALL cron, webhooks, reminders, loops,
-#                              fan-out, A2A, operator resumes
+#                              fan-out, A2A; operator resumes opt in with
+#                              ``queue_on_capacity=True`` on every agent (ent#1108)
 #   dispatch_admission_svc   → "queue_in_memory"   — POST /chat (push agents;
 #                              on a pilot /chat skips acquire and is pulled, #3127)
 #   chat_execution_service   → "queue_persistent"  — POST /task
@@ -134,6 +143,11 @@ def pull_queue_allowance(agent_name: str) -> int:
 # creates the row before the producer gate runs, and the caller ignores the
 # result, so it is as pullable as a cron fire.
 #
+# ``caller_wake`` (trinity-enterprise#1102) is the ``operator_ending`` shape for
+# a delegation: ``caller_wake_service`` wakes the agent that delegated a run
+# when that run ends, through the same ``dispatch_and_await_terminal`` adapter,
+# for the same receipt (the audit row records ``result.status``).
+#
 # **The set is currently equal to ``_AUTONOMOUS_TRIGGERS``, and it stays an
 # explicit allow-list anyway.** That is the point of it: a trigger added to the
 # autonomous set later must be reviewed against dispatch topology rather than
@@ -146,15 +160,21 @@ def pull_queue_allowance(agent_name: str) -> int:
 PULL_REACHABLE_TRIGGERS = frozenset(
     {"agent", "event", "schedule", "webhook", "reminder", "loop", "fan_out",
      "a2a", "operator_response", "operator_ending", "retry", "self_task",
-     "skill_gate"}
+     "skill_gate", "caller_wake"}
 )
 
 
 # Triggers a producer writes that are deliberately in NEITHER pull set, each
-# with the reason. Empty today. ``test_4105_pull_trigger_census.py`` fails on a
+# with the reason. ``test_4105_pull_trigger_census.py`` fails on a
 # written trigger that is in no pull set and not listed here, and
 # ``note_unreachable_pull_trigger`` stays quiet for the ones listed.
-PULL_UNPULLED_TRIGGERS: Dict[str, str] = {}
+PULL_UNPULLED_TRIGGERS: Dict[str, str] = {
+    "summarizer": (
+        "labels a public_user_memory_writes history row written by the MEM-001 "
+        "background summarizer (trinity-enterprise#962); it is never an "
+        "execution's trigger and dispatches no agent work"
+    ),
+}
 
 
 # Triggers with a CALLER waiting in-line on the reply. A pull worker claims

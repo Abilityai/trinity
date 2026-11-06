@@ -68,6 +68,7 @@ from db_models import (
     EmailWhitelistAdd,
     EmailLoginRequest,
     EmailLoginVerify,
+    EmailLoginHandoff,
     EmailLoginResponse,
     # Agent Notifications (NOTIF-001)
     NotificationCreate,
@@ -167,6 +168,7 @@ from db.compatibility import CompatibilityOperations
 from db.metric_definitions import MetricDefinitionOperations
 from db.metric_points import MetricPointOperations
 from db.sync_state import SyncStateOperations
+from db.terms import TermsOperations  # trinity-enterprise#1107 terms acceptances
 from db.idempotency import IdempotencyOperations
 from db.loops import LoopOperations
 
@@ -1099,6 +1101,7 @@ class DatabaseManager:
         self._sync_state_ops = SyncStateOperations()  # #389 sync health
         self._idempotency_ops = IdempotencyOperations()  # RELIABILITY-006, #525
         self._loop_ops = LoopOperations()  # #740 sequential agent loops
+        self._terms_ops = TermsOperations()  # trinity-enterprise#1107 terms acceptances
 
     # =========================================================================
     # User Management (delegated to db/users.py)
@@ -1463,6 +1466,13 @@ class DatabaseManager:
     def set_guardrails_config(self, agent_name: str, config: dict = None) -> bool:
         return self._agent_ops.set_guardrails_config(agent_name, config)
 
+    # Tool access (GUARD-008, trinity-enterprise#341)
+    def get_tool_access_row(self, agent_name: str):
+        return self._agent_ops.get_tool_access_row(agent_name)
+
+    def write_tool_access_row(self, agent_name: str, **kwargs) -> bool:
+        return self._agent_ops.write_tool_access_row(agent_name, **kwargs)
+
     # =========================================================================
     # Parallel Capacity (delegated to db/agents.py) - CAPACITY-001
     # =========================================================================
@@ -1504,8 +1514,23 @@ class DatabaseManager:
     def get_operator_resume_enabled(self, agent_name: str) -> bool:
         return self._agent_ops.get_operator_resume_enabled(agent_name)
 
-    def set_operator_resume_enabled(self, agent_name: str, enabled: bool) -> bool:
+    def set_operator_resume_enabled(self, agent_name: str, enabled) -> bool:
         return self._agent_ops.set_operator_resume_enabled(agent_name, enabled)
+
+    def get_operator_resume_override(self, agent_name: str):
+        # ent#1102: the raw tri-state read `wake_policy` makes (ent#1108 made
+        # the column NULL / 0 / 1); `get_operator_resume_enabled` COALESCEs.
+        return self._agent_ops.get_operator_resume_override(agent_name)
+
+    # --- wake on ending, tri-state (ent#1102) ---
+    # None = no opinion, follow the instance default. Read only through
+    # services/wake_policy.py, never directly.
+
+    def get_wake_on_ending(self, agent_name: str):
+        return self._agent_ops.get_wake_on_ending(agent_name)
+
+    def set_wake_on_ending(self, agent_name: str, enabled) -> bool:
+        return self._agent_ops.set_wake_on_ending(agent_name, enabled)
 
     def get_mcp_exposed_agents(self):
         return self._agent_ops.get_mcp_exposed_agents()
@@ -1676,6 +1701,20 @@ class DatabaseManager:
     def get_queued_count(self, agent_name: str) -> int:
         return self._schedule_ops.get_queued_count(agent_name)
 
+    # Queue-visibility reads (#4257): the receipt's depth, the stall monitor's
+    # one scan, and the conversation-serialisation half of the wait reason.
+    # Read-only — they return counts, rows and conversation keys, never writes.
+    def count_queued_ahead(
+        self, agent_name: str, queued_at: Optional[str], execution_id: str
+    ) -> int:
+        return self._schedule_ops.count_queued_ahead(agent_name, queued_at, execution_id)
+
+    def oldest_queued_head_per_agent(self):
+        return self._schedule_ops.oldest_queued_head_per_agent()
+
+    def agents_with_running_conversation(self, agent_name: str):
+        return self._schedule_ops.agents_with_running_conversation(agent_name)
+
     def cancel_queued_execution(
         self, execution_id: str, reason: str = "cancelled", status: str = "cancelled"
     ) -> bool:
@@ -1787,8 +1826,10 @@ class DatabaseManager:
         """#1745: activate/deactivate an agent's per-agent MCP keys."""
         return self._mcp_key_ops.set_agent_keys_active(agent_name, active)
 
-    def deactivate_orphaned_agent_keys(self) -> int:
-        """#1745: deactivate per-agent keys whose agent is no longer live."""
+    def deactivate_orphaned_agent_keys(self) -> List[str]:
+        """#1745: deactivate per-agent keys whose agent is no longer live;
+        returns the agents whose keys were revoked (#4259 skips keys still
+        inside the start-up grace window)."""
         return self._mcp_key_ops.deactivate_orphaned_agent_keys()
 
     def delete_agent_mcp_api_key(self, agent_name: str):
@@ -3227,11 +3268,16 @@ class DatabaseManager:
     def get_public_user_memory_agent_notes(self, agent_name: str, user_email: str) -> str:
         return self._public_link_ops.get_user_memory_agent_notes(agent_name, user_email)
 
+    def get_public_user_memory(self, agent_name: str, user_email: str):
+        # ent#962: a read that never creates the row (the owner's view).
+        return self._public_link_ops.get_user_memory(agent_name, user_email)
+
     def update_public_user_memory_conversation_summary(
-        self, agent_name: str, user_email: str, conversation_summary: str
+        self, agent_name: str, user_email: str, conversation_summary: str,
+        *, expected_previous: str = None,
     ) -> bool:
         return self._public_link_ops.update_user_memory_conversation_summary(
-            agent_name, user_email, conversation_summary
+            agent_name, user_email, conversation_summary, expected_previous=expected_previous
         )
 
     # ent#637: the write boundary records history; the person reads + undoes it.
@@ -3290,15 +3336,23 @@ class DatabaseManager:
     def prune_memory_fact_events(self, agent_name: str, *, before_iso: str) -> int:
         return self._memory_fact_ops.prune_memory_fact_events(agent_name, before_iso=before_iso)
 
-    def list_public_user_memory_writes(self, agent_name: str, user_email: str, limit: int = 20) -> list:
-        return self._public_link_ops.list_user_memory_writes(agent_name, user_email, limit)
+    def list_public_user_memory_writes(self, agent_name: str, user_email: str, limit: int = 20, **kwargs) -> list:
+        # ent#962: `before=` (keyset cursor) and `section=` (default `notes`).
+        return self._public_link_ops.list_user_memory_writes(agent_name, user_email, limit, **kwargs)
+
+    def latest_open_public_user_memory_writes(self, agent_name: str, user_email: str) -> dict:
+        return self._public_link_ops.latest_open_user_memory_writes(agent_name, user_email)
 
     def undo_public_user_memory_write(
-        self, agent_name: str, user_email: str, write_id: str, *, undone_by: str
+        self, agent_name: str, user_email: str, write_id: str, *, undone_by: str, section: str = None
     ) -> str:
         return self._public_link_ops.undo_user_memory_write(
-            agent_name, user_email, write_id, undone_by=undone_by
+            agent_name, user_email, write_id, undone_by=undone_by, section=section
         )
+
+    def list_public_user_memory_people(self, agent_name: str, *, limit: int = 50, offset: int = 0) -> dict:
+        # ent#962: everyone with memory on the agent, for the owner's view.
+        return self._public_link_ops.list_user_memory_people(agent_name, limit=limit, offset=offset)
 
     # =========================================================================
     # Agent Tags (delegated to db/tags.py) - ORG-001
@@ -4158,6 +4212,12 @@ class DatabaseManager:
         return self._operator_queue_ops.list_pending_asks_for_agent(
             agent_name, limit, exclude_request_id_prefixes)
 
+    def list_pending_ask_ids_for_execution(self, execution_id: str, limit: int = 10):
+        """ent#1102: the asks one execution parked and never got answered."""
+        return self._operator_queue_ops.list_pending_ask_ids_for_execution(
+            execution_id, limit
+        )
+
     def list_recent_operator_queue_endings(self, agent_name, since, limit,
                                            exclude_request_id_prefixes=None):
         # trinity-enterprise#611: ids + endings for the Execution Context line.
@@ -4212,6 +4272,23 @@ class DatabaseManager:
         # trinity-enterprise#747: link a pending ask to its discussion chat, once.
         return self._operator_queue_ops.set_discussion_link(item_id, key, chat_id)
 
+    def read_operator_queue_address(self, item_id):
+        # trinity-enterprise#1095: one row's address columns as stored (raw).
+        return self._operator_queue_ops.read_address(item_id)
+
+    def list_pending_role_addressed_operator_queue_items(self, agent_name, to_role):
+        # trinity-enterprise#1095: the pending rows a role change moves — an
+        # allowlist (the agent's raises, gated-skill approvals), raw address.
+        return self._operator_queue_ops.list_pending_role_addressed(agent_name, to_role)
+
+    def readdress_operator_queue_item(self, item_id, people, single, *, expect_single,
+                                      expect_resolved_raw, context=None, expect_context_raw=None):
+        # trinity-enterprise#1095: rewrite a pending row's audience under CAS.
+        return self._operator_queue_ops.readdress(
+            item_id, people, single, expect_single=expect_single,
+            expect_resolved_raw=expect_resolved_raw, context=context,
+            expect_context_raw=expect_context_raw)
+
     def bulk_cancel_operator_queue_items(self, ids, accessible_agent_names=None, *,
                                          disposed_by_email, reason=None):
         # trinity-enterprise#611: returns {"batch_id", "rows"} — the rows THIS
@@ -4244,6 +4321,16 @@ class DatabaseManager:
 
     def set_operator_queue_delivery_state(self, item_id, state, detail, now):
         return self._operator_queue_ops.set_delivery_state(item_id, state, detail, now)
+
+    # abilityai/trinity-enterprise#1108 AC #4 — the answer wake's status
+    def set_operator_queue_wake_state(self, item_id, state):
+        return self._operator_queue_ops.set_wake_state(item_id, state)
+
+    def list_operator_queue_pending_wakes(self, agent_name):
+        return self._operator_queue_ops.list_pending_wakes_for_agent(agent_name)
+
+    def mark_operator_queue_wakes_woken(self, agent_name, request_ids):
+        return self._operator_queue_ops.mark_wakes_woken(agent_name, request_ids)
 
     def mark_operator_queue_unconfirmed(self, detail, now, agent_name=None, exclude_agents=None,
                                         exclude_request_id_prefixes=None):
@@ -4707,6 +4794,32 @@ class DatabaseManager:
 
     def list_due_loops(self, now: str, *, limit: int = 100):
         return self._loop_ops.list_due_loops(now, limit=limit)
+
+
+    # =========================================================================
+    # Terms acceptances (trinity-enterprise#1107 — delegated to db/terms.py)
+    # =========================================================================
+
+    def insert_terms_acceptance(self, user_id, email, terms_version: str, accepted_at: str,
+                                *, door=None, actor_ip=None):
+        return self._terms_ops.insert_terms_acceptance(
+            user_id, email, terms_version, accepted_at, door=door, actor_ip=actor_ip
+        )
+
+    def get_terms_acceptance(self, user_id: int, terms_version: str):
+        return self._terms_ops.get_terms_acceptance(user_id, terms_version)
+
+    def get_terms_acceptance_by_email(self, email: str, terms_version: str):
+        return self._terms_ops.get_terms_acceptance_by_email(email, terms_version)
+
+    def terms_acceptances_for_user(self, user_id: int):
+        return self._terms_ops.terms_acceptances_for_user(user_id)
+
+    def terms_acceptances_for_email(self, email: str):
+        return self._terms_ops.terms_acceptances_for_email(email)
+
+    def list_terms_acceptances(self, limit: int = 200):
+        return self._terms_ops.list_terms_acceptances(limit)
 
 
 # Global database manager instance

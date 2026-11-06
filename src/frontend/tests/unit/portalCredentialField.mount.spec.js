@@ -105,6 +105,35 @@ describe('PortalAsks renders a credential ask as the secret field', () => {
     expect(tid(w, 'portal-ask-discuss-c1').exists()).toBe(false)
   })
 
+  // trinity-enterprise#1109 — a destination: the value lands on another
+  // Trinity, in the agent it is for; the card and the caption say so in plain
+  // words, and the key's variable name (which the projection withholds) is
+  // nowhere on screen.
+  it('says where the value lands when the ask carries a destination', () => {
+    const w = mountAsks([credentialAsk({ credential_destination: { agent_name: 'lopez-digest', host: 'member.example.com' } })])
+    expect(tid(w, 'portal-ask-destination-c1').text()).toBe('lopez-digest')
+    const caption = tid(w, 'portal-credential-caption-c1').text()
+    expect(caption).toContain('Sent to the agent lopez-digest on the Trinity at member.example.com')
+    expect(caption).toContain('Nothing is kept here after delivery')
+    expect(w.text()).not.toContain('MEMBER_KEY')
+  })
+
+  // The PortalAsks sentence itself: "the agent … on the Trinity at …" — never
+  // "your". Nothing on this instance ties the host to the person reading it;
+  // an admin's endpoint registry ties it to the platform (ent#1109 review).
+  it('the card names the agent and the host as the Trinity at <host>, never as yours', () => {
+    const w = mountAsks([credentialAsk({ credential_destination: { agent_name: 'lopez-digest', host: 'member.example.com' } })])
+    const sentence = tid(w, 'portal-ask-asker-c1').text().replace(/\s+/g, ' ')
+    expect(sentence).toContain('for the agent lopez-digest on the Trinity at member.example.com')
+    expect(w.text()).not.toMatch(/your agent|your Trinity/)
+  })
+
+  it('without a destination the card and the caption read as before', () => {
+    const w = mountAsks()
+    expect(tid(w, 'portal-ask-destination-c1').exists()).toBe(false)
+    expect(tid(w, 'portal-credential-caption-c1').text()).toContain('Stored on the agent as OP_SERVICE_ACCOUNT_TOKEN')
+  })
+
   it('names the asking agent and quotes its reason as its own words, wherever the card is drawn', () => {
     // A credential can be asked from any turn (a schedule reaches the owner's
     // Inbox), so the card itself says WHO asks — not only when the surface

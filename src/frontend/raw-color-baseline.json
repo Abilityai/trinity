@@ -235,8 +235,8 @@
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/InfoPanel.vue": {
-      "raw_nongray": 16,
-      "raw_gray": 103,
+      "raw_nongray": 14,
+      "raw_gray": 107,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/InfoTile.vue": {

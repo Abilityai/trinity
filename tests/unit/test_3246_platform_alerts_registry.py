@@ -54,7 +54,7 @@ _NOT_EMITTERS = {
     ("database.py", "DatabaseManager.create_native_operator_queue_item"),
     ("services/ask_service.py", "raise_ask"),
     ("services/operator_queue_service/ingest.py", "IngestMixin._sync_agent"),
-    ("services/operator_queue_service/__init__.py", "create_bounded_alert"),
+    ("services/operator_queue_service/alerts.py", "create_bounded_alert"),
 }
 
 # A hook kind on the seam whose emitter has no place that knows the condition
@@ -145,12 +145,41 @@ def _emitter_sites():
     return sites - _NOT_EMITTERS
 
 
+def _module_str_constants(text):
+    """{NAME: value} for module-level `NAME = "literal"` assignments.
+
+    An emitter that names its kind once in a module constant and uses it at
+    every call site is better code than one that repeats the string, and the
+    scanner must not read that as "no clear site" (#4257). Module level only —
+    a name assigned inside a function is not a stable kind identifier.
+    """
+    out = {}
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return out
+    for node in tree.body:
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Constant):
+            continue
+        if not isinstance(node.value.value, str):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                out[target.id] = node.value.value
+    return out
+
+
 def _seam_kind_calls():
-    """{kind literal} for every `clear(` / `reconcile(` call outside the seam."""
+    """{kind} for every `clear(` / `reconcile(` call outside the seam.
+
+    A kind given as a literal, or as a module-level string constant of the
+    calling module.
+    """
     kinds = set()
     for rel, text in _backend_files(("platform_alerts",)):
         if rel == "services/platform_alerts.py":
             continue
+        constants = _module_str_constants(text)
         for _qual, call in _walk(rel, text):
             if call is None:
                 continue
@@ -161,6 +190,8 @@ def _seam_kind_calls():
                 (k.value for k in call.keywords if k.arg == "kind"), None)
             if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                 kinds.add(arg.value)
+            elif isinstance(arg, ast.Name) and arg.id in constants:
+                kinds.add(constants[arg.id])
     return kinds
 
 
@@ -171,7 +202,9 @@ def _seam_kind_calls():
 def test_every_kind_prefix_is_reserved():
     from services import operator_queue_service as oqs
     from services import platform_alerts as pa
-    reserved = oqs._RESERVED_ID_PREFIXES
+    # ent#1111 (T4): the accessor, so a kind registered by an external emitter
+    # under a RESERVED prefix passes — `pa.register` enforces the same rule.
+    reserved = oqs.reserved_id_prefixes()
     loose = {k.name: k.prefix for k in pa.KINDS.values()
              if not any(k.prefix.startswith(p) for p in reserved)}
     assert not loose, f"kind prefixes an agent could author: {loose}"
@@ -240,6 +273,29 @@ def test_every_hook_kind_on_the_seam_has_a_clear_site():
 def test_no_clear_site_exemptions_are_live():
     stale = set(NO_CLEAR_SITE) & _seam_kind_calls()
     assert not stale, f"exempted kinds that now have a clear site: {sorted(stale)}"
+
+
+def test_clear_site_scanner_resolves_a_module_level_kind_constant():
+    """#4257: an emitter naming its kind once in a constant still has a clear
+    site, and a scanner blind to that reports a false "forgotten"."""
+    text = (
+        "from services import platform_alerts\n"
+        "ALERT_KIND = 'circuit_dormant'\n"
+        "def f():\n"
+        "    platform_alerts.clear('a', ALERT_KIND, 'a')\n"
+    )
+
+    assert _module_str_constants(text)["ALERT_KIND"] == "circuit_dormant"
+
+
+def test_clear_site_scanner_ignores_a_function_local_kind_name():
+    text = (
+        "def f():\n"
+        "    ALERT_KIND = 'circuit_dormant'\n"
+        "    return ALERT_KIND\n"
+    )
+
+    assert _module_str_constants(text) == {}
 
 
 def test_clear_site_scanner_reads_positional_and_keyword_kind():

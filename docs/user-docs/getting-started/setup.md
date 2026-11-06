@@ -118,7 +118,7 @@ Seeded agents appear on the Dashboard as soon as they exist; closing first-run s
 |---------|-----|
 | Web UI | http://localhost |
 | Backend API docs | http://localhost:8000/docs |
-| MCP Server | http://localhost:8080/mcp (on a server install also `https://trinity.your-domain.com/mcp`) |
+| MCP Server | http://localhost:8080/mcp (on a server install also `https://trinity.your-domain.com/mcp`). Clients outside the Trinity server — Claude Code on your laptop included — need **External MCP access** turned on once under Settings → MCP Keys; a fresh install starts with it off. See [MCP Server](../integrations/mcp-server.md#external-mcp-access) |
 
 ### Stopping and Starting
 

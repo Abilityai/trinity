@@ -261,9 +261,9 @@ describe("trinity-enterprise#611 get_my_ask", () => {
     assert.equal(out.disposition, "cancelled");
   });
 
-  it("declares no agent-target parameter — there is nothing to spoof", () => {
+  it("declares no agent-target parameter beyond the act-as agent_name (ent#1024)", () => {
     const tool = makeGetMyAsk(recordingClient().fake);
-    assert.deepEqual(Object.keys((tool.parameters as any).shape), ["request_id"]);
+    assert.deepEqual(Object.keys((tool.parameters as any).shape).sort(), ["agent_name", "request_id"]);
   });
 
   it("the system key reads as the agent it was minted for", async () => {
@@ -354,17 +354,26 @@ describe("trinity-enterprise#611 ask_operator", () => {
 
   it("forwards only the declared fields, whatever else the arguments carry", async () => {
     const { fake, calls } = raisingClient();
-    const stray = { ...ASK, agent_name: "sibling", channel: "file", raised_by: "gate" };
+    // agent_name naming itself is harmless and never travels in the body (ent#1024).
+    const stray = { ...ASK, agent_name: "self", channel: "file", raised_by: "gate" };
     await makeAskOperator(fake).execute(stray as any, agentCtx("self"));
     assert.deepEqual(calls, [["self", ASK]]);
   });
 
-  it("declares no agent-target parameter — there is nothing to spoof", () => {
+  it("an agent key naming a sibling is refused, and nothing is raised (ent#1024)", async () => {
+    const { fake, calls } = raisingClient();
+    const out = JSON.parse(await makeAskOperator(fake).execute({ ...ASK, agent_name: "sibling" } as any, agentCtx("self")));
+    assert.equal(out.success, false);
+    assert.match(out.error, /acts only as 'self'/);
+    assert.deepEqual(calls, []);
+  });
+
+  it("declares no agent-target parameter beyond the act-as agent_name (ent#1024)", () => {
     const tool = makeAskOperator(raisingClient().fake);
     const keys = Object.keys((tool.parameters as any).shape);
-    assert.ok(!keys.some((k) => /agent/.test(k)), `unexpected agent-shaped parameter: ${keys}`);
+    assert.ok(!keys.some((k) => /agent/.test(k) && k !== "agent_name"), `unexpected agent-shaped parameter: ${keys}`);
     assert.deepEqual(keys.sort(), [
-      "context", "expires_at", "options", "priority", "proposal", "question",
+      "agent_name", "context", "expires_at", "options", "priority", "proposal", "question",
       "replaces", "request_id", "supersedes_expired", "title", "to", "type",
     ]);
   });
@@ -588,16 +597,16 @@ describe("trinity-enterprise#901 withdraw_ask", () => {
   it("forwards only {reason} in the body, whatever else the arguments carry", async () => {
     const { fake, calls } = withdrawingClient();
     const stray = {
-      request_id: "deploy-1", reason: "moot", agent_name: "sibling",
+      request_id: "deploy-1", reason: "moot", agent_name: "self",
       replaced_by: "x", disposed_by: "person", status: "answered",
     };
     await makeWithdrawAsk(fake).execute(stray as any, agentCtx("self"));
     assert.deepEqual(calls, [["self", "deploy-1", { reason: "moot" }]]);
   });
 
-  it("declares request_id and reason only — there is nothing to spoof", () => {
+  it("declares request_id, reason and the act-as agent_name only (ent#1024)", () => {
     const tool = makeWithdrawAsk(withdrawingClient().fake);
-    assert.deepEqual(Object.keys((tool.parameters as any).shape).sort(), ["reason", "request_id"]);
+    assert.deepEqual(Object.keys((tool.parameters as any).shape).sort(), ["agent_name", "reason", "request_id"]);
   });
 
   it("the system key withdraws as the agent it was minted for", async () => {
@@ -718,8 +727,9 @@ describe("trinity-enterprise#1007 ask_operator to a canon role", () => {
 
   it("the tool description keeps its headroom and the field set is unchanged", () => {
     assert.ok(tool.description.length <= 1800, `ask_operator description is ${tool.description.length} characters`);
+    // trinity-enterprise#1024: `agent_name` is the admin act-as parameter.
     assert.deepEqual(Object.keys(schema.shape).sort(), [
-      "context", "expires_at", "options", "priority", "proposal", "question",
+      "agent_name", "context", "expires_at", "options", "priority", "proposal", "question",
       "replaces", "request_id", "supersedes_expired", "title", "to", "type",
     ]);
   });
@@ -778,9 +788,44 @@ describe("trinity-enterprise#1066 ask_for_credential", () => {
     assert.deepEqual(turns, ["exec-9"]);
   });
 
-  it("declares name, why, request_id and expires_at only — no value, no agent, no options", () => {
+  it("declares name, why, request_id, expires_at and destination only — no value, no agent, no options", () => {
     const keys = Object.keys(makeTool(raisingClient().fake).parameters.shape).sort();
-    assert.deepEqual(keys, ["expires_at", "name", "request_id", "why"]);
+    assert.deepEqual(keys, ["destination", "expires_at", "name", "request_id", "why"]);
+  });
+
+  // trinity-enterprise#1109 — a destination: the value lands on another
+  // instance, in the agent it is for, under the key the asking agent holds
+  // for it (named, never carried).
+  it("a destination travels as context.credential_destination with its three declared fields only", async () => {
+    const { fake, calls } = raisingClient({ status: "created", request_id: "cred-d" });
+    await makeTool(fake).execute(
+      {
+        name: "TELEGRAM_BOT_TOKEN", why: "For the digest.", request_id: "cred-d",
+        destination: { instance_url: "https://member.example.com", agent_name: "lopez-digest", key_env: "MEMBER_KEY", key: "trinity_mcp_leak" },
+      } as any,
+      agentCtx("self"),
+    );
+    assert.deepEqual(calls[0][1].context, {
+      credential_name: "TELEGRAM_BOT_TOKEN",
+      credential_destination: { instance_url: "https://member.example.com", agent_name: "lopez-digest", key_env: "MEMBER_KEY" },
+    });
+    assert.doesNotMatch(JSON.stringify(calls), /trinity_mcp_leak/);
+  });
+
+  it("without a destination the context carries the name only, as before", async () => {
+    const { fake, calls } = raisingClient();
+    await makeTool(fake).execute({ name: "API_KEY", why: "w" }, agentCtx("self"));
+    assert.deepEqual(calls[0][1].context, { credential_name: "API_KEY" });
+  });
+
+  it("the destination refusals come back named", async () => {
+    const detail = { code: "destination_url_invalid", message: "bad url", reason: "endpoint_not_https" };
+    const fake = { raiseAsk: async () => { throw new ApiError(422, JSON.stringify({ detail })); } } as Partial<TrinityClient>;
+    const out = JSON.parse(await makeTool(fake).execute(
+      { name: "API_KEY", why: "w", destination: { instance_url: "http://x", agent_name: "a", key_env: "K" } },
+      agentCtx("self"),
+    ));
+    assert.deepEqual(out, { success: false, status: 422, ...detail });
   });
 
   it("stray arguments never travel — a value smuggled in is dropped", async () => {

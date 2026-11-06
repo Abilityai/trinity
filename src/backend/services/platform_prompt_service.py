@@ -152,7 +152,7 @@ All operator communication is **asynchronous**. A human may answer in minutes or
 2. **End your turn.** Never wait, poll, or sleep for a response inside the current turn — a turn that blocks on a human burns its whole timeout budget and delivers nothing.
 3. **Act on the outcome in a later turn.** Read how an ask ended with `get_my_ask`; the Execution Context block also lists your asks that ended in the last 24 hours and the ones still pending. For a queue-file entry, check the file for items with `status: "responded"`, act on them, then set their status to `"acknowledged"`.
 
-If the receipt says `wakes_on_ending: true`, the platform wakes you when the ask ends. Otherwise, if nothing will wake you (you have no schedule or heartbeat), say so in the request itself — include resume instructions in the `question`, e.g. "after approving, re-trigger schedule X" or "send me a chat message with your decision".
+By default the platform wakes you when a person ends the ask: their answer or their cancel starts one turn of yours with the ending in its context, so never tell a person to write to you again after they answer — their answer alone brings you back. An expiry wakes nobody: you read it on your next turn, in the Execution Context block or with `get_my_ask`. The receipt confirms the wake with `wakes_on_ending: true`. Only when it says `false` (your owner switched the wake off) and nothing else will wake you (no schedule or heartbeat), say so in the request itself — include resume instructions in the `question`, e.g. "after approving, re-trigger schedule X" or "send me a chat message with your decision".
 
 #### Ask before irreversible actions
 
@@ -327,11 +327,12 @@ DELEGATION_CONTRACT = """\
 **The delegation contract: a receipt means the work is running. Never re-send on silence.**
 - A `chat_with_*` or `fan_out` call answers with the reply or with a receipt: an `execution_id` (a `fan_out_id` for a batch) in place of the reply, whatever its status (`accepted`, `queued`, `queued_timeout`, `fan_out_timeout`). The work arrived and is queued, running or done, even if your call timed out.
 - Never re-send because a call timed out or its delivery could not be confirmed. An exact repeat is normally answered with the original; a reworded one can run the work twice.
-- Read the result with `get_execution_result(agent_name, execution_id)` (`get_fan_out_result` for a batch); `running` is not stuck. To finish later, call `set_reminder` with a message naming the `execution_id`, then end your turn. A receipt is not a result: never report the work as done.
+- Read the result with `get_execution_result(agent_name, execution_id)` (`get_fan_out_result` for a batch); `running` is not stuck. A receipt is not a result: never report the work as done.
 - Confirmed `failed` or `cancelled`: re-send word for word to retry; same `execution_id` back: `set_reminder`, end your turn.
 - An error without an `execution_id` is not proof that nothing ran. Look for your exact message in `list_recent_executions(agent_name)`: one match is your receipt; otherwise re-send it word for word, same options. On `agent_busy` nothing ran: re-send after `retry_after_seconds`.
 - `pending_approval`: nothing ran. Do not retry or route it through another agent; its `message` says whether you will hear the outcome. On `retryable: false`, do what it says.
-- For long work use `parallel=true, async=true`: the receipt comes back at once, and the run's end fires the target's `agent.task.completed` / `agent.task.failed`. A `subscribe_to_event` subscription to those wakes you for every run of that agent, so match the `execution_id`."""
+- For long work use `parallel=true, async=true`: the receipt comes back at once, and the run's end fires the target's `agent.task.completed` / `agent.task.failed` to any `subscribe_to_event` subscription.
+- The receipt's `wake` field says who brings you the ending. `on_ending`: a turn is started on you when the run ends, so end your turn and never set a reminder for it. `none`: nobody will, and `wake_reason` says why — `set_reminder` to finish later."""
 PLATFORM_INSTRUCTIONS = PLATFORM_INSTRUCTIONS.replace("__DELEGATION_CONTRACT__", DELEGATION_CONTRACT)
 
 # The canvas ceilings the same way (ent#536): four numbers the platform already
@@ -819,10 +820,9 @@ async def summarize_user_memory_background(
                 f"[MemSummarize] Dropped {len(dropped)} line(s) from the conversation_summary "
                 f"for {user_email} on {agent_name}: rules={sorted(set(dropped))}"
             )
-        if new_summary:
-            db.update_public_user_memory_conversation_summary(
-                agent_name, user_email, new_summary
-            )
+        if new_summary and db.update_public_user_memory_conversation_summary(
+            agent_name, user_email, new_summary, expected_previous=existing_summary  # ent#962: never over an undo
+        ):
             logger.info(
                 f"[MemSummarize] Updated conversation_summary for {user_email} "
                 f"on {agent_name} ({len(new_summary)} chars)"
@@ -1321,17 +1321,47 @@ def _resolve_ended_asks(agent_name: Optional[str]) -> List[dict]:
     if not agent_name:
         return []
     try:
-        from services.operator_queue_service import _RESERVED_ID_PREFIXES
+        from services.operator_queue_service import reserved_id_prefixes
 
-        return db.list_recent_operator_queue_endings(
+        rows = db.list_recent_operator_queue_endings(
             agent_name,
             iso_cutoff(hours=ENDED_ASKS_WINDOW_HOURS),
             MAX_ENDED_ASKS + 1,
-            exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
+            exclude_request_id_prefixes=reserved_id_prefixes(),
         ) or []
     except Exception as e:
         logger.debug(f"_resolve_ended_asks({agent_name}) failed: {e}")
         return []
+    return rows
+
+
+def carried_answer_wakes(ended_asks: Optional[List[dict]]) -> List[str]:
+    """The answered asks a turn composed with ``ended_asks`` actually LISTS
+    (abilityai/trinity-enterprise#1108 AC #4) — the first ``MAX_ENDED_ASKS``
+    rows, as `_render_ended_asks` lists them; the overflow row the resolver
+    reads only makes the line say "and more", and is not carried."""
+    return [
+        r["request_id"] for r in (ended_asks or [])[:MAX_ENDED_ASKS]
+        if r.get("disposition") == "answered" and r.get("request_id")
+    ]
+
+
+def _note_carried_wakes(ctx: ExecutionContext) -> None:
+    """Hand the answers this turn's Execution Context line carries to
+    `operator_resume_service`, keyed by the execution. They are marked `woken`
+    only when THAT execution's SUCCESS terminal lands — never here: composing a
+    prompt proves nothing reached the agent (a schedule firing at a stopped
+    agent composes, the HTTP call fails, and a compose-time mark would drop
+    the pending wake silently). Best-effort, after the block is built."""
+    if not ctx.execution_id or not ctx.agent_name:
+        return
+    try:
+        ids = carried_answer_wakes(ctx.ended_asks)
+        if ids:
+            from services import operator_resume_service
+            operator_resume_service.note_carried_wakes(ctx.execution_id, ctx.agent_name, ids)
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"_note_carried_wakes({ctx.execution_id}): not recorded: {e}")
 
 
 def _resolve_pending_asks(agent_name: Optional[str]) -> tuple:
@@ -1342,16 +1372,16 @@ def _resolve_pending_asks(agent_name: Optional[str]) -> tuple:
     if not agent_name:
         return [], 0
     try:
-        from services.operator_queue_service import _RESERVED_ID_PREFIXES
+        from services.operator_queue_service import reserved_id_prefixes
 
         rows = db.list_pending_operator_queue_asks(
             agent_name, MAX_PENDING_ASKS,
-            exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
+            exclude_request_id_prefixes=reserved_id_prefixes(),
         ) or []
         total = len(rows)
         if total >= MAX_PENDING_ASKS:
             total = db.count_operator_queue_pending_for_agent(
-                agent_name, exclude_request_id_prefixes=_RESERVED_ID_PREFIXES)
+                agent_name, exclude_request_id_prefixes=reserved_id_prefixes())
         return rows, max(total, len(rows))
     except Exception as e:
         logger.debug(f"_resolve_pending_asks({agent_name}) failed: {e}")
@@ -1478,6 +1508,7 @@ def compose_system_prompt(
         block = build_execution_context(ctx)
         if block:
             parts.append(block)
+            _note_carried_wakes(ctx)
 
     if caller_prompt and caller_prompt.strip():
         parts.append(caller_prompt.strip())
