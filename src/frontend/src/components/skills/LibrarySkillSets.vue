@@ -86,6 +86,13 @@
                   variant="neutral"
                   title="The copy that runs comes from another source, by library precedence"
                 >from another source</BaseBadge>
+                <!-- trinity-enterprise#736: the ent#672 badge, the same as the skill's own card. -->
+                <BaseBadge
+                  v-if="m.deprecated"
+                  variant="warning"
+                  :title="DEPRECATED_TITLE"
+                  :data-testid="`library-set-member-deprecated-${set.name}-${m.name}`"
+                >deprecated</BaseBadge>
               </li>
             </ul>
             <div v-if="set.schedules?.length" class="mt-2 text-[12.5px] text-gray-600 dark:text-gray-400">
@@ -138,6 +145,21 @@
             {{ store.setResults[set.name].agent }}: assigned<template v-if="missingEnv(set.name).length">
               — missing credentials {{ missingEnv(set.name).join(', ') }}; add them on the agent's Credentials tab</template>.
           </p>
+          <!-- Two facts beside the note, each its own line (the ent#672 precedent):
+               a binary a member lacks (env keys are the line above), and the
+               deprecated members, named on every assign, a re-assign included. -->
+          <template v-if="!errors[set.name] && store.setResults[set.name]">
+            <p
+              v-if="setNotes(set.name).dependencies"
+              class="mt-1 text-[12.5px] text-status-warning-700 dark:text-status-warning-400"
+              :data-testid="`library-set-dependencies-${set.name}`"
+            >{{ setNotes(set.name).dependencies }}</p>
+            <p
+              v-if="setNotes(set.name).deprecation"
+              class="mt-1 text-[12.5px] text-status-warning-700 dark:text-status-warning-400"
+              :data-testid="`library-set-deprecation-${set.name}`"
+            >{{ setNotes(set.name).deprecation }}</p>
+          </template>
         </BaseCard>
       </li>
     </ul>
@@ -154,6 +176,8 @@
  */
 import { computed, reactive, ref } from 'vue'
 import { useSkillsLibraryStore } from '../../stores/skillsLibrary'
+import { DEPRECATED_TITLE } from './contract'
+import { dependencyText, deprecationText, memberDeprecationReport } from '../../utils/skillDelivery'
 import BaseBadge from '../base/BaseBadge.vue'
 import BaseButton from '../base/BaseButton.vue'
 import BaseCard from '../base/BaseCard.vue'
@@ -190,6 +214,16 @@ function missingNames(set) {
 function missingEnv(setName) {
   const status = store.setResults[setName]?.result?.status
   return status?.prerequisites?.state === 'missing' ? status.prerequisites.missing_env : []
+}
+
+// The last assign's two warning lines: missing binaries from its delivery,
+// deprecated members from its member rows (present even when nothing was added).
+function setNotes(setName) {
+  const result = store.setResults[setName]?.result
+  return {
+    dependencies: dependencyText(result?.delivery, { env: false }),
+    deprecation: deprecationText(memberDeprecationReport(result?.status?.members)),
+  }
 }
 
 async function onAssign(setName) {

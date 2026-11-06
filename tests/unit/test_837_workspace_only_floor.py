@@ -644,7 +644,10 @@ class _SharingDb:
         return {"id": 1, "username": "owner", "email": "owner@example.com"}
 
     def share_agent(self, agent_name, owner, email):
-        return {"id": 1, "agent_name": agent_name, "shared_with_email": email}
+        from datetime import datetime, timezone
+        from database import AgentShare
+        return AgentShare(id=1, agent_name=agent_name, shared_with_email=email, shared_by_id=1,
+                          shared_by_email="owner@example.com", created_at=datetime.now(timezone.utc))
 
     def get_setting_value(self, key, default=None):
         return "true" if key == "email_auth_enabled" else default
