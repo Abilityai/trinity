@@ -225,8 +225,8 @@
               <A2aPanel :agent-name="agent.name" :notify="showNotification" />
             </div>
 
-            <!-- Sharing Tab Content -->
-            <div v-if="activeTab === 'sharing' && agent.can_share">
+            <!-- Channels Tab Content (ent#225: formerly Sharing) -->
+            <div v-if="activeTab === 'channels' && agent.can_share">
               <SharingPanel
                 :agent-name="agent.name"
                 :shares="agent.shares"
@@ -358,7 +358,7 @@
                   <ChannelsPane
                     v-else-if="section === 'channels'"
                     :agent-name="agent.name"
-                    :has-sharing-tab="visibleTabIds.includes('sharing')"
+                    :has-channels-tab="visibleTabIds.includes('channels')"
                     @navigate-tab="handleOverviewNavigate"
                   />
                   <IntegrationsPane
@@ -1652,7 +1652,7 @@ onActivated(async () => {
   // reconcileDeepLinkVisibility reads `deepLinkedTab`, acts, and clears it — so
   // running it here, before onMounted's awaits have loaded the agent, would
   // evaluate `visibleTabs` against `agent.value === null`, decide that
-  // ?tab=sharing / ?tab=brain are "not visible", fall back to Overview, and
+  // ?tab=channels / ?tab=brain are "not visible", fall back to Overview, and
   // clear the flag so onMounted's own later call becomes a no-op. That
   // regresses #2130 and #2153 and no request-count assertion would see it.
   if (isInitialActivation) return

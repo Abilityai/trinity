@@ -1,11 +1,17 @@
 <template>
   <div class="p-6 space-y-8">
-    <!-- Framing: Google-Docs-style "share this agent" (trinity-enterprise#18) -->
+    <!-- Framing (trinity-enterprise#18, #225): this tab is for outsiders; people
+         the agent is shared with by email are in Settings › People. -->
     <div>
-      <h3 class="text-lg font-medium text-gray-900 dark:text-white">Share this agent</h3>
+      <h3 class="text-lg font-medium text-gray-900 dark:text-white">Channels</h3>
       <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
         Let external clients reach this agent through channels — Slack, Telegram, WhatsApp, voice, and public links.
-        Trinity <strong>operators</strong> (your teammates) are managed on the <span class="font-medium">Access</span> tab.
+        Your teammates are managed in
+        <router-link
+          :to="{ query: { ...$route.query, tab: 'settings', section: 'people' } }"
+          class="font-medium text-action-primary-600 hover:text-action-primary-700 dark:text-action-primary-400 dark:hover:text-action-primary-300"
+          data-testid="channels-people-link"
+        >Settings › People</router-link>.
       </p>
     </div>
 
