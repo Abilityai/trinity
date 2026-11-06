@@ -13,13 +13,12 @@ subscription is assigned, ANTHROPIC_API_KEY is removed from the container.
 import asyncio
 import logging
 import os
-import traceback
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from typing import Optional, List
 
 from models import SubscriptionHeadroomHistory, SubscriptionRegistration, SubscriptionTokenTest, User
 from database import db
-from utils.credential_sanitizer import redact_url_userinfo, sanitize_text
+from utils.log_masking import masked_traceback
 from dependencies import (
     get_current_user, assert_admin, assert_agent_access, assert_agent_owner,
     is_fleet_admin, principal_reach, require_interactive, require_person,
@@ -162,13 +161,7 @@ async def register_subscription(
     except Exception as e:
         # #4284: the body carries the token, and a DB error can echo its bound
         # parameters — mask it in the logged traceback (hence no exc_info).
-        trace = "".join(traceback.format_exception(e))
-        if payload.token:
-            trace = trace.replace(payload.token, "***")
-        logger.error(
-            "Failed to register subscription: %s",
-            sanitize_text(redact_url_userinfo(trace)),
-        )
+        logger.error("Failed to register subscription: %s", masked_traceback(e, payload.token))
         raise HTTPException(
             status_code=500,
             detail=f"Failed to register subscription ({e.__class__.__name__} — details in backend logs)",

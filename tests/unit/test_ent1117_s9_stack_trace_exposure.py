@@ -26,6 +26,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import socket
 import sys
 import types
 from types import SimpleNamespace
@@ -47,6 +49,16 @@ SUB_TOKEN = "sk-ant-oat01-s9faketokenAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 SLACK_SECRET = "s9-fake-slack-client-secret-value-0001"
 SLACK_SIGNING = "s9-fake-slack-signing-secret-value-0002"
 SLACK_APP_TOKEN = "xapp-1-s9-fake-app-token-value-0003"
+# Held values pasted with a line break. `sanitize_text` recognises at most the
+# head of each (pinned by the first test below), so only the held-value mask
+# keeps the tail out of the log, whatever form the exception renders it in.
+KEY_TAIL = "T" * 24 + "keytailZ"
+SPLIT_KEY = "sk-ant-api03-" + "K" * 24 + "\n" + KEY_TAIL
+PAT_TAIL = "Q" * 24 + "pattailZ"
+SPLIT_PAT = "ghp_" + "P" * 36 + "\n" + PAT_TAIL
+TOKEN_TAIL = "O" * 24 + "subtailZ"
+SPLIT_SUB_TOKEN = "sk-ant-oat01-" + "S" * 24 + "\n" + TOKEN_TAIL
+_REAL_ASYNC_CLIENT = httpx.AsyncClient
 
 
 def _run(coro):
@@ -66,6 +78,28 @@ def _log_text(caplog) -> str:
     traceback included, so `exc_info=True` records count."""
     fmt = logging.Formatter("%(name)s %(levelname)s %(message)s")
     return "\n".join(fmt.format(r) for r in caplog.records)
+
+
+def _pieces(held: str) -> list[str]:
+    """The held value plus every run of 8+ characters that no escaping
+    rewrites: none of them may appear where the value must not."""
+    return [held, *re.findall(r"[A-Za-z0-9_.~-]{8,}", held)]
+
+
+def _assert_traceback_logged(caplog, prefix: str) -> None:
+    """The record this site writes carries the traceback, not only `str(e)`
+    (an `exc_info=True` record, or a masked traceback in the message)."""
+    fmt = logging.Formatter("%(message)s")
+    hits = [fmt.format(r) for r in caplog.records if r.getMessage().startswith(prefix)]
+    assert hits, f"no log record starts with {prefix!r}"
+    assert any("Traceback (most recent call last)" in h for h in hits), hits
+
+
+def test_the_split_values_are_not_recognised_by_sanitize_text():
+    from utils.credential_sanitizer import sanitize_text
+
+    for tail in (KEY_TAIL, PAT_TAIL, TOKEN_TAIL, SLACK_SECRET, SLACK_SIGNING, SLACK_APP_TOKEN):
+        assert tail in sanitize_text(f"x {tail} y")
 
 
 def _live(name: str):
@@ -148,6 +182,7 @@ def test_public_stream_error_frame_is_the_fixed_visitor_sentence(monkeypatch, ca
     assert "RemoteProtocolError" not in "".join(chunks)
     logs = _log_text(caplog)
     assert SENTINEL in logs and "RemoteProtocolError" in logs
+    _assert_traceback_logged(caplog, "[PublicStream] Error streaming from agent")
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +212,7 @@ def test_chat_stream_error_frame_carries_no_raw_message(monkeypatch, caplog):
     assert not frames[0].get("retryable")
     assert frames[-1] == {"type": "stream_end"}
     assert SENTINEL in _log_text(caplog)
+    _assert_traceback_logged(caplog, "[Stream] Error streaming from agent")
 
 
 # ---------------------------------------------------------------------------
@@ -198,6 +234,7 @@ def test_agent_info_message_carries_no_raw_message(monkeypatch, caplog):
     assert "RuntimeError" in out["message"]
     assert out["status"] == "running"
     assert SENTINEL in _log_text(caplog)
+    _assert_traceback_logged(caplog, "Could not fetch template info for agent")
 
 
 def test_agent_playbooks_500_detail_carries_no_raw_message(monkeypatch, caplog):
@@ -217,6 +254,7 @@ def test_agent_playbooks_500_detail_carries_no_raw_message(monkeypatch, caplog):
     assert ei.value.detail.startswith("Failed to fetch playbooks")
     assert "RuntimeError" in ei.value.detail
     assert SENTINEL in _log_text(caplog)
+    _assert_traceback_logged(caplog, "Failed to fetch playbooks for agent")
 
 
 def test_agent_playbooks_named_refusal_is_untouched(monkeypatch):
@@ -264,6 +302,7 @@ def test_telegram_test_bot_message_carries_no_raw_message_or_token(monkeypatch, 
     assert SENTINEL in logs, "the detail must reach the backend log"
     assert BOT_TOKEN not in logs, "the bot token must be masked in the log"
     assert BOT_TOKEN.split(":", 1)[1] not in logs
+    _assert_traceback_logged(caplog, "Could not ")
 
 
 def test_telegram_configure_502_detail_carries_no_raw_message_or_token(monkeypatch, caplog):
@@ -349,6 +388,7 @@ def test_restart_agent_result_carries_no_raw_message(sub_env, caplog):
     out = _run(sub_env.auto_switch._restart_agent("a1"))
     _assert_failed_restart(out)
     assert SENTINEL in _log_text(caplog)
+    _assert_traceback_logged(caplog, "[SUB-003] Failed to restart agent")
 
 
 def test_assign_mode_change_restart_failure_carries_no_raw_message(sub_env, caplog):
@@ -363,6 +403,7 @@ def test_assign_mode_change_restart_failure_carries_no_raw_message(sub_env, capl
     assert out["injection_result"]["status"] == "failed"
     assert "RuntimeError" in out["injection_result"]["error"]
     assert SENTINEL in _log_text(caplog)
+    _assert_traceback_logged(caplog, "Failed to restart agent 'a1' for subscription")
 
 
 def test_assign_hot_reload_fallback_restart_failure_carries_no_raw_message(sub_env, monkeypatch, caplog):
@@ -395,17 +436,20 @@ def test_clear_restart_failure_carries_no_raw_message(sub_env, caplog):
     assert SENTINEL not in _blob(out), out
     _assert_failed_restart(out["restart_result"])
     assert SENTINEL in _log_text(caplog)
+    _assert_traceback_logged(caplog, "Failed to restart agent 'a1' after subscription removal")
 
 
-def test_register_500_detail_carries_no_raw_message_or_token(sub_env, monkeypatch, caplog):
+@pytest.mark.parametrize("token", [SUB_TOKEN, SPLIT_SUB_TOKEN], ids=["token", "token-with-line-break"])
+def test_register_500_detail_carries_no_raw_message_or_token(sub_env, monkeypatch, caplog, token):
     monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", "0" * 64)
     sub_env.db.get_user_by_username.return_value = {"id": 1}
+    # A DB error renders its bound parameters as a repr (the SQLAlchemy shape).
     sub_env.db.create_subscription.side_effect = RuntimeError(
-        f"{SENTINEL} [parameters: ('s', '{SUB_TOKEN}')]")
+        f"{SENTINEL} [parameters: {('s', token)!r}]")
     ss = _live("services.subscription_service")
     monkeypatch.setattr(ss, "is_claude_auth_configured", lambda: True)
     db_models = _live("db_models")
-    payload = db_models.SubscriptionCredentialCreate(name="s", token=SUB_TOKEN)
+    payload = db_models.SubscriptionCredentialCreate(name="s", token=token)
     caplog.set_level(logging.ERROR)
 
     with pytest.raises(HTTPException) as ei:
@@ -413,11 +457,15 @@ def test_register_500_detail_carries_no_raw_message_or_token(sub_env, monkeypatc
             payload=payload, http_request=MagicMock(), current_user=_admin()))
 
     assert ei.value.status_code == 500
-    assert SENTINEL not in ei.value.detail and SUB_TOKEN not in ei.value.detail
+    assert SENTINEL not in ei.value.detail
+    assert not any(p in ei.value.detail for p in _pieces(token))
     assert ei.value.detail.startswith("Failed to register subscription")
     assert "RuntimeError" in ei.value.detail
     logs = _log_text(caplog)
-    assert SENTINEL in logs and SUB_TOKEN not in logs
+    assert SENTINEL in logs
+    leaked = [p for p in _pieces(token) if p in logs]
+    assert not leaked, f"the token must be masked in the log: {leaked}"
+    _assert_traceback_logged(caplog, "Failed to register subscription")
 
 
 def test_register_value_error_stays_a_400_with_its_message(sub_env, monkeypatch):
@@ -453,6 +501,7 @@ def test_agent_auth_status_500_detail_carries_no_raw_message(sub_env, monkeypatc
     assert SENTINEL not in ei.value.detail
     assert "RuntimeError" in ei.value.detail
     assert SENTINEL in _log_text(caplog)
+    _assert_traceback_logged(caplog, "Failed to get auth status for agent")
 
 
 # ---------------------------------------------------------------------------
@@ -474,18 +523,121 @@ def _request():
     return r
 
 
-def _assert_clean(text: str, held: str | None = None):
+def _assert_clean(text: str, held: str | None = None, cls: str = "RuntimeError"):
     assert SENTINEL not in text, text
     if held:
-        assert held not in text, text
-    assert "RuntimeError" in text, text
+        assert not [p for p in _pieces(held) if p in text], text
+    assert cls in text, text
 
 
-def _assert_logged(caplog, held: str | None = None):
+def _assert_logged(caplog, held: str | None = None, detail: str = SENTINEL):
     logs = _log_text(caplog)
-    assert SENTINEL in logs, "the detail must reach the backend log"
+    assert detail in logs, "the detail must reach the backend log"
     if held:
-        assert held not in logs, "the credential must be masked in the log"
+        leaked = [p for p in _pieces(held) if p in logs]
+        assert not leaked, f"the credential must be masked in the log: {leaked}"
+
+
+@pytest.fixture
+def local_httpx(monkeypatch):
+    """Every `httpx.AsyncClient` the handler opens is a REAL client whose
+    requests go to a local listening socket. httpx and h11 then validate the
+    handler's own headers, so an illegal header value raises the real error
+    (`Illegal header value b'...'`) through the real `except` branch. The
+    socket's backlog completes the handshake; nothing is ever answered."""
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(8)
+    port = srv.getsockname()[1]
+
+    class _ToLocal(httpx.AsyncBaseTransport):
+        def __init__(self):
+            self._inner = httpx.AsyncHTTPTransport()
+
+        async def handle_async_request(self, request):
+            request.url = request.url.copy_with(scheme="http", host="127.0.0.1", port=port)
+            return await self._inner.handle_async_request(request)
+
+        async def aclose(self):
+            await self._inner.aclose()
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda *a, **k: _REAL_ASYNC_CLIENT(*a, transport=_ToLocal(), **k))
+    yield
+    srv.close()
+
+
+def _real_header_error(name: str, value: str) -> Exception:
+    """The exception a real httpx client raises for this header value."""
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+
+    async def go():
+        async with _REAL_ASYNC_CLIENT() as client:
+            await client.get(f"http://127.0.0.1:{port}/", headers={name: value}, timeout=2)
+
+    try:
+        _run(go())
+    except Exception as e:  # noqa: BLE001 — the error under test
+        return e
+    finally:
+        srv.close()
+    raise AssertionError("httpx accepted the header")
+
+
+def test_anthropic_key_with_a_line_break_logs_no_part_of_the_key(cr, local_httpx, caplog):
+    """A key pasted with a line break passes the prefix-only format check and
+    reaches the request header; httpx refuses it and echoes it as a bytes repr."""
+    caplog.set_level(logging.WARNING)
+    out = _run(cr.test_anthropic_key(
+        body=cr.ApiKeyTest(api_key=SPLIT_KEY), request=_request(), current_user=_admin()))
+    assert out["valid"] is False
+    _assert_clean(_blob(out), SPLIT_KEY, cls="LocalProtocolError")
+    _assert_logged(caplog, SPLIT_KEY, detail="Illegal header value")
+    _assert_traceback_logged(caplog, "Error testing key")
+
+
+def test_github_pat_with_a_line_break_logs_no_part_of_the_pat(cr, local_httpx, caplog):
+    caplog.set_level(logging.WARNING)
+    out = _run(cr.test_github_pat(
+        body=cr.ApiKeyTest(api_key=SPLIT_PAT), request=_request(), current_user=_admin()))
+    assert out["valid"] is False
+    _assert_clean(_blob(out), SPLIT_PAT, cls="LocalProtocolError")
+    _assert_logged(caplog, SPLIT_PAT, detail="Illegal header value")
+    _assert_traceback_logged(caplog, "Error testing token")
+
+
+def test_github_pat_propagation_header_error_logs_no_part_of_the_pat(cr, monkeypatch, caplog):
+    monkeypatch.setattr(cr, "set_secret_setting", lambda k, v: None)
+    prop = _live("services.github_pat_propagation_service")
+    exc = _real_header_error("Authorization", f"Bearer {SPLIT_PAT.strip()}")
+
+    async def _boom(key):
+        raise exc
+
+    monkeypatch.setattr(prop, "propagate_github_pat", _boom)
+    caplog.set_level(logging.WARNING)
+
+    out = _run(cr.update_github_pat(
+        body=cr.ApiKeyUpdate(api_key=SPLIT_PAT), request=_request(), current_user=_admin()))
+
+    assert out["success"] is True and out["propagation"]["error"]
+    _assert_clean(_blob(out), SPLIT_PAT, cls="LocalProtocolError")
+    _assert_logged(caplog, SPLIT_PAT, detail="Illegal header value")
+
+
+def test_a_short_held_value_does_not_garble_the_log(cr, monkeypatch, caplog):
+    def _boom(*a, **k):
+        raise RuntimeError("database is locked at host db-primary")
+
+    monkeypatch.setattr(cr, "db", MagicMock())
+    monkeypatch.setattr(cr, "set_secret_setting", _boom)
+    caplog.set_level(logging.WARNING)
+    with pytest.raises(HTTPException):
+        _run(cr.update_slack_settings(
+            body=cr.SlackSettingsUpdate(client_secret="a"), request=_request(), current_user=_admin()))
+    assert "database is locked at host db-primary" in _log_text(caplog)
 
 
 def test_anthropic_key_test_error_carries_no_raw_message_or_key(cr, monkeypatch, caplog):
@@ -536,8 +688,9 @@ def _raise(*a, **k):
 
 
 def _raise_with(held):
+    # Raw, and as a repr: a DB or client error renders its arguments either way.
     def _f(*a, **k):
-        raise RuntimeError(f"{SENTINEL} {held}")
+        raise RuntimeError(f"{SENTINEL} {held} args=({held!r},)")
     return _f
 
 
@@ -548,9 +701,9 @@ def _case_api_keys_status(cr, monkeypatch):
 
 def _case_update_anthropic(cr, monkeypatch):
     monkeypatch.setattr(cr, "is_claude_auth_configured", lambda: True)
-    monkeypatch.setattr(cr, "set_secret_setting", _raise_with(ANTHROPIC_KEY))
-    body = cr.ApiKeyUpdate(api_key=ANTHROPIC_KEY)
-    return cr.update_anthropic_key(body=body, request=_request(), current_user=_admin()), ANTHROPIC_KEY, "Failed to update API key"
+    monkeypatch.setattr(cr, "set_secret_setting", _raise_with(SPLIT_KEY))
+    body = cr.ApiKeyUpdate(api_key=SPLIT_KEY)
+    return cr.update_anthropic_key(body=body, request=_request(), current_user=_admin()), SPLIT_KEY, "Failed to update API key"
 
 
 def _case_delete_anthropic(cr, monkeypatch):
@@ -559,9 +712,9 @@ def _case_delete_anthropic(cr, monkeypatch):
 
 
 def _case_update_github(cr, monkeypatch):
-    monkeypatch.setattr(cr, "set_secret_setting", _raise_with(GITHUB_PAT))
-    body = cr.ApiKeyUpdate(api_key=GITHUB_PAT)
-    return cr.update_github_pat(body=body, request=_request(), current_user=_admin()), GITHUB_PAT, "Failed to update GitHub PAT"
+    monkeypatch.setattr(cr, "set_secret_setting", _raise_with(SPLIT_PAT))
+    body = cr.ApiKeyUpdate(api_key=SPLIT_PAT)
+    return cr.update_github_pat(body=body, request=_request(), current_user=_admin()), SPLIT_PAT, "Failed to update GitHub PAT"
 
 
 def _case_delete_github(cr, monkeypatch):
@@ -631,6 +784,7 @@ def test_settings_credentials_500_detail_carries_no_raw_message(cr, monkeypatch,
     _assert_logged(caplog, held)
     if held == SLACK_SECRET:
         assert SLACK_SIGNING not in _log_text(caplog)
+    _assert_traceback_logged(caplog, prefix)
 
 
 def test_update_anthropic_key_format_refusal_is_untouched(cr, monkeypatch):

@@ -18,14 +18,13 @@ Authenticated Endpoints:
 """
 
 import logging
-import traceback
 from typing import Optional, List
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Depends
 
 from database import db
-from utils.credential_sanitizer import redact_url_userinfo, sanitize_text
+from utils.log_masking import masked_traceback
 from services import channel_history, idempotency_service, rate_limiter
 from services.settings_service import get_proactive_rate_limit
 from services.telegram_group_context import flag_from_bot_info, group_context_status  # ent#600
@@ -51,24 +50,6 @@ from models import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _log_telegram_failure(what: str, e: BaseException, *held: Optional[str]) -> None:
-    """Log a failed Telegram API call with the bot token masked.
-
-    py/stack-trace-exposure (ent#1117, the #1917 pattern): callers answer with
-    a fixed text plus the exception class name, and the detail goes here. The
-    bot token is a path segment of every Telegram API URL, so any exception
-    that echoes the URL carries it; the traceback is formatted here with every
-    ``held`` value masked, rather than passed as ``exc_info``, so the token
-    does not move from the response into the log.
-    """
-    trace = "".join(traceback.format_exception(e))
-    for value in held:
-        for form in {value or "", (value or "").strip()}:
-            if form:
-                trace = trace.replace(form, "***")
-    logger.error("%s: %s", what, sanitize_text(redact_url_userinfo(trace)))
 
 
 # =========================================================================
@@ -238,7 +219,9 @@ async def configure_telegram_bot(
             bot_id = str(bot_info.get("id"))
 
     except httpx.HTTPError as e:
-        _log_telegram_failure("Could not reach Telegram API", e, config.bot_token)
+        # py/stack-trace-exposure (ent#1117): the bot token is a path segment
+        # of every Telegram API URL, so the logged traceback masks it.
+        logger.error("Could not reach Telegram API: %s", masked_traceback(e, config.bot_token))
         raise HTTPException(
             status_code=502,
             detail=f"Could not reach Telegram API ({e.__class__.__name__} — details in backend logs)",
@@ -351,7 +334,7 @@ async def test_telegram_bot(
                 else:
                     return {"ok": False, "message": result.get("description", "Unknown error")}
         except Exception as e:
-            _log_telegram_failure("Could not verify the bot", e, bot_token)
+            logger.error("Could not verify the bot: %s", masked_traceback(e, bot_token))
             return {
                 "ok": False,
                 "message": f"Could not verify the bot ({e.__class__.__name__} — details in backend logs)",
@@ -374,7 +357,7 @@ async def test_telegram_bot(
             else:
                 return {"ok": False, "message": result.get("description", "Failed to send")}
     except Exception as e:
-        _log_telegram_failure("Could not send the test message", e, bot_token)
+        logger.error("Could not send the test message: %s", masked_traceback(e, bot_token))
         return {
             "ok": False,
             "message": f"Could not send the test message ({e.__class__.__name__} — details in backend logs)",

@@ -9,7 +9,6 @@ import json
 import logging
 import os
 import re
-import traceback
 import httpx
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse
@@ -46,7 +45,7 @@ from dependencies import get_current_user, assert_admin
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services import operator_intake_service, platform_keys_service, telemetry_sharing_service
 from services.secret_settings import SecretSettingValueError
-from utils.credential_sanitizer import redact_url_userinfo, sanitize_text
+from utils.log_masking import masked_traceback
 
 from services.subscription_service import (
     connect_agents_to_first_credential,
@@ -128,12 +127,7 @@ def _log_failure(what: str, e: BaseException, *held: Optional[str]) -> None:
     text plus the class name; the detail is logged here. An exception can echo
     the credential the handler holds (an httpx header error repeats the header),
     so the traceback is logged with every ``held`` value masked, not exc_info."""
-    trace = "".join(traceback.format_exception(e))
-    for value in held:
-        for form in {value or "", (value or "").strip()}:
-            if form:
-                trace = trace.replace(form, "***")
-    logger.error("%s: %s", what, sanitize_text(redact_url_userinfo(trace)))
+    logger.error("%s: %s", what, masked_traceback(e, *held))
 
 
 def _server_error(what: str, e: BaseException, *held: Optional[str]) -> HTTPException:
