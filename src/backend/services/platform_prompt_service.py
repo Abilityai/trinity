@@ -819,10 +819,9 @@ async def summarize_user_memory_background(
                 f"[MemSummarize] Dropped {len(dropped)} line(s) from the conversation_summary "
                 f"for {user_email} on {agent_name}: rules={sorted(set(dropped))}"
             )
-        if new_summary:
-            db.update_public_user_memory_conversation_summary(
-                agent_name, user_email, new_summary
-            )
+        if new_summary and db.update_public_user_memory_conversation_summary(
+            agent_name, user_email, new_summary, expected_previous=existing_summary  # ent#962: never over an undo
+        ):
             logger.info(
                 f"[MemSummarize] Updated conversation_summary for {user_email} "
                 f"on {agent_name} ({len(new_summary)} chars)"

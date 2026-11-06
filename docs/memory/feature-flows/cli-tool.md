@@ -141,6 +141,8 @@ Response: {"success": true, "message": "Email added to the access whitelist", "a
 - `--format table` (default): Rich table rendering
   - Lists → column headers from dict keys
   - Dicts → key/value two-column table
+  - Every cell is a `rich.text.Text`, never markup: values are server data, and a plain string with `[/]` (a library author's description or successor) raised `MarkupError` and took the command down (ent#736)
+- `trinity skills list` builds its table rows in `trinity_cli/skill_rows.py` (stdlib only, so the backend unit job can run it by path): name, description (60 chars), category, and `deprecated` — `yes`, `→ <successor>` (40 chars) or blank (ent#736); `--format json` is the listing unchanged
 - `--format json`: `json.dumps(data, indent=2)` for piping/scripting
 
 ## Command Map

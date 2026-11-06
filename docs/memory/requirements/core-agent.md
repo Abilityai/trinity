@@ -2145,7 +2145,10 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   is tuned against (90-day retention per agent).
 - **Owner view**: `GET/DELETE /api/agents/{name}/retrieval-memory/facts…` and
   `GET …/retrieval-memory/events` (owner + human-only); forget is a recorded
-  soft delete.
+  soft delete. A person's facts are browsed per person in Agent Settings →
+  Person memory (trinity-enterprise#962, MEM-001's owner view): their live
+  facts, each fact's journal (`events?fact_id=`), Forget behind a confirm, and
+  the owner search scoped to that person (`user_email`).
 - **Flow**: `docs/memory/feature-flows/retrieval-memory.md`
 
 ## 6. Activity Monitoring
@@ -4444,3 +4447,5 @@ to localStorage in the clear.
   which `room_is_user_facing` counts as internal (#363).
 - **FR-7 — "New room" is its own door.** Beside New chat; it opens the agent picker in room
   words and always creates a room, even with one agent.
+- **What a collaborator reads**: the room payload and list drop `cost`, `max_cost_usd`, each message's `execution_id`, and other participants' session and cursor fields. A moderator, an admin and an agent keep them. A collaborator keeps their own cursor.
+- **A reply outlives its waker**: an engine reply lands even if the person who woke it has since left or been removed. That person still cannot read the room.
