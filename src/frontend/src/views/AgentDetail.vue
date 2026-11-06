@@ -225,15 +225,6 @@
               <A2aPanel :agent-name="agent.name" :notify="showNotification" />
             </div>
 
-            <!-- Sharing Tab Content -->
-            <div v-if="activeTab === 'sharing' && agent.can_share">
-              <SharingPanel
-                :agent-name="agent.name"
-                :shares="agent.shares"
-                @agent-updated="loadAgent"
-              />
-            </div>
-
             <!-- Permissions Tab Content -->
             <div v-if="activeTab === 'permissions' && agent.can_share">
               <PermissionsPanel :agent-name="agent.name" :agent-status="agent.status" />
@@ -358,14 +349,15 @@
                   <ChannelsPane
                     v-else-if="section === 'channels'"
                     :agent-name="agent.name"
-                    :has-sharing-tab="visibleTabIds.includes('sharing')"
-                    @navigate-tab="handleOverviewNavigate"
+                    :shares="agent.shares"
+                    @agent-updated="loadAgent"
                   />
                   <IntegrationsPane
                     v-else-if="section === 'integrations'"
                     :agent-name="agent.name"
                     :visible-tab-ids="visibleTabIds"
                     :notify="showNotification"
+                    :is-system="!!agent.is_system"
                     @navigate-tab="handleOverviewNavigate"
                   />
                   <StoragePane
@@ -465,7 +457,6 @@ import AgentHeader from '../components/AgentHeader.vue'
 import BrainPanel from '../components/BrainPanel.vue'
 import AvatarGenerateModal from '../components/AvatarGenerateModal.vue'
 import LogsPanel from '../components/LogsPanel.vue'
-import SharingPanel from '../components/SharingPanel.vue'
 import PermissionsPanel from '../components/PermissionsPanel.vue'
 import FilesPanel from '../components/FilesPanel.vue'
 import TerminalPanelContent from '../components/TerminalPanelContent.vue'
@@ -1652,7 +1643,7 @@ onActivated(async () => {
   // reconcileDeepLinkVisibility reads `deepLinkedTab`, acts, and clears it — so
   // running it here, before onMounted's awaits have loaded the agent, would
   // evaluate `visibleTabs` against `agent.value === null`, decide that
-  // ?tab=sharing / ?tab=brain are "not visible", fall back to Overview, and
+  // ?tab=permissions / ?tab=brain are "not visible", fall back to Overview, and
   // clear the flag so onMounted's own later call becomes a no-op. That
   // regresses #2130 and #2153 and no request-count assertion would see it.
   if (isInitialActivation) return

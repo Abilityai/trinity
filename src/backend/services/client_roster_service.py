@@ -2,7 +2,7 @@
 
 Surfaces the external channel users (no Trinity account) who have messaged an
 agent, aggregated across channels into one roster. This is the read surface for
-the reframed Sharing tab; per-client controls (block/revoke/approve) are a
+Settings › Channels; per-client controls (block/revoke/approve) are a
 separate follow-up (#21).
 
 Roster v1 covers the channels that record the full

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * trinity-enterprise#737 — the Sharing tab's pending access requests show the
+ * trinity-enterprise#737 — the pending access requests show the
  * requester as a person, not a string.
  *
  * Mounted against stubbed transports; channel panels are stubbed. Pinned:
@@ -12,8 +12,8 @@
  *    identity says "Identity not captured" — never a blank;
  *  - Approve still decides the request by its id.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { mount, flushPromises } from '@vue/test-utils'
+import { describe, it, expect, vi, beforeEach , afterEach } from 'vitest'
+import { mount, flushPromises, DOMWrapper } from '@vue/test-utils'
 import { setActivePinia, createPinia } from 'pinia'
 
 const ax = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), put: vi.fn(), delete: vi.fn() }))
@@ -21,7 +21,7 @@ vi.mock('axios', () => ({ default: ax }))
 const api = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() }))
 vi.mock('@/api', () => ({ default: api }))
 
-import SharingPanel from '@/components/SharingPanel.vue'
+import WhoCanChat from '@/components/agent-settings/channels/WhoCanChat.vue'
 
 const AGENT = 'scout'
 const base = (over) => ({
@@ -44,6 +44,12 @@ const HANDLE_ONLY = () => base({ id: 'r2', email: 'dee@example.com', channel: 's
 const WEB = () => base({ id: 'r3', email: 'web@example.com', channel: 'web' })
 const OLD = () => base({ id: 'r4', email: 'old@example.com', channel: 'whatsapp' })
 
+const mounted = []
+afterEach(() => {
+  mounted.splice(0).forEach((w) => w.unmount())
+  document.body.innerHTML = ''
+})
+
 beforeEach(() => {
   setActivePinia(createPinia())
   Object.values(ax).forEach((f) => f.mockReset())
@@ -58,24 +64,16 @@ beforeEach(() => {
   api.get.mockResolvedValue({ data: {} })
 })
 
-const STUB = { template: '<div />' }
 async function render() {
-  const w = mount(SharingPanel, {
-    props: { agentName: AGENT },
-    global: {
-      stubs: {
-        ChannelDisclosure: STUB, ChannelConfigRow: STUB, PublicLinksPanel: STUB, SlackChannelPanel: STUB,
-        SlackAgentBotPanel: STUB, TelegramChannelPanel: STUB, WhatsAppChannelPanel: STUB,
-        VoipChannelPanel: STUB, ConnectorChannelPanel: STUB, PortalClientsPanel: STUB,
-        'router-link': { template: '<a><slot /></a>' },
-      },
-      mocks: { $route: { query: {} } },
-    },
-  })
+  const w = mount(WhoCanChat, { props: { agentName: AGENT }, attachTo: document.body })
   await flushPromises()
+  await w.get('[data-testid="channels-review"]').trigger('click')
+  await flushPromises()
+  mounted.push(w)
   return w
 }
-const row = (w, id) => w.find(`[data-testid="access-request-${id}"]`)
+// The list is in a dialog, teleported to <body>.
+const row = (_w, id) => new DOMWrapper(document.body).find(`[data-testid="access-request-${id}"]`)
 const text = (r, t) => r.find(`[data-testid="access-request-${t}"]`).text()
 
 describe('pending access requests name the person (ent#737)', () => {

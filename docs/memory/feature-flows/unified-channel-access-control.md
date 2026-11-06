@@ -495,7 +495,7 @@ These are co-located with the router (slight deviation from invariant #15) becau
 
 ## Frontend Layer (`src/frontend/src/components/SharingPanel.vue`)
 
-The Sharing tab on `AgentDetail.vue` already housed Team Sharing + Public Links. #311 prepends a new "Channel Access Policy" section.
+The Settings › Channels on `AgentDetail.vue` already housed Team Sharing + Public Links. #311 prepends a new "Channel Access Policy" section.
 
 ### Layout (lines 3-74)
 
@@ -605,12 +605,12 @@ Approving an access request inserts the email into `agent_sharing` so all future
 
 ### Test 1: Telegram `/login` happy path
 1. As an unverified Telegram user, DM the bot. **Expected**: free passthrough (no policy set yet).
-2. As owner via UI: Sharing tab → check "Require verified email". **Expected**: policy persisted.
+2. As owner via UI: Settings › Channels → check "Require verified email". **Expected**: policy persisted.
 3. DM the bot again. **Expected**: bot replies with `/login` instructions (`prompt_auth`).
 4. Send `/login alice@example.com`. **Expected**: bot replies "📧 Sent a 6-digit code"; email arrives.
 5. Send `/login 123456` (the code from the email). **Expected**: bot replies "✅ Verified as alice@example.com".
 6. Send a normal message. **Expected**: bot still replies "🔒 Your access request is pending approval".
-7. As owner: Sharing tab shows `alice@example.com` in pending requests. Click Approve.
+7. As owner: Settings › Channels shows `alice@example.com` in pending requests. Click Approve.
 8. As alice on Telegram: send another message. **Expected**: real agent response.
 
 ### Test 2: Open access

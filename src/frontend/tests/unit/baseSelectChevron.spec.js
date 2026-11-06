@@ -3,7 +3,7 @@
  *
  * The rest of the app already flips a chevron on open (ChatHistoryDropdown,
  * OverflowTabs, InfoPanel, and the disclosure rows in LoopsPanel / TasksPanel /
- * PortalAgentDetails / PortalDeliverables / ChannelDisclosure). Every one of
+ * PortalAgentDetails / PortalDeliverables). Every one of
  * those owns its open state in JS. A NATIVE <select>'s picker is drawn by the
  * platform and reports nothing to the page, so `:open` is the only hook there
  * is — which is why selects were the one control excluded from the idiom.

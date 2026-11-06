@@ -337,7 +337,7 @@ Each `update_id` is claimed once per bot in Redis (`SET NX`, 24 h TTL) — Teleg
 
 ### Component: `src/frontend/src/components/TelegramChannelPanel.vue`
 
-Self-contained panel rendered in the Agent Detail → Sharing tab via `SharingPanel.vue`. Mirrors the `SlackChannelPanel.vue` pattern.
+Self-contained panel rendered in the Agent Detail → **Settings › Channels** via `SharingPanel.vue`. Mirrors the `SlackChannelPanel.vue` pattern.
 
 **Props**: `agentName` (String, required)
 
@@ -382,7 +382,7 @@ binding = {
 - 502 → Telegram API unreachable
 - Generic fallback for unexpected errors
 
-### Integration: `src/frontend/src/components/SharingPanel.vue`
+### Integration: `src/frontend/src/components/agent-settings/channels/MessagingRows.vue`
 
 TelegramChannelPanel is imported and rendered between the Slack and Public Links sections:
 

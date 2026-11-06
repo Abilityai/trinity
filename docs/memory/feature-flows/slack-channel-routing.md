@@ -20,7 +20,7 @@ As a **platform admin**, I want Slack messages to go through the same execution 
 ## Entry Points
 
 - **Settings UI**: `src/frontend/src/views/Settings.vue` — Slack Integration section (transport + workspace install)
-- **Agent UI**: `src/frontend/src/components/SlackChannelPanel.vue` — per-agent channel binding in Sharing tab
+- **Agent UI**: `src/frontend/src/components/SlackChannelPanel.vue` — per-agent channel binding in Settings › Channels
 - **Legacy UI**: `src/frontend/src/components/PublicLinksPanel.vue:540` — "Connect Slack" button (per public link)
 - **API**: `POST /api/settings/slack/connect` — start Socket Mode transport
 - **API**: `POST /api/settings/slack/install` — platform-level OAuth (workspace install)
@@ -36,7 +36,7 @@ As a **platform admin**, I want Slack messages to go through the same execution 
   - "Install to Workspace" button → triggers platform OAuth → redirects to Slack → callback stores bot token → redirects to Settings with success notification
   - Connected workspaces list with bound agent badges
 
-### Agent Detail — Sharing Tab (Per-Agent)
+### Agent Detail — Settings › Channels (Per-Agent)
 - `SlackChannelPanel.vue` — Three states:
   - **Bound**: Shows `#channel-name`, workspace name, DM-default badge **or** "Make default" button (with hover tooltip explaining DM routing), and "Unbind" button. The Unbind button is **disabled** when this agent is the DM default *and* the workspace has other bound agents — promoting another agent first via the "Make default" button on its panel is required (#584).
   - **Unbound**: "Create Slack Channel" button → creates channel in Slack + binds to agent
@@ -230,7 +230,7 @@ Both columns are dual-track migrated (SQLite `public_chat_messages_sender` + Ale
 ### Test Steps
 
 #### 1. Connect Agent to Slack
-**Action**: Agent Detail → Sharing → "Connect Slack"
+**Action**: Agent Detail → **Settings › Channels** → "Connect Slack"
 **Expected**: Channel `#agent-name` created in Slack workspace, binding in DB
 **Verify**: `slack_channel_agents` table has entry
 
@@ -282,7 +282,7 @@ Both columns are dual-track migrated (SQLite `public_chat_messages_sender` + Ale
 - [ ] Redirect URL uses `PUBLIC_CHAT_URL` (must be configured for callback to work)
 
 #### 10. Agent Sharing — Create Slack Channel
-**Action**: Agent Detail → Sharing tab → click "Create Slack Channel"
+**Action**: Agent Detail → **Settings › Channels** → click "Create Slack Channel"
 **Expected**: Channel `#agent-name` created in Slack workspace, panel shows bound state with channel name
 **Verify**:
 - [ ] `GET /api/agents/{name}/slack/channel` returns `{bound: true, channel_name: "agent-name"}`
@@ -388,7 +388,7 @@ A token that doesn't start with `xapp-` (operator pasted a `xoxb-` bot token by 
 - [ ] Fresh top-level @mention → brand-new session, empty history (#903)
 - [ ] Multi-participant thread (Alice + Bob) → shared context; agent's replay shows `Alice:` / `Bob:`; Bob's MEM-001 memory contains no Alice content (#903)
 - [ ] DM continuity: a user's DMs stay on one session across messages/threads (#903)
-- [ ] Non-owner views Sharing tab → SlackChannelPanel shows "Only the agent owner can manage Slack channel bindings"
+- [ ] Non-owner views Settings › Channels → SlackChannelPanel shows "Only the agent owner can manage Slack channel bindings"
 - [ ] `CREDENTIAL_ENCRYPTION_KEY` mismatch → bot token decryption fails → Slack API calls fail (logged, no crash)
 
 **Unit-test coverage (#903):** `tests/unit/test_903_slack_session_thread.py` (parser-driven session-key cases: thread isolation, fresh-mention clean history, DM continuity, F-TEAMID) + `tests/unit/test_903_public_chat_sender.py` (attribution, sender-filtered memory, race guard, schema accessor).

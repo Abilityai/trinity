@@ -64,7 +64,7 @@ no platform-level Twilio account required.
   - `POST /api/agents/{name}/whatsapp/test` — verify credentials / send test
 - **Backend router** (public, HMAC-verified):
   - `POST /api/whatsapp/webhook/{webhook_secret}` — Twilio inbound webhook
-- **Frontend**: Agent Detail → Sharing tab → `WhatsAppChannelPanel.vue`
+- **Frontend**: Agent Detail → **Settings › Channels** → `WhatsAppChannelPanel.vue`
 
 ## Components
 
@@ -438,7 +438,7 @@ CREATE INDEX idx_whatsapp_chat_links_binding ON whatsapp_chat_links(binding_id);
 2. Copy AccountSid + AuthToken
 3. Sandbox sender is `whatsapp:+14155238886` (shared across Twilio users)
 4. Users opt in by sending `join <sandbox-keyword>` from their phone
-5. In Trinity: Agent Detail → Sharing → WhatsApp → paste credentials +
+5. In Trinity: Agent Detail → **Settings › Channels** → WhatsApp → paste credentials +
    `whatsapp:+14155238886` as from-number
 6. Copy the webhook URL from Trinity → paste into Twilio Sandbox → "When a
    message comes in" (HTTP POST)

@@ -8,7 +8,7 @@ Explicit permission model controlling which agents can communicate with which. R
 
 ![Agent Permissions tab showing the agent collaboration list with Allow All / Allow None controls](../../screenshots/agent-permissions.png)
 
-1. Open the detail page of the agent that will *make* the calls and click its **Permissions** tab (next to **Sharing**). The tab is shown to the agent's owner and admins, and never on the system agent.
+1. Open the detail page of the agent that will *make* the calls and click its **Permissions** tab. The tab is shown to the agent's owner and admins, and never on the system agent.
 2. You will see a list of the other agents in the system.
 3. Toggle each agent to allow or deny the current agent calling it. You can only grant access to agents you can access yourself. **Allow All** and **Allow None** set every row at once. Click **Save Permissions** to apply.
 4. Permissions are directional: allowing Agent A to call Agent B does **not** allow Agent B to call Agent A. Each direction must be granted separately.

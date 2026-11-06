@@ -27,7 +27,7 @@ As an agent user (web, Slack, Telegram, WhatsApp), I want the agent to produce a
 ## Entry Points
 
 - **MCP tool**: `share_file({ filename, display_name?, expires_in?, execution_id?, audience_email?, dedup_label? })` — from inside any agent with file sharing enabled
-- **Owner UI**: Agent Detail → Sharing tab → File Sharing panel
+- **Owner UI**: Agent Detail → **Settings › Channels** → File Sharing panel
 - **Owner API**: `POST /api/agents/{name}/shared-files`
 - **Public download**: `GET /api/files/{file_id}?sig={token}`
 
@@ -190,7 +190,7 @@ The email is whatever the binding verified for that number (`db.get_whatsapp_ver
 |------|------|-------------|
 | `src/frontend/src/components/FileSharingPanel.vue` | 1-264 | Toggle, restart-required banner, quota, table (filename/for/size/expires/downloads), Copy URL + Revoke buttons, empty state. The **For** column says who each file is for — a label plus a second line that says why — rendered through `describeSharedFileAudience(file)`, derived ONCE per row by the `rows` computed (`v-for="{ file, audience } in rows"`, #2955) |
 | `src/frontend/src/utils/sharedFileAudience.js` | 38 | `describeSharedFileAudience(file)` → `{ label, detail, ownerOnly }`, pure. An email → the email, with the channel (`WhatsApp +15555550142`) or the reason (`turn` → "The person in the conversation", `override` → "Addressed by the agent") beneath; a channel identity alone → the channel, "No verified email — not in any Files tab"; neither → "Owner only", with `none` ("No person in this turn"), `ambiguous` ("Couldn't tell which conversation it came from") and a pre-column row ("Shared before files had an addressee") kept apart — `ambiguous` is recoverable, so the owner has to be able to see it happen |
-| `src/frontend/src/components/SharingPanel.vue` | — | Embeds `<FileSharingPanel>` between Telegram/WhatsApp and Public Links sections |
+| `src/frontend/src/components/agent-settings/StoragePane.vue` | — | Embeds `<FileSharingPanel>` between Telegram/WhatsApp and Public Links sections |
 
 ### State Management
 

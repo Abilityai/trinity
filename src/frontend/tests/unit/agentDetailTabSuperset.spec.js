@@ -67,6 +67,8 @@ describe('#2153 the deep-link superset', () => {
 
   it("an old ?tab=playbooks link lands on Skills (trinity-enterprise#754)", () => {
     expect(TAB_ALIASES.playbooks).toBe('skills')
+    expect(TAB_ALIASES.sharing).toBe('settings')
+    expect(TAB_ALIASES.channels).toBe('settings')
     expect(idsFor(OWNER)).toContain('skills')
     expect(idsFor(OWNER)).not.toContain('playbooks')
     // Every alias resolves to a tab that exists for someone.
@@ -80,7 +82,7 @@ describe('#2153 a non-owner still cannot reach owner-only tabs', () => {
   // fallback for a non-owner is unchanged, and no blank panel is ever rendered.
   // trinity-enterprise#754: `skills` left this list — the merged tab is for
   // everyone with access; its management controls are role-gated inside it.
-  const ownerOnly = ['access', 'sharing', 'permissions', 'a2a', 'folders', 'settings']
+  const ownerOnly = ['access', 'permissions', 'a2a', 'folders', 'settings']
 
   for (const id of ownerOnly) {
     it(`omits '${id}' when can_share is false`, () => {
@@ -99,7 +101,7 @@ describe('#2153 a non-owner still cannot reach owner-only tabs', () => {
 
   it('omits the sharing tabs for a system agent even when can_share is true', () => {
     const ids = idsFor({ ...OWNER, isSystem: true })
-    expect(ids).not.toContain('sharing')
+    expect(ids).not.toContain('permissions')
     expect(ids).not.toContain('permissions')
     expect(ids).toContain('skills')     // its Run surface, as the Playbooks tab had
   })
