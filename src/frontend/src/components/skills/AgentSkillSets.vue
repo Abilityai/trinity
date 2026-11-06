@@ -54,12 +54,27 @@
                 <span class="tabular-nums">{{ set.members.length }}</span> members assigned
               </template>
             </p>
-            <ul v-if="problemMembers(set).length" class="mt-1 space-y-0.5">
+            <!-- Members worth a line: a problem (with what it is), or a
+                 deprecated member (trinity-enterprise#736, the ent#672 badge),
+                 assigned or not. Live, assigned members stay counted above. -->
+            <ul v-if="listedMembers(set).length" class="mt-1 space-y-0.5">
               <li
-                v-for="m in problemMembers(set)"
+                v-for="m in listedMembers(set)"
                 :key="m.name"
-                class="text-[12.5px] text-status-warning-700 dark:text-status-warning-400"
-              >{{ m.name }} — {{ memberStateText(m.state) }}</li>
+                class="flex items-center gap-2 flex-wrap text-[12.5px]"
+                :class="m.state !== 'assigned'
+                  ? 'text-status-warning-700 dark:text-status-warning-400'
+                  : 'text-gray-700 dark:text-gray-300'"
+                :data-testid="`set-member-${set.name}-${m.name}`"
+              >
+                <span>{{ m.name }}<template v-if="m.state !== 'assigned'"> — {{ memberStateText(m.state) }}</template></span>
+                <BaseBadge
+                  v-if="m.deprecated"
+                  variant="warning"
+                  :title="DEPRECATED_TITLE"
+                  :data-testid="`set-member-deprecated-${set.name}-${m.name}`"
+                >deprecated</BaseBadge>
+              </li>
             </ul>
             <!-- Prerequisites are allowed-but-flagged, with the next action. -->
             <p
@@ -142,6 +157,20 @@
       Assigned {{ store.lastSetResult.set_name }}<template v-if="store.lastSetResult.members_added?.length">
         — added {{ store.lastSetResult.members_added.join(', ') }}</template>.
     </p>
+    <!-- Beside the note, each its own line: a binary a member lacks (env keys
+         are the set's credentials line), and the deprecated members. -->
+    <template v-if="!store.setWriteError && store.lastSetResult">
+      <p
+        v-if="setDependencyNote"
+        class="mt-1 text-[12.5px] text-status-warning-700 dark:text-status-warning-400"
+        data-testid="set-assigned-dependencies"
+      >{{ setDependencyNote }}</p>
+      <p
+        v-if="setDeprecationNote"
+        class="mt-1 text-[12.5px] text-status-warning-700 dark:text-status-warning-400"
+        data-testid="set-assigned-deprecation"
+      >{{ setDeprecationNote }}</p>
+    </template>
     <p
       v-if="store.removalDeferred"
       class="mt-2 text-[12.5px] text-status-warning-700 dark:text-status-warning-400"
@@ -159,8 +188,10 @@
  * (#342) and the assign/unassign writes. Both writes go to the set routes,
  * which carry the same ent#596 fence as the skill writes.
  */
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useSkillsStore } from '../../stores/skills'
+import { DEPRECATED_TITLE } from './contract'
+import { dependencyText, deprecationText, memberDeprecationReport } from '../../utils/skillDelivery'
 import BaseBadge from '../base/BaseBadge.vue'
 import BaseButton from '../base/BaseButton.vue'
 import BaseSelect from '../base/BaseSelect.vue'
@@ -201,9 +232,13 @@ function assignedCount(set) {
   return set.members.filter(m => m.state === 'assigned').length
 }
 
-function problemMembers(set) {
-  return set.members.filter(m => m.state !== 'assigned')
+function listedMembers(set) {
+  return set.members.filter(m => m.state !== 'assigned' || m.deprecated)
 }
+
+const setDependencyNote = computed(() => dependencyText(store.lastSetResult?.delivery, { env: false }))
+const setDeprecationNote = computed(() =>
+  deprecationText(memberDeprecationReport(store.lastSetResult?.status?.members)))
 
 function memberStateText(state) {
   return {

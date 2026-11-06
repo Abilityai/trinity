@@ -5042,6 +5042,29 @@
       "description": "Skill lifecycle keys (ent#672): extract_contract carries `deprecated` (a real boolean) and `superseded-by` (both spellings, a trinity: block wins, the author's text as one printable line <= 200 chars, None unless deprecated) with named frontmatter_invalid:* warnings for garbage; deprecation_warning is the one grammar producer (successor only when it is a skill name); list_skills / get_skill and the REST route's explicit SkillInfo construction carry both fields; the injection result carries the code on injected / unchanged / conflict; deliver_assigned stamps it on every delivery outcome (stopped agent, docker unreadable, over budget) from the library entry, leaves a live skill's report byte-identical and never fails on an unreadable library; public_skills_result keeps deprecated:<name>; CLAUDE.md is deliberately not annotated."
     },
     {
+      "file": "unit/test_ent736_deprecated_skill_markers.py",
+      "feature": "abilityai/trinity-enterprise#736",
+      "added": "2026-11-04",
+      "categories": [
+        "backend",
+        "skills",
+        "cli",
+        "unit"
+      ],
+      "description": "Deprecated library skills on the set surfaces and the CLI (ent#736): GET /skills/library/sets members carry `deprecated` through the response model, read from the listing at display time (an unreadable listing reads false and is never remembered; the cached library_sets dict is never decorated); an agent's set status members carry `deprecated` + the ent#672 `deprecation` code (one listing read), so the POST set-assign status names a deprecated member on a re-assign with delivery None; `trinity skills list` rows (stdlib skill_rows, run by path) gain the `deprecated` column (yes / -> successor / blank, category None -> blank), the command builds them through that rule, and Rich cells are Text so author `[/]` never raises MarkupError (click/rich cases importorskip)."
+    },
+    {
+      "file": "unit/test_3136_assign_dependency_warnings.py",
+      "feature": "#3136",
+      "added": "2026-11-04",
+      "categories": [
+        "backend",
+        "skills",
+        "unit"
+      ],
+      "description": "Assign keeps the injection's warnings (#3136): _deliver_assigned carries public codes (missing_binary / missing_env / packages_not_checked, ...) for injected / fallback / unchanged, dropping free-text details by the #2991 rule shared with public_skills_result (skill_packaging.public_warnings); the ent#672 deprecation stamp merges (one lifecycle code first) instead of overwriting; the whole chain through the real injection + dependency probe and the POST assign route body; regression guards: a clean skill's report is byte-identical, conflict / failed / unassigned_meanwhile / stopped carry no injection codes."
+    },
+    {
       "file": "unit/test_2337_invariant_namespace.py",
       "feature": "#2337",
       "added": "2026-09-12",
