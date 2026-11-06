@@ -42,7 +42,7 @@ from ._runtime_config import (
     _load_guardrails,
     merged_disallowed_tools,
 )
-from .execution_env import build_execution_env, auth_override_env_layers
+from .execution_env import build_execution_env, auth_override_env_layers, auto_memory_env_layer
 from .error_classifier import (
     _classify_empty_result,
     _classify_signal_exit,
@@ -658,6 +658,10 @@ class HeadlessRunContext:
     # the top env layer of THIS spawn only. None = the container's baseline.
     auth_override: Optional[object] = None
 
+    # #4156: the turn serves someone other than the owner, so this spawn runs
+    # with Claude Code's shared auto-memory off. False = today's env.
+    disable_auto_memory: bool = False
+
     # #2328: the `--max-turns` value this spawn was given and which cap set it
     # ("per_task" when the caller's tighter value bound, else "guardrail"), so
     # the turn-limit 422 can name the cap that actually stopped the turn.
@@ -750,6 +754,7 @@ def _setup_headless_command(
     persist_session: bool,
     images: Optional[List[Dict]],
     auth_override=None,
+    disable_auto_memory: bool = False,
 ) -> HeadlessRunContext:
     """Build the claude CLI command and initialise the run context.
 
@@ -875,6 +880,7 @@ def _setup_headless_command(
         max_turns_effective=effective_max_turns,
         max_turns_source=max_turns_source,
         auth_override=auth_override,
+        disable_auto_memory=bool(disable_auto_memory),
         # #1521: seed the fallback context window from the model catalog. The
         # stream parser overwrites it from the runtime's modelUsage.contextWindow
         # when present; this catalog value is the fallback for the salvage /
@@ -941,6 +947,8 @@ def _run_headless_subprocess(ctx: HeadlessRunContext) -> None:
         start_new_session=True,
         env=build_execution_env({
             **auth_extra,
+            # #4156: above `.env`, so the file cannot turn it back on.
+            **auto_memory_env_layer(ctx.disable_auto_memory),
             EXECUTION_TAG_NAME: ctx.task_session_id,
             # #2127: how long `claude --print` waits for background subagents /
             # workflows before giving up on them. Its own default is 10 min,
@@ -1747,6 +1755,7 @@ async def execute_headless_task(
     persist_session: bool = False,
     images: Optional[List[Dict]] = None,
     auth_override=None,
+    disable_auto_memory: bool = False,
 ) -> tuple[str, List[ExecutionLogEntry], ExecutionMetadata, str]:
     """
     Execute Claude Code in headless mode for parallel task execution.
@@ -1800,6 +1809,7 @@ async def execute_headless_task(
             persist_session=persist_session,
             images=images,
             auth_override=auth_override,
+            disable_auto_memory=disable_auto_memory,
         )
 
         registry = get_process_registry()

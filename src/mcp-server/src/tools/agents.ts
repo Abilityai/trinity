@@ -171,7 +171,9 @@ export function createAgentTools(
         "Returns detailed information from the agent's template.yaml including: " +
         "display name, description, version, author, capabilities (template tags, not skill " +
         "descriptions), available commands, MCP servers, tools, declared skills, and example " +
-        "use cases, plus the create-time kind ('agent' | 'deployment', null when unknown). " +
+        "use cases, plus the create-time kind ('agent' | 'deployment', null when unknown) and "
+        + "`wake_on_ending` ({effective, source}) — whether a delegated run's ending wakes "
+        + "that agent, and which layer decided. " +
         "What a skill does is its own SKILL.md description:, not anything in template.yaml. " +
         "Useful for understanding what an agent can do before interacting with it. " +
         "Access control: agents can only get info about agents they have permission to call.",

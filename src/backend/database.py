@@ -213,6 +213,10 @@ def init_database():
         _record_install_source_engine()
         return
 
+    # #4175: before mkdir and connect, so a refused boot creates nothing.
+    from db.engine import refuse_sqlite_backend
+    refuse_sqlite_backend()
+
     db_path = Path(DB_PATH)
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1510,8 +1514,23 @@ class DatabaseManager:
     def get_operator_resume_enabled(self, agent_name: str) -> bool:
         return self._agent_ops.get_operator_resume_enabled(agent_name)
 
-    def set_operator_resume_enabled(self, agent_name: str, enabled: bool) -> bool:
+    def set_operator_resume_enabled(self, agent_name: str, enabled) -> bool:
         return self._agent_ops.set_operator_resume_enabled(agent_name, enabled)
+
+    def get_operator_resume_override(self, agent_name: str):
+        # ent#1102: the raw tri-state read `wake_policy` makes (ent#1108 made
+        # the column NULL / 0 / 1); `get_operator_resume_enabled` COALESCEs.
+        return self._agent_ops.get_operator_resume_override(agent_name)
+
+    # --- wake on ending, tri-state (ent#1102) ---
+    # None = no opinion, follow the instance default. Read only through
+    # services/wake_policy.py, never directly.
+
+    def get_wake_on_ending(self, agent_name: str):
+        return self._agent_ops.get_wake_on_ending(agent_name)
+
+    def set_wake_on_ending(self, agent_name: str, enabled) -> bool:
+        return self._agent_ops.set_wake_on_ending(agent_name, enabled)
 
     def get_mcp_exposed_agents(self):
         return self._agent_ops.get_mcp_exposed_agents()
@@ -1681,6 +1700,20 @@ class DatabaseManager:
 
     def get_queued_count(self, agent_name: str) -> int:
         return self._schedule_ops.get_queued_count(agent_name)
+
+    # Queue-visibility reads (#4257): the receipt's depth, the stall monitor's
+    # one scan, and the conversation-serialisation half of the wait reason.
+    # Read-only — they return counts, rows and conversation keys, never writes.
+    def count_queued_ahead(
+        self, agent_name: str, queued_at: Optional[str], execution_id: str
+    ) -> int:
+        return self._schedule_ops.count_queued_ahead(agent_name, queued_at, execution_id)
+
+    def oldest_queued_head_per_agent(self):
+        return self._schedule_ops.oldest_queued_head_per_agent()
+
+    def agents_with_running_conversation(self, agent_name: str):
+        return self._schedule_ops.agents_with_running_conversation(agent_name)
 
     def cancel_queued_execution(
         self, execution_id: str, reason: str = "cancelled", status: str = "cancelled"
@@ -3235,11 +3268,16 @@ class DatabaseManager:
     def get_public_user_memory_agent_notes(self, agent_name: str, user_email: str) -> str:
         return self._public_link_ops.get_user_memory_agent_notes(agent_name, user_email)
 
+    def get_public_user_memory(self, agent_name: str, user_email: str):
+        # ent#962: a read that never creates the row (the owner's view).
+        return self._public_link_ops.get_user_memory(agent_name, user_email)
+
     def update_public_user_memory_conversation_summary(
-        self, agent_name: str, user_email: str, conversation_summary: str
+        self, agent_name: str, user_email: str, conversation_summary: str,
+        *, expected_previous: str = None,
     ) -> bool:
         return self._public_link_ops.update_user_memory_conversation_summary(
-            agent_name, user_email, conversation_summary
+            agent_name, user_email, conversation_summary, expected_previous=expected_previous
         )
 
     # ent#637: the write boundary records history; the person reads + undoes it.
@@ -3298,15 +3336,23 @@ class DatabaseManager:
     def prune_memory_fact_events(self, agent_name: str, *, before_iso: str) -> int:
         return self._memory_fact_ops.prune_memory_fact_events(agent_name, before_iso=before_iso)
 
-    def list_public_user_memory_writes(self, agent_name: str, user_email: str, limit: int = 20) -> list:
-        return self._public_link_ops.list_user_memory_writes(agent_name, user_email, limit)
+    def list_public_user_memory_writes(self, agent_name: str, user_email: str, limit: int = 20, **kwargs) -> list:
+        # ent#962: `before=` (keyset cursor) and `section=` (default `notes`).
+        return self._public_link_ops.list_user_memory_writes(agent_name, user_email, limit, **kwargs)
+
+    def latest_open_public_user_memory_writes(self, agent_name: str, user_email: str) -> dict:
+        return self._public_link_ops.latest_open_user_memory_writes(agent_name, user_email)
 
     def undo_public_user_memory_write(
-        self, agent_name: str, user_email: str, write_id: str, *, undone_by: str
+        self, agent_name: str, user_email: str, write_id: str, *, undone_by: str, section: str = None
     ) -> str:
         return self._public_link_ops.undo_user_memory_write(
-            agent_name, user_email, write_id, undone_by=undone_by
+            agent_name, user_email, write_id, undone_by=undone_by, section=section
         )
+
+    def list_public_user_memory_people(self, agent_name: str, *, limit: int = 50, offset: int = 0) -> dict:
+        # ent#962: everyone with memory on the agent, for the owner's view.
+        return self._public_link_ops.list_user_memory_people(agent_name, limit=limit, offset=offset)
 
     # =========================================================================
     # Agent Tags (delegated to db/tags.py) - ORG-001
@@ -4165,6 +4211,12 @@ class DatabaseManager:
         # #3247: the agent's own pending asks for the Execution Context line.
         return self._operator_queue_ops.list_pending_asks_for_agent(
             agent_name, limit, exclude_request_id_prefixes)
+
+    def list_pending_ask_ids_for_execution(self, execution_id: str, limit: int = 10):
+        """ent#1102: the asks one execution parked and never got answered."""
+        return self._operator_queue_ops.list_pending_ask_ids_for_execution(
+            execution_id, limit
+        )
 
     def list_recent_operator_queue_endings(self, agent_name, since, limit,
                                            exclude_request_id_prefixes=None):
