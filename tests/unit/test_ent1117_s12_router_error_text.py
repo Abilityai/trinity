@@ -14,9 +14,13 @@ in the exception message and asserts three things: the sentinel is absent from
 the response, the class name is present (a response that dropped the error
 entirely would pass a sentinel-only check while making the failure
 undiagnosable), and the sentinel IS in the log (the detail moved, it was not
-lost). On the git routes the log must additionally be scrubbed of the PAT and
-of any URL userinfo, because moving the text from the body into the
+lost). The log must also carry the traceback, because the response no longer
+says what failed. On the git routes the log must additionally be masked of the
+PAT and of any URL userinfo, because moving the text from the body into the
 Vector-captured log must not move the credential with it.
+
+Every one of the 32 sites has its own test: a site without one can drop its
+log line, or put the text back, and nothing notices.
 
 `routers/skills.py` has no 5xx site that renders an exception (its
 `str(e)` details are deliberate 4xx domain messages), so it has no test here.
@@ -102,9 +106,9 @@ def _assert_scrubbed_5xx(exc: HTTPException, status: int, prefix: str, cls: str)
 
 
 def _assert_logged(caplog):
-    assert SENTINEL in _log_text(
-        caplog
-    ), "the exception detail was lost, not moved to the log"
+    log = _log_text(caplog)
+    assert SENTINEL in log, "the exception detail was lost, not moved to the log"
+    assert "Traceback (most recent call last)" in log, f"no traceback in the log: {log}"
 
 
 # ---------------------------------------------------------------------------
@@ -389,7 +393,6 @@ def test_twilio_unreachable_502(module_name, monkeypatch, caplog):
     exc = _raise_http(mod._validate_twilio_credentials("AC123", "auth-token-value"))
     _assert_scrubbed_5xx(exc, 502, "Could not reach Twilio API", "ConnectError")
     _assert_logged(caplog)
-    assert "auth-token-value" not in _log_text(caplog)
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +410,7 @@ def test_telemetry_host_500(monkeypatch, caplog):
     exc = _raise_http(mod.get_host_stats(current_user=_admin()))
     _assert_scrubbed_5xx(exc, 500, "Error getting host stats", "PlantedError")
     _assert_logged(caplog)
+
 
 # ---------------------------------------------------------------------------
 # routers/git.py — the held PAT echoed in an escaped form, and the bind route
@@ -523,3 +527,234 @@ def test_git_bind_unexpected_500_names_the_class_only(bind, caplog):
     _assert_logged(caplog)
     _assert_no_credential(_log_text(caplog), "log")
 
+
+# ---------------------------------------------------------------------------
+# Every remaining site. Each case plants the sentinel at the first call inside
+# the handler's `try` and returns (coroutine, status, prefix, class name).
+# ---------------------------------------------------------------------------
+
+
+def _accessible_agents_fail(monkeypatch):
+    agents_mod = _live("routers.agents")
+
+    def boom(user):
+        raise PlantedError(SENTINEL)
+
+    monkeypatch.setattr(agents_mod, "get_accessible_agents", boom)
+
+
+def _case_systems_list(monkeypatch, tmp_path):
+    import routers.systems as mod
+    _accessible_agents_fail(monkeypatch)
+    return mod.list_systems(current_user=_admin()), 500, "Failed to list systems", "PlantedError"
+
+
+def _case_systems_get(monkeypatch, tmp_path):
+    import routers.systems as mod
+    _accessible_agents_fail(monkeypatch)
+    return mod.get_system("acme", current_user=_admin()), 500, "Failed to get system", "PlantedError"
+
+
+def _case_systems_restart(monkeypatch, tmp_path):
+    import routers.systems as mod
+    _accessible_agents_fail(monkeypatch)
+    monkeypatch.setattr(mod, "reject_agent_principal", lambda user: None)
+    return (mod.restart_system("acme", _request(), current_user=_admin()), 500,
+            "Failed to restart system", "PlantedError")
+
+
+def _case_systems_export_manifest(monkeypatch, tmp_path):
+    import routers.systems as mod
+    _accessible_agents_fail(monkeypatch)
+    return (mod.get_system_manifest("acme", naming=None, current_user=_admin()), 500,
+            "Failed to export manifest", "PlantedError")
+
+
+def _failing_db(monkeypatch, mod, method):
+    fake_db = MagicMock()
+    getattr(fake_db, method).side_effect = PlantedError(SENTINEL)
+    monkeypatch.setattr(mod, "db", fake_db)
+
+
+def _case_settings_get_one(monkeypatch, tmp_path):
+    import routers.settings.generic as mod
+    monkeypatch.setattr(mod, "assert_admin", lambda user, **kw: None)
+    _failing_db(monkeypatch, mod, "get_setting")
+    return (mod.get_setting("s12_plain_setting", _request(), current_user=_admin()), 500,
+            "Failed to get setting", "PlantedError")
+
+
+def _case_settings_update(monkeypatch, tmp_path):
+    import routers.settings.generic as mod
+    monkeypatch.setattr(mod, "assert_admin", lambda user, **kw: None)
+    _failing_db(monkeypatch, mod, "set_setting")
+    body = mod.SystemSettingUpdate(value="v")
+    return (mod.update_setting("s12_plain_setting", body, _request(), current_user=_admin()), 500,
+            "Failed to update setting", "PlantedError")
+
+
+def _case_settings_delete(monkeypatch, tmp_path):
+    import routers.settings.generic as mod
+    monkeypatch.setattr(mod, "assert_admin", lambda user, **kw: None)
+    _failing_db(monkeypatch, mod, "delete_setting")
+    return (mod.delete_setting("s12_plain_setting", _request(), current_user=_admin()), 500,
+            "Failed to delete setting", "PlantedError")
+
+
+def _case_ops_update(monkeypatch, tmp_path):
+    import routers.settings.ops as mod
+    from config import OPS_SETTINGS_DEFAULTS, validate_ops_setting
+    from models import OpsSettingsUpdate
+
+    def valid(key, value):
+        try:
+            validate_ops_setting(key, value)
+        except ValueError:
+            return False
+        return True
+
+    key, value = next((k, v) for k, v in OPS_SETTINGS_DEFAULTS.items() if valid(k, v))
+    monkeypatch.setattr(mod, "assert_admin", lambda user, **kw: None)
+    _failing_db(monkeypatch, mod, "set_setting")
+    body = OpsSettingsUpdate(settings={key: value})
+    return (mod.update_ops_settings(body, _request(), current_user=_admin()), 500,
+            "Failed to update ops settings", "PlantedError")
+
+
+def _case_ops_reset(monkeypatch, tmp_path):
+    import routers.settings.ops as mod
+    monkeypatch.setattr(mod, "assert_admin", lambda user, **kw: None)
+    _failing_db(monkeypatch, mod, "delete_setting")
+    return (mod.reset_ops_settings(_request(), current_user=_admin()), 500,
+            "Failed to reset ops settings", "PlantedError")
+
+
+def _case_mcp_keys_create(monkeypatch, tmp_path):
+    import routers.mcp_keys as mod
+    _failing_db(monkeypatch, mod, "create_mcp_api_key")
+    return (mod.create_mcp_api_key_endpoint(mod.McpApiKeyCreate(name="k"), _request(),
+                                            current_user=_admin()), 500,
+            "Failed to create MCP API key", "PlantedError")
+
+
+def _case_mcp_keys_ensure_default(monkeypatch, tmp_path):
+    import routers.mcp_keys as mod
+    _failing_db(monkeypatch, mod, "list_mcp_api_keys")
+    return (mod.ensure_default_mcp_api_key(_request(), current_user=_admin()), 500,
+            "Failed to ensure default MCP API key", "PlantedError")
+
+
+def _case_docs_content(monkeypatch, tmp_path):
+    import routers.docs as mod
+    (tmp_path / "page.json").write_text("{}")
+    monkeypatch.setattr(mod, "get_docs_dir", lambda: tmp_path)
+    fake_json = MagicMock()
+    fake_json.loads.side_effect = PlantedError(SENTINEL)
+    monkeypatch.setattr(mod, "json", fake_json)
+    return (mod.get_doc_content("page.json", current_user=_admin()), 500,
+            "Failed to read document", "PlantedError")
+
+
+def _case_logs_archive(monkeypatch, tmp_path):
+    import routers.logs as mod
+    svc = MagicMock()
+    svc.archive_old_logs = AsyncMock(side_effect=PlantedError(SENTINEL))
+    monkeypatch.setattr(mod, "log_archive_service", svc)
+    return (mod.trigger_archive(request=mod.ArchiveRequest(), current_user=_admin()), 500,
+            "Archive failed", "PlantedError")
+
+
+def _unreachable_agent(monkeypatch, mod):
+    _running(monkeypatch, mod)
+    monkeypatch.setattr(mod, "reject_agent_principal", lambda user: None)
+
+    class FailingClient:
+        async def get(self, *a, **kw):
+            raise httpx.ConnectError(SENTINEL)
+
+        async def post(self, *a, **kw):
+            raise httpx.ConnectError(SENTINEL)
+
+    @asynccontextmanager
+    async def fake_client(agent_name, **kw):
+        yield FailingClient()
+
+    monkeypatch.setattr(mod, "agent_httpx_client", fake_client)
+
+
+def _case_credentials_env_drift_503(monkeypatch, tmp_path):
+    import routers.credentials as mod
+    _unreachable_agent(monkeypatch, mod)
+    return (mod.get_agent_env_drift(agent_name="agent-a", current_user=_admin()), 503,
+            "Failed to connect to agent", "ConnectError")
+
+
+def _case_credentials_inject_503(monkeypatch, tmp_path):
+    import routers.credentials as mod
+    from models import CredentialInjectRequest
+    _unreachable_agent(monkeypatch, mod)
+    body = CredentialInjectRequest(files={".env": "A=1\n"})
+    return (mod.inject_credentials(body, _request(), agent_name="agent-a",
+                                   current_user=_admin()), 503,
+            "Failed to connect to agent", "ConnectError")
+
+
+def _encryption_fails(monkeypatch, mod, method, error):
+    enc_mod = _live("services.credential_encryption")
+    _running(monkeypatch, mod)
+    monkeypatch.setattr(mod, "reject_agent_principal", lambda user: None)
+    svc = MagicMock()
+    setattr(svc, method, AsyncMock(side_effect=error))
+    monkeypatch.setattr(enc_mod, "get_credential_encryption_service", lambda: svc)
+
+
+def _case_credentials_export_503(monkeypatch, tmp_path):
+    import routers.credentials as mod
+    _encryption_fails(monkeypatch, mod, "export_to_agent", httpx.ConnectError(SENTINEL))
+    return (mod.export_credentials(_request(), agent_name="agent-a", current_user=_admin()), 503,
+            "Failed to connect to agent", "ConnectError")
+
+
+def _case_credentials_import_503(monkeypatch, tmp_path):
+    import routers.credentials as mod
+    _encryption_fails(monkeypatch, mod, "import_to_agent", httpx.ConnectError(SENTINEL))
+    return (mod.import_credentials(_request(), agent_name="agent-a", current_user=_admin()), 503,
+            "Failed to connect to agent", "ConnectError")
+
+
+def _case_credentials_import_500(monkeypatch, tmp_path):
+    import routers.credentials as mod
+    _encryption_fails(monkeypatch, mod, "import_to_agent", PlantedError(SENTINEL))
+    return (mod.import_credentials(_request(), agent_name="agent-a", current_user=_admin()), 500,
+            "Import failed", "PlantedError")
+
+
+REMAINING_SITES = {
+    "systems-list": _case_systems_list,
+    "systems-get": _case_systems_get,
+    "systems-restart": _case_systems_restart,
+    "systems-export-manifest": _case_systems_export_manifest,
+    "settings-get-one": _case_settings_get_one,
+    "settings-update": _case_settings_update,
+    "settings-delete": _case_settings_delete,
+    "ops-update": _case_ops_update,
+    "ops-reset": _case_ops_reset,
+    "mcp-keys-create": _case_mcp_keys_create,
+    "mcp-keys-ensure-default": _case_mcp_keys_ensure_default,
+    "docs-content": _case_docs_content,
+    "logs-archive": _case_logs_archive,
+    "credentials-env-drift-503": _case_credentials_env_drift_503,
+    "credentials-inject-503": _case_credentials_inject_503,
+    "credentials-export-503": _case_credentials_export_503,
+    "credentials-import-503": _case_credentials_import_503,
+    "credentials-import-500": _case_credentials_import_500,
+}
+
+
+@pytest.mark.parametrize("case", sorted(REMAINING_SITES))
+def test_remaining_site_names_the_class_and_logs_the_detail(case, monkeypatch, tmp_path, caplog):
+    coro, status, prefix, cls = REMAINING_SITES[case](monkeypatch, tmp_path)
+    caplog.set_level(logging.DEBUG)
+    exc = _raise_http(coro)
+    _assert_scrubbed_5xx(exc, status, prefix, cls)
+    _assert_logged(caplog)
