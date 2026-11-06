@@ -84,6 +84,14 @@ class TestBootWarning:
         out = _boot_output(monkeypatch, capsys, "Str0ng-Passw0rd!x")
         assert "WARNING" not in out
 
+    def test_rules_line_states_the_validators_length_bounds(self, monkeypatch, capsys):
+        """The rules line is a literal, so it can carry nothing derived from the
+        password; this keeps its length range equal to the validator's."""
+        from utils.password_validation import MAX_LENGTH, MIN_LENGTH
+
+        out = _boot_output(monkeypatch, capsys, "short")
+        assert f"Rules: {MIN_LENGTH}-{MAX_LENGTH} characters;" in out
+
 
 # ---------------------------------------------------------------------------
 # Fork-to-own: the clone-failure log line
