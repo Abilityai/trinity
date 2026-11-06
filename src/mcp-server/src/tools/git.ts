@@ -198,10 +198,12 @@ export function createGitTools(client: TrinityClient, requireApiKey: boolean) {
         paths: z
           .array(
             z.string().regex(/^(?!-)/, {
-              // The element is echoed (capped at 200 chars) so the caller can find it.
+              // The element is echoed (capped at 200 code points, as the backend
+              // does, so the cut never splits a surrogate pair) so the caller can find it.
               error: (issue) => {
                 const s = String(issue.input);
-                const shown = s.length <= 200 ? s : `${s.slice(0, 200)}…`;
+                const chars = Array.from(s);
+                const shown = chars.length <= 200 ? s : `${chars.slice(0, 200).join("")}…`;
                 return (
                   `'${shown}' starts with '-' and would be read by git as an option; ` +
                   `name a file that starts with '-' as './${shown}'`

@@ -105,6 +105,18 @@ describe("ent#1117 git_sync — a paths element starting with '-' is a schema er
     });
   }
 
+  it("cuts a long element by code points, never through a surrogate pair", async () => {
+    // 199 UTF-16 units, then an emoji (2 units): a UTF-16 cut at 200 splits it.
+    const bad = "-" + "a".repeat(198) + "\u{1F600}" + "b".repeat(50);
+    const result = await validate({ agent_name: "alpha", paths: [bad] });
+    const message = result.issues![0].message;
+    assert.ok(
+      message.startsWith(`'${Array.from(bad).slice(0, 200).join("")}\u2026' starts with '-'`),
+      message.slice(0, 260),
+    );
+    assert.ok(!/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(message), "lone surrogate in message");
+  });
+
   it("caps a long element in the message", async () => {
     const bad = "-" + "a".repeat(10_000);
     const result = await validate({ agent_name: "alpha", paths: [bad] });
