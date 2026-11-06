@@ -296,16 +296,135 @@ def test_a_crafted_value_is_bounded_in_pieces_windows_and_time():
     import time
     from urllib.parse import quote
 
-    from utils.log_masking import MAX_PIECES, MAX_WINDOW_SOURCE, _pieces, _windows
+    from utils.log_masking import MAX_PIECES, MAX_WINDOW_SOURCE, _pieces, _runs, _windows
 
     crafted = "s9-" + "\n".join(f"R{i:07d}" for i in range(20_000))
-    pieces = _pieces(crafted, MIN_HELD_LENGTH)
-    assert len(pieces) == MAX_PIECES
-    assert len(_windows(pieces)) <= MAX_WINDOW_SOURCE
+    runs = _runs(crafted, MIN_HELD_LENGTH)
+    assert len(_pieces(runs)) == MAX_PIECES
+    long_runs = [_random_run(1000, i) for i in range(200)]  # ~200,000 distinct stretches
+    assert len(_windows(long_runs)) <= MAX_WINDOW_SOURCE  # the budget spans the runs
     rng = __import__("random").Random(1117)
     one_run = "".join(rng.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ") for _ in range(100_000))
     assert len(_windows([one_run])) <= MAX_WINDOW_SOURCE
     text = "url " + quote(crafted, safe="") + " " + "y" * 1_000_000
     start = time.perf_counter()
     mask_held_values(text, crafted)
-    assert time.perf_counter() - start < 1.0  # ~0.06 s measured; 5.7 s unbounded
+    assert time.perf_counter() - start < 1.0  # ~0.05 s measured; 5.7 s unbounded
+
+
+# ---------------------------------------------------------------------------
+# Past the cost caps: which pieces and stretches the caps keep.
+# ---------------------------------------------------------------------------
+
+def _random_run(n: int, seed: int) -> str:
+    """``n`` unshaped run characters, the same on every run of the suite."""
+    rng = __import__("random").Random(seed)
+    return "".join(rng.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789")
+                   for _ in range(n))
+
+
+def _pem_shaped(n_bytes: int, seed: int) -> str:
+    """A PEM-shaped block: base64 lines of 64, whose ``+`` and ``/`` split
+    every line into short runs, like a private key."""
+    rng = __import__("random").Random(seed)
+    body = base64.b64encode(bytes(rng.getrandbits(8) for _ in range(n_bytes))).decode()
+    lines = [body[i:i + 64] for i in range(0, len(body), 64)]
+    return "-----BEGIN S9 TEST BLOCK-----\n" + "\n".join(lines) + "\n-----END S9 TEST BLOCK-----\n"
+
+
+def _runs_of(value: str, n: int = MIN_HELD_LENGTH) -> set[str]:
+    import re
+
+    return {run for run in re.findall(r"[A-Za-z0-9_.~-]+", value) if len(run) >= n}
+
+
+def test_a_many_run_value_is_masked_run_by_run_past_the_old_piece_cap():
+    """A PEM-shaped value of ~10 KB has 334 runs of 8+, 96 of them under 16:
+    more than a cap of 64 pieces kept, within ``MAX_PIECES``.
+    Percent-encoding rewrites every ``+``, ``/`` and line break, so no whole
+    rendering matches and each run must be masked on its own; joining the
+    lines merges runs across line breaks."""
+    from urllib.parse import quote
+
+    block = _pem_shaped(7500, 1117)
+    runs = _runs_of(block)
+    short = [run for run in runs if len(run) < 16]
+    assert len(runs) > 300 and len(short) > 64  # the shape under test
+    for shown in (quote(block, safe=""), block.replace("\n", "")):
+        out = mask_held_values(f"key={shown} end", block)
+        leaked = sorted((run for run in runs if run in out), key=len)
+        assert not leaked, (len(leaked), leaked[:3])
+        assert out.startswith("key=") and out.endswith(" end")
+
+
+@pytest.mark.parametrize("render", [
+    pytest.param(lambda v: f"tail {v[-40:]}", id="tail-only-40"),
+    pytest.param(lambda v: f"tail {v[-16:]}", id="tail-only-16"),
+    pytest.param(lambda v: "\n".join(v[i:i + 64] for i in range(0, len(v), 64)), id="wrapped-at-64"),
+])
+def test_a_long_single_run_value_is_masked_in_cut_renderings_to_its_end(render):
+    """60,000 characters in one run: stretches are taken from all of it, so a
+    cut rendering of its far end is masked too."""
+    value = _random_run(60_000, 1117)
+    out = mask_held_values(render(value), value)
+    lines = out.removeprefix("tail ").split("\n")
+    assert set(lines) == {MASK}, [line[:20] for line in lines if line != MASK][:3]
+
+
+def test_the_piece_cap_keeps_the_shortest_runs():
+    """Runs under 12 characters have no stretches, so only step 2 masks them
+    in a rendering that is not whole. With one run more than the cap, the
+    longest of them is the one left visible: documented in the module."""
+    from urllib.parse import quote
+
+    from utils.log_masking import MAX_PIECES
+
+    eights = [f"p{i:07d}" for i in range(MAX_PIECES)]
+    eleven = "q" + "r" * 10
+    value = "\n".join(eights + [eleven])
+    out = mask_held_values(quote(value, safe=""), value)
+    assert not [run for run in eights if run in out]
+    assert eleven in out  # the one past the cap
+
+
+def test_the_window_budget_is_cumulative_and_spent_on_the_longest_run_first():
+    """Stretches come from the longest run first and from
+    ``MAX_WINDOW_SOURCE`` characters in all: here all of the longer run and
+    the head of the shorter one. A stretch of the shorter run past that point,
+    shown cut, is the documented limit."""
+    from utils.log_masking import MAX_WINDOW_SOURCE
+
+    longer = _random_run(MAX_WINDOW_SOURCE * 3 // 4, 1)
+    shorter = _random_run(MAX_WINDOW_SOURCE // 2, 2)
+    value = shorter + "\n" + longer
+    edge = MAX_WINDOW_SOURCE - len(longer)  # where the budget runs out in `shorter`
+    assert mask_held_values(f"x {longer[-16:]} y", value) == f"x {MASK} y"
+    assert mask_held_values(f"x {shorter[edge - 16:edge]} y", value) == f"x {MASK} y"
+    past = shorter[edge:edge + 16]
+    assert mask_held_values(f"x {past} y", value) == f"x {past} y"
+
+
+# ---------------------------------------------------------------------------
+# Several held values (the Slack routes hold two or three).
+# ---------------------------------------------------------------------------
+
+FIRST_RUN = _random_run(40, 11)
+SECOND_RUN = _random_run(28, 12)
+# Two runs: the second is the shorter, so it is not the longest piece.
+MULTI_RUN = FIRST_RUN + "\n" + SECOND_RUN
+OTHER_HELD = _random_run(36, 13)
+
+
+@pytest.mark.parametrize("render", [
+    pytest.param(lambda v: f"key starts {v[:16]}", id="prefix-only-16"),
+    pytest.param(lambda v: f"{v[:20]}\n{v[20:]}", id="wrapped-at-20"),
+])
+@pytest.mark.parametrize("cut", ["second-run", "first-run", "other-held"])
+def test_a_cut_rendering_of_any_run_of_any_held_value_is_masked(render, cut):
+    """The cut pass takes stretches from every run of every held value, not
+    only the longest run or the last value."""
+    run = {"second-run": SECOND_RUN, "first-run": FIRST_RUN, "other-held": OTHER_HELD}[cut]
+    shown = render(run)
+    out = mask_held_values(f"before {shown} after", MULTI_RUN, OTHER_HELD)
+    assert out.startswith("before ") and out.endswith(" after"), out
+    _assert_no_stretch(out, shown, value=run)
