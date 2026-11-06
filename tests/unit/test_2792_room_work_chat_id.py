@@ -194,7 +194,9 @@ async def test_voice_reply_on_a_room_row_is_not_a_channel_turn(triggered_by, age
     """Rooms have no speaker control, so the portal's `portal_client_narrated`
     guidance would be a false claim here — for the turn, and for the delegated
     child the portal branch would otherwise catch by its inherited stamp."""
-    res = await _call_voice_reply(_execution(triggered_by=triggered_by, agent_name=agent), agent=agent)
+    # A live turn: this pins the room reason, which comes after the liveness
+    # check (trinity-enterprise#1062).
+    res = await _call_voice_reply(_execution(triggered_by=triggered_by, agent_name=agent, status="running"), agent=agent)
     assert res["delivered"] is False
     assert res["reason"] == "not_a_channel_turn"
 
