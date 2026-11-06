@@ -168,11 +168,17 @@ def test_mcp_template_renders_a_panel_saved_backslash_value_exactly(mcp_template
 
 def test_mcp_template_agrees_with_the_agent_reader_on_every_short_value(agent, mcp_template, tmp_path):
     # Every right-hand side up to 6 characters over the four characters the
-    # encoding is about: 5461 lines, read by both parsers from one file.
+    # encoding is about (5461 values), each written twice: `K_i=v`, and
+    # `J_i = v` with blanks around `=` as a hand edit has them, which both
+    # parsers strip before decoding. Read by both parsers from one file.
     rhs_all = ["".join(t) for n in range(7) for t in itertools.product(B + "\"'a", repeat=n)]
     env = tmp_path / ".env"
-    env.write_text("".join(f"K_{i}={v}\n" for i, v in enumerate(rhs_all)), encoding="utf-8")
-    expected = {f"K_{i}": agent.unquote_env_value(v) for i, v in enumerate(rhs_all)}
+    env.write_text(
+        "".join(f"K_{i}={v}\nJ_{i} = {v}\n" for i, v in enumerate(rhs_all)), encoding="utf-8"
+    )
+    expected = {}
+    for i, v in enumerate(rhs_all):
+        expected[f"K_{i}"] = expected[f"J_{i}"] = agent.unquote_env_value(v)
     assert agent.parse_env_file(env) == expected
     assert mcp_template.parse_env_file(env) == expected
 

@@ -100,10 +100,15 @@ def unquote_env_value(value: str) -> str:
     panel) escapes the backslash too, so a value containing `\\` was rendered
     with it doubled.
 
-    Mirrored rather than imported: importing `agent_server.services.execution_env`
-    runs `services/__init__.py`, which loads the runtime modules, on the boot
-    path of a module that is otherwise standalone. Held equal to the original
-    by `tests/unit/test_ent1117_s11_env_escape_table.py`.
+    Copied rather than imported because this module must also load flat, by
+    file path, which is what its `except ImportError` branch is for and how the
+    tests load it. In a flat load the name `services` is ambiguous: in a test
+    process it resolves to the BACKEND package, which has no `execution_env`
+    (the reason `utils/credential_sanitizer.py` loads its decoder by path). A
+    nine-line copy is simpler than a path loader with a fallback, and
+    `tests/unit/test_ent1117_s11_env_escape_table.py` holds it equal to the
+    original on every value of up to six characters, blanks around `=`
+    included.
     """
     if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
         inner = value[1:-1]
