@@ -309,7 +309,9 @@ def test_strict_generic_exception_maps_to_500(env):
     resp = _deploy(env, TWO_AGENT_MANIFEST, strict=True)
 
     assert resp.status_code == 500
-    assert resp.json()["detail"]["reason"] == "docker exploded"
+    # abilityai/trinity#4284: an unforeseen exception is named by class; its
+    # text goes to the log.
+    assert resp.json()["detail"]["reason"] == "RuntimeError — details in backend logs"
 
 
 # --- reason normalization + sanitization --------------------------------------
@@ -328,12 +330,14 @@ def test_dict_detail_normalized_to_error_field(env):
     assert failure["status_code"] == 429
 
 
+_GIT_403 = ("fatal: unable to access "
+            "'https://x-access-token:ghp_0123456789abcdefghijklmnopqrstuvwxyz01@github.com/org/repo/': 403")
+
+
 def test_reason_redacts_pat_bearing_git_urls(env):
     # learnings 2026-07-14: git prints the PAT-bearing remote URL in errors.
-    _fail_agent(env, "alpha", Exception(
-        "fatal: unable to access "
-        "'https://x-access-token:ghp_0123456789abcdefghijklmnopqrstuvwxyz01@github.com/org/repo/': 403"
-    ))
+    # A detail the platform raised keeps its words, redacted.
+    _fail_agent(env, "alpha", HTTPException(status_code=400, detail=_GIT_403))
 
     resp = _deploy(env, TWO_AGENT_MANIFEST)
 
@@ -342,8 +346,19 @@ def test_reason_redacts_pat_bearing_git_urls(env):
     assert "://***@github.com" in reason
 
 
+def test_reason_of_an_unforeseen_exception_is_its_class(env):
+    # abilityai/trinity#4284: the report is the body of a 500 when every member
+    # fails, so a raw exception's text never reaches it.
+    _fail_agent(env, "alpha", Exception(_GIT_403))
+
+    resp = _deploy(env, TWO_AGENT_MANIFEST)
+
+    reason = resp.json()["failed"][0]["reason"]
+    assert reason == "Exception — details in backend logs"
+
+
 def test_reason_truncated(env):
-    _fail_agent(env, "alpha", Exception("x" * 5000))
+    _fail_agent(env, "alpha", ValueError("x" * 5000))
 
     resp = _deploy(env, TWO_AGENT_MANIFEST)
 

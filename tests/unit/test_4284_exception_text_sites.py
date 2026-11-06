@@ -472,3 +472,41 @@ def test_credential_inject_still_relays_an_agent_4xx(inject):
         call()
     assert exc.value.status_code == 400
     assert exc.value.detail == "Agent rejected credential injection: Path escapes the agent home"
+
+
+# ---------------------------------------------------------------------------
+# services/system_service.py::_failure_reason: the deploy and apply reports
+# are the body of a 500 when every member fails (routers/systems.py)
+# ---------------------------------------------------------------------------
+
+def test_failure_reason_names_an_unforeseen_exception_by_class(caplog):
+    from services.system_service import _failure_reason
+    caplog.set_level(logging.WARNING)
+    reason, status = _failure_reason(RuntimeError(_PLANT))
+    assert status is None
+    _assert_answer_clean(reason, "RuntimeError — details in backend logs")
+    _assert_log_keeps_text(caplog.records, "System manifest step failed")
+
+
+@pytest.mark.parametrize("build, expected", [
+    (lambda: ValueError("Invalid cpu '3': must be one of 1, 2, 4, 8, 16"), "Invalid cpu '3'"),
+    (lambda: HTTPException(404, detail={"error": "Template not found: local:x"}),
+     "Template not found: local:x"),
+], ids=["validation-error", "http-exception"])
+def test_failure_reason_keeps_platform_words(build, expected):
+    """Characterization: a validation message and a platform detail still reach
+    the manifest's author."""
+    from services.system_service import _failure_reason
+    reason, _ = _failure_reason(build())
+    assert expected in reason
+
+
+@pytest.mark.parametrize("module", ["gates", "grants", "seats"])
+def test_failure_reason_keeps_an_apply_refusal(module):
+    """The `<code>: <message>` an apply step refuses with is what the report's
+    readers split on."""
+    import importlib
+    from services.system_service import _failure_reason
+    refused = importlib.import_module(f"services.system_apply.{module}")._Refused
+    reason, _ = _failure_reason(refused("calibrating_agent: the companion is calibrating"))
+    assert reason.split(":")[0] == "calibrating_agent"

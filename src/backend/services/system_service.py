@@ -2187,6 +2187,13 @@ def _preflight_template(
     return None
 
 
+def _platform_refusals() -> Tuple[type, ...]:
+    """The apply steps' refusal classes: each is raised only with the
+    platform's own ``<code>: <message>`` (lazy: these modules import this one)."""
+    from services.system_apply import gates, grants, seats
+    return (gates._Refused, grants._Refused, seats._Refused)
+
+
 def _failure_reason(exc: Exception) -> Tuple[str, Optional[int]]:
     """Normalize an agent-create exception into a (reason, status_code) pair.
 
@@ -2195,6 +2202,18 @@ def _failure_reason(exc: Exception) -> Tuple[str, Optional[int]]:
     at this exit point because git/GitHub errors can embed PAT-bearing remote
     URLs (learnings 2026-07-14) and the deploy report is a durable response
     surface (trinity-enterprise#125).
+
+    Three kinds of exception keep their words (abilityai/trinity#4284): an
+    HTTPException, whose detail the platform wrote where it raised it; a
+    ValueError, the validation class (``ManifestError``, ``normalize_cpu`` /
+    ``normalize_memory``, pydantic's ``ValidationError`` from
+    ``ScheduleCreate``) whose text tells the manifest's author what to change;
+    and the apply steps' own refusals (``_platform_refusals``), whose
+    ``<code>: <message>`` the report's readers branch on. Anything else is an
+    unforeseen failure (Docker, the database, the filesystem, a library) and
+    answers its class name only: the report is the body of a 500 when every
+    member fails (``routers/systems.py``), and that text belongs in the log,
+    which gets it here, masked.
     """
     status_code: Optional[int] = None
     if isinstance(exc, HTTPException):
@@ -2206,8 +2225,11 @@ def _failure_reason(exc: Exception) -> Tuple[str, Optional[int]]:
                 reason = json.dumps(detail, default=str)
         else:
             reason = str(detail)
-    else:
+    elif isinstance(exc, (ValueError,) + _platform_refusals()):
         reason = str(exc)
+    else:
+        logger.warning("System manifest step failed: %s", masked_traceback(exc))
+        reason = f"{type(exc).__name__} — details in backend logs"
     reason = sanitize_text(redact_url_userinfo(reason))
     return reason[:_REASON_MAX_LEN], status_code
 
