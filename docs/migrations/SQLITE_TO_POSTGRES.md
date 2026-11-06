@@ -58,6 +58,9 @@ a release that has both. The release notes name the last one.
    the PostgreSQL schema with Alembic, copies every table in one transaction, resets sequences and
    verifies rowcounts. If it fails, no rows are committed and you can run it again. On success it writes
    `trinity.db.copied-to-postgres` beside the file, which tells `start.sh` the copy is done.
+   With the enterprise module mounted, a database password that needs URL encoding puts `%` in
+   `DATABASE_URL`. An enterprise module older than the `%` fix stops the copy with exit 1. Update the
+   module first, or use a password of letters and digits only.
 6. Start the stack (`./scripts/deploy/start.sh`, or your usual `docker compose up -d`) and check it
    as described under [Verifying the cutover](#verifying-the-cutover).
 
