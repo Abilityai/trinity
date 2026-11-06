@@ -15,7 +15,7 @@ So a picker is never a directory: an empty query lists no one, and an owner
 probing prefixes is slowed down. A route that returns people without reaching
 `search` fails `tests/unit/test_ent1153_people_search_seam.py`.
 
-Rows carry `email`, `username`, `label` and `role`; each caller decides which of
+Rows carry `user_id`, `email`, `username`, `label` and `role`; each caller decides which of
 them its reader may see (role is admin-only on the Access tab, ent#450).
 """
 from __future__ import annotations
@@ -60,6 +60,7 @@ def search(scope, query: str, *, requester_email: Optional[str], rate_key: str, 
     rows = db.search_people(scope, q, exclude_email=requester_email, limit=limit)
     return [
         {
+            "user_id": r.get("id"),
             "email": (r.get("email") or "").strip().lower(),
             "username": r.get("username"),
             "label": person_label(r),

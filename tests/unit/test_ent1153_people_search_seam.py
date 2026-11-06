@@ -128,7 +128,7 @@ class TestTheMatch:
 
     def test_a_row_carries_the_label_the_email_and_the_role(self, people_db):
         row = _search(_everyone(), "otto")[0]
-        assert row == {"email": OUTSIDER, "username": "otto", "label": "Otto Outer", "role": "user"}
+        assert row == {"user_id": 4, "email": OUTSIDER, "username": "otto", "label": "Otto Outer", "role": "user"}
 
 
 class TestTheScopes:
@@ -287,8 +287,16 @@ _HTTP_VERBS = {"get", "post", "put", "patch", "delete"}
 
 
 def _person_row_models() -> set[str]:
-    """Models whose instances are picker rows: they carry an `email` and a `label`."""
-    tree = ast.parse((BACKEND / "models.py").read_text())
+    """Models whose instances are picker rows: they carry an `email` and a `label`.
+    Every `models.py` under the backend, so a private module's model is seen too."""
+    out = set()
+    for path in [BACKEND / "models.py", *(p for p in BACKEND.rglob("models.py")
+                                         if "tests" not in p.parts and p != BACKEND / "models.py")]:
+        out |= _person_rows_in(ast.parse(path.read_text()))
+    return out
+
+
+def _person_rows_in(tree: ast.Module) -> set[str]:
     out = set()
     for node in tree.body:
         if isinstance(node, ast.ClassDef):
