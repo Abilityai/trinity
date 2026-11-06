@@ -2774,22 +2774,13 @@ async def _audit_capability(
     """One AUTHORIZATION row about a capability. Best-effort: an audit failure
     never changes what the caller gets."""
     try:
-        from services.platform_audit_service import platform_audit_service, AuditEventType
-        # The ACTOR is the agent, not its owner. `platform_audit_service` ranks
-        # `actor_user` above `actor_agent_name`, so passing the principal would
-        # file a prompt-injected agent's attempt as the owner's own act — the
-        # exact "the agent did it" vs "the person did it" line (Tandem R29) this
-        # capability exists to keep. For an agent principal: the agent is the
-        # actor, the owner rides as `actor_email`, and the key is named
-        # explicitly (the service derives it from `actor_user` otherwise).
-        agent = getattr(current_user, "agent_name", None)
-        actor = {"actor_user": current_user} if not agent else {
-            "actor_agent_name": agent,
-            "actor_email": getattr(current_user, "email", None),
-            "mcp_key_id": getattr(current_user, "mcp_key_id", None),
-            "mcp_key_name": getattr(current_user, "mcp_key_name", None),
-            "mcp_scope": getattr(current_user, "mcp_scope", None),
-        }
+        from services.platform_audit_service import (
+            platform_audit_service, AuditEventType, principal_actor,
+        )
+        # The ACTOR is the agent, not its owner (Tandem R29): `principal_actor`
+        # files a prompt-injected agent's attempt as the agent's, never as the
+        # owner's own act. Shared with the template-source bound (ent#591).
+        actor = principal_actor(current_user)
         await platform_audit_service.log(
             event_type=AuditEventType.AUTHORIZATION,
             event_action=action,

@@ -1967,6 +1967,10 @@ Example:
                so this view's raw-color count cannot move; the tag adds none. -->
           <TemplateRegistryPanel v-if="activeTab === 'agents'" />
 
+          <!-- Template sources for agent-created agents (trinity-enterprise#591):
+               beside the registry, because both decide where agents come FROM. -->
+          <AgentCreationAllowlistPanel v-if="activeTab === 'agents'" />
+
           <!-- SSH Access Section -->
           <div v-if="activeTab === 'access'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
@@ -2384,6 +2388,7 @@ import {
 } from '../components/onboarding/hardeningGuide'
 import { MODEL_CATALOG } from '../constants/modelCatalog'
 import TemplateRegistryPanel from '../components/settings/TemplateRegistryPanel.vue'
+import AgentCreationAllowlistPanel from '../components/settings/AgentCreationAllowlistPanel.vue'
 import AAuthPanel from '../components/settings/AAuthPanel.vue'
 import A2AEndpointsPanel from '../components/settings/A2AEndpointsPanel.vue'
 import NeverminedOrganizationPanel from '../components/settings/NeverminedOrganizationPanel.vue'

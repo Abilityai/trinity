@@ -165,6 +165,61 @@ would admit an edge peer the route refuses. A refusal (the uniform 404) comes ba
 error saying "refused, not 'no grants'". There is no write tool: granting stays an
 admin's interactive action.
 
+## What an agent may build from (trinity-enterprise#591)
+
+`agents.manage` decides *whether* an agent may create a durable agent (and ghosts
+need no grant); the instance's template-source allowlist decides *what from*, for
+both. Requirement: `requirements/auth.md` §2.9a.
+
+```
+Settings → Agents → AgentCreationAllowlistPanel.vue
+  GET  /api/settings/agent-creation-allowlist   (assert_admin)
+  PUT  /api/settings/agent-creation-allowlist   (assert_interactive_admin; 422 invalid_template_sources)
+        └─ routers/settings/templates.py → services/template_source_policy.py
+              parse_entries → write_entries → system_settings['agent_creation_allowlist']
+              describe(): entries, bounded, stored_invalid, not_bundled, in_use
+
+POST /api/agents ─ _require_create_capability (agents.manage, durable only)
+                 ─ template_source_policy.enforce(request, user, config)   ← before the idempotency claim
+                 └─ create_agent_internal
+                      ─ template_source_policy.enforce(...)                ← choke point, before the ghost pre-gates
+                        (fork / copy / clone / system-deploy members all pass here)
+POST /api/agents/deploy-local ─ capability_fence(agents.manage)
+                              ─ enforce(..., upload=True)                  ← before the claim and the extraction
+POST /api/systems/deploy ─ deploy_manifest: manifest_refusals() once
+                              dry run → failed[] (403 per refused member, status invalid)
+                              write   → 403 for the whole deploy, members[], before any create
+GET /api/templates ─ annotate_templates(): allowed_for_agents per entry (bounded caller + list set)
+```
+
+- **Who is bounded**: every principal outside `{JWT, user, system}` (the
+  `ADMIN_GATE_SCOPES` allowlist; an absent `mcp_scope` is bounded). People and
+  `trinity-system` never read the row.
+- **Matching** (`source_of` mirrors crud's `_parse_github_ref`): `local:<name>` only
+  when the name is listed AND bundled (`_LOCAL_TEMPLATE_ROOTS[0]`); `github:o/*`;
+  `github:o/r` (any ref); `github:o/r@ref` (only the ref the create will use —
+  `@ref`, else `source_branch`, else `main`; `fork_to_own` and a copy of the default
+  branch match only unpinned entries). Blank and unrecognised templates are refused.
+- **Refusal**: 403 `template_source_not_allowed` (with `template` — canonical, never
+  the raw string — and `allowed_sources`) or `template_upload_not_allowed`. One
+  `template_source_refused` audit row per refused request: the agent as actor
+  (`platform_audit_service.principal_actor`, shared with the capability audit), its
+  key id, the sanitised slug as target (`None` for a ghost; its base name rides in
+  `details.requested_name`).
+- **Stored row**: no row or `[]` = unbounded; a non-list bounds agents to nothing;
+  a list with bad entries keeps the valid ones; both set `stored_invalid`. The
+  generic `PUT`/`DELETE /api/settings/{key}` refuse the key.
+- **Impact read**: `in_use` = distinct `trinity.template` labels of live agents with
+  `spawned_by_agent` set (`db.list_agent_created_agent_names` + `list_all_agents_fast`),
+  each allowed or refused under the saved list; `None` when unreadable.
+- **Apply** (`POST /api/systems/apply`) is `require_person`, so agent keys never reach
+  it; `test_apply_stays_person_only` names the blocker to add if that changes.
+- **Limits**: create-time only (what a parent does to a child afterwards is governed
+  by the grants above); an unpinned repo entry is only as strong as who can push to
+  the repo.
+- **Tests**: `tests/unit/test_ent591_template_source_bound.py`,
+  `src/frontend/tests/unit/agentCreationAllowlistPanel.mount.spec.js`.
+
 ## Upgrade effect
 
 After deploy, no agent holds the three new capabilities. An orchestrating agent

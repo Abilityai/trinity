@@ -4919,6 +4919,17 @@ class TemplateRegistryUpdate(BaseModel):
     enabled: Optional[bool] = None
 
 
+class AgentCreationAllowlistUpdate(BaseModel):
+    """PUT body for `/api/settings/agent-creation-allowlist` (trinity-enterprise#591).
+
+    The whole list, replacing the saved one; `[]` clears it (unbounded). Items
+    are typed `Any` on purpose: every entry is judged by
+    `template_source_policy.parse_entries`, so a non-string gets the same named,
+    per-entry reason as a malformed source instead of Pydantic's generic 422.
+    """
+    entries: List[Any]
+
+
 class AAuthSettingsUpdate(BaseModel):
     """PUT body for `/api/settings/aauth` (abilityai/trinity-enterprise#862).
 
