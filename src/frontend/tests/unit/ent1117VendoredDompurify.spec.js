@@ -22,7 +22,8 @@ import { JSDOM } from 'jsdom'
 const here = dirname(fileURLToPath(import.meta.url))
 const root = resolve(here, '../..')
 const VENDORED = resolve(root, 'public/brain-orb/vendor/purify.min.js')
-const vendored = readFileSync(VENDORED, 'utf8')
+const vendoredBytes = readFileSync(VENDORED)
+const vendored = vendoredBytes.toString('utf8')
 const lock = JSON.parse(readFileSync(resolve(root, 'package-lock.json'), 'utf8'))
 const lockedVersion = lock.packages['node_modules/dompurify'].version
 
@@ -43,10 +44,23 @@ describe('vendored DOMPurify (brain-orb)', () => {
   it('is byte-identical to the installed dist/purify.min.js (the UMD build npm verified)', () => {
     // npm ci checks the tarball against the lock's integrity hash, so the
     // installed copy is the trusted reference for "the exact upstream file".
-    const installed = readFileSync(
-      resolve(root, 'node_modules/dompurify/dist/purify.min.js'), 'utf8',
+    const installed = readFileSync(resolve(root, 'node_modules/dompurify/dist/purify.min.js'))
+    expect(vendoredBytes.equals(installed), 'vendored copy differs from the installed UMD build')
+      .toBe(true)
+  })
+
+  it('the lockfile resolves exactly one dompurify', () => {
+    // `overrides.dompurify` in package.json is what keeps it that way:
+    // monaco-editor pins an exact older DOMPurify, and without the override
+    // npm nests that copy (inside the vulnerable ranges) under monaco-editor.
+    const copies = Object.keys(lock.packages).filter(
+      (key) => key === 'node_modules/dompurify' || key.endsWith('/node_modules/dompurify'),
     )
-    expect(vendored === installed, 'vendored copy differs from the installed UMD build').toBe(true)
+    expect(
+      copies,
+      'package-lock.json holds a second dompurify; keep overrides.dompurify in package.json ' +
+        'at the same range as the dependency',
+    ).toEqual(['node_modules/dompurify'])
   })
 
   it('defines a working global DOMPurify when run as a classic script', () => {
