@@ -603,4 +603,3 @@ def test_an_agent_with_no_library_skill_reads_no_run(world, monkeypatch):
     monkeypatch.setattr(db, "get_execution_requester", lambda e: reads.append(e))
     assert _post(world, execution_id="exec-anything") == ALLOWED
     assert reads == []
-
