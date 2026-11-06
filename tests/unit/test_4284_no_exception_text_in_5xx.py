@@ -25,9 +25,12 @@ Answers (sinks):
   ``status=`` or a leading positional int). These are the platform's domain
   errors and outcome objects (``BindError``, ``ClientPortalError``,
   ``PaidTurnOutcome``, ``_http_error``, ...) that a router later turns into a
-  response with ``status_code=e.status_code`` (G2). The carrier list is
-  derived from the code, so a new carrier is covered the first time it is
-  raised with a status;
+  response with ``status_code=e.status_code``. The carrier list is derived
+  from the code, so a new carrier is covered the first time it is raised with
+  a status;
+- an ``HTTPException`` subclass defined in the trees. One whose ``__init__``
+  fixes the status answers at that status (500 when it cannot be read), with
+  every argument as text;
 - ``return <x>`` in a function that sets ``<obj>.status_code = <5xx>``.
 
 Every argument other than the status is text: ``detail``, ``content``,
@@ -43,32 +46,47 @@ that always raises or returns).
 
 Sources:
 - **exception text**: a name bound by ``except ... as e``, referenced inside
-  that handler, in **any** arm, broad or narrow (G4). Narrow arms are not
+  that handler, in **any** arm, broad or narrow. Narrow arms are not
   exempt because ``except OSError as e`` and ``except GitHubError as e`` carry
   paths and echoed credentials as readily as ``except Exception``; the narrow
   arms whose text is deliberate are listed below with their reason. Also
   ``traceback.format_exc()`` and its siblings, ``sys.exc_info()`` /
-  ``sys.exception()``, and the exception parameter of a registered exception
+  ``sys.exception()`` (also when imported by name, ``from traceback import
+  format_exc``), and the exception parameter of a registered exception
   handler;
-- **upstream body** (G3, G6): ``<x>.text``, ``<x>.content`` or ``<x>.json()``,
-  i.e. a relayed response. An agent on an older base image still answers with
-  its own exception text, and the backend's relay is the only thing between
-  that text and the caller.
+- **upstream body**: ``<x>.text``, ``<x>.content``, ``<x>.json()``,
+  ``await <x>.text()``, the streaming iterators (``iter_text``, ``aiter_raw``,
+  ...), and ``read()`` / ``aread()`` on a receiver named like a response
+  (``r``, ``resp``, ``response``, ``*_response``), i.e. a relayed answer. An
+  agent on an older base image still answers with its own exception text, and
+  the backend's relay is the only thing between that text and the caller;
+- **a parameter**: a sink that renders one of its own function's parameters
+  is judged at each caller, by what the caller passes (the parameter is
+  replaced by the caller's argument, so ``exc.detail`` is ``e.detail`` with
+  the caller's ``e``). A status that is a parameter is read at the caller the
+  same way, so ``def _fail(code, msg): raise HTTPException(code, msg)`` called
+  as ``_fail(400, str(e))`` is a 4xx and as ``_fail(500, str(e))`` a finding.
+  Callers are found by name: anywhere in the trees when the name is defined
+  once, in the same module otherwise. Exception text is followed up to three
+  calls back, an upstream body one call back.
 
 Text is followed through every spelling the code uses: f-strings (``!r`` and
 ``!s`` included), ``str()`` / ``repr()`` / ``format()`` / ``.format()``, ``%``,
 ``+``, ``.join``, slicing, method calls on the text (``str(e).lower()``),
 dicts / lists / tuples, comprehensions, conditional expressions, ``or``, and
 any call that is handed the text (``_scrub(str(e), pat)``), so a scrubber is
-not an exemption. Locals are followed within the function (G1): an
+not an exemption. Locals are followed within the function: an
 assignment, ``+=``, ``:=``, a ``for`` target, ``x.append(...)`` and friends,
 and ``d[k] = ...`` all carry the text into the name.
 
 What is not text: ``type(e).__name__``, ``e.__class__.__name__`` (any
 ``.__name__`` / ``.__qualname__``), ``e.status_code``, ``e.status``,
-``e.code``, ``e.errno``, ``e.detail`` (an ``HTTPException``'s own platform
-detail), ``isinstance`` / ``len`` / ``bool`` / ``type`` / ``int`` results, and
-comparisons.
+``e.code``, ``e.errno``, ``isinstance`` / ``len`` / ``bool`` / ``type`` /
+``int`` results, and comparisons. ``e.detail`` is not text only when ``e``
+was caught as an ``HTTPException`` (or a subclass the trees define), whose
+details this guard checks where they are raised; on any other class it is
+that class's text. ``getattr(e, "<attr>", default)`` follows the same rule
+for the attribute, and its default is text.
 
 Exception text at a **dynamic** status is a finding only when the exception
 was caught as a broad or foreign class (``Exception``, ``httpx.HTTPError``).
@@ -78,12 +96,12 @@ whose text this guard checks where the carrier is built, so its forwarders
 routes) are not findings. An upstream body at a dynamic status is always a
 finding.
 
-Out of the rule: a 2xx payload that carries exception text (G5, for example
-the per-member ``failed[].reason`` of a system deploy), a 4xx (deliberate
-domain errors such as ``ValueError`` -> 400 stay), log lines, and text that
-crosses a function boundary through a return value (a relay assembled in a
-service and raised in a router). A nested function does not see the
-enclosing handler's exception name.
+Out of the rule: a 2xx payload that carries exception text, a 4xx
+(deliberate domain errors such as ``ValueError`` -> 400 stay), log lines, and
+text that crosses a function boundary through a return value or an object's
+attribute (a relay assembled in a service and raised in a router, an
+exception stored on ``self``). A nested function does not see the enclosing
+handler's exception name.
 
 The allowlist
 -------------
@@ -93,16 +111,31 @@ that reach it (``e.msg``, ``e.strerror``, ``resp.json()``). So a site cannot
 degrade while listed: adding ``str(e)`` next to an allowed ``e.msg`` adds the
 fragment ``e``, which no entry allows. An entry that matches no site fails
 (``test_allowlist_has_no_stale_entries``), so the list cannot rot. An entry
-whose reason is "this class is only ever raised with platform text" names the
-class, and ``test_listed_carriers_are_raised_only_with_platform_text`` checks
-every construction of it in both trees.
+that holds a site for a while carries the date it ends
+(``test_held_entries_have_not_expired``).
+
+A reason that rests on a class is checked at every construction of it in
+both trees, with the class's subclasses, and with any platform class whose
+text a construction uses (that class is checked the same way):
+- ``platform_text_only``: every argument is platform text. A parameter is
+  followed to each caller, and a parameter no caller can be seen filling
+  counts as foreign, so building the class in a helper from caller-supplied
+  text does not pass (``test_listed_carriers_are_raised_only_with_platform_text``);
+- ``no_exception_text``: the weaker claim, for a class that deliberately
+  carries a peer's or a caller's words: no argument is exception text, at the
+  construction or at a caller that can be seen
+  (``test_listed_carriers_carry_no_exception_text``). A construction that
+  does carry it is pinned by name with its reason.
 """
 
 from __future__ import annotations
 
 import ast
+import copy
+import datetime
 import functools
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, FrozenSet, Iterable, List, Optional, Set, Tuple
 
@@ -125,6 +158,23 @@ _TRACEBACK_SOURCES = frozenset(
      ("traceback", "format_stack"), ("sys", "exc_info"), ("sys", "exception")}
 )
 _RELAY_ATTRS = frozenset({"text", "content"})
+# Methods whose result is a relayed body: httpx's ``json()`` and aiohttp's
+# ``await r.text()`` on anything, ``read()`` / ``aread()`` on a receiver named
+# like a response (a file or an upload is read the same way), and the
+# streaming iterators.
+_RELAY_METHODS = frozenset({"json", "text"})
+_RELAY_READS = frozenset({"read", "aread"})
+_RESPONSE_NAME = re.compile(r"(r|res|resp|response|reply|upstream)\Z|.*_(resp|response)\Z")
+_RELAY_ITERATORS = frozenset(
+    {"iter_text", "iter_bytes", "iter_lines", "iter_raw",
+     "aiter_text", "aiter_bytes", "aiter_lines", "aiter_raw"}
+)
+# The names an ``HTTPException``'s ``detail`` is platform text under: the
+# FastAPI and Starlette classes, plus every subclass the trees define.
+_HTTP_EXCEPTIONS = frozenset({"HTTPException", "StarletteHTTPException"})
+# How far a parameter is followed back through its callers.
+_MAX_CALL_DEPTH = 3
+_FAMILIES = ("exception", "upstream body", "parameter")
 _CONTAINER_MUTATORS = frozenset(
     {"append", "extend", "insert", "add", "update", "setdefault", "appendleft"}
 )
@@ -153,11 +203,15 @@ class Finding:
     kind: str        # "exception" | "upstream body"
     status: str      # the status expression as written
     fragments: FrozenSet[str]
+    # Where a parameter in the answer was handed the text, for a finding
+    # that crosses a call ("path:line function"); empty otherwise.
+    via: str = field(default="", compare=False)
 
     def render(self) -> str:
+        via = f" (handed it at {self.via})" if self.via else ""
         return (f"{self.path}:{self.line} {self.function} -> {self.sink}"
                 f"(status={self.status}) renders {self.kind}: "
-                f"{', '.join(sorted(self.fragments))}")
+                f"{', '.join(sorted(self.fragments))}{via}")
 
 
 # ---------------------------------------------------------------------------
@@ -276,18 +330,35 @@ def _always_exits(stmts: List[ast.stmt]) -> bool:
 # ---------------------------------------------------------------------------
 
 # Context in force at a node: the exception names bound by the handlers around
-# it (name -> caught-as-broad-or-foreign), and the status expressions an
-# enclosing branch bounds below 500.
-_Ctx = Tuple[Tuple[Tuple[str, bool], ...], FrozenSet[str]]
+# it (name, caught-as-broad-or-foreign, the classes caught), and the status
+# expressions an enclosing branch bounds below 500.
+_Exc = Tuple[str, bool, Tuple[str, ...]]
+_Ctx = Tuple[Tuple[_Exc, ...], FrozenSet[str]]
 
 
 class _Scope:
     def __init__(self, fn: ast.AST, qualname: str, own_classes: FrozenSet[str],
-                 exc_param: Optional[Tuple[str, bool]] = None) -> None:
+                 exc_param: Optional[_Exc] = None, *,
+                 http_classes: FrozenSet[str] = _HTTP_EXCEPTIONS,
+                 tb_names: FrozenSet[str] = frozenset(),
+                 is_method: bool = False) -> None:
         self.fn = fn
         self.qualname = qualname
         self.own = own_classes
         self.exc_param = exc_param
+        self.http = http_classes
+        # Local names a module imported from ``traceback`` / ``sys`` that
+        # render the exception in flight (``from traceback import format_exc``).
+        self.tb_names = tb_names
+        self.params: Tuple[str, ...] = ()
+        self.param_star: FrozenSet[str] = frozenset()
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            a = fn.args
+            names = [x.arg for x in a.posonlyargs + a.args]
+            if is_method and names:
+                names = names[1:]
+            self.params = tuple(names + [x.arg for x in a.kwonlyargs])
+            self.param_star = frozenset(x.arg for x in (a.vararg, a.kwarg) if x is not None)
         self.nodes: List[Tuple[ast.AST, _Ctx]] = []
         self._block(getattr(fn, "body", []), ((), frozenset()))
 
@@ -318,7 +389,8 @@ class _Scope:
                 self.nodes.append((h, ctx))
                 if h.type is not None:
                     self._visit(h.type, ctx)
-                inner = excs + ((h.name, self._foreign(h)),) if h.name else excs
+                inner = (excs + ((h.name, self._foreign(h), tuple(_exc_type_names(h.type))),)
+                         if h.name else excs)
                 self._block(h.body, (inner, bounds))
             return
         if isinstance(node, ast.If):
@@ -330,10 +402,10 @@ class _Scope:
             if isinstance(child, (ast.stmt, ast.match_case)):
                 continue
             self._visit(child, ctx)
-        for field in ("body", "orelse", "finalbody", "handlers", "cases"):
-            seq = getattr(node, field, None)
+        for block in ("body", "orelse", "finalbody", "handlers", "cases"):
+            seq = getattr(node, block, None)
             if isinstance(seq, list) and seq and isinstance(seq[0], (ast.stmt, ast.match_case)):
-                if field == "cases":
+                if block == "cases":
                     for case in seq:
                         self._visit(case.pattern, ctx)
                         if case.guard is not None:
@@ -344,47 +416,99 @@ class _Scope:
 
 
 class _Taint:
-    """Fragment computation for one scope and one source family."""
+    """Fragment computation for one scope and one source family.
+
+    Families: ``exception`` (the exception in flight), ``upstream body`` (a
+    relayed answer) and ``parameter`` (the enclosing function's own
+    parameters, which the callers fill in; see ``_through_callers``).
+    """
 
     def __init__(self, scope: _Scope, family: str) -> None:
         self.scope = scope
-        self.family = family  # "exception" | "upstream body"
+        self.family = family
         self.locals: Dict[str, FrozenSet[Frag]] = {}
+        # fragment text -> the access expression it came from (parameter
+        # family) or the classes caught (exception family).
+        self.nodes: Dict[str, ast.expr] = {}
+        self.classes: Dict[str, Tuple[str, ...]] = {}
         self._fixpoint()
 
-    def _exc_name(self, name: str, ctx: _Ctx) -> Optional[bool]:
+    def _exc_entry(self, name: str, ctx: _Ctx) -> Optional[Tuple[bool, Tuple[str, ...]]]:
         if self.family != "exception":
             return None
-        for n, foreign in reversed(ctx[0]):
+        for n, foreign, classes in reversed(ctx[0]):
             if n == name:
-                return foreign
+                return foreign, classes
         if self.scope.exc_param and self.scope.exc_param[0] == name:
-            return self.scope.exc_param[1]
+            return self.scope.exc_param[1], self.scope.exc_param[2]
         return None
 
-    def _root_exc(self, node: ast.expr, ctx: _Ctx) -> Optional[bool]:
-        while isinstance(node, (ast.Attribute, ast.Subscript)):
-            node = node.value
-        if isinstance(node, ast.Name):
-            return self._exc_name(node.id, ctx)
-        return None
+    def _is_param(self, name: str, ctx: _Ctx) -> bool:
+        return (self.family == "parameter" and name in self.scope.params
+                and not any(n == name for n, _f, _c in ctx[0]))
+
+    @staticmethod
+    def _root_name(node: ast.expr) -> Optional[str]:
+        while True:
+            if isinstance(node, (ast.Attribute, ast.Subscript)):
+                node = node.value
+            elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                  and node.func.id == "getattr" and node.args):
+                node = node.args[0]
+            else:
+                return node.id if isinstance(node, ast.Name) else None
+
+    def _source(self, e: ast.expr, root: Optional[str], ctx: _Ctx) -> FrozenSet[Frag]:
+        """The fragment for an access rooted at an exception name or a
+        parameter, or nothing when ``root`` is neither."""
+        if root is None:
+            return frozenset()
+        entry = self._exc_entry(root, ctx)
+        if entry is not None:
+            text = ast.unparse(e)
+            self.classes[text] = entry[1]
+            return frozenset({(text, entry[0])})
+        if self._is_param(root, ctx):
+            text = ast.unparse(e)
+            self.nodes[text] = e
+            return frozenset({(text, True)})
+        return frozenset()
+
+    def _detail_is_platform(self, root: Optional[str], ctx: _Ctx) -> bool:
+        """``.detail`` is platform text only on an ``HTTPException``: its
+        details are checked where it is raised. On any other class it is
+        that class's text."""
+        if root is None:
+            return False
+        entry = self._exc_entry(root, ctx)
+        return entry is not None and bool(entry[1]) and all(c in self.scope.http for c in entry[1])
+
+    def _clean_attr(self, attr: str, root: Optional[str], ctx: _Ctx) -> bool:
+        if attr not in _CLEAN_ATTRS or self.family == "upstream body":
+            return False
+        if attr != "detail":
+            return True
+        # A parameter's ``.detail`` is decided at each caller, where the
+        # argument's class is known.
+        return self.family == "exception" and self._detail_is_platform(root, ctx)
 
     def frags(self, e: Optional[ast.AST], ctx: _Ctx) -> FrozenSet[Frag]:
         if e is None or isinstance(e, (ast.Constant, ast.Compare, ast.Lambda)):
             return frozenset()
         if isinstance(e, ast.Name):
-            foreign = self._exc_name(e.id, ctx)
-            if foreign is not None:
-                return frozenset({(e.id, foreign)})
+            found = self._source(e, e.id, ctx)
+            if found:
+                return found
             return self.locals.get(e.id, frozenset())
         if isinstance(e, ast.Attribute):
-            if self.family == "exception" and e.attr in _CLEAN_ATTRS:
+            root = self._root_name(e)
+            if self._clean_attr(e.attr, root, ctx):
                 return frozenset()
             if self.family == "upstream body" and e.attr in _RELAY_ATTRS:
                 return frozenset({(ast.unparse(e), True)})
-            foreign = self._root_exc(e, ctx)
-            if foreign is not None:
-                return frozenset({(ast.unparse(e), foreign)})
+            found = self._source(e, root, ctx)
+            if found:
+                return found
             return self.frags(e.value, ctx)
         if isinstance(e, ast.Call):
             f = e.func
@@ -393,16 +517,30 @@ class _Taint:
             if (isinstance(f, ast.Name) and f.id == "getattr" and len(e.args) >= 2
                     and isinstance(e.args[1], ast.Constant)):
                 attr = e.args[1].value
-                if self.family == "exception" and attr in _CLEAN_ATTRS:
-                    return frozenset()
+                root = self._root_name(e.args[0])
+                if (self.family == "parameter" and isinstance(e.args[0], ast.Name)
+                        and self._is_param(e.args[0].id, ctx)):
+                    if isinstance(attr, str) and attr in _CLEAN_ATTRS and attr != "detail":
+                        return self._union(e.args[2:], ctx)
+                    return self._source(e, root, ctx) | self._union(e.args[2:], ctx)
+                if isinstance(attr, str) and self._clean_attr(attr, root, ctx):
+                    # The attribute is not text, but the default is rendered
+                    # whenever the attribute is missing.
+                    return self._union(e.args[2:], ctx)
                 if self.family == "upstream body" and attr in _RELAY_ATTRS:
                     return frozenset({(ast.unparse(e), True)})
             if (self.family == "exception" and isinstance(f, ast.Attribute)
                     and isinstance(f.value, ast.Name)
                     and (f.value.id, f.attr) in _TRACEBACK_SOURCES):
                 return frozenset({(ast.unparse(e), True)})
+            if (self.family == "exception" and isinstance(f, ast.Name)
+                    and f.id in self.scope.tb_names):
+                return frozenset({(ast.unparse(e), True)})
             if (self.family == "upstream body" and isinstance(f, ast.Attribute)
-                    and f.attr == "json" and not e.args):
+                    and ((f.attr in _RELAY_METHODS and not e.args)
+                         or f.attr in _RELAY_ITERATORS
+                         or (f.attr in _RELAY_READS and _RESPONSE_NAME.match(
+                             self._root_name(f.value) or "")))):
                 return frozenset({(ast.unparse(e), True)})
             parts: List[ast.AST] = list(e.args) + [k.value for k in e.keywords]
             if isinstance(f, ast.Attribute):
@@ -420,6 +558,9 @@ class _Taint:
             return (self.frags(e.key, ctx) | self.frags(e.value, ctx)
                     | self._union([g.iter for g in e.generators], ctx))
         if isinstance(e, ast.Subscript):
+            found = self._source(e, self._root_name(e), ctx)
+            if found and self.family == "parameter":
+                return found
             return self.frags(e.value, ctx)
         if isinstance(e, ast.FormattedValue):
             return self.frags(e.value, ctx)
@@ -521,6 +662,9 @@ class _Facts:
     handlers: List[Tuple[Optional[str], Optional[str]]]  # (exception class, function)
     calls: List[Tuple[int, str]]                         # (line, callee)
     status_assign_lines: List[int]                       # `<x>.status_code = <5xx>`
+    bases: Dict[str, Set[str]] = field(default_factory=dict)   # class -> base names
+    class_defs: Dict[str, ast.ClassDef] = field(default_factory=dict)
+    tb_names: Set[str] = field(default_factory=set)
 
 
 def _module_facts(mod: _Module) -> _Facts:
@@ -530,10 +674,15 @@ def _module_facts(mod: _Module) -> _Facts:
     for n in ast.walk(mod.tree):
         if isinstance(n, ast.ClassDef):
             facts.classes.add(n.name)
+            facts.bases.setdefault(n.name, set()).update(
+                b for b in (_callee(x) for x in n.bases) if b)
+            facts.class_defs.setdefault(n.name, n)
         elif isinstance(n, ast.ImportFrom):
             for a in n.names:
                 if a.asname:
                     aliases[a.asname] = a.name
+                if (n.module, a.name) in _TRACEBACK_SOURCES:
+                    facts.tb_names.add(a.asname or a.name)
         elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
             for d in n.decorator_list:
                 if isinstance(d, ast.Call) and _callee(d.func) == "exception_handler" and d.args:
@@ -563,49 +712,241 @@ def _module_facts(mod: _Module) -> _Facts:
     return facts
 
 
-def _tree_facts(mods: List[_Module]) -> Tuple[List[_Facts], FrozenSet[str], Dict[str, Set[str]], Dict[str, bool]]:
+@dataclass
+class _Tree:
+    per_module: List[_Facts]
+    own: FrozenSet[str]
+    carriers: Dict[str, Set[str]]
+    handlers: Dict[str, Tuple[bool, str]]          # function -> (foreign, class)
+    http: FrozenSet[str]                           # HTTPException and its subclasses
+    # An HTTPException subclass whose __init__ fixes the status: the status it
+    # fixes (None when it cannot be read, which is treated as 5xx).
+    http_fixed: Dict[str, Optional[ast.expr]]
+
+
+def _fixed_http_status(cls: ast.ClassDef) -> Tuple[bool, Optional[ast.expr]]:
+    """(fixes the status, the status) for an HTTPException subclass: True when
+    its own ``__init__`` passes a status to ``super().__init__`` that is not
+    one of its parameters."""
+    for item in cls.body:
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == "__init__":
+            params = {a.arg for a in item.args.posonlyargs + item.args.args + item.args.kwonlyargs}
+            for n in ast.walk(item):
+                if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                        and n.func.attr == "__init__"):
+                    kws = {k.arg: k.value for k in n.keywords if k.arg}
+                    status = kws.get("status_code", n.args[0] if n.args else None)
+                    if isinstance(status, ast.Name) and status.id in params:
+                        return False, None
+                    return True, status
+            return True, None
+    return False, None
+
+
+def _tree(mods: List[_Module]) -> _Tree:
     per_module = [_module_facts(m) for m in mods]
+    classes: Set[str] = set().union(*(f.classes for f in per_module))
+    bases: Dict[str, Set[str]] = {}
+    defs: Dict[str, ast.ClassDef] = {}
+    for f in per_module:
+        for name, b in f.bases.items():
+            bases.setdefault(name, set()).update(b)
+        for name, d in f.class_defs.items():
+            defs.setdefault(name, d)
+    http = set(_HTTP_EXCEPTIONS)
+    changed = True
+    while changed:
+        changed = False
+        for name, b in bases.items():
+            if name not in http and b & http:
+                http.add(name)
+                changed = True
     # HTTPException's detail and headers are written where it is raised, and
     # those raises are checked here, so a caught HTTPException is a carrier.
-    own = frozenset(set().union(*(f.classes for f in per_module)) | {"HTTPException"})
+    own = frozenset(classes | _HTTP_EXCEPTIONS)
     carriers: Dict[str, Set[str]] = {"HTTPException": {"kw:status_code", "pos:0"}}
     for name in _RESPONSE_CLASSES:
         carriers[name] = {"kw:status_code", "pos:1"}
-    handlers: Dict[str, bool] = {}
+    http_fixed: Dict[str, Optional[ast.expr]] = {}
+    for name in http - _HTTP_EXCEPTIONS:
+        fixes, status = _fixed_http_status(defs[name]) if name in defs else (False, None)
+        if fixes:
+            http_fixed[name] = status
+            carriers[name] = set()
+        else:
+            carriers[name] = {"kw:status_code", "pos:0"}
+    handlers: Dict[str, Tuple[bool, str]] = {}
     for f in per_module:
         for name, positions in f.carriers.items():
-            carriers.setdefault(name, set()).update(positions)
+            if name not in http_fixed:
+                carriers.setdefault(name, set()).update(positions)
         for cls, fn in f.handlers:
             if fn:
-                handlers[fn] = cls in _BROAD or cls not in own
-    return per_module, own, carriers, handlers
+                handlers[fn] = (cls in _BROAD or cls not in own, cls or "<expr>")
+    return _Tree(per_module, own, carriers, handlers, frozenset(http), http_fixed)
 
 
-def _scopes(mod: _Module, own: FrozenSet[str], handlers: Dict[str, bool],
-            lines: Set[int]) -> List[_Scope]:
-    """Scopes for the module body and each function whose span holds a candidate line."""
-    scopes: List[_Scope] = [_Scope(mod.tree, "<module>", own)]
+def _functions(mod: _Module) -> List[Tuple[ast.AST, str, bool]]:
+    """Every function in the module: (node, dotted qualname, is a method that
+    takes self or cls)."""
+    out: List[Tuple[ast.AST, str, bool]] = []
 
-    def walk(node: ast.AST, prefix: str) -> None:
+    def walk(node: ast.AST, prefix: str, in_class: bool) -> None:
         for child in ast.iter_child_nodes(node):
             if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                qual = f"{prefix}{child.name}"
-                span = range(child.lineno, (child.end_lineno or child.lineno) + 1)
-                if any(line in span for line in lines):
-                    param = None
-                    if child.name in handlers:
-                        args = child.args.posonlyargs + child.args.args
-                        if len(args) >= 2:
-                            param = (args[1].arg, handlers[child.name])
-                    scopes.append(_Scope(child, qual, own, param))
-                    walk(child, qual + ".")
+                static = any(_callee(d) == "staticmethod" for d in child.decorator_list)
+                out.append((child, f"{prefix}{child.name}", in_class and not static))
+                walk(child, f"{prefix}{child.name}.", False)
             elif isinstance(child, ast.ClassDef):
-                walk(child, f"{prefix}{child.name}.")
+                walk(child, f"{prefix}{child.name}.", True)
             elif isinstance(child, ast.stmt):
-                walk(child, prefix)
+                walk(child, prefix, in_class)
 
-    walk(mod.tree, "")
-    return scopes
+    walk(mod.tree, "", False)
+    return out
+
+
+class _Index:
+    """Scopes and call sites across the trees, built on first use."""
+
+    def __init__(self, mods: List[_Module], tree: _Tree) -> None:
+        self.mods = mods
+        self.tree = tree
+        self._fns = [_functions(m) for m in mods]
+        self._scopes: Dict[int, _Scope] = {}
+        self._defs: Optional[Dict[str, int]] = None
+        self._calls: Optional[Dict[str, List[Tuple[int, ast.Call]]]] = None
+        self._taints: Dict[int, Dict[str, "_Taint"]] = {}
+        self._ctx: Dict[int, Dict[int, _Ctx]] = {}
+
+    def scope(self, mi: int, fn: ast.AST, qual: str, is_method: bool) -> _Scope:
+        key = id(fn)
+        if key not in self._scopes:
+            facts = self.tree.per_module[mi]
+            param = None
+            name = getattr(fn, "name", None)
+            if name in self.tree.handlers and isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                args = fn.args.posonlyargs + fn.args.args
+                if len(args) >= 2:
+                    foreign, cls = self.tree.handlers[name]
+                    param = (args[1].arg, foreign, (cls,))
+            self._scopes[key] = _Scope(
+                fn, qual, self.tree.own, param, http_classes=self.tree.http,
+                tb_names=frozenset(facts.tb_names), is_method=is_method)
+        return self._scopes[key]
+
+    def module_scope(self, mi: int) -> _Scope:
+        return self.scope(mi, self.mods[mi].tree, "<module>", False)
+
+    def scopes_for_lines(self, mi: int, lines: Set[int]) -> List[_Scope]:
+        """The module body and each function whose span holds a candidate line."""
+        out = [self.module_scope(mi)]
+        for fn, qual, is_method in self._fns[mi]:
+            span = range(fn.lineno, (fn.end_lineno or fn.lineno) + 1)  # type: ignore[attr-defined]
+            if any(line in span for line in lines):
+                out.append(self.scope(mi, fn, qual, is_method))
+        return out
+
+    def enclosing(self, mi: int, node: ast.AST) -> _Scope:
+        """The innermost function scope that holds ``node``."""
+        best = None
+        line = getattr(node, "lineno", 0)
+        for fn, qual, is_method in self._fns[mi]:
+            if fn.lineno <= line <= (fn.end_lineno or fn.lineno):  # type: ignore[attr-defined]
+                if best is None or fn.lineno >= best[0].lineno:  # type: ignore[attr-defined]
+                    best = (fn, qual, is_method)
+        if best is None:
+            return self.module_scope(mi)
+        return self.scope(mi, *best)
+
+    def _build(self) -> None:
+        defs: Dict[str, int] = {}
+        calls: Dict[str, List[Tuple[int, ast.Call]]] = {}
+        for mi, m in enumerate(self.mods):
+            for fn, _q, _m in self._fns[mi]:
+                defs[fn.name] = defs.get(fn.name, 0) + 1  # type: ignore[attr-defined]
+            for n in ast.walk(m.tree):
+                if isinstance(n, ast.Call):
+                    name = _callee(n.func)
+                    if name:
+                        calls.setdefault(name, []).append((mi, n))
+        self._defs, self._calls = defs, calls
+
+    def callers(self, mi: int, scope: _Scope) -> List[Tuple[int, ast.Call]]:
+        """Call sites of ``scope``'s function, by name: anywhere in the trees
+        when the name is defined once, else in its own module only."""
+        if self._calls is None:
+            self._build()
+        assert self._calls is not None and self._defs is not None
+        name = getattr(scope.fn, "name", None)
+        if not name:
+            return []
+        sites = self._calls.get(name, [])
+        if self._defs.get(name, 0) != 1:
+            sites = [(i, c) for i, c in sites if i == mi]
+        return sites
+
+    def calls_to(self, names: Set[str]) -> List[Tuple[int, ast.Call]]:
+        if self._calls is None:
+            self._build()
+        assert self._calls is not None
+        return [site for n in sorted(names) for site in self._calls.get(n, [])]
+
+    def taints(self, scope: _Scope) -> Dict[str, "_Taint"]:
+        key = id(scope)
+        if key not in self._taints:
+            self._taints[key] = {fam: _Taint(scope, fam) for fam in _FAMILIES}
+        return self._taints[key]
+
+    def ctx_at(self, scope: _Scope, node: ast.AST) -> Optional[_Ctx]:
+        key = id(scope)
+        if key not in self._ctx:
+            self._ctx[key] = {id(n): c for n, c in scope.nodes}
+        return self._ctx[key].get(id(node))
+
+
+def _argument_for(scope: _Scope, param: str, call: ast.Call) -> Tuple[str, Optional[ast.expr]]:
+    """What ``call`` passes for ``param``: ("arg", expr), ("default", expr),
+    ("missing", None) or ("unknown", None) when a star argument hides it."""
+    fn = scope.fn
+    assert isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+    for k in call.keywords:
+        if k.arg == param:
+            return "arg", k.value
+    if any(k.arg is None for k in call.keywords) or any(isinstance(a, ast.Starred) for a in call.args):
+        return "unknown", None
+    a = fn.args
+    positional = [x.arg for x in a.posonlyargs + a.args]
+    offset = 0
+    if positional and positional[0] in ("self", "cls") and scope.params[:1] != tuple(positional[:1]):
+        offset = 1 if isinstance(call.func, ast.Attribute) else 0
+    if param in positional:
+        i = positional.index(param) - offset
+        if 0 <= i < len(call.args):
+            return "arg", call.args[i]
+        defaults = a.defaults
+        j = positional.index(param) - (len(positional) - len(defaults))
+        if 0 <= j < len(defaults):
+            return "default", defaults[j]
+        return "missing", None
+    for x, d in zip(a.kwonlyargs, a.kw_defaults):
+        if x.arg == param:
+            return ("default", d) if d is not None else ("missing", None)
+    return "missing", None
+
+
+class _Swap(ast.NodeTransformer):
+    def __init__(self, name: str, value: ast.expr) -> None:
+        self.name, self.value = name, value
+
+    def visit_Name(self, node: ast.Name) -> ast.AST:
+        return copy.deepcopy(self.value) if node.id == self.name else node
+
+
+def _at_caller(access: ast.expr, param: str, arg: ast.expr) -> ast.expr:
+    """``access`` (``exc.detail``) with the parameter replaced by what the
+    caller passed (``e``), so the caller's own rules decide what it is."""
+    return _Swap(param, arg).visit(copy.deepcopy(access))
 
 
 def _status_of(call: ast.Call, positions: Set[str]) -> Tuple[Optional[ast.expr], Optional[str], Optional[int]]:
@@ -620,24 +961,26 @@ def _status_of(call: ast.Call, positions: Set[str]) -> Tuple[Optional[ast.expr],
     return None, None, None
 
 
-def _scan(mods: List[_Module]) -> List[Finding]:
-    per_module, own, carriers, handlers = _tree_facts(mods)
-    findings: List[Finding] = []
-    for mod, facts in zip(mods, per_module):
-        lines = {line for line, name in facts.calls if name in carriers}
-        lines |= set(facts.status_assign_lines)
-        if not lines:
-            continue
-        for scope in _scopes(mod, own, handlers, lines):
-            findings.extend(_scan_scope(mod.rel, scope, carriers))
-    return sorted(set(findings), key=lambda f: (f.path, f.line, f.sink, f.kind))
+def _status_mode(status: ast.expr, names: Tuple[Set[str], Set[str], Set[str]],
+                 bounds: FrozenSet[str]) -> Optional[str]:
+    """``"5xx"``, ``"dynamic"``, or None when the status is known to be below 500."""
+    status5_names, static_names, dyn_names = names
+    if _has_5xx(status) or (isinstance(status, ast.Name) and status.id in status5_names):
+        return "5xx"
+    if _is_static_below_500(status):
+        return None
+    if (isinstance(status, ast.Name) and status.id in static_names
+            and status.id not in dyn_names):
+        return None  # a local only ever assigned constants below 500
+    if ast.dump(status) in bounds:
+        return None
+    return "dynamic"
 
 
-def _scan_scope(rel: str, scope: _Scope, carriers: Dict[str, Set[str]]) -> List[Finding]:
-    candidates: List[Tuple[ast.AST, _Ctx, ast.expr, List[ast.AST], str]] = []
-    # A status local is static-below-500 only when every assignment to it in
-    # the function is a constant below 500. Unpacked, looped, augmented and
-    # never-assigned names (globals, closures) are dynamic.
+def _status_names(scope: _Scope) -> Tuple[Set[str], Set[str], Set[str], bool]:
+    """A status local is static-below-500 only when every assignment to it in
+    the function is a constant below 500. Unpacked, looped, augmented and
+    never-assigned names (globals, closures, parameters) are dynamic."""
     status5_names: Set[str] = set()
     static_names: Set[str] = set()
     dyn_names: Set[str] = set()
@@ -670,6 +1013,28 @@ def _scan_scope(rel: str, scope: _Scope, carriers: Dict[str, Set[str]]) -> List[
             dyn_names.update(_Taint._target_names(node.target))
         elif isinstance(node, ast.withitem) and node.optional_vars is not None:
             dyn_names.update(_Taint._target_names(node.optional_vars))
+    return status5_names, static_names, dyn_names, sets_5xx_status
+
+
+def _scan(mods: List[_Module]) -> List[Finding]:
+    tree = _tree(mods)
+    index = _Index(mods, tree)
+    findings: List[Finding] = []
+    for mi, (mod, facts) in enumerate(zip(mods, tree.per_module)):
+        lines = {line for line, name in facts.calls if name in tree.carriers}
+        lines |= set(facts.status_assign_lines)
+        if not lines:
+            continue
+        for scope in index.scopes_for_lines(mi, lines):
+            findings.extend(_scan_scope(index, mi, scope))
+    return sorted(set(findings), key=lambda f: (f.path, f.line, f.sink, f.kind))
+
+
+def _scan_scope(index: _Index, mi: int, scope: _Scope) -> List[Finding]:
+    rel = index.mods[mi].rel
+    carriers, fixed = index.tree.carriers, index.tree.http_fixed
+    candidates: List[Tuple[ast.AST, _Ctx, ast.expr, List[ast.AST], str]] = []
+    status5_names, static_names, dyn_names, sets_5xx_status = _status_names(scope)
     for node, ctx in scope.nodes:
         if isinstance(node, ast.Return) and sets_5xx_status and node.value is not None:
             candidates.append((node, ctx, ast.Constant(value=500), [node.value], "return"))
@@ -679,36 +1044,101 @@ def _scan_scope(rel: str, scope: _Scope, carriers: Dict[str, Set[str]]) -> List[
         name = _callee(node.func)
         if not name or name not in carriers:
             continue
-        status, kw, pos = _status_of(node, carriers[name])
-        if status is None:
+        if name in fixed:
+            # An HTTPException subclass that sets its own status: every
+            # argument is text, at the status it fixes (500 when unreadable).
+            status = fixed[name] if fixed[name] is not None else ast.Constant(value=500)
+            texts: List[ast.AST] = list(node.args) + [k.value for k in node.keywords]
+            candidates.append((node, ctx, status, texts, name))
             continue
-        texts: List[ast.AST] = [a for i, a in enumerate(node.args) if i != pos]
+        status_expr, kw, pos = _status_of(node, carriers[name])
+        if status_expr is None:
+            continue
+        texts = [a for i, a in enumerate(node.args) if i != pos]
         texts += [k.value for k in node.keywords if k.arg != kw]
-        candidates.append((node, ctx, status, texts, name))
+        candidates.append((node, ctx, status_expr, texts, name))
     if not candidates:
         return []
-    taints = {fam: _Taint(scope, fam) for fam in ("exception", "upstream body")}
+    taints = index.taints(scope)
     out: List[Finding] = []
     for node, ctx, status, texts, sink in candidates:
-        bounds = ctx[1]
-        if _has_5xx(status) or (isinstance(status, ast.Name) and status.id in status5_names):
-            mode = "5xx"
-        elif _is_static_below_500(status):
+        mode = _status_mode(status, (status5_names, static_names, dyn_names), ctx[1])
+        if mode is None:
             continue
-        elif (isinstance(status, ast.Name) and status.id in static_names
-              and status.id not in dyn_names):
-            continue  # a local only ever assigned constants below 500
-        elif ast.dump(status) in bounds:
-            continue
-        else:
-            mode = "dynamic"
-        for fam, taint in taints.items():
-            frs = taint._union(texts, ctx)
+        line = getattr(node, "lineno", 0)
+        for fam in ("exception", "upstream body"):
+            frs = taints[fam]._union(texts, ctx)
             if mode == "dynamic" and fam == "exception":
                 frs = frozenset(f for f in frs if f[1])
             if frs:
-                out.append(Finding(rel, getattr(node, "lineno", 0), scope.qualname, sink, fam,
+                out.append(Finding(rel, line, scope.qualname, sink, fam,
                                    ast.unparse(status), frozenset(f[0] for f in frs)))
+        pfr = taints["parameter"]._union(texts, ctx)
+        if not pfr:
+            continue
+        status_param = (status.id if mode == "dynamic" and isinstance(status, ast.Name)
+                        and status.id in scope.params else None)
+        crossed: Dict[str, Tuple[Set[str], Set[str]]] = {}
+        for fam, via, text in _through_callers(index, mi, scope, pfr, status_param, mode, 1):
+            texts_seen, vias = crossed.setdefault(fam, (set(), set()))
+            texts_seen.add(text)
+            vias.add(via)
+        for fam, (texts_seen, vias) in crossed.items():
+            out.append(Finding(rel, line, scope.qualname, sink, fam, ast.unparse(status),
+                               frozenset(texts_seen), via="; ".join(sorted(vias))))
+    return out
+
+
+def _through_callers(index: _Index, mi: int, scope: _Scope, frags: FrozenSet[Frag],
+                     status_param: Optional[str], mode: str,
+                     depth: int) -> List[Tuple[str, str, str]]:
+    """Follow parameters in an answer back to what each caller hands them.
+
+    Returns (family, caller, the parameter fragment at the answer) for every
+    caller that hands exception text or an upstream body. A status that is a
+    parameter is read at each caller the same way, so a helper answering
+    ``HTTPException(code, msg)`` is judged by the ``code`` each caller passes.
+    """
+    ptaint = index.taints(scope)["parameter"]
+    out: List[Tuple[str, str, str]] = []
+    for cmi, call in index.callers(mi, scope):
+        cscope = index.enclosing(cmi, call)
+        cctx = index.ctx_at(cscope, call)
+        if cctx is None:
+            continue
+        cmode = mode
+        if status_param:
+            how, sarg = _argument_for(scope, status_param, call)
+            if how in ("arg", "default") and sarg is not None:
+                names = _status_names(cscope)[:3]
+                cmode = _status_mode(sarg, names, cctx[1])  # type: ignore[assignment]
+                if cmode is None:
+                    continue
+        ctaints = index.taints(cscope)
+        via = f"{index.mods[cmi].rel}:{call.lineno} {cscope.qualname}"
+        for text, _f in frags:
+            access = ptaint.nodes.get(text)
+            param = ptaint._root_name(access) if access is not None else None
+            if access is None or param is None:
+                continue
+            how, arg = _argument_for(scope, param, call)
+            if arg is None:
+                continue
+            expr = _at_caller(access, param, arg)
+            # A relayed body is followed one call deep: past that, an
+            # unrelated ``.text`` (a chat message's) is likelier than a relay.
+            for fam in ("exception", "upstream body") if depth == 1 else ("exception",):
+                frs = ctaints[fam].frags(expr, cctx)
+                if cmode == "dynamic" and fam == "exception":
+                    frs = frozenset(f for f in frs if f[1])
+                if frs:
+                    out.append((fam, via, text))
+            if depth < _MAX_CALL_DEPTH:
+                deeper = ctaints["parameter"].frags(expr, cctx)
+                if deeper:
+                    for fam, cvia, _t in _through_callers(index, cmi, cscope, deeper, None,
+                                                          cmode or mode, depth + 1):
+                        out.append((fam, cvia, text))
     return out
 
 
@@ -726,40 +1156,109 @@ def _real_findings() -> Tuple[Finding, ...]:
 # carriers listed as "only ever raised with platform text"
 # ---------------------------------------------------------------------------
 
-def _constructions_with_foreign_text(mods: List[_Module], classes: Set[str]) -> List[str]:
+# A construction of a listed class that is allowed to carry another
+# exception's text: (file, enclosing function, class built, fragments). Each
+# names its reason where it is used; ``_PLATFORM_TEXT_PINS`` below.
+_Pin = Tuple[str, str, str, FrozenSet[str]]
+
+
+def _constructions_with_foreign_text(mods: List[_Module], classes: Set[str],
+                                     pins: FrozenSet[_Pin] = frozenset(), *,
+                                     strict: bool = True) -> List[str]:
     """Every call that builds one of ``classes`` (or a subclass defined in the
-    trees) with exception text or an upstream body in its arguments."""
-    per_module, own, _carriers, handlers = _tree_facts(mods)
+    trees) from anything but platform text.
+
+    Platform text is a constant, a name that is not an exception or a
+    parameter, or the text of another platform class that is itself only
+    built from platform text (that class joins the checked set). A parameter
+    is followed to every caller, up to ``_MAX_CALL_DEPTH`` deep; a parameter
+    whose callers cannot be seen, or that a star argument hides, counts as
+    foreign, so wrapping the construction in a helper changes nothing.
+
+    ``strict=False`` is the weaker "no exception text" check: an upstream
+    body and a parameter whose callers cannot be seen are allowed, and only
+    exception text (followed through the callers that can be seen) counts.
+    """
+    tree = _tree(mods)
+    index = _Index(mods, tree)
     names = set(classes)
-    changed = True
-    while changed:
-        changed = False
-        for m in mods:
-            for n in ast.walk(m.tree):
-                if (isinstance(n, ast.ClassDef) and n.name not in names
-                        and any(_callee(b) in names for b in n.bases)):
-                    names.add(n.name)
+    out: Set[str] = set()
+    seen: Set[int] = set()
+    while True:
+        changed = True
+        while changed:
+            changed = False
+            for name, bases in ((n, b) for f in tree.per_module for n, b in f.bases.items()):
+                if name not in names and bases & names:
+                    names.add(name)
                     changed = True
-    out: List[str] = []
-    for mod, facts in zip(mods, per_module):
-        lines = {line for line, name in facts.calls if name in names}
-        if not lines:
-            continue
-        for scope in _scopes(mod, own, handlers, lines):
-            calls = [(n, ctx) for n, ctx in scope.nodes
-                     if isinstance(n, ast.Call) and _callee(n.func) in names]
-            if not calls:
+        before = len(names)
+        for mi, call in index.calls_to(names):
+            if id(call) in seen:
                 continue
-            taints = [_Taint(scope, fam) for fam in ("exception", "upstream body")]
-            for call, ctx in calls:
-                args: List[ast.AST] = list(call.args) + [k.value for k in call.keywords]
-                for taint in taints:
-                    frs = taint._union(args, ctx)
-                    if frs:
-                        out.append(f"{mod.rel}:{call.lineno} {scope.qualname} builds "
-                                   f"{_callee(call.func)} from "
-                                   f"{', '.join(sorted(f[0] for f in frs))}")
-    return sorted(out)
+            seen.add(id(call))
+            scope = index.enclosing(mi, call)
+            ctx = index.ctx_at(scope, call)
+            if ctx is None:
+                continue
+            built = _callee(call.func) or "?"
+            args: List[ast.AST] = list(call.args) + [k.value for k in call.keywords]
+            bad = _foreign_in(index, mi, scope, ctx, args, names, 1, strict)
+            if not bad:
+                continue
+            key = (mods[mi].rel, scope.qualname, built, frozenset(t for t, _v in bad))
+            if key in pins:
+                continue
+            via = "; ".join(sorted({v for _t, v in bad if v}))
+            out.add(f"{mods[mi].rel}:{call.lineno} {scope.qualname} builds {built} from "
+                    f"{', '.join(sorted({t for t, _v in bad}))}" + (f" (via {via})" if via else ""))
+        if len(names) == before:
+            return sorted(out)
+
+
+def _foreign_in(index: _Index, mi: int, scope: _Scope, ctx: _Ctx, args: List[ast.AST],
+                names: Set[str], depth: int, strict: bool) -> List[Tuple[str, str]]:
+    """(fragment, caller) pairs in ``args`` that are not platform text. Adds
+    any platform class whose text is used to ``names``."""
+    taints = index.taints(scope)
+    bad: List[Tuple[str, str]] = []
+    for text, foreign in taints["exception"]._union(args, ctx):
+        caught = taints["exception"].classes.get(text, ())
+        # An HTTPException's own text is "<status>: <detail>", and a 4xx
+        # detail may carry a validation error's words, so it is never
+        # platform text here.
+        if foreign or not caught or any(c in index.tree.http for c in caught):
+            bad.append((text, ""))
+        else:
+            names.update(caught)
+    if strict:
+        for text, _f in taints["upstream body"]._union(args, ctx):
+            bad.append((text, ""))
+    pfr = taints["parameter"]._union(args, ctx)
+    if not pfr:
+        return bad
+    ptaint = taints["parameter"]
+    callers = index.callers(mi, scope)
+    for text, _f in pfr:
+        access = ptaint.nodes.get(text)
+        param = ptaint._root_name(access) if access is not None else None
+        if access is None or param is None or not callers or depth > _MAX_CALL_DEPTH:
+            if strict:
+                bad.append((text, "no caller seen" if not callers else ""))
+            continue
+        for cmi, call in callers:
+            cscope = index.enclosing(cmi, call)
+            cctx = index.ctx_at(cscope, call)
+            how, arg = _argument_for(scope, param, call)
+            where = f"{index.mods[cmi].rel}:{call.lineno}"
+            if cctx is None or how in ("unknown", "missing") or arg is None:
+                if strict:
+                    bad.append((text, f"{where} hides it"))
+                continue
+            if _foreign_in(index, cmi, cscope, cctx, [_at_caller(access, param, arg)],
+                           names, depth + 1, strict):
+                bad.append((text, where))
+    return bad
 
 
 # ---------------------------------------------------------------------------
@@ -777,6 +1276,15 @@ class _Allowed:
     # Classes whose every construction must carry platform text only: the
     # reason depends on it, so the guard checks it.
     platform_text_only: Tuple[str, ...] = ()
+    # Classes whose every construction must carry no exception text (peer or
+    # caller-supplied words are allowed): the weaker check, for a reason that
+    # says only that.
+    no_exception_text: Tuple[str, ...] = ()
+    # Constructions of those classes that do carry exception text, each named
+    # by the reason (``_Pin``).
+    pins: Tuple[_Pin, ...] = ()
+    # The last day the entry may stand: a hold, not a decision.
+    expires: Optional[datetime.date] = None
 
     def matches(self, f: Finding) -> bool:
         return (f.path, f.function, f.sink, f.fragments) == (
@@ -838,7 +1346,8 @@ _ALLOWED: Tuple[_Allowed, ...] = (
     _Allowed(
         _BE + "routers/messages.py", "send_proactive_message", "HTTPException",
         frozenset({"e"}),
-        "ChannelDeliveryError is raised only with constant sentences.",
+        "ChannelDeliveryError is raised only with platform sentences: constants, and "
+        "`recipient_blocked`'s channel name, which every caller passes as a literal.",
         platform_text_only=("ChannelDeliveryError",),
     ),
     _Allowed(
@@ -870,22 +1379,101 @@ _ALLOWED: Tuple[_Allowed, ...] = (
         "stt_capability_service.record_live_failure (#2696); the answer is that "
         "category's fixed client sentence and status, never the body.",
     ),
-    # --- backend: relays whose 5xx text is a reviewed decision ----------------
+    # --- backend: relays whose 5xx text is a deliberate decision --------------
     _Allowed(
         _BE + "services/agent_skills_listing.py", "fetch_live", "SkillsListUnavailable",
         frozenset({"response.text"}),
-        "The owner's agent page shows the agent's own error body, a reviewed "
-        "decision pinned by test_ent754_skills_list_cache.py; the public link "
-        "answers a fixed sentence (routers/public.py). The agent's skills route "
-        "has no handler that renders an exception: an unforeseen error there is "
-        "FastAPI's bare 500.",
+        "The agent's own error body, at the agent's status, on three surfaces: the "
+        "owner's agent page (routers/agent_files.py), the owner's connector route "
+        "(routers/connector.py, any user the agent is shared with) and the inline-auth "
+        "MCP route (services/mcp_auth_service.py, a verified-email collaborator), as "
+        "`Agent error: <body>` through connector_service.fetch_live_playbooks. Both "
+        "are deliberate decisions pinned by test_ent754_skills_list_cache.py; the "
+        "public link answers a fixed sentence (routers/public.py). The agent's skills "
+        "route has no handler that renders an exception, in its current code or its "
+        "history: an unforeseen error there is FastAPI's bare 500.",
     ),
     _Allowed(
         _BE + "services/chat_execution_service.py", "_proxy_terminate_and_finalize",
         "ChatDispatchError", frozenset({"response.json()"}),
-        "The agent's terminate 500s are its own sentences: `termination_unconfirmed: "
-        "...` (#3408), which tells the caller the termination can be retried, and "
-        "`Termination failed: <class>` from services/process_registry.py.",
+        "The body passes `_terminate_refusal_detail`: at an agent 5xx only the "
+        "agent's own sentences go on, `termination_unconfirmed: ...` (#3408, which "
+        "tells the caller the termination can be retried) and the registry's "
+        "`Termination failed: <class>`; anything else, such as an older agent's raw "
+        "exception text, answers a fixed sentence with the agent's status. A 4xx is "
+        "the agent's refusal. Pinned by test_4284_exception_text_sites.py.",
+    ),
+    _Allowed(
+        _BE + "services/chat_execution_service.py", "_apply_sub003_autoswitch",
+        "ChatDispatchError", frozenset({"agent_status_code", "error_msg"}),
+        "The sync chat failure: `error_msg` is `_parse_agent_http_error`'s, the "
+        "agent's own error detail from its answer (credential-scrubbed, ent#279, and "
+        "capped) or `HTTP error: <class>`, never httpx's text. It is the turn's "
+        "failure the caller acts on, and this module's classifiers and the 503's "
+        "consumers read it (#2889). The agent server's chat and task 5xx are "
+        "platform text, which this guard checks in that tree; an agent still on a "
+        "base image from before #4293 answers `Execution error: <exception text>` "
+        "here until it is recreated (named in #4284's PR).",
+        count=5,
+    ),
+    _Allowed(
+        _BE + "services/chat_execution_service.py", "_finalize_budget_exhausted",
+        "ChatDispatchError", frozenset({"budget_exc"}),
+        "`str(budget_exc)` of BackendAgentCallBudgetExhausted, built from the agent "
+        "name and the platform's own caps and wait (checked: no exception text).",
+        no_exception_text=("BackendAgentCallBudgetExhausted",),
+    ),
+    # --- backend: A2A outbound ------------------------------------------------
+    _Allowed(
+        _BE + "routers/a2a.py", "_map_call_error", "HTTPException",
+        frozenset({"exc.detail", "exc.payment", "exc.reason", "exc.remote_code",
+                   "exc.remote_status", "exc.task_id"}),
+        "A2ACallError is built from platform sentences and reason codes, the peer's "
+        "status and JSON-RPC code, and the peer's own bounded, credential-scrubbed "
+        "answer (its JSON-RPC error message, the 402 payment block, #3185): what the "
+        "calling agent acts on. A transport failure names httpx's class only "
+        "(`_read_capped`). Checked: no exception text, except a URL ValueError's "
+        "words under `endpoint_invalid`, which this route answers at 400 "
+        "(test_a2a_pinned_constructions_answer_below_500).",
+        no_exception_text=("A2ACallError",),
+        pins=(
+            (_BE + "services/a2a_client.py", "validate_endpoint", "A2ACallError",
+             frozenset({"exc"})),
+            (_BE + "utils/url_validation.py", "validate_a2a_endpoint_url",
+             "A2AEndpointUrlError", frozenset({"exc"})),
+        ),
+    ),
+    _Allowed(
+        _BE + "services/credential_sink.py", "_remote_failure", "_destination_failure",
+        frozenset({"exc.reason"}),
+        "The A2A client's reason code (A2ACallError, checked with the A2A route's "
+        "entry) in the 503's `data.reason`; `exc.detail` is deliberately never "
+        "forwarded.",
+        count=3,
+    ),
+    _Allowed(
+        _BE + "services/credential_sink.py", "_remote_failure", "_destination_failure",
+        frozenset({"getattr(exc, 'remote_status', None)"}),
+        "The peer's HTTP status (an int the A2A client read off the answer) in the "
+        "503's `data.status`.",
+    ),
+    _Allowed(
+        _BE + "services/credential_sink.py", "_destination_failure", "CredentialSinkError",
+        frozenset({"data", "message"}),
+        "`_remote_failure` fills these with its own sentences around the host, and "
+        "`data` with the A2A reason code and the peer's status: codes and platform "
+        "text, not exception text.",
+    ),
+    # --- backend: a duck-typed HTTPException ----------------------------------
+    _Allowed(
+        _BE + "services/agent_service/repo_binding.py", "_translate_destination_error",
+        "BindError", frozenset({"getattr(exc, 'detail', None)"}),
+        "Called only from bind_agent_to_own_repo's handler around "
+        "inspect_or_create_destination_repo, and only for an exception that has both "
+        "`status_code` and `detail`: that primitive's structured HTTPException "
+        "(FORK_* codes), whose every raise this guard checks. repo_binding stays "
+        "HTTP-free, so it does not name the class.",
+        count=2,
     ),
     # --- backend: deliberate operator-remediation text -------------------------
     _Allowed(
@@ -904,22 +1492,39 @@ _ALLOWED: Tuple[_Allowed, ...] = (
     _Allowed(
         _BE + "services/system_service.py", "deploy_manifest", "HTTPException",
         frozenset({"e"}),
-        "Strict-mode system deploy: `reason` is _failure_reason(e), the one "
-        "sanitized, length-capped exit point that the non-strict response also "
-        "puts in failed[].reason (ent#125 parity).",
+        "Strict-mode system deploy, at the failure's own status or 500. "
+        + "`reason` is `_failure_reason(e)`: an HTTPException's detail (each raise is "
+        "checked by this guard), a ValueError's validation text (ManifestError, "
+        "normalize_cpu / normalize_memory, ScheduleCreate's ValidationError), or an "
+        "apply step's `_Refused` (checked: no exception text); any other exception "
+        "answers its class name only, its text logged masked. Sanitized and capped "
+        "(ent#125). The non-strict report carries the same reason (ent#125 parity).",
+        no_exception_text=("_Refused",),
     ),
     _Allowed(
         _BE + "services/system_service.py", "deploy_manifest", "SystemDeployFailure",
         frozenset({"e"}),
-        "A per-member report row returned in a 2xx deploy response; its reason is "
-        "_failure_reason(e), sanitized and capped (ent#125).",
+        "A per-member report row, the body of the deploy's 500 when every member "
+        "fails (routers/systems.py). " + "`reason` is `_failure_reason(e)`: an HTTPException's detail (each raise is "
+        "checked by this guard), a ValueError's validation text (ManifestError, "
+        "normalize_cpu / normalize_memory, ScheduleCreate's ValidationError), or an "
+        "apply step's `_Refused` (checked: no exception text); any other exception "
+        "answers its class name only, its text logged masked. Sanitized and capped "
+        "(ent#125).",
         count=2,
+        no_exception_text=("_Refused",),
     ),
     _Allowed(
         _BE + "services/system_service.py", "_preflight_template", "SystemDeployFailure",
         frozenset({"e"}),
-        "The dry-run preview's per-member row, built by the same _failure_reason "
-        "as the deploy loop (ent#125).",
+        "The preview's per-member row, also apply's `template_unresolvable` blocker "
+        "(a 409/503 body). " + "`reason` is `_failure_reason(e)`: an HTTPException's detail (each raise is "
+        "checked by this guard), a ValueError's validation text (ManifestError, "
+        "normalize_cpu / normalize_memory, ScheduleCreate's ValidationError), or an "
+        "apply step's `_Refused` (checked: no exception text); any other exception "
+        "answers its class name only, its text logged masked. Sanitized and capped "
+        "(ent#125).",
+        no_exception_text=("_Refused",),
     ),
     # --- held unedited --------------------------------------------------------
     _Allowed(
@@ -927,8 +1532,13 @@ _ALLOWED: Tuple[_Allowed, ...] = (
         "routers/slack.py stays unchanged until after 2026-11-19, so the "
         "code-scanning dismissals reviewed against its current source stay valid "
         "until then. Fix it the #1917 way after that date and drop this entry.",
+        expires=datetime.date(2026, 11, 19),
     ),
 )
+
+# Constructions the A2A entry pins: each must carry this reason code, and the
+# A2A route must answer the code below 500.
+_A2A_PINNED_REASON = "endpoint_invalid"
 
 
 def _unlisted(findings: Iterable[Finding]) -> List[Finding]:
@@ -971,8 +1581,76 @@ def test_listed_carriers_are_raised_only_with_platform_text():
     bad = _constructions_with_foreign_text(list(_real_modules()), classes)
     assert not bad, (
         "A class an _ALLOWED reason calls 'platform text only' is built from "
-        "exception text or an upstream body:\n  " + "\n  ".join(bad)
+        "exception text, an upstream body or a parameter whose callers do:\n  "
+        + "\n  ".join(bad)
     )
+
+
+def test_listed_carriers_carry_no_exception_text():
+    classes = {c for a in _ALLOWED for c in a.no_exception_text}
+    pins = frozenset(p for a in _ALLOWED for p in a.pins)
+    bad = _constructions_with_foreign_text(list(_real_modules()), classes, pins, strict=False)
+    assert not bad, (
+        "A class an _ALLOWED reason says carries no exception text is built from "
+        "it (directly, or through a parameter a caller fills with it):\n  "
+        + "\n  ".join(bad)
+    )
+
+
+def test_pins_are_live():
+    """Every pinned construction still exists, so a pin cannot outlive its site."""
+    mods = list(_real_modules())
+    for a in _ALLOWED:
+        if not a.pins:
+            continue
+        found = _constructions_with_foreign_text(mods, set(a.no_exception_text), strict=False)
+        for path, function, cls, frags in a.pins:
+            want = f"{path}:"
+            assert any(b.startswith(want) and f" {function} builds {cls} from "
+                       f"{', '.join(sorted(frags))}" in b for b in found), (path, function, cls)
+
+
+def _a2a_status_table() -> Dict[str, int]:
+    tree = ast.parse((_REPO / _BE / "routers/a2a.py").read_text())
+    for n in ast.walk(tree):
+        if (isinstance(n, ast.Assign) and any(isinstance(t, ast.Name)
+                                              and t.id == "_A2A_CLIENT_ERROR_STATUS"
+                                              for t in n.targets)):
+            return ast.literal_eval(n.value)
+    raise AssertionError("routers/a2a.py: _A2A_CLIENT_ERROR_STATUS not found")
+
+
+def test_a2a_pinned_constructions_answer_below_500():
+    """The A2A entry's pins carry a URL ValueError's words, which is right only
+    because they are built under a reason the route answers below 500."""
+    assert _a2a_status_table()[_A2A_PINNED_REASON] < 500
+    [entry] = [a for a in _ALLOWED if a.function == "_map_call_error"]
+    for path, function, cls, _frags in entry.pins:
+        tree = ast.parse((_REPO / path).read_text())
+        [fn] = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and n.name == function]
+        builds = [n for n in ast.walk(fn) if isinstance(n, ast.Call) and _callee(n.func) == cls
+                  and n.args and not isinstance(n.args[0], ast.Constant)]
+        pinned = [n for n in ast.walk(fn) if isinstance(n, ast.Call) and _callee(n.func) == cls
+                  and n.args and isinstance(n.args[0], ast.Constant)
+                  and n.args[0].value == _A2A_PINNED_REASON]
+        assert pinned, (path, function)
+        for n in builds:
+            # The one non-literal reason is the URL error's own, whose every
+            # value is an `endpoint_*` code the route answers at 400.
+            assert ast.unparse(n.args[0]).endswith(".reason") or "_A2A_REASON_BY_KIND" in ast.unparse(n.args[0]), ast.unparse(n)
+    assert all(code < 500 for name, code in _a2a_status_table().items()
+               if name.startswith("endpoint_"))
+
+
+def _expired_holds(today: datetime.date) -> List[str]:
+    return [f"{a.path} {a.function}: held until {a.expires}" for a in _ALLOWED
+            if a.expires is not None and today > a.expires]
+
+
+def test_held_entries_have_not_expired():
+    expired = _expired_holds(datetime.date.today())
+    assert not expired, "Fix the site and drop the entry:\n  " + "\n  ".join(expired)
 
 
 def test_allowlist_entries_are_reasoned_and_distinct():
@@ -1051,8 +1729,8 @@ _FLAGGED = {
     "e.args": _wrap("raise HTTPException(status_code=500, detail=e.args[0])"),
     "attribute": _wrap('raise HTTPException(status_code=500, detail=f"git: {e.stderr}")'),
     "getattr": _wrap('raise HTTPException(status_code=500, detail=getattr(e, "message", ""))'),
-    "local alias (G1)": _wrap('msg = f"Failed: {e}"\nraise HTTPException(status_code=500, detail=msg)'),
-    "scrubbed alias (G1)": _wrap('safe = _scrub(str(e), pat)\nraise HTTPException(500, detail=f"x: {safe}")'),
+    "local alias": _wrap('msg = f"Failed: {e}"\nraise HTTPException(status_code=500, detail=msg)'),
+    "scrubbed alias": _wrap('safe = _scrub(str(e), pat)\nraise HTTPException(500, detail=f"x: {safe}")'),
     "augmented": _wrap('msg = "Failed"\nmsg += str(e)\nraise HTTPException(500, msg)'),
     "walrus": _wrap('raise HTTPException(500, (m := str(e)))'),
     "list append": _wrap('errs = []\nerrs.append(str(e))\nraise HTTPException(500, ", ".join(errs))'),
@@ -1070,22 +1748,22 @@ _FLAGGED = {
     "status or 500": _wrap('raise HTTPException(status_code=pat or 500, detail=str(e))'),
     "status map default": _wrap('raise HTTPException(status_code=MAP.get(pat, 502), detail=str(e))'),
     "conditional status": _wrap('raise HTTPException(409 if pat else 503, str(e))'),
-    "narrow arm (G4)": _wrap('raise HTTPException(500, f"Failed: {e}")', catch="OSError as e"),
+    "narrow arm": _wrap('raise HTTPException(500, f"Failed: {e}")', catch="OSError as e"),
     "bare re-bound": _wrap('raise HTTPException(500, f"Failed: {e}")', catch="(ValueError, KeyError) as e"),
     "traceback.format_exc": _wrap("raise HTTPException(500, traceback.format_exc())", catch="Exception"),
     "sys.exc_info": _wrap("raise HTTPException(500, str(sys.exc_info()[1]))", catch="Exception"),
-    "carrier positional (G2)": _wrap('raise BindError(502, "BIND_X", f"Could not bind: {e}")'),
-    "carrier keyword (G2)": _wrap('return Outcome(status_code=500, payload={"error": str(e)})'),
+    "carrier positional": _wrap('raise BindError(502, "BIND_X", f"Could not bind: {e}")'),
+    "carrier keyword": _wrap('return Outcome(status_code=500, payload={"error": str(e)})'),
     "foreign exception at a dynamic status": _wrap(
         "raise HTTPException(status_code=e.response.status_code, detail=str(e))",
         catch="httpx.HTTPStatusError as e"),
     "broad exception at a dynamic status": _wrap(
         "raise HTTPException(status_code=pat, detail=str(e))"),
-    "relay .text (G3)": _wrap("raise HTTPException(status_code=r.status_code, detail=r.text)"),
-    "relay .json() (G3)": _wrap(
+    "relay .text": _wrap("raise HTTPException(status_code=r.status_code, detail=r.text)"),
+    "relay .json()": _wrap(
         'raise HTTPException(status_code=r.status_code, detail=r.json().get("detail"))'),
-    "relay at 502 (G3)": _wrap('raise HTTPException(502, f"Agent failed: {r.text[:500]}")'),
-    "relay into a carrier (G3)": _wrap('raise BindError(r.status_code, "X", r.content)'),
+    "relay at 502": _wrap('raise HTTPException(502, f"Agent failed: {r.text[:500]}")'),
+    "relay into a carrier": _wrap('raise BindError(r.status_code, "X", r.content)'),
     "response.status_code = 500": _HEAD + (
         "async def handler(response, r):\n"
         "    try:\n"
@@ -1099,6 +1777,91 @@ _FLAGGED = {
         '    return JSONResponse(status_code=500, content={"detail": str(exc)})\n'
         "def register(app):\n"
         "    app.add_exception_handler(Exception, on_error)\n"
+    ),
+    ".detail of a platform class": _wrap(
+        'raise HTTPException(502, detail={"message": e.detail})', catch="BindError as e"),
+    ".detail of a broad catch": _wrap('raise HTTPException(500, e.detail)'),
+    "getattr default": _wrap('raise HTTPException(503, getattr(e, "detail", str(e)))',
+                             catch="HTTPException as e"),
+    "getattr .detail of a broad catch": _wrap('raise HTTPException(503, getattr(e, "detail", ""))'),
+    "format_exc imported by name": (
+        "from traceback import format_exc\n" + _wrap("raise HTTPException(500, format_exc())")),
+    "format_exc imported under an alias": (
+        "from traceback import format_exc as fx\n" + _wrap("raise HTTPException(500, fx())")),
+    "relay .read().decode()": _wrap(
+        'raise HTTPException(502, f"Agent failed: {response.read().decode()}")'),
+    "relay await .aread()": _wrap('raise HTTPException(502, (await resp.aread()).decode())'),
+    "relay aiohttp await .text()": _wrap('raise HTTPException(502, await r.text())'),
+    "relay iterator": _wrap('raise HTTPException(502, "".join(r.iter_text()))'),
+    "HTTPException subclass, status fixed in __init__": _HEAD + (
+        "class GitFailed(HTTPException):\n"
+        "    def __init__(self, detail):\n"
+        "        super().__init__(status_code=500, detail=detail)\n"
+        "def handler():\n"
+        "    try:\n"
+        "        work()\n"
+        "    except Exception as e:\n"
+        "        raise GitFailed(str(e))\n"
+    ),
+    "HTTPException subclass, status passed": _HEAD + (
+        "class Refused(HTTPException):\n"
+        "    pass\n"
+        "def handler():\n"
+        "    try:\n"
+        "        work()\n"
+        "    except Exception as e:\n"
+        "        raise Refused(502, str(e))\n"
+    ),
+    "helper handed the exception": _HEAD + (
+        "def _fail_git(what, e):\n"
+        '    raise HTTPException(500, f"{what}: {e}")\n'
+        "def handler():\n"
+        "    try:\n"
+        "        work()\n"
+        "    except Exception as e:\n"
+        '        _fail_git("Git sync error", e)\n'
+    ),
+    "helper handed the text, two calls back": _HEAD + (
+        "def _answer(msg):\n"
+        "    raise HTTPException(503, msg)\n"
+        "def _wrap_up(msg):\n"
+        '    _answer(f"Failed: {msg}")\n'
+        "def handler():\n"
+        "    try:\n"
+        "        work()\n"
+        "    except Exception as e:\n"
+        "        _wrap_up(str(e))\n"
+    ),
+    "helper status is a parameter, a caller passes 5xx": _HEAD + (
+        "def _fail(code, msg):\n"
+        "    raise HTTPException(code, msg)\n"
+        "def handler():\n"
+        "    try:\n"
+        "        work()\n"
+        "    except Exception as e:\n"
+        "        _fail(500, str(e))\n"
+    ),
+    "mapper handed a platform exception (.detail)": _HEAD + (
+        "class CallError(Exception):\n"
+        "    def __init__(self, reason, detail):\n"
+        "        self.reason, self.detail = reason, detail\n"
+        "def _map(exc):\n"
+        '    return HTTPException(MAP.get(exc.reason, 502), {"message": exc.detail})\n'
+        "def handler():\n"
+        "    try:\n"
+        "        work()\n"
+        "    except CallError as exc:\n"
+        "        raise _map(exc)\n"
+    ),
+    "method helper handed the exception": _HEAD + (
+        "class Svc:\n"
+        "    def _fail(self, e):\n"
+        '        raise HTTPException(500, f"failed: {e}")\n'
+        "    def run(self):\n"
+        "        try:\n"
+        "            work()\n"
+        "        except Exception as e:\n"
+        "            self._fail(e)\n"
     ),
 }
 
@@ -1139,6 +1902,48 @@ _CLEAN = {
         "else:\n"
         "    raise HTTPException(status_code=r.status_code, detail=r.text)"),
     "relay at a 4xx": _wrap("raise HTTPException(404, r.text)"),
+    "getattr .detail of an HTTPException": _wrap(
+        'raise HTTPException(502, getattr(e, "detail", "Failed"))', catch="HTTPException as e"),
+    "an upload read is not a relay": _wrap(
+        "raise HTTPException(500, f\"Bad upload: {len(await upload.read())} bytes\")"),
+    "a file read is not a relay": _wrap('raise HTTPException(500, fh.read())'),
+    "HTTPException subclass fixing a 4xx": _HEAD + (
+        "class Gone(HTTPException):\n"
+        "    def __init__(self, detail):\n"
+        "        super().__init__(status_code=410, detail=detail)\n"
+        "def handler():\n"
+        "    try:\n"
+        "        work()\n"
+        "    except ValueError as e:\n"
+        "        raise Gone(str(e))\n"
+    ),
+    "helper status is a parameter, every caller passes 4xx": _HEAD + (
+        "def _fail(code, msg):\n"
+        "    raise HTTPException(code, msg)\n"
+        "def handler():\n"
+        "    try:\n"
+        "        work()\n"
+        "    except ValueError as e:\n"
+        "        _fail(400, str(e))\n"
+    ),
+    "helper handed only platform words": _HEAD + (
+        "def _fail_git(what, e):\n"
+        '    raise HTTPException(500, f"{what}: {type(e).__name__}")\n'
+        "def handler():\n"
+        "    try:\n"
+        "        work()\n"
+        "    except Exception as e:\n"
+        '        _fail_git("Git sync error", e)\n'
+    ),
+    "mapper handed an HTTPException's detail": _HEAD + (
+        "def _map(exc):\n"
+        "    return HTTPException(502, exc.detail)\n"
+        "def handler():\n"
+        "    try:\n"
+        "        work()\n"
+        "    except HTTPException as exc:\n"
+        "        raise _map(exc)\n"
+    ),
 }
 
 
@@ -1176,3 +1981,140 @@ def test_an_allowed_site_cannot_degrade_while_listed():
     found = scan_sources({"src/backend/services/voip_service.py": mutated})
     voip = [f for f in found if f.function == "VoipService._place_call_inner"]
     assert voip and _unlisted(voip), [f.render() for f in voip]
+
+
+# ---------------------------------------------------------------------------
+# the class checks behind an allowlist reason
+# ---------------------------------------------------------------------------
+
+_CARRIER_HEAD = (
+    "import httpx\n"
+    "class Unavailable(Exception):\n"
+    "    pass\n"
+    "class Upstream(Exception):\n"
+    "    pass\n"
+)
+
+
+def _built_from(src: str, *, strict: bool = True) -> List[str]:
+    mods = _iter_modules({"src/backend/services/sample.py": _CARRIER_HEAD + src})
+    return _constructions_with_foreign_text(mods, {"Unavailable"}, strict=strict)
+
+
+_BUILT_FOREIGN = {
+    "exception text": (
+        "def f():\n"
+        "    try:\n"
+        "        work()\n"
+        "    except Exception as e:\n"
+        "        raise Unavailable(f'x: {e}')\n"),
+    "a helper handed the exception text": (
+        "def _refuse(why):\n"
+        "    raise Unavailable('template_unreadable', why)\n"
+        "def f():\n"
+        "    try:\n"
+        "        work()\n"
+        "    except Exception as e:\n"
+        "        _refuse(str(e))\n"),
+    "a method helper handed it": (
+        "class Svc:\n"
+        "    def _refuse(self, why):\n"
+        "        raise Unavailable(why)\n"
+        "    def f(self):\n"
+        "        try:\n"
+        "            work()\n"
+        "        except OSError as e:\n"
+        "            self._refuse(f'{e}')\n"),
+    "another platform class built from exception text": (
+        "def g():\n"
+        "    try:\n"
+        "        work()\n"
+        "    except Exception as e:\n"
+        "        raise Upstream(str(e))\n"
+        "def f():\n"
+        "    try:\n"
+        "        g()\n"
+        "    except Upstream as u:\n"
+        "        raise Unavailable(str(u))\n"),
+    "a subclass built from exception text": (
+        "class Narrower(Unavailable):\n"
+        "    pass\n"
+        "def f():\n"
+        "    try:\n"
+        "        work()\n"
+        "    except Exception as e:\n"
+        "        raise Narrower(repr(e))\n"),
+}
+
+_BUILT_STRICT_ONLY = {
+    "a parameter no caller fills in sight": (
+        "def _refuse(why):\n"
+        "    raise Unavailable(why)\n"),
+    "a star argument hides the parameter": (
+        "def _refuse(why):\n"
+        "    raise Unavailable(why)\n"
+        "def f(*args):\n"
+        "    _refuse(*args)\n"),
+    "an upstream body": (
+        "def f(r):\n"
+        "    raise Unavailable(r.text)\n"),
+}
+
+_BUILT_CLEAN = {
+    "constants": "def f():\n    raise Unavailable('not_running', 'Agent is not running.')\n",
+    "a helper given literals only": (
+        "def _refuse(why, channel):\n"
+        "    raise Unavailable(f'{why}: blocked on the {channel} channel')\n"
+        "def f():\n"
+        "    _refuse('recipient_blocked', 'telegram')\n"
+        "def g():\n"
+        "    _refuse(why='recipient_blocked', channel='slack')\n"),
+    "another platform class built from constants": (
+        "def g():\n"
+        "    raise Upstream('the store is unreadable')\n"
+        "def f():\n"
+        "    try:\n"
+        "        g()\n"
+        "    except Upstream as u:\n"
+        "        raise Unavailable(str(u))\n"),
+    "the class name of the exception": (
+        "def f():\n"
+        "    try:\n"
+        "        work()\n"
+        "    except Exception as e:\n"
+        "        raise Unavailable(f'parse failed ({type(e).__name__})')\n"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(_BUILT_FOREIGN))
+def test_class_check_flags_exception_text_both_ways(name):
+    assert _built_from(_BUILT_FOREIGN[name]), name
+    assert _built_from(_BUILT_FOREIGN[name], strict=False), name
+
+
+@pytest.mark.parametrize("name", sorted(_BUILT_STRICT_ONLY))
+def test_platform_text_only_fails_closed_where_no_exception_text_does_not(name):
+    assert _built_from(_BUILT_STRICT_ONLY[name]), name
+    assert not _built_from(_BUILT_STRICT_ONLY[name], strict=False), name
+
+
+@pytest.mark.parametrize("name", sorted(_BUILT_CLEAN))
+def test_class_check_passes_platform_text(name):
+    assert not _built_from(_BUILT_CLEAN[name]), _built_from(_BUILT_CLEAN[name])
+
+
+def test_a_pin_covers_only_its_construction():
+    src = _BUILT_FOREIGN["exception text"]
+    pin = ("src/backend/services/sample.py", "f", "Unavailable", frozenset({"e"}))
+    mods = _iter_modules({"src/backend/services/sample.py": _CARRIER_HEAD + src})
+    assert not _constructions_with_foreign_text(mods, {"Unavailable"}, frozenset({pin}),
+                                                strict=False)
+    other = ("src/backend/services/sample.py", "f", "Unavailable", frozenset({"e.args"}))
+    assert _constructions_with_foreign_text(mods, {"Unavailable"}, frozenset({other}),
+                                            strict=False)
+
+
+def test_the_slack_hold_ends_after_2026_11_19():
+    assert _expired_holds(datetime.date(2026, 11, 19)) == []
+    assert _expired_holds(datetime.date(2026, 11, 20)) == [
+        "src/backend/routers/slack.py connect_slack: held until 2026-11-19"]
