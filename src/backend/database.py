@@ -162,6 +162,7 @@ from db.telegram_channels import TelegramChannelOperations
 from db.whatsapp_channels import WhatsAppChannelOperations
 from db.voip import VoipOperations
 from db.access_requests import AccessRequestOperations
+from db.channel_client_blocks import ChannelClientBlockOperations
 from db.audit import PlatformAuditOperations
 from db.canary import CanaryOperations
 from db.compatibility import CompatibilityOperations
@@ -1093,6 +1094,7 @@ class DatabaseManager:
         self._whatsapp_channel_ops = WhatsAppChannelOperations()
         self._voip_ops = VoipOperations()
         self._access_request_ops = AccessRequestOperations()
+        self._channel_client_block_ops = ChannelClientBlockOperations()
         self._audit_ops = PlatformAuditOperations()
         self._canary_ops = CanaryOperations()
         self._compatibility_ops = CompatibilityOperations()  # #668 agent compatibility
@@ -4454,6 +4456,23 @@ class DatabaseManager:
 
     def delete_access_requests_for_agent(self, agent_name: str):
         return self._access_request_ops.delete_for_agent(agent_name)
+
+    # =========================================================================
+    # Channel client blocks (trinity-enterprise#21)
+    # =========================================================================
+
+    def block_channel_client(self, agent_name, channel, client_id, blocked_by_id, blocked_by_email, reason=None):
+        return self._channel_client_block_ops.block(
+            agent_name, channel, client_id, blocked_by_id, blocked_by_email, reason)
+
+    def unblock_channel_client(self, agent_name, channel, client_id):
+        return self._channel_client_block_ops.unblock(agent_name, channel, client_id)
+
+    def is_channel_client_blocked(self, agent_name, channel, client_id):
+        return self._channel_client_block_ops.is_blocked(agent_name, channel, client_id)
+
+    def list_channel_client_blocks(self, agent_name):
+        return self._channel_client_block_ops.list_for_agent(agent_name)
 
     # =========================================================================
     # Platform Audit Log (SEC-001 / Issue #20 — Phase 1)

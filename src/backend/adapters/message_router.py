@@ -389,6 +389,12 @@ class ChannelMessageRouter:
             agent_name = await adapter.get_agent_name(message)
             if not agent_name:
                 return
+            # trinity-enterprise#21: a blocked client's words are not recorded
+            # either — observed group chatter joins the history every later
+            # turn reads, which is a way to reach the agent. A read failure
+            # lands in the except below: nothing recorded.
+            if message.sender_id and db.is_channel_client_blocked(agent_name, channel, message.sender_id):
+                return
             await adapter.note_untagged_seen(message, agent_name)
             if not await adapter.group_context_enabled(message, agent_name):
                 return
@@ -476,6 +482,16 @@ class ChannelMessageRouter:
         if resolved is None:
             return
         agent_name, bot_token = resolved
+
+        # 2'. trinity-enterprise#21 — a client the owner blocked on this agent
+        # is dropped here, before any rate-limit charge, typing indicator,
+        # reply or access-policy prompt: no response at all, so the block is
+        # not a conversation. Keyed on the channel-native sender id, so it
+        # holds whether or not they ever verified an email, in a DM or a group.
+        # A read failure propagates to handle_message, which drops the turn.
+        if message.sender_id and db.is_channel_client_blocked(agent_name, channel, message.sender_id):
+            logger.info(f"[ROUTER:{channel}] Dropped: sender blocked on agent={agent_name}")
+            return
 
         # 2-. ent#600: an executed un-tagged turn (all / observe modes) is the
         # same proof as an observed one that the bot sees this group's

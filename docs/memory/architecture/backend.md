@@ -255,7 +255,7 @@
 - `turn_audience.py` - Who a turn was for (ent#549): pure `audience_of(execution)` + evidence-based `resolve_turn_audience` — same section; a leaf, no HTTP, no SQL; re-exports `normalize_addressee_email` from `utils/addressee.py` (#2955)
 - `loop_service.py` - Sequential agent loop runner — see [Sequential Agent Loops](execution.md#sequential-agent-loops-740-ui-1106)
 - `reminder_service.py` - Agent self-reminder create (bounds + timeout clamp + provenance + relative→absolute) — see [Agent Self-Reminders](execution.md#agent-self-reminders-1296) (#1296)
-- `client_roster_service.py` - Aggregates external channel clients (Telegram + WhatsApp) into the Sharing-tab roster; cross-channel sort + per-channel failure degradation (#20)
+- `client_roster_service.py` - Aggregates external channel clients (Telegram + WhatsApp) into the Sharing-tab roster; cross-channel sort + per-channel failure degradation (#20) Also the per-client controls (block/unblock/revoke, trinity-enterprise#21) and each row's access state.
 - `voip_service.py` - VoIP outbound-call orchestration — see [VoIP](integrations.md#voip-telephony-voip-001-1056)
 
 *Content & Media:*

@@ -253,13 +253,16 @@
          in", that one is "who has messaged". -->
     <PortalClientsPanel :agent-name="agentName" />
 
-    <!-- Client Roster (#20) — external channel users (read-only) -->
+    <!-- Client Roster (#20) — external channel users, with per-client
+         controls (trinity-enterprise#21): approve / revoke / block / unblock -->
     <div>
       <h4 class="text-sm font-medium text-gray-900 dark:text-gray-100 mb-1">
         Client roster <span class="font-normal text-gray-500 dark:text-gray-400">— who's reaching this agent</span>
       </h4>
       <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">
-        External users who have messaged this agent through a channel (Telegram, WhatsApp). Read-only.
+        External users who have messaged this agent through a channel (Telegram, WhatsApp).
+        <strong>Revoke</strong> removes an approved client's access; <strong>Block</strong> stops a client
+        reaching this agent at all, whatever the access policy, with no reply. Their history is kept.
       </p>
 
       <div v-if="clients.length === 0" class="text-center py-6 text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-900/50 rounded-lg border border-dashed border-gray-300 dark:border-gray-700">
@@ -284,6 +287,8 @@
                 title="Direct messages received from this client. Counting starts when this feature is deployed — earlier history is not backfilled."
               >Messages</th>
               <th class="px-4 py-2">Last active</th>
+              <th class="px-4 py-2">Access</th>
+              <th class="px-4 py-2"><span class="sr-only">Actions</span></th>
             </tr>
           </thead>
           <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
@@ -300,6 +305,45 @@
               </td>
               <td class="px-4 py-2 text-right tabular-nums text-gray-700 dark:text-gray-200">{{ client.message_count }}</td>
               <td class="px-4 py-2 text-gray-500 dark:text-gray-400">{{ formatLastActive(client.last_active) }}</td>
+              <td class="px-4 py-2 whitespace-nowrap">
+                <BaseBadge
+                  size="sm"
+                  :variant="ACCESS_BADGE[client.access]?.variant || 'neutral'"
+                  :title="blockedTitle(client)"
+                  :data-testid="`client-access-${client.channel}-${client.client_id}`"
+                >{{ ACCESS_BADGE[client.access]?.label || 'By policy' }}</BaseBadge>
+              </td>
+              <td class="px-4 py-2">
+                <div class="flex items-center justify-end gap-2 whitespace-nowrap">
+                  <BaseButton
+                    v-if="client.access === 'pending' && client.access_request_id"
+                    size="sm"
+                    :loading="clientBusy === clientKey(client)"
+                    @click="approveClient(client)"
+                  >Approve</BaseButton>
+                  <BaseButton
+                    v-if="client.access === 'granted'"
+                    size="sm"
+                    variant="secondary"
+                    :disabled="clientBusy === clientKey(client)"
+                    @click="askClientControl(client, 'revoke')"
+                  >Revoke</BaseButton>
+                  <BaseButton
+                    v-if="client.access === 'blocked'"
+                    size="sm"
+                    variant="secondary"
+                    :loading="clientBusy === clientKey(client)"
+                    @click="runClientControl(client, 'unblock')"
+                  >Unblock</BaseButton>
+                  <BaseButton
+                    v-else
+                    size="sm"
+                    variant="danger"
+                    :disabled="clientBusy === clientKey(client)"
+                    @click="askClientControl(client, 'block')"
+                  >Block</BaseButton>
+                </div>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -324,6 +368,16 @@
         </ChannelDisclosure>
       </div>
     </div>
+
+    <ConfirmDialog
+      :visible="!!clientConfirm"
+      :title="clientConfirm?.title"
+      :message="clientConfirm?.message || ''"
+      :confirm-text="clientConfirm?.confirmText"
+      variant="warning"
+      @confirm="confirmClientControl"
+      @cancel="clientConfirm = null"
+    />
   </div>
 </template>
 
@@ -344,7 +398,9 @@ import WhatsAppChannelPanel from './WhatsAppChannelPanel.vue'
 import VoipChannelPanel from './VoipChannelPanel.vue'
 import ConnectorChannelPanel from './ConnectorChannelPanel.vue'
 import PortalClientsPanel from './PortalClientsPanel.vue'
+import ConfirmDialog from './ConfirmDialog.vue'
 import BaseBadge from './base/BaseBadge.vue'
+import BaseButton from './base/BaseButton.vue'
 
 const props = defineProps({
   agentName: {
@@ -473,6 +529,79 @@ const loadClients = async () => {
   }
 }
 
+// Per-client controls (trinity-enterprise#21). The row's `access` comes from the
+// roster; approve is the existing access-request decision.
+const ACCESS_BADGE = {
+  blocked: { label: 'Blocked', variant: 'danger' },
+  granted: { label: 'Approved', variant: 'success' },
+  pending: { label: 'Pending', variant: 'warning' },
+  none: { label: 'By policy', variant: 'neutral' },
+}
+const clientBusy = ref(null)
+const clientConfirm = ref(null)
+const clientKey = (c) => `${c.channel}:${c.client_id}`
+const clientName = (c) => c.display_name || c.identity
+
+const blockedTitle = (c) => {
+  if (c.access !== 'blocked') return undefined
+  const by = c.blocked_by_email ? ` by ${c.blocked_by_email}` : ''
+  const why = c.block_reason ? ` — “${c.block_reason}”` : ''
+  return `Blocked ${formatLastActive(c.blocked_at)}${by}${why}`
+}
+
+const CLIENT_CONFIRM = {
+  block: (c) => ({
+    title: `Block ${clientName(c)}?`,
+    message: `Their ${c.channel} messages to this agent will be dropped with no reply, whatever the access policy. Their history and any approval are kept; unblocking restores them.`,
+    confirmText: 'Block',
+  }),
+  revoke: (c) => ({
+    title: `Revoke ${clientName(c)}'s access?`,
+    message: `${c.verified_email} loses access to this agent. While access is Restricted, their next message asks for approval again; while it is Open, they can still chat — block them to stop that.`,
+    confirmText: 'Revoke',
+  }),
+}
+
+const askClientControl = (client, action) => {
+  clientConfirm.value = { client, action, ...CLIENT_CONFIRM[action](client) }
+}
+
+const confirmClientControl = async () => {
+  const { client, action } = clientConfirm.value || {}
+  clientConfirm.value = null
+  if (client) await runClientControl(client, action)
+}
+
+const CLIENT_DONE = { block: 'Blocked', unblock: 'Unblocked', revoke: 'Revoked access for' }
+
+const runClientControl = async (client, action) => {
+  clientBusy.value = clientKey(client)
+  try {
+    await axios.post(
+      `/api/agents/${props.agentName}/clients/${action}`,
+      { channel: client.channel, client_id: client.client_id },
+      { headers: authStore.authHeader }
+    )
+    showNotification(`${CLIENT_DONE[action]} ${clientName(client)}`, 'success')
+    await loadClients()
+    if (action === 'revoke') await loadAgent()
+  } catch (err) {
+    console.error(`Failed to ${action} client:`, err)
+    showNotification(err.response?.data?.detail || `Failed to ${action} client`, 'error')
+  } finally {
+    clientBusy.value = null
+  }
+}
+
+const approveClient = async (client) => {
+  clientBusy.value = clientKey(client)
+  try {
+    await decideRequest({ id: client.access_request_id, email: client.verified_email }, true)
+  } finally {
+    clientBusy.value = null
+  }
+}
+
 const formatLastActive = (iso) => {
   if (!iso) return 'never'
   try {
@@ -540,7 +669,7 @@ const decideRequest = async (req, approve) => {
       approve ? `Approved ${req.email}` : `Denied ${req.email}`,
       'success'
     )
-    await loadAccessRequests()
+    await Promise.all([loadAccessRequests(), loadClients()])
     if (approve) await loadAgent()
   } catch (err) {
     console.error('Failed to decide request:', err)

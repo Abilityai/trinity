@@ -243,6 +243,7 @@ def svc(monkeypatch):
     import services.proactive_message_service as pms
 
     fake_db = MagicMock()
+    fake_db.is_channel_client_blocked.return_value = False  # ent#21: not blocked
     fake_db.get_or_create_public_chat_session.return_value = {"id": "sess-1"}
     monkeypatch.setattr(pms, "db", fake_db)
     monkeypatch.setattr(pms, "platform_audit_service", MagicMock(log=AsyncMock()))

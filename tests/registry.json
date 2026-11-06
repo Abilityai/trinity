@@ -23,6 +23,18 @@
       "description": "#4156: which turns spawn with Claude Code's shared auto-memory off. `memory_subject.keeps_shared_auto_memory` keeps it on only for the agent's own scope (a headless run, or the owner's turn); a non-owner person, an anonymous visitor, a channel group, a seat run for someone else and any trigger off the allowlist get it off. The flag `disable_auto_memory` reaches the push /api/task payload, the /api/chat payload and the pull claim envelope for a non-owner turn and is absent for the owner's; an unreadable row fails closed (off)."
     },
     {
+      "file": "unit/test_ent21_channel_client_controls.py",
+      "feature": "trinity-enterprise#21",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "unit",
+        "access-control",
+        "channels"
+      ],
+      "description": "Per-client controls on the Sharing-tab roster against a real DB: each row's client_id and access state (blocked/granted/pending with request id/none); block is per agent and channel, idempotent, keeps the share, unblock restores it; revoke removes the share (works on a blocked client, 409 with nothing to revoke); every control 404s on a client that never reached this agent; routes are owner + require_person and audited."
+    },
+    {
       "file": "unit/test_ent1108_wake_default.py",
       "feature": "trinity-enterprise#1108",
       "added": "2026-11-04",

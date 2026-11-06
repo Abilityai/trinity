@@ -1016,6 +1016,9 @@ _DB_EXEMPT = {
     ("services/system_service.py", "_apply_created_schedules"):
         "apply executor: schedules of a member this same run created, as its creator; the apply "
         "route is require_person, so no agent key reaches it (trinity-enterprise#695)",
+    ("services/client_roster_service.py", "revoke_client"):
+        "unshares a channel client as the owner; its only caller, POST /{agent_name}/clients/revoke, "
+        "is require_person + OwnedAgentByName (trinity-enterprise#21)",
 }
 
 
