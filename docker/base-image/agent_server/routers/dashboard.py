@@ -3,14 +3,17 @@ Agent Dashboard endpoint.
 
 Reads and serves dashboard configuration from dashboard.yaml file.
 """
+import errno
 import logging
+import os
+import traceback
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 
 from fastapi import APIRouter
-import yaml
 
 from ..safe_yaml import AliasPolicy, HardenedYamlError, load_hardened_yaml
+from ..utils.credential_sanitizer import sanitize_text
 from ..utils.helpers import iso_z_from_mtime
 
 logger = logging.getLogger(__name__)
@@ -20,6 +23,44 @@ router = APIRouter()
 def get_dashboard_path() -> Path:
     """Get the fixed path to dashboard.yaml."""
     return Path("/home/developer/dashboard.yaml")
+
+
+class _DashboardIsALink(Exception):
+    """`dashboard.yaml` is a link (live or dangling), or a file with more than
+    one name on disk (a hard link)."""
+
+
+def _read_dashboard(path: Path) -> Optional[tuple]:
+    """(text, stat) of the file at `path`, or None when nothing is there.
+
+    Opened with O_NOFOLLOW: a link at that name is never followed, so what is
+    parsed (and quoted back in a parse error) is always the file at the fixed
+    path, never another file a link points at. A link, live or dangling, raises
+    `_DashboardIsALink`. O_NOFOLLOW cannot see a hard link, so a file with more
+    than one name is refused the same way: the agent can be asked in chat to
+    give another file this name, and Files refuses a hard-linked file below the
+    owner tier for the same reason (ent#820). O_NONBLOCK keeps a FIFO from
+    hanging the open.
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        if e.errno == errno.ELOOP:
+            raise _DashboardIsALink() from None
+        raise
+    try:
+        f = os.fdopen(fd, "rb")
+    except BaseException:
+        os.close(fd)  # fdopen does not close a descriptor it refuses (a directory)
+        raise
+    with f:
+        st = os.fstat(f.fileno())
+        if st.st_nlink > 1:
+            raise _DashboardIsALink()
+        data = f.read()
+    return data.decode("utf-8"), st
 
 
 def validate_widget(widget: Dict[str, Any], index: int) -> Optional[str]:
@@ -135,6 +176,42 @@ def validate_section(section: Dict[str, Any], index: int) -> List[str]:
     return errors
 
 
+def _shape_error(config: Any) -> Optional[str]:
+    """The first place `config` is not the nested mappings the validator walks,
+    as a sentence its author can act on; None when the shape is walkable.
+
+    Without it a list where a mapping belongs surfaced as the raw
+    AttributeError/TypeError text (`'str' object has no attribute 'get'`).
+    """
+    if not isinstance(config, dict):
+        return "dashboard.yaml must be a mapping (key: value pairs) at the top level"
+    sections = config.get('sections')
+    if not isinstance(sections, list):
+        return None  # validate_dashboard names a missing or non-list `sections`
+    for section_index, section in enumerate(sections):
+        if not isinstance(section, dict):
+            return f"dashboard.yaml: section {section_index} must be a mapping (key: value pairs)"
+        widgets = section.get('widgets')
+        if not isinstance(widgets, list):
+            continue  # validate_dashboard names it
+        for widget_index, widget in enumerate(widgets):
+            if not isinstance(widget, dict):
+                return (
+                    f"dashboard.yaml: section {section_index}, widget {widget_index} "
+                    "must be a mapping (key: value pairs)"
+                )
+    return None
+
+
+def _no_dashboard(error: str) -> Dict[str, Any]:
+    return {
+        "has_dashboard": False,
+        "config": None,
+        "last_modified": None,
+        "error": error,
+    }
+
+
 def validate_dashboard(config: Dict[str, Any]) -> List[str]:
     """Validate dashboard configuration. Returns list of error messages.
 
@@ -207,17 +284,17 @@ async def get_dashboard():
     """
     dashboard_path = get_dashboard_path()
 
-    if not dashboard_path.exists():
-        return {
-            "has_dashboard": False,
-            "config": None,
-            "last_modified": None,
-            "error": "No dashboard.yaml found at /home/developer/dashboard.yaml"
-        }
-
     try:
         # Read and parse YAML
-        content = dashboard_path.read_text()
+        read = _read_dashboard(dashboard_path)
+        if read is None:
+            return {
+                "has_dashboard": False,
+                "config": None,
+                "last_modified": None,
+                "error": "No dashboard.yaml found at /home/developer/dashboard.yaml"
+            }
+        content, stat = read
         # #1965: REJECT, matching the backend policy for agent-authored
         # workspace YAML (`compatibility/static_checks._parse_yaml`). The
         # backend proxies this endpoint and every consumer walks the parsed
@@ -234,6 +311,10 @@ async def get_dashboard():
                 "error": "dashboard.yaml is empty"
             }
 
+        shape = _shape_error(config)
+        if shape:
+            return _no_dashboard(shape)
+
         # Validate configuration — strips bad widgets, keeps valid ones
         errors = validate_dashboard(config)
 
@@ -247,8 +328,7 @@ async def get_dashboard():
                 "error": f"Validation errors: {'; '.join(errors)}"
             }
 
-        # Get file modification time
-        stat = dashboard_path.stat()
+        # The modification time of the file that was read
         last_modified = iso_z_from_mtime(stat.st_mtime)
 
         # Ensure defaults
@@ -263,37 +343,41 @@ async def get_dashboard():
             "warnings": errors if errors else None
         }
 
+    except _DashboardIsALink:
+        return _no_dashboard("Failed to read dashboard.yaml: it is a link, and links are not followed")
     except HardenedYamlError as e:
-        # #1965: listed BEFORE the YAMLError arm and separately from it, because
-        # HardenedYamlError is a ValueError — not a YAMLError. Without its own
-        # arm a refused bomb would fall through to the generic `except
-        # Exception` below and surface as an unnamed "Failed to read
-        # dashboard.yaml", which is the timeout-shaped answer the AC rules out.
-        # `static_checks._parse_yaml` records the same trap on the backend side.
+        # #1965: the only parse-failure arm. `load_hardened_yaml` converts every
+        # yaml.YAMLError into a HardenedYamlError (a ValueError, not a
+        # YAMLError), so a refused bomb and a plain syntax error both land here
+        # with their named code. Without this arm they would fall through to
+        # the generic `except Exception` below and surface as an unnamed
+        # "Failed to read dashboard.yaml", which is the timeout-shaped answer
+        # the AC rules out. `static_checks._parse_yaml` records the same trap on
+        # the backend side.
         return {
             "has_dashboard": False,
             "config": None,
             "last_modified": None,
             "error": f"{e.code}: {e}",
         }
-    except yaml.YAMLError as e:
-        # Get line number from YAML error if available
-        error_msg = str(e)
-        if hasattr(e, 'problem_mark') and e.problem_mark:
-            mark = e.problem_mark
-            error_msg = f"YAML parse error at line {mark.line + 1}, column {mark.column + 1}: {e.problem}"
-
-        return {
-            "has_dashboard": False,
-            "config": None,
-            "last_modified": None,
-            "error": error_msg
-        }
+    except UnicodeDecodeError:
+        # `read_text` on bytes that are not UTF-8 (a ValueError, so ahead of the
+        # generic arm).
+        logger.warning("dashboard.yaml is not valid UTF-8 text")
+        return _no_dashboard("Failed to read dashboard.yaml: the file is not valid UTF-8 text")
+    except OSError as e:
+        logger.error(
+            "Failed to read dashboard.yaml (%s): %s",
+            type(e).__name__, sanitize_text(traceback.format_exc()),
+        )
+        return _no_dashboard(
+            f"Failed to read dashboard.yaml: the file could not be read ({type(e).__name__})"
+        )
     except Exception as e:
-        logger.error(f"Failed to read dashboard.yaml: {e}")
-        return {
-            "has_dashboard": False,
-            "config": None,
-            "last_modified": None,
-            "error": f"Failed to read dashboard.yaml: {str(e)}"
-        }
+        # Not ours to return: the text of an exception we did not foresee goes
+        # to the log (scrubbed) and the answer names only its class.
+        logger.error(
+            "Failed to read dashboard.yaml (%s): %s",
+            type(e).__name__, sanitize_text(traceback.format_exc()),
+        )
+        return _no_dashboard(f"Failed to read dashboard.yaml: {type(e).__name__}")

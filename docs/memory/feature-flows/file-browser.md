@@ -698,7 +698,8 @@ This feature does not emit real-time events.
 | File not found | 404 | "File not found: {path}" | Agent Server |
 | Path is directory | 400 | "Not a file: {path}" | Agent Server |
 | File too large | 413 | "File too large: {size} bytes (max 104857600)" | Agent Server |
-| File read error | 500 | "Failed to read file: {error}" | Agent Server |
+| File read error (an OS error opening a path component) | 500 | "Failed to read file: {error}" | Agent Server |
+| Unforeseen failure (list, download, delete, update, mkdir) | 500 | "Failed to list files: {ErrorClass}", "Failed to read file: {ErrorClass}", "Failed to delete: {ErrorClass}", "Failed to update file: {ErrorClass}", "Failed to create folder: {ErrorClass}" — the exception text goes only to the agent log, credential-scrubbed (trinity#4284) | Agent Server |
 | Network timeout (list) | 504 | "File listing timed out" | Backend (30s) |
 | Network timeout (download) | 504 | "File download timed out" | Backend (60s) |
 | Network timeout (delete) | 504 | "File deletion timed out" | Backend (30s) |
