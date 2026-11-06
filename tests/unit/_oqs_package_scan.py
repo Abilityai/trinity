@@ -384,7 +384,20 @@ def literal_strings(path: Path, name: str, scope=None):
 # ---------------------------------------------------------------------------
 
 def files_naming_the_package(root: Path):
+    """Product modules under `root` whose source names the package.
+
+    A `tests` directory BELOW `root` is skipped: this walk's scope is product
+    modules, so a walk of `tests/` itself still yields its own files while the
+    enterprise submodule's `src/backend/enterprise/tests/` — inside BACKEND,
+    because the submodule is mounted there — stays out. An enterprise test
+    file resolves its sibling fixture import by pytest's rootdir `sys.path`
+    entry (the sanctioned enterprise idiom), so importing one as a *consumer*
+    outside pytest cannot work and says nothing about the package
+    (trinity-enterprise#1111).
+    """
     for path in sorted(root.rglob("*.py")):
+        if "tests" in path.relative_to(root).parts[:-1]:
+            continue
         if PKG not in path.parents and "operator_queue" in path.read_text(encoding="utf-8"):
             yield path
 
