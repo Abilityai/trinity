@@ -52,15 +52,16 @@ What is NOT masked, by design:
   ``tail7c``. A value of 8+ characters whose runs are ALL under 8 (a
   password-like value) is therefore recoverable from such renderings; no
   credential these routes accept has that shape.
-- Overlap of two held values in the text: the longer is replaced first and a
-  remainder of the shorter under 16 characters can stay visible; and a short
-  held value that is part of another held value's longer run can cut that
-  run before step 3 sees it.
+- Overlap of two held values in the text: every held value's whole renderings
+  are replaced before any value's cut runs and pieces, so a held value that
+  appears inside another held value's run cuts that run, and its parts can
+  stay visible (under 16 characters, or a piece of 8-15).
 - Past the cost caps below, in any rendering that does not show the value
   whole (step 1): a run of 8-15 characters that is not among the value's
   ``MAX_PIECES`` shortest runs (step 3 catches one of 12-15 characters only
-  inside a longer run of the text, and only when a sample lands in it), and a stretch of a run past the first ``MAX_WINDOW_SOURCE``
-  characters of the value's runs, counted longest run first, unless that run
+  inside a longer run of the text, and only when a sample lands in it), and
+  a stretch of a run past the first ``MAX_WINDOW_SOURCE`` characters of the
+  value's runs, counted longest run first, unless that run
   is a kept piece shown whole. The first exists only for a value with more
   than ``MAX_PIECES`` distinct runs of 8-15 characters, the second only for
   one with more than ``MAX_WINDOW_SOURCE`` characters in its distinct runs of
