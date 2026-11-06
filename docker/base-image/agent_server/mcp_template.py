@@ -69,6 +69,11 @@ _REF_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 
 _ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
+# One escape of the `.env` writer's encoding: a backslash and the `"` or `\\`
+# it protects. `re.sub` consumes each match once, left to right, which is the
+# single scan `execution_env.unquote_env_value` does by hand.
+_ENV_ESCAPE_RE = re.compile(r'\\(["\\])')
+
 # Both files are agent-writable; cap the reads so a runaway file cannot be
 # loaded whole at every container start.
 _MAX_BYTES = 1024 * 1024
@@ -79,12 +84,46 @@ def _log(message: str) -> None:
     print(f"[mcp-template] {message}", flush=True)
 
 
+def unquote_env_value(value: str) -> str:
+    """One `.env` value as the agent's executions receive it.
+
+    Must return exactly what `services/execution_env.unquote_env_value` (#2023)
+    returns, because that is the value every spawned runtime gets; a rendered
+    `.mcp.json` env block that disagrees hands the MCP server a different
+    credential from the one the agent itself uses. One matched quote pair is
+    stripped; inside a DOUBLE-quoted value `\\"` -> `"` and `\\\\` -> `\\` in a
+    single scan; a single-quoted value is taken literally; anything else is
+    returned as is.
+
+    This used to reverse only `\\"`. Every writer of the file (the agent's own
+    `format_env_line`, the backend's `agent_env_patch`, and the Credentials
+    panel) escapes the backslash too, so a value containing `\\` was rendered
+    with it doubled.
+
+    Copied rather than imported because this module must also load flat, by
+    file path, which is what its `except ImportError` branch is for and how the
+    tests load it. In a flat load the name `services` is ambiguous: in a test
+    process it resolves to the BACKEND package, which has no `execution_env`
+    (the reason `utils/credential_sanitizer.py` loads its decoder by path). A
+    nine-line copy is simpler than a path loader with a fallback, and
+    `tests/unit/test_ent1117_s11_env_escape_table.py` holds it equal to the
+    original on every value of up to six characters, blanks around `=`
+    included.
+    """
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+        inner = value[1:-1]
+        if value[0] != '"':
+            return inner
+        return _ENV_ESCAPE_RE.sub(r"\1", inner)
+    return value
+
+
 def parse_env_file(path: Path = ENV_FILE) -> Dict[str, str]:
     """Read `.env` into a dict. Never raises.
 
-    Mirrors the writer in `routers/credentials.py` (`KEY="value"`, embedded `"`
-    backslash-escaped) while tolerating the hand-written shapes: `export KEY=v`,
-    single quotes, bare values, comments, CRLF.
+    Values are decoded by `unquote_env_value`, the agent's own decoder, while
+    tolerating the hand-written shapes: `export KEY=v`, single quotes, bare
+    values, comments, CRLF.
     """
     try:
         if not path.is_file() or path.stat().st_size > _MAX_BYTES:
@@ -104,11 +143,7 @@ def parse_env_file(path: Path = ENV_FILE) -> Dict[str, str]:
         key = key.strip()
         if not _ENV_KEY_RE.match(key):
             continue
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
-            inner = value[1:-1]
-            value = inner.replace('\\"', '"') if value[0] == '"' else inner
-        out[key] = value
+        out[key] = unquote_env_value(value.strip())
     return out
 
 
