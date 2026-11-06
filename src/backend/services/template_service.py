@@ -8,6 +8,7 @@ import base64
 import difflib
 import json
 import logging
+import os
 import re
 import subprocess
 import shutil
@@ -1484,13 +1485,14 @@ def contained_template_dir(name, root: Path) -> Optional[Path]:
 
     1. **Name allowlist.** Rejects `..`, `/`, `\\`, a leading dot, an absolute
        path, an empty string and a non-string outright — before any path math.
-       This is also what CodeQL recognises as a `py/path-injection` barrier;
-       resolve + `is_relative_to` ALONE was flagged high-severity twice on this
-       codebase (crud.py:206-210).
-    2. **Containment.** `resolve()` BOTH sides, then `is_relative_to`. A plain
-       `str(candidate).startswith(str(root))` is NOT equivalent — it passes the
-       sibling escape `<root>-evil`. Resolving also closes the symlink escape,
-       which step 1 cannot see.
+    2. **Containment.** First in the UNRESOLVED space, in the shape CodeQL's
+       `py/path-injection` query recognises as a barrier (neither the allowlist
+       nor resolve + `is_relative_to` is one, which is why this function's
+       callers were flagged): the root is normalised and given a trailing
+       separator, so the sibling `<root>-evil` is outside it and a `./` or `//`
+       spelling of the root still matches; the joined path is normalised and
+       must start with it. Then `resolve()` BOTH sides and `is_relative_to`,
+       which closes the symlink escape no string check can see.
 
     Both sides are resolved because a mismatched pair is wrong in *both*
     directions: an unresolved root with a resolved candidate rejects every
@@ -1513,9 +1515,13 @@ def contained_template_dir(name, root: Path) -> Optional[Path]:
         return None
     if not _LOCAL_TEMPLATE_NAME_RE.match(name):
         return None
-    root = root.resolve()
-    candidate = (root / name).resolve()
-    if not candidate.is_relative_to(root):
+    base = os.path.join(os.path.normpath(str(root)), "")
+    fullpath = os.path.normpath(os.path.join(base, name))
+    if not fullpath.startswith(base):
+        return None
+    resolved_root = Path(base).resolve()
+    candidate = Path(fullpath).resolve()
+    if not candidate.is_relative_to(resolved_root):
         return None
     return candidate
 
