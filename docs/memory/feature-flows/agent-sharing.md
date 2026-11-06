@@ -1,7 +1,7 @@
 # Feature: Agent Sharing
 
 ## Overview
-Collaboration feature enabling agent owners to share agents with team members via email. Supports three access levels: Owner (full control), Shared (limited access), and Admin (full control over all agents). The Sharing tab now includes Team Sharing, Channel Access Policy, Pending Access Requests, Slack/Telegram channel bindings, and Public Links in a unified interface.
+Collaboration feature enabling agent owners to share agents with team members via email. Supports three access levels: Owner (full control), Shared (limited access), and Admin (full control over all agents). The Channels tab now includes Team Sharing, Channel Access Policy, Pending Access Requests, Slack/Telegram channel bindings, and Public Links in a unified interface.
 
 > **Cross-channel allow-list (Issue #311)**: As of 2026-04-12, `agent_sharing` is the **unified cross-channel allow-list**, not a web-only construct. The same email shared on this page admits that user across Telegram, Slack, and web public links whenever the agent's access policy requires a verified email. See [unified-channel-access-control.md](unified-channel-access-control.md) for the gate semantics and channel adapter details.
 
@@ -9,7 +9,7 @@ Collaboration feature enabling agent owners to share agents with team members vi
 As an agent owner, I want to share my agents with team members so that they can use the agents from any channel (web, Slack, Telegram) without having full ownership permissions.
 
 ## Entry Points
-- **UI**: `src/frontend/src/views/AgentDetail.vue:429-432` - Sharing tab (owners only, hidden for system agents)
+- **UI**: `src/frontend/src/views/AgentDetail.vue:429-432` - Channels tab (owners only, hidden for system agents)
 - **API**: `POST /api/agents/{name}/share` - Share agent
 - **API**: `DELETE /api/agents/{name}/share/{email}` - Remove share
 - **API**: `GET /api/agents/{name}/shares` - List shares
@@ -131,7 +131,7 @@ async getAgentShares(name) {
 
 ### Tab Visibility (`src/frontend/src/views/AgentDetail.vue:506-509`)
 
-The Sharing tab is only shown to users who can share and hidden for system agents:
+The Channels tab is only shown to users who can share and hidden for system agents:
 ```javascript
 if (agent.value?.can_share && !isSystem) {
   tabs.push({ id: 'sharing', label: 'Sharing' })

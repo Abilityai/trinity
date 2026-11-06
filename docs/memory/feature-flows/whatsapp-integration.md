@@ -64,7 +64,7 @@ no platform-level Twilio account required.
   - `POST /api/agents/{name}/whatsapp/test` — verify credentials / send test
 - **Backend router** (public, HMAC-verified):
   - `POST /api/whatsapp/webhook/{webhook_secret}` — Twilio inbound webhook
-- **Frontend**: Agent Detail → Sharing tab → `WhatsAppChannelPanel.vue`
+- **Frontend**: Agent Detail → Channels tab → `WhatsAppChannelPanel.vue`
 
 ## Components
 

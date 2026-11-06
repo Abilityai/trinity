@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * trinity-enterprise#737 — the Sharing tab's pending access requests show the
+ * trinity-enterprise#737 — the Channels tab's pending access requests show the
  * requester as a person, not a string.
  *
  * Mounted against stubbed transports; channel panels are stubbed. Pinned:

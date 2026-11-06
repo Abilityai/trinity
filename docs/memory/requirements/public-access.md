@@ -101,7 +101,7 @@
   - Periodic pruning of rate-limit buckets to prevent memory leaks
   - **Settings UI**: Socket Mode connect/disconnect, app token management, connection status badge
   - **Platform OAuth**: "Install to Workspace" from Settings page (no agent context needed)
-  - **Per-agent channel binding**: Standalone UI in Sharing tab to create/unbind Slack channels per agent
+  - **Per-agent channel binding**: Standalone UI in Channels tab to create/unbind Slack channels per agent
 - **Database Tables**:
   - `slack_workspaces` — Workspace connections (team_id, bot_token encrypted)
   - `slack_channel_agents` — Channel-to-agent bindings (multi-agent routing)
@@ -151,7 +151,7 @@
 - **Priority**: P2
 - **Description**: Per-agent Telegram bot integration. Each agent gets its own Telegram bot (1:1 via @BotFather), shareable via `t.me/BotUsername` links. Reuses the `ChannelAdapter` abstraction proven by SLACK-002.
 - **Key Features**:
-  - Frontend UI: `TelegramChannelPanel.vue` in Agent Detail → Sharing tab (connect, verify, disconnect, webhook warning)
+  - Frontend UI: `TelegramChannelPanel.vue` in Agent Detail → Channels tab (connect, verify, disconnect, webhook warning)
   - Per-agent bots (one bot per agent, token encrypted via AES-256-GCM)
   - Bidirectional text chat (users message bot → agent responds via HTML formatting)
   - Photo and document support (download, text extraction for plain text files)
@@ -355,7 +355,7 @@
 - **Description**: Per-agent WhatsApp integration via Twilio's Programmable Messaging API. Each agent owner brings their own Twilio account + WhatsApp sender number — no platform-level Twilio account required. Extends the `ChannelAdapter` abstraction from SLACK-002.
 - **Phase 1 (shipped — this PR)**:
   - Direct-message chat: inbound via Twilio webhook → agent → outbound via Twilio REST (`POST /Messages.json`)
-  - Frontend: `WhatsAppChannelPanel.vue` in Agent Detail → Sharing tab (connect form with AccountSid/AuthToken/from-number, sandbox detection, copy-webhook-URL button, disconnect/verify)
+  - Frontend: `WhatsAppChannelPanel.vue` in Agent Detail → Channels tab (connect form with AccountSid/AuthToken/from-number, sandbox detection, copy-webhook-URL button, disconnect/verify)
   - Credentials: AuthToken encrypted AES-256-GCM via `CredentialEncryptionService`; AccountSid plaintext (public identifier)
   - Webhook: dual-factor auth — URL `webhook_secret` routes to binding, `X-Twilio-Signature` HMAC-SHA1 validated via `twilio.request_validator.RequestValidator` (handles Twilio's empty-param inclusion gotcha)
   - Dedup by `MessageSid` (2048-entry in-memory ring) to absorb Twilio retries
@@ -781,9 +781,13 @@ Standalone mobile-friendly admin page for managing agents on the go. Designed as
 
 ## 46. External Client Roster (Access/Sharing redesign — epic #16)
 
-### 46.1 Surface External Channel Clients on the Sharing Tab (#20)
+### 46.0 The tab is called Channels (trinity-enterprise#225)
 
-**Description**: The Sharing tab answers "who is actually talking to this agent
+The agent's external-client tab is **Channels**, id `channels`, renamed from Sharing by operator ruling on 2026-08-21: rename only, no extra top-level tabs. Old `?tab=sharing` links land on it. Settings › Channels stays too, for voice replies, and points at this tab until trinity-enterprise#340 moves the console there.
+
+### 46.1 Surface External Channel Clients on the Channels Tab (#20)
+
+**Description**: The Channels tab answers "who is actually talking to this agent
 through a channel?" with a read-only **client roster** — external users (no
 Trinity account) who have messaged the agent via a channel. Activity is already
 collected per channel link (`verified_email`, `message_count`, `last_active`)
@@ -839,7 +843,7 @@ shows that person, plus where the same channel identity has been seen before.
   or an email it verified on a Telegram/WhatsApp bot. It is limited to agents
   the viewer may manage (`can_user_share_agent`: owner or admin), excludes the
   request itself, and is capped at 10.
-- **FR-5 — UI**: the Sharing tab's pending list leads with the name (or
+- **FR-5 — UI**: the Channels tab's pending list leads with the name (or
   @handle, or the email), then the handle, the channel and its id, then the
   email. Up to three "seen before" chips are shown, with a counted rest. A
   public-link request reads "Email only — public link", and an older one reads
@@ -861,7 +865,7 @@ apply **only to public-facing conversations** — public links, channel chats
 (Slack/Telegram/WhatsApp), and x402 paid chat — without changing the agent's
 behavior in their own authenticated chats, scheduled runs, loops, or
 agent-to-agent calls. The text-surface counterpart of `voice_system_prompt`.
-Edited from the Sharing tab.
+Edited from the Channels tab.
 
 - **FR-1 — Storage**: `agent_ownership.public_channel_system_prompt TEXT`
   (versioned migration, Invariant #3). Unset/empty is the default.
