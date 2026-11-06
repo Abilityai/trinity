@@ -344,6 +344,7 @@ export function createSystemTools(
         "Agents are created with naming pattern '{system}-{agent}' (e.g., 'content-production-orchestrator'); " +
         "with `naming: bare` the agent key is the full agent name. " +
         "Supports permission presets: 'full-mesh', 'orchestrator-workers', 'none', or explicit rules. " +
+        "While the instance limits agent-created agents to a list of template sources, an agent key's manifest with a member outside it is refused as a whole (403 `template_source_not_allowed`, `members[]`), and a dry run lists those members in `failed[]`. " +
         "Deploy is best-effort: check `status` ('deployed' | 'partial' | 'failed') and `failed[]` " +
         "in the response — a partial deploy still creates the remaining agents. " +
         "`deploy: false` members are skipped and listed in `agents_declared_only[]`; a manifest whose every " +
