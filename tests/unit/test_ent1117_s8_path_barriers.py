@@ -16,7 +16,9 @@ the properties that barrier has to hold:
 * ``sanitize_agent_name`` never returns a separator, ``.`` or ``..``;
 * ``a..b`` stays a valid agent name;
 * a name longer than the filesystem allows gets the same answer on the four
-  public read routes as an unknown agent, not a 500.
+  public read routes as an unknown agent, not a 500;
+* every sink (read, write, move, staging) uses the normalised path the barrier
+  checked, not one rebuilt from the raw root.
 
 It also pins two responses that used to carry exception text: the Generate
 Default Avatars per-agent error, and the rename 500 (abilityai/trinity#4284).
@@ -38,7 +40,7 @@ from hypothesis import strategies as st
 
 import routers.agent_rename as agent_rename
 import routers.avatar as avatar
-from models import AgentConfig, User
+from models import AgentConfig, AvatarGenerateRequest, User
 from services import template_service
 from services.agent_service import crud
 from utils import avatar_paths
@@ -619,3 +621,194 @@ def _app_with_avatar_router():
     app.include_router(avatar.router)
     return app
 
+
+# =============================================================================
+# 11. Every sink uses the path the barrier checked, not a re-built one
+# =============================================================================
+# The barrier decides on the NORMALISED path. A sink that rebuilds the path
+# from the raw root (`AVATAR_DIR / f"{name}.webp"`) passes every test above,
+# because the barrier calls beside it refuse a hostile name first. To make the
+# difference observable, these tests use a root whose raw spelling and whose
+# normalised spelling are two different directories on disk:
+#
+#     <tmp>/store/hop/../avatars     hop -> <tmp>/decoy/inner
+#
+# `normpath` folds `hop/..` as text, giving <tmp>/store/avatars (the CHECKED
+# directory). The kernel follows the symlink first, so the raw spelling opens
+# <tmp>/decoy/avatars. A sink that touches the decoy has touched a path the
+# barrier never vouched for. No production root has this shape: it is a device
+# that lets a test see which of the two paths a sink used.
+
+CHECKED = b"THE-PATH-THE-BARRIER-CHECKED"
+
+
+@pytest.fixture
+def split_root(tmp_path):
+    checked = tmp_path / "store" / "avatars"
+    checked.mkdir(parents=True)
+    decoy = tmp_path / "decoy" / "avatars"
+    decoy.mkdir(parents=True)
+    (tmp_path / "decoy" / "inner").mkdir()
+    (tmp_path / "store" / "hop").symlink_to(tmp_path / "decoy" / "inner")
+    raw = tmp_path / "store" / "hop" / ".." / "avatars"
+    assert raw.resolve() == decoy.resolve()
+    return SimpleNamespace(raw=raw, raw_str=str(raw), checked=checked, decoy=decoy)
+
+
+def _plant(directory, names, data):
+    for name in names:
+        (directory / name).write_bytes(data)
+
+
+_ALL_READ_FILES = ("x.webp", "x.png", "x_ref.png", "x_emotion_happy.webp", "x_emotion_happy.png")
+
+
+def test_the_helper_returns_the_normalised_path_it_checked(split_root, monkeypatch):
+    monkeypatch.setattr(avatar_paths, "AVATAR_DIR", split_root.raw)
+    got = avatar_paths.avatar_path_or_none("x", ".webp")
+    assert got == split_root.checked / "x.webp"
+    assert ".." not in got.parts
+
+
+@pytest.mark.parametrize("route", ["avatar", "reference", "emotion-webp", "emotion-png"])
+def test_read_routes_serve_the_checked_file_not_the_raw_spelling(split_root, monkeypatch, route):
+    monkeypatch.setattr(avatar_paths, "AVATAR_DIR", split_root.raw)
+    _plant(split_root.decoy, _ALL_READ_FILES, SECRET)
+    wanted = {
+        "avatar": ("x.webp",),
+        "reference": ("x_ref.png",),
+        # Only one of the two variants exists in the checked store, so each
+        # half of the WebP-then-PNG lookup is exercised on its own.
+        "emotion-webp": ("x_emotion_happy.webp",),
+        "emotion-png": ("x_emotion_happy.png",),
+    }[route]
+    _plant(split_root.checked, wanted, CHECKED)
+    call = {
+        "avatar": lambda: avatar.get_avatar("x"),
+        "reference": lambda: avatar.get_avatar_reference("x"),
+        "emotion-webp": lambda: avatar.get_avatar_emotion("x", "happy"),
+        "emotion-png": lambda: avatar.get_avatar_emotion("x", "happy"),
+    }[route]
+    resp = _run(call())
+    assert isinstance(resp, FileResponse)
+    assert Path(resp.path).read_bytes() == CHECKED
+
+
+def test_generate_defaults_writes_the_checked_path(split_root, monkeypatch):
+    monkeypatch.setattr(avatar_paths, "AVATAR_DIR", split_root.raw)
+    _defaults_env(monkeypatch, optimize=lambda b: CHECKED)
+    body = _run(avatar.generate_default_avatars(current_user=_admin()))
+    assert body["generated"] == 1, body
+    assert (split_root.checked / "a1.webp").read_bytes() == CHECKED
+    assert list(split_root.decoy.iterdir()) == []
+
+
+def _generate_env(monkeypatch):
+    service = SimpleNamespace(
+        available=True,
+        generate_image=AsyncMock(return_value=SimpleNamespace(
+            success=True, image_data=b"PNG-BYTES", error=None, refined_prompt="r")),
+    )
+    monkeypatch.setattr(avatar, "get_image_generation_service", lambda: service)
+    monkeypatch.setattr(avatar, "db", MagicMock())
+    monkeypatch.setattr(avatar, "optimize_avatar", lambda b: b"WEBP-BYTES")
+    monkeypatch.setattr(avatar, "_generate_emotions_background", AsyncMock())
+
+
+def test_generate_writes_both_files_to_the_checked_path(split_root, monkeypatch):
+    monkeypatch.setattr(avatar_paths, "AVATAR_DIR", split_root.raw)
+    _generate_env(monkeypatch)
+    _run(avatar.generate_avatar("x", AvatarGenerateRequest(identity_prompt="a robot")))
+    assert (split_root.checked / "x.webp").read_bytes() == b"WEBP-BYTES"
+    assert (split_root.checked / "x_ref.png").read_bytes() == b"PNG-BYTES"
+    assert list(split_root.decoy.iterdir()) == []
+
+
+def test_rename_moves_to_the_checked_path(split_root, monkeypatch):
+    monkeypatch.setattr(avatar_paths, "AVATAR_DIR", split_root.raw)
+    _plant(split_root.checked, ("old.webp", "old_ref.png"), CHECKED)
+    user, request = _rename_env(monkeypatch)
+    _run(agent_rename.rename_agent_endpoint(
+        "old", SimpleNamespace(new_name="new-name"), request, user))
+    assert sorted(p.name for p in split_root.checked.iterdir()) == [
+        "new-name.webp", "new-name_ref.png"]
+    assert list(split_root.decoy.iterdir()) == []
+
+
+def test_bundled_avatar_install_writes_the_checked_path(split_root, monkeypatch, tmp_path):
+    import io
+
+    from PIL import Image
+
+    tpl = tmp_path / "tpls" / "avtpl"
+    tpl.mkdir(parents=True)
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), (40, 90, 160)).save(buf, format="PNG")
+    (tpl / "avatar.png").write_bytes(buf.getvalue())
+    monkeypatch.setattr(crud, "_LOCAL_TEMPLATE_ROOTS", (tmp_path / "tpls", tmp_path / "tpls"))
+    monkeypatch.setattr(avatar_paths, "AVATAR_DIR", split_root.raw)
+    crud._install_bundled_avatar(AgentConfig(name="bundled-av", template="local:avtpl"))
+    installed = (split_root.checked / "bundled-av.webp").read_bytes()
+    assert installed[:4] == b"RIFF" and installed[8:12] == b"WEBP"
+    assert list(split_root.decoy.iterdir()) == []
+
+
+def test_stage_config_files_writes_the_checked_paths(split_root, monkeypatch):
+    monkeypatch.setattr(crud, "_STAGING_ROOT", split_root.raw_str)
+    config_path, credentials_path, _, _ = crud._stage_config_files(
+        AgentConfig(name="good-agent"), {}, None)
+    assert config_path.parent == credentials_path.parent == split_root.checked
+    assert config_path.is_file() and credentials_path.read_text() == "{}"
+    assert (split_root.checked / "agent-good-agent-creds").is_dir()
+    assert list(split_root.decoy.iterdir()) == []
+
+
+def test_move_avatar_file_treats_a_refused_name_as_nothing_to_move(store):
+    """The contract its docstring states: a refused name is a quiet no-op. If it
+    raised instead, the rename's broad `except` would abort the remaining moves."""
+    (store / "old.webp").write_bytes(b"F")
+    assert agent_rename._move_avatar_file("../avatars2/x", "new", ".webp") is None
+    assert agent_rename._move_avatar_file("old", "../avatars2/x", ".webp") is None
+    assert (store / "old.webp").read_bytes() == b"F"
+    assert (store.parent / "avatars2" / "x.webp").read_bytes() == SECRET
+
+
+# =============================================================================
+# 12. Hostile names through the write paths (characterization)
+# =============================================================================
+# These callers take names that are owner-gated, read from the database or
+# sanitised, so none is reachable with a hostile name today; the tests pin that
+# a hostile name writes nothing, should a future caller pass one.
+
+
+def test_generate_refuses_an_escaping_name_and_writes_nothing(store, monkeypatch):
+    _generate_env(monkeypatch)
+    with pytest.raises(HTTPException) as exc:
+        _run(avatar.generate_avatar("../avatars2/x", AvatarGenerateRequest(identity_prompt="a")))
+    assert (exc.value.status_code, exc.value.detail) == (404, "Agent not found")
+    assert (store.parent / "avatars2" / "x.webp").read_bytes() == SECRET
+    assert (store.parent / "avatars2" / "x_ref.png").read_bytes() == SECRET
+    assert list(store.iterdir()) == []
+
+
+def test_generate_defaults_writes_nothing_for_an_escaping_database_name(store, monkeypatch):
+    db = _defaults_env(monkeypatch, optimize=lambda b: b"WEBP")
+    db.get_agents_without_custom_avatar.return_value = [{"agent_name": "../avatars2/x"}]
+    monkeypatch.setattr(
+        "services.docker_service.list_all_agents_fast",
+        lambda: [SimpleNamespace(name="../avatars2/x")],
+    )
+    body = _run(avatar.generate_default_avatars(current_user=_admin()))
+    assert body["generated"] == 0 and body["failed"] == 1, body
+    assert (store.parent / "avatars2" / "x.webp").read_bytes() == SECRET
+    assert list(store.iterdir()) == []
+
+
+def test_bundled_avatar_install_writes_nothing_for_an_escaping_name(store, monkeypatch, tmp_path):
+    tpl = tmp_path / "tpls" / "avtpl"
+    tpl.mkdir(parents=True)
+    (tpl / "avatar.webp").write_bytes(b"would-be-installed")
+    monkeypatch.setattr(crud, "_LOCAL_TEMPLATE_ROOTS", (tmp_path / "tpls", tmp_path / "tpls"))
+    crud._install_bundled_avatar(AgentConfig(name="../avatars2/x", template="local:avtpl"))
+    assert (store.parent / "avatars2" / "x.webp").read_bytes() == SECRET
+    assert list(store.iterdir()) == []
