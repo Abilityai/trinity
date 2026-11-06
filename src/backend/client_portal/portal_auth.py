@@ -29,6 +29,7 @@ from dependencies import (
     oauth2_scheme,
     decode_portal_session,
     is_person_principal,
+    portal_session_is_interactive,
     portal_session_minted_by,
     portal_session_needs_rotation,
     reject_agent_principal,
@@ -38,6 +39,10 @@ from dependencies import (
 
 logger = logging.getLogger(__name__)
 
+
+
+# trinity#3894: the refusal code for a platform account with no email.
+ACCOUNT_HAS_NO_EMAIL = "account_has_no_email"
 
 def _reject_if_blocked(email: str) -> None:
     """403 a blocked client. Fail-closed — a lookup failure denies.
@@ -181,6 +186,17 @@ async def get_portal_principal(
     email = decode_portal_session(token)
     if email:
         _reject_if_blocked(email)
+        # trinity-enterprise#1107 ruling A(1): a portal session is a Workspace
+        # person, and is asked for the terms like every other visit — after
+        # the block (a blocked client is refused, not shown terms), before the
+        # slide (a refused session is not handed a fresh token). Asked only
+        # when the session carries the SPA's `interactive` claim (ruling A: a
+        # harness-minted or delegate-minted token is not a visit). The terms
+        # routes are marked `@terms_route` and accept this same token, so the
+        # refusal can be ended; sign-out is client-side and needs no route.
+        from services import terms_gate
+        terms_gate.enforce_portal_session(
+            request, email, interactive=portal_session_is_interactive(token))
         # Slide the session AFTER the block check, so a blocked client is never
         # handed a fresh token on its way out.
         _maybe_rotate(token, response)
@@ -224,7 +240,19 @@ async def get_portal_principal(
     row = db.get_user_by_username(user.username)
     email = (row or {}).get("email") if row else None
     if not email:
-        raise HTTPException(status_code=403, detail="No email is associated with this account")
+        # trinity#3894: the Workspace identifies a person by email (rosters,
+        # messages, shares), so an account without one — the built-in `admin`
+        # on a default install — cannot be seated. Say how to fix it, and name
+        # the case with a code the Workspace renders as that remedy instead of
+        # a "Try again" that can never succeed.
+        from services.chat_execution_service import ERROR_CODE_HEADER
+        raise HTTPException(
+            status_code=403,
+            detail=("This Trinity account has no email address, and the Workspace identifies people "
+                    "by email. Add one under Settings → General (Admin sign-in email), then reload "
+                    "the Workspace."),
+            headers={ERROR_CODE_HEADER: ACCOUNT_HAS_NO_EMAIL},
+        )
     email = email.lower()
     # The operator-preview path is gated too: previewing as a blocked client must
     # show what that client sees, and an operator whose OWN email is blocked has

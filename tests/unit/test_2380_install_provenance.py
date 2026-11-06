@@ -1043,6 +1043,7 @@ def _flags(monkeypatch, *, source, marketplace, posture, guide=None, reached=Fal
         # request. Its own cases live in test_2691_public_url_reachability.py;
         # here it only has to exist, so the posture assertions still run.
         is_public_url_reached=lambda: reached,
+        is_mcp_external_access_enabled=lambda: (False, "default"),
     )
     monkeypatch.setattr(rs, "settings_service", stub_settings)
     monkeypatch.setattr(

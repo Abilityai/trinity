@@ -114,6 +114,13 @@ from services.subscription_headroom_alerts import (
 )
 
 
+# trinity-enterprise#1107 — the terms of use are written only through
+# `PUT /api/terms` / `POST /api/terms/restore-default` (admin + interactive,
+# validated by name, audited by version). Blocked on the generic PUT so an
+# empty or oversized text, or a hand-typed version, cannot reach the sink.
+from services.terms_service import SETTING_KEYS as TERMS_SETTING_KEYS
+
+
 
 router = APIRouter()
 
@@ -217,6 +224,16 @@ async def update_setting(
         raise HTTPException(
             status_code=422,
             detail=f"{key} is recorded by the platform at boot and is not writable through the API.",
+        )
+
+    # trinity-enterprise#1107: the terms text, title, version and switch.
+    if key in TERMS_SETTING_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} is set via PUT /api/terms (admin + interactive-only, validated, "
+                "audit-logged; POST /api/terms/restore-default restores the shipped text)"
+            ),
         )
 
     # #506: the fleet ceiling must go through the dedicated range-validated
@@ -325,6 +342,22 @@ async def update_setting(
     # route — without this block the whole SSRF gate is one generic PUT away
     # from being bypassed. `generation` and `lkg` are blocked for a different
     # reason: they ARE the cache, and a writable cache is a poisonable one.
+    # ent#641: the autonomy level has a closed vocabulary (L0-L3) and raising it
+    # is what lets anything on the instance run unprompted. An unvalidated write
+    # here would accept any string — and a value outside the vocabulary reads as
+    # the DEFAULT at every consumer, so the catch-all would be a silent way to
+    # disarm the dial rather than to set it. Same 422-with-a-pointer as the
+    # retention windows (ent#297) and the registry URL (ent#14).
+    from services import autonomy_dial_service
+
+    if key == autonomy_dial_service.LEVEL_KEY:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "the autonomy level must be set via PUT /api/settings/autonomy-dial "
+                "(admin + human-only, validated, audit-logged)"
+            ),
+        )
     # Validate at the boundary AND at the sink (#1525).
     from services.settings_service import TEMPLATE_REGISTRY_KEYS
 
@@ -450,6 +483,20 @@ async def update_setting(
             detail=(
                 f"{key} must be set via PUT /api/settings/aauth "
                 "(admin + interactive-only, issuer validated, audit-logged)"
+            ),
+        )
+
+    # trinity-enterprise#1101: the external-MCP-access switch moves the
+    # instance's perimeter, so it has one write path — the typed, audited
+    # route — and the catch-all cannot store a value it would not validate.
+    from services.settings_service import MCP_EXTERNAL_ACCESS_KEY
+
+    if key == MCP_EXTERNAL_ACCESS_KEY:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} must be set via PUT /api/settings/mcp-external-access "
+                "(admin, boolean, audit-logged)"
             ),
         )
 
@@ -698,6 +745,19 @@ async def delete_setting(
             detail=(
                 f"{key} must be changed via PUT /api/settings/aauth "
                 "(admin + interactive-only, audit-logged)"
+            ),
+        )
+
+    # trinity-enterprise#1107: deleting `terms_version` alone would make the
+    # shipped version name a custom text (nobody asked again); deleting the
+    # text brings the default back without the audit row restore-default
+    # writes. The terms routes are the only writer on BOTH verbs.
+    if key in TERMS_SETTING_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} is set via PUT /api/terms (admin + interactive-only, validated, "
+                "audit-logged; POST /api/terms/restore-default restores the shipped text)"
             ),
         )
 

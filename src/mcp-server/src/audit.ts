@@ -13,6 +13,7 @@
 
 import type { McpAuthContext, ToolOutcome } from "./types.js";
 import { ApiError } from "./client.js";
+import { runInTurn } from "./turn-context.js";
 
 /**
  * Where audit rows go. Injected by `createServer` (#2807) so the server's
@@ -63,11 +64,55 @@ export interface ToolCallContext {
   requestId?: string;
   /**
    * #2807: a RETURNED outcome. A deny site stamps it through
-   * `access.ts::accessDenied`; `withAudit` reads it after `execute`, because a
-   * denial the tool returns is not one it throws — without the stamp every
-   * refusal on the surface was audited as `success: true`.
+   * `access.ts::accessDenied`, a returned non-denial failure through
+   * `toolFailed` (#4026); `withAudit` reads it after `execute`, because a
+   * failure the tool returns is not one it throws — without the stamp every
+   * returned refusal on the surface was audited as `success: true`.
    */
   outcome?: ToolOutcome;
+}
+
+/** #4026: the row reason when a failure site names none and its envelope has no `error`. */
+const FAILED_FALLBACK_REASON = "Tool call failed";
+
+const nonEmpty = (v: unknown): v is string => typeof v === "string" && v.length > 0;
+
+/**
+ * Serialise a returned failure envelope AND record that this call failed
+ * (#4026): the non-denial twin of `access.ts::accessDenied`.
+ *
+ * A tool that never throws (its JSON result IS the contract an agent parses)
+ * used to be audited `success: true` whenever it returned a refusal, because
+ * `withAudit` labels a call by throw/no-throw. This writes
+ * `context.outcome = { kind: "failed", reason }` on the PER-CALL context and
+ * returns `JSON.stringify(envelope, null, 2)` — the serialisation every
+ * adopting site already used — so the caller's bytes do not change.
+ *
+ * - `failed` is NOT a denial: the row reads `success: false` with no `denied`
+ *   key. An authorization refusal goes through `accessDenied`, never here.
+ * - A denial wins. If this call was already stamped `denied`, the stamp is
+ *   left exactly as it is (kind and reason), so a denial is never downgraded.
+ * - The reason is `auditReason`, else `envelope.error`, else a fixed fallback,
+ *   skipping anything that is not a non-empty string: `logToolCall` drops an
+ *   empty `error`, which would leave a failure row with no reason. Pass a SHORT
+ *   `auditReason` (`HTTP 409: status 'refused'`) rather than letting a
+ *   paragraph of caller guidance land on the row.
+ * - Never stamp `context.session`: it is shared by every call on the session.
+ */
+export function toolFailed(
+  context: ToolCallContext | undefined,
+  envelope: Record<string, unknown>,
+  auditReason?: string
+): string {
+  if (context && context.outcome?.kind !== "denied") {
+    const reason = nonEmpty(auditReason)
+      ? auditReason
+      : nonEmpty(envelope.error)
+        ? envelope.error
+        : FAILED_FALLBACK_REASON;
+    context.outcome = { kind: "failed", reason };
+  }
+  return JSON.stringify(envelope, null, 2);
 }
 
 /**
@@ -219,12 +264,14 @@ export function withAudit<T>(
     const targetId = resolveTargetId(params) ?? boundTargetId;
 
     try {
-      const result = await execute(params, ctx);
+      // ent#926: every backend call the tool makes carries this request's turn.
+      const result = await runInTurn(authContext?.executionId, () => execute(params, ctx));
       // Read requestId AND outcome AFTER execute: a tool (e.g. git.ts) stamps
       // the former on the shared context object so this row carries the same
-      // id it forwarded; a deny site stamps the latter (access.ts::accessDenied)
-      // because a RETURNED denial is not a thrown one — without the stamp the
-      // wrapper labelled every refusal on the surface `success: true` (#2807).
+      // id it forwarded; a deny site (access.ts::accessDenied, #2807) or a
+      // returned-failure site (toolFailed, #4026) stamps the latter, because a
+      // RETURNED refusal is not a thrown one — without the stamp the wrapper
+      // labelled every such call `success: true`. Only `denied` sets `denied`.
       const outcome = ctx.outcome;
       logToolCall(
         toolName,

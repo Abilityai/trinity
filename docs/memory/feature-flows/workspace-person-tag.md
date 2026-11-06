@@ -84,6 +84,9 @@ POST /api/rooms/{id}/messages {content, tags}
        dedupe; >10 → 422 too_many_tags; self → 422 cannot_tag_yourself;
        db.get_taggable_person(agents, email) None → 422 unknown_person {name}
        (BEFORE the newcomer join and the append — a refused tag writes nothing)
+    _with_seated_mentions (trinity-enterprise#701): an @name matching a SEATED
+       person (username, or the local part of their email when only one seated
+       person has it) is added to the tags, best-effort — never a wake
     _join_mentioned_newcomers; mentions = resolve_mentions(content, participants)   unchanged
     append_message(id, …, mentions)                       stored mentions = agents only
     _deliver_tags → person_mention_service.deliver(Conversation('room', id, first agent, name))
@@ -104,10 +107,13 @@ POST …/client-portal/agents/{a}/chat/stream {…, tags}
 GET /api/enterprise/client-portal/mentions/{id}        (client_portal/mentions/router.py)
   person_mention_service.open_for_reader(Reader(email, is_platform), id)
     _mine: addressee match, else 404 not_found (same as missing)
-    room: _room_access — per door, as _require_membership: live workspace_user
+    room: _room_access_row — per door, as _require_membership: live workspace_user
           (email) on either door; live user participant (username) or admin
           only when is_platform (never via a portal session, #78)
-      yes → shared_sessions.db.get_messages(seq−4, limit 6) → context, message
+      yes → shared_sessions.db.get_messages(seq−4, limit 6) → context, message,
+            keeping only rows at or above the reader's read floor
+            (_room_read_floor = their visible_from_seq, trinity-enterprise#701),
+            so a tag never previews what was said before the reader was seated
       no  → can_see false, id null, no content, can_let_you_in = moderators
     chat: can_see false, can_let_you_in = [tagger]
 POST …/mentions/{id}/read   person only → db.mark_person_mention_read (CAS delivered→read)

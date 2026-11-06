@@ -23,7 +23,7 @@ description: Autonomous content pipeline with orchestrator and workers
 
 prompt: |
   System-wide instructions injected into all agents.
-  This updates the global trinity_prompt setting.
+  This updates the global trinity_prompt setting (admin callers only, #4025).
   All agents receive this via CLAUDE.md injection.
 
 # ORG-001 Phase 4: Default tags applied to ALL agents in system
@@ -57,6 +57,7 @@ agents:
         message: "Create today's content plan"
         timezone: "UTC"
         enabled: true
+        model: claude-sonnet-4-5   # optional (#4151); omitted = the agent's default model
       - name: hourly-check
         cron: "0 * * * *"
         message: "Check progress and adjust"
@@ -271,7 +272,8 @@ Each corresponds to a real way the backend can mislead a reader:
 - **Acknowledgement, not a banner** — a manifest setting `prompt:` replaces the
   platform-wide `trinity_prompt` for **every agent on the instance**, and enabled schedules
   start recurring autonomous executions that spend API budget. Deploy is gated on an
-  explicit checkbox.
+  explicit checkbox. For a non-admin the preview returns `prompt_updated: false` and a
+  `prompt_requires_admin:` note (#4025), so only the schedule clause can raise the gate.
 - **Duplicate names are confirm-grade** — on a fresh install, re-installing a bundled
   manifest resolves to `_N` suffixes by default and recovery is manual, per agent.
 - **No blind retry** — a timeout or bare 5xx renders "outcome unknown — may still be
@@ -652,7 +654,9 @@ folders only the declared keys; resources a declared key that differs from the e
 (override → label → default) written with `set_resource_limits`, the omitted key's stored value
 kept; template reported `template_differs`; schedules updated in place through `update_schedule`,
 never `enabled`, created as the agent owner, an update the caller cannot make refused up front
-(`schedule_not_updatable_by_caller`); prompt written only by an admin; view found among the
+(`schedule_not_updatable_by_caller`); a schedule's `model` (MODEL-001) is written on create and
+compared on update only when the entry declares it, named in the dry run and the result like any
+other schedule field, and exported only when set (#4151 — it was silently dropped before); prompt written only by an admin; view found among the
 caller's own or shared views by `SYSTEM_VIEW_AUTO_DESCRIPTION` + the system tag. Members apply
 creates get create's semantics; their template-dependent fields (a same-named template schedule,
 a template resource that overrides a declared one) are resolved after the create, against a fresh
@@ -725,7 +729,7 @@ method that does not exist, so no export carried `folders`.)
 
 **Skills (trinity-enterprise#1030)**: `services/system_apply/skills.py` owns `skills:` / `skill_sets:` — `read_library` (one verdict per declared name, into `ApplySnapshot.skill_verdicts` / `skill_set_verdicts`), `read_member` (individual rows + `skill_set_service.held_sets`, into `ApplyMemberState.skills` / `skill_sets`), `plan` (called from `resolve_apply_plan` via `_plan_skills` for created and managed members), `run` (`_run_op` kinds `skill_assign` / `skill_set_assign`, last in `_APPLY_OP_PHASES`). Writes call `skill_assignment_service.assign_and_deliver` / `assign_set_and_deliver`, the sequence the skills router's assign route now also calls. Deploy: `assign_manifest_skills` (step 10b). Export: per member after tags. Assigning a set goes through `skill_set_service.assign`, which may drop set-derived rows of another held set whose source drifted — the same as the set route; individual rows are never touched. The `skill_delivery` report change's note lists every per-skill `failed` / `conflict` entry of the delivery report (`delivery_failures`, e.g. `marker_not_written`); a landed set write whose skills were all held already records `current="unchanged"`; deploy adds one warning per member whose delivery names a failed skill (`deploy_delivery_warning`; `pending_start` is not a line) (#4130).
 
-**Grants (trinity-enterprise#1030 CP2)**: `services/system_apply/grants.py` owns `grants:` — `read_member` (`db.list_agent_capabilities`, into `ApplyMemberState.grants`), `plan` (via `_plan_grants`; a write only when `ApplySnapshot.grant_writer`, i.e. `dependencies.is_interactive_admin(current_user)`, else the `grant_requires_interactive_admin` report), `summarize` (`ApplyPlan.summary["grants"]` → `SystemApplyResponse.summary` plus the one warning line), `run` (`_run_op` kind `grant`, last in `_APPLY_OP_PHASES`; `capability_grant_service.set_grant(name, cap, True, actor)` then the shared `audit_grant_change`), `deploy` / `deploy_hold_back_warning` (deploy step 10c and the dry-run preview). The gate itself is `dependencies.assert_interactive_admin`, which the two capability-grant routes (`routers/agent_config.py`, `routers/skills.py`) also call after `Depends(require_admin)`. Export: per member after skills.
+**Grants (trinity-enterprise#1030 CP2)**: `services/system_apply/grants.py` owns `grants:` — `read_member` (`db.list_agent_capabilities`, into `ApplyMemberState.grants`), `plan` (via `_plan_grants`; a write only when `ApplySnapshot.grant_writer`, i.e. `dependencies.is_interactive_admin(current_user)`, else the `grant_requires_interactive_admin` report), `summarize` (`ApplyPlan.summary["grants"]` → `SystemApplyResponse.summary` plus the one warning line), `run` (`_run_op` kind `grant`, last in `_APPLY_OP_PHASES`; `capability_grant_service.set_grant(name, cap, True, actor)` then the shared `audit_grant_change`), `deploy` / `deploy_hold_back_warning` (deploy step 10c and the dry-run preview). Before steps 10a and 10b, a deploy under an agent key holding `skills.manage` writes one `capability_used` row per created member with gates, skills or sets (trinity-enterprise#871, [self-change-grants.md](self-change-grants.md)). The gate itself is `dependencies.assert_interactive_admin`, which the two capability-grant routes (`routers/agent_config.py`, `routers/skills.py`) also call after `Depends(require_admin)`. Export: per member after skills.
 
 **Gates (trinity-enterprise#1030 CP3)**: `services/system_apply/gates.py` owns `gates:` — `read_member` (`db.list_agent_skill_gates`, every row, into `ApplyMemberState.gates`), `plan` (via `_plan_gates` for created and managed members; each declared gate through `skill_gate_map_service.validate_gate_changes`, the public validator `set_gate` itself calls, so a refusal is the same blocker code the write would give; `gate_missing` / `gate_differs` writes with ent#881's `approver_reason` as the `note`; `gate_undeclared` report, never a clear), `summarize` (`ApplyPlan.summary["gates"]`), `run` (`_run_op` kind `gate_set`, step `gates`, BEFORE `skill_assign` in `_APPLY_OP_PHASES`; `skill_gate_map_service.set_gate(..., ctx=gate_context(user, trigger="apply"))`; a reachability warning from the write becomes a per-member report, and `marker_not_written` the `gate_marker_not_written` report — the deploy loop warns for it too, #4130), `export_member` (`set` rows only), `deploy` / `deploy_hold_back_warning` (deploy step 10a, before the skills step 10b, and the dry-run preview; `dependencies.capability_refusal(skills.manage)` is the T8 gate). Export: per member after grants. A `role:` approver on a member created in the same run is refused (`unknown_role` / `approver_unavailable`): the member has no roster yet, and person seats are report-only, so nothing in the run can seed one. trinity-enterprise#1043: `read_held_skills` (`db.get_agent_skill_names`, casefolded, into `ApplyMemberState.skill_names`, read beside the gates) lets `plan` stamp each `gate_set` op with `held` and the gate in force (`live`, the `_public` shape); when `attempt` returns False on a held op, `run` → `_held_skill_not_gated` appends the consequence to `out.failed[-1].reason` (the `<code>:` prefix stays), adds the per-member report `skill_runs_ungated` (`live` None) or `previous_gate_stands` (`current` = the live gate) to `out.extra_changes`, and for an ungated skill appends one line to `out.warnings`, which `_apply_report` merges after the plan's held-back grant and seat lines. trinity-enterprise#1068: `read_apply_snapshot` reads the ops setting `apply_unassign_on_failed_gate` (default true) once into `ApplyPlan.unassign_on_failed_gate`, and `read_held_via_sets` (`skill_set_service.via_sets_map`) beside the held skills; `plan` stamps each `gate_set` op with `unassign` and `held_via_sets` and joins the consequence to the change's `note` (`_consequence_note`). On a failed held op, `run` → `_unassign_held_skill` first: switch off or `live` set → the ent#1043 report; held through a set → the report `skill_held_via_set` plus the ent#1043 report (**a set-held skill stays report-only**); else it re-reads the gate row under the lease (`_gate_row_stored`: stored → nothing unassigned, the reason says so; unreadable → report) and makes a second `attempt(..., "skills", unassign, key=skill)` through `skill_assignment_service.unassign_and_remove(keep_set_held=True)` — the unassign route's own sequence (retained-via-set check, row delete, `_remove_unassigned_skills`, broadcast, `sync_gates`). Landed → the failure's reason names the unassign, the member gets the `write` change `skill_unassigned_gate_failed` (field `skills`), one warning line says unassigned, and `summary.build(extra_changes=...)` counts it in `skills.write` by the landed-key rule. Removal not `completed` → the reason says the package removal is pending and the `skill_runs_ungated` report and warning line stay. Refused → its own `failed[]` row and the ent#1043 report. No gate is cleared on any path (the ent#1030 never-clear pin).
 
@@ -780,6 +784,8 @@ async def deploy_system(
 
 4. If dry_run=True:
    └─ Return preview: {status: "valid", agents_to_create: [...], warnings: [...]}
+   └─ prompt_updated = manifest.prompt AND the caller passes assert_admin; a
+      non-admin with a prompt gets the prompt_requires_admin warning (#4025)
 
 5. Create agents — BEST-EFFORT loop (trinity-enterprise#125):
    For each agent in manifest.agents:
@@ -800,10 +806,16 @@ async def deploy_system(
       so code-only callers (curl -f) don't read it as success
    └─ Skips prompt write, all config phases, system view, and start
 
-6b. Update trinity_prompt (if manifest.prompt AND ≥1 agent created):
+6b. Update trinity_prompt (if manifest.prompt AND ≥1 agent created AND the
+    caller passes assert_admin, the settings route's own gate):
    └─ db.set_setting("trinity_prompt", manifest.prompt)
    └─ Moved post-loop (trinity-enterprise#125) so a totally-failed deploy
       never mutates the platform-wide prompt
+   └─ Any other caller the route admits (a creator, an agent key holding
+      agents.manage, even one an admin owns) gets the fleet, prompt_updated=false
+      and a `prompt_requires_admin:` warning (#4025). One predicate,
+      `_caller_passes_admin_gate`, serves deploy and apply. No warning when the
+      stored prompt already equals the manifest's (apply's `unchanged`).
 
 6c. Survivor scoping + partial warnings:
    └─ created_map = agent_names filtered to created agents; all config phases
@@ -1513,26 +1525,38 @@ All tools support MCP API key authentication when `requireApiKey=true` in server
     strict: z.boolean().optional().describe("Abort on first agent-create failure (legacy)")
   }),
   execute: async ({ manifest, dry_run, strict }, context?) => {
-    const apiClient = getClient(context?.session);
-    const response = await apiClient.request("POST", "/api/systems/deploy", {
-      manifest,
-      dry_run: dry_run || false,
-      strict: strict || false
-    });
-    return JSON.stringify(response, null, 2);
+    const apiClient = getClient(context?.session);   // a missing key still throws
+    try {
+      const response = await apiClient.request("POST", "/api/systems/deploy", {
+        manifest,
+        dry_run: dry_run || false,
+        strict: strict || false
+      });
+      return JSON.stringify(response, null, 2);      // every 2xx, verbatim
+    } catch (error) {
+      return deployFailure(error, context);          // #4027
+    }
   }
 }
 ```
 
-On a total failure the backend answers HTTP 500 with the report as the body; the
-MCP client's `ApiError` embeds that body in the tool error message, so the report
-is still visible to the calling agent (trinity-enterprise#125).
+On a total failure the backend answers HTTP 500 with the report as the body
+(trinity-enterprise#125). `deployFailure` returns that report AS the result, with
+`http_status: 500` and `success: false` added, rather than letting the client's
+`ApiError` reach the caller as a thrown tool error (#4027). It shares
+`bodyAsResult` with `apply_system`: every non-2xx JSON object body (a 400 manifest
+error, a `strict` abort with its `created[]`, a 401, a 422) comes back the same
+way, and anything else as `{success: false, http_status, detail}`. A 403 is stamped
+`denied` through `accessDenied`; every other failure is stamped `failed` through
+`audit.ts::toolFailed` (`HTTP 500: status 'failed'`). A missing API key or a lost
+connection, which carry no HTTP status, still throw.
 
 #### apply_system
 The reconcile verb (trinity-enterprise#695), proxying `POST /api/systems/apply`. A NEW tool
 rather than a `mode` argument on `deploy_system`: a released `deploy_system` has no `mode` in
 its schema, so `mode: "apply"` sent to an older instance would be dropped and run create
-(suffixing the fleet), while an unknown tool name fails closed. `deploy_system` is unchanged.
+(suffixing the fleet), while an unknown tool name fails closed. `deploy_system`'s request and
+2xx results are unchanged; its non-2xx answers return since #4027 (above).
 ```typescript
 {
   name: "apply_system",
@@ -1561,12 +1585,12 @@ contract cannot silently break the tool:
 
 | Backend answer | Tool result | Audit row |
 |---|---|---|
-| 2xx | the body, verbatim | `success: true` |
-| 404 / 405 (no apply route: an older build) | `{success: false, not_available: true, http_status, error, detail}`; `error` says not to fall back to `deploy_system` | not a denial |
+| 2xx | the body, verbatim | `success: true`, whatever the report's own `status` (`invalid`, `partial`) |
+| 404 / 405 (no apply route: an older build) | `{success: false, not_available: true, http_status, error, detail}`; `error` says not to fall back to `deploy_system` | `success: false`, no `denied`; `error: "HTTP <s>: apply route absent (not_available)"` (#4026) |
 | 403 | `{success: false, not_permitted: true, http_status: 403, error, detail}` through `access.ts::accessDenied`; hint "apply is human-only: run it with a person's credential" | `success: false, denied: true` (#2807) |
-| any other non-2xx with a JSON object body (the 409 / 503 / 500 apply reports, 400, 401, 422) | that body AS the result, plus `http_status` and `success: false`, so `status`, `blockers[]` and `failed[]` arrive intact | not a denial; the row reads `success: true` (`ToolOutcome` has no non-denial kind yet; the backend's own `system_apply` audit row records the real outcome) |
-| a JSON scalar, array or null, or a non-JSON body | `{success: false, http_status, detail}` (the raw value) | not a denial |
-| no HTTP status (missing API key, transport failure) | `{success: false, error}`, plus a `note` on a real run whose request went out (writes may have landed; run a dry run, then re-apply) | not a denial |
+| any other non-2xx with a JSON object body (the 409 / 503 / 500 apply reports, 400, 401, 422) | that body AS the result, plus `http_status` and `success: false`, so `status`, `blockers[]` and `failed[]` arrive intact | `success: false`, no `denied`, stamped through `audit.ts::toolFailed` (#4026); `error` is `HTTP <s>: status '<report status>'`, else `HTTP <s>: <string detail>` (capped at 200 characters), else `HTTP <s>` (`httpAuditReason`, through the `bodyAsResult` that `deploy_system` shares, #4027) |
+| a JSON scalar, array or null, or a non-JSON body | `{success: false, http_status, detail}` (the raw value) | `success: false`, no `denied`; `error: "HTTP <s>"` (the raw body never reaches the row) |
+| no HTTP status (missing API key, transport failure) | `{success: false, error}`, plus a `note` on a real run whose request went out (writes may have landed; run a dry run, then re-apply) | `success: false`, no `denied`; `error` is the client error, plus ` (real run, outcome unknown)` when the request went out |
 
 Policy row in `access.ts`: `kind: "none"` (a manifest, not an agent target; the backend enforces
 the per-member manage checks and refuses every non-person key), and the tool's own `canAccess`
@@ -2107,6 +2131,11 @@ prompt: !!python/object:db_models.Setting
 - Expected: 200, prompt_updated=true, GET /api/settings/trinity_prompt returns updated value
 - Verifies: Trinity prompt database update
 - Cleanup: Delete created agent
+- Non-admin callers: `tests/unit/test_4025_deploy_prompt_admin_only.py` (creator JWT and an
+  agent key with `agents.manage` deploy the fleet but not the prompt; parity with
+  `PUT /api/settings/trinity_prompt` across seven principals, two of which (a connector
+  key and a portal-delegate key) the deploy route's fence already refuses; the predicate
+  itself is pinned against `assert_admin` across every MCP scope)
 
 ### Phase 3 Tests: Permissions
 

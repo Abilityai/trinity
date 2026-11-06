@@ -365,6 +365,9 @@ def memory_on(monkeypatch):
     monkeypatch.setattr(me, "embed", hash_embed)
     monkeypatch.setattr(me, "availability", lambda: (True, None))
     monkeypatch.setattr(me, "is_loaded", lambda: True)
+    # `status()` checks the loader's error before `is_loaded`, and `_error` is a
+    # module global another test's background warm may have set.
+    monkeypatch.setattr(me, "last_error", lambda: None)
     monkeypatch.setattr(ms, "_redis", lambda: None)
     ms._scope_cache.clear()
     yield
@@ -407,7 +410,7 @@ class TestCallers:
         monkeypatch.setattr(pps.db, "get_or_create_public_user_memory", lambda a, e: {"agent_notes": "", "conversation_summary": ""})
         monkeypatch.setattr(pps.db, "get_recent_public_chat_messages",
                             lambda *a, **k: [SimpleNamespace(role="user", content="I prefer PDF invoices")])
-        monkeypatch.setattr(pps.db, "update_public_user_memory_conversation_summary", lambda a, e, s: updates.append(s))
+        monkeypatch.setattr(pps.db, "update_public_user_memory_conversation_summary", lambda a, e, s, **k: updates.append(s))
         transport.script.append(answer("- prefers PDF invoices"))
         run(pps.summarize_user_memory_background("analyst", "p@example.com", "s1"))
         assert updates == ["- prefers PDF invoices"]
@@ -483,7 +486,7 @@ class TestWiringPins:
         monkeypatch.setattr(pps.db, "get_or_create_public_user_memory", lambda a, e: {"agent_notes": "", "conversation_summary": ""})
         monkeypatch.setattr(pps.db, "get_recent_public_chat_messages",
                             lambda *a, **k: [SimpleNamespace(role="user", content="I prefer PDF invoices")])
-        monkeypatch.setattr(pps.db, "update_public_user_memory_conversation_summary", lambda a, e, s: None)
+        monkeypatch.setattr(pps.db, "update_public_user_memory_conversation_summary", lambda a, e, s, **k: None)
         transport.script.append(answer("- prefers PDF invoices"))
         run(pps.summarize_user_memory_background(agent.name, "p@example.com", "s1"))
         call, = transport.calls

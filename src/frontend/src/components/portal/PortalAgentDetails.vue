@@ -109,9 +109,15 @@
 
     <!-- ------------------------ WHAT IT CAN DO ------------------------- -->
     <!-- ent#138's rule, unchanged by the move: a card PRE-FILLS the composer
-         and never auto-sends. -->
+         and never auto-sends.
+         trinity-enterprise#584: the briefing's two tiers read as two things.
+         Playbooks are what the agent can do, each with its SKILL.md
+         description or "No description yet"; an agent exposing none shows its
+         template's use cases under "What you can ask", with no description
+         line (a prompt is not a capability missing one). One heading, two
+         arms, so the section never changes shape between them. -->
     <section>
-      <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2">What it can do</h2>
+      <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-400 mb-2"><template v-if="capabilityView.tier === 'use_cases'">What you can ask</template><template v-else>What it can do</template></h2>
       <!-- #2597: the failure arm comes FIRST, because the empty arm below it
            is a positive claim ("hasn't published anything") that a failed
            fetch supplies no evidence for. `LoadFailed` is the "failed" member
@@ -126,18 +132,22 @@
         :show-retry="!pageDenied"
         @retry="reload"
       />
+      <!-- ent#584: ONE element, two sentences (PortalBriefing's pattern). An
+           agent whose briefing never got an answer (#2163) is not an agent
+           that published nothing. -->
       <p v-else-if="!capabilities.length" class="text-sm text-gray-400">
-        This agent hasn't published anything it can do yet.
+        <template v-if="capabilitiesState === 'unavailable'">Couldn't load what this agent can do right now.</template>
+        <template v-else>This agent hasn't published anything it can do yet.</template>
       </p>
       <div v-else class="space-y-2">
         <button
-          v-for="c in capabilities"
+          v-for="c in capabilityView.items"
           :key="c.title"
           class="w-full text-left rounded-xl border border-gray-200 dark:border-gray-800 px-3 py-2.5 hover:bg-gray-50 dark:hover:bg-gray-800/50 transition"
-          @click="$emit('use-playbook', c.starter_prompt)"
+          @click="$emit('use-playbook', c.starter)"
         >
           <div class="text-sm font-medium">{{ c.title }}</div>
-          <div v-if="c.description" class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">{{ c.description }}</div>
+          <div v-if="c.line !== null" class="mt-0.5 text-xs text-gray-500 dark:text-gray-400" :class="{ italic: c.missing }">{{ c.line }}</div>
         </button>
       </div>
     </section>
@@ -205,6 +215,9 @@
     <div ref="decisionsEl">
       <PortalAgentDecisions :agent-name="agentName" />
     </div>
+
+    <!-- ent#641: what this agent may do unprompted for you, per kind of ask. -->
+    <PortalAgentAutonomy :agent-name="agentName" />
   </div>
 </template>
 
@@ -227,10 +240,11 @@ import PortalAgentMemory from './PortalAgentMemory.vue'
 import PortalAgentRole from './PortalAgentRole.vue'
 import PortalAgentDecisions from './PortalAgentDecisions.vue'
 import PortalSuggestions from './PortalSuggestions.vue'
+import PortalAgentAutonomy from './PortalAgentAutonomy.vue'
 import PortalAsksWaitingLine from './PortalAsksWaitingLine.vue'
 import { agentDisplayName } from '@/utils/agentName'
 import { capCount } from '@/utils/tabTitle'
-import { availabilityChip, threadTitle, MAIN_TAB_LABEL, asksHomeRoute } from './portalUtils'
+import { availabilityChip, threadTitle, MAIN_TAB_LABEL, asksHomeRoute, capabilitySection } from './portalUtils'
 import { useRouter } from 'vue-router'
 import { usePortalAgentPage } from '@/composables/usePortalAgentPage'
 
@@ -264,8 +278,10 @@ function openSection(name) {
 // The window is fixed here: this panel shows no windowed figure, and a second
 // selector disagreeing with the band's would be two controls for one fact.
 const timeWindow = ref('7d')
-const { header, capabilities, loaded: pageLoaded, error: pageError, denied: pageDenied, reload } =
+const { header, capabilities, capabilitiesState, loaded: pageLoaded, error: pageError, denied: pageDenied, reload } =
   usePortalAgentPage(toRef(props, 'agentName'), timeWindow)
+// trinity-enterprise#584: heading, per-card line and prefill, decided in one pure rule.
+const capabilityView = computed(() => capabilitySection(capabilities.value))
 
 // #2597: the two faces of a failed `/page`, kept apart because the honest
 // answer differs (ent#253).

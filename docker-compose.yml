@@ -54,6 +54,9 @@ services:
       - GEMINI_TRANSCRIPTION_MODEL=${GEMINI_TRANSCRIPTION_MODEL:-gemini-3.5-flash}  # Telegram voice transcription
       - VOICE_MODEL=${VOICE_MODEL:-models/gemini-3.1-flash-live-preview}  # Gemini Live model override (#1076: non-empty default so an unset var doesn't inject "")
       - VOICE_ENABLED=${VOICE_ENABLED:-true}  # Voice mode (default on when GEMINI_API_KEY set)
+      - DIRECT_VOICE_ENABLED=${DIRECT_VOICE_ENABLED:-}
+      - GEMINI_STT_MODEL=${GEMINI_STT_MODEL:-gemini-3.5-transcribe}
+      - GEMINI_TTS_MODELS=${GEMINI_TTS_MODELS:-gemini-3.8-flash-lite-tts,gemini-3.8-flash-tts}
       - WORKSPACE_VOICE_MAX_DURATION=${WORKSPACE_VOICE_MAX_DURATION:-1800}  # Workspace voice call cap, seconds (ent#534)
       # Brain Orb (#58 static render / scope) + voice tile (#60, needs GEMINI_API_KEY).
       # Both default OFF; must reach the container or the flags stay false (config.py).
@@ -394,6 +397,13 @@ services:
       # session tier. Must be wired in both services or the whole feature is
       # un-flippable on deploy (#1056/#1039 packaging-gap class).
       - MCP_INLINE_AUTH_ENABLED=${MCP_INLINE_AUTH_ENABLED:-false}
+      # ent#1101 external MCP access. MCP_BIND_ADDRESS is the interface the MCP
+      # server's raw :8080 is published on (see mcp-server); the backend reads it
+      # so the advertised URL and the status payload are honest about that port.
+      # MCP_EXTERNAL_ACCESS is the env opt-in under the Settings → MCP Keys
+      # switch (the backend is its only resolver). Wired here or both are inert.
+      - MCP_BIND_ADDRESS=${MCP_BIND_ADDRESS:-}
+      - MCP_EXTERNAL_ACCESS=${MCP_EXTERNAL_ACCESS:-}
       # #1081 pull/work-stealing pilot allowlist — the SINGLE switch that opts an
       # agent into pull mode. Backend-only, process-env (needs a backend restart),
       # default empty = pull fully dark. Forwarded here (G1) because the backend
@@ -591,7 +601,9 @@ services:
     container_name: trinity-mcp-server
     logging: *default-logging
     ports:
-      - "8080:8080"
+      # ent#1101: MCP_BIND_ADDRESS unset publishes on every interface, as
+      # before; fresh installs set 127.0.0.1 (.env.example, provision_site).
+      - "${MCP_BIND_ADDRESS:+${MCP_BIND_ADDRESS}:}8080:8080"
     environment:
       - NODE_ENV=production
       - MCP_PORT=8080

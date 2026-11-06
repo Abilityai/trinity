@@ -15,8 +15,17 @@ Design mirrors ``proactive_message_service`` (an ``effect_guard`` sink):
 - **Voice resolution**: agent ``tts_voice_id`` else the platform default voice.
 
 Gating is layered: the router validates the execution + channel trigger; this
-service gates on platform TTS availability, the agent-level enable, and the
-per-channel voice-allowed flag.
+service gates on platform TTS availability, the agent-level enable, the
+per-channel voice-allowed flag, and the ``TTS_MAX_CHARS`` cost cap.
+
+**Proactive voice (abilityai/trinity-enterprise#700)** — ``send_proactive_voice``
+is the addressed sibling: the caller names a recipient email + channel instead
+of replying into the execution's conversation, so a run with no inbound turn (a
+schedule, a loop, a reminder) can speak. It resolves the destination the way
+``proactive_message_service`` does (the recipient's verified chat link) and
+passes the SAME gates as proactive text — ``db.can_agent_message_email``
+consent, the shared per-recipient rate limit, a ``PROACTIVE_MESSAGE`` audit row
+— so voice is never the cheaper way around proactive-messaging consent.
 """
 from __future__ import annotations
 
@@ -24,6 +33,7 @@ import logging
 from dataclasses import dataclass
 from typing import Optional
 
+import config
 from database import db
 from services import idempotency_service
 
@@ -32,12 +42,149 @@ logger = logging.getLogger(__name__)
 # Channels that support an outbound voice note today.
 _SUPPORTED_CHANNELS = {"telegram", "slack", "whatsapp"}
 
+# Channels an ADDRESSED (proactive) voice note can reach (ent#700). Slack is
+# excluded: its voice path resolves the bot token by bound channel id, and a
+# proactive Slack send is a DM opened per workspace — a different credential
+# route, deferred rather than half-wired.
+_PROACTIVE_CHANNELS = {"telegram", "whatsapp"}
+
 
 @dataclass
 class VoiceReplyResult:
     delivered: bool
     channel: Optional[str] = None
     reason: Optional[str] = None
+    # #2157 pattern: a plain-language sentence the agent acts on, for refusals
+    # where the bare reason code would mislead (ent#700 / trinity#2999).
+    guidance: Optional[str] = None
+    # Set with reason="text_too_long" so the caller knows the bound to fit.
+    max_chars: Optional[int] = None
+    # ent#665, set only when the caller supplied an idempotency_key. A suppressed
+    # note is delivered=True, sent=False: the person has it, and delivered=False
+    # would tell the agent to repeat it in text.
+    sent: Optional[bool] = None
+    suppressed_by: Optional[str] = None
+    first_sent_at: Optional[str] = None
+    first_execution_id: Optional[str] = None
+
+
+# On the addressed path, the one outcome a retry of the same turn can fix: the
+# send blew up before the provider answered. Released from the effect guard
+# instead of recorded, so the retry sends again. ``send_failed`` is the provider
+# refusing (WhatsApp outside its 24-hour window, a Telegram user who blocked the
+# bot): every retry fails the same way and pays for a new synthesis and a hosted
+# file, so it stays recorded, like a configuration miss.
+_RETRYABLE_REASONS = {"delivery_error"}
+
+
+def _send_failed_guidance(channel: str) -> str:
+    """Why a provider refusal will not change on a retry. The adapters report a
+    refusal without its code, so this names the usual cause rather than claiming
+    the actual one."""
+    if channel == "whatsapp":
+        return (
+            "WhatsApp refused this voice note. The usual cause is that this person has "
+            "not written to you in the last 24 hours: outside that window WhatsApp accepts "
+            "only pre-approved templates, so a retry fails the same way. Nothing was sent; "
+            "do not retry it. Use send_message to reach them another way, or wait until "
+            "they write to you."
+        )
+    return (
+        "Telegram refused this voice note. The usual cause is that this person blocked "
+        "the bot or never started a chat with it, so a retry fails the same way. Nothing "
+        "was sent; do not retry it. Use send_message to reach them another way."
+    )
+
+
+class _ReleaseClaim(Exception):
+    """Raised inside the effect guard for an outcome that must NOT be replayed —
+    a refusal decided before anything was sent (rate limit, no chat link) or a
+    send that blew up — so the guard releases the claim and a retry of the same
+    turn can still deliver."""
+
+    def __init__(self, result: VoiceReplyResult):
+        super().__init__(result.reason)
+        self.result = result
+
+
+class _KeyNotSpent(Exception):
+    """Raised inside the intent guard for a note that did not go out but stays
+    recorded for this turn (a refusal, a configuration miss), so a later run can
+    still deliver under the same idempotency key (ent#665)."""
+
+    def __init__(self, result: VoiceReplyResult):
+        super().__init__(result.reason)
+        self.result = result
+
+
+def _too_long(channel: str, text: str) -> Optional[VoiceReplyResult]:
+    """The cost cap as a named contract (trinity#2999 AC 5, ent#700 AC 6) —
+    checked before synthesis so it never surfaces as ``synthesis_failed``."""
+    cap = config.TTS_MAX_CHARS
+    if len(text or "") <= cap:
+        return None
+    return VoiceReplyResult(
+        False, channel, "text_too_long",
+        guidance=(
+            f"A voice note can be at most {cap} characters; this text is {len(text)}. "
+            "Speak a short summary instead and send the detail as text."
+        ),
+        max_chars=cap,
+    )
+
+
+def _gate(agent_name: str, channel: str, text: str):
+    """Shared pre-claim gating for both paths. Returns ``(voice_id, None)`` when
+    voice can go out, else ``(None, VoiceReplyResult)``."""
+    import services.tts_service as tts_service
+    from services.settings_service import settings_service
+
+    too_long = _too_long(channel, text)
+    if too_long:
+        return None, too_long
+    if not tts_service.is_available():
+        return None, VoiceReplyResult(False, channel, "tts_unavailable")
+
+    cfg = db.get_tts_config(agent_name)
+    if not cfg.get("enabled"):
+        return None, VoiceReplyResult(False, channel, "voice_disabled")
+    if not cfg.get("channels", {}).get(channel, False):
+        return None, VoiceReplyResult(False, channel, "channel_disabled")
+
+    voice_id = cfg.get("voice_id") or settings_service.get_default_voice_id()
+    if not voice_id:
+        return None, VoiceReplyResult(False, channel, "no_voice_id")
+    return voice_id, None
+
+
+def _destination(execution) -> tuple:
+    """Where a turn's voice note would go: channel, chat and thread."""
+    channel = getattr(execution, "source_channel", None) or getattr(execution, "triggered_by", None)
+    return (channel, getattr(execution, "source_channel_chat_id", None),
+            getattr(execution, "source_channel_thread", None))
+
+
+def another_live_destination(agent_name: str, execution) -> bool:
+    """Whether a live turn on ``agent_name`` other than ``execution`` would
+    deliver somewhere else (trinity-enterprise#1062). Read from the ledger
+    (only ``running`` rows); a ledger that cannot be read counts as ambiguous.
+
+    The ent#926 rule the memory doors apply (`memory_service.another_live_scope`),
+    with the destination as the scope: nothing proves which turn a request comes
+    from, so while two live turns would speak into different conversations the
+    door cannot tell them apart, and the agent answers in text instead."""
+    mine = _destination(execution)
+    try:
+        for row in db.get_running_turn_attribution(agent_name):
+            if row["id"] == execution.id:
+                continue
+            other = db.get_execution(row["id"])
+            if other is not None and _destination(other) != mine:
+                return True
+        return False
+    except Exception as e:  # noqa: BLE001 — fail closed: an unreadable ledger is an unknown neighbour
+        logger.warning("[VoiceReply] live-turn ledger unreadable for %s: %s", agent_name, type(e).__name__)
+        return True
 
 
 async def send_voice_reply(
@@ -55,9 +202,6 @@ async def send_voice_reply(
     Raises ``idempotency_service.EffectInProgressError`` when a voice note for this
     turn is already being sent; otherwise never raises (returns a not-delivered
     result the caller reports so the agent replies with text)."""
-    import services.tts_service as tts_service
-    from services.settings_service import settings_service
-
     channel = (channel or "").lower()
     if channel not in _SUPPORTED_CHANNELS:
         return VoiceReplyResult(False, channel, "unsupported_channel")
@@ -65,18 +209,9 @@ async def send_voice_reply(
         return VoiceReplyResult(False, channel, "no_destination")
 
     # --- Gating (before the effect claim so a no-op never occupies a key) -----
-    if not tts_service.is_available():
-        return VoiceReplyResult(False, channel, "tts_unavailable")
-
-    cfg = db.get_tts_config(agent_name)
-    if not cfg.get("enabled"):
-        return VoiceReplyResult(False, channel, "voice_disabled")
-    if not cfg.get("channels", {}).get(channel, False):
-        return VoiceReplyResult(False, channel, "channel_disabled")
-
-    voice_id = cfg.get("voice_id") or settings_service.get_default_voice_id()
-    if not voice_id:
-        return VoiceReplyResult(False, channel, "no_voice_id")
+    voice_id, refused = _gate(agent_name, channel, text)
+    if refused:
+        return refused
 
     # --- Effect-scoped dedup (#1084) ------------------------------------------
     async with idempotency_service.effect_guard(
@@ -100,6 +235,207 @@ async def send_voice_reply(
             "reason": result.reason,
         }
         return result
+
+
+async def send_proactive_voice(
+    agent_name: str,
+    recipient_email: str,
+    channel: str,
+    text: str,
+    *,
+    execution_id: Optional[str] = None,
+    dedup_label: str = "",
+    idempotency_key: Optional[str] = None,
+    idempotency_ttl: Optional[int] = None,
+) -> VoiceReplyResult:
+    """Speak ``text`` to ``recipient_email`` on ``channel`` — the addressed path
+    (abilityai/trinity-enterprise#700). Never needs an inbound turn.
+
+    Order mirrors ``proactive_message_service.send_message``: consent (refused
+    before any claim, so it never occupies a key) → effect guard keyed on the
+    resolved ``(recipient email, channel)`` → intent key → rate limit → chat-link
+    resolution → delivery. The rate limit and the audit row are the proactive text
+    path's own (one per-recipient budget across text and voice).
+
+    The effect guard is per execution, and a scheduler retry is a new execution.
+    ``idempotency_key`` / ``idempotency_ttl`` (ent#665) make it one note per
+    (agent, recipient, key) across runs. The key's namespace is voice's own: a
+    brief is a voice note AND a text, and one name for what is being said must
+    not silence the second modality. Raises ``EffectInProgressError`` for an
+    in-flight duplicate (``IntentInProgressError`` under a key); otherwise never
+    raises.
+    """
+    from services.proactive_message_service import proactive_message_service as pms
+    from services.settings_service import get_proactive_rate_limit
+
+    recipient_email = (recipient_email or "").strip().lower()
+    channel = (channel or "").lower()
+    preview = (text or "")[:100]
+
+    if channel not in _PROACTIVE_CHANNELS:
+        if channel in _SUPPORTED_CHANNELS:
+            return VoiceReplyResult(
+                False, channel, "proactive_channel_unsupported",
+                guidance=(
+                    f"A voice note cannot be sent proactively on {channel} yet — only on "
+                    "telegram or whatsapp. Use send_message to reach this person in text, "
+                    "or address them on telegram/whatsapp if they are linked there."
+                ),
+            )
+        return VoiceReplyResult(False, channel, "unsupported_channel")
+    if not recipient_email:
+        return VoiceReplyResult(False, channel, "no_destination")
+
+    voice_id, refused = _gate(agent_name, channel, text)
+    if refused:
+        return refused
+
+    async def _audit(success: bool, error: Optional[str] = None) -> None:
+        await pms.audit_send(
+            agent_name, recipient_email, channel, success, error,
+            message_preview=preview, extra={"modality": "voice"},
+        )
+
+    # 1. Consent — the gate an inbound turn satisfies implicitly.
+    if not db.can_agent_message_email(agent_name, recipient_email):
+        await _audit(False, "not_authorized")
+        return VoiceReplyResult(
+            False, channel, "not_authorized",
+            guidance=(
+                "This person has not opted in to proactive messages from you, so no voice "
+                "note was sent. Do not retry and do not message them another way; the agent "
+                "owner can enable proactive messages for them."
+            ),
+        )
+
+    async def _rate_limit_and_deliver() -> VoiceReplyResult:
+        # 2. Rate limit — shared with send_message (same Redis key).
+        if not pms.check_rate_limit(agent_name, recipient_email):
+            await _audit(False, "rate_limited")
+            limit = get_proactive_rate_limit("proactive_dm_per_recipient")
+            raise _ReleaseClaim(VoiceReplyResult(
+                False, channel, "rate_limited",
+                guidance=(
+                    f"You have reached the limit of {limit} proactive messages per hour "
+                    "to this person (text and voice share it). Nothing was sent; try "
+                    "again later rather than switching channel."
+                ),
+            ))
+
+        # 3. Destination — the recipient's verified chat link (send_message's lookup).
+        chat_id = _resolve_linked_chat(agent_name, channel, recipient_email)
+        if not chat_id:
+            await _audit(False, "recipient_not_linked")
+            raise _ReleaseClaim(VoiceReplyResult(
+                False, channel, "recipient_not_linked",
+                guidance=(
+                    f"This person has no verified {channel} chat with you, so a voice "
+                    "note cannot reach them there. Use send_message (channel auto) to "
+                    "reach them in text."
+                ),
+            ))
+
+        result = await _deliver(agent_name, channel, chat_id, None, text, voice_id)
+        if result.delivered:
+            pms.increment_rate_limit(agent_name, recipient_email)
+        await _audit(result.delivered, result.reason)
+        if result.reason in _RETRYABLE_REASONS:
+            raise _ReleaseClaim(result)
+        if result.reason == "send_failed":
+            result.guidance = _send_failed_guidance(channel)
+        return result
+
+    async def _under_intent_key() -> VoiceReplyResult:
+        async with idempotency_service.intent_guard(
+            "voice_reply",
+            agent_name=agent_name,
+            target=recipient_email,
+            idempotency_key=idempotency_key,
+            ttl_seconds=idempotency_ttl,
+            execution_id=execution_id,
+        ) as intent:
+            if intent.suppressed:
+                first_channel = intent.first.get("channel") or channel
+                await pms.audit_send(
+                    agent_name, recipient_email, first_channel, False,
+                    message_preview=preview, action="suppressed",
+                    extra={
+                        "modality": "voice",
+                        "suppressed_by": idempotency_service.SUPPRESSED_BY_IDEMPOTENCY_KEY,
+                        "idempotency_key": idempotency_key,
+                        "first_sent_at": intent.first_sent_at,
+                        "first_execution_id": intent.first_execution_id,
+                    },
+                )
+                return VoiceReplyResult(True, first_channel, **intent.result_fields())
+            result = await _rate_limit_and_deliver()
+            if not result.delivered:
+                raise _KeyNotSpent(result)
+            intent.record = {"channel": result.channel}
+            for k, v in intent.result_fields().items():
+                setattr(result, k, v)
+            return result
+
+    # Keyless → the dict (and so the key hash) is the plain (recipient, channel).
+    identity = {"recipient": recipient_email, "channel": channel}
+    if idempotency_key:
+        identity["intent"] = idempotency_key
+    try:
+        async with idempotency_service.effect_guard(
+            "voice_reply",
+            identity,
+            execution_id=execution_id,
+            agent_name=agent_name,
+            dedup_label=dedup_label,
+        ) as guard:
+            if guard.replay:
+                snap = guard.snapshot or {}
+                return VoiceReplyResult(
+                    delivered=snap.get("delivered", True),
+                    channel=snap.get("channel", channel),
+                    reason=snap.get("reason"),
+                    guidance=snap.get("guidance"),
+                    sent=snap.get("sent"),
+                    suppressed_by=snap.get("suppressed_by"),
+                    first_sent_at=snap.get("first_sent_at"),
+                    first_execution_id=snap.get("first_execution_id"),
+                )
+            try:
+                result = await _under_intent_key()
+            except _KeyNotSpent as not_spent:
+                result = not_spent.result
+            guard.snapshot = {
+                "delivered": result.delivered,
+                "channel": result.channel,
+                "reason": result.reason,
+                "guidance": result.guidance,
+                "sent": result.sent,
+                "suppressed_by": result.suppressed_by,
+                "first_sent_at": result.first_sent_at,
+                "first_execution_id": result.first_execution_id,
+            }
+            return result
+    except _ReleaseClaim as refusal:
+        return refusal.result
+
+
+def _resolve_linked_chat(agent_name: str, channel: str, recipient_email: str) -> Optional[str]:
+    """recipient email → the channel address, via the same verified chat-link
+    lookups ``proactive_message_service`` uses. ``None`` when not linked."""
+    if channel == "telegram":
+        binding = db.get_telegram_binding(agent_name)
+        if not binding:
+            return None
+        link = db.get_telegram_chat_link_by_verified_email(binding["id"], recipient_email)
+        # A DM's chat id IS the user id (proactive_message_service relies on it too).
+        return str(link["telegram_user_id"]) if link and link.get("telegram_user_id") else None
+    if channel == "whatsapp":
+        binding = db.get_whatsapp_binding(agent_name)
+        if not binding:
+            return None
+        link = db.get_whatsapp_chat_link_by_verified_email(binding["id"], recipient_email)
+        return str(link["wa_user_phone"]) if link and link.get("wa_user_phone") else None
+    return None
 
 
 async def _deliver(

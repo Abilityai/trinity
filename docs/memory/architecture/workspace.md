@@ -24,11 +24,23 @@ for a platform principal that is not a person: a system-scoped key reads here bu
 The field defaults to False, and the principal also carries `self_approves` + `credential` (#3404): a
 portal session token says how it was minted (`minted_by`: `otp` | `delegate`), and only a platform
 person or an `otp`-minted session may self-approve a gated skill — see `feature-flows/skill-gate.md`.
+**The portal-token branch is terms-gated (trinity-enterprise#1107, ruling A(1)):** after the
+client-block check and before the session slides, `get_portal_principal` calls
+`terms_gate.enforce_portal_session(request, email, interactive=portal_session_is_interactive(token))`
+— a portal session minted with the Workspace's `"client": "web"` declaration on `/auth/verify`
+carries `interactive: true` (carried across rotation) and is refused 403 `terms_required` until its
+address has an acceptance row for the current version; a bare or delegate-minted token is not a
+visit. The two terms routes accept the portal token (`routers/terms.py::terms_caller`), the record is
+a `terms_acceptances` row with `user_id` NULL keyed by (email, version), and the Workspace shell
+renders `components/portal/PortalTerms.vue` in place of the roster for such a session —
+`feature-flows/terms-of-use.md`. The order matters: a blocked client is refused, never shown
+terms, and a refused session is never handed a fresh token.
 
 **The `user` rung is Workspace-only (trinity-enterprise#837).** A platform account whose role is
 `user` is a member who works with agents here and nowhere else: `get_current_user` refuses it on
 every operator route (403 `workspace_only`, `architecture/security.md` §1). The Workspace doors —
-`get_portal_principal`, `shared_sessions/router.py::get_room_principal`, the Workspace voice start —
+`get_portal_principal`, `shared_sessions/router.py::get_room_principal` (which also authenticates
+the `/api/enterprise/rooms/` paths that seat people in a room, ent#701), the Workspace voice start —
 resolve the credential through `resolve_platform_user_unfloored`, so such a member reaches this
 surface exactly as before, roster included (shared agents plus any they own). The handful of
 operator-side routes the Workspace calls (session identity, sign-out, the `/ws` ticket, preferences,
@@ -321,7 +333,15 @@ exposable-skills config (ent#178) slots into this same seam. A chat holds one ag
 or, where the capability below is present, several — and the picker starts a new chat
 either way, so hints scope to the active agent by construction. ent#380 also fixed the
 briefing's metadata read — #138 called a nonexistent agent `/info` route, so descriptions
-were silently always `None`.
+were silently always `None`. **Each hint says which tier it is (trinity-enterprise#584):**
+`PortalPlaybook.kind` is `playbook` (a capability, described by its SKILL.md
+`description:`, `null` → "No description yet") or `use_case` (rendered as "What you can
+ask", never as a capability missing a description); the typeahead copy carries it too, and
+the default keeps an older payload reading as a playbook. Descriptions are cleaned once,
+where they enter (`connector_service.resolve_exposed_playbooks` →
+`services/skill_packaging.py::clean_description`), not in `_agent_briefing`. `/page` carries
+`capabilities_state` (the card's `briefing_state`), so the rail's empty arm can tell
+"never answered" from "published nothing".
 
 **Briefing hint grid is bounded (#2101):** with no connector allow-list configured every
 `user_invocable` skill becomes a "Things you can ask" card, so the hint set is belted
@@ -379,6 +399,13 @@ chat. It is bound to the **Workspace thread**: `POST
 `client_portal/voice.py::start_workspace_voice`, which builds the context from the thread's
 recent rows and creates the session with `portal_session_id` + `client_email`,
 `canvas_audience="operator"` and `max_duration=WORKSPACE_VOICE_MAX_DURATION` (1800 s).
+The start response also carries the audio socket's single-use ticket (trinity-enterprise#595),
+minted in the router for the platform user it resolved — which must be an interactive
+session, so a Workspace-only account gets a call and an MCP key does not — and the client
+sends it as the socket's first frame. The ticket comes from the same `portalHttp` request the
+store's credential decision authorized; the composable never reads a session token for the
+socket, and `startWith` resolves (the orb shows *listening*) only after the server's
+`auth_ok` and a live mic. Protocol: [integrations.md → WebSocket auth](integrations.md#real-time-delivery-reliability-003-306).
 The transcript is **written turn by turn on the worker holding the live socket**
 (`persist_voice_turn`, called from the bridge's `on_turn`) as `enterprise_portal_messages`
 rows carrying `source='voice'` + `voice_call_id`; the call closes with one `system` label
@@ -411,6 +438,33 @@ hands-free STT→turn→TTS loop is **retired** by the same ruling (one voice en
 hold-to-dictate (#2212) and spoken replies (#2157) stay as composer affordances. **OSS-core
 by the standing ruling, deliberately ungated.** See
 [workspace-voice-conversation.md](../feature-flows/workspace-voice-conversation.md).
+
+**Direct calls — every spoken turn goes to the agent (trinity-enterprise#1046).** The
+second call kind, its own button beside the Live call's in the composer (each button
+carries its own reason when it is off; while one call is on the other says so; the Direct
+strip's live mark is `portal/CallBars.vue`, four token-tinted bars: green listening,
+amber working, blue speaking, flat gray dots muted). No model is in the conversational path: the browser endpoints an utterance
+(`utils/voiceEndpointing.js`), the backend transcribes it, and the browser sends the text
+through the **same `POST …/chat/stream` a typed message uses**, carrying the call's `vd_`
+id — so limits, idempotency, skill gates, attachments and attribution are the typed
+path's, and `turn_may_join_call` refuses any id that is not the caller's live call on this
+agent and thread (uniform 404). The browser then sends `speak{execution_id}`; the bridge
+(`services/direct_voice_service.py`, on the shared `/ws/voice/{id}` door, owner-only, no
+admin attach) reads the turn's stream through `client_portal.router.direct_call_stream`
+and speaks it sentence by sentence. **Harness-agnostic by construction:** every reply is
+spoken from the persisted row (`db.get_turn_reply_row`); a runtime whose stream carries
+messages (`normalize_stream_entry`: Claude Code, Codex; Gemini CLI publishes none) only
+starts sooner, and `unspoken_tail` reconciles so nothing repeats. The socket never starts
+a turn and never answers an ask: an ask the turn raised is read aloud (`speak_ask`), and a
+whole-utterance yes/no that starts ≥300 ms after the prompt finished is posted by the
+browser on the person's own `POST /asks/{id}/answer`; an approved run is spoken only if it
+is the caller's own execution. Speech providers sit behind `services/speech/`
+(`SpeechProvider`: Gemini REST STT/TTS, ElevenLabs), resolved per call from
+`GET/PUT /api/settings/direct-voice` (admin, audit-logged). One call per thread across
+both modes: `portal_direct_active:{thread}` is claimed atomically when the socket opens.
+The Direct reply is the agent's own session answering, so it moves the #2694 delta cursor
+(the call's label row stays out of the delta). Flow:
+[workspace-direct-voice.md](../feature-flows/workspace-direct-voice.md).
 
 **Thread readability, copy, new-tab entry, agent search (#2515 / ent#456 / ent#402).**
 `components/portal/PortalMarkdown.vue` is the single home of the rendered agent body — the one
@@ -722,6 +776,17 @@ next — turn-taking is mechanical: **you are woken iff you were @mentioned**.
   replies raise a room's spend per message (the turn prompt suggests sharing a file plus a
   summary for a long deliverable); and `GET /api/rooms/{id}` is unpaginated, so a room's
   first load grows with its message sizes.
+- **People in a room (trinity-enterprise#701).** A room can hold more than one person. Each
+  person has a read floor (`visible_from_seq`: the first seq they may read, 0 = all) that
+  `get_room` applies, and leaving is real: `_require_membership` gives a person whose row has
+  `left_at` the uniform 404, `list_rooms` drops the room for them, and `db.seat_person` is the
+  people-only upsert that seats someone again (clearing `left_at`). Agents keep their own
+  rules: `add_participant` never clears `left_at`, which the #2610 keep set relies on. The
+  room payload carries `you`, `people` and `can_seat_people` (UI capability only — offered to
+  a platform moderator of an open room when seating is provided through the entitlement seam).
+  With two or more people present the turn prompt names them and what each may decide, and an
+  `@username` of a seated person becomes a tag through the #631 path, never a wake.
+  `POST /api/rooms/{id}/leave` is people-only (no MCP tool: an agent is removed, never leaves).
 - **A gated wake is recorded, not re-run (trinity#3402).** A wake the skill gate held — or
   refused for a reason the same request would get again (`STANDING_REFUSALS`) — records in
   `room_gate_holds` each shown post whose own text invokes a skill gated on that agent, plus
@@ -794,7 +859,12 @@ agent never names the user. The details panel's `PortalAgentMemory.vue` reads
 `public_user_memory_writes` history with schedule names through the page's bounded map)
 and `POST …/memory/writes/{id}/undo` (latest-first; `409 not_latest` / `already_undone`
 named, unknown id the uniform 404). Requirement §10.19 of `scheduling.md`; flow in
-`schedule-workspace-delivery.md`.
+`schedule-workspace-delivery.md`. **Since trinity-enterprise#962** the history and the undo
+are shared with the owner's view (`services/person_memory_service`): this view stays
+**notes-only** (`section='notes'`, and its undo is pinned to it — a summary write id is the
+404), pages with a keyset cursor (`?before=` → `next_before`, 20 a page), and a write
+someone else undid carries `undone_by_operator` (never who) so the panel reads "Undone by an
+operator of this agent". The owner's side is `routers/person_memory.py` (`backend.md`).
 
 ## The role card — a projection of the agent's files, and the owner's readiness stamp (ent#527, #663)
 
@@ -829,6 +899,56 @@ ambiguity fails open and is logged. The rollout is a one-time data seed on both 
 `changed_by = rollout:ent#689`, insert-if-absent, for every live agent with autonomy on and an
 enabled seat brief at deploy. `effective_readiness` reports that stamp as `source: "rollout"` with no person; the card's
 `brief_held` (platform viewers only; false when autonomy is off) says a seat brief is paused.
+
+## The autonomy dial — what a companion may do unprompted (ent#641, P12)
+
+Autonomy was one switch per agent. The dial adds two scopes above and below it.
+**Above**: one instance LEVEL (canon `tandem-06` §2.3 — L0 Continuity, L1
+Companion, L2 Delegated classes, L3 Load-bearing judgment), stored as one
+validated `system_settings` key and written only through
+`PUT /api/settings/autonomy-dial` (admin **and** interactive — raising the
+ceiling is what lets anything run unprompted, so it is a grant; the generic
+`/{key}` catch-all refuses the key, the ent#297 shape). **Below**: a state per
+(seat, ask class) in `seat_ask_class_state`, earned from the seat's decision
+record — ≥3 non-expired records from ≥3 distinct conversations (each distinct
+`source_execution_id` is one; each person-written record is its own), ONE
+normalized criterion, no reversals in the window — plus a clean rating history for that seat in the last 30 days.
+Promotion is earned; there is no promote control. A person may HOLD a class
+(a refusal anyone may make for their own seat); only the agent's owner may
+RELEASE one (a grant).
+
+**The shape is a stored earned-state × three read-time conjuncts** — the
+instance level, the agent's `autonomy_enabled`, and `now <= evidence_expires_at`
+(the EARLIEST `review_by` in the window). Written instead of read, each is a
+silent failure: a class whose records all lapse at UTC midnight fires no event,
+so a materialised verdict would outlive its own evidence with nobody watching,
+and re-evaluating the fleet inside a level change is an unbounded fan-out with
+no fleet-wide seat query to drive it. As conjuncts, a level drop needs zero
+writes and restores exactly what each class had earned when it goes back up.
+Writes happen only on real events (a decision recorded or acted on, a rating by
+the seat, a hold/release), CAS'd on an evidence hash; reads persist nothing.
+
+**Reversals count over the window, not over all history.** `effective_status`
+returns `reversed` unconditionally, so a reversed record never expires — counted
+that way, one reversal would block a class forever and `on_request` would be the
+only reachable steady state. #638 shipped `stats().reversals` as this issue's
+INPUT and deferred the verdict; `autonomy_dial_service.class_evidence` is the
+verdict, and #638's contract is unchanged.
+
+**The rating query's three shapes were each a defect first**: it matches
+`operator:<email>` as well as `workspace:<email>` (on a single-operator install
+the seat person IS the platform principal, so their thumbs-down lands under the
+other prefix and the class could never demote); it reads
+`COALESCE(updated_at, created_at)` (an up→down flip updates only `updated_at`,
+and that flip is exactly a demotion); and the window is a FIXED 30-day span, not
+"since the oldest surviving record", which would let a blocking rating fall out
+as records expire — promotion by the clock, which R25 forbids.
+
+The companion is told: `autonomy_dial_service.prompt_lines` rides the seat's
+memory block, so the model reads which classes it may act on unprompted and, for
+the rest, the same sentence the panel shows. `PortalAgentAutonomy.vue` in Agent
+details; `get_autonomy` on MCP (seat from `execution_id`, never a parameter).
+Requirement §5.40 of `core-agent.md`; flow in `workspace-autonomy-dial.md`.
 
 ## The seat decision record — why things were approved, deferred or killed (ent#638, R25)
 
@@ -932,6 +1052,14 @@ agent itself (a human sharer's publish places no card at all), is stamped to the
 addressee's Main and that Main is touched (`added=0`). That is what makes the
 deliverable arm count it, gives the card an inline home and an anchor, and keeps
 the Main visible to `sidebarThreads` (which hides `is_main && !last_message_at`).
+
+**The read write covers what the client held; a room's cursor is per identity space
+(trinity-enterprise#1010, #1011).** `mark_chat_read(…, through=)` moves the cursor to the
+client's `through` (the later of `GET /chat-state`'s `as_of` and the newest row it rendered),
+clamped to now and never backwards, instead of to server time — so an arrival between the last
+fetch and the write stays unread. A room's cursor row is `chat_kind = 'room:<kind>'`
+(`db.room_cursor_kind`); the plain `room` row keeps the star and is every space's floor until
+that space writes its own. No schema change: `chat_kind` is free text in the existing PK.
 
 **A room's unread is the same cursor, read through membership (trinity-enterprise#959).**
 `db.unread_room_arrivals(email, kind, identity)` counts agent messages after the viewer's

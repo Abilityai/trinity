@@ -47,14 +47,14 @@ As a Trinity user, I want to manage my MCP API keys from a dedicated page so tha
 
 ### Lifecycle (onMounted)
 ```javascript
-// ApiKeys.vue
+// components/settings/McpKeysTab.vue
 onMounted(async () => {
-  await Promise.all([fetchMcpUrl(), fetchUserRole(), fetchApiKeys()])
+  await Promise.all([fetchExternalAccess(), fetchApiKeys()])
   await ensureDefaultKey()  // Auto-create default key for first-time users
 })
 ```
 
-**MCP URL**: `fetchMcpUrl()` calls `GET /api/settings/mcp-url` to get the admin-configured URL. If set, `mcpServerUrl` computed uses it; otherwise it uses the response's server-detected `default_url` (`https://<host>/mcp` behind an HTTPS proxy, else `http://<host>:8080/mcp`, #2907), and falls back to `window.location.hostname` only before the fetch returns. (#76)
+**MCP URL + External MCP access** (trinity-enterprise#1101): `fetchExternalAccess()` calls `GET /api/settings/mcp-external-access` → `{enabled, source, env_value, advertised_url, raw_port_bind_address}`. `mcpServerUrl` is the server's `advertised_url` (the admin override from `/api/settings/mcp-url`, else the server's detection: `<origin>/mcp` when the request carries `X-Forwarded-Proto`, else `http://127.0.0.1:8080/mcp` with `MCP_BIND_ADDRESS` set, else `http://<host>:8080/mcp`); the page no longer derives a `:8080` URL from `window.location`. The External MCP access block and the connection snippet render only once this has loaded; while it is off, a warning callout replaces the snippet. Toggle, Clear and states: [platform-settings.md](platform-settings.md#external-mcp-access-trinity-enterprise1101). (#76, #2907)
 
 ### Step 1: Fetch User Role
 ```javascript
@@ -144,14 +144,8 @@ const ensureDefaultKey = async () => {
 Displays example `.mcp.json` configuration with dynamic MCP server URL:
 
 ```javascript
-// ApiKeys.vue:344-351
-const mcpServerUrl = computed(() => {
-  const host = window.location.hostname
-  if (host === 'localhost' || host === '127.0.0.1') {
-    return 'http://localhost:8080/mcp'
-  }
-  return `http://${host}:8080/mcp`  // Production: port 8080
-})
+// components/settings/McpKeysTab.vue (trinity-enterprise#1101)
+const mcpServerUrl = computed(() => externalAccess.value?.advertised_url || '')
 ```
 
 ### Key List Display (lines 68-134)
@@ -581,4 +575,5 @@ cursor.execute("""
 
 | Date | Change |
 |------|--------|
+| 2026-11-05 | External MCP access (trinity-enterprise#1101): page load reads `GET /api/settings/mcp-external-access`; the snippet URL is the server's `advertised_url`; off-state callout. |
 | 2026-01-21 | Initial documentation - Complete UI flow for API Keys page |

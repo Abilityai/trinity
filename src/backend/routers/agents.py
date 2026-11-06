@@ -10,6 +10,7 @@ Related routers (same /api/agents prefix):
 - agent_rename.py  — rename endpoint
 - agent_ssh.py     — SSH access
 """
+import asyncio
 import json
 import logging
 import random
@@ -37,6 +38,7 @@ from models import (
 )
 from database import db
 from dependencies import get_current_user, decode_token, require_role, AuthorizedAgentByName, OwnedAgentByName, CurrentUser, enforce_agent_spawn_scope, reject_agent_principal, agent_may_reach, assert_own_agent, capability_fence, ops_write_route, require_admin_allowing, assert_not_share_viewer, OPS_WRITE_SCOPE, require_admin, require_person
+from services.tool_access_guard import assert_tool_allowed
 from services.docker_service import (
     get_agent_container,
     get_agent_by_name,
@@ -75,7 +77,7 @@ from services.agent_service import (
     # Autonomy (global view)
     get_all_autonomy_status_logic,
 )
-from utils.helpers import utc_now_iso
+from utils.helpers import sanitize_agent_name, utc_now_iso
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -516,6 +518,9 @@ async def get_agent_endpoint(agent_name: AuthorizedAgentByName, request: Request
     agent_dict["autonomy_enabled"] = db.get_autonomy_enabled(agent_name)
     read_only_data = db.get_read_only_mode(agent_name)
     agent_dict["read_only_enabled"] = read_only_data["enabled"]
+    # trinity-enterprise#341: the header's Read-only toggle is ON for Strict only.
+    from services.agent_service.tool_access import tool_access_profile_for
+    agent_dict["tool_access_profile"] = tool_access_profile_for(agent_name)
 
     # Avatar URL (AVATAR-001)
     identity = db.get_avatar_identity(agent_name)
@@ -552,8 +557,10 @@ async def _require_create_capability(request: Request, current_user, config) -> 
     if getattr(config, "ephemeral", None):
         return
     from dependencies import enforce_agent_capability
+    # The slug `create_agent_internal` will use, not the raw body: the audit row
+    # names an agent that can exist, and a raw name can carry what a row must not.
     await enforce_agent_capability(request, current_user, "agents.manage",
-                                   target=getattr(config, "name", None))
+                                   target=sanitize_agent_name(getattr(config, "name", None) or "") or None)
 
 
 @router.post("")
@@ -869,6 +876,7 @@ async def delete_agent_endpoint(agent_name: str, request: Request, current_user:
         target_type="agent",
         target_id=agent_name,
         endpoint=request.scope["path"],
+        request_id=getattr(request.state, "request_id", None),
     )
 
     if manager:
@@ -1415,9 +1423,9 @@ async def get_operator_resume_endpoint(
 ):
     """Whether an operator answer re-triggers this agent (ent#329).
 
-    Default OFF. When off, an answer still reaches the agent's queue file — it is
-    simply processed at the agent's next turn, which is the behaviour every agent
-    had before this flag existed.
+    Default ON since abilityai/trinity-enterprise#1108 (an untouched agent reads
+    `enabled: true`). When an owner switches it off, an answer still reaches
+    the agent's queue file — it is simply processed at the agent's next turn.
     """
     return {
         "agent_name": agent_name,
@@ -1565,9 +1573,58 @@ async def send_voice_reply_endpoint(
     import config as app_config
     from services import voice_reply_service, idempotency_service
 
+    # trinity-enterprise#341: refused when this agent's tool access removes send_voice_reply.
+    assert_tool_allowed(current_user, "send_voice_reply")
     execution = db.get_execution(body.execution_id)
     if not execution or execution.agent_name != agent_name:
         return {"delivered": False, "reason": "execution_not_found"}
+    # trinity-enterprise#1062: a voice note goes to the conversation of the turn
+    # the agent is IN. A run that is not running is never that turn, so nothing
+    # is sent; the agent answers in text, which reaches the right conversation.
+    if (getattr(execution, "status", None) or "").lower() != TaskExecutionStatus.RUNNING.value:
+        return {"delivered": False, "reason": "turn_not_live",
+                "guidance": "That run is not running, so no voice note was sent. Reply in text."}
+
+    # ent#700: an explicit address is the proactive path — any trigger (a
+    # schedule, a loop, a delegated child) may use it, because the service puts
+    # it through the proactive-text gates (consent, rate limit, audit). It is
+    # decided before the conversation-based branches below, which exist only
+    # because the in-session route has no consent check of its own.
+    if body.recipient_email or body.to:
+        from services import role_addressing
+
+        try:
+            recipient = role_addressing.resolve_single_recipient(
+                agent_name,
+                to=body.to,
+                recipient_email=str(body.recipient_email) if body.recipient_email else None,
+                noun="voice note",
+                surface="voice",
+                by_agent_key=bool(current_user.agent_name),
+            )
+        except role_addressing.RecipientRefused as e:
+            # Fail-soft like every other voice refusal; names the role, never a person.
+            return {
+                "delivered": False,
+                "channel": body.channel,
+                "reason": e.detail["code"],
+                "role": e.detail.get("role"),
+                "guidance": e.detail["message"] + " No voice note was sent; reply with text.",
+            }
+        try:
+            result = await voice_reply_service.send_proactive_voice(
+                agent_name,
+                recipient,
+                body.channel,
+                body.text,
+                execution_id=body.execution_id,
+                dedup_label=body.dedup_label or "",
+                idempotency_key=body.idempotency_key,
+                idempotency_ttl=body.idempotency_ttl,
+            )
+        except idempotency_service.EffectInProgressError:
+            raise HTTPException(status_code=409, detail="A voice note to this recipient is already being sent")
+        return _voice_result(result)
 
     # Only user-facing channel turns have a deliverable voice destination.
     channel = execution.source_channel or execution.triggered_by
@@ -1621,9 +1678,29 @@ async def send_voice_reply_endpoint(
             ),
         }
     if channel not in ("telegram", "slack", "whatsapp"):
-        return {"delivered": False, "channel": channel, "reason": "not_a_channel_turn"}
+        # trinity#2999 AC 3: name the constraint and the way out, not just the trigger.
+        return {
+            "delivered": False,
+            "channel": channel,
+            "reason": "not_a_channel_turn",
+            "guidance": (
+                "This turn has no Telegram, Slack or WhatsApp conversation to reply into, "
+                "so the voice note has nowhere to go. To speak to a person, call "
+                "send_voice_reply again with `to` (a role, usually `primary`, the person "
+                "you serve) and channel (telegram or whatsapp), or with recipient_email in "
+                "place of `to`; they must have opted in to proactive messages from you. "
+                "Otherwise reply with text."
+            ),
+        }
     if not execution.source_channel_chat_id:
         return {"delivered": False, "channel": channel, "reason": "no_destination"}
+    # The other half of the ledger rule (ent#926): while another live turn on
+    # this agent would speak into a different conversation, nothing tells the
+    # two apart, so no voice note is sent and the agent answers in text.
+    if await asyncio.to_thread(voice_reply_service.another_live_destination, agent_name, execution):
+        return {"delivered": False, "channel": channel, "reason": "turn_ambiguous",
+                "guidance": ("Another conversation on this agent is live right now, so this voice note could "
+                             "not be matched to yours and was not sent. Reply in text.")}
 
     try:
         result = await voice_reply_service.send_voice_reply(
@@ -1638,7 +1715,22 @@ async def send_voice_reply_endpoint(
     except idempotency_service.EffectInProgressError:
         raise HTTPException(status_code=409, detail="A voice note for this turn is already being sent")
 
-    return {"delivered": result.delivered, "channel": result.channel, "reason": result.reason}
+    return _voice_result(result)
+
+
+def _voice_result(result) -> dict:
+    """The voice-reply wire shape: ``{delivered, channel, reason}`` plus
+    ``guidance`` / ``max_chars`` and the ent#665 fields only when the service set them."""
+    out = {"delivered": result.delivered, "channel": result.channel, "reason": result.reason}
+    if getattr(result, "guidance", None):
+        out["guidance"] = result.guidance
+    if getattr(result, "max_chars", None):
+        out["max_chars"] = result.max_chars
+    # ent#665: present only when the request carried an idempotency_key.
+    for k in ("sent", "suppressed_by", "first_sent_at", "first_execution_id"):
+        if getattr(result, k, None) is not None:
+            out[k] = getattr(result, k)
+    return out
 
 
 # ============================================================================
@@ -1715,6 +1807,32 @@ def _jittered_retry_after(base_seconds: int) -> int:
     backoff edge and re-storm in lockstep when the hint elapses. Floored at 1."""
     base = max(1, int(base_seconds))
     return max(1, int(random.uniform(base * 0.5, base * 1.5)))
+
+
+@router.get("/{agent_name}/executions/{execution_id}/turn-tier")
+async def agent_execution_turn_tier(agent_name: str, execution_id: str, request: Request):
+    """Which tier a running turn acts for (trinity-enterprise#926).
+
+    Asked by the guard hook inside the agent container before a file tool
+    reaches a path the shared policy keeps at owner tier or a shell command
+    runs, and by the Gemini/Codex runtimes before a turn starts. Same auth as the
+    heartbeat: the agent's OWN agent-scoped MCP key, nothing else. A turn that
+    is not found, or belongs to another agent, answers 404.
+    """
+    from services import turn_tier_service
+
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=403, detail="Turn tier requires the agent's own MCP key")
+    res = db.validate_mcp_api_key(auth_header[7:], track_usage=False)
+    if not heartbeat_service.authorize_heartbeat(res, agent_name):
+        raise HTTPException(status_code=403, detail="Turn tier requires the agent's own MCP key")
+    tier, kind, _ = turn_tier_service.turn_actor(db, agent_name, execution_id)
+    if tier == turn_tier_service.UNKNOWN:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    # `shell` also answers whether a Gemini/Codex runtime may run the turn.
+    # The person's identity is not part of the answer: the hook needs none.
+    return {"tier": tier, "kind": kind, "shell": turn_tier_service.shell_allowed(db, agent_name, tier, kind)}
 
 
 @router.post("/{agent_name}/executions/{execution_id}/result")

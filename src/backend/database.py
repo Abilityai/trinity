@@ -68,6 +68,7 @@ from db_models import (
     EmailWhitelistAdd,
     EmailLoginRequest,
     EmailLoginVerify,
+    EmailLoginHandoff,
     EmailLoginResponse,
     # Agent Notifications (NOTIF-001)
     NotificationCreate,
@@ -141,6 +142,7 @@ from db.capability_grants import CapabilityGrantOperations
 from db.peer_skill_grants import PeerSkillGrantOperations
 from db.skill_gates import SkillGateOperations
 from db.seat_decisions import SeatDecisionOperations
+from db.seat_ask_class_state import SeatAskClassStateOperations
 from db.skill_sources import SkillSourcesOperations
 from db.public_chat import PublicChatOperations
 from db.tags import TagOperations
@@ -166,6 +168,7 @@ from db.compatibility import CompatibilityOperations
 from db.metric_definitions import MetricDefinitionOperations
 from db.metric_points import MetricPointOperations
 from db.sync_state import SyncStateOperations
+from db.terms import TermsOperations  # trinity-enterprise#1107 terms acceptances
 from db.idempotency import IdempotencyOperations
 from db.loops import LoopOperations
 
@@ -1066,6 +1069,7 @@ class DatabaseManager:
         self._peer_skill_grant_ops = PeerSkillGrantOperations()  # ent#662
         self._skill_gate_ops = SkillGateOperations()
         self._seat_decision_ops = SeatDecisionOperations()
+        self._seat_ask_class_ops = SeatAskClassStateOperations()
         self._skill_sources_ops = SkillSourcesOperations()
         self._public_chat_ops = PublicChatOperations()
         self._tag_ops = TagOperations()
@@ -1093,6 +1097,7 @@ class DatabaseManager:
         self._sync_state_ops = SyncStateOperations()  # #389 sync health
         self._idempotency_ops = IdempotencyOperations()  # RELIABILITY-006, #525
         self._loop_ops = LoopOperations()  # #740 sequential agent loops
+        self._terms_ops = TermsOperations()  # trinity-enterprise#1107 terms acceptances
 
     # =========================================================================
     # User Management (delegated to db/users.py)
@@ -1457,6 +1462,13 @@ class DatabaseManager:
     def set_guardrails_config(self, agent_name: str, config: dict = None) -> bool:
         return self._agent_ops.set_guardrails_config(agent_name, config)
 
+    # Tool access (GUARD-008, trinity-enterprise#341)
+    def get_tool_access_row(self, agent_name: str):
+        return self._agent_ops.get_tool_access_row(agent_name)
+
+    def write_tool_access_row(self, agent_name: str, **kwargs) -> bool:
+        return self._agent_ops.write_tool_access_row(agent_name, **kwargs)
+
     # =========================================================================
     # Parallel Capacity (delegated to db/agents.py) - CAPACITY-001
     # =========================================================================
@@ -1781,8 +1793,10 @@ class DatabaseManager:
         """#1745: activate/deactivate an agent's per-agent MCP keys."""
         return self._mcp_key_ops.set_agent_keys_active(agent_name, active)
 
-    def deactivate_orphaned_agent_keys(self) -> int:
-        """#1745: deactivate per-agent keys whose agent is no longer live."""
+    def deactivate_orphaned_agent_keys(self) -> List[str]:
+        """#1745: deactivate per-agent keys whose agent is no longer live;
+        returns the agents whose keys were revoked (#4259 skips keys still
+        inside the start-up grace window)."""
         return self._mcp_key_ops.deactivate_orphaned_agent_keys()
 
     def delete_agent_mcp_api_key(self, agent_name: str):
@@ -3034,6 +3048,32 @@ class DatabaseManager:
     def reconfirm_seat_decision(self, agent_name: str, decision_id: str, review_by: str) -> bool:
         return self._seat_decision_ops.reconfirm_seat_decision(agent_name, decision_id, review_by)
 
+    # Autonomy dial (delegated to db/seat_ask_class_state.py) — ent#641 / P12.
+    # Explicit signatures (learnings 2026-09-01); parity pinned by the test.
+    def list_seat_ask_class_states(self, agent_name: str, seat_email: str) -> List[dict]:
+        return self._seat_ask_class_ops.list_seat_ask_class_states(agent_name, seat_email)
+
+    def get_seat_ask_class_state(self, agent_name: str, seat_email: str, ask_class: str) -> Optional[dict]:
+        return self._seat_ask_class_ops.get_seat_ask_class_state(agent_name, seat_email, ask_class)
+
+    def upsert_seat_ask_class_state(self, *, agent_name: str, seat_email: str, ask_class: str, state: str,
+                                    blocked_by: List[str], evidence: dict, evidence_hash: str,
+                                    evidence_expires_at: Optional[str], previous_hash: Optional[str] = None) -> bool:
+        return self._seat_ask_class_ops.upsert_seat_ask_class_state(
+            agent_name=agent_name, seat_email=seat_email, ask_class=ask_class, state=state,
+            blocked_by=blocked_by, evidence=evidence, evidence_hash=evidence_hash,
+            evidence_expires_at=evidence_expires_at, previous_hash=previous_hash)
+
+    def set_seat_ask_class_hold(self, *, agent_name: str, seat_email: str, ask_class: str,
+                                held: bool, by: str) -> dict:
+        return self._seat_ask_class_ops.set_seat_ask_class_hold(
+            agent_name=agent_name, seat_email=seat_email, ask_class=ask_class, held=held, by=by)
+
+    def set_seat_ask_class_guard(self, *, agent_name: str, seat_email: str, ask_class: str,
+                                 guard_metric: str) -> bool:
+        return self._seat_ask_class_ops.set_seat_ask_class_guard(
+            agent_name=agent_name, seat_email=seat_email, ask_class=ask_class, guard_metric=guard_metric)
+
     def is_skill_assigned(self, agent_name: str, skill_name: str):
         return self._skills_ops.is_skill_assigned(agent_name, skill_name)
 
@@ -3173,6 +3213,10 @@ class DatabaseManager:
     def workspace_rating_tally(self, agent_name):
         return self._evaluation_ops.workspace_rating_tally(agent_name)
 
+    def latest_negative_seat_rating(self, agent_name: str, evaluators: list, since: str):
+        """ent#641 — the seat's most recent thumbs-down on this agent in a window."""
+        return self._evaluation_ops.latest_negative_seat_rating(agent_name, evaluators, since)
+
     def list_agent_evaluations(self, agent_name, limit=50):
         return self._evaluation_ops.list_evaluations_for_agent(agent_name, limit)
 
@@ -3191,11 +3235,16 @@ class DatabaseManager:
     def get_public_user_memory_agent_notes(self, agent_name: str, user_email: str) -> str:
         return self._public_link_ops.get_user_memory_agent_notes(agent_name, user_email)
 
+    def get_public_user_memory(self, agent_name: str, user_email: str):
+        # ent#962: a read that never creates the row (the owner's view).
+        return self._public_link_ops.get_user_memory(agent_name, user_email)
+
     def update_public_user_memory_conversation_summary(
-        self, agent_name: str, user_email: str, conversation_summary: str
+        self, agent_name: str, user_email: str, conversation_summary: str,
+        *, expected_previous: str = None,
     ) -> bool:
         return self._public_link_ops.update_user_memory_conversation_summary(
-            agent_name, user_email, conversation_summary
+            agent_name, user_email, conversation_summary, expected_previous=expected_previous
         )
 
     # ent#637: the write boundary records history; the person reads + undoes it.
@@ -3254,15 +3303,23 @@ class DatabaseManager:
     def prune_memory_fact_events(self, agent_name: str, *, before_iso: str) -> int:
         return self._memory_fact_ops.prune_memory_fact_events(agent_name, before_iso=before_iso)
 
-    def list_public_user_memory_writes(self, agent_name: str, user_email: str, limit: int = 20) -> list:
-        return self._public_link_ops.list_user_memory_writes(agent_name, user_email, limit)
+    def list_public_user_memory_writes(self, agent_name: str, user_email: str, limit: int = 20, **kwargs) -> list:
+        # ent#962: `before=` (keyset cursor) and `section=` (default `notes`).
+        return self._public_link_ops.list_user_memory_writes(agent_name, user_email, limit, **kwargs)
+
+    def latest_open_public_user_memory_writes(self, agent_name: str, user_email: str) -> dict:
+        return self._public_link_ops.latest_open_user_memory_writes(agent_name, user_email)
 
     def undo_public_user_memory_write(
-        self, agent_name: str, user_email: str, write_id: str, *, undone_by: str
+        self, agent_name: str, user_email: str, write_id: str, *, undone_by: str, section: str = None
     ) -> str:
         return self._public_link_ops.undo_user_memory_write(
-            agent_name, user_email, write_id, undone_by=undone_by
+            agent_name, user_email, write_id, undone_by=undone_by, section=section
         )
+
+    def list_public_user_memory_people(self, agent_name: str, *, limit: int = 50, offset: int = 0) -> dict:
+        # ent#962: everyone with memory on the agent, for the owner's view.
+        return self._public_link_ops.list_user_memory_people(agent_name, limit=limit, offset=offset)
 
     # =========================================================================
     # Agent Tags (delegated to db/tags.py) - ORG-001
@@ -3789,6 +3846,9 @@ class DatabaseManager:
     def record_telegram_inbound(self, binding_id, telegram_user_id, telegram_username=None):
         return self._telegram_channel_ops.record_inbound(binding_id, telegram_user_id, telegram_username)
 
+    def list_telegram_verified_links_for_user(self, telegram_user_id):
+        return self._telegram_channel_ops.list_verified_links_for_user(telegram_user_id)
+
     def list_telegram_clients_for_agent(self, agent_name):
         return self._telegram_channel_ops.list_clients_for_agent(agent_name)
 
@@ -3898,6 +3958,9 @@ class DatabaseManager:
 
     def get_whatsapp_chat_link_by_verified_email(self, binding_id, email):
         return self._whatsapp_channel_ops.get_chat_link_by_verified_email(binding_id, email)
+
+    def list_whatsapp_verified_links_for_user(self, wa_user_phone):
+        return self._whatsapp_channel_ops.list_verified_links_for_user(wa_user_phone)
 
     def list_whatsapp_clients_for_agent(self, agent_name):
         return self._whatsapp_channel_ops.list_clients_for_agent(agent_name)
@@ -4170,6 +4233,23 @@ class DatabaseManager:
         # trinity-enterprise#747: link a pending ask to its discussion chat, once.
         return self._operator_queue_ops.set_discussion_link(item_id, key, chat_id)
 
+    def read_operator_queue_address(self, item_id):
+        # trinity-enterprise#1095: one row's address columns as stored (raw).
+        return self._operator_queue_ops.read_address(item_id)
+
+    def list_pending_role_addressed_operator_queue_items(self, agent_name, to_role):
+        # trinity-enterprise#1095: the pending rows a role change moves — an
+        # allowlist (the agent's raises, gated-skill approvals), raw address.
+        return self._operator_queue_ops.list_pending_role_addressed(agent_name, to_role)
+
+    def readdress_operator_queue_item(self, item_id, people, single, *, expect_single,
+                                      expect_resolved_raw, context=None, expect_context_raw=None):
+        # trinity-enterprise#1095: rewrite a pending row's audience under CAS.
+        return self._operator_queue_ops.readdress(
+            item_id, people, single, expect_single=expect_single,
+            expect_resolved_raw=expect_resolved_raw, context=context,
+            expect_context_raw=expect_context_raw)
+
     def bulk_cancel_operator_queue_items(self, ids, accessible_agent_names=None, *,
                                          disposed_by_email, reason=None):
         # trinity-enterprise#611: returns {"batch_id", "rows"} — the rows THIS
@@ -4202,6 +4282,16 @@ class DatabaseManager:
 
     def set_operator_queue_delivery_state(self, item_id, state, detail, now):
         return self._operator_queue_ops.set_delivery_state(item_id, state, detail, now)
+
+    # abilityai/trinity-enterprise#1108 AC #4 — the answer wake's status
+    def set_operator_queue_wake_state(self, item_id, state):
+        return self._operator_queue_ops.set_wake_state(item_id, state)
+
+    def list_operator_queue_pending_wakes(self, agent_name):
+        return self._operator_queue_ops.list_pending_wakes_for_agent(agent_name)
+
+    def mark_operator_queue_wakes_woken(self, agent_name, request_ids):
+        return self._operator_queue_ops.mark_wakes_woken(agent_name, request_ids)
 
     def mark_operator_queue_unconfirmed(self, detail, now, agent_name=None, exclude_agents=None,
                                         exclude_request_id_prefixes=None):
@@ -4308,8 +4398,11 @@ class DatabaseManager:
     # Access Requests (Issue #311)
     # =========================================================================
 
-    def upsert_access_request(self, agent_name: str, email: str, channel: str = None):
-        return self._access_request_ops.upsert_pending(agent_name, email, channel)
+    def upsert_access_request(self, agent_name: str, email: str, channel: str = None, identity: dict = None):
+        return self._access_request_ops.upsert_pending(agent_name, email, channel, identity)
+
+    def list_access_requests_by_requester(self, channel: str, channel_user_id: str):
+        return self._access_request_ops.list_by_requester(channel, channel_user_id)
 
     def list_access_requests(self, agent_name: str, status: str = "pending"):
         return self._access_request_ops.list_for_agent(agent_name, status)
@@ -4662,6 +4755,32 @@ class DatabaseManager:
 
     def list_due_loops(self, now: str, *, limit: int = 100):
         return self._loop_ops.list_due_loops(now, limit=limit)
+
+
+    # =========================================================================
+    # Terms acceptances (trinity-enterprise#1107 — delegated to db/terms.py)
+    # =========================================================================
+
+    def insert_terms_acceptance(self, user_id, email, terms_version: str, accepted_at: str,
+                                *, door=None, actor_ip=None):
+        return self._terms_ops.insert_terms_acceptance(
+            user_id, email, terms_version, accepted_at, door=door, actor_ip=actor_ip
+        )
+
+    def get_terms_acceptance(self, user_id: int, terms_version: str):
+        return self._terms_ops.get_terms_acceptance(user_id, terms_version)
+
+    def get_terms_acceptance_by_email(self, email: str, terms_version: str):
+        return self._terms_ops.get_terms_acceptance_by_email(email, terms_version)
+
+    def terms_acceptances_for_user(self, user_id: int):
+        return self._terms_ops.terms_acceptances_for_user(user_id)
+
+    def terms_acceptances_for_email(self, email: str):
+        return self._terms_ops.terms_acceptances_for_email(email)
+
+    def list_terms_acceptances(self, limit: int = 200):
+        return self._terms_ops.list_terms_acceptances(limit)
 
 
 # Global database manager instance

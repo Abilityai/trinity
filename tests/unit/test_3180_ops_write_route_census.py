@@ -333,9 +333,11 @@ NO_TRINITY_CREDENTIAL = {
     "routers/auth.py::validate_token": OTHER_CREDENTIAL + " (a JWT only; an MCP key fails jwt.decode)",
     "routers/auth.py::request_email_login_code": UNAUTHENTICATED,
     "routers/auth.py::verify_email_login_code": OTHER_CREDENTIAL + " (emailed code)",
+    "routers/auth.py::redeem_email_login_handoff": OTHER_CREDENTIAL + " (one-time Workspace hand-off, #4157)",
     "routers/auth.py::request_access": UNAUTHENTICATED,
     "routers/agents.py::agent_heartbeat": OWN_VALIDATOR,
     "routers/agents.py::agent_execution_result": OWN_VALIDATOR,
+    "routers/agents.py::agent_execution_turn_tier": OWN_VALIDATOR + " (trinity-enterprise#926)",
     "routers/mcp_keys.py::validate_mcp_api_key_http_endpoint": OWN_VALIDATOR + " (introspection: grants nothing)",
     "routers/public.py::tls_allowed": UNAUTHENTICATED,
     "routers/public.py::get_public_link_info": OTHER_CREDENTIAL + " (public link token)",
@@ -359,6 +361,7 @@ NO_TRINITY_CREDENTIAL = {
     "routers/internal.py::validate_execution": OTHER_CREDENTIAL + " (X-Internal-Secret)",
     "routers/internal.py::log_audit_entry": OTHER_CREDENTIAL + " (X-Internal-Secret)",
     "routers/internal.py::mcp_exposed_agents": OTHER_CREDENTIAL + " (X-Internal-Secret)",
+    "routers/internal.py::mcp_external_access": OTHER_CREDENTIAL + " (X-Internal-Secret)",
     "routers/internal.py::internal_next_task": OWN_VALIDATOR + " (pull seam: internal secret or the agent's own key)",
     "routers/internal.py::internal_task_result": OWN_VALIDATOR + " (pull seam: internal secret or the agent's own key)",
     "routers/mcp_auth.py::request_inline_login": OTHER_CREDENTIAL + " (X-Internal-Secret)",
@@ -623,6 +626,7 @@ class TestNeverGrantableFamilies:
         own_key = {
             "heartbeat": "Heartbeat requires the agent's own MCP key",
             "result_callback": "Result callback requires the agent's own MCP key",
+            "turn_tier": "Turn tier requires the agent's own MCP key",
             "pull_next_task": "Pull seam requires a valid X-Internal-Secret or the agent's own MCP key",
             "pull_task_result": "Pull seam requires a valid X-Internal-Secret or the agent's own MCP key",
         }
@@ -631,7 +635,7 @@ class TestNeverGrantableFamilies:
         assert agent["heartbeat"]["status"] == 200, agent["heartbeat"]
         assert agent["pull_next_task"]["status"] == 200, agent["pull_next_task"]
         # Past the key check, refused only because the execution does not exist.
-        for door in ("result_callback", "pull_task_result"):
+        for door in ("result_callback", "turn_tier", "pull_task_result"):
             assert agent[door]["status"] == 404 and agent[door]["detail"] == "Execution not found", (door, agent[door])
         # The one exception, stated: introspection answers "valid" and grants nothing.
         import json as _json

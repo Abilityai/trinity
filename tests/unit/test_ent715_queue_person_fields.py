@@ -76,6 +76,7 @@ MACHINE_ROW_KEYS = frozenset({
     "disposition", "disposed_at", "disposed_by", "disposition_reason", "batch_id",
     "raised_by", "channel", "to_role", "proposal", "supersedes_expired",
     "replaces", "replaced_by",  # #3247
+    "wake_state",  # abilityai/trinity-enterprise#1108 AC #4 — pending (agent not yet woken) | woken | None
     "aging", "aged_since",
     "subject", "last_seen_at",
 })
@@ -860,8 +861,15 @@ _ROW_ACCESSORS = frozenset({
     "respond_to_operator_queue_item", "cancel_operator_queue_item", "withdraw_operator_queue_item",
     "bulk_cancel_operator_queue_items", "end_operator_queue_items_by_platform",
     "mark_operator_queue_expired", "set_operator_queue_discussion_link",
+    # trinity-enterprise#1095: the address columns and the raw context a re-address
+    # compares and rewrites; only the ask service reads them, and nothing but a
+    # boolean or a count leaves it.
+    "read_operator_queue_address", "list_pending_role_addressed_operator_queue_items",
     "create_person_mention", "list_person_mentions_for", "get_person_mention",
     "mark_person_mention_read", "list_person_mentions_by_prefix",
+    # abilityai/trinity-enterprise#1108 AC #4: the agent's own answered asks whose
+    # wake is still owed — re-dispatched into its own turn on start.
+    "list_operator_queue_pending_wakes",
 })
 _NON_ROW_ACCESSORS = frozenset({
     "create_operator_queue_item", "create_operator_queue_item_with_outcome",   # ids (test_1677)
@@ -874,6 +882,9 @@ _NON_ROW_ACCESSORS = frozenset({
     "mark_operator_queue_unconfirmed", "refresh_operator_queue_last_confirmed",
     "set_operator_queue_sync_state", "set_operator_queue_delivery_state",
     "drop_operator_queue_addressee",   # trinity-enterprise#981: a boolean, did the address change
+    "readdress_operator_queue_item",   # trinity-enterprise#1095: a boolean, did the CAS write land
+    # abilityai/trinity-enterprise#1108 AC #4: a boolean / a count — the wake's status
+    "set_operator_queue_wake_state", "mark_operator_queue_wakes_woken",
 })
 
 #: What happens to the rows each reader gets.
@@ -893,7 +904,12 @@ _TAGS = "services/person_mention_service.py"
 _ALERTS = "services/platform_alerts.py"
 _PROMPT = "services/platform_prompt_service.py"
 _GATE = "services/skill_gate_service.py"
+_ORS = "services/operator_resume_service.py"
 _ROW_READERS = {
+    (_ORS, "redispatch_pending_wakes"): (
+        "agent", "abilityai/trinity-enterprise#1108 AC #4: the agent's own answered asks whose wake "
+                 "is still owed, each handed to `maybe_dispatch_resume` — the ent#329 frame reaches "
+                 "the agent that raised the ask and nobody else; who answered stays in the audit row"),
     (_PORTAL_ASKS, "_discussed_in"): (
         "addressee", "the ask a chat discusses: addressed to the viewer in SQL, then the roster"),
     (_PORTAL_ASKS, "_linked_request_id"): (
@@ -941,18 +957,25 @@ _ROW_READERS = {
         "agent", "the receipt of the agent's own ask, ids and enums; a reserved id is refused "
                  "before the replay lookup (§2 drives it)"),
     (_ASKS, "request_id_of"): ("internal", "a uuid's request_id, nothing else"),
+    (_ASKS, "readdress_item"): (
+        "internal", "one pending row's address columns and raw context, read to rewrite them under a "
+                    "compare-and-set (trinity-enterprise#1095); a boolean leaves, the audit carries ids "
+                    "and the reason"),
+    (_ASKS, "readdress_role"): (
+        "internal", "the agent's pending role-addressed rows, read to hand each to `readdress_item`; "
+                    "counts leave, the one trigger carries ids"),
     (_ASKS, "withdraw"): (
         "agent", "the receipt of the agent's own ask; a row it did not raise, or one about a "
                  "person, is the uniform 404 (§2 drives it)"),
-    (_OQS, "OperatorQueueSyncService._poll_cycle"): (
+    ("services/operator_queue_service/poller.py", "PollerCoreMixin._poll_cycle"): (
         "internal", "marks answers owed to stopped agents, reserved prefixes excluded; audits ids"),
-    (_OQS, "OperatorQueueSyncService._sync_agent"): (
+    ("services/operator_queue_service/ingest.py", "IngestMixin._sync_agent"): (
         "agent", "the file write-back: `is_platform_minted` keeps every reserved-prefix row, so "
                  "every row about a person, out of the agent's file (§3)"),
     (_OQS, "_maybe_emit_alert_budget_episode"): (
         "internal", "the ids of the rows filling an agent's alert budget, digested into the "
                     "episode marker (#3254); no row leaves"),
-    (_OQS, "list_for_principal"): (
+    ("services/operator_queue_service/listing.py", "list_for_principal"): (
         "filtered", "the broad list's engine: a machine's about-a-person exclusion runs in SQL "
                     "before the limit (§2 drives its door)"),
     (_TAGS, "_mine"): ("addressee", "one tag, only for the person it tags"),

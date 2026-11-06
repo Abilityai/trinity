@@ -44,7 +44,7 @@ row is committed and authoritative, delivery is best-effort, NOTHING fails the w
 the HTTP status stays 200 and the body carries an honest report:
 
 ```
-delivery: {status, reason?, conflicts?, skills: {name: {status, error?}}}
+delivery: {status, reason?, conflicts?, skills: {name: {status, error?, warnings?}}}
   injected        every requested skill landed (or was already present and current)
   partial         some did; the rest carry their error (a `conflict` among them is listed in `conflicts[]`)
   conflict        (#2914) every requested name collides with an agent-authored skill dir — nothing
@@ -135,13 +135,31 @@ conflict clears without a reload.
 `skills[name].warnings = ["deprecated" | "deprecated:<successor>"]` on the report for a
 deprecated name — on every outcome, because it reads the library entry
 (`_deprecation_notes`) rather than injection results, and a stopped agent never runs an
-injection. The key is absent for a live skill and carries lifecycle codes only.
+injection. It goes first in the list, once (a deprecation code the injection itself
+reported is folded into it, never duplicated).
 `utils/skillDelivery.js::deprecationText(report)` turns it into "`<skill>` is deprecated —
 superseded by `<successor>`." and both assign surfaces render it as its own warning-toned
 line (`AssignedAgents.vue` under the delivery note; on the agent's Skills tab, under the
 save note in `SkillAssignModal.vue` and on the Shared line, shown only beside the save note
 it belongs to). `deliveryText` is untouched: a clean
 delivery stays green.
+
+**What the injection found missing (#3136)** is the third statement. `_deliver_assigned`
+used to reduce each injected / fallback / unchanged result to `{status: "injected"}`,
+dropping the per-skill warnings `_apply_dep_warnings` had just computed, so an assign that
+landed a skill whose declared binary or env key the agent lacks said "delivered — available
+now" and nothing else until a manual Sync. It now carries them as `warnings`, through
+`skill_packaging.public_warnings` — the ONE rule the start endpoint's projection
+(`lifecycle.public_skills_result`, #2991) uses too: bare codes plus
+`missing_binary|missing_env|deprecated:<name>`, never a path or a source label. A clean
+skill's entry stays exactly `{status: "injected"}`; `conflict`, `failed`,
+`unassigned_meanwhile` and every outcome that ran no probe (`pending_start`,
+`in_progress`, `not_delivered`) carry none. `utils/skillDelivery.js::dependencyText(report)`
+says only the two "missing" codes — "`pdf-report` needs the binary `pdftotext`, which this
+agent doesn't have." — on its own warning line between the delivery and the deprecation
+lines (`AssignedAgents.vue`; the Skills tab dialog and its one-line notice); codes that mean
+nothing was checked (`packages_not_checked`, `dep_check_skipped`) get no sentence. Set
+assigns (ent#736) pass `{env: false}`: their prerequisites line already names env keys.
 
 ## Removal (ent#236)
 
@@ -276,7 +294,10 @@ two dep codes.
 Parsed by `skill_packaging.parse_frontmatter`/`extract_contract` (64 KiB cap,
 alias-refusing SafeLoader — billion-laughs guard, #919 convention; every field
 isinstance-guarded; unknown keys ignored — skills are authored for Claude Code
-first). Flat keys are the convention; a `trinity:` mapping wins when present:
+first). Since trinity-enterprise#584 the framing matches the agent server's parser
+(byte-order mark and CRLF normalised; the block ends at the first line starting with
+`---`), `description` goes through `clean_description`, and a skill without one has
+none (no first-paragraph guess). Flat keys are the convention; a `trinity:` mapping wins when present:
 
 ```yaml
 ---
@@ -388,6 +409,7 @@ projection, and the un-annotated CLAUDE.md line.
 
 | Date | Change |
 |------|--------|
+| 2026-11-04 | **#3136 assign keeps the injection's warnings**: `_deliver_assigned` carries each landed skill's public codes (`skill_packaging.public_warnings`, now shared with `public_skills_result`); the ent#672 stamp merges instead of overwriting; `dependencyText` renders `missing_binary` / `missing_env` as its own warning line on both assign surfaces and (binaries only) on the set notes (ent#736). |
 | 2026-09-30 | **trinity-enterprise#672 lifecycle keys**: `extract_contract` carries `deprecated` / `superseded-by`; `deprecation_warning` produces the `deprecated[:<successor>]` code that rides every injection outcome and, via `deliver_assigned`'s library read, every delivery outcome; `public_skills_result` keeps it. A deprecated skill stays listed, assignable and injected — flagged on each surface, CLAUDE.md untouched. |
 | 2026-09-11 | **#2703 delivery on assign + `agent_skills_changed`**: every assign path delivers via the start-path injection with an honest per-skill `delivery` report (bounded 20 s → `in_progress`, busy retried once, `docker_unavailable` ≠ `pending_start`, opt-in under-lock re-read); one thin WS trigger from the service, fired by all six listing writers; Agent Detail lists refetch on the tick, the Workspace re-validates the briefing stale-while-revalidate (and on `/` open for portal clients, who have no `/ws`) |
 | 2026-08-04 | **trinity-enterprise#332 per-source skills root**: source layout resolvable per source (`catalog.yaml` `skills_root:` → evidence-gated `skills/` probe → `.claude/skills/` fallback; segment-wise validation, ent#314 hardened parse, lstat/containment guards, dual-layout keeps legacy + `layout_conflict`); `filter_skill_archive(source_root=…)` rewrites arcnames to the canonical agent-side destination so manifests/prune/removal stay destination-canonical with zero migration. Requirements §21.1.4. |

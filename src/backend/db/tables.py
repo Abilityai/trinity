@@ -122,10 +122,10 @@ agent_ownership = Table(
     Column("a2a_exposed", Integer),                # ent#157: A2A inbound-server exposure opt-in (default OFF)
     Column("a2a_scope", Text, server_default="public"),          # inert since ent#885; drop under #746
     Column("a2a_keyless_internal", Integer, server_default="1"),  # inert since ent#885; drop under #746
-    # ent#329: owner opt-in — an operator answer re-triggers the agent. Default OFF:
-    # a dispatch on respond spends money, so it is never unconditional. Per-AGENT and
-    # not per-request, so hosting asks cannot hand a client a spend button (ent#430 AC #3).
-    Column("operator_resume_enabled", Integer),
+    # ent#329: an operator answer re-triggers the agent. Per-AGENT and not
+    # per-request, so hosting asks cannot hand a client a spend button (ent#430
+    # AC #3). Default ON since abilityai/trinity-enterprise#1108; the owner's OFF is 0.
+    Column("operator_resume_enabled", Integer),         # tri-state since abilityai/trinity-enterprise#1108: NULL = platform default (on), 0 = owner OFF, 1 = owner ON
     Column("memory_opt_out", Integer),             # trinity-enterprise#1022: per-agent retrieval-memory opt-out (default 0)
     Column("tts_voice_replies_enabled", Integer),  # epic #24/#25: outbound voice-out toggle (shared agent-level)
     Column("tts_voice_id", Text),                  # epic #24/#25: ElevenLabs voice id for spoken replies
@@ -619,6 +619,7 @@ enterprise_room_participants = Table(
     Column("last_read_seq", Integer),
     Column("cached_session_id", Text),
     Column("consecutive_resume_failures", Integer),
+    Column("visible_from_seq", Integer),
 )
 
 enterprise_room_messages = Table(
@@ -965,7 +966,7 @@ public_user_memory = Table(
     Column("updated_at", Text),
 )
 
-# ent#637: write history for the agent_notes section — see the note in db/schema.py.
+# ent#637: write history for the memory blob (ent#962: both sections) — see the note in db/schema.py.
 public_user_memory_writes = Table(
     "public_user_memory_writes",
     metadata,
@@ -980,6 +981,8 @@ public_user_memory_writes = Table(
     Column("written_at", Text),
     Column("undone_at", Text),
     Column("undone_by", Text),
+    # trinity-enterprise#962: `notes` | `summary` — see the note in db/schema.py.
+    Column("section", Text, nullable=False, server_default="notes"),
 )
 
 # trinity-enterprise#1022 (MEM-002): retrieval memory facts — see the note in db/schema.py.
@@ -1074,6 +1077,29 @@ seat_decisions = Table(
     Column("closed_by", Text),
     Column("reconfirmed_at", Text),
     Column("source_execution_id", Text),
+    Column("created_at", Text),
+    Column("updated_at", Text),
+)
+
+# ent#641 (P12): the autonomy dial's earned half — see the note in db/schema.py.
+seat_ask_class_state = Table(
+    "seat_ask_class_state",
+    metadata,
+    Column("id", Text, primary_key=True),
+    Column("agent_name", Text),
+    Column("seat_email", Text),
+    Column("ask_class", Text),
+    Column("state", Text),
+    Column("blocked_by", Text),
+    Column("evidence", Text),
+    Column("evidence_hash", Text),
+    Column("evidence_expires_at", Text),
+    Column("guard_metric", Text),
+    Column("held", Integer),
+    Column("held_by", Text),
+    Column("held_at", Text),
+    Column("promoted_at", Text),
+    Column("demoted_at", Text),
     Column("created_at", Text),
     Column("updated_at", Text),
 )
@@ -1619,6 +1645,10 @@ operator_queue = Table(
     # one locked transaction that ends the predecessor and inserts the successor.
     Column("replaces", Text),            # on the successor: the predecessor row's uuid
     Column("replaced_by", Text),         # on the predecessor: the successor row's uuid
+    # abilityai/trinity-enterprise#1108 AC #4: whether the answer wake produced a
+    # turn. NULL (no wake owed / before the column) | "pending" (the agent was not
+    # running — its next start re-dispatches) | "woken".
+    Column("wake_state", Text),
     Index(
         "uq_operator_queue_pending_subject",
         "agent_name", "subject",
@@ -1779,6 +1809,13 @@ access_requests = Table(
     Column("status", Text),
     Column("decided_by", Integer),
     Column("decided_at", Text),
+    # trinity-enterprise#737 — who asked, as the channel saw them (all nullable:
+    # a field the channel does not expose stays empty, never fabricated).
+    Column("requester_channel_id", Text),
+    Column("requester_handle", Text),
+    Column("requester_name", Text),
+    Column("requester_chat_id", Text),
+    Column("requester_thread_id", Text),
 )
 
 audit_log = Table(
@@ -1925,4 +1962,25 @@ metric_points = Table(
     # partition key (`agent_name`) inside the only unique constraint is what
     # lets ent#80 partition by month without a table rebuild.
     PrimaryKeyConstraint("agent_name", "ts", "idempotency_key"),
+)
+
+
+# Terms acceptances (trinity-enterprise#1107) — one row per (person, terms
+# version). `door` is the invitation id an optional module names, else NULL.
+terms_acceptances = Table(
+    "terms_acceptances",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    # NULL for a Workspace portal session (no `users` row, ruling A(1) on
+    # trinity-enterprise#1107): such a row is keyed by (email, version) below.
+    Column("user_id", Integer, nullable=True),
+    Column("email", Text),
+    Column("terms_version", Text, nullable=False),
+    Column("accepted_at", Text, nullable=False),
+    Column("door", Text),
+    Column("actor_ip", Text),
+    UniqueConstraint("user_id", "terms_version", name="uq_terms_acceptances_user_version"),
+    Index("idx_terms_acceptances_email", "email"),
+    Index("uq_terms_acceptances_email_version", "email", "terms_version", unique=True,
+          sqlite_where=text("user_id IS NULL"), postgresql_where=text("user_id IS NULL")),
 )

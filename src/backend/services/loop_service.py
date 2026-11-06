@@ -69,15 +69,13 @@ import json
 import logging
 import math
 from datetime import datetime, timedelta, timezone
-from types import SimpleNamespace
 from typing import Any, Optional
 
 from database import db
 from db.loops import TERMINAL_STATUSES as _LOOP_TERMINAL_STATUSES
 from services.runtime_secret_scrub import get_staged_values, scrub_text
-from services.chat_signals import admission_refusal_of
 from services.skill_gate_errors import SkillGateError
-from services.task_execution_service import _split_error_code, get_task_execution_service
+from services.task_execution_service import get_task_execution_service
 from utils.helpers import utc_now_iso
 from db.write_params import ExecutionResult, TaskExecutionFields
 
@@ -601,22 +599,9 @@ class LoopService:
         # the same template.
         held = status == "skipped" and bool(db.get_gate_requests_by_origin_executions([execution_id]))
 
-        # trinity-enterprise#1059 (review H1): an iteration an admission policy
-        # refused (SKIPPED `[usage_share] …`, no gate record) did not fail
-        # either — the run row reads `skipped`, `failed_runs` and `on_failure`
-        # never count it — and the loop stops with the policy's code as the
-        # reason: each further iteration would meet the same refusal until the
-        # share is raised or the window frees.
-        refused = None
-        if status == "skipped" and not held:
-            code, text = _split_error_code(error)
-            refused = admission_refusal_of(
-                SimpleNamespace(status=status, error_code=code, error=text),
-                loop["agent_name"])
-
         if not db.finalize_loop_run(
             run["id"],
-            status="completed" if succeeded else ("skipped" if (held or refused) else "failed"),
+            status="completed" if succeeded else ("skipped" if held else "failed"),
             response=response,
             error=None if succeeded else (error or "Unknown task failure"),
             cost=cost,
@@ -631,12 +616,6 @@ class LoopService:
         if held:
             await self._finalize(loop, status="stopped", stop_reason="approval_required",
                                  error=error)
-            return True
-        if refused is not None:
-            logger.info("[Loop] %s stopped at run %d: refused by an admission policy (%s)",
-                        loop_id, run_number, refused.code)
-            await self._finalize(loop, status="stopped", stop_reason=refused.code,
-                                 error=refused.message)
             return True
 
         runs = db.list_loop_runs(loop_id)

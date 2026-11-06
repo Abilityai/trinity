@@ -527,21 +527,40 @@ async def _guard_leftover_workspace_volume(
 # GitHub's own owner/repo charset is a subset of this.
 _GITHUB_REPO_PATH_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
+# trinity#4165: the ref after `@` is a branch OR a tag, taken whole. It is
+# interpolated into the same eval-built clone command, so the charset stays a
+# shell-safety barrier; `.` is allowed (a release tag such as `v1.2.0`) minus
+# the git ref-format shapes a dotted ref cannot take: `..`, a component that
+# starts with `.`, a trailing `.` or `.lock` — and a leading `-`, which every
+# live site passes as a value today but `git checkout "<ref>"` would read as
+# an option (review I5: one shell edit away from an option injection).
+_GITHUB_REF_RE = re.compile(r"^(?!-)(?!.*\.\.)(?!\.)(?!.*/\.)(?!.*\.$)(?!.*\.lock$)[A-Za-z0-9_./-]+$")
+
 
 def _parse_github_ref(config: AgentConfig) -> tuple[str, str, Optional[str]]:
-    """GIT-002: parse `github:owner/repo[@branch]` into `(template_lookup,
-    repo_path, url_branch)`. Mutates `config.source_branch` when a valid branch
-    is present in the URL."""
+    """GIT-002: parse `github:owner/repo[@ref]` into `(template_lookup,
+    repo_path, url_branch)`. Mutates `config.source_branch` when a ref (a
+    branch or a tag) is present in the URL; an unusable ref is a 400, never a
+    silent fall-back to the default branch (trinity#4165)."""
     template_str = config.template[7:]  # Remove "github:" prefix
     url_branch = None
     if "@" in template_str:
         template_str, url_branch = template_str.rsplit("@", 1)
-        # Validate branch name (alphanumeric plus - _ /)
-        if url_branch and url_branch.replace("-", "").replace("_", "").replace("/", "").isalnum():
+        if not url_branch:
+            url_branch = None  # `repo@` with nothing after it: no ref given
+        elif _GITHUB_REF_RE.match(url_branch):
             config.source_branch = url_branch
             logger.info(f"GIT-002: Parsed branch from URL: {url_branch}")
         else:
-            url_branch = None  # Invalid branch, ignore
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Invalid ref in github:owner/repo@ref. Use a branch or tag "
+                    "name with letters, digits, '.', '_', '-' or '/' (no '..', "
+                    "no component starting with '.', no trailing '.' or '.lock', "
+                    "no leading '-')."
+                ),
+            )
 
     if "/" in template_str and not _GITHUB_REPO_PATH_RE.match(template_str):
         raise HTTPException(
@@ -637,8 +656,8 @@ async def _read_source_template(
        value-deduplicated, the tier already tried skipped). Only a 200 ends
        this walk — a 404 from a fallback token is "this token cannot see it",
        never absence (ent#14 S2: the private-`required` false pass);
-    2. the credential-free path: `probe_anonymous_ref` (the branch from
-       `@branch` as `refs/heads/<b>`, else HEAD) proves the repo public AND
+    2. the credential-free path: `probe_anonymous_ref` (the ref from
+       `@ref` as `refs/heads/<r>` or `refs/tags/<r>`, else HEAD) proves the repo public AND
        pins the ref to a SHA; `_fetch_template_yaml_raw_result(repo, sha)`
        reads that exact tree with no token. A 404 THERE is definitive absence
        (public repo, pinned commit, no file) and clears the earlier
@@ -699,7 +718,7 @@ async def _read_source_template(
                             preferred_reason, attempts)
     status = {
         "unavailable": "repository is private or does not exist",
-        "missing_ref": "branch not found",
+        "missing_ref": "branch or tag not found",
     }.get(outcome, "network error")
     attempts.append({"tier": "anonymous", "status": status})
     return TemplateRead({}, f"anonymous read: {status}", None, None,
@@ -1277,21 +1296,21 @@ async def _validate_github_access(
                     f"GitHub token."
                 ),
             )
-        # Repo reachable anonymously. Also verify the source branch exists —
-        # source-mode clones `-b <branch>`, and a missing branch would fail
-        # the clone with the same silent-empty-agent risk (the credential-less
-        # ls-remote helper answers for public repos).
+        # Repo reachable anonymously. Also verify the source ref exists — a
+        # branch or a tag (trinity#4165): source-mode clones `-b <ref>`, and
+        # a missing ref would fail the clone with the same silent-empty-agent
+        # risk (the credential-less ls-remote helper answers for public repos).
         if config.source_branch:
-            branch_ok = await git_service.check_remote_branch_exists(
+            ref_ok = await git_service.check_remote_branch_exists(
                 github_repo_for_agent, config.source_branch
             )
-            if not branch_ok:
+            if not ref_ok:
                 raise HTTPException(
                     status_code=400,
                     detail=(
-                        f"Branch '{config.source_branch}' not found in public "
-                        f"repository '{github_repo_for_agent}'. Pass the "
-                        f"branch explicitly (github:owner/repo@branch) if the "
+                        f"Branch or tag '{config.source_branch}' not found in "
+                        f"public repository '{github_repo_for_agent}'. Pass the "
+                        f"ref explicitly (github:owner/repo@ref) if the "
                         f"repository's default branch is not 'main'."
                     ),
                 )
@@ -1325,8 +1344,8 @@ async def _validate_github_access(
                     raise HTTPException(
                         status_code=400,
                         detail=(
-                            f"Branch '{config.source_branch}' not found in "
-                            f"repository '{github_repo_for_agent}'."
+                            f"Branch or tag '{config.source_branch}' not found "
+                            f"in repository '{github_repo_for_agent}'."
                         ),
                     )
                 if outcome != "ok":
@@ -1353,16 +1372,24 @@ async def _validate_github_access(
                 )
             logger.info(f"Validated GitHub repo access: {github_repo_for_agent} (private={repo_info.private})")
 
-            # If source_branch specified, validate branch exists
+            # If source_branch specified, validate the ref exists — a branch,
+            # or (trinity#4165) a tag: `@ref` may pin a release, and GitHub's
+            # branches API knows nothing of tags, so a 404 there is answered
+            # by the tag ref before it is called missing.
             if config.source_branch and config.source_branch != repo_info.default_branch:
                 try:
-                    branch_resp = await gh_service._request(
+                    ref_resp = await gh_service._request(
                         "GET", f"/repos/{github_repo_for_agent}/branches/{config.source_branch}"
                     )
-                    if branch_resp.status_code == 404:
+                    if ref_resp.status_code == 404:
+                        ref_resp = await gh_service._request(
+                            "GET", f"/repos/{github_repo_for_agent}/git/ref/tags/{config.source_branch}"
+                        )
+                    if ref_resp.status_code == 404:
                         raise HTTPException(
                             status_code=400,
-                            detail=f"Branch '{config.source_branch}' not found in repository '{github_repo_for_agent}'. "
+                            detail=f"Branch or tag '{config.source_branch}' not found in repository "
+                                   f"'{github_repo_for_agent}'. "
                                    f"Available default branch: '{repo_info.default_branch}'."
                         )
                 except HTTPException:

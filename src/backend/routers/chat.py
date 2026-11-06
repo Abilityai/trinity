@@ -40,7 +40,6 @@ from services import dispatch_admission_service
 from services import chat_execution_service
 from services import chat_persistence_service
 from services.chat_signals import (
-    AdmissionRefused,
     ChatAdmissionReplay,
     ChatDispatchError,
     InterAgentDepthExceeded,
@@ -182,22 +181,6 @@ def _raise_depth_exceeded_403(exc: InterAgentDepthExceeded) -> NoReturn:
     )
 
 
-def _raise_admission_refused_429(exc: AdmissionRefused) -> NoReturn:
-    """Map an admission-policy refusal to its named 429 (trinity-enterprise#1059).
-
-    The policy's code on ``X-Trinity-Error-Code`` and its plain-words message
-    in the body; ``Retry-After`` only when the policy knows when it admits
-    again. Nothing was claimed, acquired or (on these routes) written.
-    """
-    retry_after = exc.retry_after_seconds()
-    extra = {"Retry-After": str(retry_after)} if retry_after is not None else None
-    raise HTTPException(
-        status_code=429,
-        detail=exc.detail(),
-        headers=chat_execution_service._error_code_headers(exc.code, extra),
-    )
-
-
 @router.post("/{name}/chat")
 async def chat_with_agent(
     request: ChatMessageRequest,
@@ -274,8 +257,6 @@ async def chat_with_agent(
         )
     except InterAgentDepthExceeded as e:
         _raise_depth_exceeded_403(e)
-    except AdmissionRefused as e:
-        _raise_admission_refused_429(e)
     except CircuitOpen as e:
         _raise_circuit_open_503(name, None, e)
     except EphemeralBudgetExhausted as e:
@@ -541,8 +522,6 @@ async def execute_parallel_task(
         )
     except InterAgentDepthExceeded as e:
         _raise_depth_exceeded_403(e)
-    except AdmissionRefused as e:
-        _raise_admission_refused_429(e)
     except ChatDispatchError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail, headers=e.headers)
     if isinstance(result, ChatAdmissionReplay):

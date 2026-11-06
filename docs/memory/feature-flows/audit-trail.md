@@ -361,6 +361,8 @@ Failed logins have no `actor_user` — the service falls back to
 | `decide_access_request_endpoint` (approve) | `access_request_approved` | `{email, access_request_id}` |
 | `decide_access_request_endpoint` (reject) | `access_request_rejected` | `{email, access_request_id}` |
 
+Capability grants write `capability_used`, `capability_refused`, `capability_grant` and `capability_revoke`; [self-change-grants.md](self-change-grants.md) has the row-by-row table.
+
 ### Credentials (`routers/credentials.py`)
 
 | Handler | Event action | Details payload |
@@ -440,6 +442,19 @@ helper fails `npm test`; `access-wiring.test.ts` proves the label over the real
 transport, and J10's `test_the_operator_can_see_that_a_call_was_refused` proves
 it against a live stack on every PR. A refused call's `details`:
 `{"tool": "chat_with_agent", "duration_ms": 32, "success": false, "error": "Permission denied: Agent 'a' is not permitted to communicate with 'b'. ...", "denied": true}`.
+
+**Returned failures are labelled too (#4026).** A tool that never throws also
+RETURNS its operational failures (a 409 refusal report, a 503 retryable, a
+route this build lacks, a lost connection), and those were audited
+`success: true` for the same reason. `audit.ts::toolFailed` is the non-denial
+twin of `accessDenied`: it stamps `{kind: "failed", reason}`, the row reads
+`success: false` with a short `error` and **no** `denied` key, and the caller's
+JSON is unchanged. A `failed` stamp never overwrites a `denied` one, and its
+reason is never empty. Adopted by `apply_system`, `teardown_system`
+(whose 403 is stamped `denied`) and `deploy_system` (#4027: it now returns its
+non-2xx answers, a 403 stamped `denied`); other never-throw tools still return their
+failures unstamped. A failed call's `details`:
+`{"tool": "apply_system", "duration_ms": 41, "success": false, "error": "HTTP 409: status 'refused'"}`.
 
 ### Internal Audit Endpoint
 

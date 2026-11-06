@@ -776,15 +776,13 @@ _HELPER_ACCESSORS = {"get_accessible_agents", "accessible_agent_names", "visible
 #: (file, function) → why its principal is never an agent key, or why the admin
 #: branch selects no fleet. Shrink-only: `test_every_allowlist_entry_still_applies`.
 _ALLOW = {
-    ("routers/voice.py", "voice_websocket"):
-        "the voice socket is gated to its own session's user id; the compare is that owner check",
     ("routers/system_agent.py", "system_agent_terminal"):
         "the system-agent terminal authenticates a person (JWT) and checks the user row's role",
     ("services/settings_service.py", "get_agent_quota_for_role"):
         "maps a role to an agent-creation quota; selects no roster",
     ("services/ask_service.py", "may_end"):
         "an ask's ending is person-only at every route (reject_non_person_principal)",
-    ("services/person_mention_service.py", "_room_access"):
+    ("services/person_mention_service.py", "_room_access_row"):
         "decides about the PERSON row being mentioned (looked up by email), never a principal's fleet",
     ("services/ws_identity_service.py", "resolve_ws_identity"):
         "a /ws ticket subject is a person (the ticket route is require_person)",
@@ -814,7 +812,7 @@ _ALLOW = {
         "background cleanup loop: no principal",
     ("services/skills_sync_service.py", "_eligible_agents"):
         "background sweep, or the skills-library route behind require_admin + reject_agent_principal",
-    ("services/turn_tier_service.py", "turn_tier"):
+    ("services/turn_tier_service.py", "_user_tier"):
         "the role compared is the turn starter's user row (a person), never the caller's; selects no roster",
     ("services/ws_identity_service.py", "event_stream_identity"):
         "an agent key returns agent_reach_names as a non-admin slot before the role compare",

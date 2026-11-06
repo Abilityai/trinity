@@ -21,7 +21,7 @@ from models import (
     CANVAS_MAX_BLOCKS,
     REPORT_PAYLOAD_MAX_BYTES,
 )
-from services import admission_policy, user_memory_guard
+from services import user_memory_guard
 from services.prompt_tier import PromptTier, resolve_prompt_tier
 from utils.helpers import iso_cutoff
 
@@ -40,8 +40,6 @@ MAX_PLATFORM_URL_LEN = 200
 # MAX_FIELD_LEN = 80, which would truncate mid-name; a role id is an id.
 MAX_DISPLAY_NAME_LEN = 120
 MAX_ROLE_ID_LEN = 64
-# trinity-enterprise#1059: one or two plain-words sentences from a policy.
-MAX_USAGE_NOTICE_LEN = 400
 MAX_STAKEHOLDER_LEN = 140
 # Ended asks (trinity-enterprise#611): the agent's own request ids, how each
 # ended and when — a bounded list, one day back.
@@ -154,7 +152,7 @@ All operator communication is **asynchronous**. A human may answer in minutes or
 2. **End your turn.** Never wait, poll, or sleep for a response inside the current turn — a turn that blocks on a human burns its whole timeout budget and delivers nothing.
 3. **Act on the outcome in a later turn.** Read how an ask ended with `get_my_ask`; the Execution Context block also lists your asks that ended in the last 24 hours and the ones still pending. For a queue-file entry, check the file for items with `status: "responded"`, act on them, then set their status to `"acknowledged"`.
 
-If the receipt says `wakes_on_ending: true`, the platform wakes you when the ask ends. Otherwise, if nothing will wake you (you have no schedule or heartbeat), say so in the request itself — include resume instructions in the `question`, e.g. "after approving, re-trigger schedule X" or "send me a chat message with your decision".
+By default the platform wakes you when a person ends the ask: their answer or their cancel starts one turn of yours with the ending in its context, so never tell a person to write to you again after they answer — their answer alone brings you back. An expiry wakes nobody: you read it on your next turn, in the Execution Context block or with `get_my_ask`. The receipt confirms the wake with `wakes_on_ending: true`. Only when it says `false` (your owner switched the wake off) and nothing else will wake you (no schedule or heartbeat), say so in the request itself — include resume instructions in the `question`, e.g. "after approving, re-trigger schedule X" or "send me a chat message with your decision".
 
 #### Ask before irreversible actions
 
@@ -369,6 +367,7 @@ _GUARDRAIL_PATH_DENY: tuple[str, ...] = (
     "/home/developer/.trinity/read-only-config.json",
     "/opt/trinity/*",
     "/etc/claude-code/*",
+    "/var/lib/trinity/*",
 )
 # The same file's `path_allow` (#3868): names the slash-free deny rules skip.
 # `.env.example` holds variable names only and the compatibility check needs it.
@@ -850,10 +849,9 @@ async def summarize_user_memory_background(
                 f"[MemSummarize] Dropped {len(dropped)} line(s) from the conversation_summary "
                 f"for {user_email} on {agent_name}: rules={sorted(set(dropped))}"
             )
-        if new_summary:
-            db.update_public_user_memory_conversation_summary(
-                agent_name, user_email, new_summary
-            )
+        if new_summary and db.update_public_user_memory_conversation_summary(
+            agent_name, user_email, new_summary, expected_previous=existing_summary  # ent#962: never over an undo
+        ):
             logger.info(
                 f"[MemSummarize] Updated conversation_summary for {user_email} "
                 f"on {agent_name} ({len(new_summary)} chars)"
@@ -995,11 +993,6 @@ class ExecutionContext:
     # holds a seat itself). Rendered as its own line; the `Primary human` line
     # and its role stay the primary's.
     served_role_id: Optional[str] = None
-    # trinity-enterprise#1059: the registered admission policies' notice for
-    # this agent (`admission_policy.notice`) — e.g. how much of its usage share
-    # it has used and that it should raise its ask. Auto-filled; None in a
-    # build with no policy registered, so the block renders exactly as before.
-    usage_notice: Optional[str] = None
 
     @staticmethod
     def derive_mode(triggered_by: Optional[str]) -> str:
@@ -1282,10 +1275,6 @@ def build_execution_context(ctx: ExecutionContext) -> str:
         if ended_asks:
             lines.append(f"- **Ended asks (last {ENDED_ASKS_WINDOW_HOURS} h)**: {ended_asks}")
 
-        usage = _sanitize_field(ctx.usage_notice, max_len=MAX_USAGE_NOTICE_LEN)
-        if usage:
-            lines.append(f"- **Usage**: {usage}")
-
         timestamp = _sanitize_field(
             ctx.timestamp, max_len=MAX_TIMESTAMP_LEN
         ) or datetime.now(timezone.utc).isoformat()
@@ -1363,7 +1352,7 @@ def _resolve_ended_asks(agent_name: Optional[str]) -> List[dict]:
     try:
         from services.operator_queue_service import _RESERVED_ID_PREFIXES
 
-        return db.list_recent_operator_queue_endings(
+        rows = db.list_recent_operator_queue_endings(
             agent_name,
             iso_cutoff(hours=ENDED_ASKS_WINDOW_HOURS),
             MAX_ENDED_ASKS + 1,
@@ -1372,6 +1361,36 @@ def _resolve_ended_asks(agent_name: Optional[str]) -> List[dict]:
     except Exception as e:
         logger.debug(f"_resolve_ended_asks({agent_name}) failed: {e}")
         return []
+    return rows
+
+
+def carried_answer_wakes(ended_asks: Optional[List[dict]]) -> List[str]:
+    """The answered asks a turn composed with ``ended_asks`` actually LISTS
+    (abilityai/trinity-enterprise#1108 AC #4) — the first ``MAX_ENDED_ASKS``
+    rows, as `_render_ended_asks` lists them; the overflow row the resolver
+    reads only makes the line say "and more", and is not carried."""
+    return [
+        r["request_id"] for r in (ended_asks or [])[:MAX_ENDED_ASKS]
+        if r.get("disposition") == "answered" and r.get("request_id")
+    ]
+
+
+def _note_carried_wakes(ctx: ExecutionContext) -> None:
+    """Hand the answers this turn's Execution Context line carries to
+    `operator_resume_service`, keyed by the execution. They are marked `woken`
+    only when THAT execution's SUCCESS terminal lands — never here: composing a
+    prompt proves nothing reached the agent (a schedule firing at a stopped
+    agent composes, the HTTP call fails, and a compose-time mark would drop
+    the pending wake silently). Best-effort, after the block is built."""
+    if not ctx.execution_id or not ctx.agent_name:
+        return
+    try:
+        ids = carried_answer_wakes(ctx.ended_asks)
+        if ids:
+            from services import operator_resume_service
+            operator_resume_service.note_carried_wakes(ctx.execution_id, ctx.agent_name, ids)
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"_note_carried_wakes({ctx.execution_id}): not recorded: {e}")
 
 
 def _resolve_pending_asks(agent_name: Optional[str]) -> tuple:
@@ -1515,11 +1534,10 @@ def compose_system_prompt(
                     ctx.served_role_id if ctx.served_role_id is not None else served_role
                 ),
             )
-        if ctx.usage_notice is None:
-            ctx = replace(ctx, usage_notice=admission_policy.notice(ctx.agent_name))
         block = build_execution_context(ctx)
         if block:
             parts.append(block)
+            _note_carried_wakes(ctx)
 
     if caller_prompt and caller_prompt.strip():
         parts.append(caller_prompt.strip())

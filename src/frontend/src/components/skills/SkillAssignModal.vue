@@ -10,11 +10,15 @@
     Select all / Deselect all build the draft in one click, over the rows
     listed here only; Save asks first when it would drop an approval
     requirement. The rules are utils/skillAssignDraft.js.
+    trinity-enterprise#660: the filter narrows the rows and both bulk buttons,
+    never the draft, so a tick it hides is still counted and saved, and each
+    row says what Save would do to it.
   -->
   <BaseModal
     :model-value="modelValue"
     aria-label="Assign shared skills"
-    panel-class="relative w-full max-w-xl rounded-lg bg-white p-6 shadow-xl dark:bg-gray-800"
+    panel-class="relative flex max-h-[calc(100dvh-2rem)] w-full max-w-xl flex-col overflow-y-auto rounded-lg bg-white p-6 shadow-xl dark:bg-gray-800"
+    :close-on-backdrop="!dirty"
     @update:model-value="$emit('update:modelValue', $event)"
     @focusin="onFocusIn"
   >
@@ -23,11 +27,21 @@
       Tick to assign, then save. Assigned skills are copied into the agent now if it is running, or when it next starts.
     </p>
 
+    <SkillFilterBar
+      v-model:query="query"
+      v-model:source="source"
+      v-model:category="category"
+      :source-options="sourceOptions"
+      :category-options="categoryOptions"
+      testid-prefix="skill-assign"
+      class="mt-3"
+    />
+
     <!-- The list's header row. Both buttons are always drawn, and only their
          disabled state changes, so nothing here moves the list. -->
     <div class="mt-3 flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
       <span class="text-[12.5px] tabular-nums text-gray-600 dark:text-gray-300" data-testid="skill-assign-count">
-        {{ listed.length }} skill{{ listed.length === 1 ? '' : 's' }} in the library
+        {{ countLine }}
       </span>
       <div class="flex items-center gap-1">
         <BaseButton
@@ -53,10 +67,19 @@
       </div>
     </div>
 
+    <!-- One height whatever the filter leaves: the panel is centred, so a list
+         that shrank would move the input under the cursor (principle 6). It
+         gives way, down to its floor, on a window too short for the panel. -->
     <ul
-      class="mt-2 max-h-[50vh] overflow-y-auto divide-y divide-gray-200 dark:divide-gray-750 rounded-lg border border-gray-200 dark:border-gray-750"
+      ref="listEl"
+      class="mt-2 h-[50vh] min-h-40 overflow-y-auto divide-y divide-gray-200 dark:divide-gray-750 rounded-lg border border-gray-200 dark:border-gray-750"
       data-testid="skill-assign-list"
     >
+      <li
+        v-if="!listed.length"
+        class="px-4 py-3 text-[12.5px] text-gray-600 dark:text-gray-300"
+        data-testid="skill-assign-no-match"
+      >{{ store.library.length ? 'No skill matches the filter.' : 'The library has no skills yet.' }}</li>
       <li v-for="s in listed" :key="s.name" class="px-4 py-3">
         <label
           class="flex items-start gap-3"
@@ -89,7 +112,8 @@
               >deprecated</BaseBadge>
               <SkillContractChips :skill="s" />
             </div>
-            <p v-if="s.description" class="mt-1 text-[12.5px] text-gray-600 dark:text-gray-300">{{ s.description }}</p>
+            <!-- trinity-enterprise#584: the one empty state. -->
+            <p class="mt-1 text-[12.5px] text-gray-600 dark:text-gray-300" :class="{ italic: describeSkill(s.description).missing }">{{ describeSkill(s.description).text }}</p>
             <p
               v-if="supersededLine(s)"
               :title="supersededLine(s)"
@@ -100,26 +124,45 @@
                  turns into a missing_binary/missing_env warning later. -->
             <p v-if="deps(s)" class="mt-1 text-[11px] text-gray-500 dark:text-gray-400">Requires {{ deps(s) }}</p>
           </div>
+          <!-- Reserved, so a tick never reflows the row (principle 6). -->
+          <span class="flex w-20 flex-none justify-end pt-0.5">
+            <BaseBadge
+              v-if="marks.get(s.name)"
+              size="sm"
+              :variant="marks.get(s.name).variant"
+              :title="marks.get(s.name).kind === 'kept' ? keptTitle(store.viaSets(s.name)) : undefined"
+              :data-testid="`skill-pending-${s.name}`"
+            >{{ marks.get(s.name).label }}</BaseBadge>
+          </span>
         </label>
       </li>
     </ul>
 
-    <div class="mt-4 flex items-center gap-3">
-      <BaseButton
-        :disabled="!dirty"
-        :loading="store.saving"
-        loading-label="Saving…"
-        data-testid="skill-assign-save"
-        @click="onSaveClick"
-      >
-        Save assignments
-      </BaseButton>
-      <BaseButton
-        v-if="dirty"
-        variant="ghost"
-        data-testid="skill-assign-reset"
-        @click="resetDraft"
-      >Reset</BaseButton>
+    <!-- Below 640 px the verbs take the first row and the count shares the
+         second with Close, so neither row comes and goes with `dirty`. -->
+    <div class="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2">
+      <div class="flex w-full items-center gap-3 sm:w-auto">
+        <BaseButton
+          :disabled="!dirty"
+          :loading="store.saving"
+          loading-label="Saving…"
+          data-testid="skill-assign-save"
+          @click="onSaveClick"
+        >
+          Save assignments
+        </BaseButton>
+        <BaseButton
+          v-if="dirty"
+          variant="ghost"
+          data-testid="skill-assign-reset"
+          @click="resetDraft"
+        >Reset</BaseButton>
+      </div>
+      <span
+        class="min-w-0 flex-1 text-[12.5px] tabular-nums text-gray-600 dark:text-gray-300"
+        aria-live="polite"
+        data-testid="skill-assign-pending"
+      >{{ pendingText }}</span>
       <BaseButton
         ref="closeButton"
         variant="secondary"
@@ -135,6 +178,11 @@
       class="mt-3 text-[12.5px]"
       :class="noticeClass(notice.tone)"
     >{{ notice.text }}</p>
+    <p
+      v-if="notice && notice.text && notice.dependencies"
+      data-testid="skills-saved-dependencies"
+      class="mt-1 text-[12.5px] text-status-warning-700 dark:text-status-warning-400"
+    >{{ notice.dependencies }}</p>
     <p
       v-if="notice && notice.text && notice.deprecation"
       data-testid="skills-saved-deprecation"
@@ -158,22 +206,26 @@
 
 <script setup>
 import { computed, ref, watch } from 'vue'
+import { describeSkill } from '../../utils/skillDescription'
 import BaseBadge from '../base/BaseBadge.vue'
 import BaseButton from '../base/BaseButton.vue'
 import BaseModal from '../base/BaseModal.vue'
 import ConfirmDialog from '../ConfirmDialog.vue'
 import SkillContractChips from './SkillContractChips.vue'
+import SkillFilterBar from './SkillFilterBar.vue'
 import { deps, supersededLine, DEPRECATED_TITLE } from './contract'
+import { useSkillFilter } from '../../composables/useSkillFilter'
 import { useSkillsStore } from '../../stores/skills'
 import { useSkillGatesStore } from '../../stores/skillGates'
-import { deliveryText, deprecationText } from '../../utils/skillDelivery'
+import { deliveryText, deprecationText, dependencyText } from '../../utils/skillDelivery'
 import {
   bulkSelection, withSelectAll, withDeselectAll, removedNames, gatedRemovals, removalConfirm, REMOVAL_CONFIRM_TEXT,
+  pendingChanges, pendingLine, pendingMarks, keptTitle,
 } from '../../utils/skillAssignDraft'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
-  // The tab's shared notice ({text, tone, deprecation}), so a sync on the tab
+  // The tab's shared notice ({text, tone, dependencies, deprecation}), so a sync on the tab
   // clears the note here too — one note, one owner.
   notice: { type: Object, default: null },
 })
@@ -189,8 +241,11 @@ const draft = ref([...store.individualNames])
 const pendingRemoval = ref(null)
 
 // The rows this dialog lists. The list and both bulk buttons read this one
-// value, so a filter added later narrows all three at once.
-const listed = computed(() => store.library)
+// value, so the filter narrows all three at once (trinity-enterprise#660).
+// Nothing that decides a save reads it: those read the whole draft.
+const {
+  query, source, category, sourceOptions, categoryOptions, filtered: listed, active: filtering, reset: resetFilter,
+} = useSkillFilter(() => store.library)
 const isLocked = (name) => store.setOnlyNames.has(name)
 
 // ent#530: the draft is the INDIVIDUAL list — what the bulk PUT replaces.
@@ -198,6 +253,18 @@ const dirty = computed(() => {
   const a = [...draft.value].sort().join('|')
   const b = [...store.individualNames].sort().join('|')
   return a !== b
+})
+
+const countLine = computed(() => {
+  const total = store.library.length
+  if (filtering.value) return `${total} in the library · ${listed.value.length} shown`
+  return `${total} skill${total === 1 ? '' : 's'} in the library`
+})
+
+// A new query starts at the first row.
+const listEl = ref(null)
+watch([query, source, category], () => {
+  if (listEl.value) listEl.value.scrollTop = 0
 })
 
 function resetDraft() {
@@ -214,9 +281,20 @@ watch(() => [...store.individualNames].sort().join('|'), resetDraft)
 watch(() => props.modelValue, (open) => {
   if (!open) return
   resetDraft()
+  resetFilter()
   pendingRemoval.value = null
   lastFocus = null
 })
+
+// trinity-enterprise#660: what a save would change, over the whole draft, in
+// the removal confirm's own terms (`setHeldNames` below).
+const pending = computed(() => pendingChanges({
+  saved: store.individualNames,
+  draft: draft.value,
+  setHeld: setHeldNames(),
+}))
+const pendingText = computed(() => pendingLine(pending.value))
+const marks = computed(() => pendingMarks(pending.value))
 
 // trinity-enterprise#539: Select all / Deselect all change the draft only;
 // Save still writes, and Reset still restores the saved set.
@@ -247,7 +325,10 @@ function deselectAll() {
 // outside the overlay that owns Esc and Tab. After every change that can do
 // that, put it back: on the bulk button that undoes the one that lost it,
 // else on Close. `lastFocus` is the last control inside the dialog that held
-// focus, for when the one that had it is already gone.
+// focus, for when the one that had it is already gone. A row the filter removes
+// under focus lands here too (Safari keeps focus on a checkbox across a mouse
+// pick in a <select>): `bulk` reads the listed rows, and the source below is a
+// fresh array, so any change to them re-runs this.
 let lastFocus = null
 function onFocusIn(event) {
   lastFocus = event.target
@@ -331,6 +412,7 @@ async function onSave() {
       text: verdict.text,
       tone: verdict.tone,
       needsSync: verdict.needsSync,
+      dependencies: dependencyText(store.lastDelivery) || '',
       deprecation: deprecationText(store.lastDelivery) || '',
     })
   }

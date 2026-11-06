@@ -17,6 +17,7 @@
  */
 
 import { z } from "zod";
+import { resolveExecutionId } from "./execution_id.js";
 import { TrinityClient } from "../client.js";
 import type { McpAuthContext } from "../types.js";
 import { deriveMcpIdempotencyKey } from "./chat.js";
@@ -38,9 +39,10 @@ export function createDecisionTools(client: TrinityClient, requireApiKey: boolea
     agent_name || (authContext?.scope === "agent" ? authContext.agentName ?? null : null);
 
   // trinity-enterprise#839: an agent-scoped key records and reads only its OWN
-  // agent's seat decisions — the backend refuses anything else with a 403. The
-  // override exists for a user-scoped key; an agent key naming another agent is
-  // refused here, before any call, so the tool stops advertising the pivot.
+  // agent's seat decisions — the backend refuses anything else with a 403 — so
+  // an agent key naming another agent is refused here, before any call.
+  // trinity-enterprise#1062: these are the agent's own doors; a user-scoped key
+  // is refused by the backend (`agent_only`), so there is no override to offer.
   const foreignTarget = (authContext: McpAuthContext | undefined, agent_name?: string): string | null =>
     authContext?.scope === "agent" && agent_name && agent_name !== authContext.agentName
       ? JSON.stringify(
@@ -83,9 +85,17 @@ export function createDecisionTools(client: TrinityClient, requireApiKey: boolea
         "**Direction is not a seat decision**: pricing, positioning, roadmap → pass `scope: \"direction\"`; it is " +
         "kept as `routed` and you take it to canon as a proposal.\n\n" +
         "Works in a user-facing session (public link, Slack, Telegram, WhatsApp) or a scheduled run addressed to " +
-        "one person. Supply your `execution_id` from the Execution Context block.",
+        "one person, and only for the turn you are in: a run that is not live is refused `decision_turn_not_live`; " +
+        "while another person's turn or a headless run is live on this agent, `decision_turn_ambiguous`. A refused " +
+        "decision is NOT recorded — tell the person so, and record it on a later turn.",
       parameters: z.object({
-        execution_id: z.string().min(1).describe("Your current execution_id (Execution Context block)."),
+        execution_id: z
+          .string()
+          .min(1)
+          .optional()
+          .describe(
+            "Not needed: the platform supplies the turn's own id, and only that turn is accepted — a decision is " +
+            "recorded in the turn it was made, never for an earlier one. A typed id is never used to record."),
         outcome: z.enum(["approved", "deferred", "killed"]).describe("What happened to the thing decided."),
         decided: z.string().min(1).max(2000).describe("What was decided — one line."),
         alternatives: z
@@ -108,11 +118,12 @@ export function createDecisionTools(client: TrinityClient, requireApiKey: boolea
         agent_name: z
           .string()
           .optional()
-          .describe("For a user-scoped key only. An agent-scoped key always records for its own agent; naming another is refused."),
+          .describe("Omit. These are the agent's own tools: an agent key always uses its own agent (naming another " +
+            "is refused) and a user-scoped key is refused by the platform (`agent_only`)."),
       }),
       execute: async (
         args: {
-          execution_id: string;
+          execution_id?: string;
           outcome: "approved" | "deferred" | "killed";
           decided: string;
           alternatives: string[];
@@ -136,17 +147,91 @@ export function createDecisionTools(client: TrinityClient, requireApiKey: boolea
         const resolvedAgent = resolveAgent(authContext, args.agent_name);
         if (!resolvedAgent) return noAgent();
 
-        const { agent_name: _omit, ...body } = args;
+        // trinity-enterprise#1062: the turn the agent is IN, from the header the
+        // platform writes. The backend records only for that header (#2984), so
+        // an agent key without it — an interactive session (`manual`), or an
+        // image that predates the header — is told here, plainly, instead of
+        // forwarding a typed id the backend can only answer `not_this_turn`.
+        const platformTurn = authContext?.executionId && authContext.executionId !== "manual"
+          ? authContext.executionId : undefined;
+        if (authContext?.scope === "agent" && !platformTurn) {
+          return JSON.stringify({
+            success: false,
+            error: "The platform did not supply this turn's id (an interactive session, or an agent image that " +
+              "predates it), so nothing was recorded. Tell the person the decision was not recorded.",
+          }, null, 2);
+        }
+        const turn = platformTurn ?? resolveExecutionId(authContext, args.execution_id);
+        if (!turn) {
+          return JSON.stringify({ success: false, error: "No execution_id for this turn; nothing was recorded." }, null, 2);
+        }
+        const { agent_name: _omit, ...rest } = args;
+        const body = { ...rest, execution_id: turn };
         const idempotencyKey = deriveMcpIdempotencyKey([
-          "record_decision", resolvedAgent, args.execution_id, args.decided,
+          "record_decision", resolvedAgent, turn, args.decided,
         ]);
-        console.log(`[record_decision] ${resolvedAgent} execution=${args.execution_id} outcome=${args.outcome}`);
+        console.log(`[record_decision] ${resolvedAgent} execution=${turn} outcome=${args.outcome}`);
         try {
-          const result = await apiClient.recordSeatDecision(resolvedAgent, body, idempotencyKey);
+          // #2984 review: the turn as the PLATFORM saw it (#2392), never the
+          // model-typed execution_id.
+          const result = await apiClient.recordSeatDecision(resolvedAgent, body, idempotencyKey, platformTurn);
           return JSON.stringify(result, null, 2);
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : String(error);
           console.error(`[record_decision] Error: ${errorMessage}`);
+          return JSON.stringify({ success: false, error: errorMessage }, null, 2);
+        }
+      },
+    },
+
+    getAutonomy: {
+      name: "get_autonomy",
+      description:
+        "What you may do for this seat WITHOUT being asked, per kind of ask (the autonomy dial). " +
+        "Every class starts on-request and graduates only when its decision records show the same " +
+        "criterion applied repeatedly with no reversals AND the seat has not rated you down recently — " +
+        "never because the ask is frequent.\n\n" +
+        "Read it before acting unprompted. A class you do not see here is on-request. Each class that " +
+        "is not graduated carries `blocked_by`, and `blocker_text` spells each reason out — say that " +
+        "reason to the person instead of guessing. Three of them are not about you: the instance dial " +
+        "being below L2, the agent's autonomy switch being off, and an operator holding the class.\n\n" +
+        "The seat is resolved from the turn you are in (the platform supplies its id). Only for that turn: a run " +
+        "that is not live is refused `decision_turn_not_live`, and while another person's turn or a headless run " +
+        "is live on this agent, `decision_turn_ambiguous`.",
+      parameters: z.object({
+        execution_id: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Your current execution_id (Execution Context block). The platform supplies the turn's own id; this is the fallback."),
+        agent_name: z
+          .string()
+          .optional()
+          .describe("Omit. These are the agent's own tools: an agent key always uses its own agent (naming another " +
+            "is refused) and a user-scoped key is refused by the platform (`agent_only`)."),
+      }),
+      execute: async (
+        args: { execution_id?: string; agent_name?: string },
+        context: any
+      ) => {
+        const authContext = requireApiKey ? context?.session : undefined;
+        const refused = foreignTarget(authContext, args.agent_name);
+        if (refused) return refused;
+        const apiClient = getClient(authContext);
+        const resolvedAgent = resolveAgent(authContext, args.agent_name);
+        if (!resolvedAgent) return noAgent();
+        // trinity-enterprise#1062: the header's turn, as the sibling tools do —
+        // a stale typed id would now be refused `decision_turn_not_live`.
+        const turn = resolveExecutionId(authContext, args.execution_id);
+        if (!turn) {
+          return JSON.stringify({ success: false, error: "No execution_id for this turn." }, null, 2);
+        }
+        try {
+          const result = await apiClient.getSeatAutonomy(resolvedAgent, turn);
+          return JSON.stringify(result, null, 2);
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          console.error(`[get_autonomy] Error: ${errorMessage}`);
           return JSON.stringify({ success: false, error: errorMessage }, null, 2);
         }
       },
@@ -158,17 +243,24 @@ export function createDecisionTools(client: TrinityClient, requireApiKey: boolea
         "The standing decisions of the seat you are serving — criterion first — so you can apply the same " +
         "criterion to the same kind of ask and cite the id in record_decision. Returns the seat's active " +
         "records (set include_history for superseded / closed / reversed / expired) and the seat's evidence " +
-        "stats (recorded, reused, per ask class: criteria, reversals, stable). No person emails are returned.",
+        "stats (recorded, reused, per ask class: criteria, reversals, stable). No person emails are returned. " +
+        "Only for the turn you are in: a run that is not live is refused `decision_turn_not_live`, and while " +
+        "another person's turn or a headless run is live on this agent, `decision_turn_ambiguous`.",
       parameters: z.object({
-        execution_id: z.string().min(1).describe("Your current execution_id (Execution Context block)."),
+        execution_id: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Your current execution_id (Execution Context block). The platform supplies the turn's own id; this is the fallback."),
         include_history: z.boolean().optional().describe("Also return non-active records (default false)."),
         agent_name: z
           .string()
           .optional()
-          .describe("For a user-scoped key only. An agent-scoped key always reads its own agent; naming another is refused."),
+          .describe("Omit. These are the agent's own tools: an agent key always uses its own agent (naming another " +
+            "is refused) and a user-scoped key is refused by the platform (`agent_only`)."),
       }),
       execute: async (
-        args: { execution_id: string; include_history?: boolean; agent_name?: string },
+        args: { execution_id?: string; include_history?: boolean; agent_name?: string },
         context: any
       ) => {
         const authContext = requireApiKey ? context?.session : undefined;
@@ -177,8 +269,12 @@ export function createDecisionTools(client: TrinityClient, requireApiKey: boolea
         const apiClient = getClient(authContext);
         const resolvedAgent = resolveAgent(authContext, args.agent_name);
         if (!resolvedAgent) return noAgent();
+        const turn = resolveExecutionId(authContext, args.execution_id);
+        if (!turn) {
+          return JSON.stringify({ success: false, error: "No execution_id for this turn." }, null, 2);
+        }
         try {
-          const result = await apiClient.listSeatDecisions(resolvedAgent, args.execution_id, !!args.include_history);
+          const result = await apiClient.listSeatDecisions(resolvedAgent, turn, !!args.include_history);
           return JSON.stringify(result, null, 2);
         } catch (error) {
           const errorMessage = error instanceof Error ? error.message : String(error);

@@ -28,6 +28,7 @@ from services.docker_utils import volume_get, image_get
 from services.agent_auth import derive_agent_token, merge_auth_headers
 from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, settings_service
 from utils.helpers import sanitize_agent_name
+from services import tool_access_profiles
 
 logger = logging.getLogger(__name__)
 
@@ -341,6 +342,7 @@ def get_accessible_agents(current_user: User) -> list:
             agent_dict["is_system"] = False
             agent_dict["autonomy_enabled"] = False
             agent_dict["read_only_enabled"] = False
+            agent_dict["tool_access_profile"] = tool_access_profiles.FULL
             agent_dict["github_repo"] = None
             agent_dict["memory_limit"] = None
             agent_dict["cpu_limit"] = None
@@ -363,6 +365,10 @@ def get_accessible_agents(current_user: User) -> list:
         agent_dict["is_system"] = metadata.get("is_system", False)
         agent_dict["autonomy_enabled"] = metadata.get("autonomy_enabled", False)
         agent_dict["read_only_enabled"] = metadata.get("read_only_enabled", False)
+        # trinity-enterprise#341: the list's Read-only toggle shows ON for the
+        # Strict read-only profile only — the same resolver as the detail page.
+        agent_dict["tool_access_profile"] = tool_access_profiles.resolve(
+            metadata.get("guardrails_config"), metadata.get("read_only_enabled", False))["profile"]
         agent_dict["github_repo"] = metadata.get("github_repo")
         agent_dict["memory_limit"] = metadata.get("memory_limit")
         agent_dict["cpu_limit"] = metadata.get("cpu_limit")
@@ -728,13 +734,21 @@ def check_guardrails_env_matches(container, agent_name: str) -> bool:
     env_dict = {e.split("=", 1)[0]: e.split("=", 1)[1] for e in env_list if "=" in e}
     current = env_dict.get("AGENT_GUARDRAILS", "")
 
-    desired = db.get_guardrails_config(agent_name) or {}
-    expected = _json.dumps(desired) if desired else ""
+    # ent#926: `visitor_shell` is read live by the backend on every turn, so a
+    # change to it alone must not recreate the container.
+    # trinity-enterprise#341: `tool_access` records the owner's profile choice;
+    # what it enforces is already in `disallowed_tools` and the read-only layer
+    # (live), so a change to the record alone must not recreate the container.
+    live = {"visitor_shell", "tool_access"}
+    desired = {k: v for k, v in (db.get_guardrails_config(agent_name) or {}).items() if k not in live}
 
     if not desired and not current:
         return True
     try:
-        return _json.loads(current or "{}") == desired
+        running = _json.loads(current or "{}")
+        if isinstance(running, dict):
+            running = {k: v for k, v in running.items() if k not in live}
+        return running == desired
     except (_json.JSONDecodeError, ValueError):
         return False
 

@@ -306,10 +306,11 @@
             @toggle="$emit('toggle-autonomy')"
           />
         </div>
-        <!-- Read-Only Toggle (not for system agents) -->
+        <!-- Read-Only Toggle (not for system agents) — the shortcut to the
+             Strict read-only tool-access profile (trinity-enterprise#341) -->
         <div v-if="canEditIdentity" class="flex items-center ml-4">
           <ReadOnlyToggle
-            :model-value="agent.read_only_enabled"
+            :model-value="isStrict(agent)"
             :loading="readOnlyLoading"
             size="sm"
             @toggle="$emit('toggle-read-only')"
@@ -475,6 +476,7 @@ import SparklineChart from './SparklineChart.vue'
 import { useFormatters } from '../composables'
 import { formatRelativeTime } from '../utils/timestamps'
 import { CANVAS_PALETTE } from '../utils/canvasPalette'
+import { isStrict } from '../utils/toolAccess'
 
 const props = defineProps({
   agent: {

@@ -38,7 +38,7 @@ The **Permissions to change itself** card under **Settings › Guardrails › Bo
 | Toggle | Permission | Lets the agent | Without it |
 |--------|-----------|----------------|------------|
 | **Change skills** | `skills.manage` | Assign, unassign and re-deliver skills, and set skill approval gates on other agents — see [Skills and Playbooks](../automation/skills-and-playbooks.md#who-can-change-an-agents-skills) | Every skill change is refused, its own included |
-| **Change other agents' schedules** | `schedules.manage` | Create, change, enable, disable or delete another agent's schedules, and manage any schedule's webhook, its own included | It still manages its own schedules but not their webhooks, and never another agent's |
+| **Change other agents' schedules** | `schedules.manage` | Create, change, enable, disable or delete another agent's schedules, and manage a schedule's webhook, its own included, except on a schedule that delivers to someone other than its owner | It still manages its own schedules but not their webhooks, and never another agent's |
 | **Change instructions** | `instructions.manage` | Write `CLAUDE.md`, `AGENTS.md` and `.claude/` files (not skills) through the Files API, and reset an agent to `main` while keeping its state | Those writes are refused, its own instructions included |
 | **Manage other agents** | `agents.manage` | Create, deploy and delete agents, deploy a system, and change an agent's model, resources, timeout, public-channel model, read-only mode and guardrails | It can still spawn and discard short-lived (ephemeral) helpers |
 | **Start projects** | `projects.manage` | Start a project on its owner's behalf, on installations that offer projects | It still works on projects it is already on |
@@ -54,11 +54,13 @@ The owner and admins see the card; anyone else does not. Only an instance admin,
 
 **When an agent is refused.** An agent without the permission gets a `403` that names it (`skill_management_not_permitted`, `schedule_management_not_permitted`, `instruction_management_not_permitted`, `agent_management_not_permitted` or `project_management_not_permitted`), and the refusal is audited. The message tells the agent to raise a question to its operator whose title includes the permission id (for example `schedules.manage`). The card lists those open requests under **Open permission requests**, with a link to Operations. Answering the request grants nothing: an admin grants the permission on this card.
 
+**In the audit log.** Each call an agent makes on one of these permissions is recorded as `capability_used`, with the agent, its key, the permission and the target. It means the permission let the call through, not that the change succeeded. A refusal is `capability_refused`; a grant or revocation is `capability_grant` or `capability_revoke`. Entries written before this was added use `skill_manager_grant` and `skill_manager_revoke` for **Change skills**.
+
 **After upgrading.** No agent holds the schedule, instruction or agent permissions after the upgrade that introduces them. An orchestrating agent that creates agents, writes another agent's schedules or instructions, or reconfigures agents is refused until an admin grants the permission.
 
 Read the five permissions over MCP with `get_agent_capability_grants` (an agent key reads itself or an agent it spawned; a person key reads as the agent's owner or an admin). Granting stays on this card.
 
-The fence covers the platform's routes, not the agent's own container: an agent can still edit files in its own workspace with its own tools.
+The fence covers the platform's routes, not the agent's own container: an agent can still edit files in its own workspace with its own tools. A permission reaches only agents the same owner owns, and never the system agent.
 
 ### Parallel Capacity
 
@@ -138,9 +140,9 @@ When a breaker is open, the agent header and the agent's Dashboard tile show a "
 
 ### Wake When an Ask Ends
 
-How one of the agent's parked requests (an approval, a question) ended always reaches the agent, but by default it is only read on the agent's *next* turn. An agent with no schedule has no next turn, so an approved action would wait indefinitely. Turn on **Wake this agent when an ask it raised ends** under **Settings › Guardrails › Reliability** and the agent is woken for one turn when a person answers (trigger `operator_response`) — and also when an ask is cancelled or expires, so it stops waiting for an answer that will not come (trigger `operator_ending`, one turn per agent per cancellation sweep or expiry). Off by default.
+How one of the agent's parked requests (an approval, a question) ended always reaches the agent. **Wakes when an ask ends** under **Settings › Guardrails › Reliability** is on by default: the agent is woken for one turn when a person answers (trigger `operator_response`) or cancels the ask (trigger `operator_ending`, one turn per agent per cancellation sweep), so it acts on the decision, or stops waiting for an answer that will not come. An expiry wakes nobody — the agent reads the timeout on its next turn. Switched off, an ending is only read on the agent's *next* turn; an agent with no schedule has no next turn, so an approved action would wait until someone writes to it.
 
-- Each wake-up is one turn the owner pays for: one per answer, one per cancellation or expiry event. A stopped agent is not woken.
+- Each wake-up is one turn the owner pays for: one per answer, one per cancellation event; an expiry costs nothing. A stopped agent is not woken — its answered asks read **Agent not yet woken** and are delivered when it next starts.
 
 - Only the owner or an admin can change it, and never with an agent's key: an agent's own key is refused with `403` even though it acts for the owner. Each wake is a turn the owner pays for, so an agent cannot switch on its own wake-ups. An agent can still read the setting.
 - API: `GET /api/agents/{name}/operator-resume` and `PUT /api/agents/{name}/operator-resume` (`{"enabled": true}`)

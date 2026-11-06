@@ -34,6 +34,7 @@ from dependencies import (
     get_current_user,
     oauth2_scheme,
     require_admin,
+    require_interactive,
     require_person,
     resolve_platform_user_unfloored,
 )
@@ -51,7 +52,7 @@ from services import sync_waiter
 from services.pull_pilot import pull_queue_allowance
 
 from database import db
-from . import agent_page, chat_previews, role_card, seat_decisions, service
+from . import agent_page, autonomy, chat_previews, role_card, seat_decisions, service
 from .models import (
     PortalSessionRename,
     PortalRatingRequest,
@@ -88,7 +89,12 @@ from .models import (
     PortalSeatDecisionRecord,
     PortalSeatDecisionAction,
     PortalSeatDecisionResult,
+    PortalAutonomyDial,
+    PortalAutonomyAction,
+    PortalAutonomyGuard,
+    PortalAutonomyResult,
     PortalAgentReports,
+    PortalChatRead,
     PortalChatState,
     PortalSessionSummary,
     PortalMainReset,
@@ -311,16 +317,37 @@ def portal_auth_verify(body: PortalAuthVerify, request: Request):
                          detail="Too many sign-in attempts.")
     check_otp_rate_limit(otp_scope)  # raises 429 past the cap, before any comparison
 
-    token = service.portal_signin_verify(email, body.code)
+    from routers.auth import SPA_CLIENT  # the one spelling of the SPA's declaration
+    token = service.portal_signin_verify(email, body.code, interactive=body.client == SPA_CLIENT)
     if not token:
         record_otp_attempt(otp_scope, success=False)
+        # #4157: a correct code here now leads to a platform session (via the
+        # hand-off), so a wrong guess also spends the address's PLATFORM budget —
+        # the guesses `/login` would have counted. For EVERY address, account or
+        # not: spending it only for platform accounts made those buckets an
+        # oracle (5 wrong portal codes, then one wrong `/api/auth/email/verify`:
+        # 429 for an account, 401 for an outsider). Not a new lockout: the
+        # platform route already spends both buckets for any address an
+        # unauthenticated caller names (`_email_login_failed`), so the ent#311
+        # isolation never protected them from a deliberate guesser.
+        if email:
+            from routers.auth import record_login_attempt_account_only
+            record_login_attempt_account_only(email, success=False)
+            record_otp_attempt(email, success=False)
         raise HTTPException(status_code=401, detail="Invalid or expired code")
 
     record_otp_attempt(otp_scope, success=True)
     if token is service.PLATFORM_LOGIN_REQUIRED:
         # #3922: the code was right, but this is a platform account. It signs in
         # at `/login`, so it gets the team view, not a client session.
-        raise HTTPException(status_code=409, detail={"reason": "platform_login_required"})
+        # #4157: with a one-time hand-off `/login` redeems, so the correct code
+        # just spent here is the only one the person enters. Only reached after
+        # the code verified, so the token reveals nothing to a guesser (#186).
+        detail = {"reason": "platform_login_required"}
+        handoff = service.platform_login_handoff(email)
+        if handoff:
+            detail["handoff"] = handoff
+        raise HTTPException(status_code=409, detail=detail)
     return PortalSession(token=token, email=email)
 
 
@@ -759,14 +786,18 @@ def portal_unstar_chat(chat_kind: str, chat_id: str,
 
 @router.post("/chat-state/{chat_kind}/{chat_id}/read", status_code=204)
 def portal_mark_chat_read(chat_kind: str, chat_id: str,
+                          body: Optional[PortalChatRead] = None,
                           principal: PortalPrincipal = Depends(get_portal_principal)):
     """Advance this viewer's read cursor — clears the chat's unread count and
-    its share of the agent row's badge. A room's cursor moves only for a
-    credential actively in the room (trinity-enterprise#959); otherwise the
-    same 204, with nothing written."""
+    its share of the agent row's badge, up to ``body.through``: what the client
+    held (trinity-enterprise#1010; no body = up to now). A room's cursor moves
+    only for a credential actively in the room (trinity-enterprise#959), and
+    only in that credential's identity space (#1011); otherwise the same 204,
+    with nothing written."""
     try:
         service.mark_chat_read(principal.email, chat_kind, chat_id,
-                               room_reader=service.room_reader_of(principal))
+                               room_reader=service.room_reader_of(principal),
+                               through=body.through if body else None)
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     return Response(status_code=204)
@@ -813,6 +844,8 @@ async def portal_agent_page(
 @router.get("/agents/{agent_name}/memory", response_model=PortalAgentMemory)
 def portal_agent_memory(
     agent_name: str,
+    before: Optional[str] = Query(default=None, max_length=200,
+                                  description="Cursor from the previous page's next_before (ent#962)"),
     principal: PortalPrincipal = Depends(get_portal_principal),
 ):
     """What this agent remembers about YOU, and what changed it (ent#637).
@@ -824,7 +857,11 @@ def portal_agent_memory(
     """
     email = principal.email
     _require_roster(agent_name, email, principal.is_platform)
-    return agent_page.memory(agent_name, email)
+    try:
+        return agent_page.memory(agent_name, email, before=before)
+    except agent_page.InvalidMemoryCursor:
+        raise HTTPException(status_code=422, detail={"code": "invalid_cursor",
+                                                     "message": "That page cursor is not valid. Reload the memory view."})
 
 
 @router.post("/agents/{agent_name}/memory/writes/{write_id}/undo",
@@ -894,6 +931,70 @@ async def portal_agent_role(
     return await role_card.build_role_card(
         agent_name, email, is_platform=principal.is_platform,
         admit_objectives=admit_objectives)
+
+
+@router.get("/agents/{agent_name}/autonomy", response_model=PortalAutonomyDial)
+def portal_agent_autonomy(
+    agent_name: str,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """What this agent may do unprompted for you, per kind of ask (ent#641).
+
+    Roster-gated like every route here, then seat-filtered: a roster member
+    never sees another seat's ask-class slugs. Reads persist nothing — the
+    verdict is recomputed from the decision record, the rating history and the
+    live conjuncts (instance level, the agent's autonomy switch, the clock)."""
+    email = principal.email
+    _require_roster(agent_name, email, principal.is_platform)
+    return autonomy.page(agent_name, email, is_platform=principal.is_platform)
+
+
+@router.post("/agents/{agent_name}/autonomy/classes/{ask_class}",
+             response_model=PortalAutonomyResult)
+def portal_agent_autonomy_act(
+    agent_name: str,
+    ask_class: str,
+    body: PortalAutonomyAction,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Hold a class on-request, or release it (ent#641).
+
+    Asymmetric on purpose: **hold** is a refusal anyone may make for their own
+    seat; **release** re-enables unprompted work and is the agent owner's alone
+    (a grant, Invariant #8). There is no promote — promotion is earned."""
+    email = principal.email
+    _require_roster(agent_name, email, principal.is_platform)
+    from services import rate_limiter
+    rate_limiter.enforce(f"portal_autonomy:{email}", 30, 60)
+    try:
+        return autonomy.act(agent_name, email, is_platform=principal.is_platform,
+                            ask_class=ask_class, action=body.action, seat=body.seat)
+    except autonomy.AutonomyRefused as e:
+        raise HTTPException(status_code=e.status_code, detail=e.as_detail())
+
+
+@router.post("/agents/{agent_name}/autonomy/classes/{ask_class}/guard",
+             response_model=PortalAutonomyResult)
+def portal_agent_autonomy_guard(
+    agent_name: str,
+    ask_class: str,
+    body: PortalAutonomyGuard,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Record canon's guard-metric cap for a class (owner only, ent#641): a
+    class that moves another role's held metric can never graduate on rating
+    history alone. The default is `not_assessed`, so an unreviewed class says
+    so rather than reading as cleared."""
+    email = principal.email
+    _require_roster(agent_name, email, principal.is_platform)
+    from services import rate_limiter
+    rate_limiter.enforce(f"portal_autonomy:{email}", 30, 60)
+    try:
+        return autonomy.set_guard(agent_name, email, is_platform=principal.is_platform,
+                                  ask_class=ask_class, guard_metric=body.guard_metric,
+                                  seat=body.seat)
+    except autonomy.AutonomyRefused as e:
+        raise HTTPException(status_code=e.status_code, detail=e.as_detail())
 
 
 @router.get("/agents/{agent_name}/decisions", response_model=PortalSeatDecisions)
@@ -1527,14 +1628,18 @@ async def portal_voice_start(
     agent_name: str,
     body: PortalVoiceStartRequest,
     request: Request,
+    response: Response,
     principal: PortalPrincipal = Depends(get_portal_principal),
     token: str = Depends(oauth2_scheme),
 ):
     """Start a real-time voice call bound to a Workspace thread (ent#534).
 
-    Platform principals only — the audio WebSocket (`/ws/voice/{id}`, OSS)
-    authenticates with the platform JWT, which a portal-token client does not
-    hold, so for them this is a uniform 404 like any agent off their roster.
+    Platform principals only — the audio WebSocket (`/ws/voice/{id}`, OSS) is
+    bound to a platform user id, which a portal-token client does not have, so
+    for them this is a uniform 404 like any agent off their roster. The
+    response carries the socket's single-use ticket (trinity-enterprise#595),
+    minted only for an interactive session: a Workspace-only account gets a
+    call, an MCP key does not.
     Under the portal principal rather than the OSS `voice/start` deliberately:
     every Workspace gate (agent-key rejection, the blocked-client check, the
     roster union for owners) is inherited here instead of re-spelled.
@@ -1554,6 +1659,12 @@ async def portal_voice_start(
     # session must carry it — resolved from the same token the principal came
     # from, the way `get_portal_principal` itself does.
     user = await resolve_platform_user_unfloored(request, token)  # past the floor: a Workspace door (ent#837)
+    # trinity-enterprise#595: the response mints a credential, so the resolved
+    # user must be an interactive session (§2.8) — every MCP key scope is refused.
+    require_interactive(user)
+    from services.voice_auth_service import (
+        ORIGIN_WORKSPACE, START_UNAVAILABLE_DETAIL, VoiceTicketIssueError, issue_voice_ticket,
+    )
     from . import voice as workspace_voice
     try:
         result = await workspace_voice.start_workspace_voice(
@@ -1561,18 +1672,37 @@ async def portal_voice_start(
             email=principal.email,
             is_platform=principal.is_platform,
             portal_session_id=body.portal_session_id,
+            mode=body.mode,
             user_id=user.id,
             user_label=user.email or user.username,
             voice_name=body.voice_name,
         )
     except ClientPortalError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
-    except RuntimeError as e:
+    except RuntimeError:
         # The voice service could not persist the session (Redis down) — say
-        # so rather than hand out an id the WebSocket will refuse.
-        logger.error("workspace voice start failed for %s: %s", agent_name, e)
-        raise HTTPException(status_code=503, detail="Voice is unavailable right now. Try again shortly.")
-    return PortalVoiceStartResponse(**result)
+        # so rather than hand out an id the WebSocket will refuse. Fixed words:
+        # the exception text can name the store.
+        logger.error("workspace voice start: the session could not be stored for %s", agent_name)
+        raise HTTPException(status_code=503, detail=START_UNAVAILABLE_DETAIL)
+    from services import direct_voice_service
+    from services.gemini_voice import voice_service
+
+    async def _remove_direct_session(session_id: str) -> None:
+        direct_voice_service.discard_session(session_id)
+
+    # trinity-enterprise#1046: a Direct call's session lives in its own store.
+    remove_session = (_remove_direct_session if result.get("mode") == "direct"
+                      else voice_service.remove_session)
+    try:
+        credential = await issue_voice_ticket(
+            user, result["voice_session_id"],
+            origin=ORIGIN_WORKSPACE, remove_session=remove_session,
+        )
+    except VoiceTicketIssueError:
+        raise HTTPException(status_code=503, detail=START_UNAVAILABLE_DETAIL)
+    response.headers["Cache-Control"] = "no-store"
+    return PortalVoiceStartResponse(**result, **credential)
 
 
 @router.post("/agents/{agent_name}/stt")
@@ -2042,6 +2172,14 @@ async def portal_chat_stream(
     include_owned = principal.is_platform
 
     _require_roster(agent_name, email, include_owned)
+    # trinity-enterprise#1046: a turn may join only the caller's own live Direct call
+    # on this thread. Uniform 404, like any other id the caller cannot see.
+    if body.voice_call_id:
+        from services import direct_voice_service
+        if not principal.is_platform or not direct_voice_service.turn_may_join_call(
+            body.voice_call_id, agent_name=agent_name, email=email, portal_session_id=body.session_id,
+        ):
+            raise HTTPException(status_code=404, detail="Call not found")
     rate_limiter.enforce(
         f"portal_chat:{email}:{agent_name}", PORTAL_CHAT_BURST_LIMIT, 60, detail=_CHAT_LIMIT_DETAIL
     )
@@ -2125,6 +2263,7 @@ async def portal_chat_stream(
             attachments=await service.resolve_turn_attachments(
                 agent_name, email, getattr(body, "attachments", None)),
             person_tags=person_tags,   # trinity-enterprise#631, same rule
+            voice_call_id=body.voice_call_id,   # trinity-enterprise#1046, checked above
         )
     except service.ChatTagError as e:
         idempotency_service.fail(decision)
@@ -2187,6 +2326,72 @@ async def portal_terminate_execution(
         raise HTTPException(status_code=e.status_code, detail=e.detail)
 
 
+async def attach_execution_stream(agent_name: str, execution_id: str, queued_hold):
+    """The agent's stream for one turn, as SSE text. One home for the Workspace's
+    watcher and the Direct call's speech (trinity-enterprise#1046)."""
+    # The agent answers 404 in TWO harmless situations, and treating either
+    # as fatal is what made a mid-turn reload look broken:
+    #
+    #   too early — the client subscribes the instant it gets the 202, but
+    #     the turn passes through admission, capacity and the resume lock
+    #     before the agent registers it. Measured at ~1-2s on a warm agent.
+    #   too late  — the turn is over and the agent has dropped its buffered
+    #     log. Nothing is wrong; the reply is in history.
+    #
+    # So: retry briefly while the turn is still live, and end the stream
+    # cleanly (never `error`) when it simply is not streamable. The client
+    # reads the persisted reply on `stream_end` either way.
+    agent_url = f"http://agent-{agent_name}:8000/api/executions/{execution_id}/stream"
+    try:
+        # #3114: on a pull pilot the turn can wait on the durable queue
+        # until a worker claims it. Hold while the row is queued; the attach
+        # window below starts from the claim.
+        async for tick in queued_hold:
+            yield tick
+        deadline = asyncio.get_event_loop().time() + _STREAM_ATTACH_TIMEOUT_S
+        async with agent_httpx_client(agent_name, timeout=None) as client:
+            while True:
+                async with client.stream("GET", agent_url) as response:
+                    if response.status_code == 200:
+                        async for chunk in response.aiter_text():
+                            yield chunk
+                        return
+                    if response.status_code != 404:
+                        yield f"data: {json.dumps({'type': 'error', 'message': f'Agent returned {response.status_code}'})}\n\n"
+                        yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
+                        return
+                # 404 — is this turn still worth waiting for?
+                if not service.get_turn_inflight_matches(execution_id):
+                    # Finished (or never ran). Not an error: end cleanly so
+                    # the client goes and reads the reply.
+                    yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
+                    return
+                if asyncio.get_event_loop().time() >= deadline:
+                    logger.info(
+                        "[PortalStream] gave up attaching to %s on %s after %ss",
+                        execution_id, agent_name, _STREAM_ATTACH_TIMEOUT_S,
+                    )
+                    yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
+                    return
+                await asyncio.sleep(_STREAM_ATTACH_POLL_S)
+    except httpx.ConnectError:
+        yield f"data: {json.dumps({'type': 'error', 'message': 'Failed to connect to agent'})}\n\n"
+        yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
+    except Exception as e:  # noqa: BLE001 — the stream must always terminate cleanly
+        logger.error("[PortalStream] error streaming %s from %s: %s", execution_id, agent_name, e)
+        yield f"data: {json.dumps({'type': 'error', 'message': 'Stream interrupted'})}\n\n"
+        yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
+
+
+def direct_call_stream(agent_name: str, execution_id: str):
+    """The same stream, for the Direct call's bridge. The caller has already proved the
+    execution is the person's own."""
+    return attach_execution_stream(
+        agent_name, execution_id,
+        sync_waiter.wait_while_queued(execution_id, pull_queue_allowance(agent_name)),
+    )
+
+
 @router.get("/agents/{agent_name}/executions/{execution_id}/stream")
 async def portal_stream_execution(
     agent_name: str,
@@ -2218,64 +2423,9 @@ async def portal_stream_execution(
     if not container or container.status != "running":
         raise HTTPException(status_code=503, detail="Agent is not running")
 
-    async def proxy_stream():
-        # The agent answers 404 in TWO harmless situations, and treating either
-        # as fatal is what made a mid-turn reload look broken:
-        #
-        #   too early — the client subscribes the instant it gets the 202, but
-        #     the turn passes through admission, capacity and the resume lock
-        #     before the agent registers it. Measured at ~1-2s on a warm agent.
-        #   too late  — the turn is over and the agent has dropped its buffered
-        #     log. Nothing is wrong; the reply is in history.
-        #
-        # So: retry briefly while the turn is still live, and end the stream
-        # cleanly (never `error`) when it simply is not streamable. The client
-        # reads the persisted reply on `stream_end` either way.
-        agent_url = f"http://agent-{agent_name}:8000/api/executions/{execution_id}/stream"
-        try:
-            # #3114: on a pull pilot the turn can wait on the durable queue
-            # until a worker claims it. Hold while the row is queued; the attach
-            # window below starts from the claim.
-            async for tick in sync_waiter.wait_while_queued(
-                execution_id, pull_queue_allowance(agent_name)
-            ):
-                yield tick
-            deadline = asyncio.get_event_loop().time() + _STREAM_ATTACH_TIMEOUT_S
-            async with agent_httpx_client(agent_name, timeout=None) as client:
-                while True:
-                    async with client.stream("GET", agent_url) as response:
-                        if response.status_code == 200:
-                            async for chunk in response.aiter_text():
-                                yield chunk
-                            return
-                        if response.status_code != 404:
-                            yield f"data: {json.dumps({'type': 'error', 'message': f'Agent returned {response.status_code}'})}\n\n"
-                            yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
-                            return
-                    # 404 — is this turn still worth waiting for?
-                    if not service.get_turn_inflight_matches(execution_id):
-                        # Finished (or never ran). Not an error: end cleanly so
-                        # the client goes and reads the reply.
-                        yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
-                        return
-                    if asyncio.get_event_loop().time() >= deadline:
-                        logger.info(
-                            "[PortalStream] gave up attaching to %s on %s after %ss",
-                            execution_id, agent_name, _STREAM_ATTACH_TIMEOUT_S,
-                        )
-                        yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
-                        return
-                    await asyncio.sleep(_STREAM_ATTACH_POLL_S)
-        except httpx.ConnectError:
-            yield f"data: {json.dumps({'type': 'error', 'message': 'Failed to connect to agent'})}\n\n"
-            yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
-        except Exception as e:  # noqa: BLE001 — the stream must always terminate cleanly
-            logger.error("[PortalStream] error streaming %s from %s: %s", execution_id, agent_name, e)
-            yield f"data: {json.dumps({'type': 'error', 'message': 'Stream interrupted'})}\n\n"
-            yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
-
+    queued_hold = sync_waiter.wait_while_queued(execution_id, pull_queue_allowance(agent_name))
     return StreamingResponse(
-        proxy_stream(),
+        attach_execution_stream(agent_name, execution_id, queued_hold),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

@@ -46,6 +46,7 @@ from models import (
     activity_state_for_terminal,
 )
 from database import db
+from services import turn_tier_service  # ent#926: a dispatched turn is no higher than its parent
 from services.activity_service import activity_service
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
@@ -89,7 +90,6 @@ from services.event_dispatch_service import (
 )
 from services import idempotency_service
 from services import channel_completion_report
-from services import admission_policy
 from services import dispatch_admission_service
 from services import chat_persistence_service
 from services import skill_gate_service
@@ -103,10 +103,8 @@ from services.platform_prompt_service import (
     is_execution_context_enabled,
 )
 from services.chat_signals import (
-    AdmissionRefused,
     ChatExecutionContext,
     ChatDispatchError,
-    admission_refusal_of,
     chat_trigger,
 )
 from utils.credential_sanitizer import (
@@ -220,8 +218,8 @@ async def prepare_chat_execution(
         message=request.message,
         triggered_by=triggered_by,
         fields=TaskExecutionFields(
-            source_user_id=current_user.id,
-            source_user_email=current_user.email or current_user.username,
+            source_user_id=turn_tier_service.turn_origin_user_id(db, current_user),
+            source_user_email=turn_tier_service.turn_origin_email(db, current_user, current_user.email or current_user.username),
             source_agent_name=x_source_agent,
             source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
             source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
@@ -735,6 +733,8 @@ def _classify_agent_http_failure(
         return TaskExecutionErrorCode.NETWORK
     if is_model_rejection(error_msg):
         return TaskExecutionErrorCode.MODEL_UNSUPPORTED
+    if agent_status_code == 403:
+        return TaskExecutionErrorCode.TURN_REFUSED
     # #3849: the API refused the prompt's length — a 503 from the agent, but
     # not a credential fault.
     if is_prompt_too_long(error_msg):
@@ -796,6 +796,11 @@ async def _apply_sub003_autoswitch(
     # runtime's own sentence as a 400, the status the agent itself answers.
     if code.value == TaskExecutionErrorCode.MODEL_UNSUPPORTED.value:
         raise ChatDispatchError(400, error_msg, headers=code_headers)
+
+    # ent#926: the agent refused this turn for who it is for. Its own sentence,
+    # as the 403 it is; a 503 would tell every caller to retry a refusal.
+    if code.value == TaskExecutionErrorCode.TURN_REFUSED.value:
+        raise ChatDispatchError(403, error_msg, headers=code_headers)
 
     # Only when the WALK ended the turn: a later, unrelated failure (a plain 500
     # after a served switch) keeps the generic wording below, and the walk's
@@ -1465,8 +1470,8 @@ async def run_pulled_chat_turn(
                 triggered_by=triggered_by,
                 on_resume_failure=lambda: db.set_chat_session_claude_id(session.id, None),
                 execution_id=task_execution_id,
-                source_user_id=current_user.id,
-                source_user_email=user_email,
+                source_user_id=turn_tier_service.turn_origin_user_id(db, current_user),
+                source_user_email=turn_tier_service.turn_origin_email(db, current_user, user_email),
                 source_agent_name=x_source_agent,
                 source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
                 source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
@@ -2234,8 +2239,8 @@ async def create_task_execution_and_activities(
         message=request.message,
         triggered_by=triggered_by,
         fields=TaskExecutionFields(
-            source_user_id=current_user.id,
-            source_user_email=current_user.email or current_user.username,
+            source_user_id=turn_tier_service.turn_origin_user_id(db, current_user),
+            source_user_email=turn_tier_service.turn_origin_email(db, current_user, current_user.email or current_user.username),
             source_agent_name=x_source_agent,
             source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
             source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
@@ -2520,13 +2525,6 @@ def _map_task_failure(name, result, *, idem):
     third call site be added later that silently reintroduces the wedge, and the
     wedge is invisible until someone retries a full day later.
     """
-    refusal = getattr(result, "admission_refusal", None)
-    if isinstance(refusal, AdmissionRefused):
-        # trinity-enterprise#1059: an admission policy stopped the turn inside
-        # execute_task (the condition arrived after the /task seam admitted it).
-        # Nothing ran: release the claim and answer the seam's own refusal.
-        idempotency_service.fail(idem)
-        raise refusal
     if result.status in ("failed", "cancelled"):
         # #2889: the producer-side code. The backlog-reconstruct path reads it
         # from the row's `[code]` prefix (#3114); a row with no prefix has none,
@@ -2564,6 +2562,11 @@ def _map_task_failure(name, result, *, idem):
             # #3012: same 400 as the /chat path — a refused model is not an
             # unavailable agent, and a caller must not wait-and-retry it.
             raise ChatDispatchError(400, result.error, headers=code_headers)
+        elif getattr(getattr(result, "error_code", None), "value", None) == (
+            TaskExecutionErrorCode.TURN_REFUSED.value
+        ):
+            # ent#926: same 403 as the /chat path — a refusal, never retried.
+            raise ChatDispatchError(403, result.error, headers=code_headers)
         else:
             raise ChatDispatchError(
                 503,
@@ -2766,12 +2769,6 @@ async def _dispatch_sync_backlog(*, name, execution_id, sync_effective_timeout, 
                 "claude_session_id": row.claude_session_id,
             },
         )
-        # trinity-enterprise#1059: a share that ran out while this task waited
-        # in the backlog. The drain closed the row SKIPPED with `[usage_share]`
-        # (`_admission_policy_gate`); read back here the refusal must answer
-        # the seam's 429, not a success shaped from the row. One rebuild rule
-        # for every row reader (`chat_signals.admission_refusal_of`).
-        result.admission_refusal = admission_refusal_of(result, name)
         # #2329: the pull sink signals `result=None` with the session it saved
         # the turn to; the DB-poll wake (another worker) carries none.
         sync_chat_session_id = (wait_payload or {}).get("chat_session_id")
@@ -2807,8 +2804,8 @@ async def _dispatch_sync_immediate(
         agent_name=name,
         message=request.message,
         triggered_by=triggered_by,
-        source_user_id=current_user.id,
-        source_user_email=current_user.email or current_user.username,
+        source_user_id=turn_tier_service.turn_origin_user_id(db, current_user),
+        source_user_email=turn_tier_service.turn_origin_email(db, current_user, current_user.email or current_user.username),
         source_agent_name=x_source_agent,
         source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
         source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
@@ -2996,8 +2993,8 @@ async def dispatch_parallel_task(
                     model=request.model,
                     timeout_seconds=request.timeout_seconds,
                     allowed_tools=request.allowed_tools,
-                    source_user_id=current_user.id,
-                    source_user_email=current_user.email or current_user.username,
+                    source_user_id=turn_tier_service.turn_origin_user_id(db, current_user),
+                    source_user_email=turn_tier_service.turn_origin_email(db, current_user, current_user.email or current_user.username),
                     source_agent_name=x_source_agent,
                     source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
                     source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
@@ -3017,11 +3014,6 @@ async def dispatch_parallel_task(
                 name, request, held, current_user.id,
                 current_user.email or current_user.username)
         raise
-
-    # trinity-enterprise#1059: a registered admission policy, at the /chat
-    # seam's point — before the claim, the uploads, the row and the acquire.
-    # Raises AdmissionRefused (the router maps it to a named 429).
-    await admission_policy.enforce(name, triggered_by=derivation.triggered_by, source="task")
 
     # RELIABILITY-006 (#525): idempotency begin/replay (shared with /chat, RD2).
     idem, replay = dispatch_admission_service.begin_task_idempotency(

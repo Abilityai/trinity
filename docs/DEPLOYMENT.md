@@ -45,6 +45,12 @@ one of them (`container-security.yml` → `verify-compose-file-sets`):
 | Production (source build) | `docker compose -f docker-compose.prod.yml up -d` (+ `-f docker-compose.prod.enterprise.yml` with the enterprise submodule) | bind mount `${TRINITY_DATA_PATH:-./trinity-data}` |
 | Hosted (prebuilt GHCR images) | `./scripts/deploy/start.sh --hosted` — day-two: `docker compose -f docker-compose.hosted.yml …` | bind mount `${TRINITY_DATA_PATH:-./trinity-data}` |
 
+**Updating any of these: `./scripts/deploy/update.sh`** (#3007). It reads which
+file set the host runs from the running backend's compose labels — including the
+enterprise overlay — so an update never recreates the backend from the wrong set.
+`--check` previews it and changes nothing; see
+[Upgrading](user-docs/guides/deploying/upgrading.md).
+
 **Never stack the dev file under prod or hosted** (`-f docker-compose.yml -f
 docker-compose.prod.yml`). Compose merges list-type keys by concatenation, so the
 combination either fails validation on the duplicated hardening entries (Compose
@@ -236,7 +242,11 @@ minute after boot and every five minutes after that. When the address changed it
 rewrites the Caddyfile and the certificate, rewrites `FRONTEND_URL` only if it
 still points at the old IP (a domain you set is kept), and recreates the backend
 from the images already on the instance. It never pulls or upgrades Trinity, and
-it logs only when something changed or failed. Allow a few minutes after a start before opening the new address. An
+it logs only when something changed or failed. If the Caddyfile was edited by hand
+since Trinity wrote it, the new address is **not applied at all** — `.env`, Caddy
+and the backend all stay on the old one — and every tick logs why, until you move
+your own sites to `/etc/caddy/Caddyfile.d/*.caddy` and run `start.sh --provision
+--cloud aws --refresh-ip --caddy-overwrite` once. Allow a few minutes after a start before opening the new address. An
 Elastic IP avoids the change altogether.
 
 **No public IPv4.** `start.sh` stops with "this EC2 instance has no public IPv4
@@ -423,8 +433,9 @@ If you frequently pull `dev`, alias this to a single command in your
 shell — Trinity does not currently auto-detect the staleness on
 `start.sh` because the cost of doing so on every cold start is too high
 relative to how rarely the failure occurs (see #557 for the discussion).
-A future `scripts/deploy/upgrade.sh` will wrap backup + rebuild + start
-+ verify for the explicit upgrade path.
+For the explicit upgrade path, `./scripts/deploy/update.sh` wraps preflight +
+backup + checkout + rebuild + restart + published-URL verification, and
+rebuilds whichever platform images the update needs (#3007).
 
 **Redis connection errors**
 - Ensure Redis is running: `docker compose ps redis`

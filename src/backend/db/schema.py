@@ -16,7 +16,7 @@ Tables are organized by feature area:
 - Settings: system_settings
 - Public Links: agent_public_links, public_link_verifications, public_link_usage
 - Public Chat: public_chat_sessions, public_chat_messages, public_user_memory, public_user_memory_writes
-- Tandem: agent_role_readiness, seat_decisions
+- Tandem: agent_role_readiness, seat_decisions, seat_ask_class_state
 - Git: agent_git_config
 - Skills: agent_skills
 - Tags: agent_tags
@@ -102,7 +102,7 @@ TABLES = {
             a2a_exposed INTEGER DEFAULT 0,
             a2a_scope TEXT DEFAULT 'public',  -- inert since ent#885; drop under #746
             a2a_keyless_internal INTEGER DEFAULT 1,  -- inert since ent#885; drop under #746
-            operator_resume_enabled INTEGER DEFAULT 0,
+            operator_resume_enabled INTEGER,  -- tri-state since ent#1108: NULL = platform default (on), 0 = owner OFF, 1 = owner ON
             memory_opt_out INTEGER DEFAULT 0,
             tts_voice_replies_enabled INTEGER DEFAULT 0,
             tts_voice_id TEXT,
@@ -764,7 +764,7 @@ TABLES = {
             room_id TEXT NOT NULL,
             kind TEXT NOT NULL,                        -- agent | user | workspace_user
             identity TEXT NOT NULL,                    -- agent name, user id, or verified email
-            role TEXT NOT NULL DEFAULT 'member',       -- member | scribe | moderator
+            role TEXT NOT NULL DEFAULT 'member',       -- member | scribe | moderator | collaborator
             joined_at TEXT NOT NULL,
             left_at TEXT,
             -- THE delta-injection cursor: the highest seq this participant has seen.
@@ -773,6 +773,10 @@ TABLES = {
             -- Session-tab cold-fallback counter.
             cached_session_id TEXT,
             consecutive_resume_failures INTEGER NOT NULL DEFAULT 0,
+            -- trinity-enterprise#701: the first seq a PERSON may read. 0 = the
+            -- whole transcript (the creator, every row before #701); a person
+            -- seated mid-conversation starts at the seq after the last message.
+            visible_from_seq INTEGER NOT NULL DEFAULT 0,
             UNIQUE(room_id, kind, identity)
         )
     """,
@@ -1136,6 +1140,58 @@ TABLES = {
         )
     """,
 
+    # ent#641 (P12): the autonomy dial's earned half — one row per (agent,
+    # seat, ask class). The row records what was EARNED: the state, the
+    # evidence it rests on, and `evidence_expires_at` (the EARLIEST review_by
+    # of the window — evidence stops existing when its first record does).
+    # Everything that can change underneath it — the instance level, the
+    # agent's autonomy switch, the clock — is ANDed at READ time
+    # (`services/autonomy_dial_service.live_verdict`), never written here: a
+    # materialised verdict outlives its own evidence silently, and a level
+    # change would otherwise be an unbounded fleet-wide write. The instance
+    # LEVEL is not here at all — it is one validated `system_settings` key.
+    # trinity-enterprise#1107: terms of use per instance — one row per (person,
+    # terms version): the record of which text they accepted and when. A version
+    # bump asks again. `door` names the invitation an optional module bound the
+    # acceptance to (the ent#1054 invite door), else NULL. `users` is never
+    # ALTERed for it; the text itself is a `system_settings` row with a shipped
+    # default (`services/terms_defaults.py`).
+    "terms_acceptances": """
+        CREATE TABLE IF NOT EXISTS terms_acceptances (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            email TEXT,
+            terms_version TEXT NOT NULL,
+            accepted_at TEXT NOT NULL,
+            door TEXT,
+            actor_ip TEXT,
+            UNIQUE(user_id, terms_version)
+        )
+    """,
+
+    "seat_ask_class_state": """
+        CREATE TABLE IF NOT EXISTS seat_ask_class_state (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            seat_email TEXT NOT NULL,
+            ask_class TEXT NOT NULL,
+            state TEXT NOT NULL DEFAULT 'on_request',
+            blocked_by TEXT NOT NULL DEFAULT '[]',
+            evidence TEXT NOT NULL DEFAULT '{}',
+            evidence_hash TEXT,
+            evidence_expires_at TEXT,
+            guard_metric TEXT NOT NULL DEFAULT 'not_assessed',
+            held INTEGER NOT NULL DEFAULT 0,
+            held_by TEXT,
+            held_at TEXT,
+            promoted_at TEXT,
+            demoted_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(agent_name, seat_email, ask_class)
+        )
+    """,
+
     # ent#638 (R25): the seat-level decision record — why a thing was approved,
     # deferred or killed, by whom, on which criterion, and what would reverse
     # it. Lintable fields only (`notes` is the one prose field); a decision
@@ -1183,6 +1239,11 @@ TABLES = {
     # ent#419's "write history with rollback" layer, built here because that AC
     # needed it. Not keyed to `public_user_memory.id`: the memory row is created
     # on demand and may be re-created; `(agent_name, user_email)` is the identity.
+    # trinity-enterprise#962: `section` says which half of the blob a row
+    # changed — `notes` (the agent's write_user_memory, every row before #962)
+    # or `summary` (the background summarizer, `triggered_by = 'summarizer'`).
+    # For a `summary` row, `previous_notes` / `new_notes` hold the SUMMARY text;
+    # readers filter on `section` (the person's list defaults to `notes`).
     "public_user_memory_writes": """
         CREATE TABLE IF NOT EXISTS public_user_memory_writes (
             id TEXT PRIMARY KEY,
@@ -1195,7 +1256,8 @@ TABLES = {
             new_notes TEXT NOT NULL DEFAULT '',
             written_at TEXT NOT NULL,
             undone_at TEXT,
-            undone_by TEXT
+            undone_by TEXT,
+            section TEXT NOT NULL DEFAULT 'notes'
         )
     """,
 
@@ -1865,6 +1927,8 @@ TABLES = {
             last_seen_at TEXT,
             replaces TEXT,
             replaced_by TEXT,
+            -- abilityai/trinity-enterprise#1108 AC #4: NULL | 'pending' (agent not yet woken) | 'woken'
+            wake_state TEXT,
             FOREIGN KEY (responded_by_id) REFERENCES users(id)
         )
     """,
@@ -2032,6 +2096,11 @@ TABLES = {
             status TEXT NOT NULL DEFAULT 'pending',
             decided_by INTEGER,
             decided_at TEXT,
+            requester_channel_id TEXT,
+            requester_handle TEXT,
+            requester_name TEXT,
+            requester_chat_id TEXT,
+            requester_thread_id TEXT,
             UNIQUE(agent_name, email)
         )
     """,
@@ -2219,6 +2288,12 @@ TABLES = {
 # =============================================================================
 
 INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_terms_acceptances_email ON terms_acceptances(email)",
+    # trinity-enterprise#1107 ruling A(1): a Workspace portal session has no
+    # `users` row — its row is keyed by (email, version); UNIQUE(user_id, version)
+    # alone treats two NULL user_ids as distinct.
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_terms_acceptances_email_version "
+    "ON terms_acceptances(email, terms_version) WHERE user_id IS NULL",
     # Core indexes
     "CREATE INDEX IF NOT EXISTS idx_users_username ON users(username)",
     "CREATE INDEX IF NOT EXISTS idx_users_auth0_sub ON users(auth0_sub)",
@@ -2419,6 +2494,9 @@ INDEXES = [
     # Seat decisions (ent#638)
     "CREATE INDEX IF NOT EXISTS idx_seat_decisions_seat ON seat_decisions(agent_name, seat_email, status)",
     "CREATE INDEX IF NOT EXISTS idx_seat_decisions_review ON seat_decisions(agent_name, review_by)",
+
+    # Autonomy dial (ent#641)
+    "CREATE INDEX IF NOT EXISTS idx_seat_ask_class_state_seat ON seat_ask_class_state(agent_name, seat_email)",
 
     # System views indexes
     "CREATE INDEX IF NOT EXISTS idx_system_views_owner ON system_views(owner_id)",

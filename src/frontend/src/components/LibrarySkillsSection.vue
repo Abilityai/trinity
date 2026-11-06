@@ -1,5 +1,7 @@
 <template>
-  <div>
+  <div class="flex grow basis-0 flex-col">
+    <!-- trinity#3448: this root, the state wrapper and the has-skills branch are
+         links in the 0px-basis chain from Library.vue down to BoundedRegion. -->
     <div class="flex items-start justify-between gap-4 mb-4">
       <div class="min-w-0">
         <h2 class="text-[18px] font-[650] text-gray-900 dark:text-gray-100">Skills</h2>
@@ -54,7 +56,7 @@
          under it. Keyed on `view.state`, a verdict from `viewState` — never
          `store.loading`, which the #1927 ratchet counts as a bare gate even
          though this store derives it correctly. -->
-    <div>
+    <div class="flex grow basis-0 flex-col">
       <SkeletonLoader
         v-if="view.state === 'loading'"
         variant="rows"
@@ -112,60 +114,88 @@
            library-derived string. Assignment stays a WRITE on each agent's
            Skills tab (ent#182: one skill model); ent#384 added the READ of
            who already holds each skill, not a second write path. -->
-      <div v-else-if="hasSkills">
+      <div v-else-if="hasSkills" class="flex grow basis-0 flex-col">
         <!-- ent#530: sets declared by the synced sources, above the skills they name. -->
         <LibrarySkillSets />
-        <ul class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          <li v-for="s in store.library" :key="s.name">
-            <BaseCard class="h-full flex flex-col">
-              <div class="flex items-center gap-2 flex-wrap">
-                <span class="text-[14px] font-[550] text-gray-900 dark:text-gray-100">{{ s.name }}</span>
-                <!-- ent#237 multi-source provenance. -->
-                <BaseBadge v-if="s.source_name" variant="info">{{ s.source_name }}</BaseBadge>
-                <!-- #3135: `shadowed_by` is `{source_id, source_name}` objects, so
-                     the tooltip names each source (id if it has no name) — the
-                     one fact the badge exists to give (ent#237 AC#4). -->
-                <BaseBadge
-                  v-if="s.shadowed_by?.length"
-                  variant="warning"
-                  :title="`Shadowed by: ${s.shadowed_by.map((x) => x.source_name || x.source_id).join(', ')}`"
-                  :data-testid="`skill-shadowed-library-${s.name}`"
-                >shadowed</BaseBadge>
-                <!-- ent#672: a retired skill stays in the grid, flagged — an
-                     operator whose agents hold it must still find it here. -->
-                <BaseBadge
-                  v-if="s.deprecated"
-                  variant="warning"
-                  :title="DEPRECATED_TITLE"
-                  :data-testid="`skill-deprecated-library-${s.name}`"
-                >deprecated</BaseBadge>
-              </div>
-              <p v-if="s.description" class="mt-1 text-[12.5px] text-gray-600 dark:text-gray-400 flex-grow">{{ s.description }}</p>
-              <div v-else class="flex-grow"></div>
-              <!-- The author's text, interpolated. It can be a sentence, so it
-                   is clamped with the whole of it on hover. -->
-              <p
-                v-if="supersededLine(s)"
-                :title="supersededLine(s)"
-                :data-testid="`skill-superseded-library-${s.name}`"
-                class="mt-1 text-[12.5px] text-status-warning-700 dark:text-status-warning-400 break-words line-clamp-2"
-              >{{ supersededLine(s) }}</p>
-              <SkillContractChips :skill="s" show-version class="mt-2" />
-              <p v-if="deps(s)" class="mt-1 text-[11px] text-gray-600 dark:text-gray-400">Requires {{ deps(s) }}</p>
+        <!-- trinity-enterprise#660: narrows these cards only. The sets above
+             and the orphaned assignments below keep their own lists. -->
+        <SkillFilterBar
+          v-model:query="query"
+          v-model:source="source"
+          v-model:category="category"
+          :source-options="sourceOptions"
+          :category-options="categoryOptions"
+          :total="totalLine"
+          testid-prefix="library-skills"
+        />
+        <!-- trinity#3448: the grid scrolls here and never grows the page. -->
+        <BoundedRegion
+          ref="region"
+          label="Skills in the library"
+          class="mt-1 -mx-1 px-1 py-1"
+          data-testid="library-skills-region"
+        >
+          <ul class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            <!-- Over the whole library, hidden with v-show: AssignedAgents keeps
+                 its pick and a failed assign's error locally, and unmounting
+                 the card with the filter would lose them. -->
+            <li
+              v-for="s in store.library"
+              v-show="shownNames.has(s.name)"
+              :key="s.name"
+              :data-testid="`library-skill-${s.name}`"
+            >
+              <BaseCard class="h-full flex flex-col">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="text-[14px] font-[550] text-gray-900 dark:text-gray-100">{{ s.name }}</span>
+                  <!-- ent#237 multi-source provenance. -->
+                  <BaseBadge v-if="s.source_name" variant="info">{{ s.source_name }}</BaseBadge>
+                  <!-- #3135: `shadowed_by` is `{source_id, source_name}` objects, so
+                       the tooltip names each source (id if it has no name) — the
+                       one fact the badge exists to give (ent#237 AC#4). -->
+                  <BaseBadge
+                    v-if="s.shadowed_by?.length"
+                    variant="warning"
+                    :title="`Shadowed by: ${s.shadowed_by.map((x) => x.source_name || x.source_id).join(', ')}`"
+                    :data-testid="`skill-shadowed-library-${s.name}`"
+                  >shadowed</BaseBadge>
+                  <!-- ent#672: a retired skill stays in the grid, flagged — an
+                       operator whose agents hold it must still find it here. -->
+                  <BaseBadge
+                    v-if="s.deprecated"
+                    variant="warning"
+                    :title="DEPRECATED_TITLE"
+                    :data-testid="`skill-deprecated-library-${s.name}`"
+                  >deprecated</BaseBadge>
+                </div>
+                <!-- trinity-enterprise#584: the one empty state, never a guess
+                     from the body (the backend's first-line fallback is gone). -->
+                <p class="mt-1 text-[12.5px] text-gray-600 dark:text-gray-400 flex-grow" :class="{ italic: describeSkill(s.description).missing }">{{ describeSkill(s.description).text }}</p>
+                <!-- The author's text, interpolated. It can be a sentence, so it
+                     is clamped with the whole of it on hover. -->
+                <p
+                  v-if="supersededLine(s)"
+                  :title="supersededLine(s)"
+                  :data-testid="`skill-superseded-library-${s.name}`"
+                  class="mt-1 text-[12.5px] text-status-warning-700 dark:text-status-warning-400 break-words line-clamp-2"
+                >{{ supersededLine(s) }}</p>
+                <SkillContractChips :skill="s" show-version class="mt-2" />
+                <p v-if="deps(s)" class="mt-1 text-[11px] text-gray-600 dark:text-gray-400">Requires {{ deps(s) }}</p>
 
-              <!-- ent#384: who already holds this skill. -->
-              <AssignedAgents :skill-name="s.name" class="mt-3" />
+                <!-- ent#384: who already holds this skill. -->
+                <AssignedAgents :skill-name="s.name" class="mt-3" />
 
-              <!-- ent#386 replaced the "assign via an agent's Skills tab →"
-                   link-out that stood here. The block above now carries the
-                   assign control itself, so the page that tells you a skill is
-                   unused is also the page that can fix it. The link-out is not
-                   kept as a fallback: two routes to the same write is the
-                   parallel-mechanism problem ent#182 closed, and the agent's
-                   Skills tab remains reachable from every holder chip. -->
-            </BaseCard>
-          </li>
-        </ul>
+                <!-- ent#386 replaced the "assign via an agent's Skills tab →"
+                     link-out that stood here. The block above now carries the
+                     assign control itself, so the page that tells you a skill is
+                     unused is also the page that can fix it. The link-out is not
+                     kept as a fallback: two routes to the same write is the
+                     parallel-mechanism problem ent#182 closed, and the agent's
+                     Skills tab remains reachable from every holder chip. -->
+              </BaseCard>
+            </li>
+          </ul>
+        </BoundedRegion>
 
       </div>
 
@@ -209,17 +239,21 @@
 </template>
 
 <script setup>
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { viewState } from '../utils/loadingState'
 import { useSkillsLibraryStore } from '../stores/skillsLibrary'
 import { useRole } from '../composables/useRole'
+import { useSkillFilter } from '../composables/useSkillFilter'
 import SkillContractChips from './skills/SkillContractChips.vue'
+import SkillFilterBar from './skills/SkillFilterBar.vue'
 import AssignedAgents from './skills/AssignedAgents.vue'
 import LibrarySkillSets from './skills/LibrarySkillSets.vue'
 import { deps, supersededLine, DEPRECATED_TITLE } from './skills/contract'
+import { describeSkill } from '../utils/skillDescription'
 import BaseBadge from './base/BaseBadge.vue'
 import BaseButton from './base/BaseButton.vue'
 import BaseCard from './base/BaseCard.vue'
+import BoundedRegion from './BoundedRegion.vue'
 import InlineError from './InlineError.vue'
 import SkeletonLoader from './SkeletonLoader.vue'
 import LoadFailed from './LoadFailed.vue'
@@ -232,6 +266,22 @@ const shortSha = computed(() =>
 )
 
 const hasSkills = computed(() => store.library.length > 0)
+
+const {
+  query, source, category, sourceOptions, categoryOptions, filtered, active: filtering,
+} = useSkillFilter(() => store.library)
+const shownNames = computed(() => new Set(filtered.value.map((s) => s.name)))
+const totalLine = computed(() => {
+  const total = store.library.length
+  const skills = `${total} skill${total === 1 ? '' : 's'}`
+  if (!filtering.value) return skills
+  return filtered.value.length ? `${skills} · ${filtered.value.length} shown` : `${skills} · No skill matches the filter.`
+})
+
+// A new query starts at the first card.
+const region = ref(null)
+watch([query, source, category], () => region.value?.scrollToTop())
+
 // One verdict for the whole section (#1927's helper): "no data yet" is the only
 // thing that shows a placeholder — a background refresh with skills on screen
 // never re-flashes it.

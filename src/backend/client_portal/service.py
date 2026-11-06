@@ -47,7 +47,6 @@ from services.chat_title import (
 from config import PORTAL_SOURCE_CHANNEL
 from services import login_policy_gate, skill_gate_map_service, turn_context
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
-from services.chat_signals import AdmissionRefused, admission_refusal_of
 from services.channel_completion_report import (
     COMPLETION_SOURCE_DONE, COMPLETION_SOURCE_FAILED, COMPLETION_SOURCE_NOTICE,
 )
@@ -179,16 +178,16 @@ PORTAL_FAILURE_CATEGORIES = (
     # failure. Not `invalid_model`: the client did not choose this model, so
     # there is no stored preference to clear. Only an operator can fix it.
     "model_unsupported",
+    # trinity-enterprise#926 — the agent's runtime (Gemini CLI, Codex) cannot hold
+    # a turn to what this person may do, so it refused it before starting. The
+    # agent's own sentence names the runtime and what the owner can change. Not
+    # retryable: resending meets the same refusal.
+    "turn_refused",
     # trinity-enterprise#751 — the message invokes a skill that needs a person's
     # approval and could not be put up for one (refused by name; nothing ran).
     # Not retryable: resending meets the same refusal. A request that WAS put up
     # for approval is not a failure at all — the turn answers with the notice.
     "gated",
-    # trinity-enterprise#1059 — an admission policy stopped the turn before it
-    # ran (today: the agent's share of its subscription is used up). Not
-    # retryable: re-sending meets the same refusal until the window frees or
-    # the share is raised; the policy's own sentence says which and when.
-    "limit",
     "internal",            # anything uncategorised; copy is fixed, never raw
 )
 
@@ -326,7 +325,6 @@ def platform_login_admits(email: str | None) -> bool:
     addr = (email or "").strip().lower()
     if not addr:
         return False
-    from config import EMAIL_AUTH_ENABLED
     from database import db as core_db
     try:
         user = core_db.get_user_by_email(addr)
@@ -334,13 +332,44 @@ def platform_login_admits(email: str | None) -> bool:
             return False
         if user.get("password"):
             return True
-        setting = core_db.get_setting_value("email_auth_enabled", str(EMAIL_AUTH_ENABLED).lower())
-        if str(setting).lower() != "true" or not login_policy_gate.email_code_allowed():
-            return False
-        return bool(core_db.is_email_whitelisted(addr))
+        return _platform_email_login_open(core_db, addr)
     except Exception as exc:  # noqa: BLE001 — fall back to the unchanged client door
         logger.warning("[#3922] platform-account lookup failed; using the client door: %s", exc)
         return False
+
+
+def _platform_email_login_open(core_db, addr: str) -> bool:
+    """The platform email login would take this address: email login on, the
+    login policy allows codes, and the address is allow-listed (#2381)."""
+    from config import EMAIL_AUTH_ENABLED
+    setting = core_db.get_setting_value("email_auth_enabled", str(EMAIL_AUTH_ENABLED).lower())
+    if str(setting).lower() != "true" or not login_policy_gate.email_code_allowed():
+        return False
+    return bool(core_db.is_email_whitelisted(addr))
+
+
+def platform_login_handoff(email: str | None) -> str | None:
+    """#4157 — after a CORRECT code for a platform account, a one-time token
+    `/login` redeems at `POST /api/auth/email/handoff`, so the person does not
+    need a second emailed code.
+
+    Minted only when the platform email login would take the address. A
+    password-only account the email door refuses gets None and signs in with
+    its password, as before. Never call this before the code has verified:
+    the token is what tells the inbox owner the address has an account (#186).
+    """
+    addr = (email or "").strip().lower()
+    if not addr:
+        return None
+    from database import db as core_db
+    try:
+        if not _platform_email_login_open(core_db, addr):
+            return None
+    except Exception as exc:  # noqa: BLE001 — no token; `/login` asks for a code
+        logger.warning("[#4157] hand-off admission check failed: %s", type(exc).__name__)
+        return None
+    from services import login_handoff_service
+    return login_handoff_service.mint(addr)
 
 
 def portal_signin_request(email: str | None) -> str | None:
@@ -362,7 +391,7 @@ def portal_signin_request(email: str | None) -> str | None:
     return core_db.create_login_code(email, expiry_minutes=10)["code"]
 
 
-def portal_signin_verify(email: str | None, code: str | None):
+def portal_signin_verify(email: str | None, code: str | None, *, interactive: bool = False):
     """Step 2: verify the code AND re-check access, then mint a portal session
     token (a verified email, no platform account). Returns None on any failure.
 
@@ -381,7 +410,9 @@ def portal_signin_verify(email: str | None, code: str | None):
     if not email_has_access(email):
         return None
     from dependencies import PORTAL_MINT_OTP, create_portal_session_token
-    return create_portal_session_token(email, minted_by=PORTAL_MINT_OTP)
+    # `interactive`: the Workspace SPA's own declaration (ent#1107 ruling A) —
+    # the session the terms gate asks.
+    return create_portal_session_token(email, minted_by=PORTAL_MINT_OTP, interactive=interactive)
 
 
 def portal_exchange(email: str | None) -> str | None:
@@ -1123,13 +1154,14 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
     # ent#534: the Workspace's real-time voice capability — instance-level and
     # principal-kind-level, resolved once here like `multi_agent_chat`. The
     # roster is THE capability channel for this surface (#2128).
-    from .voice import realtime_voice_capability
+    from .voice import direct_voice_capability, realtime_voice_capability
     return PortalRoster(
         client_email=(email or None),
         agents=cards,
         multi_agent_chat_available=multi_agent_chat,
         projects_available=_projects_available(include_owned, email),
         realtime_voice=realtime_voice_capability(include_owned),
+        direct_voice=direct_voice_capability(include_owned),
         # ent#403: instance-level, so it rides the roster rather than every card.
         # Empty for a non-platform principal — belt to the per-card braces: the
         # ROUTER is the control (a client that fabricated a `model` is refused
@@ -1365,7 +1397,7 @@ def _use_case_hints(use_cases) -> list[PortalPlaybook]:
         text = uc.strip()[:_MAX_USE_CASE_CHARS]
         if not text:
             continue
-        hints.append(PortalPlaybook(title=text, description=None, starter_prompt=text))
+        hints.append(PortalPlaybook(title=text, description=None, starter_prompt=text, kind="use_case"))
         if len(hints) >= _MAX_USE_CASE_HINTS:
             break
     return hints
@@ -1534,6 +1566,7 @@ async def _agent_briefing(agent_name: str, availability: str = "ready"):
             PortalPlaybook(
                 title=(p.title or "")[:_MAX_HINT_TITLE_CHARS],
                 starter_prompt=(p.starter_prompt or "")[:_MAX_HINT_STARTER_CHARS],
+                kind=p.kind,   # ent#584: a use case stays one on the wire
             )
             for p in playbooks[:_MAX_SEARCHABLE_PLAYBOOKS]
         ]
@@ -2394,8 +2427,12 @@ def _refuse_turn_during_voice_call(session_id: str, *, voice_call_id: str | None
     this chat"), so the call could not run a single task. Its rows carry the
     call id, and `get_platform_rows_since_last_reply` skips them as a cursor,
     so the delta the guard protects stays whole.
+
+    trinity-enterprise#1046: a Direct call's `vd_` id DOES arrive on a request, so it
+    never passes here. The route checked it is the caller's own Direct call, and that
+    proves nothing about a Live call on the thread: only a dispatcher id is a bypass.
     """
-    if voice_call_id:
+    if voice_call_id and not voice_call_id.startswith("vd_"):
         return
     from .voice import voice_call_active
     if voice_call_active(session_id):
@@ -2617,6 +2654,15 @@ def _format_voice_delta(rows: list[dict], *, budget: int = _SPOKEN_CONTEXT_MAX_C
     if not lines:
         return ""
     return VOICE_DELTA_HEADER + "\n" + "\n".join(lines)
+
+
+DIRECT_CALL_ETIQUETTE = (
+    "The person is on a voice call. Their words were transcribed, so names and numbers may be "
+    "misheard: confirm them before acting on them. Your reply is read aloud. Usually use one to "
+    "three short sentences, unless asked for more. Avoid markdown, URLs and ids in what you say. "
+    "Put anything that must be seen in <screen>...</screen>, which is shown and not read. Say what "
+    "you are about to do before long work."
+)
 
 
 def _build_portal_system_prompt(agent_name: str, email: str, *, retrieved=()) -> str | None:
@@ -2907,7 +2953,8 @@ async def portal_chat(agent_name: str, message: str, email: str,
                       resolved_model: str | None = None,
                       # ent#551 — a turn dispatched from a voice call carries the
                       # call's id on both its rows (typed rows, `source` NULL):
-                      # the attribution, and nothing else. Never from a request.
+                      # the attribution, and nothing else. From a request only for a
+                      # Direct call, validated at the router (ent#1046).
                       voice_call_id: str | None = None,
                       # ent#555 — the canvas on screen, validated at the router.
                       # Stamped on the execution so the agent's tools default to it.
@@ -3236,6 +3283,10 @@ async def portal_chat(agent_name: str, message: str, email: str,
     # byte-identical to the pre-#1022 one while memory is off (the default).
     system_prompt = (_build_portal_system_prompt(agent_name, email, retrieved=retrieved)
                      if retrieved else _build_portal_system_prompt(agent_name, email))
+    # trinity-enterprise#1046: this reply will be read aloud. A prompt suffix, not a
+    # rewrite of what is said.
+    if voice_call_id and voice_call_id.startswith("vd_"):
+        system_prompt = f"{system_prompt}\n\n{DIRECT_CALL_ETIQUETTE}" if system_prompt else DIRECT_CALL_ETIQUETTE
 
     # ent#358: the shared resume engine — cached uuid → per-(agent, uuid) lock →
     # `persist_session=True` → one cold retry if the JSONL is gone. Identical to
@@ -3359,15 +3410,6 @@ async def portal_chat(agent_name: str, message: str, email: str,
     result = turn.result
 
     status = getattr(result, "status", None)
-    # trinity-enterprise#1059: the attribute when the refusal happened in this
-    # worker, the row's `skipped` + `usage_share` shape when the turn was
-    # refused on another one (a drained backlog) — one predicate for both.
-    refusal = admission_refusal_of(result, agent_name)
-    if isinstance(refusal, AdmissionRefused):
-        # Nothing ran, and the policy's sentence is written for a person (the
-        # budget, when it frees, whether an ask is pending) — shown as is,
-        # never the internal copy.
-        raise ClientPortalError(429, refusal.message, category="limit", retryable=False)
     if status == "cancelled":
         # ent#155 review (NEW-1): a cancellation is not a failure, and saying so
         # only in the browser was not enough. The client-side suppression shields
@@ -3416,6 +3458,13 @@ async def portal_chat(agent_name: str, message: str, email: str,
                 "again won't help. An admin needs to update the agent image or "
                 "pick another model.",
                 category="model_unsupported", retryable=False,
+            )
+        if code == "TURN_REFUSED":
+            raise ClientPortalError(
+                403,
+                result.error or "This agent can't take this conversation on its current runtime. "
+                "Its owner can change that.",
+                category="turn_refused", retryable=False,
             )
         if code in ("AUTH", "BILLING"):
             # #2638: "re-sending re-fails" is only true while nothing changed
@@ -4278,7 +4327,9 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                             # #3265 — see `portal_chat`.
                             attachments: str | None = None,
                             # trinity-enterprise#631 — see `portal_chat`.
-                            person_tags: tuple | None = None) -> dict:
+                            person_tags: tuple | None = None,
+                            # trinity-enterprise#1046 — already validated at the router.
+                            voice_call_id: str | None = None) -> dict:
     """Begin a turn and return as soon as it is dispatchable.
 
     Returns ``{execution_id, session_id}``. The caller subscribes to the
@@ -4390,7 +4441,8 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
                               reply_context=reply_context,
                               gate_is_person=gate_is_person,
                               gate_credential=gate_credential,
-                              person_tags=person_tags)
+                              person_tags=person_tags,
+                              voice_call_id=voice_call_id)
         except ClientPortalError as e:
             # There is no request left to raise into — the 202 went out long ago
             # — so the ONLY way this reaches the client is the record written
@@ -5917,7 +5969,8 @@ def _chat_state_room_left(email: str) -> bool:
 def get_chat_state(email: str, unread: dict[str, int] | None = None,
                    room_reader: tuple[str, str] | None = None,
                    room_unread: dict[str, int] | None = None,
-                   sees_all_rooms: bool = False) -> dict:
+                   sees_all_rooms: bool = False,
+                   as_of: str | None = None) -> dict:
     """Star + unread state for every chat the caller has state for.
 
     `unread` lets a caller pass counts it already read in the same statement as
@@ -5938,6 +5991,13 @@ def get_chat_state(email: str, unread: dict[str, int] | None = None,
     platform admin, who lists every room through `GET /api/rooms` anyway) keeps
     the admin's OWN starred rows for rooms they are not in; those still count 0.
     """
+    # trinity-enterprise#1010: the instant this state is read AS OF, returned so
+    # the client can send it back as the read write's `through` — "I held
+    # everything up to here". Stamped BEFORE any count is read (a caller that
+    # read its counts first passes the instant it stamped before them): stamped
+    # after, an arrival committed between the two would sit inside `as_of` yet
+    # be missing from what the client was shown, and its read would swallow it.
+    as_of = as_of or utc_now_iso()
     rows = db.get_chat_state(email)
     unread = db.count_unread_by_session(email) if unread is None else unread
     if room_unread is None:
@@ -5948,22 +6008,38 @@ def get_chat_state(email: str, unread: dict[str, int] | None = None,
     chats = []
     seen_threads: set[str] = set()
     seen_rooms: set[str] = set()
+    # trinity-enterprise#1011: a room's cursor lives in a row per identity space
+    # (`db.room_cursor_kind`), its star on the plain `room` row. A room is ONE
+    # entry, present when either row exists: the star from the `room` row, the
+    # presence of a read from THIS reader's space row. Another space's row is
+    # never read here — it is the other identity's state, and listing a room off
+    # it would hand this credential the id of a room it may not be in.
+    own_space = db.room_cursor_kind(room_reader[0]) if room_reader else None
+    room_rows: dict[str, dict] = {}
     for r in rows:
         kind, cid = r.get("chat_kind"), r.get("chat_id")
         if not kind or not cid:
             continue
-        if kind == "room" and my_rooms is not None and cid not in my_rooms:
+        if kind == "room" or (own_space and kind == own_space):
+            if my_rooms is not None and cid not in my_rooms:
+                continue
+            entry = room_rows.setdefault(cid, {"starred": False})
+            if kind == "room":
+                entry["starred"] = bool(r.get("starred_at"))
             continue
-        if kind == "thread":
-            seen_threads.add(cid)
-        elif kind == "room":
-            seen_rooms.add(cid)
+        if kind != "thread":
+            continue
+        seen_threads.add(cid)
         chats.append({
             "kind": kind,
             "id": cid,
             "starred": bool(r.get("starred_at")),
-            "unread": unread.get(cid, 0) if kind == "thread" else room_unread.get(cid, 0),
+            "unread": unread.get(cid, 0),
         })
+    for cid, entry in room_rows.items():
+        seen_rooms.add(cid)
+        chats.append({"kind": "room", "id": cid, "starred": entry["starred"],
+                      "unread": room_unread.get(cid, 0)})
     # A CURSORLESS thread has unread and no state row, so the loop above never
     # reaches it — and that is the whole ent#557 case: an agent replies into a
     # freshly minted Main the viewer has never opened, so no row was ever
@@ -6007,7 +6083,7 @@ def get_chat_state(email: str, unread: dict[str, int] | None = None,
         cursorless = []
     for kind, cid, n in cursorless:
         chats.append({"kind": kind, "id": cid, "starred": False, "unread": n})
-    return {"chats": chats}
+    return {"chats": chats, "as_of": as_of}
 
 
 def room_reader_of(principal) -> tuple[str, str] | None:
@@ -6060,15 +6136,52 @@ def set_chat_star(email: str, chat_kind: str, chat_id: str, starred: bool) -> No
         # accumulate from ordinary use and unstar cannot remove them.
         if db.count_starred_rows(email) >= db.MAX_STARRED_CHATS:
             raise ClientPortalError(409, "Too many saved chats — unstar some first")
-        if _would_create_row_past_cap(email, kind, cid):
+        if _would_create_row_past_cap(email, kind, cid) and not (
+                kind == "room" and any(db.chat_state_row_exists(email, db.room_cursor_kind(space), cid)
+                                       for space in ("user", "workspace_user"))):
+            # The mirror of `mark_chat_read`'s exemption (#1011 review): a
+            # viewer who has READ a room since the split holds only its
+            # identity-space cursor row, so starring it needs the plain `room`
+            # row — refused at the cap, a 409 for a room already on their list.
+            # Bounded the same way: one `room` row beside a row they own.
             raise ClientPortalError(409, "Too much saved chat state — open fewer new chats")
     db.set_chat_star(email, kind, cid, starred, utc_now_iso())
 
 
+# The spelling every stored instant uses: `utc_now_iso` ("…:SS.ffffffZ") and the
+# coarser "…:SSZ" some writers and fixtures store. Strict, because the cursor is
+# compared to stored values AS A STRING: a `through` is stored verbatim (see
+# `db._later`), so an offset form or a bare date would sort wrongly against them.
+_READ_THROUGH = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?Z")
+
+
+def _read_through(through: str | None, now: str) -> str | None:
+    """The instant a read covers (trinity-enterprise#1010): the client's
+    ``through``, clamped to ``now`` so a client cannot pre-read arrivals that do
+    not exist yet. ``None`` stays ``None`` (the write then covers up to now).
+    Anything that is not one instant in the stored spelling is a 422."""
+    if through is None:
+        return None
+    if not isinstance(through, str) or not _READ_THROUGH.fullmatch(through):
+        raise ClientPortalError(422, "through must be a UTC instant like 2026-01-15T10:30:00Z")
+    try:
+        held = parse_iso_timestamp(through)
+    except ValueError:
+        raise ClientPortalError(422, "through must be a UTC instant like 2026-01-15T10:30:00Z")
+    return now if held > parse_iso_timestamp(now) else through
+
+
 def mark_chat_read(email: str, chat_kind: str, chat_id: str,
-                   room_reader: tuple[str, str] | None = None) -> None:
+                   room_reader: tuple[str, str] | None = None,
+                   through: str | None = None) -> None:
     """Advance the caller's read cursor on one chat. Same non-validation and
     same cap as `set_chat_star` — for a thread.
+
+    trinity-enterprise#1010: the cursor moves to ``through``, the newest instant
+    the client held (its last `as_of`, or the newest message it rendered), not
+    to the server's now — so an arrival after the client's last fetch still
+    counts as unread. Clamped to now; never moves the cursor back; ``None`` is
+    the old meaning (now).
 
     A ROOM's cursor moves only for a reader actively in that room
     (trinity-enterprise#959 fix round 1, security review #3): the cursor row is
@@ -6076,17 +6189,30 @@ def mark_chat_read(email: str, chat_kind: str, chat_id: str,
     platform account clear the same email's Workspace-identity room. An unknown
     room, a room the reader is not in or left, and a call with no reader all
     return exactly as a successful write does, writing nothing — the write
-    stays no existence oracle (invariant #8).
+    stays no existence oracle (invariant #8). And it moves only the reader's
+    OWN identity space's cursor (#1011), seeded from the shared pre-split row.
     """
     kind, cid = _validate_chat_ref(chat_kind, chat_id)
-    if kind == "room" and not (room_reader and db.is_active_room_participant(cid, *room_reader)):
-        return
-    if _would_create_row_past_cap(email, kind, cid):
+    now = utc_now_iso()
+    held = _read_through(through, now)
+    cursor_kind, floor_kind = kind, None
+    if kind == "room":
+        if not (room_reader and db.is_active_room_participant(cid, *room_reader)):
+            return
+        cursor_kind, floor_kind = db.room_cursor_kind(room_reader[0]), "room"
+    if _would_create_row_past_cap(email, cursor_kind, cid) and not (
+            floor_kind and db.chat_state_row_exists(email, floor_kind, cid)):
         # Silently no-op rather than erroring: a read marker is incidental to
         # what the user asked for (opening a chat), and failing the open because
         # a bookkeeping table is full would be absurd.
+        #
+        # A room whose shared `room` row already exists is exempt (#1011
+        # review): that row lists the room and counts its unread from the
+        # pre-split floor, so refusing the space row would leave a badge no
+        # read can clear. The exemption is bounded — at most one space row per
+        # identity space beside a row the viewer already owns.
         return
-    db.mark_chat_read(email, kind, cid, utc_now_iso())
+    db.mark_chat_read(email, cursor_kind, cid, now, through=held, floor_kind=floor_kind)
 
 # ---------------------------------------------------------------------------
 # ent#366 — one-click ratings
@@ -6175,6 +6301,19 @@ def submit_rating(agent_name: str, email: str, *, target_kind: str, target_id: s
     except Exception as e:  # noqa: BLE001
         logger.warning("portal: rating write failed for %s/%s: %s", agent_name, target_kind, e)
         raise ClientPortalError(503, "Could not record that rating — try again.")
+
+    # ent#641: a thumbs-down by the seat is one of the two events that can
+    # DEMOTE an ask class, and the only one that does not pass through the
+    # decision record. Re-evaluate here rather than on the panel read — a read
+    # that writes makes an owner opening the page a writer for every seat.
+    # Fail-open: the reader re-ANDs the live conjuncts anyway, so a missed
+    # re-evaluation can only leave a verdict stale, never wider than earned.
+    try:
+        from services import autonomy_dial_service
+
+        autonomy_dial_service.evaluate_seat(platform_db, agent_name, email, persist=True)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("portal: autonomy re-evaluation after a rating failed for %s: %s", agent_name, e)
 
     return {
         "target_kind": target_kind,

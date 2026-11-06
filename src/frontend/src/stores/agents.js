@@ -502,6 +502,17 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
+    // trinity-enterprise#459: email a pending person their invitation again.
+    async resendInvite(name, email) {
+      const authStore = useAuthStore()
+      const response = await axios.post(
+        `/api/agents/${name}/share/${encodeURIComponent(email)}/invite`,
+        null,
+        { headers: authStore.authHeader }
+      )
+      return response.data
+    },
+
     async unshareAgent(name, email) {
       const authStore = useAuthStore()
       await axios.delete(`/api/agents/${name}/share/${encodeURIComponent(email)}`, {
@@ -1235,19 +1246,34 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
-    // Usage share (trinity-enterprise#1059 — an agent's share of its
-    // subscription's usage; enterprise route, entitlement-gated). Both windows
-    // as used vs budget, the warn threshold and where each number comes from.
-    async getUsageShare(name) {
-      const { data } = await api.get(`/api/enterprise/agents/${name}/usage-share`)
-      return data
+    // Tool access (GUARD-008, trinity-enterprise#341) — the profile, its five
+    // cards with per-runtime coverage, and whether a restart is waiting.
+    async getToolAccess(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/tool-access`, {
+        headers: authStore.authHeader
+      })
+      return response.data
     },
 
-    // Owner-only grant. Each field null = the platform default; all three null
-    // clears the agent's override. Takes effect on the next turn, no restart.
-    async setUsageShare(name, share) {
-      const { data } = await api.put(`/api/enterprise/agents/${name}/usage-share`, share)
-      return data
+    // `body`: { profile, custom?: { read_only, disallowed_tools } }
+    async setToolAccess(name, body) {
+      const authStore = useAuthStore()
+      const response = await axios.put(`/api/agents/${name}/tool-access`, body, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    // The header and list Read-only toggle: ON selects Strict read-only, OFF
+    // returns to the profile it came from (409 when read-only belongs to
+    // another profile). Answers with the resolved tool access.
+    async setReadOnly(name, enabled) {
+      const authStore = useAuthStore()
+      const response = await axios.put(`/api/agents/${name}/read-only`, { enabled }, {
+        headers: authStore.authHeader
+      })
+      return response.data
     },
 
     // Capacity (CAPACITY-001 / #506 — per-agent max_parallel_tasks within the fleet ceiling)

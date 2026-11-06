@@ -31,6 +31,7 @@ from dependencies import (
     require_admin,
     resolve_platform_user_unfloored,
 )
+from services.tool_access_guard import assert_tool_allowed
 from models import TaggablePerson, User
 
 from . import service
@@ -227,6 +228,8 @@ async def post_message(room_id: str, body: RoomMessageCreate,
     Idempotency-Key so a retried post creates one message, not two)."""
     from services import idempotency_service
 
+    # trinity-enterprise#341: refused when this agent's tool access removes post_to_room.
+    assert_tool_allowed(current_user, "post_to_room")
     # Membership comes BEFORE the idempotency claim (trinity-enterprise#719). A
     # stored replay and the in-flight 409 are answers this route gives too, so
     # a non-member gets the same uniform 404 on every one of them as on a first
@@ -317,5 +320,15 @@ async def remove_participant(room_id: str, agent_name: str,
                              current_user=Depends(get_room_principal)):
     try:
         return service.remove_participant(current_user, room_id, agent_name)
+    except RoomError as e:
+        _raise(e)
+
+
+@router.post("/{room_id}/leave")
+async def leave_room(room_id: str, current_user=Depends(get_room_principal)):
+    """A person leaves a room (trinity-enterprise#701). People only: an agent
+    is removed by the moderator, never by itself."""
+    try:
+        return service.leave_room(current_user, room_id)
     except RoomError as e:
         _raise(e)

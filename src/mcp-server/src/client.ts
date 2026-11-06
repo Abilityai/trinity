@@ -4,6 +4,7 @@
  * Typed client for communicating with the Trinity Backend API.
  */
 
+import { turnFetch } from "./turn-context.js";
 import type {
   StartAgentResult,
   Agent,
@@ -662,10 +663,26 @@ export class TrinityClient {
   private token?: string;
   private username?: string;
   private password?: string;
+  /** trinity-enterprise#1024: the agent an admin's user key acts on behalf of.
+   * Set only on a clone from `asAgent`, never on a shared client. */
+  private actAsAgent?: string;
 
   constructor(baseUrl: string = "http://localhost:8000", token?: string) {
     this.baseUrl = baseUrl.replace(/\/$/, ""); // Remove trailing slash
     this.token = token;
+  }
+
+  /**
+   * trinity-enterprise#1024: a copy of this client whose every request carries
+   * `X-Trinity-Act-As-Agent: <agentName>`. A CLONE, so the shared base client
+   * (non-key mode) never carries one tool call's target into another's. The
+   * backend admits the header only for an admin's user-scoped key.
+   */
+  asAgent(agentName: string): TrinityClient {
+    const clone = Object.create(Object.getPrototypeOf(this)) as TrinityClient;
+    Object.assign(clone, this);
+    clone.actAsAgent = agentName;
+    return clone;
   }
 
   /**
@@ -681,7 +698,7 @@ export class TrinityClient {
     formData.append("username", username);
     formData.append("password", password);
 
-    const response = await fetch(`${this.baseUrl}/token`, {
+    const response = await turnFetch(`${this.baseUrl}/token`, {
       method: "POST",
       headers: {
         "Content-Type": "application/x-www-form-urlencoded",
@@ -785,6 +802,10 @@ export class TrinityClient {
         headers[key] = value;
       }
     }
+    // trinity-enterprise#1024: after the per-call headers, so none can drop it.
+    if (this.actAsAgent) {
+      headers["X-Trinity-Act-As-Agent"] = this.actAsAgent;
+    }
 
     // #905: forward a caller-supplied correlation id. The backend's
     // add_request_id middleware adopts an incoming X-Request-ID, so the
@@ -800,7 +821,7 @@ export class TrinityClient {
       debugLog(`[CLIENT] ${method} ${path} - Auth: ${this.token ? 'present' : 'missing'}`);
     }
 
-    const response = await fetch(`${this.baseUrl}${path}`, {
+    const response = await turnFetch(`${this.baseUrl}${path}`, {
       method,
       headers,
       body: body ? JSON.stringify(body) : undefined,
@@ -1370,7 +1391,7 @@ export class TrinityClient {
 
     let response: Response;
     try {
-      response = await fetch(`${this.baseUrl}/api/agents/${encodeURIComponent(name)}/chat`, {
+      response = await turnFetch(`${this.baseUrl}/api/agents/${encodeURIComponent(name)}/chat`, {
         method: "POST",
         headers,
         body: JSON.stringify({ message }),
@@ -1559,7 +1580,7 @@ export class TrinityClient {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(
+      const response = await turnFetch(
         `${this.baseUrl}/api/agents/${encodeURIComponent(agentName)}/executions?limit=${limit}`,
         {
           method: "GET",
@@ -1700,7 +1721,7 @@ export class TrinityClient {
 
     let response: Response;
     try {
-      response = await fetch(`${this.baseUrl}/api/agents/${encodeURIComponent(name)}/task`, {
+      response = await turnFetch(`${this.baseUrl}/api/agents/${encodeURIComponent(name)}/task`, {
         method: "POST",
         headers,
         body: JSON.stringify(body),
@@ -1851,7 +1872,7 @@ export class TrinityClient {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(
+      const response = await turnFetch(
         `${this.baseUrl}/api/agents/${encodeURIComponent(name)}/executions/${encodeURIComponent(executionId)}/report-back`,
         {
           method: "POST",
@@ -2046,7 +2067,7 @@ export class TrinityClient {
 
     let response: Response;
     try {
-      response = await fetch(
+      response = await turnFetch(
         `${this.baseUrl}/api/agents/${encodeURIComponent(name)}/fan-out`,
         {
           method: "POST",
@@ -2959,11 +2980,26 @@ export class TrinityClient {
       text: string;
       execution_id: string;
       dedup_label?: string;
+      /** ent#700: address the note to a person (proactive path) — a role (`to`)
+       *  or, deprecated, an email; never both; always with `channel`. */
+      to?: "primary" | "approver" | "viewer";
+      recipient_email?: string;
+      channel?: "telegram" | "slack" | "whatsapp";
+      /** ent#665: one note per recipient and key across runs. Needs an address. */
+      idempotency_key?: string;
+      idempotency_ttl?: number;
     }
   ): Promise<{
     delivered: boolean;
     channel?: string;
     reason?: string;
+    /** ent#665: present only when an idempotency_key was sent. */
+    sent?: boolean;
+    suppressed_by?: string;
+    first_sent_at?: string;
+    first_execution_id?: string;
+    /** Set with reason "text_too_long" (TTS_MAX_CHARS). */
+    max_chars?: number;
     /** #2157: plain-language explanation of a refusal, for surfaces where the
      *  machine `reason` alone leads an agent to a wrong conclusion (the portal
      *  narrates the agent's text, so "no voice note here" ≠ "no voice here"). */
@@ -3081,15 +3117,33 @@ export class TrinityClient {
   async recordSeatDecision(
     agentName: string,
     data: Record<string, unknown>,
-    idempotencyKey?: string
+    idempotencyKey?: string,
+    turn?: string
   ): Promise<{ success: boolean; decision: Record<string, unknown>; hint?: string | null; replayed?: boolean }> {
+    // #2984 review: the platform-stamped turn travels with the record — the
+    // backend accepts an agent's decision only for the turn it is running.
+    const headers: Record<string, string> = {};
+    if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
+    if (turn) headers["X-Trinity-Execution-Id"] = turn;
     return this.request(
       "POST",
       `/api/agents/${encodeURIComponent(agentName)}/decisions`,
       data,
       false,
       undefined,
-      idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined
+      Object.keys(headers).length ? headers : undefined
+    );
+  }
+
+  /** The seat's autonomy dial: which ask classes are unprompted and why not (ent#641). */
+  async getSeatAutonomy(
+    agentName: string,
+    executionId: string
+  ): Promise<Record<string, unknown>> {
+    const q = new URLSearchParams({ execution_id: executionId });
+    return this.request(
+      "GET",
+      `/api/agents/${encodeURIComponent(agentName)}/seat-autonomy?${q.toString()}`
     );
   }
 
@@ -3200,7 +3254,7 @@ export class TrinityClient {
    * Check if the Trinity API is healthy (no auth required)
    */
   async healthCheck(): Promise<{ status: string; timestamp: string }> {
-    const response = await fetch(`${this.baseUrl}/health`);
+    const response = await turnFetch(`${this.baseUrl}/health`);
     if (!response.ok) {
       throw new Error(`Health check failed: ${response.statusText}`);
     }
@@ -3238,7 +3292,7 @@ export class TrinityClient {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      return await fetch(`${this.baseUrl}${path}`, {
+      return await turnFetch(`${this.baseUrl}${path}`, {
         method: "POST",
         headers: this.internalHeaders(),
         body: JSON.stringify(body),
@@ -3969,7 +4023,7 @@ export class TrinityClient {
       new Blob([buf], { type: "application/x-tar" }),
       "data.tar"
     );
-    const response = await fetch(
+    const response = await turnFetch(
       `${this.baseUrl}/api/agents/${encodeURIComponent(name)}/data/import`,
       {
         method: "POST",
@@ -4193,7 +4247,7 @@ export class TrinityClient {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), this.a2aTimeoutMs());
     try {
-      const response = await fetch(`${this.baseUrl}${path}`, {
+      const response = await turnFetch(`${this.baseUrl}${path}`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${this.token}`,

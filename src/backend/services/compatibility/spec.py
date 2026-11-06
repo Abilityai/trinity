@@ -42,6 +42,11 @@ Retired ids (#2137) — never reissued, so old persisted `checks_json` rows in
     is never reissued (old persisted `checks_json` rows would be re-read as a
     verdict about a different check), so the successor is the NEW id **D-009**.
     D-006 -> D-009 is a mapping, not a revival.
+  T-011 → X-010 (trinity-enterprise#584) — "capabilities array present" asked
+    every author for `template.yaml capabilities:` tags. Those tags stopped
+    being shown as capabilities (a capability is described once, in its
+    SKILL.md), so the nudge pointed the wrong way. X-010 checks the tags
+    against the skills instead: a mapping, not a rewording of T-011.
   I-005 — `.trinity/post-check` has no executor anywhere in the platform.
   G-002 — compared against the 58-entry fleet-wide `_GITIGNORE_PATTERNS` that
     Trinity itself injects at git-init. Most of that list is not authorable
@@ -140,7 +145,6 @@ CHECKS: List[CheckDef] = [
     _c("T-009", "soft", "ai", "T", "description is substantive",
        prompt="Is the template description substantive — does it explain what the agent does AND who would use it, in at least two sentences? PASS only if both are clear."),
     _c("T-010", "info", "static", "T", "use_cases array present with 3–7 examples"),
-    _c("T-011", "info", "static", "T", "capabilities array present"),
     _c("T-013", "soft", "ai", "T", "use_cases entries are realistic, specific prompts",
        prompt="If use_cases are present, are they realistic, specific user prompts (e.g. 'Analyze our Q3 pipeline and flag at-risk deals') rather than vague feature descriptions (e.g. 'Advanced analytics')? PASS if absent; FAIL only if present and they are buzzword/feature lists."),
     _c("T-014", "soft", "ai", "T", "tagline conveys unique value",
@@ -250,6 +254,12 @@ CHECKS: List[CheckDef] = [
     # the agent itself runs fine. Its point is that the agent can see it at all
     # (the refusal otherwise renders only in the browser).
     _c("X-009", "soft", "static", "X", "dashboard metric: is text and dims: selectors name declared dimensions of a bound metric"),
+    # trinity-enterprise#584. INFO: a note nobody has to act on yet. Bundled
+    # templates still carry tags the A2A card reads as its skill list
+    # (trinity-enterprise#178 moves the card to skills and raises this to SOFT),
+    # so deleting a tag to clear the note would empty a card.
+    _c("X-010", "info", "static", "X", "template.yaml capabilities: tags each name a skill with a description",
+       claude_only=True),
     # --- I: Composability --------------------------------------------------
     _c("I-001", "soft", "ai", "I", "callable agents declare their output format",
        prompt="If this agent is intended to be called by other agents (references Trinity MCP, agent permissions, or describes itself as a worker/specialist), does it document the format/schema of its output? FAIL if it describes only what it does, not what it returns. PASS if not a callable agent."),

@@ -205,7 +205,10 @@ def test_portal_prompt_survives_a_composer_failure():
 # ---------------------------------------------------------------------------
 
 def _execution(**kw):
+    # trinity-enterprise#1062: the voice door serves the live turn only.
     row = types.SimpleNamespace(
+        id="e1",
+        status="running",
         agent_name="agent-x",
         source_channel=None,
         triggered_by="public",
@@ -224,7 +227,8 @@ async def _call_voice_reply(execution, *, agent="agent-x"):
     db_mock = MagicMock()
     db_mock.get_execution.return_value = execution
     user = types.SimpleNamespace(agent_name=agent, id=1, username="u", role="admin")
-    with patch("routers.agents.db", db_mock):
+    with patch("routers.agents.db", db_mock), \
+         patch("services.voice_reply_service.another_live_destination", return_value=False):
         return await ar.send_voice_reply_endpoint(
             agent, VoiceReplyRequest(text="hello", execution_id="e1"), user
         )
@@ -259,10 +263,14 @@ async def test_portal_turn_without_a_voice_does_not_promise_a_speaker_control():
 
 @pytest.mark.asyncio
 async def test_non_channel_non_portal_turn_keeps_the_old_reason():
-    """A schedule/API turn is genuinely not user-facing — unchanged behaviour."""
+    """A schedule/API turn has no conversation to reply into — same reason code.
+    Since abilityai/trinity-enterprise#700 (trinity#2999 AC 3) it also carries
+    guidance, but that guidance is the ADDRESSING route, never the portal's
+    speaker control (no such control exists off the portal)."""
     res = await _call_voice_reply(_execution(triggered_by="schedule"))
     assert res["reason"] == "not_a_channel_turn"
-    assert "guidance" not in res
+    assert "`to`" in res["guidance"] and "primary" in res["guidance"]
+    assert "speaker" not in res["guidance"].lower()
 
 
 @pytest.mark.asyncio
@@ -279,6 +287,7 @@ async def test_channel_turn_still_delivers():
         delivered=True, channel="telegram", reason=None))
     user = types.SimpleNamespace(agent_name="agent-x", id=1, username="u", role="admin")
     with patch("routers.agents.db", db_mock), \
+         patch("services.voice_reply_service.another_live_destination", return_value=False), \
          patch("services.voice_reply_service.send_voice_reply", sender):
         res = await ar.send_voice_reply_endpoint(
             "agent-x", VoiceReplyRequest(text="hi", execution_id="e1"), user

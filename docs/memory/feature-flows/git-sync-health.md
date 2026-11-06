@@ -513,6 +513,11 @@ SessionStart hook, and the 2026-09-24 audit found agents up to 31 commits behind
     during the integrate window (up to 60 s for a merge, 120 s for a rebase)
     can see HEAD move.
   - Refused while the index holds unmerged paths.
+  - A detached HEAD is recorded `skipped` (`detached HEAD (pinned to a tag or
+    commit): nothing to pull onto`), never `failed`: a clone of `@<tag>` runs
+    pinned to that release by design, and pull sync is on for every `github:`
+    agent (trinity#4165). A detached HEAD left by a rebase stopped part-way is
+    still `failed`.
   - Counts are strict (`_ahead_behind_vs`): a branch that can't be counted
     against origin fails the pull (`could not count commits on …`) instead of
     reading as up to date.
@@ -833,7 +838,7 @@ the data-loss setup.
 | `services/sync_health_view.py` | ent#706: `sync_view(row, config)` — the backend's single call into the policy |
 | `db/migrations.py`, `migrations/versions/0082_agent_sync_state_divergence.py`, `db/schema.py`, `db/tables.py` | ent#706: the four columns on both tracks |
 | `db/sync_state.py` | ent#706: `KEEP` sentinel, the new upsert kwargs, `list_health_rows` (the shared reader) |
-| `services/operator_queue_service.py` | ent#706: `sync-diverged-` in `_RESERVED_ID_PREFIXES` |
+| `services/operator_queue_service/__init__.py` | ent#706: `sync-diverged-` in `_RESERVED_ID_PREFIXES` |
 | `src/scheduler/sync_freeze_policy.py` | ent#706: byte-identical mirror of the policy |
 | `src/scheduler/database.py` | ent#706: `sync_freeze_reason`; the threshold is imported from the mirror |
 | `src/scheduler/service.py` | ent#706: the gate writes `Git sync frozen: <reason>` into the skipped row |

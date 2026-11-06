@@ -119,7 +119,11 @@ Sign-in / reload on bare /workspace
                       (shield-check / question-mark-circle / bell, kind sr-only); no
                       "Waiting on you"; Critical (danger) / High (urgent) only; "Expires
                       in 18m" (warning, < 1h) / "Expires in 5h" (neutral, 1–24h), absolute
-                      + zone on hover; ≤ 2 badges; a 30 s clock only while such a row exists
+                      + zone on hover; ≤ 2 badges; a 30 s clock only while such a row exists;
+                      a pending row with none of those carries one neutral "Unanswered"
+                      badge (#4229) so the badge line is never empty and the ended badge
+                      (Answered · you / Expired / …) replaces it in place — a row is one
+                      height in every state, nothing below it moves on answer
     PortalInboxPane
       ask   → <PortalAsks :ask-ids="[id]" testid-prefix="inbox-ask"> → store.answerAsk → asks/router
               the card (§3g L6, every surface): a pick focuses the note (not on a coarse
@@ -524,9 +528,31 @@ POST /client-portal/chat-state/room/{id}/read
   `portalInboxRooms.mount.spec.js`.
 - **Reading only what is on screen**: a room is read only once the transcript held reaches the
   room's `message_count` (`roomTranscriptComplete`), in the pane and in the room view alike.
-- **Known gaps (follow-ups)**: a message landing between the last fetch and the read write is
-  cleared unseen (the write stamps server time, as a chat's does); and the cursor row has no
-  identity-space column, so one email in the SAME room under both identities shares one cursor.
+- **The read covers what the client held (trinity-enterprise#1010, chats and rooms)**:
+  `POST …/read` takes `{"through": "<instant>"}` — the later of the last `GET /chat-state`
+  `as_of` (stamped before the counts it labels) and the newest row the view rendered
+  (`utils/readThrough.js::heldThrough`: the room's newest message, the conversation's newest
+  row; the conversation also reads itself after its history loads). The cursor moves to
+  `through`, clamped to now and never backwards (`db._later`, compared as instants, stored in
+  the client's own spelling so a message's `created_at` sent back reads that message). An
+  arrival after the last fetch therefore still counts. No body = up to now (the old meaning);
+  a live reply with no instant sends none (`READ_UP_TO_NOW`), and so does a live call's read,
+  the whole thread being on screen (a spoken turn persists after the last poll, which the call
+  skips). Before any chat state was read there is no `as_of`, and no body is sent either: that
+  read is also the viewer's first, and its ent#557 baseline (which otherwise takes the same
+  instant) must not land at one chat's message. The conversation's after-load read compares
+  what it holds with what this chat's last read covered (`store.readCovered`), not the newest
+  `as_of`, which a poll during the load can move past an arrival. A `through` that is not an
+  ISO-Z instant is a 422. A room read only through its identity-space row can still be starred
+  at the row cap (the `room` row is created beside it, the mirror of the read's exemption).
+- **One room read state per identity space (trinity-enterprise#1011)**: a room's cursor lives
+  in `chat_kind = 'room:<participant kind>'` (`db.room_cursor_kind`), so one email seated as
+  both `user` and `workspace_user` reads the room separately in each. The plain `room` row keeps
+  the star and any pre-split cursor, which each space reads as its floor
+  (`COALESCE(sp.last_read_at, st.last_read_at)`) until it writes its own — no count moves on
+  upgrade, no migration. The payload is still one `room` entry per room; another space's row
+  never lists one. Pinned by `tests/unit/test_ent1010_1011_read_cursor.py` and
+  `portalReadThrough.spec.js`.
 - **Counts**: the room's count rides `sidebarThreads`, so Σ "N new" == came holds
   (`portalInboxRooms.spec.js` property; `portalInboxRoomsShell.mount.spec.js` through the shell).
 - **Known limit**: between an agent message landing and the open room's next 3 s poll, a
@@ -567,6 +593,21 @@ fence instead: the platform chose the addressee; the roster was never its fence.
   reason=…)` removes one person from a row's `resolved_to` (and clears the
   single addressee when it named them), compare-and-set; the row stays for the
   others. The audit row carries ids and the reason, never the address.
+- **A role-addressed row follows the role (trinity-enterprise#1095).**
+  `ask_service.readdress_role(agent, role, reason=…)` re-resolves `role` and
+  rewrites the audience of the agent's pending rows that were addressed BY
+  ROLE — an allowlist: the agent's own raises and gated-skill approvals
+  (`gate-` + 40 hex); a row the platform addressed to a named person (a gate
+  note, a project consent card, a reach row) never moves. `readdress_item` is
+  the one-row primitive beneath it (compare-and-set on the address columns
+  and `status='pending'`; the Workspace chat keys dropped on a single-addressee
+  change and the new person's Main re-attached). Nobody filling `primary` →
+  NULL audience (the operators, as a fresh raise); an unfilled `approver` /
+  `viewer` → rows untouched (ent#1053); a credential row moves only to one
+  person (ent#1066). One audit row per changed row (`platform_readdressed`,
+  ids and the reason), one agent-keyed `operator_queue_new` trigger per call.
+  The Inbox has no WebSocket — the new addressee sees it on the next poll. The
+  trigger today is a `primary` write on an assignments provider.
 - **No chat, platform-written context.** A gate raise may pass
   `attach_chat=False` (no Workspace attachment, no Main minted, no `chat_id`)
   and `platform_context`, merged into `context` after the agent-content strip

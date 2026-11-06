@@ -14,7 +14,7 @@ import json
 import logging
 import os
 import time
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from database import db
 
 logger = logging.getLogger(__name__)
@@ -109,6 +109,12 @@ OPS_SETTINGS_DESCRIPTIONS = {
 # works — everything else here is what the instance ADVERTISES, not what was
 # observed.
 PUBLIC_URL_REACHED_KEY = "public_url_reached_at"
+
+# trinity-enterprise#1101: may an off-box client reach /mcp? Written only
+# through PUT /api/settings/mcp-external-access (the generic catch-all refuses
+# it). Absent row → `MCP_EXTERNAL_ACCESS` env opt-in → default OFF.
+MCP_EXTERNAL_ACCESS_KEY = "mcp_external_access"
+MCP_EXTERNAL_ACCESS_ENV = "MCP_EXTERNAL_ACCESS"
 
 TEMPLATE_REGISTRY_URL_KEY = "template_registry_url"
 TEMPLATE_REGISTRY_ENABLED_KEY = "template_registry_enabled"
@@ -553,12 +559,58 @@ class SettingsService:
         at the consumers, not here."""
         return self._resolve_bool_flag("brain_orb_voice_enabled", "BRAIN_ORB_VOICE_ENABLED")
 
+    def is_direct_voice_enabled(self) -> bool:
+        """Workspace Direct calls (trinity-enterprise#1046). On by default, unlike the
+        opt-in flags `_resolve_bool_flag` was written for, so an env "false" has to be
+        honoured here: that helper reads env values only as an opt-in."""
+        env_off = os.getenv("DIRECT_VOICE_ENABLED", "").strip().lower() in ("false", "0", "no")
+        return self._resolve_bool_flag("direct_voice_enabled", "DIRECT_VOICE_ENABLED", default=not env_off)
+
+    def get_direct_voice_provider(self) -> str:
+        """`auto` | `gemini` | `elevenlabs`. An unrecognised stored value reads as
+        `auto` rather than breaking every call."""
+        try:
+            stored = (self.get_setting("direct_voice_provider") or "").strip().lower()
+        except Exception:  # noqa: BLE001 - a settings read must not break the roster
+            stored = ""
+        return stored if stored in ("auto", "gemini", "elevenlabs") else "auto"
+
     def is_brain_orb_write_enabled(self) -> bool:
         """Brain Orb KB-write kill-switch (trinity-enterprise#61). Distinct from
         the base flag so the write/exec surface can be downed without downing
         read/voice. Write routes also require the base flag (composed at the
         router)."""
         return self._resolve_bool_flag("brain_orb_write_enabled", "BRAIN_ORB_WRITE_ENABLED")
+
+    # =========================================================================
+    # External MCP access (trinity-enterprise#1101)
+    # =========================================================================
+
+    def is_mcp_external_access_enabled(self) -> Tuple[bool, str]:
+        """Whether an off-box client may reach `/mcp`, and which tier decided.
+
+        Instance-wide switch. Same precedence as `_resolve_bool_flag` — the
+        Settings row wins in BOTH directions, then `MCP_EXTERNAL_ACCESS` as an
+        OPT-IN, then default OFF — but it also names the tier in effect
+        (`settings` | `environment` | `default`), because the Settings page has
+        to say which one an operator is looking at. Agents are never affected:
+        the MCP server classifies them on-box before it asks.
+
+        The backend is the sole resolver; the MCP server reads the verdict from
+        `GET /api/internal/mcp-external-access` and never reads the env var
+        itself. Fail-open on a settings-read error, like `_resolve_bool_flag`,
+        which here means falling to env/default (default OFF).
+        """
+        try:
+            stored = self.get_setting(MCP_EXTERNAL_ACCESS_KEY)
+        except Exception:
+            stored = None
+        if stored is not None:
+            return str(stored).lower() in ("true", "1", "yes"), "settings"
+        env_val = os.getenv(MCP_EXTERNAL_ACCESS_ENV, "").strip().lower()
+        if env_val in ("true", "1", "yes"):
+            return True, "environment"
+        return False, "default"
 
     # =========================================================================
     # Install provenance + advertised-URL posture (#2380)
@@ -1314,6 +1366,18 @@ def is_brain_orb_voice_enabled() -> bool:
 def is_brain_orb_write_enabled() -> bool:
     """Brain Orb KB-write kill-switch — runtime-resolved (#85)."""
     return settings_service.is_brain_orb_write_enabled()
+
+
+def is_mcp_external_access_enabled() -> Tuple[bool, str]:
+    """External MCP access — `(enabled, source)` (trinity-enterprise#1101)."""
+    return settings_service.is_mcp_external_access_enabled()
+
+
+def get_mcp_external_access_env_value() -> Optional[str]:
+    """The raw `MCP_EXTERNAL_ACCESS` value, or None when unset — so the
+    Settings page can say an environment value exists even where the Settings
+    row overrides it."""
+    return os.getenv(MCP_EXTERNAL_ACCESS_ENV)
 
 
 def get_ops_setting(key: str, as_type: type = str):

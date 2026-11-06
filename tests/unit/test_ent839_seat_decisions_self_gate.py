@@ -85,14 +85,22 @@ def harness(monkeypatch):
     def call(user, method):
         principal["user"] = user
         if method == "POST":
-            return client.post(f"/api/agents/{VICTIM}/decisions", json=RECORD)
+            # As the MCP `record_decision` sends it: the platform turn header
+            # names the turn the record is for (#2984 review).
+            return client.post(f"/api/agents/{VICTIM}/decisions", json=RECORD,
+                               headers={"X-Trinity-Execution-Id": RECORD["execution_id"]})
+        if method == "AUTONOMY":
+            # trinity-enterprise#641: the seat-autonomy read is a third handler on
+            # this router and must hold the same gate, or it reopens #839.
+            return client.get(f"/api/agents/{VICTIM}/seat-autonomy",
+                              params={"execution_id": "exec-of-agent-a"})
         return client.get(f"/api/agents/{VICTIM}/decisions",
                           params={"execution_id": "exec-of-agent-a"})
 
     return call, seen
 
 
-@pytest.mark.parametrize("method", ["POST", "GET"])
+@pytest.mark.parametrize("method", ["POST", "GET", "AUTONOMY"])
 def test_a_sibling_agent_key_is_refused_before_any_lookup(harness, method):
     call, seen = harness
     res = call(_agent_key("agent-b"), method)
@@ -101,7 +109,7 @@ def test_a_sibling_agent_key_is_refused_before_any_lookup(harness, method):
     assert seen == [], "the refusal must come before the access check and the execution read"
 
 
-@pytest.mark.parametrize("method", ["POST", "GET"])
+@pytest.mark.parametrize("method", ["POST", "GET", "AUTONOMY"])
 def test_the_keys_own_agent_passes_the_gate(harness, method):
     call, seen = harness
     res = call(_agent_key(VICTIM), method)
@@ -109,9 +117,12 @@ def test_the_keys_own_agent_passes_the_gate(harness, method):
     assert seen == [("access", VICTIM), ("seat_for", VICTIM)]
 
 
-@pytest.mark.parametrize("method", ["POST", "GET"])
-def test_a_person_passes_the_gate(harness, method):
+@pytest.mark.parametrize("method", ["POST", "GET", "AUTONOMY"])
+def test_a_person_is_refused_as_not_the_agent(harness, method):
+    """trinity-enterprise#1062: these are the agent's own doors (a person reads
+    and decides through the client-portal routes), refused before any lookup."""
     call, seen = harness
     res = call(_person(), method)
-    assert res.status_code == 418, res.text
-    assert ("seat_for", VICTIM) in seen
+    assert res.status_code == 403, res.text
+    assert res.json()["detail"]["code"] == "agent_only"
+    assert seen == []

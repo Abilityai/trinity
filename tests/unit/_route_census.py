@@ -871,6 +871,9 @@ AGENT_CALLABLE_SELF: Dict[str, Tuple[str, str]] = {
     "routers/seat_decisions.py::list_seat_decisions": (
         "GET /api/agents/{agent_name}/decisions",
         "MCP list_seat_decisions: the seat's standing decisions, read to reuse a criterion (trinity-enterprise#638)"),
+    "routers/seat_decisions.py::get_seat_autonomy": (
+        "GET /api/agents/{agent_name}/seat-autonomy",
+        "MCP get_autonomy: this companion's seat verdict, ask classes only, never a person (trinity-enterprise#641)"),
     "routers/agent_memory.py::search_retrieval_memory_agent_endpoint": (
         "POST /api/agents/{agent_name}/retrieval-memory/search",
         "MCP search_memory: the agent reads its own retrieval memory past the injected tail, the scope resolved from the "
@@ -959,6 +962,10 @@ AGENT_CALLABLE_ANY: Dict[str, Tuple[str, str, str]] = {
     "routers/agents.py::agent_execution_result": (
         "POST /api/agents/{agent_name}/executions/{execution_id}/result",
         "terminal result delivery; authenticates the agent's own key and path self-match (#1083)",
+        _SIB_OWN_KEY),
+    "routers/agents.py::agent_execution_turn_tier": (
+        "GET /api/agents/{agent_name}/executions/{execution_id}/turn-tier",
+        "the in-container guard asks which tier its own turn acts for; authenticates the agent's own key and path self-match (ent#926)",
         _SIB_OWN_KEY),
     "routers/aauth_person.py::request_person_token": (
         "POST /api/agents/{agent_name}/aauth/person-token",
@@ -1060,6 +1067,13 @@ AGENT_CALLABLE_ANY: Dict[str, Tuple[str, str, str]] = {
     "routers/agent_config.py::get_agent_timeout": ("GET /api/agents/{agent_name}/timeout", "a non-sensitive read of this agent's own setting (access-level)", _SIB_READ),
     "routers/agent_config.py::get_public_channel_model": ("GET /api/agents/{agent_name}/public-channel-model", "a non-sensitive read of this agent's own setting (access-level)", _SIB_READ),
     "routers/agent_config.py::get_agent_guardrails": ("GET /api/agents/{agent_name}/guardrails", "a non-sensitive read of this agent's own setting (access-level)", _SIB_READ),
+    "routers/agent_config.py::get_agent_tool_access": (
+        "GET /api/agents/{agent_name}/tool-access",
+        "trinity-enterprise#341: the tool-access profile behind the Settings cards; the same facts GET /guardrails "
+        "and GET /read-only already give the agent, plus Custom's remembered list (owner-level; the write is "
+        "person-or-grant and never the agent on itself)",
+        "owner tier (OwnedAgentByName): a sibling reads it only for an agent it spawned, never through an edge "
+        "(the ent#629 manage reach)"),
     "routers/agent_config.py::list_agent_capability_grants": (
         "GET /api/agents/{agent_name}/capability-grants",
         "trinity-enterprise#164: an agent reads which self-change permissions it holds, so it knows when to raise a "
@@ -1127,6 +1141,16 @@ AGENT_CALLABLE_ANY: Dict[str, Tuple[str, str, str]] = {
     "routers/git.py::get_pull_sync_config": (
         "GET /api/agents/{agent_name}/git/pull-sync", "ent#703 the agent's pull loop reads its own switch live each cycle",
         _SIB_READ + " — one boolean"),
+    # The autonomy dial (ent#641): the instance ceiling a companion reads to tell a person
+    # why it asks first. The write is the GRANT (PUT /api/settings/autonomy-dial, admin + interactive).
+    # trinity-enterprise#1101: the external-MCP-access state the MCP Keys page reads (on/off, the
+    # tier that decided, the advertised URL). The write (PUT/DELETE) is admin-tier.
+    "routers/settings/mcp_url.py::get_mcp_external_access": (
+        "GET /api/settings/mcp-external-access", "ent#1101 status read beside GET /mcp-url; reading the switch is not a grant",
+        _SIB_NO_AGENT + ": one instance-wide switch"),
+    "routers/settings/autonomy_dial.py::get_autonomy_dial": (
+        "GET /api/settings/autonomy-dial", "ent#641 read of the instance ceiling; reading the level is not a grant",
+        _SIB_NO_AGENT + ": one instance-wide level"),
     # trinity-enterprise#265 / #600: the agent keeps setting its own group's trigger mode and
     # welcome; the completion-report consent and group-context fields are a person's decision,
     # refused to every machine principal by assert_person inside the handler (trinity-enterprise#719).
@@ -1152,6 +1176,7 @@ OWN_AUTH: Dict[str, Tuple[str, str]] = {
     "routers/internal.py::internal_next_task": ("GET /api/internal/next-task", _PULL),
     "routers/internal.py::internal_task_result": ("POST /api/internal/tasks/{execution_id}/result", _PULL),
     "routers/internal.py::log_audit_entry": ("POST /api/internal/audit", _SECRET),
+    "routers/internal.py::mcp_external_access": ("GET /api/internal/mcp-external-access", _SECRET),
     "routers/internal.py::mcp_exposed_agents": ("GET /api/internal/mcp-exposed-agents", _SECRET),
     "routers/internal.py::validate_execution": ("POST /api/internal/validate-execution", _SECRET),
     "routers/setup.py::get_setup_status": ("GET /api/setup/status", "unauthenticated by design (first-run status)"),
@@ -1169,6 +1194,7 @@ OWN_AUTH: Dict[str, Tuple[str, str]] = {
     "routers/auth.py::request_access": ("POST /api/access/request", "unauthenticated by design (access request)"),
     "routers/auth.py::request_email_login_code": ("POST /api/auth/email/request", "email sign-in, step 1"),
     "routers/auth.py::verify_email_login_code": ("POST /api/auth/email/verify", "email sign-in, step 2"),
+    "routers/auth.py::redeem_email_login_handoff": ("POST /api/auth/email/handoff", "email sign-in, step 2 via the Workspace's one-time hand-off (#4157)"),
     "routers/auth.py::validate_token": ("GET /api/auth/validate", "validates the presented token itself"),
     "routers/public.py::clear_public_session": ("DELETE /api/public/session/{token}", _PUBLIC_LINK),
     "routers/public.py::confirm_verification_code": ("POST /api/public/verify/confirm", "public-link surface; the link token in the path is the credential (email verification)"),
@@ -1247,6 +1273,14 @@ DELEGATED: Dict[str, Tuple[str, str, str]] = {
         "GET /api/rooms/{room_id}/people",
         "shared_sessions.service.room_people -> person_mention_service.tagger_for",
         "tests/unit/test_ent631_person_mention.py::test_an_agent_key_cannot_list_people_to_tag"),
+    # trinity-enterprise#701: a person leaves a room. Same principal as above
+    # (a platform user OR a Workspace client), so no dependency gate fits; the
+    # service refuses any non-person (`not_a_person`, 403) after the uniform
+    # membership 404.
+    "shared_sessions/router.py::leave_room": (
+        "POST /api/rooms/{room_id}/leave",
+        "shared_sessions.service.leave_room -> PEOPLE_KINDS check",
+        "tests/unit/test_ent701_room_people.py::test_an_agent_cannot_leave"),
     # trinity-enterprise#719: three room uses. Agents read and post in a room as
     # themselves (ent#169); `get_room_principal` fits no census gate, and the
     # service keeps each room to its members. Creating a room stays in the
@@ -1279,7 +1313,7 @@ WEBSOCKET_ROUTES = frozenset({
 
 # The exact size of the frozen baseline. Lower it in the same change that
 # removes an entry; it never goes up.
-FROZEN_BASELINE_COUNT = 233
+FROZEN_BASELINE_COUNT = 232
 
 
 def load_baseline(path: Path = BASELINE_PATH) -> Dict[str, str]:

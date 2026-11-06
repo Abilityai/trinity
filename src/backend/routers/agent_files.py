@@ -10,6 +10,7 @@ from sqlalchemy.exc import DBAPIError, OperationalError
 from models import User
 from database import db
 from dependencies import get_current_user, AuthorizedAgentByName, OwnedAgentByName, require_person_or_capability, reject_agent_principal, assert_agent_owner, assert_own_agent, is_interactive_principal, require_admin, reject_non_interactive_principal, require_person
+from services.tool_access_guard import assert_tool_allowed
 from services.agent_auth import agent_httpx_client
 from services import (
     agent_skills_listing,
@@ -1033,6 +1034,8 @@ async def share_agent_file(
     # reach since ent#629) would refuse a sibling too, less specifically.
     assert_own_agent(current_user, agent_name,
                      detail="Agent-scoped MCP key cannot share files for a different agent.")
+    # trinity-enterprise#341: refused when this agent's tool access removes share_file.
+    assert_tool_allowed(current_user, "share_file")
     actor_agent = getattr(current_user, "agent_name", None)
 
     # Owner gate (the agent's owner always passes)

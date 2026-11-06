@@ -2,6 +2,50 @@
 
 Apply a new Trinity release to a running instance. The procedure keeps agent containers running throughout — only the platform services are rebuilt (source installs) or re-pulled (hosted installs) and restarted.
 
+## The one command
+
+On the host, in the Trinity checkout:
+
+```bash
+./scripts/deploy/update.sh --check   # preflight only — changes nothing
+./scripts/deploy/update.sh           # update to the newest release tag
+./scripts/deploy/update.sh --to v1.0.0
+```
+
+A target older than your checkout is refused, because an install on a release candidate or a branch is often ahead of the newest release. Pass `--allow-downgrade` if you mean it.
+
+### First update from a release without this command
+
+Older checkouts do not contain `update.sh`. Run a copy from outside the checkout. Do not copy it into `scripts/deploy/`: the untracked file would block the checkout of the release that tracks it. Replace `<release>` with a release that contains `update.sh`:
+
+```bash
+git fetch --force --tags origin
+mkdir -p /tmp/trinity-update
+git show <release>:scripts/deploy/update.sh    > /tmp/trinity-update/update.sh
+git show <release>:scripts/deploy/update-db.py > /tmp/trinity-update/update-db.py
+bash /tmp/trinity-update/update.sh --dir "$PWD" --to <release>
+```
+
+After that the script is in the checkout. Rolling back to the older release removes it again, so the next update starts from this step.
+
+(`trinity update` from the [CLI](../../../CLI.md) runs the same script.) It works out how the install was deployed — dev, source-built production (with or without the enterprise overlay) or hosted — from the running backend's own compose labels, so it never runs the wrong file set. Then it:
+
+1. **Preflights** before touching anything: Docker reachable, `CREDENTIAL_ENCRYPTION_KEY` set, no local edits to tracked files, enough free disk, the compose files render, and on an enterprise install the enterprise pin recorded by the target release is available. Any failure stops here with nothing changed.
+2. **Backs up the database** through the running backend (SQLite: a verified copy at `backups/pre-migration-<timestamp>.db`; PostgreSQL: a fresh `pg_dump` at `backups/pre-update-<timestamp>.dump`), and records the schema position — which migrations the database has applied.
+3. **Checks out** the target, and on an enterprise install the enterprise tree at the pin that release records.
+4. **Compares published ports** (address and port) with what is running. If a binding would move or disappear (for example because a `.env` key such as `FRONTEND_PORT` now applies), it puts the checkout back and stops before any container changes — pass `--accept-port-change` once your proxy is updated. A binding that is only added prints a warning and the update continues.
+5. **Rebuilds and restarts** the platform services (hosted: pulls via `start.sh --hosted`). The agent base image is rebuilt only when the release changed it (`--rebuild-base` forces it); agents pick it up on their next cold stop/start.
+6. **Verifies the published URL** — `FRONTEND_URL` from `.env`, or `--url https://your-domain` — not just `localhost`, retrying for up to two minutes while the frontend restarts (`TRINITY_UPDATE_PUBLISHED_TIMEOUT`): the page must be real HTML, its hashed UI bundle must load, and `/api/auth/mode` must answer through the same address. On an enterprise install it also confirms the enterprise modules registered.
+
+If verification fails it prints `./scripts/deploy/update.sh --rollback` (and offers it on a terminal). Rollback first checks whether a migration ran during the update:
+
+- **No migration ran** — the code, the enterprise tree and the hosted image tag return to the recorded version, are rebuilt and re-verified. The database is untouched. On a hosted install left on `latest`, the tag to return to is read from the running image; if it cannot be, the update warns and the rollback refuses, so pin `TRINITY_IMAGE_TAG` before updating.
+- **A migration ran** (or it cannot tell) — it **refuses** to roll back the code alone, because the older release cannot be assumed to run on the newer schema. It names the pre-update backup and prints the exact steps: stop `backend` and `scheduler`, restore the backup (the commands are printed for SQLite or PostgreSQL), then run `./scripts/deploy/update.sh --rollback --db-restored`. Restoring discards every write made since the backup, so it never happens automatically.
+
+`--verify` runs step 6 on its own at any time.
+
+The manual procedure below is what the command automates; use it when you need to run a step by hand.
+
 ## When to Run This
 
 - **Source install** (`docker-compose.yml` or `docker-compose.prod.yml`): after every `git pull` that includes changes to platform code (backend, frontend, MCP server, scheduler). Skip it for documentation-only changes.
@@ -110,6 +154,8 @@ Do not substitute a bare `docker compose -f docker-compose.hosted.yml pull`: the
 - Before pulling, it checks that the ingress network's range (`TRINITY_PROXY_PREFIX`, default `172.30.0.0/24`) is free and stops — changing nothing — if another Docker network already uses it, naming that network. Set a free `/24` prefix in `.env` and re-run.
 - After the backend is healthy and the web UI answers on its local port, it re-renders the Caddyfile. Caddy is pointed at the web container's PROXY-protocol listener (`127.0.0.1:${CADDY_PROXY_PORT:-18082}`) only after a live check that the listener answers; that listener is what carries each visitor's address to Trinity, so per-client sign-in limits and audit addresses see real clients. If the running web image is older than the checkout, Caddy keeps the ordinary listener and the run prints a warning that visitors' addresses are not yet passed through — pin the matching `TRINITY_IMAGE_TAG` and re-run.
 - The first switch restarts Caddy once, so open live views (execution logs, chat streams) reconnect. Later re-runs with an unchanged configuration leave Caddy running. A configuration Caddy rejects is never installed; the previous one keeps serving.
+- `/etc/caddy/Caddyfile` belongs to Trinity and is rewritten on every upgrade. **Put your own sites in `/etc/caddy/Caddyfile.d/<name>.caddy`**: the Caddyfile imports every `*.caddy` file there, and Trinity never writes to that directory. If the Caddyfile was edited by hand since Trinity last wrote it (or, on an install from before this check, holds a site Trinity never renders, such as your own hostname), the upgrade **does not replace it**. It prints why, leaves the running configuration serving, and finishes the rest of the upgrade. To apply the new configuration, move your blocks into `Caddyfile.d/`, then re-run with `--caddy-overwrite`; the old file is kept beside it as `Caddyfile.bak-<timestamp>`. To see the file before anything is written, run `sudo ./scripts/deploy/start.sh --provision --cloud <digitalocean|vultr|aws> --caddy-only --dry-run` (`--dry-run` works only with `--caddy-only`; anywhere else it is refused rather than ignored).
+- After adding or editing a file in `Caddyfile.d/`, apply it with `sudo ./scripts/deploy/start.sh --provision --cloud <digitalocean|vultr|aws> --caddy-only`, which reloads Caddy when that directory changed (or `sudo systemctl reload caddy`). Keep the directory `0755` and its files `0644`: Caddy runs as the `caddy` user, and a file only root can read is refused before Caddy is touched.
 
 `--caddy-only` remains available for deliberate reconfiguration (for example after changing `PRIVATE_NETWORK_CIDRS`); it applies the same listener check.
 

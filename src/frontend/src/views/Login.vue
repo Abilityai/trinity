@@ -480,6 +480,18 @@ onMounted(async () => {
     // mfa → the existing 2FA challenge UI takes over; error → authError shows.
   }
 
+  // #4157: the Workspace's code page already took this person's correct code
+  // and handed over a one-time token in memory. Redeem it at the platform door
+  // instead of asking for a second code. 2FA → the challenge step below; any
+  // failure (reload, expiry) → the ordinary code form, already filled in.
+  if (workspaceHandoff && authStore.workspaceHandoff) {
+    loadingMessage.value = 'Signing you in...'
+    if (await authStore.redeemWorkspaceHandoff(handoffEmail)) {
+      afterLogin()
+      return
+    }
+  }
+
   // Populate SSO login buttons (no-op / empty in OSS-only builds).
   ssoProviders.value = await authStore.fetchSsoProviders()
   ssoLoaded.value = true

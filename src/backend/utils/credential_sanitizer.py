@@ -494,6 +494,14 @@ _GUARD_EXCLUDED = frozenset({
 })
 _guard_shape_re = [(re.compile(p), name) for p, name in _GUARD_SHAPES.items()]
 _GUARD_MIN_PAIR_VALUE = 8
+# The guard's own `KEY=value` walk (CodeQL `py/polynomial-redos` on the chat
+# message): no unbounded regex. Each `=` is found with `str.find`, the key is
+# walked back to the character `_KV_LINE_RE` would stop at, and the value is one
+# FIXED-WIDTH match — an optional opening quote, then eight characters that are
+# neither whitespace nor a quote. Unlike `_KV_PAIR_RE` it does not need the
+# closing quote: a truncated paste is still the secret.
+_GUARD_KEY_STOP = frozenset('"\'=&;,')
+_GUARD_VALUE_RE = re.compile(r'["\']?[^\s"\']{%d}' % _GUARD_MIN_PAIR_VALUE)
 
 
 def secret_shape(text: Optional[str]) -> Optional[str]:
@@ -508,18 +516,23 @@ def secret_shape(text: Optional[str]) -> Optional[str]:
     for pattern, name in _guard_shape_re:
         if pattern.search(text):
             return name
-    # A `KEY=value` whose key names a credential: the same forward walk as
-    # `_redact_kv_pairs`, with the harmless-word blanking applied to every key.
+    # A `KEY=value` whose key names a credential: the same keys as
+    # `_redact_kv_pairs` walks, with the harmless-word blanking applied to every
+    # key. Linear: the walk back never passes the previous `=`, so no character
+    # is visited by two keys.
     pos = 0
     while True:
-        key = _KV_LINE_RE.search(text, pos)
-        if key is None:
+        eq = text.find("=", pos)
+        if eq < 0:
             return None
-        pos = key.end()
-        if not _is_sensitive_chained_key(key.group(1)):
+        start = eq
+        while start > pos and not (
+                text[start - 1] in _GUARD_KEY_STOP or text[start - 1].isspace()):
+            start -= 1
+        pos = eq + 1
+        if start == eq or not _is_sensitive_chained_key(text[start:eq]):
             continue
-        pair = _KV_PAIR_RE.match(text, key.start())
-        if pair is not None and len(pair.group(3)) >= _GUARD_MIN_PAIR_VALUE:
+        if _GUARD_VALUE_RE.match(text, pos):
             return "env_pair"
 
 

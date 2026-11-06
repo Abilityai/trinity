@@ -76,6 +76,8 @@ class AgentOperatorAccess(BaseModel):
     role: Optional[str] = None
     last_active: Optional[str] = None  # ISO-Z last_login; None until first login
     status: str                        # 'active' | 'pending'
+    # trinity-enterprise#459: can an invitation be emailed to this person now?
+    invite_available: bool = False
     allow_proactive: bool = False
     proactive_consent: str = "not_asked"  # ent#817: consented | declined | not_asked
 
@@ -770,6 +772,16 @@ class EmailLoginVerify(BaseModel):
     """Verify a login code."""
     email: str
     code: str  # 6-digit code
+    # trinity-enterprise#1107 ruling A: `"web"` from the SPA marks the session
+    # interactive (the terms gate asks it); anything else, or absent, does not.
+    client: Optional[str] = None
+
+
+class EmailLoginHandoff(BaseModel):
+    """#4157 — redeem a one-time Workspace sign-in hand-off at `/login`."""
+    email: str
+    token: str = Field(..., min_length=1, max_length=256)
+    client: Optional[str] = None  # ent#1107 ruling A, as on EmailLoginVerify
 
 
 class EmailLoginResponse(BaseModel):
@@ -879,6 +891,10 @@ class SkillInfo(BaseModel):
     # trinity-enterprise#753: `recommended` — the skill is gated by default on
     # every agent it is assigned to (the owner can clear it). None otherwise.
     approval: Optional[str] = None
+    # trinity-enterprise#660: the author's `category:` (one line, <= 64 chars).
+    # It narrows the Skills lists and nothing else reads it. URL-free, like
+    # `source_name`.
+    category: Optional[str] = None
 
 
 class AgentSkillsUpdate(BaseModel):

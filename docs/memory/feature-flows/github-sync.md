@@ -487,7 +487,7 @@ the clone will succeed), and immune to the anonymous REST 60/hr cap that makes
 
 | Probe outcome | Meaning | Create result |
 |---------------|---------|---------------|
-| `ok` | Remote answered; public and reachable | Proceed; the source branch is then verified anonymously via `check_remote_branch_exists` — missing branch → 400 "Branch '…' not found in public repository '…'" |
+| `ok` | Remote answered; public and reachable | Proceed; the source ref (a branch or a tag, trinity#4165) is then verified anonymously via `check_remote_branch_exists` — missing → 400 "Branch or tag '…' not found in public repository '…'" |
 | `unavailable` | Remote answered with auth-challenge / not-found (anonymous GitHub deliberately cannot distinguish private from nonexistent) | 400 combined message: "was not found or is private. If it is private, add your GitHub token…" |
 | `transient` | GitHub itself unreachable (timeout / DNS / no git binary) | **502 — FAIL-CLOSED.** The clone would fail too, and with monitoring default-off (#1121) a fail-open would produce a silently empty agent |
 
@@ -981,12 +981,23 @@ back the PAT save.
     "updated": ["agent-a"],
     "skipped": [
       {"agent_name": "agent-b", "status": "skipped_per_agent_pat", "error": null},
-      {"agent_name": "agent-c", "status": "skipped_no_pat", "error": null}
+      {"agent_name": "agent-c", "status": "skipped_no_pat", "error": null},
+      {"agent_name": "agent-d", "status": "skipped_env_unreadable", "error": null}
     ],
     "failed": []
   }
 }
 ```
+
+**`skipped_env_unreadable`** (trinity-enterprise#1073): the agent did not hand
+`.env` back as text (non-UTF-8 bytes, a read error, or an image too old to
+report the file absent), so step 3's whole-file write is skipped rather than
+treating the file as empty. The docker-exec path in `update_remote_pat` still
+runs: its script edits the `GITHUB_PAT` line in place and itself refuses a file
+with NUL bytes or invalid UTF-8 (exit 6) or a grep error (exit 7), never
+replacing it with a lone `GITHUB_PAT` line. An agent whose remote was
+re-templated that way counts as `updated` (the token landed); only one whose
+remote did not land is listed as skipped.
 
 **Delete does NOT propagate** — `DELETE /api/settings/api-keys/github` is
 intentionally unchanged; agents keep working with their existing injected PAT
@@ -1458,7 +1469,7 @@ X-Conflict-Type: branch_ownership_collision
 }
 ```
 
-The backend's `OperatorQueueSyncService` (5s polling, see `services/operator_queue_service.py`) picks this up on its next sweep and surfaces it in the Operating Room. The losing instance now learns it lost the race, instead of believing its push succeeded — that's the substantive behavior change versus the pre-#382 silent-clobber regime.
+The backend's `OperatorQueueSyncService` (5s polling, see `services/operator_queue_service/`) picks this up on its next sweep and surfaces it in the Operating Room. The losing instance now learns it lost the race, instead of believing its push succeeded — that's the substantive behavior change versus the pre-#382 silent-clobber regime.
 
 Append failures are caught and logged but never raised — surfacing the alert is best-effort; the 409 to the caller is the authoritative signal.
 

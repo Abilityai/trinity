@@ -38,6 +38,10 @@ FRONTEND = REPO / "src" / "frontend" / "src"
 MARKED = frozenset({
     "main.py::get_current_user_info",
     "routers/auth.py::logout",
+    # trinity-enterprise#1107: the terms screen is a member page — the text is
+    # read and accepted before any Workspace route answers a person.
+    "routers/terms.py::current_terms",
+    "routers/terms.py::accept_terms",
     "routers/ws_tickets.py::create_ws_ticket",
     "routers/users.py::get_my_preferences",
     "routers/users.py::put_my_preference",
@@ -199,6 +203,17 @@ _DOORS = (
     "/api/enterprise/projects",        # Workspace projects, portal door
     "/api/rooms",                      # get_room_principal
 )
+# Seating people in a room (trinity-enterprise#701) is served by a private
+# router mounted through the entitlement seam; each of these routes
+# authenticates with `get_room_principal`, never `get_current_user`, so it is
+# the rooms door. Listed one by one, not as a prefix, so a future operator
+# route under /api/enterprise/rooms/ is still flagged (PR #3954 review).
+_ROOM_SEAT_DOORS = {
+    "/api/enterprise/rooms/{}/seatable",
+    "/api/enterprise/rooms/{}/people",
+    "/api/enterprise/rooms/{}/people/{}",
+    "/api/enterprise/rooms/{}/people/{}/history",
+}
 _OTHER_AUTH = (
     "/api/files/",                     # token-gated downloads
     "/api/public/",                    # public links
@@ -263,7 +278,7 @@ class TestTheWorkspaceCalls:
                     continue
                 if (rel, raw.split("?", 1)[0]) in _KNOWN:
                     continue
-                if _normalise(raw) in marked:
+                if _normalise(raw) in marked or _normalise(raw) in _ROOM_SEAT_DOORS:
                     continue
                 offenders.append(f"{rel}: {raw}")
         assert not offenders, (

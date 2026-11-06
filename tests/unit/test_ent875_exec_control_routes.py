@@ -702,7 +702,7 @@ READ_SITES = {
     ("routers/agent_config.py", "_visible"): "the closure get_agent_capacity filters its slots with, under the scope it asked for",
     # Not a person reading another person's turn:
     ("routers/agents.py", "agent_execution_result"): "the agent's own key reports its own turn's result (heartbeat pattern)",
-    ("routers/agents.py", "send_voice_reply_endpoint"): "agent-driven; returns delivery flags, never the turn's text",
+    ("routers/agents.py", "send_voice_reply_endpoint"): "agent-driven; the named run must be RUNNING and no other live turn may deliver elsewhere (ent#926's rule, ent#1062); returns delivery flags, never the turn's text",
     ("routers/a2a.py", "_send_paid_task"): "A2A tasks are bound to the caller's own task id",
     ("routers/a2a.py", "_bound_task_rpc"): "A2A tasks are bound to the caller's own task id",
     ("routers/a2a.py", "_dispatch_jsonrpc"): "A2A tasks are bound to the caller's own task id",
@@ -714,7 +714,7 @@ READ_SITES = {
     ("routers/public.py", "public_terminate_execution"): "public link token binds the session",
     ("routers/agent_memory.py", "search_retrieval_memory_agent_endpoint"): "agents only; the named run must be RUNNING and no other live turn may resolve to another scope (ent#926's rule); the row only names whose memory, none of it is returned",
     ("routers/public_memory.py", "write_user_memory"): "agents only; the named run must be RUNNING and no other live turn may resolve to another scope (ent#926's rule, #4121); the row names whose notes are written, and only that address comes back",
-    ("routers/seat_decisions.py", "_seat_for"): "reads the row to find the seat a decision belongs to",
+    ("routers/seat_decisions.py", "_seat_for"): "agents only; the named run must be RUNNING and no other live turn may resolve to another scope (ent#926's rule, ent#1062); reads the row to find the seat a decision belongs to",
 }
 
 
@@ -808,6 +808,7 @@ ROUTE_TIERS = {
     ("routers/git.py", "get_pull_sync_config"): "accessor: a config flag, no text",
     ("routers/git.py", "set_pull_sync_config"): "owner + person (already ruled)",
     ("routers/fan_out.py", "fan_out"): "dispatch with the caller's own key; the rows it makes carry their id",
+    ("routers/agents.py", "agent_execution_turn_tier"): "the agent's own key only, for its own turn (ent#926 turn-tier route)",
     # whole-agent aggregates, ruled open to share holders (PR #3777 review): counts,
     # rates, cost and durations, no prompt or response text
     ("routers/schedules.py", "get_schedule_analytics"): "accessor: one schedule's run counts and durations, no text (ruled open)",

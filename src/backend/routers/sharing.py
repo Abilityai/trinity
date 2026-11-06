@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from models import (
     AccessPolicy, AccessPolicyUpdate, AccessRequest, AccessRequestDecision,
     User, ClientRosterEntry, PublicChannelPrompt, PublicChannelPromptUpdate,
+    AgentInviteResult, AgentShareResult,
 )
 from database import db, AgentShare, AgentOperatorAccess, AgentShareRequest
 from dependencies import (
@@ -19,6 +20,7 @@ from dependencies import (
     reject_non_interactive_principal, require_interactive, require_person,
 )
 from services.docker_service import get_agent_container
+from services import access_request_service, agent_invite_service
 from services.client_roster_service import get_client_roster
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services.proactive_message_service import proactive_message_service
@@ -81,7 +83,7 @@ def set_websocket_manager(ws_manager):
     manager = ws_manager
 
 
-@router.post("/{agent_name}/share", response_model=AgentShare,
+@router.post("/{agent_name}/share", response_model=AgentShareResult,
              dependencies=[Depends(require_interactive)])
 async def share_agent_endpoint(
     agent_name: OwnedAgentByName,
@@ -135,7 +137,54 @@ async def share_agent_endpoint(
         details={"shared_with": share_request.email},
     )
 
-    return share
+    # trinity-enterprise#459: tell a pending person. The share stands either way.
+    invitation = await agent_invite_service.invite_on_share(
+        agent_name, share_request.email, current_user.username)
+    if invitation in (agent_invite_service.SENT, agent_invite_service.FAILED):
+        await _audit_invite(request, current_user, agent_name, share_request.email, "share", invitation)
+
+    return AgentShareResult(**share.model_dump(), invitation=invitation)
+
+
+async def _audit_invite(request: Request, current_user, agent_name: str, email: str,
+                        trigger: str, outcome: str) -> None:
+    await platform_audit_service.log(
+        event_type=AuditEventType.AUTHORIZATION,
+        event_action="agent_invite",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        target_type="agent",
+        target_id=agent_name,
+        endpoint=request.scope["path"],
+        request_id=getattr(request.state, "request_id", None),
+        details={"shared_with": email, "trigger": trigger, "outcome": outcome},
+    )
+
+
+@router.post("/{agent_name}/share/{email}/invite", response_model=AgentInviteResult,
+             dependencies=[Depends(require_interactive)])
+async def resend_agent_invite_endpoint(
+    agent_name: OwnedAgentByName,
+    email: str,
+    request: Request,
+    current_user: CurrentUser,
+):
+    """Email a pending person their invitation again (trinity-enterprise#459).
+
+    INTERACTIVE, as share is: it sends mail on the owner's behalf. Works on a
+    stopped agent, since the roster is DB-sourced.
+    """
+    reject_non_interactive_principal(current_user)
+    try:
+        await agent_invite_service.resend_invite(agent_name, email, current_user.username)
+    except agent_invite_service.InviteRefused as e:
+        if e.code == "invite_not_sent":
+            await _audit_invite(request, current_user, agent_name, email, "resend", agent_invite_service.FAILED)
+        headers = {"Retry-After": str(e.retry_after)} if e.retry_after else None
+        raise HTTPException(status_code=e.status_code, detail={"code": e.code, "message": e.message}, headers=headers)
+    await _audit_invite(request, current_user, agent_name, email, "resend", agent_invite_service.SENT)
+    return AgentInviteResult(email=email.strip().lower())
 
 
 @router.delete("/{agent_name}/share/{email}", dependencies=[Depends(require_person)])
@@ -210,7 +259,7 @@ async def get_agent_access_endpoint(
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    return db.get_agent_operator_access(agent_name)
+    return agent_invite_service.mark_invite_available(db.get_agent_operator_access(agent_name))
 @router.get("/{agent_name}/public-prompt", response_model=PublicChannelPrompt)
 async def get_public_channel_prompt_endpoint(
     agent_name: OwnedAgentByName,
@@ -298,7 +347,10 @@ async def list_access_requests_endpoint(
     status: str = "pending",
 ):
     """List access requests for this agent (owner-only)."""
-    rows = db.list_access_requests(agent_name, status)
+    # trinity-enterprise#737: each request names who asked, as the channel saw
+    # them, and where the viewer has seen that identity before.
+    rows = access_request_service.list_access_requests(
+        agent_name, status, current_user.username, principal=current_user)
     return [AccessRequest(**r) for r in rows]
 
 
@@ -374,4 +426,4 @@ async def decide_access_request_endpoint(
         details={"email": existing["email"], "access_request_id": request_id},
     )
 
-    return AccessRequest(**updated)
+    return AccessRequest(**updated, identity_captured=bool(updated.get("requester_channel_id")))
