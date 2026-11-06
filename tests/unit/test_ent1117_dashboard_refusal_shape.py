@@ -9,6 +9,9 @@ the file, the `except HardenedYamlError` arm answers
 This file pins what that `error` string is made of, so it stays a named refusal
 and never grows into internals:
 
+* every `raise` in the loader is a bare re-raise or a call to one of its
+  refusal constructors (`err`, `error_cls`, `HardenedYamlError`), so the
+  source scan below sees every refusal it can raise;
 * the code comes from a closed set (`<kind>_too_large`, `_too_deep`,
   `_alias_not_permitted`, `_alias_budget_exceeded`, `_duplicate_key`,
   `_yaml_invalid`), read from the loader's source;
@@ -45,6 +48,9 @@ if str(_BASE_IMAGE) not in sys.path:
 pytestmark = pytest.mark.unit
 
 KIND = "workspace_yaml"
+# The names the loader raises its refusals through: the parameter and local
+# alias (`err = error_cls or HardenedYamlError`) and the class itself.
+REFUSAL_CONSTRUCTORS = {"err", "error_cls", "HardenedYamlError"}
 REFUSAL_SUFFIXES = {
     "too_large",
     "too_deep",
@@ -89,17 +95,34 @@ def serve(dashboard_module, monkeypatch, tmp_path):
 
 
 def _refusal_calls():
-    """Every `err(...)` / `error_cls(...)` call in the loader: (code, message)."""
+    """Every call to a refusal constructor in the loader."""
     tree = ast.parse(_SAFE_YAML.read_text())
     calls = []
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.Call)
             and isinstance(node.func, ast.Name)
-            and node.func.id in {"err", "error_cls"}
+            and node.func.id in REFUSAL_CONSTRUCTORS
         ):
             calls.append(node)
     return calls
+
+
+def test_every_raise_in_the_loader_is_a_refusal_constructor_or_a_re_raise():
+    """Closes the scan: a refusal raised any other way (a new class, a
+    prebuilt instance, a wrapped call) would be invisible to the two tests
+    below."""
+    raises = [n for n in ast.walk(ast.parse(_SAFE_YAML.read_text())) if isinstance(n, ast.Raise)]
+    assert raises, f"no raise found in {_SAFE_YAML}"
+    for node in raises:
+        if node.exc is None:
+            continue  # bare `raise` re-raises a refusal already built
+        assert (
+            node.cause is None
+            and isinstance(node.exc, ast.Call)
+            and isinstance(node.exc.func, ast.Name)
+            and node.exc.func.id in REFUSAL_CONSTRUCTORS
+        ), f"line {node.lineno}: {ast.unparse(node)}"
 
 
 def _code_suffix(arg: ast.expr) -> str:
