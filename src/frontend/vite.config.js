@@ -38,9 +38,9 @@ const devSecurityHeaders = {
     "img-src 'self' data: blob: https:; " +
     "media-src 'self' blob:; " +
     "font-src 'self'; " +
-    "connect-src 'self' blob: ws: wss: https://us-central1-mcp-server-project-455215.cloudfunctions.net https://intake.abilityai.dev; " +
+    "connect-src 'self' blob: ws: wss: https://us-central1-mcp-server-project-455215.cloudfunctions.net https://intake.abilityai.dev https://api.sandbox.nevermined.app https://api.live.nevermined.app; " +
     "object-src 'self' blob:; " +
-    "frame-src 'self' blob:; " +
+    "frame-src 'self' blob: https://embed.nevermined.app; " +
     "frame-ancestors 'self'; " +
     "base-uri 'self'; " +
     "form-action 'self'",
@@ -75,7 +75,7 @@ export default defineConfig({
   // whether one is found depends on how its caller happens to be wired, so the rule
   // lists them all. Guard: tests/unit/optimizeDepsIncludeGuard.spec.js.
   optimizeDeps: {
-    include: ['mermaid', 'qrcode'],
+    include: ['mermaid', 'qrcode', '@nevermined-io/ui-widgets'],
   },
   server: {
     port: 80,
