@@ -885,6 +885,9 @@ _NON_ROW_ACCESSORS = frozenset({
     "readdress_operator_queue_item",   # trinity-enterprise#1095: a boolean, did the CAS write land
     # abilityai/trinity-enterprise#1108 AC #4: a boolean / a count — the wake's status
     "set_operator_queue_wake_state", "mark_operator_queue_wakes_woken",
+    # abilityai/trinity-enterprise#1102: request ids only — the caller's wake
+    # names which asks the ended run parked, never a title or a question.
+    "list_pending_ask_ids_for_execution",
 })
 
 #: What happens to the rows each reader gets.
