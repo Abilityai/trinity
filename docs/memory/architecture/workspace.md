@@ -859,7 +859,12 @@ agent never names the user. The details panel's `PortalAgentMemory.vue` reads
 `public_user_memory_writes` history with schedule names through the page's bounded map)
 and `POST …/memory/writes/{id}/undo` (latest-first; `409 not_latest` / `already_undone`
 named, unknown id the uniform 404). Requirement §10.19 of `scheduling.md`; flow in
-`schedule-workspace-delivery.md`.
+`schedule-workspace-delivery.md`. **Since trinity-enterprise#962** the history and the undo
+are shared with the owner's view (`services/person_memory_service`): this view stays
+**notes-only** (`section='notes'`, and its undo is pinned to it — a summary write id is the
+404), pages with a keyset cursor (`?before=` → `next_before`, 20 a page), and a write
+someone else undid carries `undone_by_operator` (never who) so the panel reads "Undone by an
+operator of this agent". The owner's side is `routers/person_memory.py` (`backend.md`).
 
 ## The role card — a projection of the agent's files, and the owner's readiness stamp (ent#527, #663)
 
