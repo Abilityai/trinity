@@ -6229,7 +6229,7 @@ def _migrate_channel_client_blocks(cursor, conn):
     """trinity-enterprise#21 — an owner's per-agent block on one external
     channel client, checked by the channel access gate on every message.
     Schema is also in db/schema.py for fresh installs; mirrored by Alembic
-    revision 0121_channel_client_blocks.
+    revision 0122_channel_client_blocks.
     """
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS channel_client_blocks (
