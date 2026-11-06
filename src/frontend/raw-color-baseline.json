@@ -45,8 +45,8 @@
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/AccessPanel.vue": {
-      "raw_nongray": 3,
-      "raw_gray": 38,
+      "raw_nongray": 2,
+      "raw_gray": 31,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/AgentHeader.vue": {
@@ -996,8 +996,8 @@
     }
   },
   "totals": {
-    "raw_nongray": 813,
-    "raw_gray": 8736,
+    "raw_nongray": 812,
+    "raw_gray": 8729,
     "hardcoded_colors": 447,
     "semantic_tokens": 4030,
     "files_with_violations": 198

@@ -2,28 +2,18 @@
  * The Access tab's add-field suggestions (trinity-enterprise#450): what the panel
  * decides, kept pure so a spec can execute it.
  */
-import { platformRoleLabel } from './workspaceOnly'
+import { PEOPLE_INPUT_MIN_QUERY, nextActive, personRows } from '../components/base/peopleInput'
 
-export const MIN_QUERY = 2
+// trinity-enterprise#1153: the field is BasePeopleInput now, so the row shape,
+// the keyboard and the minimum are the primitive's. Re-exported here so the
+// Access tab's own rules read as one list.
+export const MIN_QUERY = PEOPLE_INPUT_MIN_QUERY
+export { nextActive }
+export const candidateRows = personRows
 
 /** Would this text produce a query? The popup never opens on a shorter one. */
 export function wantsSuggestions(text) {
   return String(text || '').trim().length >= MIN_QUERY
-}
-
-export function candidateRows(candidates) {
-  return (candidates || []).map((c) => ({
-    key: c.email,
-    primary: c.label,
-    secondary: c.role ? `${c.email} · ${platformRoleLabel(c.role)}` : c.email,
-  }))
-}
-
-/** Arrow keys over `count` rows, wrapping. -1 means none, so Enter submits the text. */
-export function nextActive(active, count, delta) {
-  if (count <= 0) return -1
-  if (active < 0) return delta > 0 ? 0 : count - 1
-  return (active + delta + count) % count
 }
 
 /** A query that matched no one says so, and how to invite anyway. */

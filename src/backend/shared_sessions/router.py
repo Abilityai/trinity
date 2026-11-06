@@ -273,15 +273,16 @@ async def room_people(room_id: str,
 
     The ent#450 shape: membership-scoped (uniform 404 for a non-member), a query
     is required (an empty one lists no one), capped, and rate-limited per
-    caller — a picker, never a directory. Refused by name for a caller who may
+    caller by the one people search (ent#1153) — a picker, never a directory. Refused by name for a caller who may
     not tag (an agent key, an external Workspace client)."""
-    from services import rate_limiter
-    who = getattr(current_user, "email", None) or getattr(current_user, "username", "") or "?"
-    rate_limiter.enforce(f"room_people:{who}", 120, 60)
+    from services import people_search_service as pss
     try:
         return service.room_people(current_user, room_id, q)
     except RoomError as e:
         _raise(e)
+    except pss.PeopleSearchLimited as e:   # the seam's per-person budget (ent#1153)
+        raise HTTPException(status_code=429, detail=pss.RATE_LIMITED_DETAIL,
+                            headers={"Retry-After": str(e.retry_after)})
 
 
 @router.patch("/{room_id}")
