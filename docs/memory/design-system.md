@@ -125,7 +125,7 @@ Shared primitives are the unit of consistency: **compose them, never re-implemen
 | BaseButton | `components/base/BaseButton.vue` | `ConfirmDialog.vue` actions · TemplateRegistryPanel Save/Reset |
 | BaseInput | `components/base/BaseInput.vue` | TemplateRegistryPanel registry URL |
 | BaseSelect | `components/base/BaseSelect.vue` | `ResourceModal.vue` memory/CPU (`field`) · `PortalConversation.vue` model picker (`ghost`, #2662) · `SkillCard.vue` approver picker (`field`, `size="sm"`, trinity-enterprise#754) |
-| BasePeopleInput | `components/base/BasePeopleInput.vue` | `AccessPanel.vue` add field (`suggest`, trinity-enterprise#1153) |
+| BasePeopleInput | `components/base/BasePeopleInput.vue` | `AccessPanel.vue` add field (`suggest`, trinity-enterprise#1153); assignments Person / New primary (`pick`, #1154); project member, steward, task owner (`pick`) and guest (`suggest`, #1155) |
 | BaseToggle | `components/base/BaseToggle.vue` | TemplateRegistryPanel enable switch |
 | BaseTextarea | `components/base/BaseTextarea.vue` | `SystemInstallPanel.vue` manifest editor (mono) |
 | BaseBadge | `components/base/BaseBadge.vue` | TemplateRegistryPanel status + Default chips · `SkillCard.vue` author-mode chip (`size="sm"`, trinity-enterprise#754) |
@@ -167,7 +167,7 @@ The people-picker form field (trinity-enterprise#1153): BaseInput's anatomy and 
 
 **Two modes:**
 - **`suggest`** (suggest-and-allow, default) — any text submits; a row is accepted only by ↑↓ + Enter or a click, and a plain Enter is left to the form. For an invite field, where an outside address is legitimate.
-- **`pick`** (must-pick) — the field is natively invalid (`setCustomValidity`) until a person is chosen, so the form will not submit; once the field is left, unchosen text shows a named message — the caller's `noMatch(text)` when the server said no one matches, else "Choose a person from the list". A chosen person is confirmed under the field (`Name · email`). Bind `v-model:picked`; editing the text after a pick drops it.
+- **`pick`** (must-pick) — the field is natively invalid (`setCustomValidity`) until a person is chosen, so the form will not submit; once the field is left, unchosen text shows a named message — the caller's `noMatch(text)` when the server said no one matches, else "Choose a person from the list". A chosen person is confirmed under the field (`Name · email`). Bind `v-model:picked`; editing the text after a pick drops it. `acceptText(text)` is the one escape hatch: text it returns true for is taken without a pick (a task owner's `role:<id>`, or the value the field opened with, trinity-enterprise#1155). Pre-fill an edit by passing both the text and `picked`.
 
 **Keyboard:** ↑↓ move (wrapping), Enter accepts only a highlighted row, Esc and blur dismiss. Asks from 2 characters after a 200ms pause; only the newest answer shows.
 **Degradation:** a 403 or a network failure leaves a plain input with no error wall and stops asking for the session (`usePeoplePicker`'s `unavailable`, emitted as `unavailable` so a surface can fall back); a 429 is a pause, not a verdict.

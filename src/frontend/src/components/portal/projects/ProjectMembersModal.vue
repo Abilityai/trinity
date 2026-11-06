@@ -30,7 +30,11 @@
         <h3 class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">People</h3>
         <ul class="mt-1 divide-y divide-gray-100 dark:divide-gray-750">
           <li v-for="m in project.members" :key="m.email" class="flex items-center gap-2 py-2 text-sm">
-            <span class="min-w-0 flex-1 truncate text-gray-900 dark:text-gray-100">{{ m.email === myEmail ? 'You' : m.email }}</span>
+            <span class="min-w-0 flex-1 truncate text-gray-900 dark:text-gray-100">
+              {{ m.email === myEmail ? 'You' : (m.label || m.email) }}<span
+                v-if="m.email !== myEmail && m.label && m.label !== m.email"
+                class="text-gray-500 dark:text-gray-400"> · {{ m.email }}</span>
+            </span>
             <BaseBadge>{{ m.role === 'creator' ? 'Creator' : 'Member' }}</BaseBadge>
             <BaseButton
               v-if="canManage && m.role !== 'creator'"
@@ -42,13 +46,17 @@
           </li>
         </ul>
         <form v-if="canManage" class="mt-2 flex items-start gap-2" @submit.prevent="addMember">
-          <BaseInput
+          <BasePeopleInput
             id="project-add-member"
+            ref="memberField"
             v-model="newMember"
+            v-model:picked="memberPicked"
             class="flex-1"
-            type="email"
-            placeholder="name@your-company.com"
-            aria-label="Add a person by email"
+            mode="pick"
+            :fetch="(q) => store.fetchProjectPeople(project.id, q, 'member')"
+            :no-match="noCompanyMatch"
+            placeholder="Type a name or email"
+            aria-label="Add a person"
           />
           <BaseButton type="submit" variant="secondary" :loading="busy === 'member'" :disabled="!newMember.trim()">Add</BaseButton>
         </form>
@@ -66,7 +74,17 @@
           </li>
         </ul>
         <form v-if="canManage" class="mt-2 flex items-start gap-2" @submit.prevent="addGuest">
-          <BaseInput id="project-add-guest" v-model="newGuest" class="flex-1" type="email" placeholder="name@client.com" aria-label="Invite a guest by email" />
+          <BasePeopleInput
+            id="project-add-guest"
+            ref="guestField"
+            v-model="newGuest"
+            class="flex-1"
+            type="email"
+            :fetch="(q) => store.fetchProjectPeople(project.id, q, 'guest')"
+            :no-match="inviteThisAddress"
+            placeholder="name@client.com"
+            aria-label="Invite a guest by email"
+          />
           <BaseButton type="submit" variant="secondary" :loading="busy === 'guest'" :disabled="!newGuest.trim()">Invite</BaseButton>
         </form>
         <p v-if="canManage" class="mt-1 text-xs text-gray-500 dark:text-gray-400">
@@ -138,7 +156,7 @@
 <script setup>
 import { computed, ref } from 'vue'
 import BaseModal from '@/components/base/BaseModal.vue'
-import BaseInput from '@/components/base/BaseInput.vue'
+import BasePeopleInput from '@/components/base/BasePeopleInput.vue'
 import BaseSelect from '@/components/base/BaseSelect.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
@@ -163,6 +181,9 @@ const store = useProjectsStore()
 const newMember = ref('')
 const newAgent = ref('')
 const newGuest = ref('')
+const memberPicked = ref(null)
+const memberField = ref(null)
+const guestField = ref(null)
 const busy = ref('')
 const error = ref('')
 const confirm = ref({ open: false, kind: '', target: '', title: '', message: '', verb: '' })
@@ -184,12 +205,22 @@ async function run(kind, fn) {
   try { await fn() } catch (err) { error.value = projectErrorMessage(err) } finally { busy.value = '' }
 }
 
-const addMember = () => run('member', async () => {
-  await store.addMember(props.project.id, newMember.value.trim())
-  newMember.value = ''
-})
+// A member is someone at the company, picked from the list; a guest may be an
+// outside address nobody has an account for (trinity-enterprise#1155).
+const noCompanyMatch = (t) => `No one at your company matches “${t}”. Invite an outside client below, as a guest.`
+const inviteThisAddress = (t) => `No one with an account matches “${t}”. Invite will invite this address.`
+
+function addMember() {
+  if (!memberField.value?.validate()) return
+  return run('member', async () => {
+    await store.addMember(props.project.id, memberPicked.value?.email || newMember.value.trim())
+    memberField.value?.close()
+    newMember.value = ''
+  })
+}
 const addGuest = () => run('guest', async () => {
   await store.addGuest(props.project.id, newGuest.value.trim())
+  guestField.value?.close()
   newGuest.value = ''
 })
 const addAgent = () => run('agent', async () => {
