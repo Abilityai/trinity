@@ -47,6 +47,7 @@ from services.docker_utils import (
     container_stop, container_remove,
 )
 from services import heartbeat_service
+from services import wake_policy
 from services import idempotency_service
 from services.platform_audit_service import (
     platform_audit_service,
@@ -1427,9 +1428,21 @@ async def get_operator_resume_endpoint(
     `enabled: true`). When an owner switches it off, an answer still reaches
     the agent's queue file — it is simply processed at the agent's next turn.
     """
+    verdict = wake_policy.resolve(agent_name)
+    override = db.get_wake_on_ending(agent_name)
+    if not isinstance(override, bool):
+        override = None  # NULL, or no live row — neither is an owner's voice
     return {
         "agent_name": agent_name,
+        # ent#329's field, unchanged for every existing client.
         "enabled": db.get_operator_resume_enabled(agent_name),
+        # ent#1102: the tri-state the control renders, plus what it resolves to.
+        # `mode` is the owner's own voice ("default" when they have not spoken);
+        # `effective`/`source` are the answer and the layer that produced it, so
+        # a UI can say "On (instance default)" rather than inventing a reason.
+        "mode": "default" if override is None else ("on" if override else "off"),
+        "effective": verdict.enabled,
+        "source": verdict.source,
     }
 
 
@@ -1449,9 +1462,20 @@ async def set_operator_resume_endpoint(
     the ent#223 consent toggle — the GET (a use) stays agent-reachable.
     """
     reject_agent_principal(current_user)
-    if not db.set_operator_resume_enabled(agent_name, body.enabled):
+    # ent#1102: the tri-state column is the switch both wake paths read, so it
+    # is written on every request — including a legacy `enabled`, because a
+    # person who moved the switch has expressed an opinion either way and the
+    # instance default must stop overriding them. The ent#329 column is written
+    # in step on every body too (it is tri-state since ent#1108, so `default`
+    # clears it to NULL): the resolver reads it as the owner's voice when the
+    # wider column is NULL, and a `mode` that left a stale 0 or 1 behind would
+    # let an older answer outvote the newer one.
+    if not db.set_wake_on_ending(agent_name, body.wake_override):
         raise HTTPException(status_code=404, detail="Agent not found")
+    db.set_operator_resume_enabled(agent_name, body.wake_override)
 
+    verdict = wake_policy.resolve(agent_name)
+    mode = body.mode if body.mode is not None else ("on" if body.enabled else "off")
     await platform_audit_service.log(
         event_type=AuditEventType.CONFIGURATION,
         event_action="operator_resume_config",
@@ -1459,9 +1483,15 @@ async def set_operator_resume_endpoint(
         actor_user=current_user,
         target_type="agent",
         target_id=agent_name,
-        details={"enabled": body.enabled},
+        details={"mode": mode, "enabled": body.enabled, "effective": verdict.enabled},
     )
-    return {"agent_name": agent_name, "enabled": body.enabled}
+    return {
+        "agent_name": agent_name,
+        "enabled": verdict.enabled,
+        "mode": mode,
+        "effective": verdict.enabled,
+        "source": verdict.source,
+    }
 
 
 # ============================================================================

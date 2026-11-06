@@ -54,6 +54,7 @@ from services import agent_call_limiter
 from services.agent_call_limiter import BackendAgentCallBudgetExhausted
 from services.model_context import DEFAULT_CONTEXT_WINDOW
 from services.execution_envelope import TaskExecutionErrorCode
+from services import wake_policy  # ent#1102: the receipt reports the caller's wake policy
 from services.task_execution_service import (
     _compute_context_used,
     _SWITCH_RETRY_DELAY_S,
@@ -1548,6 +1549,9 @@ async def run_pulled_chat_turn(
                         f"GET /api/agents/{name}/executions/{execution_id}."
                     ),
                     "async_mode": True,
+                    # ent#1102: the one /chat answer that is a receipt rather
+                    # than the reply, so it carries the wake verdict too.
+                    **_wake_on_ending_receipt(x_source_agent, name),
                 }
                 idempotency_service.complete(idem, execution_id, receipt)
                 idem_done = True
@@ -2633,6 +2637,37 @@ def _map_task_failure(name, result, *, idem):
             )
 
 
+def _wake_on_ending_receipt(x_source_agent, target_name) -> dict:
+    """ent#1102: what a RECEIPT tells the delegating caller about its wake.
+
+    A receipt is the one answer that is not the answer, so it is the moment the
+    caller decides whether to arm a reminder or simply end its turn. That choice
+    needs the policy, and only the backend can read it — the MCP client cannot
+    see the per-agent tri-state or the instance default. So the dispatch answer
+    carries the verdict and the layer that made it, in the SAME
+    ``{effective, source}`` shape ``GET /agent-info`` already publishes, so one
+    vocabulary covers the receipt, the audit row and the agent's own read.
+
+    Returns ``{}`` — no claim at all — when there is nobody to wake (a human's
+    call) or the caller IS the callee: ``resolveWake`` on the client already
+    stands those down by itself, and a field that contradicted it would be
+    worse than silence. A policy that cannot be read is also silence rather
+    than a promise: ``resolve`` already fails closed, and a receipt that says
+    ``on_ending`` and then goes quiet costs exactly what ent#1102 removed.
+    """
+    if not x_source_agent or x_source_agent == target_name:
+        return {}
+    try:
+        verdict = wake_policy.resolve(x_source_agent)
+    except Exception:  # noqa: BLE001 — a receipt never fails over its own footnote
+        logger.warning(
+            "[ent#1102] wake policy unreadable for caller '%s'; receipt stays silent",
+            x_source_agent,
+        )
+        return {}
+    return {"wake_on_ending": {"effective": verdict.enabled, "source": verdict.source}}
+
+
 async def _dispatch_async(
     *,
     request,
@@ -2697,6 +2732,9 @@ async def _dispatch_async(
             # to tell a first-poll start from a wait that will not end. These
             # three answer "how deep, since when, and waiting on what".
             **_queue_wait_fields(name, execution_id, pull=cap_result.pull),
+            # ent#1102: a queued receipt is a receipt — the caller needs the
+            # wake verdict here exactly as it does on `accepted`.
+            **_wake_on_ending_receipt(x_source_agent, name),
         }
         idempotency_service.complete(idem, execution_id, _queued_payload)
         return _queued_payload
@@ -2742,6 +2780,9 @@ async def _dispatch_async(
         "agent_name": name,
         "message": "Task accepted. Poll GET /api/agents/{name}/executions/{execution_id} for results.",
         "async_mode": True,
+        # ent#1102: whether a turn is coming when this run ends, and which
+        # layer decided. Absent when there is no caller to wake.
+        **_wake_on_ending_receipt(x_source_agent, name),
     }
     idempotency_service.complete(idem, execution_id, _accepted_payload)
     return _accepted_payload

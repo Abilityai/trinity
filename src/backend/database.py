@@ -1510,8 +1510,23 @@ class DatabaseManager:
     def get_operator_resume_enabled(self, agent_name: str) -> bool:
         return self._agent_ops.get_operator_resume_enabled(agent_name)
 
-    def set_operator_resume_enabled(self, agent_name: str, enabled: bool) -> bool:
+    def set_operator_resume_enabled(self, agent_name: str, enabled) -> bool:
         return self._agent_ops.set_operator_resume_enabled(agent_name, enabled)
+
+    def get_operator_resume_override(self, agent_name: str):
+        # ent#1102: the raw tri-state read `wake_policy` makes (ent#1108 made
+        # the column NULL / 0 / 1); `get_operator_resume_enabled` COALESCEs.
+        return self._agent_ops.get_operator_resume_override(agent_name)
+
+    # --- wake on ending, tri-state (ent#1102) ---
+    # None = no opinion, follow the instance default. Read only through
+    # services/wake_policy.py, never directly.
+
+    def get_wake_on_ending(self, agent_name: str):
+        return self._agent_ops.get_wake_on_ending(agent_name)
+
+    def set_wake_on_ending(self, agent_name: str, enabled) -> bool:
+        return self._agent_ops.set_wake_on_ending(agent_name, enabled)
 
     def get_mcp_exposed_agents(self):
         return self._agent_ops.get_mcp_exposed_agents()
@@ -4192,6 +4207,12 @@ class DatabaseManager:
         # #3247: the agent's own pending asks for the Execution Context line.
         return self._operator_queue_ops.list_pending_asks_for_agent(
             agent_name, limit, exclude_request_id_prefixes)
+
+    def list_pending_ask_ids_for_execution(self, execution_id: str, limit: int = 10):
+        """ent#1102: the asks one execution parked and never got answered."""
+        return self._operator_queue_ops.list_pending_ask_ids_for_execution(
+            execution_id, limit
+        )
 
     def list_recent_operator_queue_endings(self, agent_name, since, limit,
                                            exclude_request_id_prefixes=None):
