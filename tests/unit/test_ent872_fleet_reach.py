@@ -780,6 +780,10 @@ _ALLOW = {
         "the system-agent terminal authenticates a person (JWT) and checks the user row's role",
     ("services/settings_service.py", "get_agent_quota_for_role"):
         "maps a role to an agent-creation quota; selects no roster",
+    ("services/template_source_policy.py", "in_use"):
+        "trinity-enterprise#591 impact view: reached only via describe() from the two "
+        "/api/settings/agent-creation-allowlist routes (assert_admin / assert_interactive_admin, "
+        "both reject agent principals); returns template sources and counts, no agent names",
     ("services/ask_service.py", "may_end"):
         "an ask's ending is person-only at every route (reject_non_person_principal)",
     ("services/person_mention_service.py", "_room_access_row"):

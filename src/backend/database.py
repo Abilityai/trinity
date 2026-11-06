@@ -1220,6 +1220,10 @@ class DatabaseManager:
         """ent#629: live agents spawned by `agent_name` with key `key_id`."""
         return self._agent_ops.list_agents_spawned_by_key(agent_name, key_id)
 
+    def list_agent_created_agent_names(self) -> List[str]:
+        """ent#591: live agents another agent created (the bound's impact read)."""
+        return self._agent_ops.list_agent_created_agent_names()
+
     def purge_agent_ownership(self, agent_name: str):
         return self._agent_ops.purge_agent_ownership(agent_name)
 
