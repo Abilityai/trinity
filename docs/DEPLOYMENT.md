@@ -370,9 +370,11 @@ ADMIN_PASSWORD=your-secure-password
 # Backup database
 ./scripts/deploy/backup-database.sh ./backups/
 
-# Restore from backup
+# Restore from backup (SQLite installs only)
 ./scripts/deploy/restore-database.sh ./backups/trinity_backup.db
 ```
+
+`restore-database.sh` restores a SQLite file and does not read `DATABASE_URL`. On a PostgreSQL install it writes a file the backend never reads. Restore PostgreSQL from the `pg_dump` under `trinity-data/backups/` with `pg_restore`.
 
 ## Troubleshooting
 
