@@ -170,3 +170,128 @@ def test_masked_traceback_without_held_values_still_redacts_userinfo():
     except RuntimeError as e:
         out = masked_traceback(e)
     assert "pw-s9" not in out and "RuntimeError" in out
+
+
+# ---------------------------------------------------------------------------
+# Cut renderings: a formatter that shows only PART of a run of the held value.
+# ---------------------------------------------------------------------------
+
+# One unshaped run (no sanitize_text pattern matches it): 78 characters.
+CUT = "s9held-" + "".join(chr(65 + (i * 7) % 26) for i in range(60)) + "-endpartXYZ"
+
+
+def _stretches(value: str, n: int = 16) -> list[str]:
+    """Every n-character stretch of ``value``: none may survive the mask."""
+    return [value[i:i + n] for i in range(len(value) - n + 1)]
+
+
+def _assert_no_stretch(out: str, shown: str, value: str = CUT) -> None:
+    """No 16-character stretch of the value survives, and no 12-character
+    stretch that the rendering actually showed does either."""
+    leaked = [s for s in _stretches(value) if s in out]
+    leaked += [s for s in _stretches(value, 12) if s in shown and s in out]
+    assert not leaked, (leaked[:3], out)
+
+
+def test_the_cut_value_is_not_recognised_by_sanitize_text():
+    assert CUT in sanitize_text(f"x {CUT} y")
+
+
+def test_pydantic_truncated_input_value_is_masked():
+    """pydantic 2.12 renders a long input as `input_value='<25>...<24>'`."""
+    from pydantic import BaseModel, ValidationError
+
+    class _Model(BaseModel):
+        n: int
+
+    try:
+        _Model(n=CUT)
+    except ValidationError as e:
+        raw = str(e)
+        out = masked_traceback(e, CUT)
+    assert "..." in raw and CUT[:20] in raw and CUT[-20:] in raw  # the cut is real
+    assert "input_value=" in out and "int_parsing" in out  # the detail stays
+    _assert_no_stretch(out, raw)
+
+
+@pytest.mark.parametrize("render", [
+    pytest.param(lambda v: f"{v[:30]}' '{v[30:]}", id="split-across-two-strings"),
+    pytest.param(lambda v: "\n".join(v[i:i + 50] for i in range(0, len(v), 50)), id="wrapped-at-50"),
+    pytest.param(lambda v: f"X-Key: {v[:40]}\r\n\t{v[40:]}", id="header-folding"),
+    pytest.param(lambda v: __import__("reprlib").repr(v), id="reprlib"),
+    pytest.param(lambda v: f"{v[:20]}…{v[-20:]}", id="middle-ellipsis"),
+    pytest.param(lambda v: f"key starts {v[:16]}", id="prefix-only-16"),
+])
+def test_a_rendering_that_cuts_the_run_is_masked(render):
+    shown = render(CUT)
+    assert CUT not in shown  # it really is cut
+    out = mask_held_values(f"before {shown} after", CUT)
+    assert out.startswith("before ") and out.endswith(" after"), out
+    _assert_no_stretch(out, shown)
+
+
+def test_a_visible_stretch_under_the_window_is_not_masked():
+    """Documented limit: 11 characters of a run, alone, are not caught."""
+    text = f"key starts {CUT[:11]} here"
+    assert mask_held_values(text, CUT) == text
+
+
+def test_an_unrelated_long_run_is_left_alone():
+    text = "traceback /srv/app/services/subscription_auto_switch.py line 1802"
+    assert mask_held_values(text, CUT) == text
+
+
+# ---------------------------------------------------------------------------
+# Pass order, run class and floors, pinned on their own.
+# ---------------------------------------------------------------------------
+
+def test_the_held_pass_runs_before_the_shape_pass():
+    """On a REAL-shaped key the shape pass rewrites the head; run first, it
+    would break the whole escaped rendering and leave a short tail visible."""
+    key = "sk-ant-api03-" + "x" * 40 + "\nab12cd"
+    try:
+        raise RuntimeError(f"Illegal header value {key.encode()!r}")
+    except RuntimeError as e:
+        out = masked_traceback(e, key)
+    assert "ab12cd" not in out, out
+
+
+def test_the_run_class_includes_underscore_dot_tilde_and_hyphen():
+    from urllib.parse import quote
+
+    value = "ab_cd.ef~gh-ij_kl.mn'op_qr.st~uv-wx_yz.12"
+    out = mask_held_values(quote(value, safe=""), value)
+    assert "ab_cd.ef~gh-ij_kl.mn" not in out and "op_qr.st~uv-wx_yz.12" not in out, out
+
+
+def test_a_piece_of_exactly_the_floor_is_masked():
+    from urllib.parse import quote
+
+    value = "ABCDEFGH'IJKLMNOP"
+    out = mask_held_values(quote(value, safe=""), value)
+    assert "ABCDEFGH" not in out and "IJKLMNOP" not in out, out
+
+
+def test_a_value_of_exactly_the_floor_is_masked():
+    assert mask_held_values("x ABCDEFGH y", "ABCDEFGH") == f"x {MASK} y"
+    assert mask_held_values("x ABCDEFG y", "ABCDEFG") == "x ABCDEFG y"
+
+
+# ---------------------------------------------------------------------------
+# Cost bound: a crafted value cannot cost seconds on the event loop.
+# ---------------------------------------------------------------------------
+
+def test_a_crafted_value_is_bounded_in_pieces_windows_and_time():
+    import time
+    from urllib.parse import quote
+
+    from utils.log_masking import MAX_PIECES, MAX_WINDOW_SOURCE, _pieces, _windows
+
+    crafted = "s9-" + "\n".join(f"R{i:07d}" for i in range(20_000))
+    pieces = _pieces(crafted, MIN_HELD_LENGTH)
+    assert len(pieces) == MAX_PIECES
+    assert len(_windows(pieces)) <= MAX_WINDOW_SOURCE
+    text = "url " + quote(crafted, safe="") + " " + "y" * 1_000_000
+    start = time.perf_counter()
+    mask_held_values(text, crafted)
+    assert time.perf_counter() - start < 1.0  # ~0.06 s measured; 5.7 s unbounded

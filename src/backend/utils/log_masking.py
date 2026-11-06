@@ -7,32 +7,76 @@ test, a PAT being saved, a bot token in the request URL), the exception can
 echo that credential, and the log must not carry it.
 
 The pattern pass in ``utils.credential_sanitizer.sanitize_text`` only knows
-credential SHAPES. A held value is known by IDENTITY, so it is masked here in
-every form an exception message is known to render it in:
+credential SHAPES. A held value is known by IDENTITY, and is masked here.
 
-- raw, and stripped of surrounding whitespace;
-- the inside of its ``str`` repr (``'a\\nb'``), the inside of its ``bytes``
-  repr (h11 / httpx: ``Illegal header value b'...'``) and the inside of its
-  JSON string;
-- base64 of its UTF-8 bytes (which also covers a ``Basic`` header for
-  ``x-access-token:<value>``: that prefix is 15 bytes, so the encodings align);
-- every run of characters that no escaping scheme rewrites
-  (``[A-Za-z0-9_.~-]``): a value pasted with a line break, or carrying a
-  quote or a non-ASCII character, is still masked piece by piece in a form
-  this list does not name.
+What is masked, in this order (``mask_held_values``):
 
-Every form shorter than ``MIN_HELD_LENGTH`` is skipped, and so is a value whose
-stripped length is shorter: masking a one-character value would garble every
-word that contains it, and no credential these routes accept is that short.
-Forms are replaced longest first, so a whole value becomes one ``***`` rather
-than a run of masked pieces.
+1. Whole renderings of each held value: raw; stripped; the inside of its
+   ``str`` repr (``'a\\nb'``); the inside of its ``bytes`` repr (h11 / httpx:
+   ``Illegal header value b'...'``); the inside of its JSON string; base64 of
+   its UTF-8 bytes. Base64 also covers a ``Basic`` header for
+   ``x-access-token:<value>``, because that prefix is 15 bytes and the
+   encodings align.
+2. Pieces: every run of the value's characters that no escaping scheme
+   rewrites (``[A-Za-z0-9_.~-]``, 8+ characters), wherever it appears. A value
+   pasted with a line break, or carrying a quote or a non-ASCII character, is
+   still masked piece by piece in a rendering step 1 does not name
+   (percent-encoding, ``ascii()``, a dict or tuple ``%r``).
+3. Cut renderings: any run of 16+ such characters in the text that shares a
+   16-character stretch with a run of a held value is masked whole. This
+   catches renderings that show only PART of a run: pydantic's truncated
+   ``input_value='head...tail'``, ``reprlib``, a prefix-only echo, line
+   wrapping and header folding, a value split across two strings.
 
-Names here are chosen to stay clear of CodeQL's sensitive-data name heuristics
-(``SensitiveDataHeuristics.qll``): a function or parameter whose name reads as
-sensitive makes its value a source, and logging it would raise
-``py/clear-text-logging-sensitive-data``. The held values only ever reach the
-FIRST argument of ``str.replace``, which is not a taint step, so the masked
-text that is logged carries no taint from them.
+Steps 1 and 2 replace longest first, so a whole value becomes one ``***``.
+
+What is NOT masked, by design:
+
+- A value whose stripped length is under ``MIN_HELD_LENGTH`` (8), and any
+  single rendering or piece under 8: masking a one-character value would
+  garble every word that contains it. No credential these routes accept is
+  that short.
+- A visible stretch of a cut run that is shorter than 16 characters (for
+  example the 10-character tail a wrapped line leaves on its own), unless it
+  is a whole 8+ piece.
+- A piece under 8 characters inside a DOUBLY escaped rendering (``repr`` of a
+  repr, JSON inside JSON, ``repr(exc)``): ``b'***\\\\ntail7c'`` keeps
+  ``tail7c``. A value of 8+ characters whose runs are ALL under 8 (a
+  password-like value) is therefore recoverable from such renderings; no
+  credential these routes accept has that shape.
+- Overlap of two held values in the text: the longer is replaced first and a
+  remainder of the shorter under 16 characters can stay visible.
+
+Bounds, so a crafted value cannot cost seconds on the event loop: each held
+value contributes at most ``MAX_PIECES`` pieces (its longest), and its
+16-character stretches are taken from at most ``MAX_WINDOW_SOURCE`` characters
+of those pieces. Step 3 samples the text every ``_STRIDE`` characters, so its
+cost is linear in the text and independent of the held values.
+
+Rules for callers (S12/S13 and any later adopter):
+
+1. Never run a held value through pydantic validation or another truncating
+   formatter inside a masked ``try`` unless step 3 covers what it shows; a
+   visible stretch under 16 characters is not caught.
+2. For a ``Basic`` header whose user part is not 15 bytes (``oauth2:``,
+   ``user:``, ``git:``), pass ``f"{user}:{pat}"`` as an extra held value:
+   base64 of the PAT alone does not align with it.
+3. Pass the credential, not the URL that carries it: the URL's pieces
+   (``github.com``, path segments) would be masked everywhere and garble the
+   line. ``masked_traceback`` redacts URL userinfo on its own.
+4. Never log with ``logger.exception`` or ``exc_info`` next to masked text:
+   both render the raw message again.
+5. Bound a held value the service has not validated (length or shape) before
+   passing it; the caps above bound the cost, not the masking.
+6. Keep wrapper, variable and parameter names off CodeQL's sensitive-name
+   heuristics (``SensitiveDataHeuristics.qll``: secret, password, passcode,
+   passphrase, api key/token, auth key, oauth, cert, account, ...). A function
+   or parameter whose name reads as sensitive makes its value a source, and
+   logging it raises ``py/clear-text-logging-sensitive-data``;
+   ``scrub_secret(...)`` is such a call. Held values here only ever reach the
+   FIRST argument of ``str.replace`` and a set-membership test, neither of
+   which is a taint step, so the masked text that is logged carries no taint
+   from them.
 """
 
 from __future__ import annotations
@@ -41,22 +85,33 @@ import base64
 import json
 import re
 import traceback
-from typing import Optional
+from typing import Iterable, Optional
 
 from utils.credential_sanitizer import redact_url_userinfo, sanitize_text
 
 MASK = "***"
 MIN_HELD_LENGTH = 8
+# A cut rendering is caught when it shows this many characters of a run.
+MIN_CUT_LENGTH = 16
+# Cost bounds per held value: pieces kept (longest first), and characters of
+# those pieces that 16-character stretches are taken from.
+MAX_PIECES = 64
+MAX_WINDOW_SOURCE = 4096
 
 # Characters that str/bytes repr, JSON escaping and percent-encoding all leave
 # as they are, so a run of them appears verbatim in any of those renderings.
 _VERBATIM_RUN = re.compile(r"[A-Za-z0-9_.~-]+")
+# Step 3 stores every _WINDOW-character stretch of the held runs and samples
+# the text every _STRIDE characters: any shared stretch of
+# _WINDOW + _STRIDE - 1 (= MIN_CUT_LENGTH) characters contains a sample.
+_WINDOW = 12
+_STRIDE = MIN_CUT_LENGTH - _WINDOW + 1
 
 
-def _forms(value: str) -> set[str]:
-    """Every rendering of ``value`` that ``mask_held_values`` replaces."""
+def _renderings(value: str) -> set[str]:
+    """Step 1: the whole renderings of ``value``."""
     raw = value.encode("utf-8", "backslashreplace")
-    forms = {
+    return {
         value,
         value.strip(),
         repr(value)[1:-1],
@@ -64,12 +119,47 @@ def _forms(value: str) -> set[str]:
         json.dumps(value)[1:-1],
         base64.b64encode(raw).decode("ascii"),
     }
-    forms.update(_VERBATIM_RUN.findall(value))
-    return forms
+
+
+def _pieces(value: str, min_length: int) -> list[str]:
+    """Step 2: the value's verbatim runs of ``min_length``+, longest first, capped."""
+    runs = {run for run in _VERBATIM_RUN.findall(value) if len(run) >= min_length}
+    return sorted(runs, key=lambda r: (len(r), r), reverse=True)[:MAX_PIECES]
+
+
+def _windows(pieces: Iterable[str]) -> set[str]:
+    """Step 3: every _WINDOW-character stretch of the pieces, capped in source size."""
+    found: set[str] = set()
+    budget = MAX_WINDOW_SOURCE
+    for run in pieces:
+        if budget <= 0:
+            break
+        run = run[:budget]
+        budget -= len(run)
+        found.update(run[i:i + _WINDOW] for i in range(len(run) - _WINDOW + 1))
+    return found
+
+
+def _mask_cut_runs(text: str, windows: set[str]) -> str:
+    """Mask whole every text run of MIN_CUT_LENGTH+ that shares a stretch with a held run."""
+    parts: list[str] = []
+    last = 0
+    for match in _VERBATIM_RUN.finditer(text):
+        run = match.group()
+        if len(run) < MIN_CUT_LENGTH:
+            continue
+        if any(run[i:i + _WINDOW] in windows for i in range(0, len(run) - _WINDOW + 1, _STRIDE)):
+            parts.append(text[last:match.start()])
+            parts.append(MASK)
+            last = match.end()
+    if not parts:
+        return text
+    parts.append(text[last:])
+    return "".join(parts)
 
 
 def mask_held_values(text: str, *held: Optional[str], min_length: int = MIN_HELD_LENGTH) -> str:
-    """Return ``text`` with every form of every ``held`` value replaced by ``MASK``.
+    """Return ``text`` with every held value masked as the module docstring describes.
 
     ``None`` and empty values are ignored, so a caller can pass an optional
     field as it is. A value that is not a ``str`` raises ``TypeError``: a
@@ -80,6 +170,7 @@ def mask_held_values(text: str, *held: Optional[str], min_length: int = MIN_HELD
     if not text:
         return text
     forms: set[str] = set()
+    windows: set[str] = set()
     for value in held:
         if value is None or value == "":
             continue
@@ -87,20 +178,27 @@ def mask_held_values(text: str, *held: Optional[str], min_length: int = MIN_HELD
             raise TypeError(f"held values must be str, not {type(value).__name__}")
         if len(value.strip()) < min_length:
             continue
-        forms.update(form for form in _forms(value) if len(form) >= min_length)
+        pieces = _pieces(value, min_length)
+        forms.update(form for form in _renderings(value) if len(form) >= min_length)
+        forms.update(pieces)
+        windows.update(_windows(pieces))
     for form in sorted(forms, key=lambda f: (len(f), f), reverse=True):
         text = text.replace(form, MASK)
+    if windows:
+        text = _mask_cut_runs(text, windows)
     return text
 
 
 def masked_traceback(exc: BaseException, *held: Optional[str]) -> str:
     """``exc`` with its traceback and cause chain, ready to log.
 
-    Three passes, because they cover different credentials: the ``held``
-    values by identity (``mask_held_values``), then any URL userinfo the text
-    echoes (a stale credential baked into a remote URL is not the held one),
-    then the known credential shapes (``sanitize_text``). Log the result
-    instead of passing ``exc_info``, which renders the raw message.
+    Three passes, in this order, because they cover different credentials:
+    the ``held`` values by identity (``mask_held_values``; first, so the
+    shape pass cannot rewrite part of a held rendering before it is matched
+    whole), then any URL userinfo the text echoes (a stale credential baked
+    into a remote URL is not the held one), then the known credential shapes
+    (``sanitize_text``). Log the result instead of passing ``exc_info``, which
+    renders the raw message.
     """
     text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
     return sanitize_text(redact_url_userinfo(mask_held_values(text, *held)))
