@@ -204,6 +204,17 @@ def owner_email(agent_name: str) -> Optional[str]:
         return None
 
 
+def owner_id(agent_name: str) -> Optional[int]:
+    """The agent owner's user id, or None (#4156: compares a turn's driver by id,
+    so an owner with no email — the built-in admin — is still the owner)."""
+    try:
+        owner = db.get_agent_owner(agent_name)
+        raw = owner.get("owner_id") if isinstance(owner, dict) else None
+        return int(raw) if raw is not None else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def scope_for(agent_name: str, user_email: Optional[str]) -> str:
     """The scope key for a person's turn: the agent scope when the person is
     the agent's owner, otherwise their own address."""
