@@ -296,3 +296,179 @@ def test_repo_binding_destination_check_502_names_the_class(monkeypatch, caplog)
     assert exc.value.code == "BIND_DESTINATION_UNREACHABLE"
     _assert_answer_clean(exc.value.message, "(RuntimeError — details in backend logs)")
     _assert_log_keeps_text(caplog.records, "me/dest")
+
+
+# ---------------------------------------------------------------------------
+# Relays of an agent's own answer (G3): an agent on an older base image still
+# answers its 500s with its exception text, and the backend's relay is the only
+# thing between that text and the caller. At an agent 5xx the backend answers
+# a fixed sentence with the agent's status; a 4xx is the agent's refusal and is
+# still relayed word for word.
+# ---------------------------------------------------------------------------
+
+
+
+def _agent_answer(status: int) -> httpx.Response:
+    return httpx.Response(status, json={"detail": f"Failed: {_PLANT}"})
+
+
+_FILES_CALLS = {
+    "list": ("list_agent_files_logic", "Failed to list files",
+             lambda f, u, r: f.list_agent_files_logic("a1", "/home/developer", u, r)),
+    "download": ("download_agent_file_logic", "Failed to download file",
+                 lambda f, u, r: f.download_agent_file_logic("a1", "notes.md", u, r)),
+    "delete": ("delete_agent_file_logic", "Failed to delete",
+               lambda f, u, r: f.delete_agent_file_logic("a1", "notes.md", u, r)),
+    "preview": ("preview_agent_file_logic", "Failed to preview",
+                lambda f, u, r: f.preview_agent_file_logic("a1", "notes.md", u, r)),
+    "update": ("update_agent_file_logic", "Failed to update",
+               lambda f, u, r: f.update_agent_file_logic("a1", "notes.md", "x", u, r)),
+    "mkdir": ("create_agent_folder_logic", "Failed to create folder",
+              lambda f, u, r: f.create_agent_folder_logic("a1", "newdir", u, r)),
+}
+
+
+@pytest.fixture
+def files_relay(monkeypatch):
+    import services.agent_service.files as files
+    monkeypatch.setattr(files.db, "can_user_access_agent", lambda u, a: True)
+    monkeypatch.setattr(files.db, "can_user_share_agent", lambda u, a: True)
+    monkeypatch.setattr(files.db, "get_agent_owner", lambda a: {"owner_username": "owner"})
+    monkeypatch.setattr(files, "agent_may_reach", lambda u, a, **kw: True)
+    container = SimpleNamespace(status="running", id="c-1", name="agent-a1",
+                                attrs={"Image": "sha256:i"})
+    monkeypatch.setattr(files, "get_agent_container", lambda name: container)
+    monkeypatch.setattr(files, "container_reload", AsyncMock())
+    probe = AsyncMock(return_value={"exit_code": 0, "output": "", "timed_out": False})
+    monkeypatch.setattr(files, "execute_command_in_container", probe, raising=False)
+    monkeypatch.setattr(files, "_READ_POLICY_PROBE_CACHE", {}, raising=False)
+    answer = {"response": None}
+    monkeypatch.setattr(files, "agent_http_request",
+                        AsyncMock(side_effect=lambda *a, **kw: answer["response"]))
+    user = SimpleNamespace(
+        id=1, username="owner", email="owner@example.com", role="user", mcp_scope=None,
+        agent_name=None, connector_agent=None, mcp_key_id=None, mcp_key_name=None,
+    )
+    request = SimpleNamespace(
+        client=SimpleNamespace(host="127.0.0.1"), method="GET",
+        scope={"path": "/api/agents/a1/files"}, state=SimpleNamespace(request_id="r1"),
+    )
+    return SimpleNamespace(files=files, user=user, request=request, answer=answer)
+
+
+@pytest.mark.parametrize("route", sorted(_FILES_CALLS))
+@pytest.mark.parametrize("status", [500, 503])
+def test_files_relay_answers_a_fixed_sentence_at_an_agent_5xx(files_relay, caplog, route, status):
+    _fn, prefix, call = _FILES_CALLS[route]
+    files_relay.answer["response"] = _agent_answer(status)
+    caplog.set_level(logging.WARNING)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(call(files_relay.files, files_relay.user, files_relay.request))
+    assert exc.value.status_code == status
+    _assert_answer_clean(
+        exc.value.detail, f"{prefix} (the agent answered {status} — details in backend logs)")
+    _assert_log_keeps_text(caplog.records, prefix)
+
+
+@pytest.mark.parametrize("route", sorted(_FILES_CALLS))
+def test_files_relay_still_relays_an_agent_4xx(files_relay, route):
+    """Characterization: an agent's refusal (here a 404) is still the answer."""
+    _fn, _prefix, call = _FILES_CALLS[route]
+    files_relay.answer["response"] = httpx.Response(404, json={"detail": "File not found: notes.md"})
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(call(files_relay.files, files_relay.user, files_relay.request))
+    assert exc.value.status_code == 404
+    assert "File not found: notes.md" in str(exc.value.detail)
+
+
+def test_data_import_restore_failure_names_the_agent_status(tmp_path, monkeypatch, caplog):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import routers.agent_data as ad
+
+    app = FastAPI()
+    app.include_router(ad.router)
+    # Override the callables the route itself bound, not a fresh import of
+    # `dependencies`: another test file may have re-imported that module.
+    route = next(r for r in ad.router.routes if getattr(r, "path", "").endswith("/data/import"))
+    for dep in route.dependant.dependencies:
+        if dep.name == "agent_name":
+            app.dependency_overrides[dep.call] = lambda: "a1"
+        elif dep.name == "current_user":
+            app.dependency_overrides[dep.call] = lambda: SimpleNamespace(
+                id=1, username="admin", email="admin@example.com")
+    monkeypatch.setattr(ad, "_TMP_DIR", str(tmp_path / "agent-data-tmp"))
+    monkeypatch.setattr(ad.platform_audit_service, "log", AsyncMock(return_value=None))
+    monkeypatch.setattr(ad.git_service, "_data_paths_for", AsyncMock(return_value=[]))
+    monkeypatch.setattr("routers.auth.get_redis_client", lambda: None)
+    monkeypatch.setattr(ad, "get_agent_container", lambda name: SimpleNamespace(status="running"))
+    monkeypatch.setattr(ad, "agent_http_request", AsyncMock(return_value=_agent_answer(500)))
+    caplog.set_level(logging.WARNING)
+    resp = TestClient(app).post(
+        "/api/agents/a1/data/import",
+        files={"tarball": ("data.tar", b"\0" * 1024, "application/x-tar")},
+    )
+    assert resp.status_code == 502, resp.text
+    _assert_answer_clean(
+        resp.json(), "Agent restore failed (the agent answered 500 — details in backend logs)")
+    _assert_log_keeps_text(caplog.records, "restore")
+
+
+@pytest.fixture
+def inject(monkeypatch):
+    import routers.credentials as cr
+    from models import CredentialInjectRequest
+
+    answer = {"response": None}
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, *a, **kw):
+            return answer["response"]
+
+    monkeypatch.setattr(cr, "agent_httpx_client", lambda name, **kw: _Client())
+    monkeypatch.setattr(cr, "get_agent_container", lambda name: object())
+    monkeypatch.setattr(cr, "get_agent_status_from_container",
+                        lambda c: SimpleNamespace(status="running"))
+    monkeypatch.setattr(cr.platform_audit_service, "log", AsyncMock(return_value=None))
+    user = SimpleNamespace(
+        id=1, username="owner", email="owner@example.com", role="user", mcp_scope=None,
+        agent_name=None, connector_agent=None, mcp_key_id=None, mcp_key_name=None,
+    )
+    request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"),
+                              scope={"path": "/api/agents/a1/credentials/inject"},
+                              state=SimpleNamespace(request_id="r1"))
+
+    def call():
+        body = CredentialInjectRequest(files={".env": "A=1\n"})
+        return asyncio.run(cr.inject_credentials(body, request, "a1", user))
+
+    return answer, call
+
+
+def test_credential_inject_answers_a_fixed_sentence_at_an_agent_5xx(inject, caplog):
+    answer, call = inject
+    answer["response"] = _agent_answer(500)
+    caplog.set_level(logging.WARNING)
+    with pytest.raises(HTTPException) as exc:
+        call()
+    assert exc.value.status_code == 500
+    _assert_answer_clean(
+        exc.value.detail,
+        "Agent rejected credential injection (the agent answered 500 — details in backend logs)")
+    _assert_log_keeps_text(caplog.records, "Credential injection")
+
+
+def test_credential_inject_still_relays_an_agent_4xx(inject):
+    """Characterization: the agent's own refusal reaches the person."""
+    answer, call = inject
+    answer["response"] = httpx.Response(400, json={"detail": "Path escapes the agent home"})
+    with pytest.raises(HTTPException) as exc:
+        call()
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "Agent rejected credential injection: Path escapes the agent home"

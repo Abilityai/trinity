@@ -227,6 +227,12 @@ def mask_held_values(text: str, *held: Optional[str], min_length: int = MIN_HELD
     return text
 
 
+def masked_text(text: str, *held: Optional[str]) -> str:
+    """``text`` (an upstream answer's body, for example) ready to log, through
+    the same three passes as ``masked_traceback``, in the same order."""
+    return sanitize_text(redact_url_userinfo(mask_held_values(text, *held)))
+
+
 def masked_traceback(exc: BaseException, *held: Optional[str]) -> str:
     """``exc`` with its traceback and cause chain, ready to log.
 
