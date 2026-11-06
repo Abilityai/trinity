@@ -38,7 +38,7 @@ The **Permissions to change itself** card under **Settings › Guardrails › Bo
 | Toggle | Permission | Lets the agent | Without it |
 |--------|-----------|----------------|------------|
 | **Change skills** | `skills.manage` | Assign, unassign and re-deliver skills, and set skill approval gates on other agents — see [Skills and Playbooks](../automation/skills-and-playbooks.md#who-can-change-an-agents-skills) | Every skill change is refused, its own included |
-| **Change other agents' schedules** | `schedules.manage` | Create, change, enable, disable or delete another agent's schedules, and manage any schedule's webhook, its own included | It still manages its own schedules but not their webhooks, and never another agent's |
+| **Change other agents' schedules** | `schedules.manage` | Create, change, enable, disable or delete another agent's schedules, and manage a schedule's webhook, its own included, except on a schedule that delivers to someone other than its owner | It still manages its own schedules but not their webhooks, and never another agent's |
 | **Change instructions** | `instructions.manage` | Write `CLAUDE.md`, `AGENTS.md` and `.claude/` files (not skills) through the Files API, and reset an agent to `main` while keeping its state | Those writes are refused, its own instructions included |
 | **Manage other agents** | `agents.manage` | Create, deploy and delete agents, deploy a system, and change an agent's model, resources, timeout, public-channel model, read-only mode and guardrails | It can still spawn and discard short-lived (ephemeral) helpers |
 | **Start projects** | `projects.manage` | Start a project on its owner's behalf, on installations that offer projects | It still works on projects it is already on |
