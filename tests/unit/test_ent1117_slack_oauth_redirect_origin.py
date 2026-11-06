@@ -20,8 +20,10 @@ the route's five redirects (the `error` parameter, a failed token exchange,
 platform success, agent success, and the storage-failure branch).
 
 To make the check strictly harder than reality, the signed `state` is not
-required: the state decoder is replaced so the test controls `agent_name` and
-`source` directly, and the token exchange returns test-controlled error text.
+required: the state decoder is replaced so the test controls every state key
+(`agent_name`, `source`, and any key the route might read in future, which
+returns the hostile value), and the token exchange returns test-controlled
+error text.
 
 Patches go through the route function's own `__globals__` (and the redirect
 helper's), so the test exercises whichever module object the route actually
@@ -91,6 +93,25 @@ SITES = {
 }
 
 
+class _AnyKey(dict):
+    """A decoded state where every key the test did not set holds `default`,
+    and every key reads as present: the route cannot read a field the caller
+    does not control."""
+
+    def __init__(self, default, **given):
+        super().__init__(**given)
+        self._default = default
+
+    def __missing__(self, key):
+        return self._default
+
+    def __contains__(self, key):
+        return True
+
+    def get(self, key, default=None):
+        return self[key]
+
+
 class _Db:
     """Stands in for the storage the success branches write to."""
 
@@ -150,12 +171,13 @@ def callback(monkeypatch):
 
     def call(site: str, value: str):
         query, source, exchange_ok, storage_fails, _path, _marker = SITES[site]
-        controls["state"] = {
-            "link_id": "l1",
-            "agent_name": value,
-            "user_id": 1,
-            "source": value if source is None else source,
-        }
+        controls["state"] = _AnyKey(
+            value,
+            link_id="l1",
+            agent_name=value,
+            user_id=1,
+            source=value if source is None else source,
+        )
         controls["exchange"] = (
             (True, {"team_id": "T1", "team_name": "team", "access_token": "test-token"})
             if exchange_ok
