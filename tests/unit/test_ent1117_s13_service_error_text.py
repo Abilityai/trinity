@@ -600,9 +600,52 @@ def test_rendered_domain_errors_only_carry_constant_text(class_name, expected_mi
     assert len(sites) >= expected_min, f"expected raise sites for {class_name}: {sites}"
     for path, call in sites:
         assert not call.keywords, f"{path}:{call.lineno}"
-        assert len(call.args) == 1 and isinstance(call.args[0], ast.Constant) \
-            and isinstance(call.args[0].value, str), (
+        assert len(call.args) == 1, f"{path}:{call.lineno}"
+        arg = call.args[0]
+        if (path, ast.unparse(arg)) in _PLATFORM_PARAM_TEXT:
+            continue
+        assert isinstance(arg, ast.Constant) and isinstance(arg.value, str), (
             f"{path}:{call.lineno}: {class_name} built from non-constant text: {ast.unparse(call)}"
+        )
+
+
+# A construction whose only interpolation is a parameter that every caller
+# passes as a string literal. Each entry is (file, the exact argument text),
+# and test_platform_param_text_is_only_given_literals checks the callers.
+_PLATFORM_PARAM_TEXT = {
+    (
+        Path("src/backend/services/proactive_message_service.py"),
+        "f\"recipient_blocked: this client is blocked on the agent's {channel} channel\"",
+    ),
+}
+_PLATFORM_PARAM_CALLERS = {
+    # file -> (function whose parameter is interpolated, that parameter's position)
+    Path("src/backend/services/proactive_message_service.py"): ("_refuse_blocked", 1),
+}
+
+
+def test_platform_param_text_is_only_given_literals():
+    """The channel name in `recipient_blocked` comes from the platform: every
+    call to `_refuse_blocked` passes it as a string literal. If a caller passes
+    anything else, the exemption above no longer holds."""
+    for rel, (fn_name, pos) in _PLATFORM_PARAM_CALLERS.items():
+        tree = ast.parse((REPO / rel).read_text(encoding="utf-8"))
+        defs = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == fn_name]
+        assert len(defs) == 1, f"{rel}: expected one {fn_name}"
+        assert defs[0].args.args[pos].arg == "channel", f"{rel}: {fn_name} parameter {pos} renamed"
+        calls = [
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == fn_name
+        ]
+        assert calls, f"{rel}: no calls to {fn_name}"
+        for call in calls:
+            arg = call.args[pos]
+            assert isinstance(arg, ast.Constant) and isinstance(arg.value, str), (
+                f"{rel}:{call.lineno}: {fn_name} given a non-literal channel: {ast.unparse(arg)}"
+            )
+    for rel, arg_text in _PLATFORM_PARAM_TEXT:
+        assert arg_text in {ast.unparse(c.args[0]) for p, c in _constructions("ChannelDeliveryError") if p == rel}, (
+            f"stale exemption: {rel} no longer builds {arg_text}"
         )
 
 
