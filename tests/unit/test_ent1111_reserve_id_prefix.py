@@ -36,12 +36,12 @@ SPARE_ALERT_PREFIX = "member-spare-"
 @pytest.fixture
 def clean_registry():
     """Reserving mutates a module global — restore it, and `KINDS`, after."""
-    saved_extra = oqs._EXTRA_RESERVED_ID_PREFIXES
+    saved_extra = oqs.reserved._EXTRA_RESERVED_ID_PREFIXES
     saved_kinds = dict(pa.KINDS)
     try:
         yield
     finally:
-        oqs._EXTRA_RESERVED_ID_PREFIXES = saved_extra
+        oqs.reserved._EXTRA_RESERVED_ID_PREFIXES = saved_extra
         pa.KINDS.clear()
         pa.KINDS.update(saved_kinds)
 
@@ -67,7 +67,7 @@ class TestReserveIdPrefix:
 
     def test_reserving_an_already_literal_prefix_is_a_no_op(self, clean_registry):
         oqs.reserve_id_prefix("poison-")
-        assert oqs._EXTRA_RESERVED_ID_PREFIXES == ()
+        assert oqs.reserved._EXTRA_RESERVED_ID_PREFIXES == ()
         assert oqs.reserved_id_prefixes().count("poison-") == 1
 
     @pytest.mark.parametrize("bad", [
@@ -85,7 +85,7 @@ class TestReserveIdPrefix:
     def test_a_malformed_prefix_is_refused(self, clean_registry, bad):
         with pytest.raises(ValueError):
             oqs.reserve_id_prefix(bad)
-        assert oqs._EXTRA_RESERVED_ID_PREFIXES == ()
+        assert oqs.reserved._EXTRA_RESERVED_ID_PREFIXES == ()
 
 
 class TestEveryReaderSeamHonoursTheRegistry:
@@ -116,8 +116,9 @@ class TestEveryReaderSeamHonoursTheRegistry:
 
         backend = Path(__file__).resolve().parents[2] / "src" / "backend"
         allowed = {
-            # the registry's own home
+            # the literal's home, and the registry that wraps it
             "services/operator_queue_service/__init__.py",
+            "services/operator_queue_service/reserved.py",
         }
         offenders = []
         for path in backend.rglob("*.py"):

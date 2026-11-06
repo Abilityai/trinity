@@ -22,7 +22,7 @@ from typing import Optional
 from services import operator_queue_service as _oq
 from utils.helpers import utc_now_iso
 
-from . import deps
+from . import deps, reserved
 
 logger = logging.getLogger("services.operator_queue_service")
 
@@ -232,7 +232,7 @@ class PollerCoreMixin:
         try:
             swept = deps.db.mark_operator_queue_unconfirmed(
                 "agent_not_running", now, exclude_agents=running_agents,
-                exclude_request_id_prefixes=_oq.reserved_id_prefixes(),
+                exclude_request_id_prefixes=reserved.reserved_id_prefixes(),
             )
             if swept:
                 self._changed_this_cycle = True
@@ -247,7 +247,7 @@ class PollerCoreMixin:
         try:
             stalled = deps.db.mark_operator_queue_undelivered_for_stopped_agents(
                 now, running_agents=running_agents,
-                exclude_request_id_prefixes=_oq.reserved_id_prefixes(),
+                exclude_request_id_prefixes=reserved.reserved_id_prefixes(),
             )
         except Exception as e:
             logger.error(f"Operator queue not-running delivery sweep failed: {e}")
