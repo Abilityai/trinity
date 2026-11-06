@@ -6,6 +6,10 @@ on:
       - 'src/frontend/**'
       # #2964: previewTitle's contract with the server's clean_title (vitest twin).
       - 'tests/fixtures/portal-work-titles.json'
+      # trinity-enterprise#1117: the Credentials panel's .env encoding contract
+      # with the agent's readers (vitest twin of test_ent1117_s11_env_escape_table.py).
+      - 'tests/fixtures/ent1117-env-escape-cases.json'
+      - 'tests/fixtures/ent1117-env-legacy-reads.json'
       - '.github/workflows/frontend-build.yml'
   push:
     branches: [main, dev]
@@ -13,6 +17,10 @@ on:
       - 'src/frontend/**'
       # #2964: previewTitle's contract with the server's clean_title (vitest twin).
       - 'tests/fixtures/portal-work-titles.json'
+      # trinity-enterprise#1117: the Credentials panel's .env encoding contract
+      # with the agent's readers (vitest twin of test_ent1117_s11_env_escape_table.py).
+      - 'tests/fixtures/ent1117-env-escape-cases.json'
+      - 'tests/fixtures/ent1117-env-legacy-reads.json'
       - '.github/workflows/frontend-build.yml'
 
 # CSO M9: least-privilege token — this workflow only reads the checkout.
