@@ -488,6 +488,35 @@ def test_dashboard_dangling_link_gets_the_same_answer(dashboard, tmp_path):
     assert out["error"] == "Failed to read dashboard.yaml: it is a link, and links are not followed"
 
 
+def test_dashboard_hard_link_to_another_file_is_refused_without_its_text(dashboard, tmp_path):
+    """#282: a second name for another file is refused like a link. A hard link
+    is invisible to O_NOFOLLOW, and the agent can make one on request in chat;
+    Files refuses a hard-linked file below the owner tier for the same reason
+    (ent#820). None of the other file's text is returned."""
+    mod, path = dashboard
+    env = path.parent / "dot-env"  # a hard link needs the same filesystem
+    env.write_text("A=1\n" + _ENV_LINE + "\n")
+    os.link(env, path)
+    out = _dash(mod)
+    assert out["has_dashboard"] is False and out["config"] is None
+    assert out["error"] == "Failed to read dashboard.yaml: it is a link, and links are not followed"
+    assert "FAKEPASS" not in str(out)
+
+
+def test_dashboard_fifo_does_not_hang_the_endpoint(dashboard):
+    """A FIFO at the path is answered at once, never left blocking the open."""
+    import threading
+
+    mod, path = dashboard
+    os.mkfifo(path)
+    result = {}
+    worker = threading.Thread(target=lambda: result.setdefault("out", _dash(mod)), daemon=True)
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive(), "opening a FIFO at dashboard.yaml blocked the endpoint"
+    assert result["out"]["has_dashboard"] is False
+
+
 def test_dashboard_missing_file_keeps_its_answer(dashboard):
     """Characterization: no file at the path is still "no dashboard"."""
     mod, _path = dashboard

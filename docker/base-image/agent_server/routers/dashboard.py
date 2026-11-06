@@ -26,7 +26,8 @@ def get_dashboard_path() -> Path:
 
 
 class _DashboardIsALink(Exception):
-    """`dashboard.yaml` is a link (live or dangling)."""
+    """`dashboard.yaml` is a link (live or dangling), or a file with more than
+    one name on disk (a hard link)."""
 
 
 def _read_dashboard(path: Path) -> Optional[tuple]:
@@ -35,7 +36,11 @@ def _read_dashboard(path: Path) -> Optional[tuple]:
     Opened with O_NOFOLLOW: a link at that name is never followed, so what is
     parsed (and quoted back in a parse error) is always the file at the fixed
     path, never another file a link points at. A link, live or dangling, raises
-    `_DashboardIsALink`. O_NONBLOCK keeps a FIFO from hanging the open.
+    `_DashboardIsALink`. O_NOFOLLOW cannot see a hard link, so a file with more
+    than one name is refused the same way: the agent can be asked in chat to
+    give another file this name, and Files refuses a hard-linked file below the
+    owner tier for the same reason (ent#820). O_NONBLOCK keeps a FIFO from
+    hanging the open.
     """
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
@@ -52,6 +57,8 @@ def _read_dashboard(path: Path) -> Optional[tuple]:
         raise
     with f:
         st = os.fstat(f.fileno())
+        if st.st_nlink > 1:
+            raise _DashboardIsALink()
         data = f.read()
     return data.decode("utf-8"), st
 
