@@ -143,10 +143,17 @@ async def snapshot_endpoint(body: dict):
             status_code=400, detail="paths must be a list of glob patterns"
         )
 
+    backup_rel = body.get("backup_dir")
+    if backup_rel is not None and (
+        not isinstance(backup_rel, str) or "\x00" in backup_rel
+    ):
+        raise HTTPException(
+            status_code=400, detail="backup_dir must be a path string"
+        )
+
     tar_bytes, files = build_snapshot(_HOME, patterns)
 
     snapshot_path_str = ""
-    backup_rel = body.get("backup_dir")
     if backup_rel:
         # A lexical barrier first (CodeQL py/path-injection): both sides are
         # normalised in the same unresolved space and end in a separator, so
@@ -168,9 +175,17 @@ async def snapshot_endpoint(body: dict):
                 status_code=400,
                 detail="backup_dir must be inside /home/developer",
             ) from exc
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        (backup_dir / "snapshot.tar").write_bytes(tar_bytes)
-        (backup_dir / "files.txt").write_text("\n".join(files) + "\n")
+        # Both files go in through ent#822's writer: the directories are walked
+        # (and created) one component at a time without following a link, and
+        # a link at any level, either file included, is a 403 rather than a
+        # write that lands somewhere else.
+        rel = os.path.relpath(full, base)
+        _write_bytes_nofollow(os.path.join(rel, "snapshot.tar"), tar_bytes, base=_HOME)
+        _write_bytes_nofollow(
+            os.path.join(rel, "files.txt"),
+            ("\n".join(files) + "\n").encode("utf-8"),
+            base=_HOME,
+        )
         snapshot_path_str = str(
             (backup_dir / "snapshot.tar").relative_to(_HOME.resolve())
         )

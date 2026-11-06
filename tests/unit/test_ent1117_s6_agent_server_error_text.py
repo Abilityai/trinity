@@ -191,6 +191,86 @@ def test_snapshot_barrier_precedes_resolve():
     assert "relative_to(_HOME.resolve())" in body
 
 
+def test_snapshot_does_not_write_through_a_link_at_snapshot_tar(snapshot, tmp_path):
+    """#153: the leaf is opened without following a link, so a link planted at
+    `<backup_dir>/snapshot.tar` is refused rather than written through, and the
+    file it points at (here outside the home) keeps its content."""
+    mod, home = snapshot
+    victim = tmp_path / "outside-victim.txt"
+    victim.write_text("ORIGINAL-OUTSIDE\n")
+    (home / "backups").mkdir()
+    (home / "backups" / "snapshot.tar").symlink_to(victim)
+    with pytest.raises(HTTPException) as exc:
+        _snap(mod, "backups")
+    assert exc.value.status_code == 403
+    assert exc.value.detail["code"] == "resolved_path_mismatch"
+    assert victim.read_text() == "ORIGINAL-OUTSIDE\n"
+    assert (home / "backups" / "snapshot.tar").is_symlink()
+
+
+def test_snapshot_does_not_write_through_a_link_at_files_txt(snapshot):
+    """#153: the same for `files.txt`, here pointing at another file inside the
+    home, which `relative_to` alone cannot tell from a legitimate target."""
+    mod, home = snapshot
+    victim = home / ".bashrc"
+    victim.write_text("ORIGINAL-BASHRC\n")
+    (home / "backups").mkdir()
+    (home / "backups" / "files.txt").symlink_to(victim)
+    with pytest.raises(HTTPException) as exc:
+        _snap(mod, "backups")
+    assert exc.value.status_code == 403
+    assert exc.value.detail["code"] == "resolved_path_mismatch"
+    assert victim.read_text() == "ORIGINAL-BASHRC\n"
+
+
+def test_snapshot_does_not_write_through_a_linked_directory_inside_home(snapshot):
+    """#153: a link anywhere on the way is refused too, even one that stays in
+    the home and so passes the `resolve()` + `relative_to` check."""
+    mod, home = snapshot
+    (home / "elsewhere").mkdir()
+    (home / "backups").symlink_to(home / "elsewhere")
+    with pytest.raises(HTTPException) as exc:
+        _snap(mod, "backups/run-1")
+    assert exc.value.status_code == 403
+    assert not (home / "elsewhere" / "run-1").exists()
+
+
+def test_snapshot_backup_dir_written_twice_replaces_the_files(snapshot):
+    """Legitimate reuse of a `backup_dir`: the second snapshot replaces the
+    first one's regular files."""
+    mod, home = snapshot
+    _snap(mod, "backups")
+    (home / "workspace" / "b.txt").write_text("b")
+    _snap(mod, "backups")
+    assert (home / "backups" / "files.txt").read_text() == "workspace/a.txt\nworkspace/b.txt\n"
+    assert not (home / "backups" / "snapshot.tar").is_symlink()
+
+
+@pytest.mark.parametrize(
+    "backup_dir",
+    [5, 1.5, True, False, 0, ["backups"], {"a": 1}, "back\x00ups"],
+    ids=["int", "float", "true", "false", "zero", "list", "dict", "nul"],
+)
+def test_snapshot_backup_dir_that_is_not_a_path_string_is_a_400(snapshot, backup_dir):
+    """A `backup_dir` that is not a path string is the caller's error (400),
+    not a 500 from `os.path.join` or `resolve()`; nothing is written."""
+    mod, home = snapshot
+    with pytest.raises(HTTPException) as exc:
+        _snap(mod, backup_dir)
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "backup_dir must be a path string"
+    assert not list(home.parent.glob("**/snapshot.tar"))
+
+
+@pytest.mark.parametrize("backup_dir", [None, ""], ids=["absent", "empty"])
+def test_snapshot_without_backup_dir_writes_nothing(snapshot, backup_dir):
+    """Characterization: no `backup_dir` (or an empty one) is no disk copy."""
+    mod, home = snapshot
+    resp = _snap(mod, backup_dir)
+    assert resp.headers["X-Snapshot-Path"] == ""
+    assert not list(home.parent.glob("**/snapshot.tar"))
+
+
 # ---------------------------------------------------------------------------
 # #30 / #31 — dashboard
 # ---------------------------------------------------------------------------
