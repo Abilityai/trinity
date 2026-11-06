@@ -586,7 +586,7 @@ const server = new FastMCP({
 | Delete not found | 404 | MCP API key not found | `delete_mcp_api_key_endpoint` |
 | Creation failed | 400 | Failed to create API key | `create_mcp_api_key_endpoint` |
 | Create / ensure-default with an MCP key | 403 | This operation requires an interactive session; MCP API keys cannot perform it | `require_interactive` |
-| Server error | 500 | Failed to [action] MCP API key: {error} | All endpoints |
+| Server error | 500 | Failed to create MCP API key / Failed to list MCP API keys / Failed to ensure default MCP API key, each followed by `({ExceptionClass} — details in backend logs)`; the exception is logged with its traceback | `create_mcp_api_key_endpoint`, `list_mcp_api_keys_endpoint`, `ensure_default_mcp_api_key` (the other key routes have no 500 arm) |
 
 ---
 

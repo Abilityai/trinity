@@ -24,6 +24,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request, Depends
 
 from database import db
+from utils.log_masking import masked_traceback
 from services import channel_history, idempotency_service, rate_limiter
 from services.settings_service import get_proactive_rate_limit
 from services.telegram_group_context import flag_from_bot_info, group_context_status  # ent#600
@@ -218,7 +219,13 @@ async def configure_telegram_bot(
             bot_id = str(bot_info.get("id"))
 
     except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"Could not reach Telegram API: {e}")
+        # py/stack-trace-exposure (ent#1117): the bot token is a path segment
+        # of every Telegram API URL, so the logged traceback masks it.
+        logger.error("Could not reach Telegram API: %s", masked_traceback(e, config.bot_token))
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not reach Telegram API ({e.__class__.__name__} — details in backend logs)",
+        )
 
     # Check bot_id isn't already bound to another agent
     existing = db.get_telegram_binding_by_bot_id(bot_id)
@@ -327,7 +334,11 @@ async def test_telegram_bot(
                 else:
                     return {"ok": False, "message": result.get("description", "Unknown error")}
         except Exception as e:
-            return {"ok": False, "message": str(e)}
+            logger.error("Could not verify the bot: %s", masked_traceback(e, bot_token))
+            return {
+                "ok": False,
+                "message": f"Could not verify the bot ({e.__class__.__name__} — details in backend logs)",
+            }
 
     # Send test message to specific chat
     try:
@@ -346,7 +357,11 @@ async def test_telegram_bot(
             else:
                 return {"ok": False, "message": result.get("description", "Failed to send")}
     except Exception as e:
-        return {"ok": False, "message": str(e)}
+        logger.error("Could not send the test message: %s", masked_traceback(e, bot_token))
+        return {
+            "ok": False,
+            "message": f"Could not send the test message ({e.__class__.__name__} — details in backend logs)",
+        }
 
 
 # =========================================================================

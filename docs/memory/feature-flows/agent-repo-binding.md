@@ -223,7 +223,7 @@ so there is nothing to snapshot and overlay back.
 | `BIND_RECREATE_FAILED` | 502 | env not re-baked | **yes** |
 | `BIND_OP_IN_PROGRESS` | 503 | lock contention or lock layer unavailable (+ `Retry-After`) | no |
 | `BIND_DESTINATION_UNREACHABLE` | 502 | the destination-binding pre-check could not read the DB, or the shared primitive raised a non-structured error. **Fail-closed** — an unreadable guard must not open the gate | no |
-| `BIND_UNEXPECTED_ERROR` | 500 | router catch-all; audited, and the idempotency claim released so a retry can proceed | unknown |
+| `BIND_UNEXPECTED_ERROR` | 500 | router catch-all; audited, and the idempotency claim released so a retry can proceed. The `error` text names the exception class only (`Repository binding failed unexpectedly ({ExceptionClass} — details in backend logs)`); the traceback is logged with the PAT masked | unknown |
 
 `partial: true` is surfaced in the response body and rendered distinctly in the UI
 (warning, "Partly applied — action needed"). A post-commit failure means the DB

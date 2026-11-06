@@ -108,7 +108,11 @@ async def get_agent_playbooks_endpoint(
     except agent_skills_listing.SkillsListUnavailable as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch playbooks: {str(e)}")
+        logger.error(f"Failed to fetch playbooks for agent {agent_name}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch playbooks ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 @router.get("/{agent_name}/info")
@@ -186,6 +190,7 @@ async def _agent_template_info(agent_name: str, request: Request) -> dict:
     except httpx.TimeoutException:
         raise HTTPException(status_code=504, detail="Agent is starting up, please try again")
     except Exception as e:
+        logger.warning(f"Could not fetch template info for agent {agent_name}: {e}", exc_info=True)
         labels = container.labels
         return {
             "has_template": bool(labels.get("trinity.template")),
@@ -197,7 +202,11 @@ async def _agent_template_info(agent_name: str, request: Request) -> dict:
             },
             "kind": kind_from_labels(labels),
             "status": "running",
-            "message": f"Could not fetch template info: {str(e)}"
+            # py/stack-trace-exposure (ent#1117, the #1917 pattern).
+            "message": (
+                f"Could not fetch template info "
+                f"({e.__class__.__name__} — details in backend logs)"
+            ),
         }
 
 
