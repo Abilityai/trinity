@@ -34,7 +34,6 @@ from services import (
 )
 from services.runtime_secret_scrub import get_staged_values, scrub_text
 from utils.credential_sanitizer import redact_url_userinfo, sanitize_text
-from utils.log_masking import mask_held_values
 from db.write_params import ExecutionResult
 
 logger = logging.getLogger(__name__)
@@ -569,13 +568,16 @@ async def execute_task_internal(
         idempotency_service.fail(idem)
         # #4284: the class name in the body, the scrubbed text in the log: an
         # execution error can echo agent output, which can hold a credential.
-        # The staged values are masked by identity (as the persisted copies
-        # are), then URL userinfo and the known credential shapes.
+        # The staged values are masked by identity with the same seam the
+        # persisted copies of agent output use, then URL userinfo and the known
+        # credential shapes. That seam replaces three renditions per value, so
+        # the cost stays linear however long or numerous the staged values are
+        # (the store caps them at 1000 but not their length).
         logger.error(
             "Internal task execution failed for %s (%s): %s",
             request.agent_name, type(e).__name__,
             sanitize_text(redact_url_userinfo(
-                mask_held_values(str(e), *get_staged_values())
+                scrub_text(get_staged_values(), str(e))
             )),
         )
         raise HTTPException(
