@@ -24,11 +24,11 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 
-from models import RecordDecisionRequest
+from models import RecordDecisionRequest, TaskExecutionStatus
 from database import db
 from dependencies import get_current_user, assert_agent_access, assert_own_agent
 from db_models import User
-from services import idempotency_service, rate_limiter, schedule_seat_memory, seat_decision_service
+from services import idempotency_service, memory_service, rate_limiter, schedule_seat_memory, seat_decision_service
 from services.assignment_provider import resolve_assignment, resolve_served_seat
 
 logger = logging.getLogger(__name__)
@@ -50,6 +50,19 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _OWN_DECISIONS = "Agent-scoped key may only record and read its own agent's seat decisions"
 
 
+def _agent_only(current_user: User) -> None:
+    """trinity-enterprise#1062: the agent's own door, as the memory doors are
+    (#4121). The run named decides whose seat is read or written, so a human
+    the agent is merely shared with could name any person's run. A person reads
+    and decides through the client-portal routes, never through these."""
+    if not current_user.agent_name:
+        raise HTTPException(status_code=403, detail={
+            "code": "agent_only",
+            "message": "This door is for the agent's own key. An agent records and reads a person's "
+                       "decisions during that person's turn.",
+        })
+
+
 def _require_running_turn(current_user: User, execution_id: str, turn_header: Optional[str]) -> None:
     """#2984 review (option b): an agent records a decision only for the turn it
     is running. The graduation rule counts distinct conversations, and the
@@ -57,10 +70,8 @@ def _require_running_turn(current_user: User, execution_id: str, turn_header: Op
     could cite three past executions of the seat and graduate a class nobody
     asked about. The turn is the PLATFORM-stamped `X-Trinity-Execution-Id`
     (#2392), which the model cannot set; the body must name that same turn, and
-    `record_seat_decision` checks it is still `running`. A person's own record
-    (a non-agent principal) is not an agent inventing evidence and keeps its path."""
-    if not current_user.agent_name:
-        return
+    `_seat_for` checks it is still `running`. Only an agent key reaches here
+    (`_agent_only`, trinity-enterprise#1062)."""
     turn = (turn_header or "").strip()
     if not turn or turn == "manual" or turn != (execution_id or "").strip():
         raise HTTPException(status_code=422, detail={
@@ -77,6 +88,17 @@ def _seat_for(agent_name: str, execution_id: str) -> tuple[str, object]:
         raise HTTPException(status_code=404, detail="Execution not found")
     if execution.agent_name != agent_name:
         raise HTTPException(status_code=403, detail="Execution does not belong to this agent")
+    # trinity-enterprise#1062: the door serves the turn the agent is IN. Nothing
+    # proves which turn a request comes from (ent#926: the ledger is the fact),
+    # so a run that is not running, whoever it served, is refused. Same rule as
+    # the memory doors (#4121).
+    if (getattr(execution, "status", None) or "").lower() != TaskExecutionStatus.RUNNING.value:
+        logger.info(f"[SeatDecision] Refused on {agent_name} (decision_turn_not_live, execution={execution_id})")
+        raise HTTPException(status_code=422, detail={
+            "code": "decision_turn_not_live",
+            "message": "That run is not running, so nothing was recorded or read. Decisions are recorded "
+                       "during the turn they serve. Tell the person the decision was not recorded.",
+        })
     triggered_by = (execution.triggered_by or "").lower()
     seat = schedule_seat_memory.seat_for_execution(execution)
     if seat:
@@ -106,7 +128,24 @@ def _seat_for(agent_name: str, execution_id: str) -> tuple[str, object]:
     if not email or not _EMAIL_RE.match(email):
         raise HTTPException(status_code=422, detail={"code": "no_seat",
                                                      "message": "No verified person on this execution."})
-    return email.lower(), execution
+    email = email.lower()
+    # The other half of the ledger rule: no other live turn on this agent may
+    # serve anyone else. While one does, nothing tells the two turns apart, so
+    # the door fails closed. Stricter than the memory doors on purpose: there
+    # the owner and a headless run share one scope, but a decision is ONE
+    # person's, so a headless neighbour is "someone else" too (review of #4204:
+    # a cron turn naming the owner's live run recorded under the owner's seat).
+    # The cost: two live turns for different people, or a person's turn beside
+    # a scheduled run, refuse each other.
+    if memory_service.another_live_turn_not_serving(agent_name, execution.id, email):
+        logger.info(f"[SeatDecision] Refused on {agent_name} (decision_turn_ambiguous, execution={execution_id})")
+        raise HTTPException(status_code=422, detail={
+            "code": "decision_turn_ambiguous",
+            "message": ("Another turn that does not serve this person is running on this agent right now, so "
+                        "whose decisions these are cannot be told apart. Nothing was recorded or read. Tell the "
+                        "person the decision was not recorded; it can be recorded on a later turn."),
+        })
+    return email, execution
 
 
 @router.post("/{agent_name}/decisions")
@@ -119,15 +158,12 @@ async def record_seat_decision(
 ):
     """Record a decision for the seat this execution serves."""
     assert_own_agent(current_user, agent_name, detail=_OWN_DECISIONS)
+    _agent_only(current_user)
     assert_agent_access(current_user, agent_name, detail="Not authorized")
     rate_limiter.enforce(f"seat_decision_record:{agent_name}", 60, 60)
     _require_running_turn(current_user, body.execution_id, x_trinity_execution_id)
+    # A finished run is refused once, by `_seat_for` (`decision_turn_not_live`).
     seat_email, execution = _seat_for(agent_name, body.execution_id)
-    _status = getattr(execution, "status", "")
-    if current_user.agent_name and str(getattr(_status, "value", _status)).lower() != "running":
-        raise HTTPException(status_code=422, detail={
-            "code": "turn_not_running",
-            "message": "A decision is recorded during the turn it was made in; this execution is not running."})
 
     scope = f"seat_decision:{agent_name}:{seat_email}"
     idem = idempotency_service.begin(scope, idempotency_key)
@@ -188,6 +224,7 @@ async def get_seat_autonomy(
     ask classes and blockers, never a person. A companion that cannot read this
     cannot tell someone why it is asking first."""
     assert_own_agent(current_user, agent_name, detail=_OWN_DECISIONS)
+    _agent_only(current_user)
     assert_agent_access(current_user, agent_name, detail="Not authorized")
     seat_email, _ = _seat_for(agent_name, execution_id)
     from services import autonomy_dial_service
@@ -216,6 +253,7 @@ async def list_seat_decisions(
     """The seat's standing decisions (criterion first), for reuse and citing.
     `include_history` adds superseded / closed / reversed / expired rows."""
     assert_own_agent(current_user, agent_name, detail=_OWN_DECISIONS)
+    _agent_only(current_user)
     assert_agent_access(current_user, agent_name, detail="Not authorized")
     seat_email, _ = _seat_for(agent_name, execution_id)
     rows = db.list_seat_decisions(agent_name, seat_email, limit=seat_decision_service.MAX_ROWS_PER_SEAT)

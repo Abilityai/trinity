@@ -44,10 +44,14 @@ fi
 
 emit() { printf '%s\n' "$@"; }
 
+# A here-string, never `printf | grep -q`, for every class test below (#4280). Under
+# pipefail, grep exiting on its match can SIGPIPE a printf that is still writing,
+# so the pipeline returns 141 and the `if` reads a real match as a miss.
+
 # ---------------------------------------------------------------------------
 # 1. Host key — the layer this issue was actually about.
 # ---------------------------------------------------------------------------
-if printf '%s' "$OUTPUT" | grep -qE 'Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED|No (ED25519|RSA|ECDSA) host key is known'; then
+if grep -qE 'Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED|No (ED25519|RSA|ECDSA) host key is known' <<<"$OUTPUT"; then
     emit "CLASS: host-key" \
          "CAUSE: SSH refused the server's identity before any credential was offered." \
          "       The deploying user has no github.com entry in ~/.ssh/known_hosts (or a stale one)." \
@@ -67,7 +71,7 @@ fi
 # ---------------------------------------------------------------------------
 # 2. Authorization — what the old diagnostic assumed unconditionally.
 # ---------------------------------------------------------------------------
-if printf '%s' "$OUTPUT" | grep -qE 'Permission denied \(publickey|Repository not found|could not read Username|Authentication failed|remote: (Invalid username or password|Write access|Support for password authentication)|HTTP Basic: Access denied|fatal: unable to access .*: The requested URL returned error: (401|403)'; then
+if grep -qE 'Permission denied \(publickey|Repository not found|could not read Username|Authentication failed|remote: (Invalid username or password|Write access|Support for password authentication)|HTTP Basic: Access denied|fatal: unable to access .*: The requested URL returned error: (401|403)' <<<"$OUTPUT"; then
     emit "CLASS: authorization" \
          "CAUSE: The transport connected and the credential was rejected (or absent)." \
          "FIX:   Give the deploying user read access to Abilityai/trinity-enterprise —" \
@@ -79,7 +83,7 @@ fi
 # ---------------------------------------------------------------------------
 # 3. Network / DNS — nothing to fix on the repo side.
 # ---------------------------------------------------------------------------
-if printf '%s' "$OUTPUT" | grep -qE 'Could not resolve host|Connection timed out|Connection refused|Network is unreachable|Operation timed out|Failed to connect to github.com'; then
+if grep -qE 'Could not resolve host|Connection timed out|Connection refused|Network is unreachable|Operation timed out|Failed to connect to github.com' <<<"$OUTPUT"; then
     emit "CLASS: network" \
          "CAUSE: github.com was unreachable from the deploying host." \
          "FIX:   Transient or egress-blocked. Re-run; if it persists, check the VM's" \

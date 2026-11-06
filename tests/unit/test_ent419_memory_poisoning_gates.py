@@ -573,7 +573,7 @@ def _run_summarizer(monkeypatch, *, summary_out, messages, existing="- likes tea
                         lambda a, e: {"agent_notes": "", "conversation_summary": existing})
     monkeypatch.setattr(pps.db, "get_recent_public_chat_messages", lambda *a, **k: messages)
     monkeypatch.setattr(pps.db, "update_public_user_memory_conversation_summary",
-                        lambda a, e, s: updates.append(s))
+                        lambda a, e, s, **k: updates.append(s))   # ent#962: + expected_previous=
     monkeypatch.setattr(settings_service, "get_anthropic_api_key", lambda: "test-anthropic-key-placeholder")
 
     class _Resp:
