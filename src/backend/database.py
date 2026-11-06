@@ -1510,8 +1510,13 @@ class DatabaseManager:
     def get_operator_resume_enabled(self, agent_name: str) -> bool:
         return self._agent_ops.get_operator_resume_enabled(agent_name)
 
-    def set_operator_resume_enabled(self, agent_name: str, enabled: bool) -> bool:
+    def set_operator_resume_enabled(self, agent_name: str, enabled) -> bool:
         return self._agent_ops.set_operator_resume_enabled(agent_name, enabled)
+
+    def get_operator_resume_override(self, agent_name: str):
+        # ent#1102: the raw tri-state read `wake_policy` makes (ent#1108 made
+        # the column NULL / 0 / 1); `get_operator_resume_enabled` COALESCEs.
+        return self._agent_ops.get_operator_resume_override(agent_name)
 
     # --- wake on ending, tri-state (ent#1102) ---
     # None = no opinion, follow the instance default. Read only through

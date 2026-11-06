@@ -96,6 +96,7 @@ def _install(monkeypatch):
     monkeypatch.setattr(wake_policy, "db", SimpleNamespace(
         get_wake_on_ending=lambda name: None,
         get_operator_resume_enabled=lambda name: True,
+        get_operator_resume_override=lambda name: True,
         get_setting_value=lambda key, default=None: default,
     ))
     _mod("services.idempotency_service", SimpleNamespace(

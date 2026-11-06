@@ -51,6 +51,11 @@ class _PolicyDb:
     def get_operator_resume_enabled(self, agent_name):
         return self._fake.get_operator_resume_enabled(agent_name)
 
+    def get_operator_resume_override(self, agent_name):
+        # The raw tri-state read (ent#1108): the fake's True is an opt-in, its
+        # False is "never said" — NULL — so the instance default applies.
+        return True if self._fake.get_operator_resume_enabled(agent_name) else None
+
     def get_setting_value(self, key, default=None):
         return default
 

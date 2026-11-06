@@ -59,9 +59,12 @@ def seeded_db(tmp_path, monkeypatch):
     conn.execute(
         "CREATE TABLE system_settings (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)"
     )
+    # NULL explicitly: the ent#329 column is tri-state since ent#1108 and the
+    # fixture DDL above still bakes the old `DEFAULT 0`, which would read as
+    # the owner's OFF — `register_agent_owner` passes NULL for the same reason.
     conn.execute(
-        "INSERT INTO agent_ownership (agent_name, owner_id, created_at) "
-        "VALUES ('alpha', 1, '2026-01-01T00:00:00Z')"
+        "INSERT INTO agent_ownership (agent_name, owner_id, created_at, "
+        "operator_resume_enabled) VALUES ('alpha', 1, '2026-01-01T00:00:00Z', NULL)"
     )
     conn.commit()
     try:
@@ -217,8 +220,9 @@ async def test_the_read_reports_the_mode_and_what_it_resolves_to(routes, seeded_
     assert out["mode"] == "default"
     assert out["effective"] is True
     assert out["source"] == "instance"
-    # ent#329's own field is unchanged for every existing client.
-    assert out["enabled"] is False
+    # ent#329's own field is unchanged for every existing client: since
+    # ent#1108 an untouched agent reads ON through it too.
+    assert out["enabled"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -227,9 +231,11 @@ async def test_the_read_reports_the_mode_and_what_it_resolves_to(routes, seeded_
 
 @pytest.mark.asyncio
 async def test_a_tristate_on_wakes_an_agent_whose_legacy_column_is_zero(routes, seeded_db):
-    """The regression this file exists for. `operator_resume_enabled` stays 0
-    (nobody wrote it), so any gate still reading that column declines — and the
-    dispatcher behind it never gets asked."""
+    """The regression this file exists for. The ent#329 column is written in
+    step (1 — it is tri-state since ent#1108, and a stale 0 there would be read
+    as the owner's OFF), and the resolver reads the wider column first; any
+    gate still reading the old column through its COALESCEd boolean getter is
+    reading the wrong switch — the source-text pin below keeps them off it."""
     from models import OperatorResumeUpdate
     from services import ask_service, operator_resume_service, wake_policy
     from client_portal.asks import service as portal_asks
@@ -237,7 +243,7 @@ async def test_a_tristate_on_wakes_an_agent_whose_legacy_column_is_zero(routes, 
     await routes.set_operator_resume_endpoint(
         "alpha", OperatorResumeUpdate(mode="on"), current_user=_Person()
     )
-    assert _stored(seeded_db) == {"operator_resume_enabled": 0, "wake_on_ending": 1}
+    assert _stored(seeded_db) == {"operator_resume_enabled": 1, "wake_on_ending": 1}
     assert wake_policy.resolve("alpha").enabled is True
 
     for module in (operator_resume_service, ask_service, portal_asks):

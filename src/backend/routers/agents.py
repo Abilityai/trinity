@@ -1463,13 +1463,14 @@ async def set_operator_resume_endpoint(
     # ent#1102: the tri-state column is the switch both wake paths read, so it
     # is written on every request — including a legacy `enabled`, because a
     # person who moved the switch has expressed an opinion either way and the
-    # instance default must stop overriding them. The boolean column is kept in
-    # step only for a legacy body, so an `enabled: false` that used to mean
-    # "off" still reads as off to anything still on the old column.
+    # instance default must stop overriding them. The ent#329 column is written
+    # in step on every body too (it is tri-state since ent#1108, so `default`
+    # clears it to NULL): the resolver reads it as the owner's voice when the
+    # wider column is NULL, and a `mode` that left a stale 0 or 1 behind would
+    # let an older answer outvote the newer one.
     if not db.set_wake_on_ending(agent_name, body.wake_override):
         raise HTTPException(status_code=404, detail="Agent not found")
-    if body.enabled is not None:
-        db.set_operator_resume_enabled(agent_name, body.enabled)
+    db.set_operator_resume_enabled(agent_name, body.wake_override)
 
     verdict = wake_policy.resolve(agent_name)
     mode = body.mode if body.mode is not None else ("on" if body.enabled else "off")

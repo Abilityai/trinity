@@ -74,7 +74,9 @@ def seeded_db(tmp_path, monkeypatch):
     conn.close()
 
 
-def _seed(conn, agent_name: str, *, wake_on_ending=None, legacy=0) -> None:
+def _seed(conn, agent_name: str, *, wake_on_ending=None, legacy=None) -> None:
+    # `legacy=None`: the ent#329 column is tri-state since ent#1108 — NULL is
+    # "never said" (what `register_agent_owner` writes), 0 is the owner's OFF.
     conn.execute(
         "INSERT INTO agent_ownership (agent_name, owner_id, created_at, "
         "operator_resume_enabled, wake_on_ending) VALUES (?, 1, '2026-01-01T00:00:00Z', ?, ?)",

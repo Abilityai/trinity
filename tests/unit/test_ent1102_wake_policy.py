@@ -203,6 +203,21 @@ class TestResolver:
         assert verdict.enabled is True
         assert verdict.source == "legacy_resume"
 
+    def test_a_legacy_off_is_the_owners_voice_since_ent1108(
+        self, policy, tmp_db_conn, monkeypatch
+    ):
+        """ent#1108 made the ent#329 column tri-state and moved every undecided
+        ``DEFAULT 0`` to NULL, so a 0 that survives is an owner's explicit OFF —
+        and the wider switch being NULL must not let the instance default
+        outvote it. The read is RAW: the COALESCEd boolean getter would fold
+        the NULL row above into "on" and make the instance layer unreachable."""
+        _stub_setting(monkeypatch, policy, "true")
+        _seed(tmp_db_conn, "opted-out", resume=0, wake=None)
+        verdict = policy.resolve("opted-out")
+        assert verdict.enabled is False
+        assert verdict.source == "legacy_resume"
+        assert verdict.reason == "wake_disabled_by_legacy_resume"
+
     def test_explicit_tristate_off_beats_the_legacy_optin(
         self, policy, tmp_db_conn, monkeypatch
     ):
@@ -237,7 +252,7 @@ class TestResolver:
         def _boom(agent_name):
             raise RuntimeError("database is locked")
 
-        monkeypatch.setattr(real_db, "get_operator_resume_enabled", _boom, raising=False)
+        monkeypatch.setattr(real_db, "get_operator_resume_override", _boom, raising=False)
         verdict = policy.resolve("anyone")
         assert verdict.enabled is False
         assert verdict.source == "unreadable"

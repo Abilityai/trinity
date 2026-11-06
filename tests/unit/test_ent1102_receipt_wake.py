@@ -38,8 +38,11 @@ def stub_policy(monkeypatch):
 
     def _set(*, wake=None, legacy=False, instance="true"):
         monkeypatch.setattr(real_db, "get_wake_on_ending", lambda n: wake, raising=False)
+        # `legacy` speaks ent#329's boolean: True is an owner's opt-in, False
+        # is "never said" (NULL since ent#1108), so the instance default applies.
         monkeypatch.setattr(
-            real_db, "get_operator_resume_enabled", lambda n: legacy, raising=False
+            real_db, "get_operator_resume_override", lambda n: True if legacy else None,
+            raising=False,
         )
         monkeypatch.setattr(
             real_db,

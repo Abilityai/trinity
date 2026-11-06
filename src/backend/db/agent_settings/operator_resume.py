@@ -31,9 +31,13 @@ answer-wake and the end of a run the agent delegated. It is **tri-state**
 (NULL / 0 / 1) where this one is boolean, because its instance default is ON:
 an ``INTEGER DEFAULT 0`` cannot tell "nobody ever touched this" from "the owner
 said off", so flipping the default would silently discard the second. Nothing
-reads either column directly — ``services/wake_policy.py`` is the only reader,
-and it treats ``operator_resume_enabled = 1`` as an explicit opt-in made before
-the tri-state existed.
+reads either column directly — ``services/wake_policy.py`` is the only reader.
+It reads this column RAW (``get_operator_resume_override``), because since
+ent#1108 it is tri-state too: 1 is an owner's explicit ON made before the
+wider switch existed, 0 is an owner's explicit OFF (the ent#1108 migration
+moved every untouched ``DEFAULT 0`` to NULL, so a 0 that survives IS a
+decision), and NULL is no opinion. The Settings PUT writes both columns in
+step, so the two can only disagree on rows that predate ent#1102.
 """
 
 from typing import Optional
@@ -69,12 +73,32 @@ class OperatorResumeMixin:
             row = conn.execute(stmt).mappings().first()
         return bool(row["operator_resume_enabled"]) if row else False
 
-    def set_operator_resume_enabled(self, agent_name: str, enabled: bool) -> bool:
-        """Enable/disable respond→resume for one agent.
+    def get_operator_resume_override(self, agent_name: str) -> Optional[bool]:
+        """The ent#329 column RAW: ``None`` for NULL (no opinion, ent#1108), an
+        unknown or a soft-deleted agent; ``False`` for the owner's explicit 0;
+        ``True`` for 1. No COALESCE — this is the read ``wake_policy`` makes,
+        and the platform default is its business, not this column's.
+        """
+        stmt = select(agent_ownership.c.operator_resume_enabled).where(
+            and_(
+                agent_ownership.c.agent_name == agent_name,
+                agent_ownership.c.deleted_at.is_(None),
+            )
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).mappings().first()
+        if not row or row["operator_resume_enabled"] is None:
+            return None
+        return bool(row["operator_resume_enabled"])
+
+    def set_operator_resume_enabled(self, agent_name: str, enabled: Optional[bool]) -> bool:
+        """Enable/disable respond→resume for one agent (``None`` clears it to
+        NULL — the ent#1108 "follow the platform default" state).
 
         Returns True if a live row was updated (False for unknown or
         soft-deleted agents, so the caller can 404 rather than report success).
         """
+        value = None if enabled is None else (1 if enabled else 0)
         stmt = (
             update(agent_ownership)
             .where(
@@ -83,7 +107,7 @@ class OperatorResumeMixin:
                     agent_ownership.c.deleted_at.is_(None),
                 )
             )
-            .values(operator_resume_enabled=1 if enabled else 0)
+            .values(operator_resume_enabled=value)
         )
         with get_engine().begin() as conn:
             return conn.execute(stmt).rowcount > 0
