@@ -1594,7 +1594,8 @@ _ALLOWED: Tuple[_Allowed, ...] = (
         _BE + "routers/slack.py", "connect_slack", "HTTPException", frozenset({"e"}),
         "routers/slack.py stays unchanged until after 2026-11-19, so the "
         "code-scanning dismissals reviewed against its current source stay valid "
-        "until then. Fix it the #1917 way after that date and drop this entry.",
+        "until then. Fix it the #1917 way after that date and drop this entry "
+        "(abilityai/trinity#4339).",
         expires=datetime.date(2026, 11, 19),
     ),
 )
