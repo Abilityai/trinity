@@ -22,7 +22,9 @@ Measured on the old code: 8-11 s of CPU for one 64 KB reply. This module pins:
 3. the conversion entry clamps its regex input to the largest reply any caller
    can hand it, and passes any excess through unchanged rather than dropping it;
 4. on realistic agent markdown the output equals the previous implementation;
-   the only intentional differences are pinned by name.
+   the only intentional differences are pinned by name;
+5. on random markdown over every kind of whitespace the output is exactly the
+   previous rules with those four differences applied, and nothing else.
 """
 
 from __future__ import annotations
@@ -302,8 +304,108 @@ class TestEquivalence:
             # A header with only whitespace after the marks stays as it is
             # instead of becoming an empty bold `* *`.
             ("#  \nnext", "* *\nnext", "#  \nnext"),
+            # A header whose title starts with whitespace that the `[ \t]+`
+            # after the marks does not take (`\r`, `\f`, NBSP, U+3000, ...)
+            # also stays as it is instead of becoming a bold line.
+            ("## \xa0Summary", "*\xa0Summary*", "## \xa0Summary"),
+            ("# \u3000Overview\nbody", "*\u3000Overview*\nbody", "# \u3000Overview\nbody"),
+            ("#\t\x0cTitle", "*\x0cTitle*", "#\t\x0cTitle"),
+            ("# \rX", "*\rX*", "# \rX"),
         ],
     )
     def test_intentional_differences(self, wa, text, before, after):
         assert _convert_unclamped(text) == before
         assert _convert(wa, text) == after
+
+
+# ---------------------------------------------------------------------------
+# The declared differences are the only ones
+# ---------------------------------------------------------------------------
+
+_OLD_HEADER = re.compile(r"^[ \t]*#{1,6}[ \t]+(.+?)\s*$", re.MULTILINE)
+_OLD_LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+
+
+def _previous_rules_with_declared_differences(text):
+    """The previous rules, changed only where `test_intentional_differences`
+    says, and written without the new regexes so the comparison is not
+    circular:
+
+    * a header whose title starts with whitespace (a blank title, or `\\r`,
+      NBSP, U+3000, ...) is left as it is;
+    * link text holds no `[`, and a URL holds no `](` (a lookahead form: not
+      linear, which is fine for the short strings used here).
+    """
+    if not text:
+        return text
+    text = _OLD_HEADER.sub(
+        lambda m: m.group(0) if re.match(r"\s", m.group(1)) else f"*{m.group(1)}*",
+        text,
+    )
+    text = re.sub(r"\[([^\[\]]+)\]\(((?:(?!\]\()[^)])+)\)", r"\1 (\2)", text)
+    text = re.sub(r"\*\*(.+?)\*\*", r"*\1*", text)
+    text = re.sub(r"__(.+?)__", r"*\1*", text)
+    text = re.sub(r"~~(.+?)~~", r"~\1~", text)
+    return text
+
+
+def _declared_kinds(text):
+    """The declared differences `text` reaches under the previous rules."""
+    kinds = set()
+    for m in _OLD_HEADER.finditer(text):
+        title = m.group(1)
+        if title.isspace():
+            kinds.add("blank header title")
+        elif title[0].isspace():
+            kinds.add("header title starting with whitespace")
+    for m in _OLD_LINK.finditer(_OLD_HEADER.sub(r"*\1*", text)):
+        if "[" in m.group(1):
+            kinds.add("link text holding [")
+        if "](" in m.group(2):
+            kinds.add("URL holding ](")
+    return kinds
+
+
+# Every non-newline character `\s` matches. The ones the `[ \t]+` after the
+# header marks does not take are where a difference once went unnoticed.
+_WHITESPACE = "".join(
+    c for c in map(chr, range(0x110000)) if c.isspace() and c != "\n"
+)
+_TOKENS = (
+    list("#[]()*_~a\n")
+    + list(_WHITESPACE)
+    + ["# ", "## ", "\n# ", "\n#\t", "](", "[a](", "**", "__", "~~"]
+)
+
+
+def _random_markdown(count, seed=1117):
+    rng = random.Random(seed)
+    return [
+        "".join(rng.choice(_TOKENS) for _ in range(rng.randint(1, 30)))
+        for _ in range(count)
+    ]
+
+
+class TestDeclaredDifferencesAreComplete:
+    def test_output_is_the_previous_rules_with_only_the_declared_changes(self, wa):
+        for text in _random_markdown(20_000):
+            assert _convert(wa, text) == _previous_rules_with_declared_differences(text), (
+                f"undeclared difference for {text!r}: before "
+                f"{_convert_unclamped(text)!r}, now {_convert(wa, text)!r}"
+            )
+
+    def test_corpus_reaches_every_declared_difference(self, wa):
+        """Each declared difference, alone, changes some output in the corpus
+        above -- so the comparison exercises all four rather than passing on
+        inputs that never reach them."""
+        alone = set()
+        for text in _random_markdown(20_000):
+            kinds = _declared_kinds(text)
+            if len(kinds) == 1 and _convert(wa, text) != _convert_unclamped(text):
+                alone |= kinds
+        assert alone == {
+            "blank header title",
+            "header title starting with whitespace",
+            "link text holding [",
+            "URL holding ](",
+        }
