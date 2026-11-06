@@ -9,9 +9,16 @@
  * whose text starts "MCP error -32602: Input validation error". The tool
  * callback (and so the docs endpoint) is never reached.
  *
- * What did change with zod 4: the advertised inputSchema no longer carries
- * `additionalProperties: false`, and the human-readable validation text is
- * worded differently. Extra keys were and still are accepted at runtime.
+ * What did change with zod 4:
+ * - the advertised inputSchema no longer carries `additionalProperties: false`;
+ * - the human-readable validation text is worded differently;
+ * - zod 4 counts the question's length in Unicode code points, zod 3 counted
+ *   UTF-16 code units. For text with characters outside the Basic
+ *   Multilingual Plane (emoji, for example) the schema cap therefore admits
+ *   more, and the cap the caller hits is client.ts's UTF-16 guard, with its
+ *   own wording. Nothing rejected before is accepted now, and the endpoint is
+ *   still never reached.
+ * Extra keys were and still are accepted at runtime, and are not forwarded.
  */
 import { test, describe, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -23,12 +30,15 @@ import { MAX_QUESTION_CHARS } from "./client.js";
 
 const realFetch = globalThis.fetch;
 let fetchCalls = 0;
+let lastBody: Record<string, unknown> | undefined;
 
 function stubEndpoint(): void {
   fetchCalls = 0;
+  lastBody = undefined;
   globalThis.fetch = (async (_url: unknown, init?: RequestInit) => {
     fetchCalls++;
-    const { question } = JSON.parse(String(init?.body)) as { question: string };
+    lastBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    const { question } = lastBody as { question: string };
     return new Response(
       JSON.stringify({ answer: `len=${question.length}`, state: "SUCCEEDED", session_id: "1" }),
       { status: 200 },
@@ -50,6 +60,19 @@ async function connectedClient(): Promise<Client> {
 
 const VALIDATION_TEXT =
   /^MCP error -32602: Input validation error: Invalid arguments for tool ask_trinity: .*\b4000\b.* at question$/;
+
+const VALIDATION_PREFIX =
+  "MCP error -32602: Input validation error: Invalid arguments for tool ask_trinity: ";
+
+function onlyText(result: Record<string, unknown>): string {
+  const content = result.content as Array<{ type: string; text: string }>;
+  assert.equal(content.length, 1);
+  assert.equal(content[0].type, "text");
+  return content[0].text;
+}
+
+// U+1F600: one code point, two UTF-16 code units.
+const ASTRAL = "\u{1F600}";
 
 describe("ask_trinity input contract (ent1117-s2)", () => {
   test("the limit under test is 4000 characters", () => {
@@ -140,6 +163,69 @@ describe("ask_trinity input contract (ent1117-s2)", () => {
     });
     assert.equal(result.isError ?? false, false);
     assert.equal(fetchCalls, 1);
+    assert.deepEqual(lastBody, { question: "q" });
+  });
+
+  // Each argument set fails the input schema, so the SDK must answer with the
+  // -32602 validation result naming the offending field, and the tool (and so
+  // the docs endpoint) must never run. A schema that coerced or loosened
+  // either field would forward these to the endpoint instead.
+  const invalidArguments: Array<{ name: string; args: Record<string, unknown>; field: string }> = [
+    { name: "question is a number", args: { question: 5 }, field: "question" },
+    { name: "question is null", args: { question: null }, field: "question" },
+    { name: "question is an array", args: { question: ["a"] }, field: "question" },
+    { name: "question is missing", args: {}, field: "question" },
+    { name: "session_id is null", args: { question: "q", session_id: null }, field: "session_id" },
+    { name: "session_id is a number", args: { question: "q", session_id: 5 }, field: "session_id" },
+  ];
+  for (const { name, args, field } of invalidArguments) {
+    test(`invalid arguments (${name}) return the -32602 validation result and never reach the endpoint`, async () => {
+      stubEndpoint();
+      const client = await connectedClient();
+      const result = await client.callTool({ name: "ask_trinity", arguments: args });
+      assert.equal(result.isError, true);
+      const text = onlyText(result);
+      assert.ok(text.startsWith(VALIDATION_PREFIX), `unexpected text: ${text}`);
+      assert.ok(text.endsWith(` at ${field}`), `expected the error to name ${field}: ${text}`);
+      assert.equal(fetchCalls, 0);
+    });
+  }
+
+  test("astral text: 4001 UTF-16 units in 2001 code points passes the schema and is stopped by the client guard", async () => {
+    stubEndpoint();
+    const client = await connectedClient();
+    const question = ASTRAL.repeat(MAX_QUESTION_CHARS / 2) + "a";
+    assert.equal(question.length, MAX_QUESTION_CHARS + 1);
+    assert.equal([...question].length, MAX_QUESTION_CHARS / 2 + 1);
+    const result = await client.callTool({ name: "ask_trinity", arguments: { question } });
+    assert.equal(result.isError, true);
+    assert.equal(
+      onlyText(result),
+      "The question is 4001 characters — the limit is 4000. Shorten it and try again.",
+    );
+    assert.equal(fetchCalls, 0);
+  });
+
+  test("astral text: 4000 UTF-16 units is accepted and reaches the endpoint", async () => {
+    stubEndpoint();
+    const client = await connectedClient();
+    const question = ASTRAL.repeat(MAX_QUESTION_CHARS / 2);
+    const result = await client.callTool({ name: "ask_trinity", arguments: { question } });
+    assert.equal(result.isError ?? false, false);
+    assert.match(onlyText(result), /^len=4000\n/);
+    assert.equal(fetchCalls, 1);
+  });
+
+  test("astral text: 4001 code points is rejected by the schema", async () => {
+    stubEndpoint();
+    const client = await connectedClient();
+    const result = await client.callTool({
+      name: "ask_trinity",
+      arguments: { question: ASTRAL.repeat(MAX_QUESTION_CHARS + 1) },
+    });
+    assert.equal(result.isError, true);
+    assert.match(onlyText(result), VALIDATION_TEXT);
+    assert.equal(fetchCalls, 0);
   });
 
   test("advertised ask_trinity inputSchema is exactly the zod 4 rendering", async () => {
