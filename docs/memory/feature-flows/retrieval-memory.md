@@ -275,6 +275,15 @@ hits kept on a failed re-search.
   Memory): the per-agent opt-out; says "Platform switch is off" rather than
   pretending a saved choice is live.
 - Spec: `tests/unit/retrievalMemoryPanel.spec.js` (mounted).
+- `components/agent-settings/PersonMemoryModal.vue` (trinity-enterprise#962, Guardrails →
+  Memory → Person memory → a person): the person's live facts (`GET …/facts?user_email=`,
+  20 a page, offset = the count still on screen), each fact's journal on a History
+  disclosure (`GET …/events?fact_id=`), Forget behind `ConfirmDialog` ("Forget this fact?
+  The agent will stop recalling it." → `DELETE …/facts/{id}`), and `RetrievalMemorySearch`
+  with `user-email` set, so the owner search is scoped to that person. The current
+  owner's own row reads the agent scope, so it shows a pointer instead of a list; with
+  the switch off or the agent kept out, the empty reason reuses the toggle's wording.
+  Spec: `tests/unit/personMemory.mount.spec.js`. Flow: `public-agent-links.md` (MEM-001 owner view).
 
 ## Tests
 `tests/unit/test_ent1022_retrieval_memory.py` — switches, the subject table,
@@ -369,7 +378,6 @@ owner search box (idle / skeleton / hits / empty / failed, stale hits kept).
 
 ## Deferred (recorded)
 BM25/FTS adapter behind the same port pending ent#634; a retention floor for
-facts; cross-scope beyond the owner; the enterprise Workspace surface for the
-owner view and the journal (ent#962); backfill of historical chat; an `as_of`
+facts; cross-scope beyond the owner; backfill of historical chat; an `as_of`
 date the extractor reads off the exchange itself (relative dates in the fact
 text still rot — the rendered stamp is the revision date, not the event's).
