@@ -8,6 +8,8 @@ the properties that barrier has to hold:
 
 * a sibling directory that shares the base's prefix (``avatars2`` beside
   ``avatars``) is outside it, and so is any name carrying a NUL byte;
+* an avatar agent name is one path component: ``foo/../bar`` is refused
+  even though it normalises to another agent's file inside the store;
 * a legitimate name is still served when the root is written with ``./``, with
   a doubled ``//`` separator, or sits behind a symlink;
 * on the three unauthenticated read routes, an agent name carrying an encoded
@@ -111,6 +113,24 @@ def test_the_avatar_store_module_holds_no_http_concerns():
                  if isinstance(n, ast.ImportFrom) and n.module}
     assert "fastapi" not in imported
     assert not hasattr(avatar_paths, "avatar_path")
+
+
+@pytest.mark.parametrize("name", ["foo/../bar", "a/b", "./bar", "bar/.", "x//bar"])
+def test_a_name_with_a_path_separator_is_refused_even_inside_the_store(store, name):
+    """``foo/../bar`` normalises to agent ``bar``'s own file. That is inside
+    the store, so containment alone lets it through; an agent name is one path
+    component, so a separator in it is refused."""
+    (store / "bar.webp").write_bytes(b"BAR")
+    assert avatar_paths.avatar_path_or_none(name, ".webp") is None
+
+
+def test_the_base_check_still_refuses_a_sibling_through_the_suffix(store):
+    """With the name held to one component, the prefix check is what guards a
+    suffix carrying a separator: ``..`` + ``/avatars2/x.webp`` normalises into
+    the sibling ``<root>2``, which only a base with a trailing separator
+    refuses."""
+    assert avatar_paths.avatar_path_or_none("..", "/avatars2/x.webp") is None
+    assert avatar_paths.avatar_path_or_none("..", "/avatars/x.webp") == store / "x.webp"
 
 
 def test_escape_uses_the_callers_detail(store):
@@ -411,6 +431,17 @@ def test_rename_reads_the_same_constant():
     assert not hasattr(rename_service, "AVATAR_DIR")
     assert not hasattr(rename_service, "_avatar_path_or_none")
     assert rename_service.avatar_paths is avatar_paths
+
+
+def test_a_rename_cannot_overwrite_another_agents_avatar_through_a_separator(store):
+    """The primitive takes the new name as final. ``x/../victim`` stays inside
+    the store and normalises onto agent ``victim``'s avatar; refused as a
+    non-name, it moves nothing and overwrites nothing."""
+    (store / "old.webp").write_bytes(b"OLD")
+    (store / "victim.webp").write_bytes(b"VICTIM")
+    rename_service._move_avatars("old", "x/../victim")
+    assert (store / "victim.webp").read_bytes() == b"VICTIM"
+    assert (store / "old.webp").read_bytes() == b"OLD"
 
 
 def test_rename_of_an_escaping_old_name_moves_nothing_outside_the_store(store, monkeypatch, tmp_path):

@@ -12,6 +12,9 @@ CodeQL's ``py/path-injection`` query recognises as a barrier:
   ``./x`` or ``a//b`` still matches the normalised joined path;
 * the joined path is normalised and must start with that base;
 * a NUL byte is refused by name: it survives both steps above;
+* the agent name must be one path component, so a separator in it is refused:
+  ``foo/../bar`` normalises to agent ``bar``'s own files, which are inside the
+  store, so containment alone would let one agent's name reach another's;
 * a path component longer than ``NAME_MAX`` bytes is refused too. The
   filesystem would refuse it anyway, but by raising ``ENAMETOOLONG`` from
   ``exists()``/``stat()``, which is a 500 on the public read routes. No agent
@@ -67,6 +70,8 @@ def avatar_path_or_none(agent_name: str, suffix: str) -> Optional[Path]:
     """``AVATAR_DIR/<agent_name><suffix>``, or ``None`` when it would leave the store."""
     filename = f"{agent_name}{suffix}"
     if "\x00" in filename:
+        return None
+    if os.sep in agent_name or (os.altsep and os.altsep in agent_name):
         return None
     base = _store_base()
     fullpath = os.path.normpath(os.path.join(base, filename))
