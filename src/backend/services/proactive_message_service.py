@@ -77,6 +77,15 @@ class DeliveryResult:
     first_execution_id: Optional[str] = None
 
 
+def _refuse_blocked(agent_name: str, channel: str, client_id: str) -> None:
+    """trinity-enterprise#21: a client the owner blocked on this agent's channel
+    gets nothing from the agent on it — no proactive message, no notification.
+    A ChannelDeliveryError, so `auto` still tries the next channel (the block is
+    per channel) and an explicit channel fails with this reason."""
+    if db.is_channel_client_blocked(agent_name, channel, client_id):
+        raise ChannelDeliveryError(f"recipient_blocked: this client is blocked on the agent's {channel} channel")
+
+
 class ProactiveMessageService:
     """
     Service for sending proactive messages from agents to users.
@@ -561,6 +570,7 @@ class ProactiveMessageService:
             raise RecipientNotFoundError(
                 f"No Telegram user with verified email '{recipient_email}' for agent '{agent_name}'"
             )
+        _refuse_blocked(agent_name, "telegram", str(chat_link["telegram_user_id"]))
 
         # Get bot token (decrypted)
         bot_token = db.get_telegram_bot_token(agent_name)
@@ -707,6 +717,7 @@ class ProactiveMessageService:
             raise RecipientNotFoundError(
                 f"No WhatsApp user with verified email '{recipient_email}' for agent '{agent_name}'"
             )
+        _refuse_blocked(agent_name, "whatsapp", chat_link["wa_user_phone"])
 
         auth_token = db.get_whatsapp_auth_token(agent_name)
         if not auth_token:

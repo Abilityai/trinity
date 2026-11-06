@@ -408,6 +408,7 @@ def _group(text, *, observe_only=False, untagged=False, quoted=None):
 @contextmanager
 def _router_env(execute):
     db = MagicMock()
+    db.is_channel_client_blocked.return_value = False  # ent#21: not blocked
     db.get_access_policy.return_value = {"require_email": False, "open_access": True,
                                          "group_auth_mode": "none"}
     db.get_or_create_public_chat_session.return_value = {"id": "s1", "message_count": 3}

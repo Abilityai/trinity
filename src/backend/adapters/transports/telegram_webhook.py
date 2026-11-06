@@ -159,6 +159,14 @@ class TelegramWebhookTransport(ChannelTransport):
                 # parses as observe-only, so gate here — trigger rules must not
                 # change. `/reset@bot` is the deliberate group-reset gesture.
                 normalized = self.adapter.parse_message(update)
+                # trinity-enterprise#21: commands bypass the router, so its
+                # block check never saw them — a blocked sender got `/login`
+                # replies and `/reset@bot` cleared the group's session. Dropped
+                # here with no reply, as every other message of theirs is.
+                if (normalized and normalized.sender_id
+                        and db.is_channel_client_blocked(binding["agent_name"], "telegram", normalized.sender_id)):
+                    logger.info("Telegram webhook: command from a blocked sender dropped")
+                    return
                 if normalized and not normalized.metadata.get("observe_only"):
                     command_response = await self.adapter.handle_command(normalized)
                     if command_response:
