@@ -255,11 +255,12 @@ from .dashboard import router as dashboard_router
 ```python
 @router.get("/api/dashboard")
 async def get_dashboard():
-    dashboard_path = find_dashboard_yaml()
-    if not dashboard_path:
+    dashboard_path = get_dashboard_path()
+    read = _read_dashboard(dashboard_path)  # O_NOFOLLOW; a link raises _DashboardIsALink
+    if read is None:
         return {"has_dashboard": False, "error": "No dashboard.yaml found..."}
 
-    content = dashboard_path.read_text()
+    content, stat = read
     config = yaml.safe_load(content)
     errors = validate_dashboard(config)
     # ...
@@ -575,7 +576,8 @@ sections:
 | Validation error (cached) | 200 | `stale: true, stale_reason: "Validation errors..."` |
 | Top level, a section or a widget is not a mapping (no cache) | 200 | `error: "dashboard.yaml must be a mapping (key: value pairs) at the top level"`, or `"dashboard.yaml: section N[, widget M] must be a mapping (key: value pairs)"` |
 | File unreadable / not UTF-8 (no cache) | 200 | `error: "Failed to read dashboard.yaml: the file could not be read (<ErrorClass>)"` / `"...: the file is not valid UTF-8 text"` |
-| Any other failure (no cache) | 200 | `error: "Failed to read dashboard.yaml: <ErrorClass>"`; the exception text goes only to the agent log, credential-scrubbed (trinity#4284). With a cache, each of these three is served as `stale: true` with the same text as `stale_reason` |
+| `dashboard.yaml` is a link, live or dangling (no cache) | 200 | `error: "Failed to read dashboard.yaml: it is a link, and links are not followed"`; the file is opened with `O_NOFOLLOW`, so what is parsed (and quoted in a parse error) is always the file at the fixed path |
+| Any other failure (no cache) | 200 | `error: "Failed to read dashboard.yaml: <ErrorClass>"`; the exception text goes only to the agent log, credential-scrubbed (trinity#4284). With a cache, each of these four is served as `stale: true` with the same text as `stale_reason` |
 | Agent timeout (no cache) | 200 | `error: "Agent is starting up, please try again"` |
 | Agent timeout (cached) | 200 | `stale: true, stale_reason: "Agent is starting up..."` |
 
