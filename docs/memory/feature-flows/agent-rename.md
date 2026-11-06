@@ -413,7 +413,7 @@ Note: Container is NOT auto-restarted, and its env and labels are unchanged. Vol
 | Name taken | 409 | "Agent with name '{name}' already exists" |
 | Agent not found | 404 | "Agent not found" |
 | Database failure | 500 | "Failed to update database" |
-| Docker failure | 500 | "Failed to rename agent: {error}" |
+| Docker failure | 500 | "Failed to rename agent ({ExceptionClass} — details in backend logs)" (the full exception is logged with its traceback) |
 
 ---
 
