@@ -422,6 +422,8 @@ def _execute_task_failing_with(monkeypatch, text: str) -> MagicMock:
     failed = MagicMock()
     monkeypatch.setattr(internal.idempotency_service, "fail", failed)
     monkeypatch.setattr(internal.platform_audit_service, "log", AsyncMock())
+    # Hermetic: never read a live staged store; tests that need staged values set their own.
+    monkeypatch.setattr(internal, "get_staged_values", lambda: [])
     return failed
 
 
@@ -458,6 +460,26 @@ def test_internal_execute_task_log_masks_staged_values(monkeypatch, caplog):
     text = _log_text(caplog)
     assert SENTINEL in text, "the rest of the error must still be logged"
     assert STAGED_VALUE not in text, f"a staged value reached the log: {text}"
+
+
+STAGED_URL_PATH = "s13-tenant-path-7f3a9c"
+STAGED_URL_VALUE = f"https://svc:s13StagedPw0rd@stage.example.com/{STAGED_URL_PATH}"
+
+
+def test_internal_execute_task_masks_a_staged_value_before_the_url_pass(monkeypatch, caplog):
+    """The staged-value scrub runs before the URL-userinfo pass. Run after it,
+    a staged connection string has already been rewritten, its identity match
+    misses, and everything after the userinfo (host and path) reaches the log."""
+
+    caplog.set_level(logging.DEBUG)
+    _execute_task_failing_with(monkeypatch, f"{SENTINEL} agent echoed {STAGED_URL_VALUE}")
+    monkeypatch.setattr(internal, "get_staged_values", lambda: [STAGED_URL_VALUE])
+    exc = _call_execute_task()
+    assert exc.status_code == 500
+    text = _log_text(caplog)
+    assert SENTINEL in text, "the rest of the error must still be logged"
+    assert "s13StagedPw0rd" not in text, f"the staged URL's password reached the log: {text}"
+    assert STAGED_URL_PATH not in text, f"the staged URL's path reached the log: {text}"
 
 
 def test_internal_execute_task_releases_the_claim_when_the_staged_read_fails(monkeypatch):
