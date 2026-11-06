@@ -16,11 +16,23 @@
  */
 import { describe, it } from "node:test";
 import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
 
 import { createGitTools } from "./git.js";
 import type { TrinityClient } from "../client.js";
 
 type Issue = { message: string; path?: ReadonlyArray<PropertyKey | { key: PropertyKey }> };
+
+// One table of tricky inputs, read by this file AND by the backend's test
+// (tests/unit/test_ent1117_s6a_sync_paths_option_reject.py), so the API and
+// the MCP tool cannot drift into giving a caller different answers.
+const CASES = JSON.parse(
+  readFileSync(new URL("../../../../tests/fixtures/git-sync-path-cases.json", import.meta.url), "utf8"),
+) as ReadonlyArray<{ path: string; accept: boolean; note: string }>;
+
+function issueKeys(i: Issue): PropertyKey[] {
+  return (i.path ?? []).map((p) => (typeof p === "object" ? p.key : p));
+}
 
 function makeTools(calls: unknown[][]) {
   const fake: Partial<TrinityClient> = {
@@ -53,17 +65,31 @@ describe("ent#1117 git_sync — a paths element starting with '-' is a schema er
     it(`rejects ${JSON.stringify(paths)} and names '${bad}'`, async () => {
       const result = await validate({ agent_name: "alpha", paths });
       assert.ok(result.issues && result.issues.length > 0, "expected a schema error");
-      const messages = result.issues.map((i) => i.message).join(" | ");
-      assert.ok(messages.includes(`'${bad}'`), `the error must name the element: ${messages}`);
       // The issue points at the offending element, so FastMCP renders `paths.<i>: ...`.
       const index = (paths as readonly string[]).indexOf(bad);
+      const at = result.issues.filter((i) => {
+        const keys = issueKeys(i);
+        return keys[0] === "paths" && keys[1] === index;
+      });
+      assert.equal(at.length, 1, `issue path must be paths.${index}: ${JSON.stringify(result.issues)}`);
+      // The message must LEAD with the element. A bare substring check is
+      // vacuous for ["-"]: "'-'" is already in "starts with '-'".
       assert.ok(
-        result.issues.some((i) => {
-          const keys = (i.path ?? []).map((p) => (typeof p === "object" ? p.key : p));
-          return keys[0] === "paths" && keys[1] === index;
-        }),
-        `issue path must be paths.${index}: ${JSON.stringify(result.issues)}`,
+        at[0].message.startsWith(`'${bad}' starts with '-'`),
+        `the error must name the element first: ${at[0].message}`,
       );
+    });
+  }
+
+  for (const [n, c] of CASES.entries()) {
+    it(`shared case ${n} (${c.note}): ${c.accept ? "accepts" : "rejects"} ${JSON.stringify(c.path)}`, async () => {
+      const result = await validate({ agent_name: "alpha", paths: [c.path] });
+      if (c.accept) {
+        assert.equal(result.issues, undefined, JSON.stringify(result.issues));
+        assert.deepEqual((result.value as { paths: string[] }).paths, [c.path]);
+      } else {
+        assert.ok(result.issues && result.issues.length > 0, "expected a schema error");
+      }
     });
   }
 
