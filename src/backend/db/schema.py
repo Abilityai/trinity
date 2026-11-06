@@ -1239,6 +1239,11 @@ TABLES = {
     # ent#419's "write history with rollback" layer, built here because that AC
     # needed it. Not keyed to `public_user_memory.id`: the memory row is created
     # on demand and may be re-created; `(agent_name, user_email)` is the identity.
+    # trinity-enterprise#962: `section` says which half of the blob a row
+    # changed — `notes` (the agent's write_user_memory, every row before #962)
+    # or `summary` (the background summarizer, `triggered_by = 'summarizer'`).
+    # For a `summary` row, `previous_notes` / `new_notes` hold the SUMMARY text;
+    # readers filter on `section` (the person's list defaults to `notes`).
     "public_user_memory_writes": """
         CREATE TABLE IF NOT EXISTS public_user_memory_writes (
             id TEXT PRIMARY KEY,
@@ -1251,7 +1256,8 @@ TABLES = {
             new_notes TEXT NOT NULL DEFAULT '',
             written_at TEXT NOT NULL,
             undone_at TEXT,
-            undone_by TEXT
+            undone_by TEXT,
+            section TEXT NOT NULL DEFAULT 'notes'
         )
     """,
 

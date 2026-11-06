@@ -76,6 +76,8 @@ class AgentOperatorAccess(BaseModel):
     role: Optional[str] = None
     last_active: Optional[str] = None  # ISO-Z last_login; None until first login
     status: str                        # 'active' | 'pending'
+    # trinity-enterprise#459: can an invitation be emailed to this person now?
+    invite_available: bool = False
     allow_proactive: bool = False
     proactive_consent: str = "not_asked"  # ent#817: consented | declined | not_asked
 

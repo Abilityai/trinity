@@ -16,6 +16,7 @@ from utils.helpers import parse_iso_timestamp, to_utc_iso
 from utils.addressee import normalize_addressee_email
 from db_models import WebFileUpload  # noqa: F401 — re-exported for router imports
 from db_models import SubscriptionCredential
+from db_models import AgentShare
 
 
 # Fork-to-own destination: "owner/name". Owner per GitHub rules (alphanumeric +
@@ -523,6 +524,11 @@ class User(BaseModel):
     # trinity-enterprise#872: `dependencies.principal_reach`'s per-request memo of
     # an agent key's fleet reach. Private, never serialized; None until read.
     _fleet_reach: Optional[set] = PrivateAttr(default=None)
+    # trinity-enterprise#1024: the agent an ADMIN's user-scoped MCP key acts on
+    # behalf of, admitted from `X-Trinity-Act-As-Agent` by
+    # `dependencies.admit_act_as` and by nothing else. Private and never
+    # serialized, like the turn above; read through `act_as_agent_of`.
+    _act_as_agent: Optional[str] = PrivateAttr(default=None)
 
 
 class Token(BaseModel):
@@ -2389,6 +2395,87 @@ class MemorySearchResponse(BaseModel):
     agent_name: str
     scope: str            # "agent" | "person"
     hits: list[MemorySearchHit]
+
+
+class PersonMemoryPerson(BaseModel):
+    """One person with memory on an agent, as the owner's list shows them
+    (trinity-enterprise#962). `user_email` is the verified identity the memory
+    is keyed on; `channel*` is what an access request captured, as the channel
+    reported it (ent#737), or None. `fact_count` is None when the person's
+    scope is the agent scope (the current owner's own turns)."""
+    user_email: str
+    last_changed_at: Optional[str] = None
+    has_notes: bool = False
+    has_summary: bool = False
+    write_count: int = 0
+    fact_count: Optional[int] = 0
+    agent_scope: bool = False
+    channel: Optional[str] = None
+    channel_name: Optional[str] = None
+    channel_handle: Optional[str] = None
+
+
+class PersonMemoryPeople(BaseModel):
+    """A page of the people with memory on an agent, newest change first."""
+    agent_name: str
+    total: int
+    offset: int
+    limit: int
+    people: list[PersonMemoryPerson]
+
+
+class PersonMemoryWrite(BaseModel):
+    """One write to a person's memory (trinity-enterprise#962). `section` is
+    which half it changed; `text` is what it left and `previous_text` what
+    Undo restores. `undoable` is the latest open write of its section, decided
+    server-side. `undone_by` is who undid it — the owner's view only."""
+    id: str
+    section: Literal["notes", "summary"]
+    kind: Literal["scheduled_run", "conversation", "summarizer"]
+    execution_id: Optional[str] = None
+    schedule_name: Optional[str] = None
+    written_at: str
+    undone_at: Optional[str] = None
+    undone_by: Optional[str] = None
+    undone_by_operator: bool = False
+    undoable: bool = False
+    text: str = ""
+    previous_text: str = ""
+
+
+class PersonMemoryHistory(BaseModel):
+    """A page of a person's write history; `next_before` is the cursor for the
+    next page (None on the last)."""
+    writes: list[PersonMemoryWrite]
+    next_before: Optional[str] = None
+
+
+class PersonMemoryDetail(BaseModel):
+    """One person's memory on an agent, for the owner (trinity-enterprise#962)."""
+    agent_name: str
+    user_email: str
+    agent_scope: bool = False
+    notes: str = ""
+    summary: str = ""
+    updated_at: Optional[str] = None
+    channel: Optional[str] = None
+    channel_name: Optional[str] = None
+    channel_handle: Optional[str] = None
+    history: PersonMemoryHistory
+
+
+class PersonMemoryUndoRequest(BaseModel):
+    """Whose write it is. The write id alone would do, but the undo primitive is
+    keyed on (agent, person, write) — an id from another person is the uniform
+    404, never a cross-person revert."""
+    user_email: str = Field(..., min_length=1, max_length=320)
+
+
+class PersonMemoryUndoResult(BaseModel):
+    """What Undo did: both sections as they now stand."""
+    write_id: str
+    notes: str = ""
+    summary: str = ""
 
 
 class MemoryFactEventOut(BaseModel):
@@ -6019,6 +6106,8 @@ class SkillSetMember(BaseModel):
     version: Optional[str] = None
     # The source that wins this member when it is NOT the set's own source.
     shadowed_source: Optional[str] = None
+    # trinity-enterprise#736: the library is retiring this member (ent#672).
+    deprecated: bool = False
 
 
 class SkillSetInfo(BaseModel):
@@ -6039,6 +6128,10 @@ class AgentSkillSetMember(BaseModel):
     state: str  # assigned | conflict | not_assigned | missing_upstream
     version: Optional[str] = None
     shadowed_source: Optional[str] = None
+    # trinity-enterprise#736: `deprecation` is the ent#672 code
+    # (`deprecated` | `deprecated:<successor>`) an assign note names; None when live.
+    deprecated: bool = False
+    deprecation: Optional[str] = None
 
 
 class AgentSkillSetStatus(BaseModel):
@@ -6406,3 +6499,14 @@ class TermsAcceptance(BaseModel):
     accepted_at: str
     door: Optional[str] = None
     actor_ip: Optional[str] = None
+
+
+class AgentShareResult(AgentShare):
+    """A new share, and whether its invitation went out (trinity-enterprise#459)."""
+    # sent | not_needed | invalid_address | unavailable | rate_limited | failed
+    invitation: str = "not_needed"
+
+
+class AgentInviteResult(BaseModel):
+    email: str
+    sent: bool = True

@@ -2313,10 +2313,10 @@ print(json.dumps(out))
         or answer before one finishes (`in_progress`) — so an injection warning
         cannot be what tells the caller a skill it just assigned is deprecated.
         The notice comes from the library entry instead
-        and is stamped on whatever report delivery produced:
-        `skills[name]["warnings"] = ["deprecated[:<successor>]"]`, present ONLY
-        for a deprecated name and carrying lifecycle codes only (an injection's
-        dep warnings stay on the sync result, where they have always been).
+        and is stamped on whatever report delivery produced: the code
+        `deprecated[:<successor>]` goes FIRST in `skills[name]["warnings"]`,
+        once, ahead of any codes the injection itself reported for that skill
+        (#3136 — a missing dependency must survive the stamp).
 
         The library read (git I/O) runs BESIDE delivery, started first, so it
         never delays delivery. A slow delivery (the budget-bound `in_progress`
@@ -2333,7 +2333,9 @@ print(json.dumps(out))
         if notes and isinstance(skills, dict):
             for name, code in notes.items():
                 if isinstance(skills.get(name), dict):
-                    skills[name]["warnings"] = [code]
+                    rest = [w for w in skills[name].get("warnings") or []
+                            if not pkg.is_deprecation_code(w)]
+                    skills[name]["warnings"] = [code, *rest]
         return report
 
     def _deprecation_notes(self, names: List[str]) -> Dict[str, str]:
@@ -2373,7 +2375,7 @@ print(json.dumps(out))
         has no agent-side meta and is injected; unchanged siblings cost one
         batched metas read. The report is projected onto `requested`.
 
-        Returns `{status, reason?, conflicts?, skills: {name: {status, error?}}}`
+        Returns `{status, reason?, conflicts?, skills: {name: {status, error?, warnings?}}}`
         where status is `injected` | `partial` | `conflict` | `pending_start` |
         `in_progress` | `not_delivered`:
           conflict        (#2914) every requested name collides with an
@@ -2385,6 +2387,13 @@ print(json.dumps(out))
                           continues in the background (WS trigger on completion)
           not_delivered   + reason: docker_unavailable | injection_in_progress |
                           agent_not_ready | injection_error
+
+        `warnings` (#3136) is present only on a skill this injection put on the
+        agent (`injected` / `fallback` / `unchanged`) that reported any, and
+        holds the same public codes the start endpoint returns
+        (`pkg.public_warnings`): `missing_binary:<b>`, `missing_env:<KEY>`,
+        `packages_not_checked`, … — codes, never a path or a label. Absent
+        otherwise, so a clean skill's entry is exactly `{"status": "injected"}`.
         """
         names = sorted({n for n in requested if pkg.validate_skill_name(n)})
         if not names:
@@ -2430,6 +2439,9 @@ print(json.dumps(out))
             st = r.get("status")
             if st in ("injected", "fallback", "unchanged"):
                 per[n] = {"status": "injected"}
+                warnings = pkg.public_warnings(r.get("warnings"))
+                if warnings:
+                    per[n]["warnings"] = warnings
             elif st == "unassigned_meanwhile":
                 per[n] = {"status": "unassigned_meanwhile"}
             elif st == "conflict":

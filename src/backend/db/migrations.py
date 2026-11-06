@@ -6206,7 +6206,7 @@ def _migrate_channel_client_blocks(cursor, conn):
     """trinity-enterprise#21 — an owner's per-agent block on one external
     channel client, checked by the channel access gate on every message.
     Schema is also in db/schema.py for fresh installs; mirrored by Alembic
-    revision 0120_channel_client_blocks.
+    revision 0121_channel_client_blocks.
     """
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS channel_client_blocks (
@@ -6267,6 +6267,17 @@ def _migrate_mcp_external_access_backfill(cursor, conn):
     if run_mcp_external_access_backfill(_run, now_iso=utc_now_iso()):
         conn.commit()
         logger.info("Existing install: external MCP access kept on (ent#1101)")
+
+
+def _migrate_public_user_memory_writes_section(cursor, conn):
+    """trinity-enterprise#962 — the write history records which half of the
+    memory blob a row changed: `notes` (every row before this migration) or
+    `summary` (the background summarizer, now recorded). Schema is also in
+    db/schema.py for fresh installs; mirrored by Alembic revision
+    0120_public_user_memory_writes_section.
+    """
+    _safe_add_column(cursor, "public_user_memory_writes", "section",
+                     "ALTER TABLE public_user_memory_writes ADD COLUMN section TEXT NOT NULL DEFAULT 'notes'")
 
 
 MIGRATIONS = [
@@ -6458,5 +6469,6 @@ MIGRATIONS = [
     ("operator_queue_wake_state", _migrate_operator_queue_wake_state),
     ("mcp_external_access_backfill", _migrate_mcp_external_access_backfill),
     ("terms_acceptances_table", _migrate_terms_acceptances_table),
+    ("public_user_memory_writes_section", _migrate_public_user_memory_writes_section),
     ("channel_client_blocks", _migrate_channel_client_blocks),
 ]
