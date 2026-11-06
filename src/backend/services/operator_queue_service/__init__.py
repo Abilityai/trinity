@@ -658,6 +658,12 @@ from . import write_back  # noqa: E402
 from . import alerts  # noqa: E402,F401 — loads the submodule here, in G6 order
 from . import flood  # noqa: E402
 
+# trinity-enterprise#1111 (T4): the runtime id-prefix reservation registry —
+# mutable state with two public functions, in its own module so `__init__`
+# stays under the #3785 G1 cap. Reads `_oq._RESERVED_ID_PREFIXES` at call
+# time only.
+from . import reserved  # noqa: E402
+
 
 class OperatorQueueSyncService(poller.PollerCoreMixin, ingest.IngestMixin, write_back.WriteBackMixin,
                               flood.FloodAlertMixin):
@@ -744,4 +750,10 @@ from .alerts import (  # noqa: E402,F401
     ALERT_REFUSED_UNREGISTERED,
     create_bounded_alert,
     create_bounded_alert_outcome,
+)
+# reserved: the ent#1111 registry, which `platform_alerts.register`, the ask
+# sink and the enterprise emitters read through the package.
+from .reserved import (  # noqa: E402,F401
+    reserve_id_prefix,
+    reserved_id_prefixes,
 )

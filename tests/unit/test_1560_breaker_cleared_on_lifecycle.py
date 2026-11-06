@@ -393,11 +393,15 @@ def test_delete_path_sweeps_everything_and_replaces_the_heartbeat_only_clear():
 
 
 def test_rename_path_sweeps_both_the_old_and_the_new_name():
-    src = _src("routers/agent_rename.py")
+    # ent#1111 (T3): the rename's steps moved out of the route into the
+    # primitive every caller shares, so the sweep is pinned where it now lives.
+    src = _src("services/agent_service/rename.py")
 
-    assert "await clear_agent_runtime_state(agent_name)" in src
-    assert "await clear_agent_runtime_state(sanitized_name)" in src
+    assert "await clear_agent_runtime_state(old_name)" in src
+    assert "await clear_agent_runtime_state(new_name)" in src
     assert "heartbeat_service.clear_heartbeat" not in src
+    # And the route must not have kept a copy of it.
+    assert "clear_agent_runtime_state" not in _src("routers/agent_rename.py")
 
 
 def test_purge_sweeps_the_name_at_the_moment_it_becomes_reusable():

@@ -119,6 +119,15 @@ async def accept_terms(body: TermsAccept, request: Request, background: Backgrou
     except TermsError as e:
         _raise(e)
     if out["created"]:
+        # trinity-enterprise#1111 (T1): the INLINE consumers first, awaited
+        # here, before the response — for work the person is about to look for
+        # (a share that has to be on their roster when the Workspace re-reads
+        # it at the redirect, which it does once, right after this call).
+        # Bounded by `TERMS_INLINE_HOOK_BUDGET_S` and never a cancellation: a
+        # consumer past the ceiling finishes in the background and this answers
+        # anyway. Never raises.
+        await terms_service.run_inline_acceptance_hooks(
+            out["user_id"], out["email"], out["version"], out["accepted_at"])
         # After the response, inside this request: the consumers (an invite
         # door, a member's agent) never hold the acceptance up, once per new row.
         background.add_task(terms_service.run_acceptance_hooks, out["user_id"], out["email"],

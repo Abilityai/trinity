@@ -8553,6 +8553,42 @@
         "unit"
       ],
       "description": "trinity-enterprise#962: the per-person memory blob is read-modify-written under a row lock on BOTH backends (requires_postgres; schema-parity's PostgreSQL tier runs it). Each writer is held inside its critical section, so without the lock the interleaving is forced: a concurrent notes write and summary write keep both halves, and an undo racing a summary write keeps the undo and the new summary."
+    },
+    {
+      "file": "unit/test_ent1111_reserve_id_prefix.py",
+      "feature": "trinity-enterprise#1111",
+      "added": "2026-11-06",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1111 (T4): a platform alert kind can reserve its own operator-queue id prefix. reserve_id_prefix makes a prefix reserved at every reader seam (is_platform_minted, raise_ask's refusal, both ingest hijack guards, the cap/exclusion reads) because they all call reserved_id_prefixes(); the OSS literal tuple is never mutated (the frozen migration heal list is pinned against it); re-reserving is idempotent and a malformed prefix (no terminator, upper-case, not id-shaped, non-string) is refused; platform_alerts.register now verifies a kind's prefix is reserved, a longer id under a reserved family is accepted, and a duplicate name is still refused. An AST guard fails the build if any reader outside the registry's own module goes back to the literal."
+    },
+    {
+      "file": "unit/test_ent1111_rename_agent_now.py",
+      "feature": "trinity-enterprise#1111",
+      "added": "2026-11-06",
+      "categories": [
+        "backend",
+        "agents",
+        "lifecycle",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1111 (T3): the agent rename as a service primitive. rename_agent_now runs the route's steps in the route's order (stop, container rename, db.rename_agent cascade, gate cancel, Redis sweep of BOTH names, avatar files, WS agent_renamed, audit), audits source=system with no request to dereference when actor is None and source=api with the actor_ip/endpoint/request_id ctx when a person asks, reports was_running, leaves the agent stopped, renames the container BACK when db.rename_agent returns False or raises, refuses a system agent before any side effect, raises AgentContainerMissing when there is no container, and swallows each best-effort step's failure. The route delegates with every status code and response field unchanged (403 agent principal / system / permission, the four name 400s, 409 name taken, 409 claimed volume base before the primitive is entered, 404 missing container, the 500 DB text, the generic 500), and an AST guard fails the build if the route keeps a copy of the mutation steps."
+    },
+    {
+      "file": "unit/test_ent1111_terms_inline_hooks.py",
+      "feature": "trinity-enterprise#1111",
+      "added": "2026-11-06",
+      "categories": [
+        "backend",
+        "auth",
+        "settings",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1111 (T1): acceptance consumers that run BEFORE the response. register_acceptance_hook(fn, inline=True) keeps a separate list (registration idempotent, one clear drops both); run_inline_acceptance_hooks awaits them under ONE ceiling per acceptance (TERMS_INLINE_HOOK_BUDGET_S = 5). In time: the hook's work is done before the route's return value exists while the background hook is only scheduled, and through the real route inline precedes background; a sync hook is tolerated; a repeat acceptance (created=False) runs neither kind. Past the ceiling: the runner stops waiting, the route still answers 200, terms_hook_slow is audited, three slow hooks share one ceiling rather than three — and the hook is NEVER cancelled (shielded task), which is the property a wait_for over the work itself would break mid-mutation. It raises: logged, audited terms_hook_failed with the error type, the next hook still runs, the acceptance still succeeds."
     }
   ]
 }
