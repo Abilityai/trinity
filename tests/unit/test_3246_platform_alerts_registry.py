@@ -202,7 +202,9 @@ def _seam_kind_calls():
 def test_every_kind_prefix_is_reserved():
     from services import operator_queue_service as oqs
     from services import platform_alerts as pa
-    reserved = oqs._RESERVED_ID_PREFIXES
+    # ent#1111 (T4): the accessor, so a kind registered by an external emitter
+    # under a RESERVED prefix passes — `pa.register` enforces the same rule.
+    reserved = oqs.reserved_id_prefixes()
     loose = {k.name: k.prefix for k in pa.KINDS.values()
              if not any(k.prefix.startswith(p) for p in reserved)}
     assert not loose, f"kind prefixes an agent could author: {loose}"

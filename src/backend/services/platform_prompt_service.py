@@ -1320,13 +1320,13 @@ def _resolve_ended_asks(agent_name: Optional[str]) -> List[dict]:
     if not agent_name:
         return []
     try:
-        from services.operator_queue_service import _RESERVED_ID_PREFIXES
+        from services.operator_queue_service import reserved_id_prefixes
 
         rows = db.list_recent_operator_queue_endings(
             agent_name,
             iso_cutoff(hours=ENDED_ASKS_WINDOW_HOURS),
             MAX_ENDED_ASKS + 1,
-            exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
+            exclude_request_id_prefixes=reserved_id_prefixes(),
         ) or []
     except Exception as e:
         logger.debug(f"_resolve_ended_asks({agent_name}) failed: {e}")
@@ -1371,16 +1371,16 @@ def _resolve_pending_asks(agent_name: Optional[str]) -> tuple:
     if not agent_name:
         return [], 0
     try:
-        from services.operator_queue_service import _RESERVED_ID_PREFIXES
+        from services.operator_queue_service import reserved_id_prefixes
 
         rows = db.list_pending_operator_queue_asks(
             agent_name, MAX_PENDING_ASKS,
-            exclude_request_id_prefixes=_RESERVED_ID_PREFIXES,
+            exclude_request_id_prefixes=reserved_id_prefixes(),
         ) or []
         total = len(rows)
         if total >= MAX_PENDING_ASKS:
             total = db.count_operator_queue_pending_for_agent(
-                agent_name, exclude_request_id_prefixes=_RESERVED_ID_PREFIXES)
+                agent_name, exclude_request_id_prefixes=reserved_id_prefixes())
         return rows, max(total, len(rows))
     except Exception as e:
         logger.debug(f"_resolve_pending_asks({agent_name}) failed: {e}")

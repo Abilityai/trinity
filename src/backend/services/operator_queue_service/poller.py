@@ -232,7 +232,7 @@ class PollerCoreMixin:
         try:
             swept = deps.db.mark_operator_queue_unconfirmed(
                 "agent_not_running", now, exclude_agents=running_agents,
-                exclude_request_id_prefixes=_oq._RESERVED_ID_PREFIXES,
+                exclude_request_id_prefixes=_oq.reserved_id_prefixes(),
             )
             if swept:
                 self._changed_this_cycle = True
@@ -247,7 +247,7 @@ class PollerCoreMixin:
         try:
             stalled = deps.db.mark_operator_queue_undelivered_for_stopped_agents(
                 now, running_agents=running_agents,
-                exclude_request_id_prefixes=_oq._RESERVED_ID_PREFIXES,
+                exclude_request_id_prefixes=_oq.reserved_id_prefixes(),
             )
         except Exception as e:
             logger.error(f"Operator queue not-running delivery sweep failed: {e}")
