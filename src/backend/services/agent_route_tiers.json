@@ -1571,6 +1571,11 @@
   "path": "/api/agents/{agent_name}/access-requests",
   "tier": "owner"
  },
+ "sharing.py::resend_agent_invite_endpoint": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/share/{email}/invite",
+  "tier": "owner"
+ },
  "sharing.py::set_public_channel_prompt_endpoint": {
   "method": "PUT",
   "path": "/api/agents/{agent_name}/public-prompt",

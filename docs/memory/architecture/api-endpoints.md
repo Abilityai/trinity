@@ -195,6 +195,7 @@ The per-agent VoIP config + voice-picker UI lives in the agent Settings/Sharing 
 |--------|------|-------------|
 | POST | `/api/agents/{name}/share` | Share agent |
 | DELETE | `/api/agents/{name}/share/{email}` | Remove share |
+| POST | `/api/agents/{name}/share/{email}/invite` | Email a pending person their invitation again (trinity-enterprise#459). Share itself also sends it |
 | GET | `/api/agents/{name}/shares` | List shares |
 | GET | `/api/agents/{name}/access` | Operator (Trinity-user) access roster for the **Access tab** (trinity-enterprise#17). Resolves each `agent_sharing` allow-list email against `users`: resolved → **active** operator (`username`/`role`/`last_active`), unresolved → **pending** invite. Read-only typed view over `agent_sharing`; add/remove reuse `/share` + `/share/{email}`. Drawing the operator-vs-client line on the read path is this endpoint's job (strict client roster is the Sharing redesign #18/#20) |
 | GET | `/api/agents/{name}/clients` | External-client roster: channel users who've messaged the agent, aggregated across Telegram + WhatsApp, sorted by `last_active` desc (never-active last). Owner-only, read-only, DB-sourced (renders when agent stopped). Slack/VoIP additive (#20) |
