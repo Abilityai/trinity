@@ -12,6 +12,10 @@
 
 ## Database Schema
 
+### PostgreSQL by default, SQLite refused in images (#4175, HOST-023)
+
+Every compose file defaults `DATABASE_URL` to the bundled `postgres` service. The images set `TRINITY_REQUIRE_POSTGRES=1`, which arms two refusals in `db/engine.py`: `refuse_sqlite_backend` (from `init_database`, before any file is touched; `TRINITY_ALLOW_SQLITE=1` opens it) and `refuse_empty_postgres_beside_sqlite` (from `alembic_runner.upgrade_to_head`, under the advisory lock, when `trinity.db` has data and `users` is absent or empty; nothing opens it). An `upgrade_to_head` that fires this cannot have built anything. `db/sqlite_to_postgres.py` is the only caller of `allow_sqlite_source=True`, and it must never import `database`, whose import runs `init_database()`. Outside an image the unit tier keeps running on SQLite until the runner is removed.
+
 ### SQLite (`/data/trinity.db`)
 
 **Orphan tables (#3432):** installs upgraded from before #3432 — SQLite and PostgreSQL alike — may carry `process_schedules` and `process_schedule_executions`, which the scheduler's boot path created ad hoc outside both migration tracks; the scheduler no longer creates or reads them, nothing else references them, and they are deliberately left in place (no migration), so #746 autogenerate will surface them as unknown tables.
@@ -543,7 +547,8 @@ purge paths in `db/agent_shared_files.py` (`delete_expired_and_revoked` and
 
 **public_user_memory_writes** (ent#637 — every write to the MEM-001 `agent_notes` section,
 so a person can see that a scheduled run touched their memory and undo it; also ent#419's
-"write history with rollback" layer):
+"write history with rollback" layer; since trinity-enterprise#962 the summarizer's
+`conversation_summary` changes too, marked by `section`):
 ```sql
 CREATE TABLE public_user_memory_writes (
     id TEXT PRIMARY KEY,
@@ -556,7 +561,9 @@ CREATE TABLE public_user_memory_writes (
     new_notes TEXT NOT NULL DEFAULT '',
     written_at TEXT NOT NULL,
     undone_at TEXT,
-    undone_by TEXT
+    undone_by TEXT,                        -- the person, or the operator (ent#962)
+    section TEXT NOT NULL DEFAULT 'notes'  -- 'notes' | 'summary' (ent#962); a summary row's
+                                           -- previous_/new_notes hold SUMMARY text
 );
 CREATE INDEX idx_public_user_memory_writes_lookup ON public_user_memory_writes(agent_name, user_email, written_at);
 ```
@@ -619,11 +626,18 @@ CREATE INDEX idx_agent_memory_fact_events_execution ON agent_memory_fact_events(
 ```
 Both tracks: SQLite `public_user_memory_writes_table`, Alembic `0066_public_user_memory_writes`;
 `AgentRef("public_user_memory_writes", "agent_name", Policy.CASCADE)`. Written only by
-`db/public_links.py::write_user_memory_agent_notes`, in the same transaction as the notes
-replace, so `previous_notes` is what the row held at that instant. Not keyed to
+`db/public_links.py::write_user_memory_agent_notes` (`section='notes'`) and
+`update_user_memory_conversation_summary` (`section='summary'`, `triggered_by='summarizer'`,
+only when the text changed; a compare-and-set on `expected_previous`), each in the same
+transaction as the blob replace and under the row lock (`_read_blob_for_update`: PostgreSQL
+`FOR UPDATE`, SQLite the RESERVED-lock no-op write), so `previous_notes` is what the row held
+at that instant. `section` is the ent#962 column, both tracks (SQLite
+`public_user_memory_writes_section`, Alembic `0120`). Not keyed to
 `public_user_memory.id` — that row is created on demand; `(agent_name, user_email)` is the
 identity. Undo (`undo_user_memory_write`) is latest-first over the open (`undone_at IS NULL`)
-writes of one `(agent, email)`; a foreign write id is `not_found`, never a 403 (Invariant #8).
+writes of one `(agent, email)` **within the write's section**; a foreign write id is
+`not_found`, never a 403 (Invariant #8). Readers default to `section='notes'`; the Alembic downgrade deletes the summary rows before dropping the column, so no summary text is ever relabelled as notes. No retention:
+rows live until the agent is deleted (a bound is a follow-up).
 
 **agent_role_readiness** (ent#527 / #663 — the agent owner's readiness stamp for a role companion):
 ```sql

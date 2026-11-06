@@ -450,8 +450,9 @@ route this build lacks, a lost connection), and those were audited
 twin of `accessDenied`: it stamps `{kind: "failed", reason}`, the row reads
 `success: false` with a short `error` and **no** `denied` key, and the caller's
 JSON is unchanged. A `failed` stamp never overwrites a `denied` one, and its
-reason is never empty. Adopted by `apply_system` and `teardown_system`
-(whose 403 is stamped `denied`); other never-throw tools still return their
+reason is never empty. Adopted by `apply_system`, `teardown_system`
+(whose 403 is stamped `denied`) and `deploy_system` (#4027: it now returns its
+non-2xx answers, a 403 stamped `denied`); other never-throw tools still return their
 failures unstamped. A failed call's `details`:
 `{"tool": "apply_system", "duration_ms": 41, "success": false, "error": "HTTP 409: status 'refused'"}`.
 

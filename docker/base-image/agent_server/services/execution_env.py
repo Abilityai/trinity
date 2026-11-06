@@ -592,6 +592,36 @@ def auth_override_env_layers(override) -> tuple:
     return {}, ()
 
 
+# #4156: Claude Code's auto-memory directory (`~/.claude/projects/<project>/
+# memory/`) is ONE directory for everyone the agent serves, and its system
+# prompt tells the model to save there when "the user explicitly asks you to
+# remember something". On a turn that serves someone other than the owner that
+# competes with `write_user_memory` and can land a person's note where every
+# other user's turn reads it. Claude Code (pinned 2.1.281 and later) reads this
+# variable: truthy (1/true/yes/on) takes the memory system out of the spawn.
+AUTO_MEMORY_OFF_ENV = "CLAUDE_CODE_DISABLE_AUTO_MEMORY"
+
+
+def auto_memory_env_layer(disable: bool) -> Dict[str, str]:
+    """The `extra` layer for a spawn that must not use the shared auto-memory.
+
+    An `extra` key outranks `.env`, so a falsy value an agent wrote there (which
+    Claude Code reads as "forced on") cannot re-enable it for this spawn. A turn
+    that keeps auto-memory gets nothing, i.e. today's env, byte for byte."""
+    return {AUTO_MEMORY_OFF_ENV: "1"} if disable else {}
+
+
+def auto_memory_spawn_kwargs(runtime, disable) -> Dict[str, bool]:
+    """The runtime keyword for a turn the backend marked `disable_auto_memory`
+    (#4156), or ``{}`` — for a turn that keeps it, and for a runtime without
+    Claude Code's auto-memory. Every entry point that reaches the runtime
+    (`/api/chat`, `/api/task`, the #1083 async path, the pull worker) builds
+    its keyword through here, so none of them can drop it on its own."""
+    if disable and getattr(runtime, "supports_auto_memory_switch", False):
+        return {"disable_auto_memory": True}
+    return {}
+
+
 # ---------------------------------------------------------------------------
 # Process-env mirror (for in-process readers, not for spawning)
 # ---------------------------------------------------------------------------

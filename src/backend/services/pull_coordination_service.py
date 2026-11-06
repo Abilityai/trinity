@@ -85,6 +85,18 @@ def _served_person(row: dict) -> Optional[str]:
         return None
 
 
+def _auto_memory_off(row: dict) -> bool:
+    """`task_execution_service.auto_memory_off_for_row` for a claimed row (#4156).
+    Lazy import (as above); fail-closed, like the rule itself."""
+    try:
+        from services.task_execution_service import auto_memory_off_for_row
+
+        return auto_memory_off_for_row(row.get("agent_name"), row)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[PullCoordination] auto-memory rule for %s: %s", row.get("id"), type(e).__name__)
+        return True
+
+
 def _compose_pull_system_prompt(
     agent_name: Optional[str],
     triggered_by: Optional[str],
@@ -452,6 +464,9 @@ def _build_claim_response(row: Dict[str, Any], cap: Optional[int] = None) -> Dic
         payload["persist_session"] = bool(meta.get("persist_session"))
     if meta.get("images"):
         payload["images"] = meta.get("images")
+    # #4156: the push wire's flag, judged off the same row by the same rule.
+    if _auto_memory_off(row):
+        payload["disable_auto_memory"] = True
 
     # #1629: compose the platform system prompt (parity with the push path) and
     # hand it to the worker via task_overrides.system_prompt — the field the pull
