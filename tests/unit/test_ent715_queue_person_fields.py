@@ -885,6 +885,9 @@ _NON_ROW_ACCESSORS = frozenset({
     "readdress_operator_queue_item",   # trinity-enterprise#1095: a boolean, did the CAS write land
     # abilityai/trinity-enterprise#1108 AC #4: a boolean / a count — the wake's status
     "set_operator_queue_wake_state", "mark_operator_queue_wakes_woken",
+    # abilityai/trinity-enterprise#1102: request ids only — the caller's wake
+    # names which asks the ended run parked, never a title or a question.
+    "list_pending_ask_ids_for_execution",
 })
 
 #: What happens to the rows each reader gets.
@@ -904,6 +907,7 @@ _TAGS = "services/person_mention_service.py"
 _ALERTS = "services/platform_alerts.py"
 _PROMPT = "services/platform_prompt_service.py"
 _GATE = "services/skill_gate_service.py"
+_STALL = "services/queue_stall_service.py"
 _ORS = "services/operator_resume_service.py"
 _ROW_READERS = {
     (_ORS, "redispatch_pending_wakes"): (
@@ -988,6 +992,9 @@ _ROW_READERS = {
     (_ALERTS, "clear"): ("internal", "ends a condition's pending row (#3246); returns a count"),
     (_ALERTS, "observe"): ("internal", "records a reading on a condition's row (#3246); returns an outcome"),
     (_ALERTS, "reconcile"): ("internal", "ends the rows whose condition cleared (#3246); returns a count"),
+    (_STALL, "_agents_with_pending_alerts"): (
+        "internal", "the agents whose stall row outlived its stalled head (#4257): the subject "
+                    "prefix and `agent_name` only, and a list of agent names is all that leaves"),
     (_PROMPT, "_resolve_ended_asks"): (
         "agent", "the agent's own ended asks for its prompt: reserved prefixes excluded in SQL"),
     (_PROMPT, "_resolve_pending_asks"): (

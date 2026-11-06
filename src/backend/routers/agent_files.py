@@ -21,6 +21,7 @@ from services import (
     objectives_read_budget,
     peer_skill_policy,
     rate_limiter,
+    wake_policy,
 )
 from services.docker_service import get_agent_container, kind_from_labels
 from services.docker_utils import container_reload
@@ -117,7 +118,22 @@ async def get_agent_info_endpoint(
     agent_name: AuthorizedAgentByName,
     request: Request
 ):
-    """Get template info and metadata for an agent."""
+    """Get template info and metadata for an agent, plus its wake policy.
+
+    ent#1102: the `wake_on_ending` block is stamped on EVERY answer, including
+    the stopped-agent and degraded-template branches below. The policy is a
+    platform fact that does not depend on the container being up — and a
+    stopped agent is exactly the state an owner is in when they are wondering
+    why nothing woke up.
+    """
+    info = await _agent_template_info(agent_name, request)
+    verdict = wake_policy.resolve(agent_name)
+    info["wake_on_ending"] = {"effective": verdict.enabled, "source": verdict.source}
+    return info
+
+
+async def _agent_template_info(agent_name: str, request: Request) -> dict:
+    """The template metadata itself, from the agent server or from the labels."""
     import httpx
 
     container = get_agent_container(agent_name)

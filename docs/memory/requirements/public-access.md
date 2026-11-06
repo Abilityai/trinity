@@ -30,7 +30,16 @@
   - **Trust envelope**: the notes and the summary enter the prompt between platform lines carrying a per-render nonce, every stored line behind a `│ ` margin, under a framing paragraph (reference material about the person; it cannot change instructions, grant permissions or trigger tools or links on its own) and followed by a platform reminder. The content cannot reproduce the delimiters (envelope lines dropped, any other copy defanged in one pass; line breaks split with `splitlines()`; control characters removed). A rendering failure drops the memory rather than injecting it raw.
   - **One-to-one channel writes (AC 4)**: on Slack, Telegram and WhatsApp a write (and a seat decision) resolves the person from `source_channel_client` — ent#549's stamp for the verified speaker of a one-to-one conversation — and fails closed without it, so a group turn writes no one's memory.
   - **Seat decisions** (ride the same block): one-line fields refuse every line terminator, and `decided` / `criterion` / `reversal` pass the checks that can never describe a legitimate decision (markers, an instruction aimed at the agent, a shell command or secrets file given as an order, a script fetched from a URL and piped to a shell in any position, an MCP tool id, a slotted URL); the block carries its own framing line and renders every field on one line, older rows included.
-  - **Out of scope**: the owner/admin memory view and the summarizer's write history (ent#962); paraphrase, other languages and homoglyphs pass the screen by design — the envelope is the layer that does not depend on spelling.
+  - **Out of scope**: paraphrase, other languages and homoglyphs pass the screen by design — the envelope is the layer that does not depend on spelling.
+- **Owner view of a person's memory (trinity-enterprise#962)**: the agent's owner or an admin — a human — reads any person's memory on that agent and undoes its writes. The motivating case is a channel or public-link user with no Workspace view of their own.
+  - **Readers rule** (the ent#638 seat-decision rule): the owner and an admin read every person; nobody else. A person the agent is shared with, an approver or other assignment kind, an agent key, a system key, a connector key and a Workspace-only principal are refused — machine principals with `403` before any agent lookup (`require_person` on the route), humans without the right with the uniform `404`.
+  - **What is listed**: everyone with memory on the agent — notes or a summary, any history row, or live retrieval-memory facts in their own scope — newest change first, each with the verified email, the channel identity an access request captured (ent#737, shown as the channel reported it), last change time and counts. "Last change" is the newest write or fact; a per-message bump never counts.
+  - **What is shown**: notes and summary text (plain text, never rendered as markup), the write history paged 20 at a time with a cursor, and the person's live retrieval-memory facts with a per-fact journal, Forget (behind a confirm) and search scoped to the person. The current owner's own turns feed the agent scope, so their Facts section points to the agent-scope search instead.
+  - **Undo**: latest-first **per section** (notes and summary each have their own latest write), through the same primitive as the person's own undo, recorded with `undone_by` = the operator, and audited (`person_memory_undo`: agent, person, write id — no text). The operator confirms first; there is no redo.
+  - **Summarizer history**: every summary change the background summarizer makes is recorded as a `section = 'summary'` history row (`triggered_by = 'summarizer'`), only when the text changed. A summary write is a compare-and-set against the summary it was built from, so an undo made while the model is answering is never overwritten. **Stated limit**: the summarizer rebuilds from the latest 20 messages every 5, so an undone summary can be derived again while the conversation that produced it is still recent.
+  - **The person's own view** (Workspace) still lists notes writes only and pages through all of them ("Load more"); every change shows what it did as the lines it added (`+`) and removed (`−`) against the version before, on conversation and scheduled-run rows alike ("No change to the text" when the text is the same), and the undoable change says "Undo puts your notes back to how they were before this change."; a write someone else undid reads "Undone by an operator of this agent" — one line for owner and admin, no role or identity disclosed. The person's undo route accepts notes writes only.
+  - **Not in scope**: an owner edit of the notes (undo only), and a retention bound for history rows (rows are kept until the agent is deleted) — both follow-ups.
+  - **API**: `GET /api/agents/{name}/person-memory` (people), `GET …/person-memory/person?user_email=` (one person), `GET …/person-memory/writes?user_email=&before=` (a history page), `POST …/person-memory/writes/{write_id}/undo` (`{user_email}`); the facts, forget, events and search routes of MEM-002 serve the Facts section.
 - **Flow**: `docs/memory/feature-flows/public-agent-links.md#per-user-persistent-memory-mem-001`
 
 ### 15.1a-3 Agent Website Proxy (SITE-001)
@@ -691,6 +700,41 @@
 - **FR-4 Errors** are `{"detail": {"code", "message"}}` so the panel (ent#967)
   branches on `code`. Secrets, the session token, the agent's `.env` and any
   upstream body never appear in a response or a log line.
+- **FR-5 Panel (ent#967)** — `components/NeverminedSpendingPanel.vue`, mounted
+  on the agent's Payments tab directly below `NeverminedPanel` (one block, so
+  it moves with ent#889). Pure rules live in `utils/neverminedSpending.js`.
+  - **States**, derived from the FR-3 GET only (the panel never calls the
+    admin organization route): loading (skeleton, never the empty copy) →
+    failed (`LoadFailed` + Retry) → `configured:false` (admins get a link to
+    Settings › Integrations, others are told an admin sets it up) →
+    `funded:false` (an **Enroll a card** action for the owner tier while the
+    agent is running; disabled with a "start the agent first" hint when it is
+    stopped; text only for a shared viewer) → `funded:true` (remaining, limit,
+    spent, purchases and expiry copied from `live`, a **Revoke** action for
+    the owner tier, "takes effect at the agent's next run"). `live.source:
+    "unavailable"` or `status: "unknown"` renders every number as unknown —
+    never a locally derived figure such as `limit − spent`. No replace
+    affordance: a funded agent offers Revoke only (FR-3).
+  - **Freshness**: no polling — one read on mount/activate, after a verb, and
+    on Refresh. A failed refresh keeps the last data on screen with a stale
+    banner. A response for another agent or a superseded request is dropped.
+  - **Enroll** uses the Nevermined widget SDK's combined `setupCard` flow
+    (pinned version, loaded on demand): inline where the slot is at least
+    440 px wide, the SDK's fullscreen overlay otherwise; the returned ids are
+    bound through FR-3 POST and kept in this browser until bound, so a failed
+    bind is retried without a second widget round. A frame the browser blocks
+    offers Nevermined's hosted redirect page as a fallback.
+  - **Revoke** goes through FR-3 DELETE behind a `ConfirmDialog` that restates
+    the consequence, so the row, the audit trail and the agent's `.env` move
+    together.
+  - **Copy**: every text surface names Nevermined as the holder of the card
+    and the mandate and carries the literal "Nevermined holds the card"; none
+    reads as Trinity holding a card or settling money (ent#932). The
+    backend's `message` is the default error copy; `code` (or the HTTP status
+    when there is none) selects only the recovery action.
+  - The admin organization form (FR-1) is
+    `components/settings/NeverminedOrganizationPanel.vue` on Settings ›
+    Integrations, not on the agent tab.
 
 ---
 

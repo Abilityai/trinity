@@ -54,6 +54,7 @@ from services import agent_call_limiter
 from services.agent_call_limiter import BackendAgentCallBudgetExhausted
 from services.model_context import DEFAULT_CONTEXT_WINDOW
 from services.execution_envelope import TaskExecutionErrorCode
+from services import wake_policy  # ent#1102: the receipt reports the caller's wake policy
 from services.task_execution_service import (
     _compute_context_used,
     _SWITCH_RETRY_DELAY_S,
@@ -389,6 +390,12 @@ def build_chat_payload(
     # Pass execution ID so agent registers process under the same ID (enables termination)
     if task_execution_id:
         payload["execution_id"] = task_execution_id
+    # #4156: a turn serving someone other than the owner (a user the agent is
+    # shared with) spawns with Claude Code's shared auto-memory off.
+    from services.task_execution_service import auto_memory_off_for
+
+    if auto_memory_off_for(name, task_execution_id):
+        payload["disable_auto_memory"] = True
 
     # Mark execution dispatched BEFORE calling agent so the cleanup-service
     # no-session sweep doesn't falsely fail long-running executions
@@ -1542,6 +1549,9 @@ async def run_pulled_chat_turn(
                         f"GET /api/agents/{name}/executions/{execution_id}."
                     ),
                     "async_mode": True,
+                    # ent#1102: the one /chat answer that is a receipt rather
+                    # than the reply, so it carries the wake verdict too.
+                    **_wake_on_ending_receipt(x_source_agent, name),
                 }
                 idempotency_service.complete(idem, execution_id, receipt)
                 idem_done = True
@@ -2377,6 +2387,58 @@ def _ephemeral_dispatch_error(name, execution_id, exc) -> ChatDispatchError:
     )
 
 
+def _queue_wait_fields(
+    agent_name: str, execution_id: str, *, pull: Optional[bool] = None
+) -> dict:
+    """The three queue-wait keys both receipts carry (#4257).
+
+    `queued_at` (when the row was admitted), `queue_position` (how many of this
+    agent's queued rows sit ahead of it, head = 0) and `wait_reason` (which of
+    the five states it is in — see `queue_stall_service.WAIT_REASONS`).
+
+    Best-effort by design: this runs on the dispatch path, and a receipt that
+    is already correct must not fail because a diagnostic read did. Any error
+    degrades to `None`/absent rather than raising, and the row itself stays the
+    source of truth either way.
+    """
+    out: dict = {"queued_at": None, "queue_position": None, "wait_reason": None}
+    try:
+        from database import db
+        from services import queue_stall_service, settings_service
+        from services.pull_pilot import is_pull_pilot_agent
+
+        row = db.get_execution(execution_id)
+        queued_at = getattr(row, "queued_at", None) if row is not None else None
+        out["queued_at"] = queued_at
+        out["queue_position"] = db.count_queued_ahead(
+            agent_name, queued_at, execution_id
+        )
+        is_pilot = is_pull_pilot_agent(agent_name) if pull is None else bool(pull)
+        leased = 0
+        if is_pilot:
+            leased = int(db.count_active_leased_by_agent([agent_name]).get(agent_name, 0))
+        max_parallel = int(settings_service.get_effective_max_parallel_tasks(agent_name))
+        out["wait_reason"] = queue_stall_service.classify_wait(
+            is_pilot=is_pilot,
+            leased_running=leased,
+            max_parallel=max_parallel,
+            # On a push agent, reaching `queued_persistent` IS the slot meter
+            # refusing admission a moment ago, so this row is `capacity` by
+            # construction. (The monitor reads the same agent differently 60 s
+            # later: a row STILL queued then is a drain that has not landed.
+            # Both are true of the same row at different instants.) The
+            # physical lease count is the pilot term and is 0 for a push row
+            # by construction, so it must not be the push answer.
+            slot_free=False,
+        )
+    except Exception:  # noqa: BLE001 — a diagnostic never breaks a receipt
+        logger.debug(
+            "[#4257] could not read queue wait fields for %s", execution_id,
+            exc_info=True,
+        )
+    return out
+
+
 async def _acquire_task_capacity(
     *,
     mode_label,
@@ -2575,6 +2637,37 @@ def _map_task_failure(name, result, *, idem):
             )
 
 
+def _wake_on_ending_receipt(x_source_agent, target_name) -> dict:
+    """ent#1102: what a RECEIPT tells the delegating caller about its wake.
+
+    A receipt is the one answer that is not the answer, so it is the moment the
+    caller decides whether to arm a reminder or simply end its turn. That choice
+    needs the policy, and only the backend can read it — the MCP client cannot
+    see the per-agent tri-state or the instance default. So the dispatch answer
+    carries the verdict and the layer that made it, in the SAME
+    ``{effective, source}`` shape ``GET /agent-info`` already publishes, so one
+    vocabulary covers the receipt, the audit row and the agent's own read.
+
+    Returns ``{}`` — no claim at all — when there is nobody to wake (a human's
+    call) or the caller IS the callee: ``resolveWake`` on the client already
+    stands those down by itself, and a field that contradicted it would be
+    worse than silence. A policy that cannot be read is also silence rather
+    than a promise: ``resolve`` already fails closed, and a receipt that says
+    ``on_ending`` and then goes quiet costs exactly what ent#1102 removed.
+    """
+    if not x_source_agent or x_source_agent == target_name:
+        return {}
+    try:
+        verdict = wake_policy.resolve(x_source_agent)
+    except Exception:  # noqa: BLE001 — a receipt never fails over its own footnote
+        logger.warning(
+            "[ent#1102] wake policy unreadable for caller '%s'; receipt stays silent",
+            x_source_agent,
+        )
+        return {}
+    return {"wake_on_ending": {"effective": verdict.enabled, "source": verdict.source}}
+
+
 async def _dispatch_async(
     *,
     request,
@@ -2635,6 +2728,13 @@ async def _dispatch_async(
             "agent_name": name,
             "message": queued_message,
             "async_mode": True,
+            # #4257: a receipt that only says "queued" leaves the caller no way
+            # to tell a first-poll start from a wait that will not end. These
+            # three answer "how deep, since when, and waiting on what".
+            **_queue_wait_fields(name, execution_id, pull=cap_result.pull),
+            # ent#1102: a queued receipt is a receipt — the caller needs the
+            # wake verdict here exactly as it does on `accepted`.
+            **_wake_on_ending_receipt(x_source_agent, name),
         }
         idempotency_service.complete(idem, execution_id, _queued_payload)
         return _queued_payload
@@ -2680,6 +2780,9 @@ async def _dispatch_async(
         "agent_name": name,
         "message": "Task accepted. Poll GET /api/agents/{name}/executions/{execution_id} for results.",
         "async_mode": True,
+        # ent#1102: whether a turn is coming when this run ends, and which
+        # layer decided. Absent when there is no caller to wake.
+        **_wake_on_ending_receipt(x_source_agent, name),
     }
     idempotency_service.complete(idem, execution_id, _accepted_payload)
     return _accepted_payload
@@ -2738,6 +2841,11 @@ async def _dispatch_sync_backlog(*, name, execution_id, sync_effective_timeout, 
                 "execution_id": execution_id,
                 "task_execution_id": execution_id,
                 "agent_name": name,
+                # #4257: the same three keys as the async receipt — a sync
+                # caller that timed out waiting is the one who most needs to
+                # know whether anything is moving. Divergent receipts would
+                # make the MCP client's answer depend on which door it used.
+                **_queue_wait_fields(name, execution_id),
                 "message": (
                     f"Sync task on agent '{name}' did not complete within "
                     f"{sync_wait_cap}s. Execution {execution_id} may still be "

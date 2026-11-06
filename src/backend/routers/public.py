@@ -608,7 +608,10 @@ async def get_agent_intro(
                 f"http://agent-{agent_name}:8000/api/task",
                 json={
                     "message": INTRO_PROMPT,
-                    "timeout_seconds": 60
+                    "timeout_seconds": 60,
+                    # #4156: a visitor-facing turn never runs with the agent's
+                    # shared auto-memory, which holds other people's notes.
+                    "disable_auto_memory": True,
                 }
             )
 

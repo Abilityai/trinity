@@ -162,6 +162,19 @@
               @click="askProvision(op)"
             >Give a platform account</BaseButton>
           </div>
+          <!-- trinity-enterprise#459: the width holds across the button's labels. -->
+          <BaseButton
+            v-if="op.status === 'pending'"
+            variant="secondary"
+            size="sm"
+            class="min-w-[7rem]"
+            :disabled="!op.invite_available || (!!inviting && inviting !== op.email)"
+            :loading="inviting === op.email"
+            loading-label="Sending…"
+            :title="op.invite_available ? undefined : INVITE_UNAVAILABLE"
+            data-testid="access-resend-invite"
+            @click="resendInvite(op)"
+          >{{ invitedEmail === op.email ? 'Invite sent' : 'Resend invite' }}</BaseButton>
           <!-- #1577: per-recipient proactive-messaging toggle (allow_proactive
                on agent_sharing). The flag rides on the sharing row, which exists
                pre-resolution, so a pending invite can be pre-authorized too. -->
@@ -195,6 +208,7 @@
     >
       <span class="font-medium">Proactive</span> lets the agent message a user without being
       prompted (e.g. Telegram alerts). The agent owner always receives proactive messages.
+      <span v-if="invitesUnavailable" data-testid="access-invite-unavailable">{{ INVITE_UNAVAILABLE }}</span>
     </p>
 
     <ConfirmDialog
@@ -239,12 +253,16 @@ const auth = useAuthStore()
 const enterprise = useEnterpriseStore()
 const users = useUsersStore()
 
+const INVITE_UNAVAILABLE = "Resend invite is off because email isn't set up for sign-in here, so tell people how to sign in yourself."
+
 const operators = ref([])
 const hasLoaded = ref(false)
 const loadError = ref('')
 const adding = ref(false)
 const removing = ref('')
 const savingProactive = ref('')   // #1577: email whose proactive toggle is in flight
+const inviting = ref('')          // ent#459: email whose invitation is in flight
+const invitedEmail = ref('')      // ent#459: the last one that went out
 const newEmail = ref('')
 const message = ref(null)
 
@@ -253,6 +271,7 @@ const view = computed(() => viewState({
   error: loadError.value,
   count: operators.value.length,
 }))
+const invitesUnavailable = computed(() => operators.value.some((op) => op.status === 'pending' && !op.invite_available))
 // What the serves section warns from: nothing until a list has loaded.
 const people = computed(() => (hasLoaded.value ? operators.value : null))
 
@@ -276,10 +295,45 @@ function restart() {
   hasLoaded.value = false
   loadError.value = ''
   message.value = null
+  inviting.value = ''
+  invitedEmail.value = ''
   rowError.value = { email: '', message: '' }
   confirming.value = null
   pendingRole.value = null
   return load()
+}
+
+// trinity-enterprise#459: the share stands either way; say whether the mail went.
+function addedMessage(email, invitation) {
+  if (invitation === 'sent') return { type: 'success', text: `Added ${email} and emailed them an invitation.` }
+  if (invitation === 'invalid_address') {
+    return { type: 'error', text: `Added ${email}, but no invitation went out because it isn't a single email address. Remove it and add the person again.` }
+  }
+  if (invitation === 'unavailable') {
+    return { type: 'error', text: `Added ${email}. No invitation went out because email isn't set up for sign-in here, so tell them how to sign in yourself.` }
+  }
+  if (invitation === 'rate_limited') {
+    return { type: 'error', text: `Added ${email}. No invitation went out because too many were sent recently. Use Resend invite later.` }
+  }
+  if (invitation === 'failed') {
+    return { type: 'error', text: `Added ${email}, but the invitation email failed. Use Resend invite to try again.` }
+  }
+  return { type: 'success', text: `Added ${email}.` }
+}
+
+async function resendInvite(op) {
+  inviting.value = op.email
+  invitedEmail.value = ''
+  rowError.value = { email: '', message: '' }
+  try {
+    await agentsStore.resendInvite(props.agentName, op.email)
+    invitedEmail.value = op.email
+  } catch (e) {
+    const detail = e?.response?.data?.detail
+    rowError.value = { email: op.email, message: detail?.message || writeError(e, "Couldn't send the invitation.") }
+  } finally {
+    inviting.value = ''
+  }
 }
 
 async function addOperator() {
@@ -288,9 +342,10 @@ async function addOperator() {
   adding.value = true
   message.value = null
   try {
-    await agentsStore.shareAgent(props.agentName, email)
+    const share = await agentsStore.shareAgent(props.agentName, email)
     newEmail.value = ''
-    message.value = { type: 'success', text: `Added ${email}.` }
+    message.value = addedMessage(email, share?.invitation)
+    if (share?.invitation === 'sent') invitedEmail.value = email.toLowerCase()
     await load()
   } catch (e) {
     message.value = { type: 'error', text: e?.response?.data?.detail || 'Failed to add this person.' }

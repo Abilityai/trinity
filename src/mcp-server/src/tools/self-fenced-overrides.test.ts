@@ -29,8 +29,8 @@ const decisions = createDecisionTools(fake, false);
 const voice = createVoiceReplyTools(fake, false);
 
 // Every tool whose route is in AGENT_CALLABLE_SELF (tests/unit/_route_census.py)
-// and still takes `agent_name`, except the memory tools, which have their own
-// block below — kept by hand; the other self-fenced tools take
+// and still takes `agent_name`, except the memory and decision tools, which have
+// their own blocks below — kept by hand; the other self-fenced tools take
 // the agent from the key. (`call_a2a_agent`, `get_a2a_task` and `get_agent_spending`
 // REQUIRE the name, so it is not an override; each says an agent key may only pass
 // its own.)
@@ -38,8 +38,6 @@ const SELF_FENCED: Tool[] = [
   reminders.setReminder,
   reminders.listReminders,
   reminders.cancelReminder,
-  decisions.recordDecision,
-  decisions.listSeatDecisions,
   voice.sendVoiceReply,
 ] as unknown as Tool[];
 
@@ -52,6 +50,23 @@ describe("the agents-only memory tools tell the caller to leave agent_name out",
       assert.match(description, /leave this out/i, `${tool.name}: ${description}`);
       assert.match(description, /naming another is refused/i, `${tool.name}: ${description}`);
       assert.doesNotMatch(description, /user-scoped key/i, `${tool.name}: ${description}`);
+    });
+  }
+});
+
+// The seat-decision doors refuse every human too (`_agent_only`,
+// trinity-enterprise#1062), and their description names that refusal.
+describe("the agents-only decision tools name the refusal for a user-scoped key", () => {
+  for (const tool of [decisions.recordDecision, decisions.listSeatDecisions] as unknown as Tool[]) {
+    it(tool.name, () => {
+      const description = tool.parameters.shape.agent_name?.description ?? "";
+      assert.match(description, /naming another is refused/i, `${tool.name}: ${description}`);
+      assert.match(description, /agent_only/, `${tool.name}: ${description}`);
+      assert.doesNotMatch(
+        description,
+        /for a user-scoped key only|override|omit in normal use|default to the bound agent/i,
+        `${tool.name}: ${description}`
+      );
     });
   }
 });

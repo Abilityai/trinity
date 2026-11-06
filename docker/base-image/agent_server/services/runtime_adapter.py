@@ -51,6 +51,11 @@ class AgentRuntime(ABC):
     # `.env` and must never receive a Claude credential (#1187 decision 7).
     supports_auth_override: bool = False
 
+    # #4156: whether `execute`/`execute_headless` accept `disable_auto_memory`
+    # (spawn with Claude Code's shared auto-memory off). Only the Claude
+    # runtime has that memory; the others never receive the keyword.
+    supports_auto_memory_switch: bool = False
+
     @abstractmethod
     async def execute(
         self,
