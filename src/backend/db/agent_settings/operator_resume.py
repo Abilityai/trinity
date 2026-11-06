@@ -40,12 +40,35 @@ decision), and NULL is no opinion. The Settings PUT writes both columns in
 step, so the two can only disagree on rows that predate ent#1102.
 """
 
-from typing import Optional
+from typing import Optional, Union
 
 from sqlalchemy import and_, func, select, update
 
 from ..engine import get_engine
 from ..tables import agent_ownership
+
+
+class _NoLiveRow:
+    """What ``get_wake_on_ending`` returns for an agent with no live ownership row.
+
+    Distinct from ``None`` (a live row whose column is NULL — "no opinion",
+    follow the instance default) because the two must resolve differently: a
+    NULL row is owned by somebody who has not spoken, a missing or soft-deleted
+    row is owned by nobody, and a wake for an agent nobody owns is spend on
+    nothing (the ent#1108 getter's rule). Falsy, so a reader that forgot the
+    distinction reads it as "off", never as "on".
+    """
+
+    __slots__ = ()
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __repr__(self) -> str:
+        return "NO_LIVE_ROW"
+
+
+NO_LIVE_ROW = _NoLiveRow()
 
 
 class OperatorResumeMixin:
@@ -114,14 +137,16 @@ class OperatorResumeMixin:
 
     # -- ent#1102: the wider, tri-state wake switch ------------------------
 
-    def get_wake_on_ending(self, agent_name: str) -> Optional[bool]:
-        """This agent's wake override, or ``None`` for "follow the instance default".
+    def get_wake_on_ending(self, agent_name: str) -> Union[Optional[bool], _NoLiveRow]:
+        """This agent's wake override: ``None`` for "follow the instance default".
 
-        Three states, and the third is the point: ``None`` is returned both for a
-        NULL column (every row that predates the migration) and for an unknown or
-        soft-deleted agent, because neither has expressed an opinion. An explicit
-        0 is a real answer and comes back as ``False``. No COALESCE here — one
-        would collapse exactly the distinction this column exists to keep.
+        Four answers, and the fourth is the point: ``None`` is a live row whose
+        column is NULL (every row that predates the migration — an owner who has
+        not spoken); ``NO_LIVE_ROW`` is an unknown or soft-deleted agent, which
+        nobody owns, so the resolver spends nothing on it rather than handing it
+        the instance default. An explicit 0 is a real answer and comes back as
+        ``False``. No COALESCE here — one would collapse exactly the
+        distinctions this column exists to keep.
         """
         stmt = select(agent_ownership.c.wake_on_ending).where(
             and_(
@@ -131,7 +156,9 @@ class OperatorResumeMixin:
         )
         with get_engine().connect() as conn:
             row = conn.execute(stmt).mappings().first()
-        if not row or row["wake_on_ending"] is None:
+        if not row:
+            return NO_LIVE_ROW
+        if row["wake_on_ending"] is None:
             return None
         return bool(row["wake_on_ending"])
 

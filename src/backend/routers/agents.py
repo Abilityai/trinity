@@ -1430,6 +1430,8 @@ async def get_operator_resume_endpoint(
     """
     verdict = wake_policy.resolve(agent_name)
     override = db.get_wake_on_ending(agent_name)
+    if not isinstance(override, bool):
+        override = None  # NULL, or no live row — neither is an owner's voice
     return {
         "agent_name": agent_name,
         # ent#329's field, unchanged for every existing client.

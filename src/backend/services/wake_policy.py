@@ -33,8 +33,10 @@ read is therefore RAW (``get_operator_resume_override``), never the COALESCEd
 boolean getter — that one folds NULL into the ent#329 default and would make
 the instance default below unreachable.
 
-Fail-closed: an empty agent name, or ANY of the three reads raising, resolves to
-OFF. Never spend a turn on a flag you could not read (the ent#329 rule) — which
+Fail-closed: an empty agent name, an agent with no live ``agent_ownership`` row
+(unknown or soft-deleted — nobody owns it, so a wake would be spend on nothing,
+the ent#1108 getter's rule; source ``no_owner``), or ANY of the three reads
+raising, resolves to OFF. Never spend a turn on a flag you could not read (the ent#329 rule) — which
 includes the instance default, whose read is as fallible as the other two.
 
 The reads go through the module-level ``db``, never a function-local import. A
@@ -52,6 +54,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from database import db
+from db.agent_settings.operator_resume import NO_LIVE_ROW
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +75,7 @@ SOURCE_AGENT = "agent"
 SOURCE_LEGACY_RESUME = "legacy_resume"
 SOURCE_INSTANCE = "instance"
 SOURCE_UNREADABLE = "unreadable"
+SOURCE_NO_OWNER = "no_owner"
 
 
 @dataclass(frozen=True)
@@ -127,6 +131,10 @@ def resolve(agent_name: Optional[str]) -> WakeVerdict:
         )
         return WakeVerdict(enabled=False, source=SOURCE_UNREADABLE)
 
+    if override is NO_LIVE_ROW:
+        # Nobody owns this agent (no row, or soft-deleted): nothing to bill a
+        # turn to, so no wake — never the instance default.
+        return WakeVerdict(enabled=False, source=SOURCE_NO_OWNER)
     if override is not None:
         return WakeVerdict(enabled=bool(override), source=SOURCE_AGENT)
 

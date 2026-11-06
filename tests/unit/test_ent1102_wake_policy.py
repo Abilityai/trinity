@@ -108,8 +108,13 @@ class TestTriStateColumn:
         _seed(tmp_db_conn, "loud", wake=1)
         assert mixin.get_wake_on_ending("loud") is True
 
-    def test_unknown_agent_has_no_opinion(self, mixin):
-        assert mixin.get_wake_on_ending("no-such-agent") is None
+    def test_unknown_agent_has_no_live_row(self, mixin):
+        """Not ``None``: an agent nobody owns is told apart from an owner who
+        has not spoken, so the resolver can spend nothing on the first."""
+        from db.agent_settings.operator_resume import NO_LIVE_ROW
+
+        assert mixin.get_wake_on_ending("no-such-agent") is NO_LIVE_ROW
+        assert not NO_LIVE_ROW
 
     def test_set_round_trips_all_three_states(self, mixin, tmp_db_conn):
         _seed(tmp_db_conn, "a", wake=None)
@@ -122,9 +127,11 @@ class TestTriStateColumn:
 
     def test_soft_deleted_agent_cannot_be_flipped_on(self, mixin, tmp_db_conn):
         """A soft-deleted agent is recoverable; it must not come back pre-armed."""
+        from db.agent_settings.operator_resume import NO_LIVE_ROW
+
         _seed(tmp_db_conn, "gone", wake=None, deleted_at="2026-08-01T00:00:00Z")
         assert mixin.set_wake_on_ending("gone", True) is False
-        assert mixin.get_wake_on_ending("gone") is None
+        assert mixin.get_wake_on_ending("gone") is NO_LIVE_ROW
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +290,22 @@ class TestResolver:
         verdict = policy.resolve("fresh")
         assert verdict.enabled is True
         assert verdict.source == "instance"
+
+    def test_an_agent_nobody_owns_is_not_woken(self, policy, tmp_db_conn, monkeypatch):
+        """No live ownership row — unknown, or soft-deleted — resolves OFF with
+        its own source, never the instance default: a wake for an agent nobody
+        owns is spend on nothing (the ent#1108 getter's rule). A live row with
+        a NULL column still follows the instance default (pinned above)."""
+        _stub_setting(monkeypatch, policy, "true")
+        verdict = policy.resolve("ghost")
+        assert verdict.enabled is False
+        assert verdict.source == "no_owner"
+        assert verdict.reason == "wake_disabled_by_no_owner"
+
+        _seed(tmp_db_conn, "gone", wake=1, deleted_at="2026-08-01T00:00:00Z")
+        verdict = policy.resolve("gone")
+        assert verdict.enabled is False
+        assert verdict.source == "no_owner"
 
     def test_missing_agent_name_reads_off(self, policy):
         assert policy.resolve("").enabled is False
