@@ -10,7 +10,13 @@ always stubs this function out.)
 The wildcard address is deliberate: a bind on `0.0.0.0` collides with an
 existing bind on ANY local address, which a `127.0.0.1` probe would miss.
 
-Pinned here, on the real function and real sockets:
+Pinned here, on the function's source:
+
+* it constructs exactly one socket, `socket.socket(socket.AF_INET,
+  socket.SOCK_STREAM)`, used as a context manager, and names no `listen`,
+  `accept`, `create_server`, `create_connection` or low-level `_socket`;
+
+and on the real function and real sockets:
 
 * the exact socket calls are `settimeout`, `bind(("0.0.0.0", port))`, `close`,
   on one AF_INET / SOCK_STREAM socket, on both the free and the busy path;
@@ -22,6 +28,7 @@ abilityai/trinity-enterprise#1117
 """
 from __future__ import annotations
 
+import ast
 import importlib
 import socket
 import sys
@@ -90,6 +97,41 @@ def recorded(monkeypatch):
 
     monkeypatch.setattr(socket, "socket", Recorder)
     return sockets
+
+
+_SOURCE = _BACKEND / "services" / "docker_service.py"
+_FORBIDDEN_NAMES = {"listen", "accept", "create_server", "create_connection", "fromfd", "socketpair", "_socket"}
+
+
+def _probe_source() -> ast.FunctionDef:
+    tree = ast.parse(_SOURCE.read_text())
+    found = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "is_port_available"]
+    assert len(found) == 1, f"is_port_available not found exactly once in {_SOURCE}"
+    return found[0]
+
+
+def test_probe_source_builds_one_stream_socket_and_names_no_listener():
+    fn = _probe_source()
+    names = set()
+    for node in ast.walk(fn):
+        if isinstance(node, ast.Attribute):
+            names.add(node.attr)
+        elif isinstance(node, ast.Name):
+            names.add(node.id)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            names.update(a.name for a in node.names)
+            if isinstance(node, ast.ImportFrom):
+                names.add(node.module or "")
+    assert not names & _FORBIDDEN_NAMES, sorted(names & _FORBIDDEN_NAMES)
+    assert "__import__" not in names and "importlib" not in names, sorted(names)
+    constructors = [
+        ast.unparse(n)
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Call) and ast.unparse(n.func).split(".")[-1] == "socket"
+    ]
+    assert constructors == ["socket.socket(socket.AF_INET, socket.SOCK_STREAM)"], constructors
+    withs = [n for n in ast.walk(fn) if isinstance(n, ast.With)]
+    assert [ast.unparse(item.context_expr) for w in withs for item in w.items] == constructors
 
 
 def _free_port() -> int:
