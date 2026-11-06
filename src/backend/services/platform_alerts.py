@@ -203,6 +203,11 @@ _BUILTIN_KINDS = (
     # re-reads of the SAME episode only; a new episode differs and files.
     Kind("queue_flood", "queue-flood-", _D, CLEARS_HOOK, budgeted_type="queue_flood",
          material_keys=("episode_started_at",)),
+    # #4257: the episode is the admission of the head that started the stall,
+    # so a person's ending snoozes re-reads of THAT stall only; a later one
+    # after the queue recovered carries a different marker and files.
+    Kind("dispatch_queue_stalled", "queue-stall-", _D, CLEARS_HOOK,
+         material_keys=("episode_started_at",)),
     Kind("alert_budget", "alert-budget-", _D, CLEARS_HOOK, material_keys=("filled_by",)),
     Kind("skill_not_found", "skill-not-found-", _D, CLEARS_HOOK, budgeted_type="skill_not_found"),
     Kind("effect_unguarded", "effect-unguarded-", _D, CLEARS_LIFETIME_ONLY,

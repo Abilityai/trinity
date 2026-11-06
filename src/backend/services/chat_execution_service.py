@@ -390,6 +390,12 @@ def build_chat_payload(
     # Pass execution ID so agent registers process under the same ID (enables termination)
     if task_execution_id:
         payload["execution_id"] = task_execution_id
+    # #4156: a turn serving someone other than the owner (a user the agent is
+    # shared with) spawns with Claude Code's shared auto-memory off.
+    from services.task_execution_service import auto_memory_off_for
+
+    if auto_memory_off_for(name, task_execution_id):
+        payload["disable_auto_memory"] = True
 
     # Mark execution dispatched BEFORE calling agent so the cleanup-service
     # no-session sweep doesn't falsely fail long-running executions
@@ -2381,6 +2387,58 @@ def _ephemeral_dispatch_error(name, execution_id, exc) -> ChatDispatchError:
     )
 
 
+def _queue_wait_fields(
+    agent_name: str, execution_id: str, *, pull: Optional[bool] = None
+) -> dict:
+    """The three queue-wait keys both receipts carry (#4257).
+
+    `queued_at` (when the row was admitted), `queue_position` (how many of this
+    agent's queued rows sit ahead of it, head = 0) and `wait_reason` (which of
+    the five states it is in — see `queue_stall_service.WAIT_REASONS`).
+
+    Best-effort by design: this runs on the dispatch path, and a receipt that
+    is already correct must not fail because a diagnostic read did. Any error
+    degrades to `None`/absent rather than raising, and the row itself stays the
+    source of truth either way.
+    """
+    out: dict = {"queued_at": None, "queue_position": None, "wait_reason": None}
+    try:
+        from database import db
+        from services import queue_stall_service, settings_service
+        from services.pull_pilot import is_pull_pilot_agent
+
+        row = db.get_execution(execution_id)
+        queued_at = getattr(row, "queued_at", None) if row is not None else None
+        out["queued_at"] = queued_at
+        out["queue_position"] = db.count_queued_ahead(
+            agent_name, queued_at, execution_id
+        )
+        is_pilot = is_pull_pilot_agent(agent_name) if pull is None else bool(pull)
+        leased = 0
+        if is_pilot:
+            leased = int(db.count_active_leased_by_agent([agent_name]).get(agent_name, 0))
+        max_parallel = int(settings_service.get_effective_max_parallel_tasks(agent_name))
+        out["wait_reason"] = queue_stall_service.classify_wait(
+            is_pilot=is_pilot,
+            leased_running=leased,
+            max_parallel=max_parallel,
+            # On a push agent, reaching `queued_persistent` IS the slot meter
+            # refusing admission a moment ago, so this row is `capacity` by
+            # construction. (The monitor reads the same agent differently 60 s
+            # later: a row STILL queued then is a drain that has not landed.
+            # Both are true of the same row at different instants.) The
+            # physical lease count is the pilot term and is 0 for a push row
+            # by construction, so it must not be the push answer.
+            slot_free=False,
+        )
+    except Exception:  # noqa: BLE001 — a diagnostic never breaks a receipt
+        logger.debug(
+            "[#4257] could not read queue wait fields for %s", execution_id,
+            exc_info=True,
+        )
+    return out
+
+
 async def _acquire_task_capacity(
     *,
     mode_label,
@@ -2670,6 +2728,10 @@ async def _dispatch_async(
             "agent_name": name,
             "message": queued_message,
             "async_mode": True,
+            # #4257: a receipt that only says "queued" leaves the caller no way
+            # to tell a first-poll start from a wait that will not end. These
+            # three answer "how deep, since when, and waiting on what".
+            **_queue_wait_fields(name, execution_id, pull=cap_result.pull),
             # ent#1102: a queued receipt is a receipt — the caller needs the
             # wake verdict here exactly as it does on `accepted`.
             **_wake_on_ending_receipt(x_source_agent, name),
@@ -2779,6 +2841,11 @@ async def _dispatch_sync_backlog(*, name, execution_id, sync_effective_timeout, 
                 "execution_id": execution_id,
                 "task_execution_id": execution_id,
                 "agent_name": name,
+                # #4257: the same three keys as the async receipt — a sync
+                # caller that timed out waiting is the one who most needs to
+                # know whether anything is moving. Divergent receipts would
+                # make the MCP client's answer depend on which door it used.
+                **_queue_wait_fields(name, execution_id),
                 "message": (
                     f"Sync task on agent '{name}' did not complete within "
                     f"{sync_wait_cap}s. Execution {execution_id} may still be "

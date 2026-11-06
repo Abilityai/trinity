@@ -1,26 +1,26 @@
 {
   "test_files": [
     {
-      "file": "unit/test_ent1024_admin_acts_as_agent.py",
-      "feature": "abilityai/trinity-enterprise#1024",
-      "added": "2026-10-30",
+      "file": "unit/test_4156_agent_auto_memory_spawn.py",
+      "feature": "#4156",
+      "added": "2026-11-02",
       "categories": [
-        "backend",
-        "security",
-        "unit"
+        "agent",
+        "unit",
+        "security"
       ],
-      "description": "An admin's user MCP key acts on behalf of an agent through X-Trinity-Act-As-Agent: admit_act_as admits it only for a user-scoped key whose user is an admin and writes one acted_as_agent audit row naming the acting user and the agent; every other principal (non-admin user key, creator, agent, system, connector, portal_delegate, ops, a browser session) is a named 403 act_as_not_permitted and writes nothing; blank/oversize names are 400; a failed audit write never fails the request; no header changes nothing. get_self_acting_agent admits the admitted agent on its own path only and tells an un-admitted admin to pass agent_name; agent keys still act only as themselves; assert_own_agent holds the admitted agent to its path. An on-behalf raise records acted_by: user:<id>; an agent's own ask does not. Mutations (no admin check, ask gate or own-agent gate ignoring act-as, any scope admitted, no acted_by) each turn it red."
+      "description": "#4156: a turn the backend marked `disable_auto_memory` spawns `claude` with CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 on both spawn paths (headless /api/task and /api/chat), measured at the Popen env; the owner's spawn is unchanged; a falsy value in `.env` cannot turn it back on; only a runtime with the switch (Claude) gets the keyword; /api/chat, /api/task, the #1083 async path and the pull worker all forward it."
     },
     {
-      "file": "../src/mcp-server/src/act_as_agent.test.ts",
-      "feature": "abilityai/trinity-enterprise#1024",
-      "added": "2026-10-30",
+      "file": "unit/test_4156_auto_memory_person_turns.py",
+      "feature": "#4156",
+      "added": "2026-11-02",
       "categories": [
-        "mcp",
-        "security",
-        "unit"
+        "backend",
+        "unit",
+        "security"
       ],
-      "description": "resolveActingAgent's scope matrix with agent_name (agent/system act as themselves and may not name another; a user key acts for the named agent or is told to pass agent_name; connector/portal_delegate/ops/anonymous refused naming the key); TrinityClient.asAgent adds X-Trinity-Act-As-Agent on a clone only and a per-call header cannot override it; ask_operator, report, record_metrics, set_canvas and the project tools (create_project, create_project_task) send the header for a user key with agent_name, never put agent_name in a body, refuse a user key without it and a connector key with it, and leave an agent key's call unchanged."
+      "description": "#4156: which turns spawn with Claude Code's shared auto-memory off. `memory_subject.keeps_shared_auto_memory` keeps it on only for the agent's own scope (a headless run, or the owner's turn); a non-owner person, an anonymous visitor, a channel group, a seat run for someone else and any trigger off the allowlist get it off. The flag `disable_auto_memory` reaches the push /api/task payload, the /api/chat payload and the pull claim envelope for a non-owner turn and is absent for the owner's; an unreadable row fails closed (off)."
     },
     {
       "file": "unit/test_ent1108_wake_default.py",
@@ -8428,6 +8428,28 @@
         "unit"
       ],
       "description": "trinity-enterprise#1107: terms of use per instance. The shipped default is served when nothing is configured; PUT /api/terms saves and stamps a new version (the author has accepted it), empty/oversized text refused by name (422), restore-default is one action, the switch turns the gate off; an admin JWT with no acceptance is refused 403 terms_required on an ordinary route and admitted on a @terms_route; accepting records (version, time, account) and lifts the refusal; a new version asks everyone else again; a stale version is 409; an agent key is never gated; a registered provider still answers the invite door and a broken one cannot lock an admin out; the acceptance list is admin-gated; setup resolves no principal; main.py registers the router with its # mcp: none header. No Docker."
+    },
+    {
+      "file": "unit/test_ent1024_admin_acts_as_agent.py",
+      "feature": "abilityai/trinity-enterprise#1024",
+      "added": "2026-10-30",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "An admin's user MCP key acts on behalf of an agent through X-Trinity-Act-As-Agent: admit_act_as admits it only for a user-scoped key whose user is an admin and writes one acted_as_agent audit row naming the acting user and the agent; every other principal (non-admin user key, creator, agent, system, connector, portal_delegate, ops, a browser session) is a named 403 act_as_not_permitted and writes nothing; blank/oversize names are 400; a failed audit write never fails the request; no header changes nothing. get_self_acting_agent admits the admitted agent on its own path only and tells an un-admitted admin to pass agent_name; agent keys still act only as themselves; assert_own_agent holds the admitted agent to its path. An on-behalf raise records acted_by: user:<id>; an agent's own ask does not. Mutations (no admin check, ask gate or own-agent gate ignoring act-as, any scope admitted, no acted_by) each turn it red."
+    },
+    {
+      "file": "../src/mcp-server/src/act_as_agent.test.ts",
+      "feature": "abilityai/trinity-enterprise#1024",
+      "added": "2026-10-30",
+      "categories": [
+        "mcp",
+        "security",
+        "unit"
+      ],
+      "description": "resolveActingAgent's scope matrix with agent_name (agent/system act as themselves and may not name another; a user key acts for the named agent or is told to pass agent_name; connector/portal_delegate/ops/anonymous refused naming the key); TrinityClient.asAgent adds X-Trinity-Act-As-Agent on a clone only and a per-call header cannot override it; ask_operator, report, record_metrics, set_canvas and the project tools (create_project, create_project_task) send the header for a user key with agent_name, never put agent_name in a body, refuse a user key without it and a connector key with it, and leave an agent key's call unchanged."
     },
     {
       "file": "integration/test_ent1062_live_turn_doors.py",
