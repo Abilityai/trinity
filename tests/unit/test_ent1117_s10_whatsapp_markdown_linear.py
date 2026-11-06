@@ -392,9 +392,11 @@ def _random_markdown(count, seed=1117):
 class TestDeclaredDifferencesAreComplete:
     def test_output_is_the_previous_rules_with_only_the_declared_changes(self, wa):
         for text in _random_markdown(20_000):
-            assert _convert(wa, text) == _previous_rules_with_declared_differences(text), (
-                f"undeclared difference for {text!r}: before "
-                f"{_convert_unclamped(text)!r}, now {_convert(wa, text)!r}"
+            now = _convert(wa, text)
+            expected = _previous_rules_with_declared_differences(text)
+            assert now == expected, (
+                f"undeclared difference for {text!r}: now {now!r}, expected "
+                f"{expected!r}, previous rules {_convert_unclamped(text)!r}"
             )
 
     def test_corpus_reaches_every_declared_difference(self, wa):
