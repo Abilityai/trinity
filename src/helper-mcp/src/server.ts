@@ -3,12 +3,30 @@
  * endpoint. Separated from index.ts so tests can connect it over an
  * in-memory transport.
  */
+import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { askTrinity, fetchAgentGuide, MAX_QUESTION_CHARS } from "./client.js";
 
 export const SERVER_NAME = "trinity-docs";
-export const SERVER_VERSION = "0.1.0";
+/**
+ * The version npm installed, read from this package's own package.json (one
+ * level above both src/ and dist/). The publish workflow writes the release
+ * version into that field before it builds, so serverInfo and the startup log
+ * always name the version that is actually running.
+ */
+export const SERVER_VERSION: string = readPackageVersion(
+  new URL("../package.json", import.meta.url),
+);
+
+/** Exported for tests: a manifest without a usable version must stop startup. */
+export function readPackageVersion(url: URL): string {
+  const { version } = JSON.parse(readFileSync(url, "utf8")) as { version?: unknown };
+  if (typeof version !== "string" || version === "") {
+    throw new Error(`${SERVER_NAME}: package.json at ${url.pathname} has no version`);
+  }
+  return version;
+}
 
 export function createServer(): McpServer {
   const server = new McpServer({

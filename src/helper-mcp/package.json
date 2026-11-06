@@ -1,6 +1,6 @@
 {
   "name": "trinity-docs-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Ask Trinity anything — standalone MCP server exposing the Trinity docs Q&A assistant (Vertex AI Search + Gemini, grounded on the Trinity documentation). No Trinity instance or API key required.",
   "type": "module",
   "license": "Apache-2.0",
@@ -43,8 +43,8 @@
     "prepublishOnly": "npm run build && npm test"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "zod": "^3.24.1"
+    "@modelcontextprotocol/sdk": "^1.32.0",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
