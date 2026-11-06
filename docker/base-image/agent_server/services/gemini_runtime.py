@@ -1176,8 +1176,14 @@ class GeminiRuntime(AgentRuntime):
         except HTTPException:
             raise
         except TimeoutError as e:
-            logger.error(f"[Headless Task] Timeout: {e}")
-            raise HTTPException(status_code=504, detail=str(e))
+            # trinity#4284: the timeouts this path owns all read "Task execution
+            # timed out after N seconds", so the answer is built from that value,
+            # never from the caught exception. "timed out" stays: the backend reads it.
+            logger.error("[Headless Task] Timeout: %s", sanitize_text(str(e)))
+            raise HTTPException(
+                status_code=504,
+                detail=f"Task execution timed out after {timeout_seconds} seconds",
+            ) from e
         except (BrokenPipeError, ConnectionResetError) as pipe_err:
             # Subprocess stdin pipe closed before write completed — Gemini CLI
             # child process exited early. Parallel surface to headless_executor.

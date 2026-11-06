@@ -762,6 +762,31 @@ async def test_gemini_task_error_returns_the_class_name(monkeypatch, caplog):
     )
 
 
+@pytest.mark.asyncio
+async def test_gemini_task_timeout_answers_with_its_own_text(monkeypatch, caplog):
+    """The headless path raises its own TimeoutError("Task execution timed out
+    after N seconds"); the 504 is built from that value, never from the caught
+    exception, so a foreign TimeoutError's text stays out of the answer and the
+    log carries it scrubbed. "timed out" stays: the backend reads it."""
+    from agent_server.services import gemini_runtime
+
+    monkeypatch.setenv("GEMINI_API_KEY", "fake-key-for-test")
+    runtime = gemini_runtime.GeminiRuntime()
+    monkeypatch.setattr(runtime, "is_available", lambda: True)
+
+    def _boom(*_a, **_kw):
+        raise TimeoutError(_PLANT)
+
+    monkeypatch.setattr(gemini_runtime.subprocess, "Popen", _boom)
+    with caplog.at_level(logging.ERROR, logger=gemini_runtime.logger.name):
+        with pytest.raises(HTTPException) as exc:
+            await runtime.execute_headless(prompt="hello", timeout_seconds=42)
+    assert exc.value.status_code == 504
+    assert exc.value.detail == "Task execution timed out after 42 seconds"
+    assert _SECRET not in exc.value.detail and _MARKER not in exc.value.detail
+    _assert_log_scrubbed(_runtime_records(caplog, gemini_runtime.logger.name), "Timeout")
+
+
 @pytest.fixture
 def headless(monkeypatch):
     from agent_server.services import headless_executor as he
