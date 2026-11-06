@@ -87,6 +87,23 @@ describe('PeerSkillEnforcementLine (mounted)', () => {
     expect(lineOf(wrapper).exists()).toBe(false)
   })
 
+  it('an older answer for the same agent never overwrites a newer one', async () => {
+    let resolveFirst
+    const answers = [
+      Promise.resolve({ reachable: true, hook: 'unknown' }),                // mount
+      new Promise((r) => { resolveFirst = r }),                            // stopped → slow
+      Promise.resolve({ reachable: true, hook: 'predates' }),              // running → fast
+    ]
+    const { wrapper } = await mountWith(() => answers.shift(), { agentStatus: 'running' })
+    await wrapper.setProps({ agentStatus: 'stopped' })
+    await wrapper.setProps({ agentStatus: 'running' })
+    await flushPromises()
+    expect(lineOf(wrapper).text()).toBe(PREFIX + LINES.predates)
+    resolveFirst({ reachable: true, hook: 'ok' })                          // the stale answer lands last
+    await flushPromises()
+    expect(lineOf(wrapper).text()).toBe(PREFIX + LINES.predates)
+  })
+
   it('reads again when the agent starts or stops', async () => {
     const { wrapper, get } = await mountWith({ reachable: true, hook: 'unknown' }, { agentStatus: 'stopped' })
     get.mockResolvedValue({ reachable: true, hook: 'predates' })

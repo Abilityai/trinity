@@ -50,6 +50,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from database import db
 from db.agents import SYSTEM_AGENT_NAME
+from db.peer_skill_grants import IN_CONTAINER_ENDPOINT
 from services import rate_limiter
 from services.skill_gate_errors import SkillGateRefused
 from utils.skill_invocation import find_gated_invocations
@@ -207,14 +208,16 @@ def run_requester(agent_name: str, row: Optional[tuple]) -> Optional[str]:
 
 
 def check_load(agent_name: str, caller: str, *, names: List[str], invoked: Optional[str],
-               resolved: bool) -> Tuple[List[str], bool]:
+               resolved: bool, assigned: Optional[Dict[str, Any]] = None) -> Tuple[List[str], bool]:
     """What a peer's run may not load here: ``(refused library names, could
     not tell)``. Names match case-insensitively (the hook sends what the call
     answers to); a grant matches the library name exactly. A call the hook
     could not resolve is "could not tell" only while `caller` lacks a grant for
-    some library skill here. Raises on an unreadable read — the caller fails
-    open on a database error."""
-    assigned = library_assigned(agent_name)
+    some library skill here. `assigned` is the read the caller already made.
+    Raises on an unreadable read — the caller fails open on a database
+    error."""
+    if assigned is None:
+        assigned = library_assigned(agent_name)
     if not assigned:
         return [], False
     wanted = {n.casefold() for n in [*(names or []), invoked or ""] if n}
@@ -260,22 +263,31 @@ async def audit_in_container_refusal(*, caller: str, callee: str, skills: List[s
                          mcp_key_id=getattr(current_user, "mcp_key_id", None),
                          reason=REFUSED_CODE, execution_id=execution_id,
                          via=via, subagent=subagent, requester_key_id=requester_key_id,
-                         source="api", endpoint="/api/skill-gate/check")
+                         source="api", endpoint=IN_CONTAINER_ENDPOINT)
+
+
+def peer_sources(agent_name: str) -> set:
+    """The agents whose requests can reach `agent_name` as a peer's: an edge
+    to it, or an ENABLED subscription of it to their events that delivery
+    would still honour (the subscriber holds the edge to the source —
+    `event_dispatch_service._subscription_still_permitted`). Never the agent
+    itself or `trinity-system`; a spawner is the caller's to exclude."""
+    callers = {e["source"] for e in db.get_all_permission_edges() if e["target"] == agent_name}
+    for sub in db.list_event_subscriptions(subscriber_agent=agent_name, enabled_only=True, limit=1000):
+        source = getattr(sub, "source_agent", None)
+        if source and db.is_agent_permitted(agent_name, source):
+            callers.add(source)
+    return {c for c in callers if _peer(agent_name, c)}
 
 
 def could_reach(agent_name: str) -> bool:
     """Could a peer reach a library skill on `agent_name` that it holds no
-    grant for? A peer is an agent with an edge to it, or one whose events it
-    subscribes to (those runs carry the emitter as requester) — never the
-    agent itself, `trinity-system` or its spawner. For the Permissions panel's
-    "not enforced in-container" line."""
+    grant for (`peer_sources`, minus its spawner)? For the Permissions
+    panel's "not enforced in-container" line."""
     assigned = library_assigned(agent_name)
     if not assigned:
         return False
-    callers = {e["source"] for e in db.get_all_permission_edges() if e["target"] == agent_name}
-    callers |= {getattr(s, "source_agent", None)
-                for s in db.list_event_subscriptions(subscriber_agent=agent_name, limit=1000)}
-    for caller in sorted(c for c in callers if _peer(agent_name, c)):
+    for caller in sorted(peer_sources(agent_name)):
         granted = db.granted_peer_skills(caller, agent_name)
         if any(n not in granted for n in assigned) and not _spawned(caller, agent_name):
             return True
@@ -420,9 +432,12 @@ def drift_report() -> dict:
         for name, hit in _recent_uses(caller, target, restricted).items():
             found[(caller, target, name)] = dict(hit)
     restricted_by_pair: Dict[tuple, set] = {}
+    sources_by_target: Dict[str, set] = {}
     for (caller, target, name), hit in _in_container_uses(iso_cutoff(DRIFT_WINDOW_DAYS * 24)).items():
-        if not _peer(target, caller):
-            continue
+        if target not in sources_by_target:
+            sources_by_target[target] = peer_sources(target)
+        if caller not in sources_by_target[target]:
+            continue   # it can no longer reach the target: a grant would restore nothing
         if (caller, target) not in restricted_by_pair:
             assigned = library_assigned(target)
             restricted_by_pair[(caller, target)] = (

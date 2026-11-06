@@ -1208,20 +1208,26 @@ async def _peer_verdict(agent_name: str, *, via: str, invoked: Optional[str], na
                         resolved: bool, subagent: Optional[str], run: Optional[str],
                         current_user) -> Optional[Dict[str, Any]]:
     """The refusal, or None, for the peer rule at load (trinity-enterprise#925).
-    No run → the agent's own session: no requester. One row read for every
-    id, so an unknown id and another agent's run read alike. A database error
-    fails OPEN (the owner's ruling): the peer rule is silent and the gate still
-    answers from its OWN reads — the gate's clearance never rides on this
-    fail-open read. Any other error propagates."""
+    No run → the agent's own session: no requester. An agent holding no
+    library skill (the common case — every skill load fleet-wide asks) costs
+    one read and stops. Otherwise one row read for every id, so an unknown id
+    and another agent's run read alike. A database error fails OPEN (the
+    owner's ruling): the peer rule is silent and the gate still answers from
+    its OWN reads — the gate's clearance never rides on this fail-open read.
+    Any other error propagates."""
     if run is None:
         return None
     try:
+        assigned = peer_skill_policy.library_assigned(agent_name)
+        if not assigned:
+            return None
         row = db.get_execution_requester(run)
         caller = peer_skill_policy.run_requester(agent_name, row)
         if caller is None:
             return None
         refused, unsure = peer_skill_policy.check_load(
-            agent_name, caller, names=names, invoked=invoked, resolved=resolved)
+            agent_name, caller, names=names, invoked=invoked, resolved=resolved,
+            assigned=assigned)
     except SQLAlchemyError:
         logger.warning("[SkillGate] peer check for run %s on %s could not read — letting the "
                        "peer rule pass", run, agent_name, exc_info=True)

@@ -339,8 +339,8 @@ peer agent B ──/task, /chat, fan-out, event──▶ backend
 | `GET /api/agents/{caller}/peer-skills` | `AuthorizedAgentByName` | per permitted target the viewer may open (and an agent key may reach): library skills, `granted` + who/when, `individual`, `assigned_by`, `not_granted` count — also the upgrade report |
 | `PUT /api/agents/{caller}/peer-skills/{target}/{skill}` | `require_admin` + `reject_non_interactive_principal` | grant; 422 `skill_not_assigned` / `self_grant` / `system_agent_not_grantable`, 404 unknown agent; returns `consent` |
 | `DELETE …/peer-skills/{target}/{skill}` | same | revoke; always allowed |
-| `GET /api/skills/peer-grants/drift` | `require_admin` | the honest upgrade: (caller, target, skill) pairs USED in the last 30 days (execution ledger × gate matcher, plus in-container refusals from the audit log, ent#925) and now refused; `uses`, `last_used_at` |
-| `GET /api/agents/{name}/peer-skills/enforcement` | `AuthorizedAgentByName`; answered only for a person who may manage the agent's skills (`is_person_principal` + `can_manage_agent_skills`), nulls otherwise | ent#925: `reachable` (`peer_skill_policy.could_reach` — an inbound edge or an event source it subscribes to lacks a grant for one of its library skills; not itself, `trinity-system` or its spawner) and `hook` (`skill_gate_map_service.hook_status`, one `/health` read, only when reachable) |
+| `GET /api/skills/peer-grants/drift` | `require_admin` | the honest upgrade: (caller, target, skill) pairs USED in the last 30 days (execution ledger × gate matcher, plus in-container refusals from the audit log — selected by endpoint in the query, callers that can still reach the target only — ent#925) and now refused; `uses`, `last_used_at` |
+| `GET /api/agents/{name}/peer-skills/enforcement` | `AuthorizedAgentByName`; answered only for a person who may manage the agent's skills (`is_person_principal` + `can_manage_agent_skills`), nulls otherwise | ent#925: `reachable` (`peer_skill_policy.could_reach` over `peer_sources` — an inbound edge, or an enabled subscription whose edge delivery would still honour, lacks a grant for one of its library skills; not itself, `trinity-system` or its spawner) and `hook` (`skill_gate_map_service.hook_status`, one `/health` read, only when reachable) |
 
 A grant goes with its edge: `db/permissions.py` `remove_permission` / `set_permissions` delete the grants on the edges they drop. Settings → Agents shows `PeerSkillDriftNotice.vue` (Grant per pair) while the report is non-empty; the per-agent list shows `last_used_at` and marks a spawned target (no grant needed).
 
@@ -352,6 +352,7 @@ A grant goes with its edge: `db/permissions.py` `remove_permission` / `set_permi
 check_invocation(agent, via, invoked, names, resolved, subagent, execution_id)
   read_gates + _heal_marker                       (unchanged; 503 only for the gate map)
   _peer_verdict  — no run / "manual" → skip (the agent's own session)
+    no library skill on the agent → stop (one read; the common case)
     row = db.get_execution_requester(run)         (one read for every id)
     caller = peer_skill_policy.run_requester(agent, row)
              row must be this agent's, ANY status; key's agent first, then source_agent_name

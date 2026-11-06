@@ -129,10 +129,28 @@ def test_an_agent_with_no_library_skill_is_not_reachable(world):
     assert _ok(world)["reachable"] is False
 
 
-def test_an_event_source_it_subscribes_to_counts_as_a_peer(world):
+def _subscribe(enabled=True):
     db.create_event_subscription(FIN, EventSubscriptionCreate(
-        source_agent=OPS, event_type="report.ready", target_message="publish it"), OWNER)
+        source_agent=OPS, event_type="report.ready", target_message="publish it",
+        enabled=enabled), OWNER)
+
+
+def test_an_event_source_it_subscribes_to_counts_as_a_peer(world):
+    db.add_agent_permission(FIN, OPS, OWNER)        # the edge a subscription needs
+    _subscribe()
     assert _ok(world)["reachable"] is True
+
+
+@pytest.mark.parametrize("case", ["disabled", "edge-withdrawn"])
+def test_a_subscription_that_delivers_nothing_does_not_count(world, case):
+    """Delivery skips a disabled subscription and one whose edge was withdrawn
+    (`_subscription_still_permitted`), so neither can carry a peer's request."""
+    if case == "disabled":
+        db.add_agent_permission(FIN, OPS, OWNER)
+        _subscribe(enabled=False)
+    else:
+        _subscribe()
+    assert _ok(world)["reachable"] is False
 
 
 def test_its_spawner_and_the_system_agent_do_not_count(world, monkeypatch):

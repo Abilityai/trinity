@@ -19,6 +19,10 @@ from .tables import agent_peer_skill_grants as grants, audit_log, schedule_execu
 from utils.helpers import utc_now_iso
 
 
+# Where an in-container peer refusal is audited (the ent#752 hook's check).
+IN_CONTAINER_ENDPOINT = "/api/skill-gate/check"
+
+
 class PeerSkillGrantOperations:
     """Per-skill peer grant operations."""
 
@@ -95,13 +99,16 @@ class PeerSkillGrantOperations:
 
         The upgrade report's second ledger: a peer that asked in prose never
         named the skill, so its message cannot show the use — the refusal at
-        load does. A gateway refusal (no `via`) is left out: its request text
-        is already in the execution ledger `recent_peer_messages` reads."""
+        load does. A gateway refusal is left out IN the query (it shares the
+        event, is not throttled, and would otherwise fill `limit` first): its
+        request text is already in the ledger `recent_peer_messages` reads."""
         stmt = (
             select(audit_log.c.actor_id, audit_log.c.target_id, audit_log.c.details,
                    audit_log.c.timestamp)
             .where(and_(
+                audit_log.c.event_type == "authorization",
                 audit_log.c.event_action == "peer_skill_refused",
+                audit_log.c.endpoint == IN_CONTAINER_ENDPOINT,
                 audit_log.c.timestamp >= since,
             ))
             .order_by(audit_log.c.timestamp.desc())

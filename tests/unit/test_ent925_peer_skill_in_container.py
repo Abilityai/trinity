@@ -551,13 +551,15 @@ def _refusal_row(caller, target, skills, *, via="skill_tool", when=None):
         "event_id": str(uuid.uuid4()),
         "event_type": "authorization", "event_action": "peer_skill_refused",
         "actor_type": "agent", "actor_id": caller, "target_type": "agent", "target_id": target,
-        "timestamp": when or utc_now_iso(), "source": "api",
+        "timestamp": when or utc_now_iso(), "source": "api" if via else "gateway",
+        "endpoint": "/api/skill-gate/check" if via else None,
         "details": json.dumps({"skills": skills, "reason": "skill_not_granted",
                                **({"via": via} if via else {})}),
     })
 
 
 def test_the_drift_report_lists_in_container_refusals(world):
+    db.add_agent_permission(BILL, FIN, OWNER)
     _refusal_row(BILL, FIN, ["pay-invoice"])
     _refusal_row(BILL, FIN, ["pay-invoice"])
     pairs = _POLICY.drift_report()["pairs"]
@@ -566,9 +568,39 @@ def test_the_drift_report_lists_in_container_refusals(world):
 
 
 def test_the_drift_report_drops_a_refusal_once_granted_or_unassigned_or_stale(world):
+    db.add_agent_permission(BILL, FIN, OWNER)
+    db.add_agent_permission(OPS, FIN, OWNER)
     _refusal_row(BILL, FIN, ["pay-invoice"])
     _refusal_row(OPS, FIN, ["gone-skill"])
     _refusal_row(OPS, FIN, ["pay-invoice"], when="2020-01-01T00:00:00.000000Z")
     _refusal_row(OPS, FIN, ["pay-invoice"], via=None)     # a gateway refusal: its message is the ledger
     db.grant_peer_skill(BILL, FIN, "pay-invoice", ADMIN)
     assert _POLICY.drift_report()["pairs"] == []
+
+
+def test_the_drift_report_drops_a_caller_that_can_no_longer_reach_the_agent(world):
+    """A grant would not restore reach once the edge is gone: no pair to offer."""
+    _refusal_row(BILL, FIN, ["pay-invoice"])
+    assert _POLICY.drift_report()["pairs"] == []
+
+
+def test_gateway_refusals_never_crowd_in_container_ones_out_of_the_ledger(world):
+    """The ledger read is bounded; gateway refusals (same event, no `via`, not
+    throttled) must not fill that bound before the in-container rows are read."""
+    from utils.helpers import iso_cutoff
+    _refusal_row(BILL, FIN, ["pay-invoice"], when="2026-11-05T00:00:00.000000Z")
+    for _ in range(3):
+        _refusal_row(BILL, FIN, ["pay-invoice"], via=None)
+    rows = db.recent_in_container_peer_refusals(iso_cutoff(24 * 365 * 5), limit=2)
+    assert [(r["caller"], r["target"], r["skills"]) for r in rows] == [(BILL, FIN, ["pay-invoice"])]
+
+
+def test_an_agent_with_no_library_skill_reads_no_run(world, monkeypatch):
+    """The hot path: every skill load fleet-wide asks. An agent holding no
+    library skill (the common case) must not pay a run or key read."""
+    db.delete_agent_skills(FIN)
+    reads = []
+    monkeypatch.setattr(db, "get_execution_requester", lambda e: reads.append(e))
+    assert _post(world, execution_id="exec-anything") == ALLOWED
+    assert reads == []
+

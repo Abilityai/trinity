@@ -50,16 +50,20 @@ const line = computed(() => {
   return PREFIX + (REASONS[hook] || FALLBACK)
 })
 
+// Only the latest read may answer: a status flip or an agent switch starts a
+// new one, and an older read that resolves after it is dropped.
+let latest = 0
+
 async function load() {
-  const forAgent = props.agentName
+  const mine = ++latest
   try {
-    const data = await agentsStore.getAgentPeerSkillEnforcement(forAgent)
-    if (forAgent !== props.agentName) return
+    const data = await agentsStore.getAgentPeerSkillEnforcement(props.agentName)
+    if (mine !== latest) return
     state.value = { reachable: data?.reachable ?? null, hook: data?.hook ?? null }
   } catch {
     // A failed read is "no answer", never an error: the line is a warning
     // about the agent, and the grants above stand either way.
-    if (forAgent === props.agentName) state.value = NO_ANSWER
+    if (mine === latest) state.value = NO_ANSWER
   }
 }
 
@@ -69,7 +73,5 @@ watch(() => props.agentName, () => {
   load()
 })
 // Started or stopped: the in-agent check can now (or no longer) answer.
-watch(() => props.agentStatus, (status, previous) => {
-  if (status !== previous) load()
-})
+watch(() => props.agentStatus, load)
 </script>
