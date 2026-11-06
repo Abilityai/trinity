@@ -74,8 +74,8 @@ Enables agents to send proactive messages to specific users by verified email ac
 ### Access-tab Toggle (#376, relocated #1317 → restored #1577)
 
 The `allow_proactive` flag is managed via a per-operator toggle in the **Access tab**
-(`AccessPanel.vue`). *(History: the toggle originally lived in the Sharing tab's Team
-Sharing section (`SharingPanel.vue`, #377); the #1317 Access-tab redesign replaced that
+(`AccessPanel.vue`). *(History: the toggle originally lived in **Settings › Channels**'s Team
+Sharing section (`channels/` in Settings › Channels, #377); the #1317 Access-tab redesign replaced that
 markup and silently dropped the toggle — a UI-only regression restored in #1577.)*
 
 **Location**: `src/frontend/src/components/AccessPanel.vue` (operator roster rows).

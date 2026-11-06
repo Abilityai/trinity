@@ -25,7 +25,7 @@ answers.
 | Allow-list seam | `src/backend/services/a2a_gate.py` | Open-core provider protocol; OSS registers none → allow. **Fails open** by design |
 | DB | `src/backend/db/agent_settings/` + `db/schema.py` / `db/tables.py` | `a2a_exposed` getter/setter on the `AgentOperations` mixin (Invariant #2) |
 | MCP tools | `src/mcp-server/src/tools/a2a.ts` (+ `a2a.test.ts`) | ent#160 control surface (Invariant #13) |
-| UI | `components/A2aPanel.vue` | Sharing tab: exposure toggle, card URL, advertised skills, inbound allow-list, outbound endpoints |
+| UI | `components/A2aPanel.vue` | Settings › Channels: exposure toggle, card URL, advertised skills, inbound allow-list, outbound endpoints |
 | Front door | `src/frontend/nginx.conf` + `nginx-server.conf` | `location /a2a/` → backend, `proxy_buffering off` for SSE; appends the caller to `X-Forwarded-For`, which the backend's client-address middleware reads from this trusted hop only (ent#873) |
 
 ## Endpoints

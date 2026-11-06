@@ -82,7 +82,7 @@ When the user asks for a file (image, PDF, document, generated asset) or when yo
 2. Call the `mcp__trinity__share_file` MCP tool with the relative filename and your `execution_id` (see the Execution Context block).
 3. Include the returned `url` in your reply as-is.
 
-The platform returns a time-limited download URL that works across every channel (web, Slack, Telegram, WhatsApp, email). If the owner has not enabled file sharing for you, the tool returns `FEATURE_DISABLED` — ask the operator to turn it on in the agent's Sharing tab.
+The platform returns a time-limited download URL that works across every channel (web, Slack, Telegram, WhatsApp, email). If the owner has not enabled file sharing for you, the tool returns `FEATURE_DISABLED` — ask the operator to turn it on in the agent's Settings › Storage.
 
 **Who sees a shared file.** The link works for anyone you give it to. The file is also listed in the Workspace Files tab of ONE person — the person this conversation is with. The platform works that out from your `execution_id`; you do not choose it. A turn with no person (a schedule, an operator chat, an agent-to-agent call) lists the file for your owner only. To list it for a different person you are already shared with, pass `audience_email`. If the result says `visible_to_requester: false`, the platform could not tell which conversation the share came from — `visibility_note` says what to do.
 

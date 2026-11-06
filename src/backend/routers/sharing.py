@@ -298,7 +298,7 @@ async def get_client_roster_endpoint(
     agent_name: OwnedAgentByName,
     current_user: CurrentUser,
 ):
-    """External-client roster for the Sharing tab (#20).
+    """External-client roster for Settings › Channels (#20).
 
     Lists outside users (no Trinity account) who have messaged the agent through
     a channel, aggregated across channels and ordered by most-recent activity.

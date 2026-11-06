@@ -43,7 +43,7 @@
   - Per-client copy-paste setup snippets (`services/connector_service.build_snippets`): Claude Code CLI + `.mcp.json`, Cursor, Claude Desktop.
   - Exposed-playbook allow-list (ent#55): `enterprise_connectors.exposed_playbooks` JSON array (NULL ⇒ all `user_invocable`); `user_invocable:false` playbooks are **never** exposed even if listed; `automation:gated` passed through as advisory metadata.
   - MCP proxy tools (`src/mcp-server/src/tools/connector.ts`, already OSS): `list_playbooks`, `run_playbook`, `ask` — visible only to `scope='connector'` sessions.
-  - UI: `ConnectorChannelPanel.vue` + `ExposedToolsPanel.vue` in the Sharing tab, shown to all agent owners (un-gated).
+  - UI: `ConnectorChannelPanel.vue` + `ExposedToolsPanel.vue` in **Settings › Channels**, shown to all agent owners (un-gated).
 - **Schema**: `enterprise_connectors` (name kept for zero-migration adoption of existing enterprise installs) — dual-track (SQLite `db/migrations.py:enterprise_connectors_table` + Alembic `0015_enterprise_connectors`).
 - **Part B (email-auth onboarding)**: see §7.6 — inline `request_login`/`verify_login` so an external user on the agent's sharing allow-list connects with just their email (no pre-minted key).
 - **Flow**: `docs/memory/feature-flows/mcp-connector.md`

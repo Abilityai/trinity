@@ -64,7 +64,7 @@ Non-public triggers (chat, schedule with its own `agent_schedules.model`, loop, 
 agent-to-agent) never touch this field — their model resolution is unchanged.
 
 ## Frontend
-`components/SharingPanel.vue` — a "Public chat model" `<select>` (options from the GET's
+`components/agent-settings/channels/SpeaksOutside.vue` — a "Public chat model" `<select>` (options from the GET's
 `available_models`, "" = Use platform default) above the Channels section; loads on mount,
 PUTs on change, re-syncs on error.
 

@@ -149,3 +149,10 @@ describe('the restart registry behind the one banner', () => {
     expect(s.epochFor('atlas')).toBe(before + 1)
   })
 })
+
+// trinity-enterprise#340: the tab's old names land on the Channels pane, not General.
+describe('the Channels pane, by its old tab names', () => {
+  it.each(['sharing', 'channels'])('?tab=%s resolves to it', (tab) => {
+    expect(resolveSettingsSection({ tab })).toBe('channels')
+  })
+})

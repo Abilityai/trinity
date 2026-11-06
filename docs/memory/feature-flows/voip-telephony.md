@@ -229,7 +229,7 @@ money-spending OSS backend would be cosmetic; gated on the existing
 `voip_available` platform flag instead):
 
 - **Panel**: `src/frontend/src/components/VoipChannelPanel.vue` (modeled on
-  `WhatsAppChannelPanel.vue`), mounted in `SharingPanel.vue` under
+  `WhatsAppChannelPanel.vue`), mounted in `agent-settings/channels/MessagingRows.vue` under
   `v-if="sessionsStore.voipAvailable"` (`stores/sessions.js` now reads
   `voip_available` from `/api/settings/feature-flags`). Create/update/remove the
   binding over the existing `GET/PUT/DELETE /api/agents/{name}/voip`; the Auth

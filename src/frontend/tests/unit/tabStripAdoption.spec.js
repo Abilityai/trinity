@@ -97,7 +97,6 @@ describe('#1925 tab-strip adoption', () => {
     'components/FileSharingPanel.vue',
     'components/LoopsPanel.vue',
     'components/NeverminedPanel.vue',
-    'components/SharingPanel.vue',
     'components/process/RoleMatrix.vue',
     'components/reports/ReportTable.vue',
     'components/settings/McpKeysTab.vue',

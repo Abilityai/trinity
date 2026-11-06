@@ -1,44 +1,61 @@
 <template>
   <!--
     Settings › Channels — "Where outsiders reach it" (trinity#966 step 6,
-    ent#340). This step only re-homes the Voice card from the old flat
-    Settings list (migration map: Channels › How it speaks outside); the
-    channel console itself is still the Sharing tab until ent#340 moves it,
-    and the row below says so and opens it rather than leaving a dead end.
+    trinity-enterprise#340). Each section loads and saves its own data. The pane
+    composes them, and owns the header line and the `&channel=` deep link.
   -->
   <div class="space-y-6">
-    <SettingsSection title="How it speaks outside">
-      <div class="px-4 py-3">
-        <p class="text-sm font-medium text-gray-900 dark:text-gray-100">Voice replies</p>
-        <p class="mt-0.5 mb-3 text-[12.5px] text-gray-600 dark:text-gray-400">
-          Let the agent answer with a spoken voice note on messaging channels. Each channel can still opt out in its own settings.
-        </p>
-        <VoiceRepliesControl :agent-name="agentName" embedded />
-      </div>
-    </SettingsSection>
-
-    <SettingsSection v-if="hasSharingTab" title="Who can chat, and where">
-      <SettingRow
-        label="Chat policy, channels and public links"
-        hint="Who may chat, Slack, Telegram, WhatsApp, voice calls, public links and the client roster are on the Sharing tab for now."
-      >
-        <template #action>
-          <BaseButton variant="secondary" size="sm" @click="$emit('navigate-tab', 'sharing')">Open Sharing</BaseButton>
-        </template>
-      </SettingRow>
-    </SettingsSection>
+    <p v-if="summaryLine" class="text-sm text-gray-600 dark:text-gray-300" data-testid="channels-summary">{{ summaryLine }}</p>
+    <WhoCanChat :agent-name="agentName" :shares="shares" @summary="access = $event" @agent-updated="$emit('agent-updated')" />
+    <MessagingRows :agent-name="agentName" :open-channel="openChannel" @status="onStatus" @channel-closed="closeChannel" />
+    <WebRows :agent-name="agentName" @status="onStatus" />
+    <SpeaksOutside :agent-name="agentName" />
+    <ClientRoster :agent-name="agentName" />
   </div>
 </template>
 
 <script setup>
-import SettingsSection from './SettingsSection.vue'
-import SettingRow from './SettingRow.vue'
-import BaseButton from '../base/BaseButton.vue'
-import VoiceRepliesControl from '../VoiceRepliesControl.vue'
+import { computed, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { deepLinkChannel, paneSummary } from '../../utils/channelsPane'
+import ClientRoster from './channels/ClientRoster.vue'
+import MessagingRows from './channels/MessagingRows.vue'
+import SpeaksOutside from './channels/SpeaksOutside.vue'
+import WebRows from './channels/WebRows.vue'
+import WhoCanChat from './channels/WhoCanChat.vue'
 
-defineProps({
+const props = defineProps({
   agentName: { type: String, required: true },
-  hasSharingTab: { type: Boolean, default: false },
+  shares: { type: Array, default: () => [] },
 })
-defineEmits(['navigate-tab'])
+defineEmits(['agent-updated'])
+
+const route = useRoute()
+const router = useRouter()
+
+const access = ref({ mode: null, pending: null })
+const surfaces = ref({})
+
+function onStatus({ name, connected }) {
+  surfaces.value = { ...surfaces.value, [name]: connected }
+}
+
+// Only what's confirmed: a surface that failed its check (null) isn't listed.
+const reachable = computed(() => {
+  const names = Object.keys(surfaces.value)
+  return names.length ? names.filter((n) => surfaces.value[n] === true) : null
+})
+const summaryLine = computed(() => paneSummary({ ...access.value, reachable: reachable.value }))
+
+const openChannel = computed(() => deepLinkChannel(route.query.channel))
+function closeChannel() {
+  if (!route.query.channel) return
+  const { channel: _channel, ...query } = route.query
+  router.replace({ query })
+}
+
+watch(() => props.agentName, () => {
+  access.value = { mode: null, pending: null }
+  surfaces.value = {}
+})
 </script>

@@ -75,7 +75,7 @@ You need three values from Twilio: **Account SID**, **Auth Token**, and a **What
 ### Connect WhatsApp to an Agent
 
 1. Open the agent detail page
-2. Select the **Sharing** tab and find the **WhatsApp** row under **Channels**
+2. Open **Settings › Channels** and find the **WhatsApp** row under **Messaging**
 3. Click **Configure** — the WhatsApp (Twilio) configuration opens in a dialog
 4. Enter:
    - **Twilio Account SID** — starts with `AC`, 34 characters long
@@ -126,7 +126,7 @@ Agents can deliver files and images in their WhatsApp replies, not just text. Ea
 
 Rules:
 
-- Outbound media requires the agent's **file-sharing** toggle to be on (Sharing tab → Distribution → File sharing) and a configured **Public URL** under Settings → General (media links must be HTTPS).
+- Outbound media requires the agent's **file-sharing** toggle to be on (**Settings › Storage** → File sharing) and a configured **Public URL** under Settings → General (media links must be HTTPS).
 - A file that is oversized, of an unsupported type, or otherwise undeliverable degrades to a `📎 name: url` download link appended to the text reply — it never blocks the reply or other files.
 
 ### Voice Replies (Outbound)
@@ -148,7 +148,7 @@ After successful `/login`, if the agent has a restricted access policy (`require
 
 ## Access Control
 
-WhatsApp respects the same cross-channel access policy as Telegram and Slack. Configure it in **Agent Detail → Sharing → Channel Access Policy**:
+WhatsApp respects the same cross-channel access policy as Telegram and Slack. Configure it in **Settings › Channels → Who can chat**:
 
 | Policy | Effect |
 |--------|--------|
@@ -156,7 +156,7 @@ WhatsApp respects the same cross-channel access policy as Telegram and Slack. Co
 | **Require email** | Users must complete `/login` before chatting; unverified users are prompted |
 | **Require sharing** | Users must be explicitly shared on the agent (owner/admin must approve) |
 
-Approving an access request (from **Sharing → Access Requests**) automatically adds the email to the shared-access list.
+Approving an access request (from **Settings › Channels → Pending requests**) automatically adds the email to the shared-access list.
 
 ## For Agents
 
@@ -270,7 +270,7 @@ This is different from "download failed" — the file **was** fetched successful
 - [Telegram Integration](telegram-integration.md) · [Slack Integration](slack-integration.md)
 - [Voice Replies](../advanced/voice-replies.md) — spoken replies across channels
 - [Access Control](../sharing-and-access/access-control.md) — the channel access policy `/login` enforces
-- [Agent Sharing & Access](../sharing-and-access/agent-sharing.md) — the Sharing tab that hosts the WhatsApp dialog
+- [Agent Sharing & Access](../sharing-and-access/agent-sharing.md) — the **Settings › Channels** that hosts the WhatsApp dialog
 
 **External references:**
 

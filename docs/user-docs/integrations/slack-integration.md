@@ -18,11 +18,11 @@ Connect agents to Slack workspaces. Supports DMs, @mentions in channels, multi-a
 2. Go to **Settings → Integrations** and find the **Slack Integration** section.
 3. Under **OAuth Credentials**, enter the app's **Client ID**, **Client Secret** and **Signing Secret** and click **Save Credentials**. The client secret, signing secret and app token are stored encrypted at rest (see [Credential Management](../credentials/credential-management.md#platform-level-credentials)).
 4. Under **Transport Connection**, paste the app-level token (`xapp-...`) and click **Connect** to start the Socket Mode transport. The badge shows **Socket Mode**, **Webhook** or **Disconnected**.
-5. Click **Install to Workspace** (**Reinstall to Workspace** once a workspace is connected) to complete the platform-level OAuth and obtain the bot token. Then bind agents to channels from each agent's Sharing tab.
+5. Click **Install to Workspace** (**Reinstall to Workspace** once a workspace is connected) to complete the platform-level OAuth and obtain the bot token. Then bind agents to channels from each agent's **Settings › Channels**.
 
-### Per-Agent Channel Binding (Agent Sharing Tab)
+### Per-Agent Channel Binding (Agent **Settings › Channels**)
 
-1. Open the agent detail page and select the **Sharing** tab.
+1. Open the agent detail page and open **Settings › Channels**.
 2. Under **Channels**, click **Configure** on the **Slack** row — the Slack configuration opens in a dialog.
 3. Click **Create Channel**. A dedicated Slack channel is created and bound to this agent.
 4. All messages in that channel are routed to the bound agent.
@@ -33,7 +33,7 @@ Connect agents to Slack workspaces. Supports DMs, @mentions in channels, multi-a
 DMs to the Slack bot are routed to the workspace's **DM-default agent**. By default the first agent bound to a workspace becomes the DM default, but you can reassign it at any time.
 
 1. Open the agent detail page for the agent you want to receive DMs.
-2. Go to the **Sharing** tab → Slack Channel section.
+2. Go to the **Settings › Channels** → Slack Channel section.
 3. Click **Set as DM Default**.
 4. The previous DM-default agent retains its channel binding but no longer receives DMs.
 
@@ -65,7 +65,7 @@ By default, every agent shares one workspace bot and is told apart by that per-m
 
 ### Per-Agent Dedicated Bots (enterprise)
 
-On the enterprise tier, an agent can have its **own dedicated Slack bot identity** instead of sharing the workspace bot: its own name and avatar, and — the part a shared bot can't do — a bot users can **DM directly** and **`@mention` by name**, right alongside other agents in the same channel. Configure it per agent from the **Dedicated Slack bot** panel on the agent's Sharing tab (enable/disable, replace tokens, remove). In a community build this panel is hidden and the shared-workspace-bot model above applies.
+On the enterprise tier, an agent can have its **own dedicated Slack bot identity** instead of sharing the workspace bot: its own name and avatar, and — the part a shared bot can't do — a bot users can **DM directly** and **`@mention` by name**, right alongside other agents in the same channel. Configure it per agent from the **Dedicated Slack bot** panel on the agent's **Settings › Channels** (enable/disable, replace tokens, remove). In a community build this panel is hidden and the shared-workspace-bot model above applies.
 
 ### Voice Replies (Outbound)
 
@@ -151,7 +151,7 @@ Full request/response schemas are in the [Swagger docs](http://localhost:8000/do
 
 **Trinity docs:**
 
-- [Agent Sharing & Access](../sharing-and-access/agent-sharing.md) — the Sharing tab that hosts the Slack dialog
+- [Agent Sharing & Access](../sharing-and-access/agent-sharing.md) — the **Settings › Channels** that hosts the Slack dialog
 - [Voice Replies](../advanced/voice-replies.md) — spoken replies across channels
 - [Telegram Integration](telegram-integration.md) · [WhatsApp Integration](whatsapp-integration.md)
 

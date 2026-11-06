@@ -68,7 +68,10 @@ export const SETTINGS_SECTIONS = Object.freeze([
     id: 'channels',
     label: 'Channels',
     question: 'Where outsiders reach it',
-    keywords: ['channels', 'voice', 'slack', 'telegram', 'whatsapp', 'public', 'sharing'],
+    keywords: [
+      'channels', 'voice', 'slack', 'telegram', 'whatsapp', 'public', 'sharing', 'links', 'portal', 'clients',
+      'roster', 'pending', 'requests', 'policy', 'restricted', 'open', 'instructions', 'model',
+    ],
   },
   {
     id: 'integrations',
@@ -104,6 +107,8 @@ export const LEGACY_TAB_SECTIONS = Object.freeze({
   credentials: 'credentials',
   folders: 'storage',
   access: 'people',
+  sharing: 'channels',
+  channels: 'channels',
 })
 
 /**

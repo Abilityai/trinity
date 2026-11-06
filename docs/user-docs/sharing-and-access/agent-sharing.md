@@ -1,6 +1,6 @@
 # Agent Sharing & Access
 
-Two owner-only surfaces on the Agent Detail page control who can reach an agent: **Settings › People** (the former Access tab) manages the *people the agent is shared with* (they use it in the Workspace), and the **Sharing** tab manages *external clients* (outside users reaching the agent through Slack, Telegram, WhatsApp, voice calls, or public links).
+Two owner-only surfaces on the Agent Detail page control who can reach an agent: **Settings › People** (the former Access tab) manages the *people the agent is shared with* (they use it in the Workspace), and the **Settings › Channels** manages *external clients* (outside users reaching the agent through Slack, Telegram, WhatsApp, voice calls, or public links).
 
 ## Concepts
 
@@ -49,11 +49,11 @@ Enforcement notes:
 - Shared users see only their own chat messages. Admins see all messages.
 - Deleting an agent cascades to remove all associated sharing records.
 
-## Sharing Tab — External Clients
+## **Settings › Channels** — External Clients
 
-The **Sharing** tab is organized around "who outside the team can reach this agent, and through what." Sections, top to bottom:
+The **Settings › Channels** is organized around "who outside the team can reach this agent, and through what." Sections, top to bottom:
 
-### Who can chat with this agent?
+### Who can chat
 
 A single **Restricted ↔ Open** control:
 
@@ -94,9 +94,7 @@ Both actions are recorded in the audit log, and an agent's own API key cannot pe
 
 A read-only table of external channel users who have messaged the agent, aggregated across Telegram and WhatsApp (more channels to follow): client name, channel, verified email, message count, and last-active time, ordered by most recent. The roster is database-sourced, so it renders even when the agent container is stopped.
 
-### Distribution
-
-One collapsible panel for distributing the agent's output rather than granting access:
+### Web
 
 - **Public links** — shareable chat URLs; see [Public Links](public-links.md).
 
