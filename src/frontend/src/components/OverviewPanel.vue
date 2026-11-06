@@ -557,7 +557,7 @@ onMounted(() => {
         <button class="px-2.5 py-1 rounded-md bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600" @click="emit('navigate-tab', 'skills')">
           {{ skillsCount ?? '—' }} skills
         </button>
-        <button v-if="agent.can_share" class="px-2.5 py-1 rounded-md bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600" @click="emit('navigate-tab', 'sharing')">
+        <button v-if="agent.can_share" class="px-2.5 py-1 rounded-md bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600" @click="emit('navigate-tab', 'channels')">
           {{ (agent.shares && agent.shares.length) || 0 }} shares
         </button>
         <span data-testid="overview-sync" :title="syncTitle" class="px-2.5 py-1 rounded-md text-gray-600 dark:text-gray-300 tabular-nums" :class="syncPill || 'bg-gray-100 dark:bg-gray-700'">

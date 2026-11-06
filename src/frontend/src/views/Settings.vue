@@ -512,7 +512,7 @@
                     Secure-by-default. When on, newly created agents require a verified email on
                     incoming DMs / public chat / shared access. Applies to <strong>new agents
                     only</strong> — existing agents keep their current setting, and owners can
-                    override per agent in the agent's Sharing tab.
+                    override per agent in the agent's Channels tab.
                   </p>
                 </div>
 
@@ -1307,7 +1307,7 @@
                     <p><strong>5.</strong> Subscribe to events: <code class="px-1 py-0.5 bg-gray-200 dark:bg-gray-600 rounded text-xs">message.im</code>, <code class="px-1 py-0.5 bg-gray-200 dark:bg-gray-600 rounded text-xs">app_mention</code></p>
                     <p><strong>6.</strong> Add OAuth Redirect URL: <code class="px-1 py-0.5 bg-gray-200 dark:bg-gray-600 rounded text-xs break-all">https://YOUR_DOMAIN/api/public/slack/oauth/callback</code></p>
                     <p><strong>7.</strong> Click <strong>Connect</strong> above to start receiving messages</p>
-                    <p><strong>8.</strong> Install the app to your workspace, then bind agents to channels from each agent's Sharing tab</p>
+                    <p><strong>8.</strong> Install the app to your workspace, then bind agents to channels from each agent's Channels tab</p>
                   </div>
                 </details>
               </div>
