@@ -1360,6 +1360,23 @@ class _Allowed:
 _AS = "docker/base-image/agent_server/"
 _BE = "src/backend/"
 
+# The system_service entries' shared reason. `_failure_reason` RETURNS the
+# text, which the scan does not follow, so the guard checks only the classes.
+_FAILURE_REASON = (
+    "`reason` is `_failure_reason(e)`. It keeps an HTTPException's detail (each "
+    "raise is checked by this guard), any ValueError's text (the validators' words; "
+    "a library ValueError's text too, sanitized, redacted and capped), and the "
+    "words of the classes in `_platform_worded`, whose constructions this entry "
+    "checks: no exception text. That any other exception answers its class name "
+    "only crosses as a return value, so test_4284_exception_text_sites.py and "
+    "test_ent125_resilient_system_deploy.py hold it, not this guard. Sanitized and "
+    "capped (ent#125)."
+)
+_FAILURE_REASON_CLASSES = (
+    "_Refused", "AgentAuthSecretMissing", "GitInstanceReservationError",
+    "SeatWriterUnavailable", "SkillSetUnresolved",
+)
+
 _ALLOWED: Tuple[_Allowed, ...] = (
     # --- agent server --------------------------------------------------------
     _Allowed(
@@ -1460,7 +1477,9 @@ _ALLOWED: Tuple[_Allowed, ...] = (
         "tells the caller the termination can be retried) and the registry's "
         "`Termination failed: <class>`; anything else, such as an older agent's raw "
         "exception text, answers a fixed sentence with the agent's status. A 4xx is "
-        "the agent's refusal. Pinned by test_4284_exception_text_sites.py.",
+        "the agent's refusal. This entry pins only the fragment: the filter is a "
+        "return value the scan does not follow, so test_4284_exception_text_sites.py "
+        "and test_terminate_async_executor.py hold it, not this guard.",
     ),
     _Allowed(
         _BE + "services/chat_execution_service.py", "_apply_sub003_autoswitch",
@@ -1552,38 +1571,23 @@ _ALLOWED: Tuple[_Allowed, ...] = (
         _BE + "services/system_service.py", "deploy_manifest", "HTTPException",
         frozenset({"e"}),
         "Strict-mode system deploy, at the failure's own status or 500. "
-        + "`reason` is `_failure_reason(e)`: an HTTPException's detail (each raise is "
-        "checked by this guard), a ValueError's validation text (ManifestError, "
-        "normalize_cpu / normalize_memory, ScheduleCreate's ValidationError), or an "
-        "apply step's `_Refused` (checked: no exception text); any other exception "
-        "answers its class name only, its text logged masked. Sanitized and capped "
-        "(ent#125). The non-strict report carries the same reason (ent#125 parity).",
-        no_exception_text=("_Refused",),
+        + _FAILURE_REASON + " The non-strict report carries the same reason (ent#125 parity).",
+        no_exception_text=_FAILURE_REASON_CLASSES,
     ),
     _Allowed(
         _BE + "services/system_service.py", "deploy_manifest", "SystemDeployFailure",
         frozenset({"e"}),
         "A per-member report row, the body of the deploy's 500 when every member "
-        "fails (routers/systems.py). " + "`reason` is `_failure_reason(e)`: an HTTPException's detail (each raise is "
-        "checked by this guard), a ValueError's validation text (ManifestError, "
-        "normalize_cpu / normalize_memory, ScheduleCreate's ValidationError), or an "
-        "apply step's `_Refused` (checked: no exception text); any other exception "
-        "answers its class name only, its text logged masked. Sanitized and capped "
-        "(ent#125).",
+        "fails (routers/systems.py). " + _FAILURE_REASON,
         count=2,
-        no_exception_text=("_Refused",),
+        no_exception_text=_FAILURE_REASON_CLASSES,
     ),
     _Allowed(
         _BE + "services/system_service.py", "_preflight_template", "SystemDeployFailure",
         frozenset({"e"}),
         "The preview's per-member row, also apply's `template_unresolvable` blocker "
-        "(a 409/503 body). " + "`reason` is `_failure_reason(e)`: an HTTPException's detail (each raise is "
-        "checked by this guard), a ValueError's validation text (ManifestError, "
-        "normalize_cpu / normalize_memory, ScheduleCreate's ValidationError), or an "
-        "apply step's `_Refused` (checked: no exception text); any other exception "
-        "answers its class name only, its text logged masked. Sanitized and capped "
-        "(ent#125).",
-        no_exception_text=("_Refused",),
+        "(a 409/503 body). " + _FAILURE_REASON,
+        no_exception_text=_FAILURE_REASON_CLASSES,
     ),
     # --- held unedited --------------------------------------------------------
     _Allowed(
@@ -1672,6 +1676,18 @@ def test_classes_answered_at_a_dynamic_status_carry_no_exception_text():
         "there, as a carrier checked where it is built) is built from exception "
         "text:\n  " + "\n  ".join(bad)
     )
+
+
+def test_failure_reason_classes_are_the_ones_it_keeps():
+    """The system_service entries check the classes `_platform_worded` keeps
+    the words of; a class kept there and not checked here would pass unseen."""
+    tree = ast.parse((_REPO / _BE / "services/system_service.py").read_text())
+    [fn] = [n for n in ast.walk(tree)
+            if isinstance(n, ast.FunctionDef) and n.name == "_platform_worded"]
+    [ret] = [n for n in ast.walk(fn) if isinstance(n, ast.Return)]
+    assert isinstance(ret.value, ast.Tuple), ast.unparse(ret)
+    kept = {ast.unparse(e).rsplit(".", 1)[-1] for e in ret.value.elts}
+    assert kept == set(_FAILURE_REASON_CLASSES)
 
 
 def test_carried_classes_are_defined_and_reasoned():
