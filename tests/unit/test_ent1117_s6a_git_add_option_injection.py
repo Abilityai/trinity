@@ -144,18 +144,40 @@ def test_long_option_in_paths_is_a_pathspec_not_an_option(home):
     assert ".env" not in _origin_files(home)
 
 
-def test_plain_paths_still_stage_and_push(home):
-    """The fix must not break the documented subset sync, including a path
-    whose dash is not the first character."""
+def _origin_blob(home, path):
+    origin = home.parent / "origin.git"
+    return _git(["show", f"main:{path}"], origin)
+
+
+def test_plain_paths_stage_and_push_only_the_named_paths(home):
+    """The documented subset sync: ONLY the named paths are staged and pushed.
+    An unrelated tracked file that is also modified stays out of the push and
+    stays dirty locally, so a regression that stages everything whenever
+    `paths` is given (`git add -A`) fails here. Also pins, at the agent, the
+    `./-name` spelling the backend's 422 recommends for a file whose name
+    really starts with '-', and a dash that is not the first character."""
+    (home / "other.md").write_text("other v1\n")
+    _git(["add", "other.md"], home)
+    _git(["commit", "-qm", "other"], home)
+    _git(["push", "-q", "origin", "main"], home)
+
     (home / "notes.md").write_text("v2\n")
+    (home / "other.md").write_text("other v2, not named\n")
     (home / "sub").mkdir()
     (home / "sub" / "-x.md").write_text("dash in the middle\n")
+    (home / "-x.md").write_text("name really starts with a dash\n")
 
-    result = _sync(paths=["notes.md", "sub/-x.md"], message="m")
+    result = _sync(paths=["notes.md", "sub/-x.md", "./-x.md"], message="m")
 
-    assert result["success"] is True and result["files_changed"] == 2
+    assert _origin_blob(home, "other.md") == "other v1\n", (
+        "a tracked file the caller did not name was pushed: the paths branch "
+        f"staged more than `paths` (sync result: {result})"
+    )
+    assert _git(["status", "--porcelain", "--", "other.md"], home) == " M other.md\n"
+    assert result["success"] is True and result["files_changed"] == 3, result
     pushed = _origin_files(home)
-    assert {"notes.md", "sub/-x.md"} <= pushed
+    assert {"notes.md", "sub/-x.md", "-x.md"} <= pushed
+    assert _origin_blob(home, "notes.md") == "v2\n"
     assert ".env" not in pushed
 
 
