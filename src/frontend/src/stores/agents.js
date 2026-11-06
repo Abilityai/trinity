@@ -530,6 +530,16 @@ export const useAgentsStore = defineStore('agents', {
 
     // #17 Access tab: operator (Trinity-user) roster — allow-list emails resolved
     // against `users` (active operator vs pending invite).
+    // trinity-enterprise#450: accounts to suggest in the Access tab's add field.
+    async getAccessCandidates(name, query) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/access/candidates`, {
+        params: { q: query },
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
     async getAgentAccess(name) {
       const authStore = useAuthStore()
       const response = await axios.get(`/api/agents/${name}/access`, {

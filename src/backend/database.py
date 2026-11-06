@@ -1134,6 +1134,9 @@ class DatabaseManager:
         return self._user_ops.list_users()
 
     # trinity-enterprise#631 — who may be tagged in a conversation with these agents
+    def list_share_candidates(self, agent_name, query, *, exclude_email=None, limit=8):
+        return self._user_ops.list_share_candidates(agent_name, query, exclude_email=exclude_email, limit=limit)
+
     def list_taggable_people(self, agent_names, query, *, exclude_email=None, limit=8):
         return self._user_ops.list_taggable_people(agent_names, query,
                                                    exclude_email=exclude_email, limit=limit)

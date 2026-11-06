@@ -6486,6 +6486,16 @@ class AgentShareResult(AgentShare):
     invitation: str = "not_needed"
 
 
+class AccessCandidate(BaseModel):
+    """A registered account the Access tab's add field can suggest (trinity-enterprise#450).
+
+    Only what the row shows. `role` is set for an admin reader and absent for
+    everyone else, so the list can't be used to find the admins."""
+    email: str
+    label: str
+    role: Optional[str] = None
+
+
 class AgentInviteResult(BaseModel):
     email: str
     sent: bool = True

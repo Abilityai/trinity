@@ -43,6 +43,11 @@
   - **Agent keys** keep their capability path (`instructions.manage` ent#164, `skills.manage` ent#596) and are refused files that run code.
   - Below the owner tier the list withholds hidden files and flags each node with the verbs the caller cannot use; every write, delete and mkdir writes an audit row.
   - The Access tab states the grant in one sentence.
+- **Suggesting people when adding one (trinity-enterprise#450, OSS-core)**: as an owner or admin types in the Access tab's add field, it suggests registered accounts that match by a prefix of the email or username, or a word of the name. It's a suggestion over the input: any address can still be typed and shared.
+  - Never offered: people already on the roster, the agent's owner, the person typing, suspended accounts, accounts with no email. Channel clients can't appear, since the source is `users`.
+  - Bounded, because the people offered are by definition not on the agent yet: at least 2 characters, at most 8 rows, 60 lookups a minute per person (`rate_limited`, 429). Signed-in session only (`require_interactive`): every key is refused. Each row is email and name; role only for an admin, so the list can't be used to find the admins.
+  - **Known limit:** an owner can still find accounts on the instance by trying prefixes. The bounds slow that down and don't prevent it.
+  - If the lookup fails or is limited, the field is the plain email input. A query with no match says so, and how to invite anyway.
 - **Telling a pending person (trinity-enterprise#459, OSS-core)**: a share to an address with no account emails that person, and **Resend invite** on a Pending row sends it again. A share to someone with an account sends nothing.
   - The mail names who invited them and which agent, and points at the Workspace sign-in. It carries no code and no secret; they request their own code there.
   - Owner or admin, signed-in session only (`require_interactive`), matching share. Named refusals: `not_shared` (404), `not_pending` (409), `invalid_address` (422, anything but one plain address), `invite_unavailable` (409, no real provider or emailed codes are off for them), `invite_rate_limited` (429), `invite_not_sent` (502).

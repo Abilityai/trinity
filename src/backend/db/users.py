@@ -397,6 +397,43 @@ class UserOperations:
 
     _TAGGABLE_COLUMNS = (users.c.username, users.c.name, users.c.email)
 
+    def list_share_candidates(self, agent_name: str, query: str, *,
+                              exclude_email: Optional[str] = None, limit: int = 8) -> List[Dict]:
+        """Accounts matching `query` that this agent could be shared with, for the
+        Access tab's add field (trinity-enterprise#450): not suspended, with an
+        email, not its owner and not already on its roster. Same match as tagging.
+        An empty query matches nothing, so this is never a list of every account."""
+        q = (query or "").strip().lower()
+        if not q:
+            return []
+        esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        name = func.lower(func.coalesce(users.c.name, ""))
+        owners = select(agent_ownership.c.owner_id).where(
+            agent_ownership.c.agent_name == agent_name, agent_ownership.c.owner_id.isnot(None))
+        sharees = select(func.lower(agent_sharing.c.shared_with_email)).where(
+            agent_sharing.c.agent_name == agent_name)
+        conds = [
+            users.c.email.isnot(None),
+            users.c.email != "",
+            users.c.suspended_at.is_(None),
+            users.c.id.notin_(owners),
+            func.lower(users.c.email).notin_(sharees),
+            or_(
+                func.lower(users.c.email).like(f"{esc}%", escape="\\"),
+                func.lower(users.c.username).like(f"{esc}%", escape="\\"),
+                name.like(f"{esc}%", escape="\\"),
+                name.like(f"% {esc}%", escape="\\"),
+            ),
+        ]
+        exclude = normalize_email(exclude_email)
+        if exclude:
+            conds.append(func.lower(users.c.email) != exclude)
+        stmt = (select(users.c.username, users.c.name, users.c.email, users.c.role).where(and_(*conds))
+                .order_by(func.lower(func.coalesce(users.c.name, users.c.username)), users.c.id)
+                .limit(max(1, int(limit))))
+        with get_engine().connect() as conn:
+            return [dict(r) for r in conn.execute(stmt).mappings()]
+
     def list_taggable_people(self, agent_names: List[str], query: str, *,
                              exclude_email: Optional[str] = None, limit: int = 8) -> List[Dict]:
         """Accounts matching `query` (a prefix of the email, the username, or a
