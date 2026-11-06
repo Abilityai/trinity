@@ -1832,6 +1832,9 @@ class DatabaseManager:
         inside the start-up grace window)."""
         return self._mcp_key_ops.deactivate_orphaned_agent_keys()
 
+    def get_agent_name_for_agent_key(self, key_id: str):
+        return self._mcp_key_ops.get_agent_name_for_agent_key(key_id)
+
     def delete_agent_mcp_api_key(self, agent_name: str):
         return self._mcp_key_ops.delete_agent_mcp_api_key(agent_name)
 
@@ -2041,6 +2044,9 @@ class DatabaseManager:
 
     def get_execution_gate_state(self, execution_id: str):
         return self._schedule_ops.get_execution_gate_state(execution_id)
+
+    def get_execution_requester(self, execution_id: str):
+        return self._schedule_ops.get_execution_requester(execution_id)
 
     def get_execution_failure_stamp(self, execution_id: str):
         """`(status, error, completed_at)` or None — the #3245 liveness read."""
@@ -2997,6 +3003,9 @@ class DatabaseManager:
 
     def recent_peer_messages(self, caller_agent: str, target_agent: str, since: str, limit: int = 500):
         return self._peer_skill_grant_ops.recent_peer_messages(caller_agent, target_agent, since, limit)
+
+    def recent_in_container_peer_refusals(self, since: str, limit: int = 2000):
+        return self._peer_skill_grant_ops.recent_in_container_peer_refusals(since, limit)
 
     def delete_agent_peer_skill_grants(self, agent_name: str):
         return self._peer_skill_grant_ops.delete_agent_peer_skill_grants(agent_name)
