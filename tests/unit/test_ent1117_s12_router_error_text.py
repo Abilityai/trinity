@@ -407,3 +407,119 @@ def test_telemetry_host_500(monkeypatch, caplog):
     exc = _raise_http(mod.get_host_stats(current_user=_admin()))
     _assert_scrubbed_5xx(exc, 500, "Error getting host stats", "PlantedError")
     _assert_logged(caplog)
+
+# ---------------------------------------------------------------------------
+# routers/git.py — the held PAT echoed in an escaped form, and the bind route
+# ---------------------------------------------------------------------------
+
+# The PAT route strips only SURROUNDING whitespace, so a token pasted with a
+# line break inside it reaches the request. h11 refuses that header by echoing
+# it as a bytes repr, where the line break is the two characters `\n`: the held
+# value no longer occurs verbatim, and the shape pass masks only the run after
+# `Bearer `. Neither piece below is GitHub-shaped, so only the held-value mask
+# can remove the tail.
+PAT_HEAD = "planted-held"
+PAT_TAIL = "tail-after-the-break-0123"
+
+
+def _h11_header_echo(value: str) -> Exception:
+    """The exception h11 itself raises for this Authorization value."""
+    import h11
+
+    try:
+        h11.Request(method="GET", target="/", headers=[("Host", "api.github.com"),
+                                                        ("Authorization", f"Bearer {value}")])
+    except h11.LocalProtocolError as e:
+        return e
+    raise AssertionError("h11 accepted a header value with a line break")
+
+
+def test_git_validate_pat_masks_an_escaped_echo_of_the_held_pat(monkeypatch, caplog):
+    import routers.git as mod
+    gh_mod = _live("services.github_service")
+    held = f"{PAT_HEAD}\n{PAT_TAIL}"
+    planted = _h11_header_echo(held)
+    assert PAT_TAIL in str(planted) and held not in str(planted)
+
+    class FakeGitHub:
+        def __init__(self, pat):
+            assert pat == held, "the route must hand the stripped body value on"
+
+        async def validate_token(self):
+            raise planted
+
+    monkeypatch.setattr(gh_mod, "GitHubService", FakeGitHub)
+    body = MagicMock()
+    body.pat = f"  {held}\n"
+    caplog.set_level(logging.DEBUG)
+    exc = _raise_http(mod.set_agent_github_pat("agent-a", body, _request()))
+    blob = json.dumps(exc.detail, default=str)
+    assert exc.status_code == 500 and "LocalProtocolError" in blob
+    assert PAT_TAIL not in blob and PAT_HEAD not in blob
+    log = _log_text(caplog)
+    assert "Illegal header value" in log, f"the failure was not logged: {log}"
+    assert PAT_TAIL not in log, f"the tail of the held PAT reached the log: {log}"
+    assert PAT_HEAD not in log, f"the head of the held PAT reached the log: {log}"
+
+
+@pytest.fixture
+def bind(monkeypatch):
+    """The real bind handler with locks, audit, idempotency and the service
+    stubbed (test_3164's fixture, trimmed)."""
+    import sys
+    import types
+    from contextlib import asynccontextmanager as acm
+
+    import routers.git as git_router
+    import services.idempotency_service as idem_mod
+    from services.agent_service.repo_binding import BindError
+
+    state = types.SimpleNamespace(audits=[], failed=[], raises=None, router=git_router)
+
+    async def fake_audit(**kw):
+        state.audits.append(kw)
+
+    @acm
+    async def no_locks(agent, dest):
+        yield
+
+    async def fake_bind(**kw):
+        raise state.raises
+
+    decision = types.SimpleNamespace(replay=False, in_flight=False, snapshot=None)
+    monkeypatch.setattr(git_router, "_audit_git", fake_audit)
+    monkeypatch.setattr(git_router, "_bind_locks", no_locks)
+    monkeypatch.setattr(idem_mod, "begin", lambda s, k: decision)
+    monkeypatch.setattr(idem_mod, "complete", lambda *a: None)
+    monkeypatch.setattr(idem_mod, "fail", lambda *a: state.failed.append(a))
+    monkeypatch.setitem(sys.modules, "services.agent_service.repo_binding",
+                        types.SimpleNamespace(BindError=BindError, bind_agent_to_own_repo=fake_bind))
+    return state
+
+
+def test_git_bind_unexpected_500_names_the_class_only(bind, caplog):
+    """`BIND_UNEXPECTED_ERROR` returned the credential-scrubbed exception text,
+    which still names internal paths and hosts. It now names the class, and the
+    masked traceback is in the log."""
+    import types
+
+    import models
+
+    bind.raises = _pat_bearing_error()
+    req = types.SimpleNamespace(client=types.SimpleNamespace(host="127.0.0.1"),
+                                scope={"path": "/x"}, state=types.SimpleNamespace(request_id="r"))
+    body = models.BindAgentRepoRequest(destination_repo="alice/my-brain", private=True,
+                                       github_pat=PAT)
+    user = types.SimpleNamespace(id=1, username="alice", email="alice@example.com",
+                                 role="user", agent_name=None)
+    caplog.set_level(logging.DEBUG)
+    exc = _raise_http(bind.router.bind_agent_to_own_repo(
+        agent_name="bot", body=body, request=req, current_user=user, idempotency_key=None))
+    _assert_scrubbed_5xx(exc, 500, "Repository binding failed unexpectedly", "PlantedError")
+    assert exc.detail["code"] == "BIND_UNEXPECTED_ERROR"
+    assert bind.failed, "the idempotency claim must still be released"
+    assert "BIND_UNEXPECTED_ERROR" in str(bind.audits), "the failure must still be audited"
+    _assert_no_credential(json.dumps(bind.audits, default=str), "audit row")
+    _assert_logged(caplog)
+    _assert_no_credential(_log_text(caplog), "log")
+

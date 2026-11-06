@@ -11,7 +11,6 @@ Provides API endpoints for:
 import contextlib
 import hashlib
 import logging
-import traceback
 import uuid
 from typing import Dict, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -42,6 +41,7 @@ from dependencies import (
 )
 from services import git_service
 from services.platform_audit_service import platform_audit_service, AuditEventType
+from utils.log_masking import masked_traceback
 
 logger = logging.getLogger(__name__)
 
@@ -52,24 +52,15 @@ def _log_redacted_failure(what: str, agent_name: str, e: Exception, held: str) -
     The exception text can carry the PAT (an httpx header-validation error
     echoes `Bearer <token>`) or a credentialed remote URL. The caller returns
     the class name only, so the detail moves here, and it must not carry the
-    credential with it. The traceback is formatted and redacted by hand,
-    because `exc_info=True` renders the raw message unredacted.
-
-    Three passes: the token this handler holds (and its `x-access-token:` b64
-    form), then any URL userinfo (a stale baked token is not the held one),
-    then the known credential shapes.
+    credential with it. `exc_info=True` would render the raw message, so the
+    traceback goes through the shared mask instead (`utils.log_masking`): the
+    token this handler holds in every form an exception renders it (its
+    `x-access-token:` base64 form included), then any URL userinfo (a stale
+    baked token is not the held one), then the known credential shapes.
     """
-    import base64
-
-    from utils.credential_sanitizer import redact_url_userinfo, sanitize_text
-
-    text = "".join(traceback.format_exception(type(e), e, e.__traceback__))
-    if held:
-        b64 = base64.b64encode(f"x-access-token:{held}".encode()).decode()
-        text = text.replace(held, "***").replace(b64, "***")
     logger.error(
         "%s for %s failed (%s): %s",
-        what, agent_name, type(e).__name__, sanitize_text(redact_url_userinfo(text)),
+        what, agent_name, type(e).__name__, masked_traceback(e, held),
     )
 
 
@@ -1046,8 +1037,6 @@ async def bind_agent_to_own_repo(
         BindError,
         bind_agent_to_own_repo as _bind,
     )
-    from utils.credential_sanitizer import scrub_secret_and_urls
-
     reject_agent_principal(current_user)
 
     from services.agent_service.fork_to_own import (
@@ -1167,21 +1156,20 @@ async def bind_agent_to_own_repo(
             idempotency_service.fail(idem)
         raise
     except Exception as e:
-        # The ONE path that surfaces a raw exception string, so it is the one
-        # that must scrub. An httpx/h11 header-validation error echoes the
-        # offending header value verbatim — i.e. `Bearer <the user's PAT>` —
-        # and `logger.exception` would put it in the Vector-captured platform
-        # log while the detail put it in the response body. The model-level
-        # charset guard (`models._validate_pat_secret`) is the primary fix;
-        # this is the belt, because the next foreign exception type is not
-        # knowable in advance.
+        # The ONE path that sees a raw foreign exception, so it is the one that
+        # must mask. An httpx/h11 header-validation error echoes the offending
+        # header value verbatim — i.e. `Bearer <the user's PAT>` — and
+        # `logger.exception` would put it in the Vector-captured platform log.
+        # The model-level charset guard (`models._validate_pat_secret`) is the
+        # primary fix; this is the belt, because the next foreign exception
+        # type is not knowable in advance. The response names the class only
+        # (#4284): even masked, the text names internal paths and hosts.
         # `user_pat`, not `body.github_pat`: on the saved-token path the body
-        # carries no token, and dereferencing it here raised before the scrub,
+        # carries no token, and dereferencing it here raised before the mask,
         # skipping the audit row and the idempotency release (#3164 review).
-        safe = scrub_secret_and_urls(str(e), user_pat)
         logger.error(
             "repo-bind: unexpected failure for %s (%s): %s",
-            agent_name, type(e).__name__, safe,
+            agent_name, type(e).__name__, masked_traceback(e, user_pat),
         )
         await _audit(False, {
             "destination_repo": destination,
@@ -1194,7 +1182,10 @@ async def bind_agent_to_own_repo(
         raise HTTPException(
             status_code=500,
             detail={
-                "error": f"Repository binding failed unexpectedly: {safe}",
+                "error": (
+                    "Repository binding failed unexpectedly "
+                    f"({e.__class__.__name__} — details in backend logs)"
+                ),
                 "code": "BIND_UNEXPECTED_ERROR",
             },
         )
