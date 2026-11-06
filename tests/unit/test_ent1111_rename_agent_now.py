@@ -179,6 +179,47 @@ class TestRenameAgentNow:
         assert (avatars / "new_emotion_happy.webp").exists()
         assert not (avatars / "old.webp").exists()
 
+    async def test_every_cached_shape_follows_the_name(self, env):
+        """All of them, not a sample: every path is built through the
+        containment barrier now (`_avatar_path_or_none`), so a shape whose move
+        was lost to a refusal would otherwise show up only as one missing file
+        on one agent."""
+        avatars = env["avatars"]
+        shapes = [f"{{}}{ext}" for ext in (".webp", ".png")]
+        shapes.append("{}_ref.png")
+        shapes += [f"{{}}_emotion_{e}{ext}" for e in rename_mod.AVATAR_EMOTIONS
+                   for ext in (".webp", ".png")]
+        for shape in shapes:
+            (avatars / shape.format("old")).write_bytes(b"x")
+
+        await rename_agent_now("old", "new", actor=None)
+
+        assert [s for s in shapes if not (avatars / s.format("new")).exists()] == []
+        assert [s for s in shapes if (avatars / s.format("old")).exists()] == []
+
+    @pytest.mark.parametrize("bad_name", ["../x", "ne\x00w"])
+    async def test_a_name_that_would_leave_the_avatar_store_moves_nothing(
+            self, env, tmp_path, bad_name):
+        """The primitive takes `new_name` as FINAL — the sanitiser stayed with
+        the route — so containment is this module's own barrier to keep.
+
+        `../x` escapes the store: without the barrier the cached images are
+        moved OUT of it, one directory up, under an attacker-chosen name. A NUL
+        byte survives normalisation and reaches `rename()` as a `ValueError`,
+        which the best-effort `except` swallows after aborting the remaining
+        moves half-done; refused by name, it moves nothing instead."""
+        avatars = env["avatars"]
+        (avatars / "old.webp").write_bytes(b"a")
+        (avatars / "old_ref.png").write_bytes(b"b")
+        (avatars / "old_emotion_happy.webp").write_bytes(b"c")
+        before = sorted(p.name for p in avatars.iterdir())
+
+        await rename_agent_now("old", bad_name, actor=None)
+
+        assert sorted(p.name for p in avatars.iterdir()) == before
+        # Nothing written outside the store either.
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["avatars"]
+
     async def test_the_rename_event_is_broadcast_on_both_channels(self, env):
         await rename_agent_now("old", "new", actor=None, ws_manager=env["ws"],
                                filtered_ws_manager=env["filtered"])

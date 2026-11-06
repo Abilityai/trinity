@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -249,25 +250,56 @@ async def _rename_container_back(container, old_container_name: str, new_name: s
             f"and let the next start recreate it: {e}")
 
 
+def _avatar_path_or_none(agent_name: str, suffix: str) -> Optional[Path]:
+    """`AVATAR_DIR/<agent_name><suffix>`, or `None` when it would leave the store.
+
+    The primitive takes `new_name` as FINAL — the route's sanitiser stayed with
+    the route (module docstring) — so the containment of every avatar path is
+    this module's own to keep, in the shape CodeQL's `py/path-injection` query
+    recognises as a barrier: normalise the base and give it a trailing
+    separator (so a sibling that merely shares its prefix, `/data/avatars2`, is
+    outside it), normalise the joined path, and require that prefix. A NUL byte
+    is refused by name because it survives both steps and reaches `rename()` as
+    a `ValueError`, which the best-effort `except` below swallows after
+    abandoning the remaining moves half-done.
+
+    Never add a `".." in name` check: `a..b` is a valid agent name.
+
+    `AVATAR_DIR` is read at call time, so a test that patches the constant
+    moves every caller. Draft #4295 lifts this same barrier into
+    `utils/avatar_paths.avatar_path_or_none` for every avatar caller in the
+    tree; when it lands, this private copy is replaced by that import.
+    """
+    filename = f"{agent_name}{suffix}"
+    if "\x00" in filename:
+        return None
+    base = os.path.join(os.path.normpath(str(AVATAR_DIR)), "")
+    fullpath = os.path.normpath(os.path.join(base, filename))
+    if not fullpath.startswith(base):
+        return None
+    return Path(fullpath)
+
+
+def _move_avatar_file(old_name: str, new_name: str, suffix: str) -> None:
+    """Move one cached image, skipping the pair if either side is refused."""
+    old_path = _avatar_path_or_none(old_name, suffix)
+    new_path = _avatar_path_or_none(new_name, suffix)
+    if old_path is None or new_path is None:
+        return
+    if old_path.exists():
+        old_path.rename(new_path)
+
+
 def _move_avatars(old_name: str, new_name: str) -> None:
     """Rename the cached avatar, reference and emotion images (best effort)."""
     try:
         for ext in (".webp", ".png"):
-            old_path = AVATAR_DIR / f"{old_name}{ext}"
-            new_path = AVATAR_DIR / f"{new_name}{ext}"
-            if old_path.exists():
-                old_path.rename(new_path)
+            _move_avatar_file(old_name, new_name, ext)
         # Reference stays .png
-        old_ref = AVATAR_DIR / f"{old_name}_ref.png"
-        new_ref = AVATAR_DIR / f"{new_name}_ref.png"
-        if old_ref.exists():
-            old_ref.rename(new_ref)
+        _move_avatar_file(old_name, new_name, "_ref.png")
         for emotion in AVATAR_EMOTIONS:
             for ext in (".webp", ".png"):
-                old_path = AVATAR_DIR / f"{old_name}_emotion_{emotion}{ext}"
-                new_path = AVATAR_DIR / f"{new_name}_emotion_{emotion}{ext}"
-                if old_path.exists():
-                    old_path.rename(new_path)
+                _move_avatar_file(old_name, new_name, f"_emotion_{emotion}{ext}")
     except Exception as e:
         logger.warning(f"Failed to rename avatar for agent {old_name}: {e}")
 
