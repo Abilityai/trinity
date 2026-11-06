@@ -103,6 +103,7 @@ TABLES = {
             a2a_scope TEXT DEFAULT 'public',  -- inert since ent#885; drop under #746
             a2a_keyless_internal INTEGER DEFAULT 1,  -- inert since ent#885; drop under #746
             operator_resume_enabled INTEGER,  -- tri-state since ent#1108: NULL = platform default (on), 0 = owner OFF, 1 = owner ON
+            wake_on_ending INTEGER,
             memory_opt_out INTEGER DEFAULT 0,
             tts_voice_replies_enabled INTEGER DEFAULT 0,
             tts_voice_id TEXT,

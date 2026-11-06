@@ -46,6 +46,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, 
 from database import db
 from db.operator_queue import OUTCOME_UNKNOWN
 from services import operator_resume_service
+from services import wake_policy
 from services.operator_queue_choices import (
     SOMETHING_ELSE,
     NotOffMenuError,
@@ -1018,7 +1019,7 @@ def raise_ask(
         supersedes_expired=predecessor["id"] if predecessor else None,
         # #3130: the cap counts the agent's own asks, never the platform's rows
         # about it (its flood alarm above all).
-        exclude_request_id_prefixes=oqs._RESERVED_ID_PREFIXES,
+        exclude_request_id_prefixes=oqs.reserved_id_prefixes(),
         replaces=target["id"] if target else None,
         # T8 (#3247): an AGENT's approval with a non-empty proposal only. A
         # question or an alert is never guarded; a missing or empty proposal is
@@ -1195,7 +1196,7 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent",
             raise AskRejected(
                 422, "invalid_request_id",
                 f"A gate raise's request_id must start with {oqs.GATE_ASK_ID_PREFIX!r}.")
-    elif lowered.startswith(oqs._RESERVED_ID_PREFIXES):
+    elif lowered.startswith(oqs.reserved_id_prefixes()):
         raise AskRejected(422, "reserved_request_id",
                           "That request_id prefix is reserved for the platform's own alerts and asks.")
     kind = ask.get("type") or "question"
@@ -1872,7 +1873,7 @@ def _opted_in(agent_name: str) -> bool:
     Unreadable ⇒ not opted in: never "spend" on a flag nobody could read.
     """
     try:
-        return bool(db.get_operator_resume_enabled(agent_name))
+        return bool(wake_policy.resolve(agent_name).enabled)
     except Exception:  # noqa: BLE001
         logger.warning("[AskService] resume opt-in unreadable for %s; not waking it",
                        agent_name, exc_info=True)

@@ -1950,10 +1950,28 @@ row's section, read from the store (`latest_open_user_memory_writes`), never fro
 `undone_by_operator` = undone by someone other than the person (case-insensitive); the
 Workspace projection (`agent_page.memory`) drops `undone_by` itself.
 
+**Frontend** — Agent Settings → Guardrails → Memory → **Person memory**
+(`components/agent-settings/PersonMemorySection.vue`, store `stores/personMemory.js`): the
+people list (skeleton / failed / "No one has memory with this agent yet." / a bounded list
+with its total and Load more), each row the email, the channel identity line and the counts.
+A row opens `PersonMemoryModal.vue` (a wide `BaseModal`): Notes and Summary as plain text,
+History (bounded, Load more by cursor, Undo on the latest write of each section behind
+`ConfirmDialog`, Cancel focused; after an Undo the store re-reads as many rows as were shown)
+and Facts (`retrieval-memory.md` → Frontend). One post-flush watcher re-homes focus on Close
+when Undo or Forget disables or unmounts the focused control. The person's Workspace panel
+(`portal/PortalAgentMemory.vue`) gains Load more (`?before=`, bounded list), shows every
+change as the lines it added and removed (`utils/lineDiff.js`, a whole-line LCS of
+`previous_notes` → `notes`; "No change to the text" when none), explains Undo on the
+undoable row, and reads "Undone by an operator of this agent" on a write someone else
+undid.
+
 **Tests** — `tests/unit/test_ent962_person_memory_owner_view.py`: the readers rule through the
 real dependency chain, the summarizer CAS driven through `summarize_user_memory_background`,
 per-section undo, the shared primitive, paging, the people union, non-creating reads, the live
-route table, both migration tracks.
+route table, both migration tracks. `src/frontend/tests/unit/personMemory.mount.spec.js` and
+`portalAgentMemory.spec.js` (mounted): the list's faces, Undo / Forget behind the confirm,
+plain-text rendering, the person-scoped search, the focus re-home, cursor paging, the
+operator line.
 
 ## Chat History for Logged-In Users (#587)
 

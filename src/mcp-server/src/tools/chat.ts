@@ -379,6 +379,16 @@ export function resolveReportBack(input: ReportBackInput): ReportBackDecision {
 }
 
 /**
+ * ent#1102: put the wake fields on a result the call answered with, beside the
+ * report-back fields and under the same rule — gate results, depth refusals and
+ * thrown errors stay byte-unchanged, because none of them is a dispatch and
+ * nothing will end.
+ */
+function withWake<T extends object>(result: T, fields: WakeFields | undefined): T {
+  return fields ? { ...result, ...fields } : result;
+}
+
+/**
  * #3232: put the report-back fields on a result the call answered with. Never
  * called for gate results, depth refusals or thrown errors — those stay
  * byte-unchanged. The remedy note on `off` is left off `queued_timeout` /
@@ -430,6 +440,120 @@ export async function delegationTurnScope(
     );
     return callerTurn;
   }
+}
+
+/**
+ * ent#1102 — what the receipt says about the WAKE: whether the caller will be
+ * told the run ended, or has to come back for it itself.
+ *
+ * The backend now dispatches a turn on the caller when a delegated run reaches
+ * a terminal (`caller_wake_service`), so "set a reminder and poll" is no longer
+ * the only way to learn an outcome — and for a run that will be reported it is
+ * the wrong move. The delegation contract teaches the field; this decides it.
+ *
+ * Pure, and deliberately silent when it cannot know. Four stand-downs are
+ * knowable right here, whatever the policy says — there is nobody to wake, or
+ * nothing ran, or the caller already holds the reply, or the ending has its own
+ * reaction (a self-task's caller IS the callee; a `fan_out` leg ends into the
+ * batch join, #2524). The POLICY is the backend's to report, because only it
+ * reads the per-agent flag and the instance default: `policyEnabled` is what
+ * the dispatch answer said. When the answer carries no opinion we return
+ * `undefined` and the receipt makes NO claim, rather than promising a wake that
+ * an owner may have switched off — a receipt that says `on_ending` and then
+ * goes quiet costs exactly what ent#1102 set out to remove.
+ */
+export type WakeValue = "on_ending" | "none";
+export type WakeReason =
+  | "nothing_ran"
+  | "answered_inline"
+  | "self_task"
+  | "fan_out"
+  | "no_caller"
+  | "opted_out";
+export interface WakeFields {
+  wake: WakeValue;
+  wake_reason?: WakeReason;
+}
+export interface WakeInput {
+  /** How the call ended — the same three outcomes report-back reads. */
+  outcome: ChatOutcome;
+  /** Is there an agent to wake? A human's call has nobody to tell. */
+  hasCaller: boolean;
+  /** The caller dispatched to itself: the wake would be its own ending. */
+  isSelfTask: boolean;
+  /** A `fan_out` leg; the batch join is the ending's own reaction. */
+  batch?: boolean;
+  /** What the dispatch answer said about this caller's wake policy. */
+  policyEnabled?: boolean;
+}
+
+/**
+ * ent#1102 — the policy out of a backend dispatch answer.
+ *
+ * The backend stamps `wake_on_ending: {effective, source}` on every receipt it
+ * answers a delegation with (`chat_execution_service._wake_on_ending_receipt`),
+ * the same shape `get_agent_info` publishes. An answer without the key carries
+ * no opinion — a human's call, a self-task, a receipt this MCP server
+ * synthesised itself when its own fetch timed out — and `undefined` keeps the
+ * receipt silent rather than guessing.
+ *
+ * A bare boolean is accepted as well: it is what a backend older than ent#1102
+ * would send if the field were ever flattened, and reading the object's
+ * truthiness instead of its `effective` would turn `{effective: false}` into a
+ * promised wake — the one misreading that costs the caller a turn it was told
+ * to expect and never gets.
+ */
+export function wakePolicyFromAnswer(answer?: unknown): boolean | undefined {
+  if (!answer || typeof answer !== "object") return undefined;
+  const raw = (answer as { wake_on_ending?: unknown }).wake_on_ending;
+  if (typeof raw === "boolean") return raw;
+  if (raw && typeof raw === "object" && "effective" in raw) {
+    return Boolean((raw as { effective?: unknown }).effective);
+  }
+  return undefined;
+}
+
+export function resolveWake(input: WakeInput): WakeFields | undefined {
+  const no = (wake_reason: WakeReason): WakeFields => ({ wake: "none", wake_reason });
+  if (!input.hasCaller) return no("no_caller");
+  if (input.outcome === "busy") return no("nothing_ran");
+  if (input.outcome === "inline") return no("answered_inline");
+  if (input.isSelfTask) return no("self_task");
+  if (input.batch) return no("fan_out");
+  if (input.policyEnabled === false) return no("opted_out");
+  if (input.policyEnabled === true) return { wake: "on_ending" };
+  return undefined;
+}
+
+/**
+ * The three `none` reasons a RECEIPT stays silent about, for the same reason
+ * `chatRouteFields` prints nothing on a default-armed inline answer: the caller
+ * has no wake expectation to correct, so the field would be noise on a result
+ * that is otherwise byte-unchanged. A person's call has no agent to wake; a
+ * call that answered inline already carries the reply the wake would announce;
+ * a self-task's caller IS the callee and is the one turn in the system that
+ * cannot be waiting on itself.
+ *
+ * The decision above still names them — it is the full verdict, and the places
+ * that EXPLAIN a wake (audit rows, `get_agent_info`) want the reason even when
+ * the receipt does not print it. Only `nothing_ran`, `fan_out` and `opted_out`
+ * reach a caller that dispatched to a sibling and would otherwise be entitled
+ * to expect a turn.
+ */
+const WAKE_REASONS_THE_RECEIPT_KEEPS_QUIET = new Set<WakeReason>([
+  "no_caller",
+  "answered_inline",
+  "self_task",
+]);
+
+/** What `resolveWake`'s verdict puts on the result the call answers with. */
+export function wakeReceiptFields(input: WakeInput): WakeFields | undefined {
+  const verdict = resolveWake(input);
+  if (!verdict) return undefined;
+  if (verdict.wake_reason && WAKE_REASONS_THE_RECEIPT_KEEPS_QUIET.has(verdict.wake_reason)) {
+    return undefined;
+  }
+  return verdict;
 }
 
 /** How a sequential `/chat` call ended, which decides what it says about report-back (#3295). */
@@ -530,6 +654,18 @@ export async function runAgentChat(
 
   // SELF-EXEC-001: Detect self-call (agent calling itself)
   const isSelfTask = sourceAgent !== undefined && sourceAgent === agent_name;
+
+  // ent#1102: the wake fields for whatever this call ends up answering with.
+  // `wake_on_ending` is the dispatch answer's own report of the caller's policy;
+  // an answer that does not carry it leaves the receipt silent rather than
+  // promising a turn the backend may not spend.
+  const wakeFields = (outcome: ChatOutcome, answer?: unknown): WakeFields | undefined =>
+    wakeReceiptFields({
+      outcome,
+      hasCaller: sourceAgent !== undefined,
+      isSelfTask,
+      policyEnabled: wakePolicyFromAnswer(answer),
+    });
 
   // #946 pull pilot: route a SEQUENTIAL agent→agent call through the
   // durable async /task path instead of the synchronous held /chat. Gated
@@ -658,7 +794,7 @@ export async function runAgentChat(
     if ('status' in response && response.status === 'queued_timeout') {
       console.log(`[Task Timeout Recovery] Agent '${agent_name}' execution_id=${response.execution_id} — caller should poll get_execution_result (#2661)`);
     }
-    return JSON.stringify(withReportBack(asyncReceipt(agent_name, response), reportBack.fields), null, 2);
+    return JSON.stringify(withWake(withReportBack(asyncReceipt(agent_name, response), reportBack.fields), wakeFields("receipt", response)), null, 2);
   }
 
   // #946 pull pilot: agent→agent sequential call routed through the
@@ -683,7 +819,7 @@ export async function runAgentChat(
     );
     if (isGateResult(receipt)) return JSON.stringify(receipt, null, 2);
     if (isDepthRefusal(receipt)) return depthRefusalResult(receipt);
-    return JSON.stringify(withReportBack(asyncReceipt(agent_name, receipt), reportBack.fields), null, 2);
+    return JSON.stringify(withWake(withReportBack(asyncReceipt(agent_name, receipt), reportBack.fields), wakeFields("receipt", receipt)), null, 2);
   }
 
   // Sequential chat mode - uses queue, maintains context
@@ -716,7 +852,7 @@ export async function runAgentChat(
         `armed=${armed === undefined ? "unknown" : armed}`,
       );
     }
-    return JSON.stringify(withReportBack(response, chatRouteFields(reportBack, "receipt", armed)), null, 2);
+    return JSON.stringify(withWake(withReportBack(response, chatRouteFields(reportBack, "receipt", armed)), wakeFields("receipt", response)), null, 2);
   }
 
   // #3244: a 429 that is not the admission refusal — the run may have started
@@ -725,13 +861,13 @@ export async function runAgentChat(
   // reads as answered inline, never `requested`.
   if (isRateLimitedRun(response)) {
     console.log(`[Rate Limited] Agent '${agent_name}' answered 429 after dispatch, execution_id=${response.execution_id ?? "unknown"} (#3244)`);
-    return JSON.stringify(withReportBack(response, chatRouteFields(reportBack, "inline")), null, 2);
+    return JSON.stringify(withWake(withReportBack(response, chatRouteFields(reportBack, "inline")), wakeFields("inline", response)), null, 2);
   }
 
   // Check if response is a queue status (agent busy)
   if ('queue_status' in response) {
     console.log(`[Queue Full] Agent '${agent_name}' is busy, queue is full`);
-    return JSON.stringify(withReportBack({
+    return JSON.stringify(withWake(withReportBack({
       status: "agent_busy",
       agent: agent_name,
       queue_status: response.queue_status,
@@ -740,10 +876,10 @@ export async function runAgentChat(
         `Please wait ${response.retry_after} seconds before retrying, or try a different agent. ` +
         `Consider using parallel=true for independent tasks.`,
       details: response.details,
-    }, chatRouteFields(reportBack, "busy")), null, 2);
+    }, chatRouteFields(reportBack, "busy")), wakeFields("busy")), null, 2);
   }
 
-  return JSON.stringify(withReportBack(response, chatRouteFields(reportBack, "inline")), null, 2);
+  return JSON.stringify(withWake(withReportBack(response, chatRouteFields(reportBack, "inline")), wakeFields("inline", response)), null, 2);
 }
 
 /**
@@ -785,9 +921,8 @@ export function createChatTools(
       // delegation-contract.test.ts pins the published length.
       description:
         "Delegate a task to another agent and get back its reply or a receipt." +
-        "\n\n**Modes:** `parallel=false` (default) continues the agent's own chat session, one queue for every " +
-        "caller. `parallel=true` runs a stateless task; several can run at once. `async=true` (with " +
-        "`parallel=true`) answers with a receipt at once.\n\n" +
+        "\n\n**Modes:** `parallel=false` (default) continues the agent's own chat session; `parallel=true` runs " +
+        "a stateless task; `async=true` answers with a receipt at once.\n\n" +
         DELEGATION_CONTRACT,
       parameters: z.object({
         agent_name: z.string().describe("The name of the agent to chat with"),

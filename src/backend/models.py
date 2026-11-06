@@ -2054,6 +2054,15 @@ class SkillsLibraryAutomationUpdate(BaseModel):
     auto_reinject_enabled: Optional[bool] = None
 
 
+class QueueStallAlertMinutesUpdate(BaseModel):
+    """Body for PUT /api/settings/queue-stall-alert-minutes (#4257).
+
+    Range (5–1440) is enforced in the router so an out-of-range value returns a
+    400 with a descriptive message rather than a generic 422.
+    """
+    value: int
+
+
 class MaxParallelTasksCeilingUpdate(BaseModel):
     """Body for PUT /api/settings/max-parallel-tasks-ceiling (#506).
 
@@ -2309,8 +2318,41 @@ class OperatorResumeUpdate(BaseModel):
     Per-agent rather than per-item deliberately — a dispatch spends money, and an
     agent-declared per-item flag would let the agent make answering costly for
     whoever answers, including an external Workspace client (ent#430 AC #3).
+
+    ent#1102 widens this to the tri-state ``mode``, which is the same switch for
+    both wake paths (an answered ask AND the end of a run this agent delegated —
+    ``services/wake_policy.py`` is the only reader of either column). Three
+    states, not two, because the instance default is ON: "nobody has said" has
+    to be distinguishable from "the owner said off", or flipping the default
+    silently discards the second.
+
+    ``enabled`` is the ent#329 body and stays accepted — an older client, the
+    MCP surface and the current Settings control all send it. It is NOT a
+    synonym for ``mode``: ``enabled`` writes the boolean column as before AND
+    records the same answer in the tri-state, because a person who moves the
+    switch has expressed an opinion either way. Exactly one of the two must be
+    present; both, or neither, is a named 422 rather than a silent precedence
+    rule nobody can see from the request.
     """
-    enabled: bool
+
+    mode: Optional[Literal["default", "on", "off"]] = None
+    enabled: Optional[bool] = None
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> "OperatorResumeUpdate":
+        if (self.mode is None) == (self.enabled is None):
+            raise ValueError(
+                "send exactly one of `mode` ('default' | 'on' | 'off') or the "
+                "legacy `enabled` (true | false)"
+            )
+        return self
+
+    @property
+    def wake_override(self) -> Optional[bool]:
+        """The tri-state value this body writes: None clears the override."""
+        if self.mode is not None:
+            return {"default": None, "on": True, "off": False}[self.mode]
+        return self.enabled
 
 
 class MemoryOptOutUpdate(BaseModel):
