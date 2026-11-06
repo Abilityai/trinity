@@ -135,7 +135,7 @@ payments-py==1.18.0
 # payment doors answer 501 with a green build). Bump both files together.
 a2a-sdk==0.3.26
 mcp==1.30.0
-python-socketio==5.14.3
+python-socketio==5.16.2
 pyjwt==2.14.0
 jsonschema==4.26.0
 websocket-client==1.9.2
