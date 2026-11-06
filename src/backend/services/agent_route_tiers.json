@@ -1505,20 +1505,20 @@
  "seat_decisions.py::get_seat_autonomy": {
   "method": "GET",
   "path": "/api/agents/{agent_name}/seat-autonomy",
-  "reason": "trinity-enterprise#641: a seat-scoped read of the companion's ask-class states and blockers, email-free, the same gates as its sibling decision routes (assert_own_agent, then assert_agent_access); an agent key reads only its own agent",
-  "tier": "accessor"
+  "reason": "trinity-enterprise#1062: the agent's own key only (assert_own_agent, then the agent_only refusal), for the running turn it names; a person reads and decides through the client-portal routes",
+  "tier": "self"
  },
  "seat_decisions.py::list_seat_decisions": {
   "method": "GET",
   "path": "/api/agents/{agent_name}/decisions",
-  "reason": "legacy",
-  "tier": "accessor"
+  "reason": "trinity-enterprise#1062: the agent's own key only (assert_own_agent, then the agent_only refusal), for the running turn it names; a person reads and decides through the client-portal routes",
+  "tier": "self"
  },
  "seat_decisions.py::record_seat_decision": {
   "method": "POST",
   "path": "/api/agents/{agent_name}/decisions",
-  "reason": "legacy",
-  "tier": "accessor"
+  "reason": "trinity-enterprise#1062: the agent's own key only (assert_own_agent, then the agent_only refusal), for the running turn it names; a person reads and decides through the client-portal routes",
+  "tier": "self"
  },
  "sessions.py::create_session": {
   "method": "POST",

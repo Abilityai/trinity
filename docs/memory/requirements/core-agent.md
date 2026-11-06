@@ -4197,7 +4197,9 @@ to localStorage in the clear.
   platform-stamped `X-Trinity-Execution-Id` (#2392, which MCP `record_decision`
   forwards and the model cannot set; `manual` or absent is refused) — else 422
   `not_this_turn` — and that execution must be `running`, else 422
-  `turn_not_running`. A person's own record keeps its path. And when **every** record
+  `decision_turn_not_live` (trinity-enterprise#1062, which also made these doors the
+  agent's own: a person is refused `agent_only` and decides through the client-portal
+  routes). And when **every** record
   in a class's window is agent-written (no person-written record), the evidence must
   span **`STABLE_MIN_DAYS` (3) distinct days** of `created_at`, else the class is
   blocked `agent_only_evidence_too_recent`, so one burst of turns (or self-tasks)
