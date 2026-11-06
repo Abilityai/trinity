@@ -4444,3 +4444,5 @@ to localStorage in the clear.
   which `room_is_user_facing` counts as internal (#363).
 - **FR-7 — "New room" is its own door.** Beside New chat; it opens the agent picker in room
   words and always creates a room, even with one agent.
+- **What a collaborator reads**: the room payload and list drop `cost`, `max_cost_usd`, each message's `execution_id`, and other participants' session and cursor fields. A moderator, an admin and an agent keep them. A collaborator keeps their own cursor.
+- **A reply outlives its waker**: an engine reply lands even if the person who woke it has since left or been removed. That person still cannot read the room.
