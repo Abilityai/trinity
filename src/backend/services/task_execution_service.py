@@ -153,6 +153,38 @@ def _served_person_for(execution_id: Optional[str], triggered_by: Optional[str])
         return None
 
 
+def auto_memory_off_for_row(agent_name: str, row: Any) -> bool:
+    """#4156: whether the agent must spawn this turn with Claude Code's shared
+    auto-memory off — ``memory_subject.keeps_shared_auto_memory``, negated.
+
+    Read off the row (the ORM-ish row or a pull claim's dict), so the push, the
+    `/api/chat` and the pull wire agree. Fail-CLOSED: a row that is missing or
+    cannot be judged turns it off — a wrong "off" costs one turn the agent's
+    own auto-memory notes, a wrong "on" is the cross-user leak."""
+    from services import memory_service, memory_subject
+
+    if row is None:
+        return True
+    try:
+        return not memory_subject.keeps_shared_auto_memory(
+            row, memory_service.owner_email(agent_name), memory_service.owner_id(agent_name))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[#4156] auto-memory rule failed for {agent_name}, turning it off: {type(e).__name__}")
+        return True
+
+
+def auto_memory_off_for(agent_name: str, execution_id: Optional[str]) -> bool:
+    """`auto_memory_off_for_row` for a dispatch that holds only the id."""
+    if not execution_id:
+        return True
+    try:
+        row = db.get_execution(execution_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[#4156] execution {execution_id} unreadable, auto-memory off: {type(e).__name__}")
+        return True
+    return auto_memory_off_for_row(agent_name, row)
+
+
 def _default_model_for(agent_name: str) -> Optional[str]:
     """The model a turn with no explicit model runs on.
 
@@ -1939,6 +1971,11 @@ class TaskExecutionService:
                 # payload (`{**payload, ...}`), so they keep it too.
                 "max_turns": max_turns,
             }
+            # #4156: a turn serving someone other than the owner spawns with
+            # Claude Code's shared auto-memory off. Sent only when set, so an
+            # owner / headless turn's payload is unchanged.
+            if auto_memory_off_for(agent_name, execution_id):
+                payload["disable_auto_memory"] = True
 
             response = await self._call_agent_with_retries(
                 agent_name=agent_name,
