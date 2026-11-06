@@ -288,19 +288,28 @@ def _staging_path(filename: str) -> Path:
     prefix is outside it), the joined path is normalised and must start with it.
     A NUL byte survives both, so it is refused by name.
 
+    A staging name is one path component (`agent-<name>` plus a separator-free
+    suffix), so a separator in it is refused too: `agent-x/../agent-victim-creds`
+    normalises to agent `victim`'s own staging directory, which is inside the
+    root, so containment alone would let one agent's name overwrite another's
+    files. No legitimate agent name carries one: `sanitize_agent_name` maps it
+    away, and Docker refuses it in the `agent-<name>` container name.
+
     Raises `HTTPException(400)` with code `INVALID_AGENT_NAME`.
     """
     refusal = HTTPException(
         status_code=400,
         detail={
             "error": (
-                "The agent name is not a plain name: its staging files would "
-                "leave the staging directory."
+                "The agent name is not a plain name: it must be a single path "
+                "component, with no path separator or NUL byte."
             ),
             "code": "INVALID_AGENT_NAME",
         },
     )
     if "\x00" in filename:
+        raise refusal
+    if os.sep in filename or (os.altsep and os.altsep in filename):
         raise refusal
     base = os.path.join(os.path.normpath(str(_STAGING_ROOT)), "")
     fullpath = os.path.normpath(os.path.join(base, filename))

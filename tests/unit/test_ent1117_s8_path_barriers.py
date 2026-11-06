@@ -22,7 +22,9 @@ the properties that barrier has to hold:
 * every sink (read, write, move, staging) uses the normalised path the barrier
   checked, not one rebuilt from the raw root.
 * the three staging names always get the same verdict, so a refused name
-  leaves the staging root untouched.
+  leaves the staging root untouched;
+* a staging name is one path component: ``agent-x/../agent-victim-creds`` is
+  refused even though it normalises to another agent's file inside the root.
 
 It also pins two responses that used to carry exception text: the Generate
 Default Avatars per-agent error, and the rename 500 (abilityai/trinity#4284).
@@ -491,6 +493,37 @@ def test_stage_config_files_writes_nothing_outside_the_staging_root(staging, tmp
         crud._stage_config_files(config, {}, None)
     assert exc.value.status_code == 400
     assert not any(p.name.startswith("escaped") for p in tmp_path.rglob("*"))
+
+
+@pytest.mark.parametrize("filename", [
+    "agent-x/../agent-victim-creds",
+    "agent-x/../agent-victim.yaml",
+    "agent-a/b-credentials.json",
+    "./agent-x.yaml",
+    "agent-x//y-creds",
+])
+def test_staging_path_refuses_a_separator_even_inside_the_root(staging, filename):
+    """``agent-x/../agent-victim-creds`` normalises to agent ``victim``'s own
+    staging directory. That is inside the root, so containment alone lets it
+    through; a staging name is one path component, so a separator is refused."""
+    with pytest.raises(HTTPException) as exc:
+        crud._staging_path(filename)
+    assert exc.value.status_code == 400
+    assert exc.value.detail["code"] == "INVALID_AGENT_NAME"
+
+
+def test_stage_config_files_cannot_overwrite_another_agents_staging_files(staging):
+    """A name taken as final (``skip_name_sanitization``) that normalises onto
+    another agent's staging files is refused before any write."""
+    (staging / "agent-victim.yaml").write_text("VICTIM")
+    (staging / "agent-victim-credentials.json").write_text("VICTIM")
+    before = sorted(p.relative_to(staging) for p in staging.rglob("*"))
+    with pytest.raises(HTTPException) as exc:
+        crud._stage_config_files(AgentConfig(name="x/../agent-victim"), {}, None)
+    assert exc.value.detail["code"] == "INVALID_AGENT_NAME"
+    assert (staging / "agent-victim.yaml").read_text() == "VICTIM"
+    assert (staging / "agent-victim-credentials.json").read_text() == "VICTIM"
+    assert sorted(p.relative_to(staging) for p in staging.rglob("*")) == before
 
 
 def test_stage_config_files_stages_a_legitimate_agent(staging):
