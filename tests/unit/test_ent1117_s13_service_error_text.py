@@ -266,6 +266,9 @@ def deploy_env(tmp_path, monkeypatch):
     monkeypatch.setattr(deploy_mod, "_prepopulate_workspace_from_template", lambda v, d: None)
     monkeypatch.setattr(deploy_mod, "_compatibility_hard_count", AsyncMock(return_value=None), raising=False)
     monkeypatch.setattr(deploy_mod, "_deploy_lock_client", lambda: None, raising=False)
+    # Never reach the real Docker socket: the failure path removes the deploy
+    # volume by name, which on a machine with Docker running is a real volume.
+    monkeypatch.setattr(deploy_mod, "_cleanup_deploy_volume", lambda volume_name: None)
     return deploy_mod
 
 
@@ -480,6 +483,25 @@ def test_internal_execute_task_masks_a_staged_value_before_the_url_pass(monkeypa
     assert SENTINEL in text, "the rest of the error must still be logged"
     assert "s13StagedPw0rd" not in text, f"the staged URL's password reached the log: {text}"
     assert STAGED_URL_PATH not in text, f"the staged URL's path reached the log: {text}"
+
+
+STAGED_SHAPED_PREFIX = "s13StagedPrefix7c1d-"
+STAGED_SHAPED_VALUE = STAGED_SHAPED_PREFIX + "ghp_" + "S13shapedStagedTokenbbbbbbbbbbbbbbbbbbb"[:36]
+
+
+def test_internal_execute_task_masks_a_staged_value_before_the_shape_pass(monkeypatch, caplog):
+    """The staged-value scrub also runs before the shape pass. Run after it, a
+    staged value that embeds a recognisable token has already had that token
+    rewritten, its identity match misses, and the rest of the value is logged."""
+
+    caplog.set_level(logging.DEBUG)
+    _execute_task_failing_with(monkeypatch, f"{SENTINEL} agent echoed {STAGED_SHAPED_VALUE}")
+    monkeypatch.setattr(internal, "get_staged_values", lambda: [STAGED_SHAPED_VALUE])
+    exc = _call_execute_task()
+    assert exc.status_code == 500
+    text = _log_text(caplog)
+    assert SENTINEL in text, "the rest of the error must still be logged"
+    assert STAGED_SHAPED_PREFIX not in text, f"the staged value's unshaped part reached the log: {text}"
 
 
 def test_internal_execute_task_releases_the_claim_when_the_staged_read_fails(monkeypatch):
