@@ -884,7 +884,7 @@ Callers must check `status`/`failed[]`, not just the HTTP code.
   "name": "my-system-worker2",
   "short_name": "worker2",
   "template": "github:invalid/repo",
-  "reason": "Failed to validate GitHub repository access: repository not found",
+  "reason": "Failed to validate GitHub repository access (GitHubError, HTTP 503 — details in backend logs)",
   "status_code": 502
 }
 ```

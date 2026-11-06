@@ -36,7 +36,8 @@ from fastapi import HTTPException
 from utils.credential_sanitizer import scrub_secret as _scrub_secret
 
 from services.git_credential_helper import git_auth_env as _shared_git_auth_env
-from services.github_service import GitHubService, GitHubError, OwnerType
+from services.github_service import GitHubService, GitHubError, OwnerType, github_error_words
+from utils.log_masking import masked_traceback
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +104,13 @@ scrub_secret = _scrub_secret
 
 def _http_error(status_code: int, code: str, message: str) -> HTTPException:
     return HTTPException(status_code=status_code, detail={"error": message, "code": code})
+
+
+def _log_github_failure(what: str, e: GitHubError, pat: Optional[str]) -> None:
+    """The GitHub error's text goes here, masked, and never into the answer:
+    for a network error it is httpx's, which can echo the token
+    (abilityai/trinity#4284)."""
+    logger.warning("fork-to-own: %s: %s", what, masked_traceback(e, pat))
 
 
 def _git_auth_env(pat: str) -> dict:
@@ -195,8 +203,9 @@ async def _resolve_template_tip(template_repo: str, read_pat: str) -> tuple:
     try:
         info = await gh.check_repo_exists(owner, name)
     except GitHubError as e:
-        raise _http_error(502, "FORK_TEMPLATE_UNREACHABLE",
-                          f"Could not read template '{template_repo}': {e}")
+        _log_github_failure(f"could not read template {template_repo}", e, read_pat)
+        why = github_error_words(type(e), getattr(e, "status", None))
+        raise _http_error(502, "FORK_TEMPLATE_UNREACHABLE", f"Could not read template '{template_repo}' ({why})")
     if not info.exists:
         raise _http_error(
             400, "FORK_TEMPLATE_NOT_FOUND",
@@ -206,8 +215,9 @@ async def _resolve_template_tip(template_repo: str, read_pat: str) -> tuple:
     try:
         head_sha = await gh.get_branch_sha(template_repo, default_branch)
     except GitHubError as e:
-        raise _http_error(502, "FORK_TEMPLATE_UNREACHABLE",
-                          f"Could not read template branch: {e}")
+        _log_github_failure(f"could not read the branch of {template_repo}", e, read_pat)
+        why = github_error_words(type(e), getattr(e, "status", None))
+        raise _http_error(502, "FORK_TEMPLATE_UNREACHABLE", f"Could not read template branch ({why})")
     if not head_sha:
         raise _http_error(
             400, "FORK_TEMPLATE_EMPTY",
@@ -340,15 +350,17 @@ async def inspect_or_create_destination_repo(
     try:
         dest_info = await user_gh.check_repo_exists(dest_owner, dest_name)
     except GitHubError as e:
-        raise _http_error(502, "FORK_DESTINATION_UNREACHABLE",
-                          f"Could not check '{destination_repo}': {e}")
+        _log_github_failure(f"could not check {destination_repo}", e, user_pat)
+        why = github_error_words(type(e), getattr(e, "status", None))
+        raise _http_error(502, "FORK_DESTINATION_UNREACHABLE", f"Could not check '{destination_repo}' ({why})")
 
     if dest_info.exists:
         try:
             dest_branches = await user_gh.list_branches(destination_repo, limit=10)
         except GitHubError as e:
-            raise _http_error(502, "FORK_DESTINATION_UNREACHABLE",
-                              f"Could not inspect '{destination_repo}': {e}")
+            _log_github_failure(f"could not inspect {destination_repo}", e, user_pat)
+            why = github_error_words(type(e), getattr(e, "status", None))
+            raise _http_error(502, "FORK_DESTINATION_UNREACHABLE", f"Could not inspect '{destination_repo}' ({why})")
         if not dest_branches:
             return DestinationState("empty", [])
         return DestinationState("branches", dest_branches)
