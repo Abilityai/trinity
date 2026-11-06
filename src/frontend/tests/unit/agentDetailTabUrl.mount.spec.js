@@ -151,7 +151,7 @@ describe('AC5 — the #2130 tab-restore guard still holds', () => {
   it('the late reconcile does not move a user who clicked in the meantime', async () => {
     backend.state.agent.can_share = false
     const release = holdMountBatch()
-    await open('/agents/alpha?tab=sharing')
+    await open('/agents/alpha?tab=channels')
     expect(strip().exists()).toBe(true)   // agent loaded; the batch is still out
 
     await clickTab('reports')
@@ -164,17 +164,23 @@ describe('AC5 — the #2130 tab-restore guard still holds', () => {
 
   it('left alone, the fallback to Overview replaces the dead link instead of stacking on it', async () => {
     backend.state.agent.can_share = false
-    await open('/agents/alpha?tab=sharing')
+    await open('/agents/alpha?tab=channels')
     expect(active()).toBe('overview')
     expect(url()).toBe('/agents/alpha?tab=overview')
-    // Back leaves the page: there is no ?tab=sharing entry to bounce through.
+    // Back leaves the page: there is no ?tab=channels entry to bounce through.
     await back()
     expect(url()).toBe('/')
   })
 
-  it('a visible deep link is left exactly as it was', async () => {
+  // trinity-enterprise#225: the tab was called Sharing, and those links are out there.
+  it('an old ?tab=sharing link opens the Channels tab', async () => {
     await open('/agents/alpha?tab=sharing')
-    expect(active()).toBe('sharing')
-    expect(url()).toBe('/agents/alpha?tab=sharing')
+    expect(active()).toBe('channels')
+  })
+
+  it('a visible deep link is left exactly as it was', async () => {
+    await open('/agents/alpha?tab=channels')
+    expect(active()).toBe('channels')
+    expect(url()).toBe('/agents/alpha?tab=channels')
   })
 })
