@@ -1496,15 +1496,24 @@ def _with_switch(
 _TIMEOUT_ATTRIBUTION_GRACE_S = 30
 
 
+# The phrases the execution error's readers match, case and all: the sync
+# /task mapper (`chat_execution_service._map_task_failure`), the public and
+# inline-auth chats and the client portal answer 429 on "at capacity" and 504
+# on "timed out".
+_READER_PHRASES = ("timed out", "at capacity")
+
+
 def _exception_words(exc: BaseException) -> str:
-    """The class of ``exc``, plus "timed out" when its text says so.
+    """The class of ``exc``, plus each reader phrase its text holds.
 
     The text itself stays in the log (abilityai/trinity#4284): this message is
-    the execution's error, which the sync routes answer at 5xx. "timed out"
-    survives because the sync /task mapper answers 504 on it.
+    the execution's error, which the sync routes answer at 5xx. A reader phrase
+    survives exactly as the readers match it, so each answers the status it
+    gave the exception's own text.
     """
-    said = ": timed out" if "timed out" in str(exc).lower() else ""
-    return f"{type(exc).__name__}{said}"
+    text = str(exc)
+    said = [phrase for phrase in _READER_PHRASES if phrase in text]
+    return type(exc).__name__ + (f": {', '.join(said)}" if said else "")
 
 
 def _classify_timeout_failure(

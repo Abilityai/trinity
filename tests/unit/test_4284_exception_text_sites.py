@@ -674,6 +674,34 @@ def test_execute_task_unexpected_timeout_keeps_timed_out():
         result.error, "Task execution failed (RuntimeError: timed out — details in backend logs)")
 
 
+def _mapped_status(result) -> int:
+    from unittest.mock import MagicMock, patch
+    from services import chat_execution_service as ces
+    with patch.object(ces, "idempotency_service", MagicMock()):
+        with pytest.raises(ces.ChatDispatchError) as exc:
+            ces._map_task_failure("test-agent", result, idem=MagicMock())
+    return exc.value.status_code
+
+
+@pytest.mark.parametrize("words, status", [
+    ("Lock Timed Out", 503),
+    ("Read timed out.", 504),
+    ("the agent is at capacity", 429),
+    ("Agent At Capacity", 503),
+    ("", 503),
+], ids=["capitalised-timeout", "timed-out", "at-capacity", "capitalised-capacity", "plain"])
+def test_execute_task_error_keeps_the_status_its_text_had(words, status):
+    """The sync /task mapper, the public, inline-auth and portal chats match
+    "timed out" and "at capacity" case and all. Each answers the class-only
+    error with the status it gave the exception's own text."""
+    exc = RuntimeError(f"{_PLANT} {words}")
+    result = _execute_with(exc)
+    _assert_answer_clean(result.error, "RuntimeError")
+    as_text = SimpleNamespace(**{**vars(result), "error": str(exc)})
+    assert _mapped_status(as_text) == status
+    assert _mapped_status(result) == status
+
+
 def test_execute_task_short_timeout_names_the_class(caplog):
     caplog.set_level(logging.ERROR)
     result = _execute_with(httpx.ReadTimeout(f"{_PLANT} The read operation timed out"))
