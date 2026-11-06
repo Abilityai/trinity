@@ -230,6 +230,15 @@ def test_a_rendering_that_cuts_the_run_is_masked(render):
     _assert_no_stretch(out, shown)
 
 
+@pytest.mark.parametrize("offset", range(8))
+def test_a_16_character_stretch_is_masked_at_any_offset_in_a_longer_run(offset):
+    # The text samples every few characters; a shared stretch of 16 must be
+    # caught wherever it sits inside the surrounding run.
+    text = f"see {'q' * offset}{CUT[10:26]}{'q' * (7 - offset)} here"
+    out = mask_held_values(text, CUT)
+    assert CUT[10:26] not in out and out == f"see {MASK} here", out
+
+
 def test_a_visible_stretch_under_the_window_is_not_masked():
     """Documented limit: 11 characters of a run, alone, are not caught."""
     text = f"key starts {CUT[:11]} here"
@@ -274,6 +283,8 @@ def test_a_piece_of_exactly_the_floor_is_masked():
 
 def test_a_value_of_exactly_the_floor_is_masked():
     assert mask_held_values("x ABCDEFGH y", "ABCDEFGH") == f"x {MASK} y"
+    # A rendering of exactly 8 that no piece covers (both pieces are short).
+    assert mask_held_values("x ABCD\nEFG y", "ABCD\nEFG") == f"x {MASK} y"
     assert mask_held_values("x ABCDEFG y", "ABCDEFG") == "x ABCDEFG y"
 
 
@@ -291,6 +302,9 @@ def test_a_crafted_value_is_bounded_in_pieces_windows_and_time():
     pieces = _pieces(crafted, MIN_HELD_LENGTH)
     assert len(pieces) == MAX_PIECES
     assert len(_windows(pieces)) <= MAX_WINDOW_SOURCE
+    rng = __import__("random").Random(1117)
+    one_run = "".join(rng.choice("ABCDEFGHIJKLMNOPQRSTUVWXYZ") for _ in range(100_000))
+    assert len(_windows([one_run])) <= MAX_WINDOW_SOURCE
     text = "url " + quote(crafted, safe="") + " " + "y" * 1_000_000
     start = time.perf_counter()
     mask_held_values(text, crafted)
