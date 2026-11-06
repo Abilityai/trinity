@@ -364,16 +364,27 @@ def test_dashboard_unreadable_file_names_the_failure(dashboard, caplog):
     assert any("dashboard.yaml" in r.getMessage() for r in caplog.records)
 
 
+def test_dashboard_unreadable_file_leaves_no_descriptor_open(dashboard):
+    """The no-follow open hands back a descriptor before the read can fail (a
+    directory opens, then refuses to be read); it is closed on that path too."""
+    mod, path = dashboard
+    path.mkdir()
+    before = len(os.listdir("/dev/fd"))
+    for _ in range(5):
+        _dash(mod)
+    assert len(os.listdir("/dev/fd")) == before
+
+
 def test_dashboard_permission_denied_names_the_failure(dashboard, monkeypatch, caplog):
     """The OSError arm names the class; the error's own text (here a filename
     carrying a planted credential) reaches the log only through the sanitizer."""
     mod, path = dashboard
     path.write_text("title: T\n")
 
-    def _denied(self, *a, **kw):
+    def _denied(*a, **kw):
         raise PermissionError(13, "Permission denied", _PLANT)
 
-    monkeypatch.setattr(type(path), "read_text", _denied)
+    monkeypatch.setattr(mod, "_read_dashboard", _denied)
     with caplog.at_level(logging.ERROR, logger=mod.logger.name):
         out = _dash(mod)
     assert (
@@ -431,6 +442,84 @@ def test_dashboard_has_no_unreachable_yaml_error_arm():
     assert "except yaml.YAMLError" not in src
     assert "\nimport yaml\n" not in src
     assert "except HardenedYamlError" in src  # test_1965's contract
+
+
+# What the #282 tests plant: one line of a credentials file the dashboard must
+# never quote (a fake; built by concatenation so no source line holds it whole).
+_ENV_LINE = "DB_URL: postgres://u:" + "FAKEPASS" + "@h/db"
+
+
+def test_dashboard_link_to_another_file_is_refused_without_its_text(dashboard, tmp_path):
+    """#282: `dashboard.yaml` is opened without following a link, so a link to
+    another file (here a stand-in for `~/.env`, which the shared tier cannot
+    read through Files) is refused and none of that file's text is returned."""
+    mod, path = dashboard
+    env = tmp_path / "dot-env"
+    env.write_text("A=1\n" + _ENV_LINE + "\n")
+    path.symlink_to(env)
+    out = _dash(mod)
+    assert out == {
+        "has_dashboard": False,
+        "config": None,
+        "last_modified": None,
+        "error": "Failed to read dashboard.yaml: it is a link, and links are not followed",
+    }
+    assert "FAKEPASS" not in str(out)
+
+
+def test_dashboard_link_to_a_valid_dashboard_is_refused(dashboard, tmp_path):
+    """#282: the success path is held to the same rule: a link to another file
+    that happens to be a valid dashboard is not served either."""
+    mod, path = dashboard
+    other = tmp_path / "other.yaml"
+    other.write_text(f"title: Other\nsections:\n  - widgets: [{_VALID_WIDGET}]\n")
+    path.symlink_to(other)
+    out = _dash(mod)
+    assert out["has_dashboard"] is False and out["config"] is None
+    assert out["error"] == "Failed to read dashboard.yaml: it is a link, and links are not followed"
+
+
+def test_dashboard_dangling_link_gets_the_same_answer(dashboard, tmp_path):
+    """#282: whether a link's target exists is not disclosed either: a dangling
+    link is answered exactly like a live one."""
+    mod, path = dashboard
+    path.symlink_to(tmp_path / "no-such-file")
+    out = _dash(mod)
+    assert out["error"] == "Failed to read dashboard.yaml: it is a link, and links are not followed"
+
+
+def test_dashboard_missing_file_keeps_its_answer(dashboard):
+    """Characterization: no file at the path is still "no dashboard"."""
+    mod, _path = dashboard
+    out = _dash(mod)
+    assert out == {
+        "has_dashboard": False,
+        "config": None,
+        "last_modified": None,
+        "error": "No dashboard.yaml found at /home/developer/dashboard.yaml",
+    }
+
+
+def test_dashboard_regular_file_reports_its_own_mtime(dashboard):
+    """Legitimate input: a regular file renders, with its own modification time."""
+    mod, path = dashboard
+    path.write_text(f"title: T\nsections:\n  - widgets: [{_VALID_WIDGET}]\n")
+    os.utime(path, (1_700_000_000, 1_700_000_000))
+    out = _dash(mod)
+    assert out["has_dashboard"] is True
+    assert out["last_modified"] == mod.iso_z_from_mtime(1_700_000_000)
+
+
+def test_dashboard_parse_error_still_points_at_the_offending_line(dashboard):
+    """Kept on purpose: a parse error names the line and quotes it, because
+    with links refused that line is from `dashboard.yaml` itself, a file the
+    same caller reads whole through Files and on every successful read."""
+    mod, path = dashboard
+    path.write_text("A=1\n" + _ENV_LINE + "\n")
+    out = _dash(mod)
+    assert out["error"].startswith("workspace_yaml_yaml_invalid: ")
+    assert "line 2, column 7" in out["error"]
+    assert _ENV_LINE in out["error"]
 
 
 # ---------------------------------------------------------------------------
