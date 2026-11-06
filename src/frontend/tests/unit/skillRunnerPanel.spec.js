@@ -11,6 +11,7 @@ import { describe, it, expect } from 'vitest'
 import {
   blockingReason, blockingAction, runnerState, runnerSummary, actionState,
   headerCounts, isDuplicateGrant, grantFormState, revokePrompt, filterGrants, grantsFrom,
+  skillOptions,
   RUNNER_ABSENT, RUNNER_STOPPED, RUNNER_RUNNING,
 } from '../../src/components/settings/skillRunnerPanel.js'
 
@@ -260,5 +261,30 @@ describe('loading treatment', () => {
   it('gates on a view verdict, never a bare loading flag (#1927)', () => {
     expect(panelSrc).toMatch(/v-if="view\.state === 'loading'"/)
     expect(panelSrc).not.toMatch(/v-if="loading"/)
+  })
+})
+
+describe('the skill picker (trinity-enterprise#736)', () => {
+  it('marks a deprecated library skill in its option text, and only those', () => {
+    expect(skillOptions([
+      { name: 'research', deprecated: false },
+      { name: 'add-backlog', deprecated: true, superseded_by: 'backlog' },
+      { name: 'legacy' },                                    // an older backend: no lifecycle field
+    ])).toEqual([
+      { name: 'add-backlog', label: 'add-backlog (deprecated)' },
+      { name: 'legacy', label: 'legacy' },
+      { name: 'research', label: 'research' },
+    ])
+  })
+
+  it('keeps the order the picker always had (code-unit sort, like Array#sort)', () => {
+    const names = ['b', 'B', 'a-1', 'a', '_x']
+    expect(skillOptions(names.map((name) => ({ name }))).map((o) => o.name)).toEqual([...names].sort())
+  })
+
+  it('is empty for a listing it cannot read', () => {
+    expect(skillOptions(null)).toEqual([])
+    expect(skillOptions({ detail: 'nope' })).toEqual([])
+    expect(skillOptions([null, { description: 'nameless' }])).toEqual([])
   })
 })

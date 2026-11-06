@@ -5999,6 +5999,8 @@ class SkillSetMember(BaseModel):
     version: Optional[str] = None
     # The source that wins this member when it is NOT the set's own source.
     shadowed_source: Optional[str] = None
+    # trinity-enterprise#736: the library is retiring this member (ent#672).
+    deprecated: bool = False
 
 
 class SkillSetInfo(BaseModel):
@@ -6019,6 +6021,10 @@ class AgentSkillSetMember(BaseModel):
     state: str  # assigned | conflict | not_assigned | missing_upstream
     version: Optional[str] = None
     shadowed_source: Optional[str] = None
+    # trinity-enterprise#736: `deprecation` is the ent#672 code
+    # (`deprecated` | `deprecated:<successor>`) an assign note names; None when live.
+    deprecated: bool = False
+    deprecation: Optional[str] = None
 
 
 class AgentSkillSetStatus(BaseModel):
