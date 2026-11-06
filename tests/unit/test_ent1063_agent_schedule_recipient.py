@@ -14,6 +14,7 @@ is stubbed.
 """
 from __future__ import annotations
 
+import secrets
 import uuid
 from types import SimpleNamespace
 
@@ -40,6 +41,16 @@ class _SchedulerOK:
     async def post(self, *a, **k):
         return SimpleNamespace(status_code=200, json=lambda: {"execution_id": "e1", "status": "started"},
                                text="{}")
+
+
+@pytest.fixture(autouse=True)
+def encryption_key(monkeypatch):
+    """The owner-positive webhook-secret case reaches the real cipher. The unit
+    workflow sets no CREDENTIAL_ENCRYPTION_KEY, and the encryption service is a
+    singleton, so without this pin the case is green only when a sibling file
+    that sets the key happens to run first in the same worker (merge-train, #4209)."""
+    monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", secrets.token_hex(32))
+    yield
 
 
 @pytest.fixture
