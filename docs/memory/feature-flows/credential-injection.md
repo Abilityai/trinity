@@ -119,9 +119,15 @@ OpenAI/Codex key) and the `GITHUB_PAT` lookups in `startup.sh` and
 `tests/fixtures/ent1117-env-escape-cases.json`
 holds the encoding (values → lines, generated from the agent's encoder) and
 `tests/fixtures/ent1117-env-legacy-reads.json` holds lines this writer never
-produced (the previous writer's output, hand edits, pastes) with the values
-each reader must keep returning; the only difference between the panel and the
-agent is a lone `'`, which the panel reads as empty. Both fixtures are run by
+produced (the previous writer's output, hand edits, pastes) with two expected
+columns: `panel`, what the previous panel reader returned (the panel must keep
+returning it), and `agent`, what `execution_env` returns (every agent-side
+reader must return it). The columns differ only on a lone `'`, which the panel
+reads as empty. One shape of line reads differently in `mcp_template` than before
+trinity-enterprise#1117: a double-quoted value containing `\\`, such as an
+old-writer line `"a\\b"` that has not been re-saved, used to render into
+`.mcp.json` as `a\\b` and now renders as `a\b`, which is what executions have
+always received for that line. Both fixtures are run by
 `tests/unit/test_ent1117_s11_env_escape_table.py` and
 `src/frontend/tests/unit/ent1117EnvEscape.spec.js`. `formatEnvContent` still
 drops author comments.
