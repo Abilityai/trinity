@@ -48,8 +48,14 @@ def captured_env(monkeypatch):
     """Record the env of the next `subprocess.Popen` and stop the run there.
 
     The key is removed from the container baseline so a developer's shell (or
-    a future image default) cannot decide the owner-turn case."""
+    a future image default) cannot decide the owner-turn case.
+
+    `claude_code_available` is probed once at import (`claude --version`), so
+    it is True on a workstation with the CLI and False on CI; both public
+    runtime methods 503 before the spawn when it is False. Pin it so the test
+    exercises the hand-off, not the host's PATH."""
     monkeypatch.delitem(ee.INITIAL_ENV, KEY, raising=False)
+    monkeypatch.setattr(cc.agent_state, "claude_code_available", True)
     seen: dict = {}
 
     def _popen(cmd, **kwargs):
