@@ -30,6 +30,10 @@ TEXT_SURFACES = (
     REPO / "src" / "mcp-server" / "src" / "tools" / "nevermined.ts",
     REPO / "docs" / "memory" / "feature-flows" / "nevermined-payments.md",
     REPO / "docs" / "user-docs" / "integrations" / "nevermined-payments.md",
+    # The ent#967 spending panel and organization form: the copy constants and both SFCs.
+    REPO / "src" / "frontend" / "src" / "utils" / "neverminedSpending.js",
+    REPO / "src" / "frontend" / "src" / "components" / "NeverminedSpendingPanel.vue",
+    REPO / "src" / "frontend" / "src" / "components" / "settings" / "NeverminedOrganizationPanel.vue",
 )
 FORBIDDEN = re.compile(
     r"trinity\s+(charges|holds|stores|keeps|saves)\s+(the|your|a)\s+card"

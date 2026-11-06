@@ -122,6 +122,13 @@
             ? 'text-status-warning-700 dark:text-status-warning-300'
             : 'text-status-success-700 dark:text-status-success-300'"
       >{{ deliveryNote.agent }}: {{ deliveryNote.text }}</p>
+      <!-- The skill landed, but the agent lacks a binary or env key it declares.
+           Its own line: the delivery note above stays green. -->
+      <p
+        v-if="!writeError && dependencyNote"
+        data-testid="skill-dependency-note"
+        class="mt-1 text-[11px] text-status-warning-700 dark:text-status-warning-400"
+      >{{ dependencyNote }}</p>
       <!-- ent#672: the assign went through, and the skill is deprecated. Its
            own line rather than a clause in the delivery note — delivery and
            lifecycle are two facts, and a clean delivery stays green. -->
@@ -151,7 +158,7 @@
  */
 import { computed, ref } from 'vue'
 import { useSkillsLibraryStore } from '../../stores/skillsLibrary'
-import { deliveryText, deprecationText } from '../../utils/skillDelivery'
+import { deliveryText, deprecationText, dependencyText } from '../../utils/skillDelivery'
 
 const props = defineProps({
   skillName: { type: String, required: true },
@@ -183,6 +190,9 @@ const deliveryNote = computed(() => {
 
 // ent#672 — read off the same report; null for a live skill.
 const deprecationNote = computed(() => deprecationText(store.deliveries[props.skillName]?.report))
+
+// #3136 — what the injection found missing on that agent; null when nothing is.
+const dependencyNote = computed(() => dependencyText(store.deliveries[props.skillName]?.report))
 
 async function onAssign() {
   if (!picked.value) return

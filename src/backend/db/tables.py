@@ -126,6 +126,12 @@ agent_ownership = Table(
     # per-request, so hosting asks cannot hand a client a spend button (ent#430
     # AC #3). Default ON since abilityai/trinity-enterprise#1108; the owner's OFF is 0.
     Column("operator_resume_enabled", Integer),         # tri-state since abilityai/trinity-enterprise#1108: NULL = platform default (on), 0 = owner OFF, 1 = owner ON
+    # ent#1102: tri-state wake-on-ending override. NULL = follow the instance
+    # default (``wake_on_ending_default``, ON), 0 = never wake, 1 = always wake.
+    # Nullable BY DESIGN: a NULL is "no opinion", which an INTEGER DEFAULT 0
+    # could not express — and telling "never set" from "the owner said off" is
+    # the whole reason the default could be flipped on without erasing intent.
+    Column("wake_on_ending", Integer),
     Column("memory_opt_out", Integer),             # trinity-enterprise#1022: per-agent retrieval-memory opt-out (default 0)
     Column("tts_voice_replies_enabled", Integer),  # epic #24/#25: outbound voice-out toggle (shared agent-level)
     Column("tts_voice_id", Text),                  # epic #24/#25: ElevenLabs voice id for spoken replies
@@ -966,7 +972,7 @@ public_user_memory = Table(
     Column("updated_at", Text),
 )
 
-# ent#637: write history for the agent_notes section — see the note in db/schema.py.
+# ent#637: write history for the memory blob (ent#962: both sections) — see the note in db/schema.py.
 public_user_memory_writes = Table(
     "public_user_memory_writes",
     metadata,
@@ -981,6 +987,8 @@ public_user_memory_writes = Table(
     Column("written_at", Text),
     Column("undone_at", Text),
     Column("undone_by", Text),
+    # trinity-enterprise#962: `notes` | `summary` — see the note in db/schema.py.
+    Column("section", Text, nullable=False, server_default="notes"),
 )
 
 # trinity-enterprise#1022 (MEM-002): retrieval memory facts — see the note in db/schema.py.

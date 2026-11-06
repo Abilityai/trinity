@@ -73,6 +73,7 @@ def tmp_db_conn(tmp_path, monkeypatch):
             spawned_by_key_id TEXT,
             max_parallel_tasks INTEGER,
             operator_resume_enabled INTEGER DEFAULT 0,
+            wake_on_ending INTEGER,
             deleted_at TEXT
         )
         """
@@ -298,6 +299,12 @@ class TestTheSettingsReadIsHonest:
         except Exception as e:  # pragma: no cover — venv-less checkout
             pytest.skip(f"backend venv required: {e}")
         monkeypatch.setattr(agents_router, "db", mixin, raising=False)
+        # ent#1102: the handler also reports the resolver's verdict, and the
+        # resolver reads through its own `db`; point it at the same rows so the
+        # read never touches a real database (its instance-default read is
+        # absent on the mixin and resolves "unreadable", which is not asserted).
+        import services.wake_policy as wake_policy
+        monkeypatch.setattr(wake_policy, "db", mixin)
         return agents_router
 
     def _read(self, router, name):
@@ -307,8 +314,11 @@ class TestTheSettingsReadIsHonest:
 
     def test_an_untouched_agent_reads_on(self, router, tmp_db_conn):
         _seed(tmp_db_conn, "untouched", enabled=None)
-        assert self._read(router, "untouched") == {"agent_name": "untouched", "enabled": True}
+        out = self._read(router, "untouched")
+        # ent#1102 adds `mode`/`effective`/`source` beside the ent#329 field.
+        assert (out["agent_name"], out["enabled"]) == ("untouched", True)
 
     def test_an_owner_off_reads_off(self, router, tmp_db_conn):
         _seed(tmp_db_conn, "owner-off", enabled=0)
-        assert self._read(router, "owner-off") == {"agent_name": "owner-off", "enabled": False}
+        out = self._read(router, "owner-off")
+        assert (out["agent_name"], out["enabled"]) == ("owner-off", False)

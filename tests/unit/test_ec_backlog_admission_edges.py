@@ -628,22 +628,30 @@ def test_d12_equal_queued_at_each_row_dequeued_exactly_once(ops):
     assert ops.claim_next_queued("alpha") is None
 
 
-def test_d13_released_claim_loses_its_head_position_characterisation(ops):
-    """D13 — UNSPECIFIED, pinned. ``release_claim_to_queued`` restores
-    ``queued_at`` from ``started_at``, but ``claim_next_queued`` overwrote
-    ``started_at`` with the claim time. So a row released by the drain's
-    re-acquire race re-enters BEHIND rows queued before that claim (and its 24h
-    TTL clock restarts). Whether that is intended (cf. ``requeue_expired_lease``
-    which sends a redelivery to the back on purpose) is a human decision; this
-    test makes any change to it visible."""
+def test_d13_released_claim_keeps_its_head_position(ops):
+    """D13 — SPECIFIED by #4257; this pinned the behaviour before the ruling.
+
+    It used to read the other way: ``claim_next_queued`` nulled ``queued_at``
+    and ``release_claim_to_queued`` rebuilt it from ``started_at`` (the claim
+    time), so a row released by the drain's re-acquire race re-entered BEHIND
+    rows queued after it, with its 24h TTL clock restarted. #4257 made the
+    call: a claim now PRESERVES ``queued_at``, and the release coalesces
+    instead of overwriting, so a released row keeps the admission instant it
+    was actually admitted at — its FIFO place and its TTL clock with it. The
+    deliberate contrast is ``requeue_expired_lease``, which still sends a
+    redelivery to the back on purpose; losing a place is a decision a path
+    makes, not an accident of which column the value was rebuilt from.
+    """
     now = datetime.now(timezone.utc)
-    _row("d13-a", status="queued", queued_at=_iso(now - timedelta(seconds=20)))
+    original = _iso(now - timedelta(seconds=20))
+    _row("d13-a", status="queued", queued_at=original)
     _row("d13-b", status="queued", queued_at=_iso(now - timedelta(seconds=10)))
     assert ops.claim_next_queued("alpha")["id"] == "d13-a"
     assert ops.release_claim_to_queued("d13-a") is True
     q = _hscalar("SELECT queued_at FROM schedule_executions WHERE id='d13-a'")
-    assert q > _iso(now - timedelta(seconds=20))  # original position not restored
-    assert ops.claim_next_queued("alpha")["id"] == "d13-b"
+    assert q == original  # the original admission instant, not the claim time
+    # So it is still the head: the row that waited longest is claimed first.
+    assert ops.claim_next_queued("alpha")["id"] == "d13-a"
 
 
 def test_d13b_release_of_a_non_running_row_is_a_noop(ops):

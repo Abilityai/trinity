@@ -264,6 +264,13 @@ GATE_ASK_ID_PREFIX = "gate-"
 # / validation_service, plus this service's own alert id).
 _RESERVED_ID_PREFIXES = (
     "queue-flood-",      # this service's own flood alert
+    "queue-stall-",      # queue_stall_service stalled-head alert (#4257). The id
+                         # is `queue-stall-<agent>-<timestamp>`, so the stem is
+                         # guessable from the agent's own name — reserved for
+                         # the same reason as the flood alert above: an agent
+                         # must not be able to pre-create, and through
+                         # create_item's ON CONFLICT silently suppress, the row
+                         # that says its own queue is not moving
     "poison-",           # lease_reaper_service poison-park (#1402)
     "cb-dormant-",       # agent_client circuit-breaker-dormant alert
     "sync-failing-",     # sync_health_service
@@ -651,6 +658,12 @@ from . import write_back  # noqa: E402
 from . import alerts  # noqa: E402,F401 — loads the submodule here, in G6 order
 from . import flood  # noqa: E402
 
+# trinity-enterprise#1111 (T4): the runtime id-prefix reservation registry —
+# mutable state with two public functions, in its own module so `__init__`
+# stays under the #3785 G1 cap. Reads `_oq._RESERVED_ID_PREFIXES` at call
+# time only.
+from . import reserved  # noqa: E402
+
 
 class OperatorQueueSyncService(poller.PollerCoreMixin, ingest.IngestMixin, write_back.WriteBackMixin,
                               flood.FloodAlertMixin):
@@ -737,4 +750,10 @@ from .alerts import (  # noqa: E402,F401
     ALERT_REFUSED_UNREGISTERED,
     create_bounded_alert,
     create_bounded_alert_outcome,
+)
+# reserved: the ent#1111 registry, which `platform_alerts.register`, the ask
+# sink and the enterprise emitters read through the package.
+from .reserved import (  # noqa: E402,F401
+    reserve_id_prefix,
+    reserved_id_prefixes,
 )

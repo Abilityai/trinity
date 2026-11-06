@@ -226,6 +226,7 @@ def test_allowlist_oracle(members, probe, pads, empties):
 @given(trigger=st.one_of(st.none(), st.text(max_size=12),
                          st.sampled_from(sorted({"agent", "event", "schedule", "webhook", "reminder", "loop",
                                                  "fan_out", "a2a", "operator_response", "operator_ending",
+                                                 "caller_wake",
                                                  "retry", "manual", "mcp", "chat", "session", "public",
                                                  "validation", "self_task", "slack", "paid"}))),
        pilot=st.booleans())

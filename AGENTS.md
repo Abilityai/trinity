@@ -32,7 +32,7 @@ Trinity is the operating system for the AI-native company — open source, self-
 | Unauthenticated endpoints | `/health`, `/api/auth/mode`, `/api/setup/status`, `/api/token` |
 | Agent SSH ports | 2222+ (incrementing per agent) |
 | Required agent files | `CLAUDE.md` (agent instructions), `template.yaml` (metadata); optional `.env.example`, `.mcp.json.template` |
-| Persistence | SQLite at `~/trinity-data/trinity.db` (host bind mount); Redis for transient state |
+| Persistence | PostgreSQL in the bundled `postgres` container (volume `postgres-data`); Redis for transient state |
 | License | Apache 2.0 — free for any use, commercial included |
 
 ## Stand up a Trinity instance

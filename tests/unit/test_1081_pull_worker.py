@@ -447,7 +447,21 @@ class TestTaskOverridesReachTheRuntime:
         """A 60s turn budget must not cut the result-POST retry window down to
         60s+buffer — the backend lease derives from the agent's
         execution_timeout, not the row's, so the reaper would re-run a turn whose
-        terminal was still being retried."""
+        terminal was still being retried.
+
+        #4257 rewrote the mechanism, not the invariant. The in-loop window is
+        now bounded by a constant (`_DELIVERY_IN_LOOP_SECONDS`), because
+        retrying to the lease deadline parked one of N workers for up to 20
+        minutes with no process running — the pool then looks alive to the
+        backend and claims nothing, which is the stall #4257 is about. What
+        #2317 guarded is unchanged and still asserted below: the window owes
+        NOTHING to the row's `timeout_seconds`. The reaper-re-runs-spent-work
+        risk it names is now carried by the persisted envelope (B6) plus the
+        60 s resend tick, both of which land well inside the lease — so the
+        guarantee is kept by a different, strictly tighter route. The
+        full-lease arm still applies where nothing is persisted; see
+        `test_4257_pull_worker_hardening.py`.
+        """
         monkeypatch.setenv("TRINITY_PULL_TURN_TIMEOUT", "900")
         md = SimpleNamespace(model_dump=lambda: {})
         runtime = SimpleNamespace(
@@ -470,5 +484,11 @@ class TestTaskOverridesReachTheRuntime:
         }
         before = time.monotonic()
         asyncio.run(pw._run_and_report(claim, _FakeClient(), "http://b", "s", "alpha"))
-        # 900 (pool budget) + 300 (slot-TTL buffer), NOT 60 + 300.
-        assert seen["deadline"] - before >= 900 + pw._SLOT_TTL_BUFFER_SECONDS - 5
+        window = seen["deadline"] - before
+        # The bounded in-loop window — NOT 60 + 300, and not the row's budget
+        # in any form.
+        assert window == pytest.approx(pw._DELIVERY_IN_LOOP_SECONDS, abs=5)
+        # The point of #2317: a short row budget buys the delivery nothing and
+        # costs it nothing. The lease (900 + buffer) remains the outer bound,
+        # reached by the resend tick rather than by one parked worker.
+        assert window < 900 + pw._SLOT_TTL_BUFFER_SECONDS

@@ -119,6 +119,10 @@
       <div class="px-4 py-3">
         <RetrievalMemorySearch :agent-name="agentName" :notify="notify" />
       </div>
+      <!-- trinity-enterprise#962: what the agent remembers about each person, with Undo. -->
+      <div class="px-4 py-3">
+        <PersonMemorySection :agent-name="agentName" :notify="notify" />
+      </div>
     </SettingsSection>
   </div>
 </template>
@@ -134,6 +138,7 @@ import SettingsSection from './SettingsSection.vue'
 import SettingRow from './SettingRow.vue'
 import RetrievalMemoryToggle from './RetrievalMemoryToggle.vue'
 import RetrievalMemorySearch from './RetrievalMemorySearch.vue'
+import PersonMemorySection from './PersonMemorySection.vue'
 import BaseButton from '../base/BaseButton.vue'
 import BaseBadge from '../base/BaseBadge.vue'
 import GuardrailsPanel from '../GuardrailsPanel.vue'

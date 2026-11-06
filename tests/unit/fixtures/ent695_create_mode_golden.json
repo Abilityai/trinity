@@ -13,7 +13,8 @@
       "trinity-enterprise#1022 agent_ownership.memory_opt_out",
       "#4130 SystemDeployResponse.agents_declared_only",
       "abilityai/trinity#4025 trinity_prompt written for an admin only",
-      "abilityai/trinity-enterprise#1108"
+      "abilityai/trinity-enterprise#1108",
+      "abilityai/trinity-enterprise#1102"
     ]
   },
   "cases": {
@@ -204,7 +205,8 @@
               "use_platform_api_key": 1,
               "voice_name": null,
               "voice_system_prompt": null,
-              "volume_base_name": null
+              "volume_base_name": null,
+              "wake_on_ending": null
             },
             {
               "a2a_exposed": 0,
@@ -253,7 +255,8 @@
               "use_platform_api_key": 1,
               "voice_name": null,
               "voice_system_prompt": null,
-              "volume_base_name": null
+              "volume_base_name": null,
+              "wake_on_ending": null
             },
             {
               "a2a_exposed": 0,
@@ -302,7 +305,8 @@
               "use_platform_api_key": 1,
               "voice_name": null,
               "voice_system_prompt": null,
-              "volume_base_name": null
+              "volume_base_name": null,
+              "wake_on_ending": null
             }
           ],
           "removed": []
@@ -651,7 +655,8 @@
               "use_platform_api_key": 1,
               "voice_name": null,
               "voice_system_prompt": null,
-              "volume_base_name": null
+              "volume_base_name": null,
+              "wake_on_ending": null
             },
             {
               "a2a_exposed": 0,
@@ -700,7 +705,8 @@
               "use_platform_api_key": 1,
               "voice_name": null,
               "voice_system_prompt": null,
-              "volume_base_name": null
+              "volume_base_name": null,
+              "wake_on_ending": null
             }
           ],
           "removed": []
@@ -1029,7 +1035,8 @@
               "use_platform_api_key": 1,
               "voice_name": null,
               "voice_system_prompt": null,
-              "volume_base_name": null
+              "volume_base_name": null,
+              "wake_on_ending": null
             }
           ],
           "removed": []
@@ -1207,7 +1214,8 @@
               "use_platform_api_key": 1,
               "voice_name": null,
               "voice_system_prompt": null,
-              "volume_base_name": null
+              "volume_base_name": null,
+              "wake_on_ending": null
             },
             {
               "a2a_exposed": 0,
@@ -1256,7 +1264,8 @@
               "use_platform_api_key": 1,
               "voice_name": null,
               "voice_system_prompt": null,
-              "volume_base_name": null
+              "volume_base_name": null,
+              "wake_on_ending": null
             },
             {
               "a2a_exposed": 0,
@@ -1305,7 +1314,8 @@
               "use_platform_api_key": 1,
               "voice_name": null,
               "voice_system_prompt": null,
-              "volume_base_name": null
+              "volume_base_name": null,
+              "wake_on_ending": null
             }
           ],
           "removed": []
@@ -1964,7 +1974,8 @@
               "use_platform_api_key": 1,
               "voice_name": null,
               "voice_system_prompt": null,
-              "volume_base_name": null
+              "volume_base_name": null,
+              "wake_on_ending": null
             },
             {
               "a2a_exposed": 0,
@@ -2013,7 +2024,8 @@
               "use_platform_api_key": 1,
               "voice_name": null,
               "voice_system_prompt": null,
-              "volume_base_name": null
+              "volume_base_name": null,
+              "wake_on_ending": null
             },
             {
               "a2a_exposed": 0,
@@ -2062,7 +2074,8 @@
               "use_platform_api_key": 1,
               "voice_name": null,
               "voice_system_prompt": null,
-              "volume_base_name": null
+              "volume_base_name": null,
+              "wake_on_ending": null
             }
           ],
           "removed": []
