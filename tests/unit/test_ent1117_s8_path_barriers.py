@@ -794,6 +794,63 @@ def test_stage_config_files_writes_the_checked_paths(split_root, monkeypatch):
     assert list(split_root.decoy.iterdir()) == []
 
 
+@pytest.fixture
+def fresh_split_root(tmp_path):
+    """`split_root` before the store exists: neither spelling names a directory
+    yet, so the sink that creates the store shows which one it created."""
+    (tmp_path / "store").mkdir()
+    (tmp_path / "decoy" / "inner").mkdir(parents=True)
+    (tmp_path / "store" / "hop").symlink_to(tmp_path / "decoy" / "inner")
+    return SimpleNamespace(
+        raw=tmp_path / "store" / "hop" / ".." / "avatars",
+        checked=tmp_path / "store" / "avatars",
+        decoy=tmp_path / "decoy" / "avatars",
+    )
+
+
+def test_ensure_avatar_store_creates_the_checked_directory(fresh_split_root, monkeypatch):
+    monkeypatch.setattr(avatar_paths, "AVATAR_DIR", fresh_split_root.raw)
+    avatar_paths.ensure_avatar_store()
+    assert fresh_split_root.checked.is_dir()
+    assert not fresh_split_root.decoy.exists()
+
+
+def test_generate_creates_the_checked_store_on_a_fresh_install(fresh_split_root, monkeypatch):
+    monkeypatch.setattr(avatar_paths, "AVATAR_DIR", fresh_split_root.raw)
+    _generate_env(monkeypatch)
+    _run(avatar.generate_avatar("x", AvatarGenerateRequest(identity_prompt="a robot")))
+    assert (fresh_split_root.checked / "x.webp").read_bytes() == b"WEBP-BYTES"
+    assert (fresh_split_root.checked / "x_ref.png").read_bytes() == b"PNG-BYTES"
+    assert not fresh_split_root.decoy.exists()
+
+
+def test_generate_defaults_creates_the_checked_store_on_a_fresh_install(fresh_split_root, monkeypatch):
+    monkeypatch.setattr(avatar_paths, "AVATAR_DIR", fresh_split_root.raw)
+    _defaults_env(monkeypatch, optimize=lambda b: CHECKED)
+    body = _run(avatar.generate_default_avatars(current_user=_admin()))
+    assert body["generated"] == 1, body
+    assert (fresh_split_root.checked / "a1.webp").read_bytes() == CHECKED
+    assert not fresh_split_root.decoy.exists()
+
+
+def test_bundled_avatar_install_creates_the_checked_store_on_a_fresh_install(
+        fresh_split_root, monkeypatch, tmp_path):
+    import io
+
+    from PIL import Image
+
+    tpl = tmp_path / "tpls" / "avtpl"
+    tpl.mkdir(parents=True)
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), (40, 90, 160)).save(buf, format="PNG")
+    (tpl / "avatar.png").write_bytes(buf.getvalue())
+    monkeypatch.setattr(crud, "_LOCAL_TEMPLATE_ROOTS", (tmp_path / "tpls", tmp_path / "tpls"))
+    monkeypatch.setattr(avatar_paths, "AVATAR_DIR", fresh_split_root.raw)
+    crud._install_bundled_avatar(AgentConfig(name="bundled-av", template="local:avtpl"))
+    assert (fresh_split_root.checked / "bundled-av.webp").read_bytes()[8:12] == b"WEBP"
+    assert not fresh_split_root.decoy.exists()
+
+
 def test_move_avatar_file_treats_a_refused_name_as_nothing_to_move(store):
     """The contract its docstring states: a refused name is a quiet no-op. If it
     raised instead, the rename's broad `except` would abort the remaining moves."""

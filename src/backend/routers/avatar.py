@@ -182,7 +182,7 @@ async def generate_default_avatars(
     errors = []
     skipped = 0
 
-    avatar_paths.AVATAR_DIR.mkdir(parents=True, exist_ok=True)
+    avatar_paths.ensure_avatar_store()
 
     for agent_name in sorted(agent_names_needing):
         # Skip agents that don't exist in Docker
@@ -488,7 +488,7 @@ async def generate_avatar(
         raise HTTPException(status_code=status, detail=detail)
 
     # Save optimized display avatar (.webp) and full-quality reference (.png)
-    avatar_paths.AVATAR_DIR.mkdir(parents=True, exist_ok=True)
+    avatar_paths.ensure_avatar_store()
     avatar_path = _avatar_path(agent_name, ".webp")
     ref_path = _avatar_path(agent_name, "_ref.png")
     avatar_path.write_bytes(optimize_avatar(result.image_data))

@@ -2712,7 +2712,7 @@ def _install_bundled_avatar(config: AgentConfig) -> None:
         with Image.open(io.BytesIO(data)) as img:
             if img.width * img.height > 4096 * 4096:
                 raise ValueError(f"bundled avatar is {img.width}x{img.height}, max 4096x4096")
-        avatar_paths.AVATAR_DIR.mkdir(parents=True, exist_ok=True)
+        avatar_paths.ensure_avatar_store()
         with open(dest, "wb") as f:
             f.write(optimize_avatar(data))
         logger.info(f"[AVATAR-003] Installed bundled avatar from {config.template} for {config.name}")
