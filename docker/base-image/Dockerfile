@@ -46,7 +46,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && \
 # downloads, and untars WITHOUT ERROR — 641 s of build time installing a
 # toolchain that cannot execute on the host. Nothing fails, so nothing reports
 # it. That is the more dangerous half of the #263 pair, and it is exactly the
-# defect the "deliberately NOT changed here" note further down predicted.
+# defect the lilu#20 out-of-scope note further down predicted.
 #
 # `uname -m`, NOT `TARGETARCH`. All three `docker build` call sites
 # (scripts/deploy/build-base-image.sh and the two in scripts/deploy/gcp-deploy.sh)

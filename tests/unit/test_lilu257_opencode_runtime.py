@@ -537,6 +537,20 @@ def test_execution_id_cannot_escape_the_turn_root(monkeypatch, tmp_path):
     assert "etc" not in turn_dir.split("turns")[1]
 
 
+def test_ensure_within_refuses_a_path_outside_the_turns_root(tmp_path):
+    """The realpath containment guard at the turn root (the Codex
+    ``_ensure_within`` precedent): a contained path comes back resolved, an
+    escaping one raises rather than being written to."""
+    root = tmp_path / "turns"
+    root.mkdir()
+    inside = opencode_runtime._ensure_within(str(root), str(root / "exec-1"))
+    assert inside == os.path.realpath(str(root / "exec-1"))
+    with pytest.raises(ValueError):
+        opencode_runtime._ensure_within(str(root), str(root / ".." / "evil"))
+    with pytest.raises(ValueError):
+        opencode_runtime._ensure_within(str(root), str(root))
+
+
 # ---------------------------------------------------------------------------
 # test helper: a fake subprocess
 # ---------------------------------------------------------------------------
