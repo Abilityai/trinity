@@ -58,22 +58,6 @@
           @dismiss="loadError = ''"
         />
 
-        <!-- A failed SAVE: persists next to the control (principle 18). The
-             per-line reasons are the fix, not a technical detail, so they are
-             listed in the open rather than behind the disclosure. -->
-        <div v-if="saveError" class="space-y-2">
-          <InlineError :message="saveError" :detail="saveErrorDetail" @dismiss="clearSaveError" />
-          <ul v-if="lineErrors.length" class="space-y-1" data-testid="allowlist-line-errors">
-            <li
-              v-for="err in lineErrors"
-              :key="err.key"
-              class="text-sm text-status-danger-700 dark:text-status-danger-300 break-words"
-            >
-              {{ err.text }}
-            </li>
-          </ul>
-        </div>
-
         <!-- A damaged stored row (only a direct DB write can make one). -->
         <div
           v-if="config.stored_invalid"
@@ -105,7 +89,7 @@
           </p>
           <p
             v-if="config.not_bundled.length && !dirty"
-            class="mt-2 text-sm text-status-warning-700 dark:text-status-warning-300 break-words"
+            class="mt-2 text-sm text-status-warning-700 dark:text-status-warning-400 break-words"
             data-testid="allowlist-not-bundled"
           >
             Not a bundled template, so agents are refused it:
@@ -124,8 +108,9 @@
             <span class="font-mono">{{ config.hidden.join(', ') }}</span>
           </p>
           <div class="mt-3 flex items-center gap-2">
+            <!-- A damaged row is saveable untouched: the banner asks for a save. -->
             <BaseButton
-              :disabled="saving || !dirty"
+              :disabled="saving || !(dirty || config.stored_invalid)"
               :loading="saving"
               loading-label="Saving…"
               data-testid="allowlist-save"
@@ -141,6 +126,23 @@
             >
               Discard
             </BaseButton>
+          </div>
+
+          <!-- A failed SAVE: persists next to the control (principle 18), BELOW
+               the field and its buttons so a list of up to 100 reasons never
+               moves them (principle 30). The per-line reasons are the fix, not a
+               technical detail, so they are listed in the open. -->
+          <div v-if="saveError" class="mt-3 space-y-2">
+            <InlineError :message="saveError" :detail="saveErrorDetail" @dismiss="clearSaveError" />
+            <ul v-if="lineErrors.length" class="space-y-1" data-testid="allowlist-line-errors">
+              <li
+                v-for="err in lineErrors"
+                :key="err.key"
+                class="text-sm text-status-danger-700 dark:text-status-danger-400 break-words"
+              >
+                {{ err.text }}
+              </li>
+            </ul>
           </div>
         </div>
 

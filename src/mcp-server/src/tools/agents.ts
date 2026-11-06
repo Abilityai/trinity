@@ -276,7 +276,7 @@ export function createAgentTools(
       description:
         "Create a new agent in the Trinity platform. " +
         "With an agent key, this needs the agent-management permission an instance admin grants (ephemeral helpers excepted); without it the call is refused with `agent_management_not_permitted`. " +
-        "If the instance limits agent-created agents to a list of template sources, a source outside it (or no template) is refused with `template_source_not_allowed`, whose body lists `allowed_sources`; list_templates marks each entry `allowed_for_agents`. " +
+        "If the instance limits agent-created agents to a list of template sources, a source outside it (or no template) is refused with `template_source_not_allowed`, whose body lists `allowed_sources`; list_templates marks each entry `allowed_for_agents`. A pinned entry (`github:owner/repo@ref`) admits only a pull-only create tracking that ref (source_mode false is refused against it). " +
         "You can create agents from: (1) any GitHub repo using 'github:owner/repo' format (PAT must have access), " +
         "(2) pre-defined templates from list_templates, or (3) local templates. " +
         "The agent will be started automatically after creation. " +

@@ -39,7 +39,7 @@ None at the confidence gate. 0 SUPPORTED.
 
 ## Hypotheses
 
-- **An unpinned repo entry is only as strong as who can push to it.** An agent built from a listed repo can push a working branch and spawn from `@thatbranch`; an owner entry admits any repo the agent's token can create under that owner. Stated as the limit in requirements/auth.md §2.9a and the panel hint; the ref pin is the control an admin opts into.
+- **A repo entry, pinned or not, is only as strong as who can push to it.** (Corrected by the PR #4311 review: a pin is a name, which push access can move or shadow with a same-named branch; the working-branch and copy-of-`main` mismatches it also found are fixed.) An agent built from a listed repo can push a working branch and spawn from `@thatbranch`; an owner entry admits any repo the agent's token can create under that owner. Stated as the limit in requirements/auth.md §2.9a and the panel hint; the ref pin is the control an admin opts into.
 - **The bound is create-time, not containment.** A parent can reshape a child afterwards through `instructions.manage` / `skills.manage` file writes, or by chatting to a ghost that has a shell. Stated in §2.9a.
 - **`trinity-system` is unbounded.** Its key is `system` scope, which the ruling leaves outside the bound, as `ADMIN_GATE_SCOPES` leaves it outside the capability gates.
 

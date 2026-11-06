@@ -187,6 +187,10 @@ def _allowed(entries, template, **kw):
     (["github:acme/tools@main"], "github:acme/tools", {"fork": True}, False),   # default branch unknown
     (["github:acme/tools"], "github:acme/tools", {"fork": True}, True),
     (["github:acme/tools@main"], "github:acme/tools", {"copy": True}, False),
+    (["github:acme/tools@main"], "github:acme/tools@main", {"copy": True}, False),  # copy of main = default branch
+    (["github:acme/tools@v2"], "github:acme/tools@v2", {"copy": True}, True),       # copy of a named ref = that ref
+    (["github:acme/tools@v2"], "github:acme/tools@v2", {"source_mode": False}, False),  # working branch = default branch
+    (["github:acme/tools"], "github:acme/tools@v2", {"source_mode": False}, True),     # unpinned still admits it
     (["github:acme/tools", "local:scout"], None, {}, False),           # blank
     (["github:acme/tools"], "github:acme", {}, False),                 # unrecognised
     (["github:acme/tools"], "github:acme/tools\n", {}, False),         # fullmatch, never match
@@ -204,10 +208,12 @@ TRICKY = [
 
 
 @pytest.mark.parametrize("template", TRICKY)
-def test_a_recognised_source_is_exactly_what_crud_builds_from(template):
+def test_a_recognised_source_parses_to_crud_s_repo_and_ref(template):
     """One-way parity with crud's `_parse_github_ref`: whatever the leaf
-    recognises, crud accepts with the same repo and ref. (Where crud is laxer —
-    a slashless catalog id — the leaf refuses: fail closed.)"""
+    recognises, crud parses to the same repo and ref. (Where crud is laxer — a
+    slashless catalog id — the leaf refuses: fail closed.) Parsing only: which
+    ref the build then CLONES depends on the mode, pinned by the
+    working-branch, copy and pin-forcing tests below."""
     from models import AgentConfig
     from services.agent_service import crud
     source = _tsp().source_of(template)
@@ -588,6 +594,8 @@ def settings_client(monkeypatch, bundled):
         SimpleNamespace(name="helper-2", template="local:scout"),
         SimpleNamespace(name="by-a-person", template="github:evil/tools"),
     ])
+    monkeypatch.setattr(ds, "agent_container_states", lambda: {
+        "helper-1": "running", "helper-2": "running", "by-a-person": "stopped"})
     monkeypatch.setattr(db, "list_agent_created_agent_names", lambda: ["helper-1", "helper-2"])
     who = {"user": None}
     app = FastAPI()
@@ -682,14 +690,17 @@ def test_a_damaged_row_shows_as_bounded_and_invalid(settings_client):
 
 
 def test_the_impact_read_degrades_to_unknown_never_to_none(settings_client, monkeypatch):
+    """`list_all_agents_fast` answers `[]` when Docker cannot be read (#2196),
+    never raises, so the impact read asks the tri-state reader first: Docker
+    unreadable is `None` ("couldn't read"), a fleet with no containers is `[]`."""
     c = settings_client
     c.who["user"] = _admin()
-
-    def boom():
-        raise RuntimeError("docker down")
     ds = importlib.import_module("services.docker_service")
-    monkeypatch.setattr(ds, "list_all_agents_fast", boom)
+    monkeypatch.setattr(ds, "list_all_agents_fast", lambda: [])
+    monkeypatch.setattr(ds, "agent_container_states", lambda: None)
     assert c.client.get(URL).json()["in_use"] is None
+    monkeypatch.setattr(ds, "agent_container_states", lambda: {})
+    assert c.client.get(URL).json()["in_use"] == []
 
 
 # ===========================================================================
@@ -792,3 +803,92 @@ def test_a_system_deploy_against_an_unreadable_list_says_so(bundled, allowlist, 
     assert "not on the list" not in e.value.detail["message"]
     assert e.value.detail["list_unreadable"] is True
     create.assert_not_awaited()
+
+
+# ===========================================================================
+# 12. The pin is judged on what the build clones (review of PR #4311)
+# ===========================================================================
+
+def test_an_explicit_working_branch_never_matches_a_pin(bundled, allowlist):
+    """A working-branch agent clones the repo's DEFAULT branch (startup.sh runs
+    `git clone` without `-b` unless GIT_SOURCE_MODE), so `source_mode: false`
+    can never satisfy a pinned entry; an unpinned entry still admits it."""
+    tsp = _tsp()
+    allowlist(["github:acme/tools@v2"])
+    assert tsp.refusal_for(_principal(), _config("github:acme/tools@v2", source_mode=False)) is not None
+    assert tsp.refusal_for(_principal(), _config("github:acme/tools@v2", source_mode=True)) is None
+    allowlist(["github:acme/tools"])
+    assert tsp.refusal_for(_principal(), _config("github:acme/tools@v2", source_mode=False)) is None
+
+
+def test_a_pinned_match_makes_the_create_track_the_pin(bundled, allowlist, audit):
+    """Ruled 2026-11-06: a create admitted only by a pinned entry, that left
+    the mode unset, is made a source-mode create, so ent#705 (which honours an
+    explicit `source_mode`) cannot turn it into a working branch built from the
+    default branch. An unpinned match leaves the create untouched."""
+    from models import AgentConfig
+    tsp = _tsp()
+    allowlist(["github:acme/tools@v2"])
+    pinned = AgentConfig(name="x", template="github:acme/tools@v2")
+    asyncio.run(tsp.enforce(_request(), _principal(), pinned))
+    assert pinned.source_mode is True and "source_mode" in pinned.model_fields_set
+
+    allowlist(["github:acme/tools"])
+    free = AgentConfig(name="y", template="github:acme/tools@v2")
+    asyncio.run(tsp.enforce(_request(), _principal(), free))
+    assert "source_mode" not in free.model_fields_set
+    # Both a pin and a looser entry: the looser one admits it, nothing is forced.
+    allowlist(["github:acme/tools@v2", "github:acme/tools"])
+    both = AgentConfig(name="b", template="github:acme/tools@v2")
+    asyncio.run(tsp.enforce(_request(), _principal(), both))
+    assert "source_mode" not in both.model_fields_set
+
+    allowlist(["github:acme/tools@v2"])
+    with pytest.raises(HTTPException):
+        asyncio.run(tsp.enforce(_request(), _principal(),
+                                AgentConfig(name="z", template="github:acme/tools@v2", source_mode=False)))
+    person = AgentConfig(name="p", template="github:acme/tools@v2")
+    asyncio.run(tsp.enforce(_request(), _principal(**PERSON), person))
+    assert "source_mode" not in person.model_fields_set      # people are never touched
+
+
+def test_a_manifest_member_on_a_pin_previews_as_allowed(bundled, allowlist):
+    """The deploy preview judges a member as the create will: no `source_mode`
+    in a manifest, so a pinned member is admitted and the real create is made
+    source mode by the choke point — the dry run stays exact."""
+    allowlist(["github:acme/tools@v2"])
+    refused, _ = _tsp().manifest_refusals(_principal(), [("f-a", "a", "github:acme/tools@v2")])
+    assert refused == []
+
+
+@pytest.mark.asyncio
+async def test_a_pin_beats_the_working_branch_default(crud_env, monkeypatch):
+    """End to end through the real create: the creator's own token owns the repo
+    and can push, which is exactly when ent#705 grants a working branch. With a
+    pinned entry the agent is built in source mode on the pinned ref instead."""
+    import test_1484_create_agent_characterization as h
+    crud, ctx = crud_env
+    h._own_token(monkeypatch, crud)
+    ctx["template_service"].get_github_template.return_value = {
+        "github_repo": "alice/brain", "resources": {"cpu": "2", "memory": "4g"},
+        "mcp_servers": [], "fork_to_own": None,
+    }
+    ctx["template_service"].is_catalog_github_template.return_value = False
+    h._patch_repo_validation(monkeypatch, crud, login=("valid", "alice"))
+
+    _set_crud_list(ctx, ["github:alice/brain@v2"])
+    from models import AgentConfig
+    pinned = await crud.create_agent_internal(
+        AgentConfig(name="pinned", template="github:alice/brain@v2"), _agent_user(), request=None)
+    env = h._agent_run_kwargs(ctx)["environment"]
+    assert env.get("GIT_SOURCE_MODE") == "true" and env.get("GIT_SOURCE_BRANCH") == "v2"
+    assert "GIT_WORKING_BRANCH" not in env
+    assert pinned.git_mode["source_mode"] is True
+
+    # Control: the same create under an unpinned entry keeps ent#705's grant.
+    ctx["docker_utils"].containers_run.reset_mock()
+    _set_crud_list(ctx, ["github:alice/brain"])
+    free = await crud.create_agent_internal(
+        AgentConfig(name="free", template="github:alice/brain@v2"), _agent_user(), request=None)
+    assert free.git_mode["source_mode"] is False
+    assert "GIT_WORKING_BRANCH" in h._agent_run_kwargs(ctx)["environment"]

@@ -36,7 +36,7 @@
   "findings": [],
   "hypotheses": [
     {
-      "title": "An unpinned repo entry is only as strong as who can push to it",
+      "title": "A repo entry, pinned or not, is only as strong as who can push to it (a pin is a name)",
       "category": "agentic-supply-chain",
       "asi": "ASI04",
       "status": "stated limit"

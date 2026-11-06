@@ -63,6 +63,17 @@ describe('AgentCreationAllowlistPanel', () => {
     expect($('allowlist-empty').exists()).toBe(false)
   })
 
+  it('lets the admin save a damaged list without editing it (the banner asks for a save)', async () => {
+    await render({ ...UNBOUNDED, bounded: true, stored_invalid: true, entries: ['local:scout'] })
+    expect($('allowlist-save').attributes('disabled')).toBeUndefined()
+    expect($('allowlist-discard').attributes('disabled')).toBeDefined()
+    api.put.mockResolvedValue({ data: { ...UNBOUNDED, bounded: true, entries: ['local:scout'] } })
+    await $('allowlist-save').trigger('click')
+    await flushPromises()
+    expect(api.put).toHaveBeenCalledWith('/api/settings/agent-creation-allowlist', { entries: ['local:scout'] })
+    expect($('allowlist-damaged').exists()).toBe(false)
+  })
+
   it('pre-fills the saved list and saves the trimmed, non-empty lines', async () => {
     await render({ ...UNBOUNDED, bounded: true, entries: ['local:scout'] })
     expect(textarea().element.value).toBe('local:scout')
@@ -93,6 +104,10 @@ describe('AgentCreationAllowlistPanel', () => {
     expect($('allowlist-line-errors').text()).toBe(
       'Line 3 github:acme — Use github:<owner>/<repo> or github:<owner>/*, e.g. github:acme/*.')
     expect(textarea().element.value).toBe('local:scout\n\ngithub:acme')   // the draft is kept
+    // Below the field it describes: a list of up to 100 reasons must not push
+    // the field down (design-system principle 30).
+    const order = textarea().element.compareDocumentPosition($('allowlist-line-errors').element)
+    expect(order & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 
   it('clears the list by saving an empty field, and Discard restores the saved one', async () => {

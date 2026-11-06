@@ -197,9 +197,13 @@ GET /api/templates ─ annotate_templates(): allowed_for_agents per entry (bound
   `trinity-system` never read the row.
 - **Matching** (`source_of` mirrors crud's `_parse_github_ref`): `local:<name>` only
   when the name is listed AND bundled (`_LOCAL_TEMPLATE_ROOTS[0]`); `github:o/*`;
-  `github:o/r` (any ref); `github:o/r@ref` (only the ref the create will use —
-  `@ref`, else `source_branch`, else `main`; `fork_to_own` and a copy of the default
-  branch match only unpinned entries). Blank and unrecognised templates are refused.
+  `github:o/r` (any ref); `github:o/r@ref` (only the ref the build will clone —
+  `@ref`, else `source_branch`, else `main`; `fork_to_own`, a copy of `main` and a
+  working-branch create, which all clone the default branch, match only unpinned
+  entries). A create admitted only by a pin, with `source_mode` unset, is made
+  source mode by `enforce` (`_pin_source_mode`), so ent#705's working-branch default
+  cannot apply; an unpinned match wins when both match. Blank and unrecognised
+  templates are refused.
 - **Refusal**: 403 `template_source_not_allowed` (with `template` — canonical, never
   the raw string — and `allowed_sources`) or `template_upload_not_allowed`. One
   `template_source_refused` audit row per refused request: the agent as actor
@@ -217,8 +221,10 @@ GET /api/templates ─ annotate_templates(): allowed_for_agents per entry (bound
 - **Apply** (`POST /api/systems/apply`) is `require_person`, so agent keys never reach
   it; `test_apply_stays_person_only` names the blocker to add if that changes.
 - **Limits**: create-time only (what a parent does to a child afterwards is governed
-  by the grants above); an unpinned repo entry is only as strong as who can push to
-  the repo.
+  by the grants above); a repo entry, pinned or not, is only as strong as who can
+  push to the repo — a pin is a name, so push access can move a pinned branch or
+  shadow a pinned tag with a same-named branch (resolved first). Protect the pinned
+  name on GitHub.
 - **Tests**: `tests/unit/test_ent591_template_source_bound.py`,
   `src/frontend/tests/unit/agentCreationAllowlistPanel.mount.spec.js`.
 

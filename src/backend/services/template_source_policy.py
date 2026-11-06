@@ -237,18 +237,22 @@ def source_of(template: Optional[str]) -> Source:
 
 
 def effective_ref(source: Source, *, source_branch: Optional[str] = None,
-                  fork: bool = False, copy: bool = False) -> Optional[str]:
-    """The branch or tag the create will really build from, or None when it is
-    the repo's default branch and not knowable here. crud moves a template's
-    `@ref` into `source_branch`; otherwise the body's `source_branch` (model
-    default `main`) is used. `fork_to_own` copies the default branch, and a copy
-    treats `main` as "the default branch" (crud.py, the copy staging)."""
-    if source.ref:
-        return source.ref
+                  fork: bool = False, copy: bool = False,
+                  source_mode: Optional[bool] = None) -> Optional[str]:
+    """The branch or tag the create will really CLONE, or None when that is the
+    repo's default branch and not knowable here (a pinned entry then never
+    matches). crud moves a template's `@ref` into `source_branch`, else the
+    body's `source_branch` (model default `main`) stands. Three builds ignore it:
+    `fork_to_own` copies the default branch; a copy treats `main` as "the default
+    branch" (crud's copy staging); and a working-branch agent
+    (`source_mode: false`) clones the default branch, because startup.sh passes
+    `-b` only in source mode."""
     if fork:
         return None
-    branch = source_branch or "main"
-    if copy and branch == "main":
+    branch = source.ref or source_branch or "main"
+    if copy:
+        return None if branch == "main" else branch
+    if source_mode is False:
         return None
     return branch
 
@@ -288,19 +292,30 @@ def is_hidden(name: str) -> bool:
     return isinstance(data, dict) and bool(data.get("hidden"))
 
 
-def allows(entries: Iterable[Entry], source: Source, ref: Optional[str]) -> bool:
+def match(entries: Iterable[Entry], source: Source, ref: Optional[str]) -> Optional[Entry]:
+    """The entry that admits this source, or None. An unpinned entry is
+    preferred over a pinned one, so a pin's extra condition (source mode,
+    `enforce`) applies only when nothing looser admits the create."""
+    entries = list(entries)
     if source.kind == "local":
-        return (any(e.kind == "local" and e.name == source.name for e in entries)
-                and is_bundled(source.name))
+        hit = next((e for e in entries if e.kind == "local" and e.name == source.name), None)
+        return hit if hit is not None and is_bundled(source.name) else None
     if source.kind != "github":
-        return False
+        return None
     for e in entries:
         if e.kind == "github_owner" and e.owner == source.owner:
-            return True
+            return e
+        if e.kind == "github_repo" and e.owner == source.owner and e.repo == source.repo and e.ref is None:
+            return e
+    for e in entries:
         if (e.kind == "github_repo" and e.owner == source.owner and e.repo == source.repo
-                and (e.ref is None or e.ref == ref)):
-            return True
-    return False
+                and e.ref is not None and e.ref == ref):
+            return e
+    return None
+
+
+def allows(entries: Iterable[Entry], source: Source, ref: Optional[str]) -> bool:
+    return match(entries, source, ref) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -367,29 +382,38 @@ UPLOAD_MESSAGE = (
 )
 
 
-def refusal_for(current_user: Any, config: Any = None, *, upload: bool = False,
-                stored: Optional[Stored] = None) -> Optional[Refusal]:
-    """None when this create may go ahead; else the refusal. The principal is
-    judged first, so a person's create never reads the setting."""
+def _decide(current_user: Any, config: Any, *, upload: bool,
+            stored: Optional[Stored]) -> Tuple[Optional[Refusal], Optional[Entry]]:
+    """`(refusal, None)`, or `(None, the admitting entry)` — the entry is None
+    when the create is not bounded at all."""
     if not is_bounded_principal(current_user):
-        return None
+        return None, None
     stored = stored if stored is not None else read_stored()
     if not stored.bounded:
-        return None
+        return None, None
     allowed = stored.texts
     if upload:
-        return Refusal(CODE_UPLOAD, UPLOAD_MESSAGE, None, allowed, stored.invalid)
+        return Refusal(CODE_UPLOAD, UPLOAD_MESSAGE, None, allowed, stored.invalid), None
     source = source_of(getattr(config, "template", None))
     ref = effective_ref(
         source,
         source_branch=getattr(config, "source_branch", None),
         fork=bool(getattr(config, "fork_to_own", None)),
         copy=getattr(config, "import_intent", None) == "copy",
+        source_mode=getattr(config, "source_mode", None),
     )
-    if allows(stored.entries, source, ref):
-        return None
+    hit = match(stored.entries, source, ref)
+    if hit is not None:
+        return None, hit
     message = _unreadable_message(allowed) if stored.invalid else _source_message(source)
-    return Refusal(CODE_SOURCE, message, source.text, allowed, stored.invalid)
+    return Refusal(CODE_SOURCE, message, source.text, allowed, stored.invalid), None
+
+
+def refusal_for(current_user: Any, config: Any = None, *, upload: bool = False,
+                stored: Optional[Stored] = None) -> Optional[Refusal]:
+    """None when this create may go ahead; else the refusal. The principal is
+    judged first, so a person's create never reads the setting."""
+    return _decide(current_user, config, upload=upload, stored=stored)[0]
 
 
 def manifest_refusals(current_user: Any, members: Iterable[Tuple[str, str, Optional[str]]]
@@ -464,12 +488,32 @@ async def audit_refusal(request: Any, current_user: Any, *, code: str,
         logger.warning("[ent#591] refusal audit failed (%s)", code)
 
 
+def _pin_source_mode(config: Any, hit: Optional[Entry]) -> None:
+    """A create admitted only by a pinned entry must track that ref, which only
+    source mode does. When the caller left the mode unset, make it explicit:
+    ent#705 honours an explicit `source_mode` and so cannot turn the create into
+    a working branch cloned from the default branch (ruled 2026-11-06). An
+    explicit `source_mode: false` never reaches here — it matches no pin."""
+    if hit is None or hit.ref is None:
+        return
+    if bool(getattr(config, "fork_to_own", None)) or getattr(config, "import_intent", None) == "copy":
+        return  # neither clones by mode; a pin was matched on their own rule
+    fields_set = getattr(config, "model_fields_set", None)
+    if fields_set is None or "source_mode" in fields_set:
+        return
+    config.source_mode = True
+    logger.info("[ent#591] %s matched a pinned entry (%s): created in source mode",
+                getattr(config, "name", None), hit.text)
+
+
 async def enforce(request: Any, current_user: Any, config: Any = None, *,
                   upload: bool = False) -> None:
     """Refuse with a named 403 and one audit row, or return. Call it before any
-    side effect of the create it guards."""
-    refusal = refusal_for(current_user, config, upload=upload)
+    side effect of the create it guards. A create admitted only by a pinned
+    entry leaves in source mode (`_pin_source_mode`)."""
+    refusal, hit = _decide(current_user, config, upload=upload, stored=None)
     if refusal is None:
+        _pin_source_mode(config, hit)
         return
     from fastapi import HTTPException
     from utils.helpers import sanitize_agent_name
@@ -515,10 +559,19 @@ def in_use(stored: Stored) -> List[dict]:
     """The templates live agent-created agents use, each allowed or refused
     under the saved list. Raises on a failed read (the caller degrades)."""
     from database import db
-    from services.docker_service import list_all_agents_fast
+    from services.docker_service import agent_container_states, list_all_agents_fast
+    # `list_all_agents_fast` answers [] when Docker cannot be read (#2196), so
+    # the tri-state reader decides "unreadable" first: None is "couldn't read",
+    # never "none". Containers that exist but list as nothing is a failed read too.
+    states = agent_container_states()
+    if states is None:
+        raise RuntimeError("Docker could not be read")
+    agents = list_all_agents_fast()
+    if states and not agents:
+        raise RuntimeError("Docker listed no agents while containers exist")
     created = set(db.list_agent_created_agent_names())
     counts: dict = {}
-    for agent in list_all_agents_fast():
+    for agent in agents:
         if agent.name not in created:
             continue
         source = source_of(getattr(agent, "template", None))
