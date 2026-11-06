@@ -1760,7 +1760,12 @@ ensure_database() {
         echo "❌ Refusing to start: SQLite reached end-of-support on 2026-09-01." >&2
         if [ "$has_sqlite" = "1" ]; then
             echo "" >&2
-            echo "   This install has a SQLite database. Get this release's image, then copy it to PostgreSQL:" >&2
+            if [ "$url_set" = "1" ]; then
+                echo "   This install has a SQLite database. Remove the DATABASE_URL= line from .env (an" >&2
+                echo "   empty value selects SQLite), get this release's image, then copy it to PostgreSQL:" >&2
+            else
+                echo "   This install has a SQLite database. Get this release's image, then copy it to PostgreSQL:" >&2
+            fi
             if [ "$HOSTED" = "1" ]; then
                 echo "       docker compose ${COMPOSE_FILES[*]:-} pull backend" >&2
             else
