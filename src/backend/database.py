@@ -1682,6 +1682,20 @@ class DatabaseManager:
     def get_queued_count(self, agent_name: str) -> int:
         return self._schedule_ops.get_queued_count(agent_name)
 
+    # Queue-visibility reads (#4257): the receipt's depth, the stall monitor's
+    # one scan, and the conversation-serialisation half of the wait reason.
+    # Read-only — they return counts, rows and conversation keys, never writes.
+    def count_queued_ahead(
+        self, agent_name: str, queued_at: Optional[str], execution_id: str
+    ) -> int:
+        return self._schedule_ops.count_queued_ahead(agent_name, queued_at, execution_id)
+
+    def oldest_queued_head_per_agent(self):
+        return self._schedule_ops.oldest_queued_head_per_agent()
+
+    def agents_with_running_conversation(self, agent_name: str):
+        return self._schedule_ops.agents_with_running_conversation(agent_name)
+
     def cancel_queued_execution(
         self, execution_id: str, reason: str = "cancelled", status: str = "cancelled"
     ) -> bool:

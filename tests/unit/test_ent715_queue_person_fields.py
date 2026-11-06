@@ -904,6 +904,7 @@ _TAGS = "services/person_mention_service.py"
 _ALERTS = "services/platform_alerts.py"
 _PROMPT = "services/platform_prompt_service.py"
 _GATE = "services/skill_gate_service.py"
+_STALL = "services/queue_stall_service.py"
 _ORS = "services/operator_resume_service.py"
 _ROW_READERS = {
     (_ORS, "redispatch_pending_wakes"): (
@@ -988,6 +989,9 @@ _ROW_READERS = {
     (_ALERTS, "clear"): ("internal", "ends a condition's pending row (#3246); returns a count"),
     (_ALERTS, "observe"): ("internal", "records a reading on a condition's row (#3246); returns an outcome"),
     (_ALERTS, "reconcile"): ("internal", "ends the rows whose condition cleared (#3246); returns a count"),
+    (_STALL, "_agents_with_pending_alerts"): (
+        "internal", "the agents whose stall row outlived its stalled head (#4257): the subject "
+                    "prefix and `agent_name` only, and a list of agent names is all that leaves"),
     (_PROMPT, "_resolve_ended_asks"): (
         "agent", "the agent's own ended asks for its prompt: reserved prefixes excluded in SQL"),
     (_PROMPT, "_resolve_pending_asks"): (
