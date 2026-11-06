@@ -1,6 +1,18 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent1063_agent_schedule_recipient.py",
+      "feature": "trinity-enterprise#1063",
+      "added": "2026-11-03",
+      "categories": [
+        "backend",
+        "unit",
+        "schedules",
+        "security"
+      ],
+      "description": "An agent's own key may deliver a schedule only to its owner: a third-party deliver_to_workspace_email is refused agent_cannot_address_another_person on create and update, and an owner-made colleague schedule is refused to the agent on update/trigger/enable/disable/delete/webhook; the owner keeps every control."
+    },
+    {
       "file": "unit/test_ent1108_wake_default.py",
       "feature": "trinity-enterprise#1108",
       "added": "2026-11-04",
