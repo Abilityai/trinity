@@ -3633,12 +3633,15 @@ class GitSyncRequest(BaseModel):
         # like `-f` is read as an option and force-stages an ignored file such
         # as `.env`, which the sync then pushes (ent#1117). Refuse it here, at
         # the edge every caller crosses. A dash elsewhere (`sub/-x.md`) is fine.
+        # The element is echoed so the caller can find it (the 422 handler
+        # drops `input`), but capped: the request body bounds nothing.
         for i, path in enumerate(v or []):
             if path.startswith("-"):
+                shown = path if len(path) <= 200 else path[:200] + "\u2026"
                 raise ValueError(
-                    f"paths[{i}] {path!r} starts with '-' and would be read by "
+                    f"paths[{i}] {shown!r} starts with '-' and would be read by "
                     "git as an option; name a file that starts with '-' as "
-                    f"'./{path}'"
+                    f"'./{shown}'"
                 )
         return v
 

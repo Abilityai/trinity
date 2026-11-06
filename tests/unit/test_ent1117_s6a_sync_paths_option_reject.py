@@ -104,6 +104,17 @@ def test_shared_table_covers_both_decisions_and_the_divergence_edges():
     assert {" -f", "\t-f", "\n-f", "x\n-f", "", "./-x", "\ufeff-f"} <= accepted
 
 
+def test_model_caps_a_long_element_in_the_message():
+    """The element is echoed twice (the name and the './' suggestion); an
+    unbounded element must not make an unbounded 422."""
+    bad = "-" + "a" * 10_000
+    with pytest.raises(ValidationError) as exc:
+        GitSyncRequest(paths=[bad])
+    msg = exc.value.errors()[0]["msg"]
+    assert len(msg) < 1_000, len(msg)
+    assert msg.startswith(f"Value error, paths[0] {bad[:200] + chr(0x2026)!r} "), msg[:300]
+
+
 @pytest.mark.parametrize(
     "paths",
     [

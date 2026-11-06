@@ -93,6 +93,15 @@ describe("ent#1117 git_sync — a paths element starting with '-' is a schema er
     });
   }
 
+  it("caps a long element in the message", async () => {
+    const bad = "-" + "a".repeat(10_000);
+    const result = await validate({ agent_name: "alpha", paths: [bad] });
+    assert.ok(result.issues && result.issues.length === 1, JSON.stringify(result.issues?.length));
+    const message = result.issues[0].message;
+    assert.ok(message.length < 1_000, String(message.length));
+    assert.ok(message.startsWith(`'${bad.slice(0, 200)}\u2026' starts with '-'`), message.slice(0, 300));
+  });
+
   it("accepts a dash anywhere but the first character", async () => {
     const paths = ["sub/-x.md", "a-b/c-d.txt", "./-leading-dash-spelt-safely.md", "x-"];
     const result = await validate({ agent_name: "alpha", paths });
