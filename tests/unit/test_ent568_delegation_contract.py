@@ -56,8 +56,16 @@ RUNTIMES = ("claude-code", "codex", "gemini-cli", "")
 # accident — the #1535 / ent#536 context-budget discipline. #3245 raised it
 # 1650 → 1730 for the confirmed-failure retry bullet (1,720 chars), and trimmed
 # `chat_with_agent`'s lead by 36 chars to keep its published description inside
-# the cap.
-MAX_CONTRACT_CHARS = 1730
+# the cap. ent#1102 raised it 1730 -> 1810 for the wake bullet (1,802 chars) and
+# paid most of that growth back out of the text itself rather than out of the
+# cap: the unconditional "to finish later, set a reminder" sentence became the
+# `wake: none` half of the new bullet, the subscription sentence lost the
+# `execution_id` advice the bullet above it already gives, and the lead's modes
+# paragraph shed the detail its own parameter descriptions carry in full (which
+# are not cut). What is left is 12 chars of headroom on the published
+# description — raising this number again without trimming something is how the
+# end of the contract stops being read.
+MAX_CONTRACT_CHARS = 1810
 
 # Every backticked token in the contract, classified. A token outside these
 # sets fails the build until someone decides what it is and adds it to the set
@@ -96,7 +104,17 @@ FIELD_PRODUCERS = {
     "retry_after_seconds": "src/mcp-server/src/tools/chat.ts",
     "retryable: false": "src/mcp-server/src/client.ts",
     "message": "src/mcp-server/src/client.ts",
+    # ent#1102: the receipt's wake fields.
+    "wake": "src/mcp-server/src/tools/chat.ts",
+    "wake_reason": "src/mcp-server/src/tools/chat.ts",
 }
+# ent#1102: the values the `wake` field can carry. Classified apart from
+# STATUS_PRODUCERS because they are not dispatch statuses — a `wake` value says
+# who brings the caller the ENDING, and the contract tells a caller to end its
+# turn on `on_ending`, so a value the receipt cannot actually produce would be
+# an instruction to stop waiting for a turn that is never dispatched.
+WAKE_VALUES = {"on_ending", "none"}
+WAKE_VALUE_PRODUCER = "src/mcp-server/src/tools/chat.ts"
 EVENTS = {TASK_COMPLETED_EVENT, TASK_FAILED_EVENT}
 # argument spellings -> (tool, the parameters its schema must declare)
 ARGUMENT_FORMS = {"parallel=true, async=true": ("chat_with_agent", ("parallel", "async"))}
@@ -275,7 +293,7 @@ def test_a_confirmed_failure_is_retried_word_for_word():
 
 def test_every_backticked_token_is_classified():
     known = (TOOLS | set(TOOL_GLOBS) | set(STATUS_PRODUCERS) | set(FIELD_PRODUCERS)
-             | EVENTS | set(ARGUMENT_FORMS))
+             | EVENTS | set(ARGUMENT_FORMS) | WAKE_VALUES)
     unclassified = []
     for token in _backticked():
         call = re.fullmatch(r"([a-z_]+)\(([^)]*)\)", token)
@@ -320,6 +338,19 @@ def test_every_status_the_contract_names_is_emitted_by_a_dispatch_route():
         for rel in STATUS_PRODUCERS[status]:
             src = (REPO_ROOT / rel).read_text(encoding="utf-8")
             assert f'"{status}"' in src, f"`{status}` is taught but {rel} never emits it"
+
+
+def test_every_wake_value_the_contract_names_is_carried_by_the_receipt():
+    """ent#1102: `resolveWake` is the only producer, and both values must be
+    reachable from it — a contract that teaches `on_ending` while the receipt
+    can only ever answer `none` tells callers to end their turn on a promise
+    nothing makes."""
+    named = {t for t in _backticked() if t in WAKE_VALUES}
+    assert named == WAKE_VALUES, f"the contract names {named}, not {WAKE_VALUES}"
+    src = (REPO_ROOT / WAKE_VALUE_PRODUCER).read_text(encoding="utf-8")
+    assert "export function resolveWake(" in src, "resolveWake is gone from chat.ts"
+    for value in sorted(named):
+        assert f'"{value}"' in src, f"`{value}` is taught but chat.ts never answers it"
 
 
 def test_every_field_the_contract_names_is_carried_by_an_answer():

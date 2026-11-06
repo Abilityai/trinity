@@ -8,7 +8,7 @@ Explicit permission model controlling which agents can communicate with which. R
 
 ![Agent Permissions tab showing the agent collaboration list with Allow All / Allow None controls](../../screenshots/agent-permissions.png)
 
-1. Open the detail page of the agent that will *make* the calls and click its **Permissions** tab (next to **Sharing**). The tab is shown to the agent's owner and admins, and never on the system agent.
+1. Open the detail page of the agent that will *make* the calls and click its **Permissions** tab (next to **Channels**). The tab is shown to the agent's owner and admins, and never on the system agent.
 2. You will see a list of the other agents in the system.
 3. Toggle each agent to allow or deny the current agent calling it. You can only grant access to agents you can access yourself. **Allow All** and **Allow None** set every row at once. Click **Save Permissions** to apply.
 4. Permissions are directional: allowing Agent A to call Agent B does **not** allow Agent B to call Agent A. Each direction must be granted separately.
@@ -42,7 +42,10 @@ Explicit permission model controlling which agents can communicate with which. R
 - An agent can run every skill on an agent **it spawned**. The reverse is not true: a spawned agent calling its parent needs a grant like any other agent.
 - To let A run one library skill on B, an admin turns it on in A's **Permissions** tab, under **Library skills on agents this agent can call**. Each skill is granted separately and can be turned off again. Removing A's permission to call B also removes these grants.
 - **After an upgrade, nothing is granted.** **Settings → Agents** shows a notice listing every call between agents that used a library skill in the last 30 days and is now refused, with a **Grant** button for each. The Permissions list also shows when each library skill was last used.
-- **Known gap:** the check looks for the skill's name (`/skill-name`) in the request. If A describes the work in plain words without naming the skill, B may still choose to run it. Grant permissions only to agents you would trust with B's skills.
+- **Asking in plain words is checked too.** If A describes the work without naming the skill ("please pay the invoice"), B's own model may decide to run the library skill. B checks again at the moment it loads a skill: inside a run that A asked for, a library skill A holds no grant for is refused, and B's model is told it may not run it for A. The refusal is recorded in the audit log like the one above, and it appears in the **Settings → Agents** notice with its **Grant** button.
+- The same applies when A's request reaches B as a fan-out, a reminder, a loop or an event B subscribes to (an enabled subscription). It does not apply to B's own work, its schedules, people, or an agent calling an agent it spawned.
+- **When B can't check inside itself**, B's **Permissions** tab shows a warning beside the grants, starting "Agents calling this agent are checked only for library skills they name". That happens when B runs on Gemini or Codex, or on an image that lacks or predates the check, and a calling agent lacks a grant for one of B's library skills. Recreating the agent on a current image fixes it, except on Gemini and Codex. Only people who manage B's skills see the warning.
+- **Limits:** if Trinity can't be reached when B loads a skill, B lets it run rather than block B's own work. B can also still act on a skill's instructions it has read, or work it sends to itself while working for A (a task, a fan-out, a reminder, a loop or a schedule). Grant permissions only to agents you would trust with B's skills.
 - The MCP tool `get_agent_skills` marks each library skill with `peer_needs_grant`.
 
 ### When a withdrawn permission takes effect

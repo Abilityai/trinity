@@ -294,6 +294,7 @@ def _user(uid=7, username="eugene", role="creator"):
     u.username = username
     u.role = role
     u.agent_name = None
+    u.mcp_scope = None  # a person (ent#591: an unknown scope is bounded)
     return u
 
 

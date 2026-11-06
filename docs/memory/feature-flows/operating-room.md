@@ -35,6 +35,10 @@ Three operator queue request types:
 - **Question** -- Agent needs freeform guidance
 - **Alert** -- Agent is reporting a situation (acknowledgement only)
 
+### An admin's key raising an ask for an agent (trinity-enterprise#1024)
+
+`ask_operator`, `get_my_ask` and `withdraw_ask` take an optional `agent_name`. With an admin's user-scoped key, the MCP sends `X-Trinity-Act-As-Agent`, `get_current_user` admits it (`dependencies.admit_act_as`), and `get_self_acting_agent` holds the request to that agent's path. The ask renders like the agent's own; its `raised`, `withdrawn` and `replaced` audit rows carry `acted_by: user:<id>`. `ask_for_credential` is not part of this. Rule and refusals: `requirements/auth.md`.
+
 ## User Story
 
 As an operator, I want a single inbox where I can see and respond to all agent requests and notifications so that I can manage my fleet efficiently without switching between pages.

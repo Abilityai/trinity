@@ -1,6 +1,6 @@
 # Agent Sharing & Access
 
-Two owner-only surfaces on the Agent Detail page control who can reach an agent: **Settings › People** (the former Access tab) manages the *people the agent is shared with* (they use it in the Workspace), and the **Sharing** tab manages *external clients* (outside users reaching the agent through Slack, Telegram, WhatsApp, voice calls, or public links).
+Two owner-only surfaces on the Agent Detail page control who can reach an agent: **Settings › People** (the former Access tab) manages the *people the agent is shared with* (they use it in the Workspace), and the **Channels** tab manages *external clients* (outside users reaching the agent through Slack, Telegram, WhatsApp, voice calls, or public links).
 
 ## Concepts
 
@@ -20,6 +20,8 @@ Two owner-only surfaces on the Agent Detail page control who can reach an agent:
    - **Pending** — no platform account ("No platform account — uses the Workspace"). Where the row offers **Give a platform account**, an admin can create the account right away (after a confirmation; as `user` — Workspace only — unless an earlier allow-list entry set another role), so the person can be assigned to the agent before they first sign in; they sign in at `/login`. Give accounts to colleagues — a platform account sees the team's view of every agent shared with its address — and keep outside clients on a plain share.
 4. Each operator row also carries a **proactive-messaging toggle** — "allow this operator to receive proactive DMs from the agent." It is off by default; turn it on per operator to let the agent message that person unprompted. This is a **per-recipient** DM permission (`PUT /api/agents/{name}/shares/proactive`, body `{email, allow_proactive}`). Trinity records consent in three states — *not asked* (every new share), *declined* and *consented* — and only *consented* lets the agent send; the other two are both a no, kept apart so you can see whether anyone ever asked.
 5. Click **Remove** on a row to revoke access.
+
+When you add someone with no account, Trinity emails them an invitation that says who invited them and which agent, and links to the Workspace sign-in. Use **Resend invite** on their Pending row to send it again, up to 3 times an hour. If email isn't set up for sign-in on your instance, no invitation goes out and the panel says so, so tell them how to sign in yourself.
 
 On instances licensed for it, Settings › People also shows a **People this agent serves** section above this list: the agent's primary person, its other stakeholders, and the seat the agent holds or serves. Assigning someone there also shares the agent with them, because an assignment by itself grants no access; a row for someone the agent is not shared with carries a warning and **Share with them**. Without the entitlement the section is absent, and non-admins see it read-only.
 
@@ -47,9 +49,9 @@ Enforcement notes:
 - Shared users see only their own chat messages. Admins see all messages.
 - Deleting an agent cascades to remove all associated sharing records.
 
-## Sharing Tab — External Clients
+## Channels Tab — External Clients
 
-The **Sharing** tab is organized around "who outside the team can reach this agent, and through what." Sections, top to bottom:
+The **Channels** tab is organized around "who outside the team can reach this agent, and through what." Sections, top to bottom:
 
 ### Who can chat with this agent?
 

@@ -132,7 +132,9 @@ detect_shape() {
     fi
     # No backend container to ask: fall back to what is on disk.
     local bind=0 devvol=0 pinned=0
-    [ -f "$(data_path)/trinity.db" ] && bind=1
+    # Only prod and hosted bind-mount the data dir; a PostgreSQL install has no
+    # trinity.db there but still keeps backups and agent files in it.
+    [ -n "$(ls -A "$(data_path)" 2>/dev/null)" ] && bind=1
     docker volume inspect "$(compose_project_name)_trinity-data" >/dev/null 2>&1 && devvol=1
     [ -n "$(env_value TRINITY_IMAGE_TAG)" ] && pinned=1
     if [ "$pinned" = 1 ] && [ "$devvol" = 0 ]; then
@@ -144,7 +146,7 @@ detect_shape() {
     else
         printf '❌ Cannot tell how this install was deployed, so it will not guess.\n' >&2
         printf '   No trinity-backend container to read the compose file set from, and the\n' >&2
-        printf '   disk evidence is ambiguous: bind-mounted DB=%s, dev volume=%s, TRINITY_IMAGE_TAG pinned=%s.\n' \
+        printf '   disk evidence is ambiguous: bind-mounted data=%s, dev volume=%s, TRINITY_IMAGE_TAG pinned=%s.\n' \
             "$bind" "$devvol" "$pinned" >&2
         printf '   Re-run with --shape dev|prod|prod-enterprise|hosted.\n' >&2
         exit 1
@@ -761,6 +763,8 @@ $(sed 's/^/     /' "$WORK/config.err")"
             printf '   If it failed after pulling, new images may have run a migration. To return, run\n' >&2
             printf '       ./scripts/deploy/update.sh --rollback\n' >&2
             printf '   which checks the schema first. Starting the old images directly does not.\n' >&2
+            printf '   If it refused a SQLite database, this checkout is back on the old release, which has no\n' >&2
+            printf '   copy command. Follow docs/migrations/SQLITE_TO_POSTGRES.md from the target release.\n' >&2
             exit 1
         fi
     else

@@ -178,6 +178,13 @@
           <p class="mt-0.5 h-5 text-[12.5px] leading-5 truncate" :title="sharedLineTitle || undefined">
             <template v-if="notice && notice.text">
               <span data-testid="skills-saved-note" :data-tone="notice.tone" :class="noticeClass(notice.tone)">{{ notice.text }}</span>
+              <!-- What the agent lacks comes before the deprecation: the line
+                   truncates, and this is the clause with a next step. -->
+              <span
+                v-if="notice.dependencies"
+                data-testid="skills-saved-dependencies"
+                class="ml-2 text-status-warning-700 dark:text-status-warning-400"
+              >{{ notice.dependencies }}</span>
               <span
                 v-if="notice.deprecation"
                 data-testid="skills-saved-deprecation"
@@ -489,7 +496,7 @@ const syncMeta = computed(() => {
   return ''
 })
 const sharedLineTitle = computed(() => (notice.value?.text
-  ? [notice.value.text, notice.value.deprecation].filter(Boolean).join(' ')
+  ? [notice.value.text, notice.value.dependencies, notice.value.deprecation].filter(Boolean).join(' ')
   : syncMeta.value))
 
 // ---- In-agent enforcement (ent#752 hook) ---------------------------------

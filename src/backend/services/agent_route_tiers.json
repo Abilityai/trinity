@@ -321,6 +321,12 @@
   "reason": "legacy",
   "tier": "accessor"
  },
+ "agent_files.py::get_agent_peer_skill_enforcement": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/peer-skills/enforcement",
+  "reason": "abilityai/trinity-enterprise#925: the Permissions panel's 'not enforced in-container' line. Anyone who can open the agent may call it; only a person who may manage its skills gets an answer (everyone else, a shared viewer included, gets nulls and causes no probe)",
+  "tier": "accessor"
+ },
  "agent_files.py::get_agent_peer_skills": {
   "method": "GET",
   "path": "/api/agents/{agent_name}/peer-skills",
@@ -1297,6 +1303,26 @@
   "reason": "payment-gated public surface (x402 / Nevermined)",
   "tier": "public"
  },
+ "person_memory.py::get_person_memory": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/person-memory/person",
+  "tier": "owner"
+ },
+ "person_memory.py::list_person_memory_people": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/person-memory",
+  "tier": "owner"
+ },
+ "person_memory.py::list_person_memory_writes": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/person-memory/writes",
+  "tier": "owner"
+ },
+ "person_memory.py::undo_person_memory_write": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/person-memory/writes/{write_id}/undo",
+  "tier": "owner"
+ },
  "public_links.py::create_public_link": {
   "method": "POST",
   "path": "/api/agents/{agent_name}/public-links",
@@ -1485,20 +1511,20 @@
  "seat_decisions.py::get_seat_autonomy": {
   "method": "GET",
   "path": "/api/agents/{agent_name}/seat-autonomy",
-  "reason": "trinity-enterprise#641: a seat-scoped read of the companion's ask-class states and blockers, email-free, the same gates as its sibling decision routes (assert_own_agent, then assert_agent_access); an agent key reads only its own agent",
-  "tier": "accessor"
+  "reason": "trinity-enterprise#1062: the agent's own key only (assert_own_agent, then the agent_only refusal), for the running turn it names; a person reads and decides through the client-portal routes",
+  "tier": "self"
  },
  "seat_decisions.py::list_seat_decisions": {
   "method": "GET",
   "path": "/api/agents/{agent_name}/decisions",
-  "reason": "legacy",
-  "tier": "accessor"
+  "reason": "trinity-enterprise#1062: the agent's own key only (assert_own_agent, then the agent_only refusal), for the running turn it names; a person reads and decides through the client-portal routes",
+  "tier": "self"
  },
  "seat_decisions.py::record_seat_decision": {
   "method": "POST",
   "path": "/api/agents/{agent_name}/decisions",
-  "reason": "legacy",
-  "tier": "accessor"
+  "reason": "trinity-enterprise#1062: the agent's own key only (assert_own_agent, then the agent_only refusal), for the running turn it names; a person reads and decides through the client-portal routes",
+  "tier": "self"
  },
  "sessions.py::create_session": {
   "method": "POST",
@@ -1569,6 +1595,11 @@
  "sharing.py::list_access_requests_endpoint": {
   "method": "GET",
   "path": "/api/agents/{agent_name}/access-requests",
+  "tier": "owner"
+ },
+ "sharing.py::resend_agent_invite_endpoint": {
+  "method": "POST",
+  "path": "/api/agents/{agent_name}/share/{email}/invite",
   "tier": "owner"
  },
  "sharing.py::set_public_channel_prompt_endpoint": {

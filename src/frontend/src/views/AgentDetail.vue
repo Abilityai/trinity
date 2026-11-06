@@ -217,6 +217,7 @@
             <!-- Nevermined Payments Tab Content -->
             <div v-if="activeTab === 'nevermined'">
               <NeverminedPanel :agent-name="agent.name" :can-edit="agent.can_share" />
+              <NeverminedSpendingPanel :agent-name="agent.name" :can-edit="agent.can_share" :agent-status="agent.status" :notify="showNotification" />
             </div>
 
             <!-- A2A Tab Content (trinity-enterprise#158) -->
@@ -224,8 +225,8 @@
               <A2aPanel :agent-name="agent.name" :notify="showNotification" />
             </div>
 
-            <!-- Sharing Tab Content -->
-            <div v-if="activeTab === 'sharing' && agent.can_share">
+            <!-- Channels Tab Content (ent#225: formerly Sharing) -->
+            <div v-if="activeTab === 'channels' && agent.can_share">
               <SharingPanel
                 :agent-name="agent.name"
                 :shares="agent.shares"
@@ -357,7 +358,7 @@
                   <ChannelsPane
                     v-else-if="section === 'channels'"
                     :agent-name="agent.name"
-                    :has-sharing-tab="visibleTabIds.includes('sharing')"
+                    :has-channels-tab="visibleTabIds.includes('channels')"
                     @navigate-tab="handleOverviewNavigate"
                   />
                   <IntegrationsPane
@@ -471,6 +472,7 @@ import TerminalPanelContent from '../components/TerminalPanelContent.vue'
 import SkillsTab from '../components/skills/SkillsTab.vue'  // trinity-enterprise#754
 import ChatPanel from '../components/ChatPanel.vue'
 import NeverminedPanel from '../components/NeverminedPanel.vue'
+import NeverminedSpendingPanel from '../components/NeverminedSpendingPanel.vue'
 import A2aPanel from '../components/A2aPanel.vue'  // trinity-enterprise#158: A2A config tab
 import OverflowTabs from '../components/OverflowTabs.vue'  // #1114: tab overflow dropdown
 
@@ -563,7 +565,9 @@ let skipNextActivation = false
 // two hooks can't drift again.
 //
 function applyDeepLinkRouting() {
-  const resolvedTab = route.query.tab ? resolveDeepLinkTab(route.query.tab) : null
+  // ent#967 (D30): Nevermined's redirect return carries no `tab` (its returnUrl takes no query).
+  const tab = route.query.tab ?? (route.query.delegationId && route.query.state ? 'nevermined' : undefined)
+  const resolvedTab = tab ? resolveDeepLinkTab(tab) : null
   // #2900: no tab named (or one that names nothing). The view is KeepAlive-
   // cached, so it may be showing a tab remembered from the last visit — make
   // the URL say so, or a reload would land somewhere else.
@@ -1648,7 +1652,7 @@ onActivated(async () => {
   // reconcileDeepLinkVisibility reads `deepLinkedTab`, acts, and clears it — so
   // running it here, before onMounted's awaits have loaded the agent, would
   // evaluate `visibleTabs` against `agent.value === null`, decide that
-  // ?tab=sharing / ?tab=brain are "not visible", fall back to Overview, and
+  // ?tab=channels / ?tab=brain are "not visible", fall back to Overview, and
   // clear the flag so onMounted's own later call becomes a no-op. That
   // regresses #2130 and #2153 and no request-count assertion would see it.
   if (isInitialActivation) return

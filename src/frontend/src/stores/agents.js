@@ -502,6 +502,17 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
+    // trinity-enterprise#459: email a pending person their invitation again.
+    async resendInvite(name, email) {
+      const authStore = useAuthStore()
+      const response = await axios.post(
+        `/api/agents/${name}/share/${encodeURIComponent(email)}/invite`,
+        null,
+        { headers: authStore.authHeader }
+      )
+      return response.data
+    },
+
     async unshareAgent(name, email) {
       const authStore = useAuthStore()
       await axios.delete(`/api/agents/${name}/share/${encodeURIComponent(email)}`, {
@@ -581,6 +592,17 @@ export const useAgentsStore = defineStore('agents', {
     async getAgentPeerSkills(name) {
       const authStore = useAuthStore()
       const response = await axios.get(`/api/agents/${name}/peer-skills`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    // abilityai/trinity-enterprise#925: does the agent hold peer skill grants
+    // inside itself? `{ reachable, hook }` — both null unless the caller may
+    // manage the agent's skills.
+    async getAgentPeerSkillEnforcement(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/peer-skills/enforcement`, {
         headers: authStore.authHeader
       })
       return response.data
