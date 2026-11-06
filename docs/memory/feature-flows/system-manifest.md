@@ -1525,26 +1525,38 @@ All tools support MCP API key authentication when `requireApiKey=true` in server
     strict: z.boolean().optional().describe("Abort on first agent-create failure (legacy)")
   }),
   execute: async ({ manifest, dry_run, strict }, context?) => {
-    const apiClient = getClient(context?.session);
-    const response = await apiClient.request("POST", "/api/systems/deploy", {
-      manifest,
-      dry_run: dry_run || false,
-      strict: strict || false
-    });
-    return JSON.stringify(response, null, 2);
+    const apiClient = getClient(context?.session);   // a missing key still throws
+    try {
+      const response = await apiClient.request("POST", "/api/systems/deploy", {
+        manifest,
+        dry_run: dry_run || false,
+        strict: strict || false
+      });
+      return JSON.stringify(response, null, 2);      // every 2xx, verbatim
+    } catch (error) {
+      return deployFailure(error, context);          // #4027
+    }
   }
 }
 ```
 
-On a total failure the backend answers HTTP 500 with the report as the body; the
-MCP client's `ApiError` embeds that body in the tool error message, so the report
-is still visible to the calling agent (trinity-enterprise#125).
+On a total failure the backend answers HTTP 500 with the report as the body
+(trinity-enterprise#125). `deployFailure` returns that report AS the result, with
+`http_status: 500` and `success: false` added, rather than letting the client's
+`ApiError` reach the caller as a thrown tool error (#4027). It shares
+`bodyAsResult` with `apply_system`: every non-2xx JSON object body (a 400 manifest
+error, a `strict` abort with its `created[]`, a 401, a 422) comes back the same
+way, and anything else as `{success: false, http_status, detail}`. A 403 is stamped
+`denied` through `accessDenied`; every other failure is stamped `failed` through
+`audit.ts::toolFailed` (`HTTP 500: status 'failed'`). A missing API key or a lost
+connection, which carry no HTTP status, still throw.
 
 #### apply_system
 The reconcile verb (trinity-enterprise#695), proxying `POST /api/systems/apply`. A NEW tool
 rather than a `mode` argument on `deploy_system`: a released `deploy_system` has no `mode` in
 its schema, so `mode: "apply"` sent to an older instance would be dropped and run create
-(suffixing the fleet), while an unknown tool name fails closed. `deploy_system` is unchanged.
+(suffixing the fleet), while an unknown tool name fails closed. `deploy_system`'s request and
+2xx results are unchanged; its non-2xx answers return since #4027 (above).
 ```typescript
 {
   name: "apply_system",
@@ -1576,7 +1588,7 @@ contract cannot silently break the tool:
 | 2xx | the body, verbatim | `success: true`, whatever the report's own `status` (`invalid`, `partial`) |
 | 404 / 405 (no apply route: an older build) | `{success: false, not_available: true, http_status, error, detail}`; `error` says not to fall back to `deploy_system` | `success: false`, no `denied`; `error: "HTTP <s>: apply route absent (not_available)"` (#4026) |
 | 403 | `{success: false, not_permitted: true, http_status: 403, error, detail}` through `access.ts::accessDenied`; hint "apply is human-only: run it with a person's credential" | `success: false, denied: true` (#2807) |
-| any other non-2xx with a JSON object body (the 409 / 503 / 500 apply reports, 400, 401, 422) | that body AS the result, plus `http_status` and `success: false`, so `status`, `blockers[]` and `failed[]` arrive intact | `success: false`, no `denied`, stamped through `audit.ts::toolFailed` (#4026); `error` is `HTTP <s>: status '<report status>'`, else `HTTP <s>: <string detail>` (capped at 200 characters), else `HTTP <s>` |
+| any other non-2xx with a JSON object body (the 409 / 503 / 500 apply reports, 400, 401, 422) | that body AS the result, plus `http_status` and `success: false`, so `status`, `blockers[]` and `failed[]` arrive intact | `success: false`, no `denied`, stamped through `audit.ts::toolFailed` (#4026); `error` is `HTTP <s>: status '<report status>'`, else `HTTP <s>: <string detail>` (capped at 200 characters), else `HTTP <s>` (`httpAuditReason`, through the `bodyAsResult` that `deploy_system` shares, #4027) |
 | a JSON scalar, array or null, or a non-JSON body | `{success: false, http_status, detail}` (the raw value) | `success: false`, no `denied`; `error: "HTTP <s>"` (the raw body never reaches the row) |
 | no HTTP status (missing API key, transport failure) | `{success: false, error}`, plus a `note` on a real run whose request went out (writes may have landed; run a dry run, then re-apply) | `success: false`, no `denied`; `error` is the client error, plus ` (real run, outcome unknown)` when the request went out |
 

@@ -19,6 +19,7 @@ from sqlalchemy.exc import OperationalError
 
 from database import db
 from services import ask_service, credential_ask_policy, credential_destination, skill_gate_service
+from services import wake_policy
 from services.operator_queue_choices import (
     SOMETHING_ELSE,
     ReservedAnswerError,
@@ -1019,7 +1020,7 @@ def _resume_requested(agent_name: str) -> bool:
     nothing happened.
     """
     try:
-        return bool(db.get_operator_resume_enabled(agent_name))
+        return bool(wake_policy.resolve(agent_name).enabled)
     except Exception:  # noqa: BLE001
         logger.warning(
             "[WorkspaceAsks] could not read the resume opt-in for %s; "

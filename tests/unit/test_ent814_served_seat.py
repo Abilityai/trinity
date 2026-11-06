@@ -203,6 +203,7 @@ def wired(monkeypatch):
     monkeypatch.setattr(r.db, "get_execution", lambda eid: store.get("execution"))
     monkeypatch.setattr(r, "assert_agent_access", lambda *a, **k: None)
     monkeypatch.setattr(r.rate_limiter, "enforce", lambda *a, **k: None)
+    monkeypatch.setattr(r.memory_service, "another_live_scope", lambda *a, **k: False)
     recorded = []
     monkeypatch.setattr(sds, "record", lambda db, **kw: recorded.append(kw) or {
         "id": "d1", "seat_email": kw["seat_email"], "decided_by_person": kw["decided_by_person"],
@@ -222,12 +223,15 @@ def _record(r, store, email, **body):
     store["execution"] = SimpleNamespace(
         id="e1", agent_name=AGENT, triggered_by="schedule", source_user_email=None,
         source_channel="portal", source_channel_chat_id="s", source_channel_client=email,
-        schedule_id="sch-1")
+        schedule_id="sch-1", status="running")
     req = RecordDecisionRequest(
         execution_id="e1", outcome="approved", decided="Renew the Acme contract",
         alternatives=["let it lapse"], criterion="margin above 20%", reversal="margin drops",
         review_by="2027-01-01", **body)
-    return asyncio.run(r.record_seat_decision(AGENT, req, current_user=SimpleNamespace(id=1, agent_name=None)))
+    # trinity-enterprise#1062: recorded by the agent's own key, in the live turn
+    # the platform names (#2984's header).
+    return asyncio.run(r.record_seat_decision(
+        AGENT, req, current_user=SimpleNamespace(id=1, agent_name=AGENT), x_trinity_execution_id="e1"))
 
 
 def test_a_decision_for_bob_is_stamped_with_bobs_seat_not_the_primarys(wired):

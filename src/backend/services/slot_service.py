@@ -253,6 +253,17 @@ class SlotService:
                         "[Slots] release callback skipped: no running event loop"
                     )
 
+    def active_slot_count(self, agent_name: str) -> int:
+        """How many slots the agent is holding right now — the same ZSET
+        ``acquire_slot`` admits against, counted with ZCARD.
+
+        Synchronous on purpose: a caller that only needs the meter reading
+        (the #4257 queue-stall monitor runs inside the sync maintenance tick)
+        should not have to await `get_slot_state`, which additionally reads one
+        metadata hash per slot to build the per-slot detail it does not want.
+        """
+        return int(self.redis.zcard(self._slots_key(agent_name)))
+
     def renew_slot(self, agent_name: str, execution_id: str) -> bool:
         """#2433: re-anchor a HELD slot's lease at 'now'.
 

@@ -191,6 +191,18 @@ def _install(monkeypatch, *, enabled=True, recorder=None, flag_raises=False, rep
         sys.modules, "database",
         SimpleNamespace(db=SimpleNamespace(get_operator_resume_enabled=_get_flag)),
     )
+    # ent#1102: the opt-in gate is now `wake_policy.resolve`, so one owner
+    # decision covers this answer-wake and the delegated-run wake. `_get_flag`
+    # stays the test's switch; only the layer that reads it moved.
+    _install_module(
+        "services.wake_policy",
+        SimpleNamespace(
+            resolve=lambda name: SimpleNamespace(
+                enabled=bool(_get_flag(name)),
+                source="agent" if _get_flag(name) else "instance",
+            ),
+        ),
+    )
     decision = SimpleNamespace(replay=replay, in_flight=False)
     _install_module(
         "services.idempotency_service",

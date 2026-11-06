@@ -26,7 +26,13 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy import inspect, text
 
-from db.engine import get_engine, resolve_database_url
+from db.engine import (
+    get_engine,
+    postgres_required,
+    refuse_empty_postgres_beside_sqlite,
+    resolve_database_url,
+    sqlite_file_has_data,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -85,12 +91,24 @@ def _pg_migration_lock(engine):
 def _config() -> Config:
     cfg = Config()
     cfg.set_main_option("script_location", str(_BACKEND_DIR / "migrations"))
-    cfg.set_main_option("sqlalchemy.url", resolve_database_url())
+    # ConfigParser reads `%` as interpolation; an encoded password would raise
+    # with the full URL in the message.
+    cfg.set_main_option("sqlalchemy.url", resolve_database_url().replace("%", "%%"))
     return cfg
 
 
-def upgrade_to_head() -> None:
+def _users_table_is_empty(engine, has_core: bool) -> bool:
+    if not has_core:
+        return True
+    with engine.connect() as conn:
+        return conn.execute(text(f"SELECT 1 FROM {_CORE_TABLE} LIMIT 1")).first() is None
+
+
+def upgrade_to_head(*, allow_sqlite_source: bool = False) -> None:
     """Bring the active PostgreSQL schema to head via Alembic.
+
+    ``allow_sqlite_source`` is for ``db.sqlite_to_postgres`` only: it builds the
+    schema an install's SQLite data is about to be copied into.
 
     Serialised across concurrent boots (multi-worker uvicorn + the scheduler
     container) by a PG session advisory lock (#1425) — the SQLite flock in
@@ -107,6 +125,16 @@ def upgrade_to_head() -> None:
         insp = inspect(engine)
         has_version = insp.has_table("alembic_version")
         has_core = insp.has_table(_CORE_TABLE)
+
+        # #4175: inside the lock, before anything is built. Stat first, so an
+        # install with no SQLite file never queries for this.
+        if (
+            not allow_sqlite_source
+            and postgres_required()
+            and sqlite_file_has_data()
+            and _users_table_is_empty(engine, has_core)
+        ):
+            refuse_empty_postgres_beside_sqlite()
 
         cfg = _config()
         if not has_version and has_core:

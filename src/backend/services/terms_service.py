@@ -43,9 +43,21 @@ commits. The route schedules ``run_acceptance_hooks`` through FastAPI
 consumer; a consumer that raises is logged and audited
 (``AUTHORIZATION/terms_hook_failed``). ``run_acceptance_hooks`` is a coroutine
 so every hook runs ON the event-loop thread.
+
+``register_acceptance_hook(fn, inline=True)`` (trinity-enterprise#1111) opts a
+consumer into being awaited BEFORE the response instead:
+``run_inline_acceptance_hooks`` runs the inline hooks under one ceiling
+(``TERMS_INLINE_HOOK_BUDGET_S``) for the whole acceptance. For work the person
+is about to look for — a share that has to be on their roster when the
+Workspace re-reads it at the redirect — "after the response" always loses that
+race. The ceiling is a WAIT ceiling, not a cancellation: past it the hook runs
+on as a shielded task and the acceptance answers anyway, audited
+``AUTHORIZATION/terms_hook_slow``.
 """
 from __future__ import annotations
 
+import asyncio
+import inspect
 import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
@@ -350,21 +362,131 @@ async def _audit(action: str, actor: Any, *, actor_ip: Optional[str], request_id
 
 _HOOKS: List[AcceptanceHook] = []
 
+# trinity-enterprise#1111 (T1): the consumers awaited BEFORE the response.
+_INLINE_HOOKS: List[AcceptanceHook] = []
 
-def register_acceptance_hook(fn: AcceptanceHook) -> None:
-    """Register a consumer of new acceptances. Idempotent per function."""
-    if fn not in _HOOKS:
-        _HOOKS.append(fn)
-        logger.info("[terms] acceptance hook registered: %s", getattr(fn, "__qualname__", fn))
+# The ceiling on the whole inline phase of ONE acceptance — not per hook, so
+# three slow consumers cannot add up to three ceilings on one request. It is a
+# WAIT ceiling, never a cancellation: past it the hook runs on as a shielded
+# task and reaches its own compensation (see `run_inline_acceptance_hooks`).
+TERMS_INLINE_HOOK_BUDGET_S = 5
+
+# Strong references to the inline tasks still running. Without this the loop is
+# the only owner of a task it is no longer awaiting, and a mid-mutation consumer
+# can be garbage-collected.
+_PENDING_INLINE: set = set()
+
+
+def register_acceptance_hook(fn: AcceptanceHook, *, inline: bool = False) -> None:
+    """Register a consumer of new acceptances. Idempotent per function.
+
+    ``inline=True`` opts the consumer into the phase awaited BEFORE the
+    response (trinity-enterprise#1111): for work the person is about to look
+    for — a share that has to be on their roster when the Workspace re-reads it
+    at the redirect — "after the response" always loses that race. An inline
+    hook should be a coroutine function and should keep its inline half short;
+    anything slower belongs in a background hook, or in a task the inline half
+    schedules.
+    """
+    hooks = _INLINE_HOOKS if inline else _HOOKS
+    if fn not in hooks:
+        hooks.append(fn)
+        logger.info("[terms] %s acceptance hook registered: %s",
+                    "inline" if inline else "background", getattr(fn, "__qualname__", fn))
 
 
 def clear_acceptance_hooks() -> None:
-    """Drop every hook — used by tests."""
+    """Drop every hook, both kinds — used by tests."""
     _HOOKS.clear()
+    _INLINE_HOOKS.clear()
 
 
 def acceptance_hooks() -> tuple:
     return tuple(_HOOKS)
+
+
+def inline_acceptance_hooks() -> tuple:
+    return tuple(_INLINE_HOOKS)
+
+
+def _hook_name(fn: AcceptanceHook) -> str:
+    return getattr(fn, "__module__", "") + "." + getattr(fn, "__qualname__", repr(fn))
+
+
+async def _run_one_inline(fn: AcceptanceHook, name: str, user_id: Optional[int],
+                          email: Optional[str], terms_version: Optional[str],
+                          accepted_at: Optional[str]) -> None:
+    """One inline hook, owning its own failure.
+
+    The failure is audited HERE rather than by the waiter, because past the
+    ceiling there is no waiter left to catch it — and an exception nobody
+    retrieves is a warning on stderr instead of an audit row.
+    """
+    try:
+        result = fn(user_id, email, terms_version, accepted_at)
+        if inspect.isawaitable(result):
+            await result
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:  # noqa: BLE001 — a consumer never fails an acceptance
+        logger.exception("[terms] inline acceptance hook %s failed for user %s", name, user_id)
+        await _audit("terms_hook_failed", None, actor_ip=None, request_id=None, endpoint=None,
+                     details={"hook": name, "user_id": user_id, "version": terms_version,
+                              "error": type(e).__name__, "inline": True})
+
+
+async def run_inline_acceptance_hooks(user_id: Optional[int], email: Optional[str],
+                                      terms_version: Optional[str],
+                                      accepted_at: Optional[str]) -> None:
+    """Await the inline hooks before the response, under ONE ceiling.
+
+    Each hook runs as its own task, and the wait is `wait_for(shield(task))`:
+    on timeout the WAIT ends, the task does not. That is the whole point —
+    `wait_for` over the work itself would cancel a consumer part-way through a
+    multi-step mutation, which is worse than answering late. Past the ceiling
+    the remaining hooks are still STARTED (so their work happens) but not
+    waited on, and `terms_hook_slow` records that this acceptance's consumer
+    did not finish in time.
+
+    Never raises: an acceptance is already committed by the time this runs.
+    """
+    hooks = tuple(_INLINE_HOOKS)
+    if not hooks:
+        return
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(float(TERMS_INLINE_HOOK_BUDGET_S), 0.0)
+    for fn in hooks:
+        name = _hook_name(fn)
+        try:
+            task = asyncio.create_task(
+                _run_one_inline(fn, name, user_id, email, terms_version, accepted_at))
+        except Exception:  # noqa: BLE001 — a hook that cannot even start
+            logger.exception("[terms] could not start inline acceptance hook %s", name)
+            continue
+        _PENDING_INLINE.add(task)
+        task.add_done_callback(_PENDING_INLINE.discard)
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            await _audit_hook_slow(name, user_id, terms_version, "budget_spent")
+            continue
+        try:
+            await asyncio.wait_for(asyncio.shield(task), remaining)
+        except asyncio.TimeoutError:
+            await _audit_hook_slow(name, user_id, terms_version, "timeout")
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — `_run_one_inline` already audited it
+            logger.exception("[terms] inline acceptance hook %s raised past its own guard",
+                             name)
+
+
+async def _audit_hook_slow(name: str, user_id: Optional[int], terms_version: Optional[str],
+                           reason: str) -> None:
+    logger.warning("[terms] inline acceptance hook %s did not finish within %ss (%s); "
+                   "it runs on in the background", name, TERMS_INLINE_HOOK_BUDGET_S, reason)
+    await _audit("terms_hook_slow", None, actor_ip=None, request_id=None, endpoint=None,
+                 details={"hook": name, "user_id": user_id, "version": terms_version,
+                          "budget_s": TERMS_INLINE_HOOK_BUDGET_S, "reason": reason})
 
 
 async def run_acceptance_hooks(user_id: Optional[int], email: Optional[str], terms_version: Optional[str],
