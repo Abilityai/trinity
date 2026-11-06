@@ -126,6 +126,10 @@ text a construction uses (that class is checked the same way):
   construction or at a caller that can be seen
   (``test_listed_carriers_carry_no_exception_text``). A construction that
   does carry it is pinned by name with its reason.
+
+``_CARRIED`` lists classes whose text reaches a 5xx by a return value or an
+attribute, which the scan does not follow, so no entry sits at their sink;
+each is given the ``no_exception_text`` check with its reason.
 """
 
 from __future__ import annotations
@@ -1301,6 +1305,29 @@ def _foreign_in(index: _Index, mi: int, scope: _Scope, ctx: _Ctx, args: List[ast
 
 
 # ---------------------------------------------------------------------------
+# classes whose text crosses a function before a 5xx
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class _Carried:
+    cls: str
+    reason: str
+
+
+_CARRIED: Tuple[_Carried, ...] = (
+    _Carried(
+        "EgressError",
+        "AAuth egress (services/aauth/egress.py). ps_client and person_token hand "
+        "its `detail` to a returned refusal that routers/aauth_person.py answers at "
+        "502 (`person_server_unreachable`), and resource_client to one that "
+        "routers/aauth_resource.py answers at 502 by default. A transport failure "
+        "names httpx's class only; the A2A validator's words it re-raises are "
+        "A2ACallError's, checked with that class's pins.",
+    ),
+)
+
+
+# ---------------------------------------------------------------------------
 # the allowlist
 # ---------------------------------------------------------------------------
 
@@ -1619,7 +1646,7 @@ def test_listed_carriers_are_raised_only_with_platform_text():
 
 
 def test_listed_carriers_carry_no_exception_text():
-    classes = {c for a in _ALLOWED for c in a.no_exception_text}
+    classes = {c for a in _ALLOWED for c in a.no_exception_text} | {c.cls for c in _CARRIED}
     pins = frozenset(p for a in _ALLOWED for p in a.pins)
     bad = _constructions_with_foreign_text(list(_real_modules()), classes, pins, strict=False)
     assert not bad, (
@@ -1645,6 +1672,15 @@ def test_classes_answered_at_a_dynamic_status_carry_no_exception_text():
         "there, as a carrier checked where it is built) is built from exception "
         "text:\n  " + "\n  ".join(bad)
     )
+
+
+def test_carried_classes_are_defined_and_reasoned():
+    """A renamed class would leave its check matching nothing."""
+    defined = {n.name for m in _real_modules() for n in ast.walk(m.tree)
+               if isinstance(n, ast.ClassDef)}
+    for c in _CARRIED:
+        assert c.cls in defined, f"_CARRIED names {c.cls}, which no module defines"
+        assert len(c.reason) > 80, c.cls
 
 
 def test_pins_are_live():
