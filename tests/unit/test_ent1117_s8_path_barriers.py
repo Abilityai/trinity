@@ -773,6 +773,69 @@ def test_move_avatar_file_treats_a_refused_name_as_nothing_to_move(store):
     assert (store.parent / "avatars2" / "x.webp").read_bytes() == SECRET
 
 
+def test_listing_and_identity_look_in_the_checked_store(split_root, monkeypatch):
+    monkeypatch.setattr(avatar_paths, "AVATAR_DIR", split_root.raw)
+    _plant(split_root.checked, ("x.webp", "x_ref.png", "x_emotion_calm.png"), CHECKED)
+    _plant(split_root.decoy, ("x_emotion_happy.webp",), SECRET)
+    assert _run(avatar.get_avatar_emotions("x"))["emotions"] == ["calm"]
+    monkeypatch.setattr(avatar, "assert_agent_access", lambda *a, **k: None)
+    monkeypatch.setattr(avatar, "db", MagicMock(get_avatar_identity=MagicMock(return_value=None)))
+    body = _run(avatar.get_avatar_identity("x", current_user=MagicMock()))
+    assert body["has_avatar"] is True and body["has_reference"] is True
+
+
+def test_generate_clears_stale_files_only_in_the_checked_store(split_root, monkeypatch):
+    monkeypatch.setattr(avatar_paths, "AVATAR_DIR", split_root.raw)
+    stale = ("x.png", "x_emotion_happy.webp", "x_emotion_calm.png")
+    _plant(split_root.checked, stale, CHECKED)
+    _plant(split_root.decoy, stale, SECRET)
+    _generate_env(monkeypatch)
+    _run(avatar.generate_avatar("x", AvatarGenerateRequest(identity_prompt="a robot")))
+    assert sorted(p.name for p in split_root.checked.iterdir()) == ["x.webp", "x_ref.png"]
+    assert sorted(p.name for p in split_root.decoy.iterdir()) == sorted(stale)
+
+
+def test_regenerate_reads_and_writes_the_checked_path(split_root, monkeypatch):
+    monkeypatch.setattr(avatar_paths, "AVATAR_DIR", split_root.raw)
+    _plant(split_root.checked, ("x_ref.png",), CHECKED)
+    service = SimpleNamespace(
+        available=True,
+        generate_variation=AsyncMock(return_value=SimpleNamespace(
+            success=True, image_data=b"VARIATION", error=None)),
+    )
+    monkeypatch.setattr(avatar, "get_image_generation_service", lambda: service)
+    monkeypatch.setattr(avatar, "db", MagicMock(
+        get_avatar_identity=MagicMock(return_value={"identity_prompt": "a robot"})))
+    monkeypatch.setattr(avatar, "optimize_avatar", lambda b: b"WEBP-" + b)
+    _run(avatar.regenerate_avatar("x"))
+    assert service.generate_variation.await_args.kwargs["reference_image"] == CHECKED
+    assert (split_root.checked / "x.webp").read_bytes() == b"WEBP-VARIATION"
+    assert list(split_root.decoy.iterdir()) == []
+
+
+def test_background_emotions_read_and_write_the_checked_path(split_root, monkeypatch):
+    monkeypatch.setattr(avatar_paths, "AVATAR_DIR", split_root.raw)
+    _plant(split_root.checked, ("x_ref.png",), CHECKED)
+    service = SimpleNamespace(generate_emotion_variation=AsyncMock(return_value=SimpleNamespace(
+        success=True, image_data=b"EMO", error=None)))
+    monkeypatch.setattr(avatar, "get_image_generation_service", lambda: service)
+    monkeypatch.setattr(avatar, "optimize_avatar", lambda b: b"WEBP-" + b)
+    _run(avatar._generate_emotions_background("x", CHECKED, "a robot"))
+    written = sorted(p.name for p in split_root.checked.iterdir() if "_emotion_" in p.name)
+    assert written == sorted(f"x_emotion_{e}.webp" for e in avatar.AVATAR_EMOTIONS)
+    assert list(split_root.decoy.iterdir()) == []
+
+
+def test_delete_removes_only_the_checked_files(split_root, monkeypatch):
+    monkeypatch.setattr(avatar_paths, "AVATAR_DIR", split_root.raw)
+    _plant(split_root.checked, _ALL_READ_FILES, CHECKED)
+    _plant(split_root.decoy, _ALL_READ_FILES, SECRET)
+    monkeypatch.setattr(avatar, "db", MagicMock())
+    _run(avatar.delete_avatar("x"))
+    assert list(split_root.checked.iterdir()) == []
+    assert sorted(p.name for p in split_root.decoy.iterdir()) == sorted(_ALL_READ_FILES)
+
+
 # =============================================================================
 # 12. Hostile names through the write paths (characterization)
 # =============================================================================
