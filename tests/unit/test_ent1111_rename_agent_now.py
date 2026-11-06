@@ -16,6 +16,7 @@ This file pins both halves:
 """
 import ast
 import json
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -248,6 +249,41 @@ class TestRenameAgentNow:
             await rename_agent_now("old", "new", actor=None)
 
         assert env["order"][-1] == "container.rename:agent-old"
+
+    @pytest.mark.parametrize("fails,expected", [
+        (False, "the name is taken"),
+        (True, "locked"),
+    ])
+    async def test_a_failed_rename_back_still_raises_the_original_refusal(
+            self, env, monkeypatch, caplog, fails, expected):
+        """I5: the rename-back is the one step whose failure cannot be repaired
+        — rows under the old name, container under the new one. Masking the
+        refusal with the Docker error would send the route to its generic 500
+        and make adoption's `except RenameRefused` miss its release path, so
+        the Docker fault is logged (naming the stranded container) and the
+        ORIGINAL refusal is raised. Both failure branches, since each had its
+        own bare call."""
+        env["db"].rename_agent.side_effect = (
+            RuntimeError("locked") if fails else (lambda o, n: False))
+        forward = []
+
+        async def _rename(c, name):
+            env["order"].append(f"container.rename:{name}")
+            if name == "agent-old":
+                raise RuntimeError("docker daemon gone")
+            forward.append(name)
+        monkeypatch.setattr(rename_mod, "container_rename", AsyncMock(side_effect=_rename))
+
+        with caplog.at_level(logging.ERROR, logger=rename_mod.__name__):
+            with pytest.raises(RenameRefused) as exc:
+                await rename_agent_now("old", "new" if fails else "taken", actor=None)
+
+        assert expected in str(exc.value)
+        assert "docker daemon gone" not in str(exc.value)
+        assert env["order"][-1] == "container.rename:agent-old", "it tried"
+        logged = caplog.text
+        assert "STRANDED" in logged and "agent-old" in logged
+        env["audit"].assert_not_awaited()
 
     @pytest.mark.parametrize("step", ["gate", "redis"])
     async def test_a_best_effort_step_cannot_fail_the_rename(self, env, monkeypatch, step):

@@ -69,7 +69,10 @@ class RenameRefused(Exception):
     transaction — it re-checks the #1671 volume-base claim there).
 
     The Docker container has been renamed BACK before this is raised, so the
-    agent is left exactly as it was found, under its old name and stopped.
+    agent is left exactly as it was found, under its old name and stopped —
+    unless that rename-back itself failed, in which case the container is
+    stranded under the new name and `_rename_container_back` has logged it
+    (the refusal is still what is raised, so no caller loses its branch).
     """
 
 
@@ -162,10 +165,10 @@ async def rename_agent_now(
         # raise here is a refusal too — and leaves the rows untouched. Undo the
         # container rename either way, or the agent is stranded under a name
         # nothing in the database knows (eng H3).
-        await container_rename(container, old_container_name)
+        await _rename_container_back(container, old_container_name, new_name)
         raise RenameRefused(f"{old_name} -> {new_name}: {e}") from e
     if not renamed:
-        await container_rename(container, old_container_name)
+        await _rename_container_back(container, old_container_name, new_name)
         raise RenameRefused(f"{old_name} -> {new_name}: the name is taken")
 
     # trinity-enterprise#751: a gated request approved for the old name must not
@@ -221,6 +224,29 @@ async def rename_agent_now(
     )
 
     return RenameResult(old_name=old_name, new_name=new_name, was_running=was_running)
+
+
+async def _rename_container_back(container, old_container_name: str, new_name: str) -> None:
+    """Undo the container rename after the DB refused (I5).
+
+    A Docker fault HERE is the one state this flow cannot repair: the rows kept
+    the old name, the container is under the new one, and nothing in the
+    database points at it — the #1581 orphan sweep reads it as unowned and the
+    next start recreates a second container. So it is logged by name and
+    swallowed, and the ORIGINAL refusal is the error the caller sees: masking a
+    `RenameRefused` with a Docker error loses the reason the rename failed and
+    sends every caller down the wrong branch (the route would 500 with
+    "Failed to rename agent: <docker>" instead of the DB text, and adoption's
+    `except RenameRefused` would miss its own release path entirely).
+    """
+    try:
+        await container_rename(container, old_container_name)
+    except Exception as e:
+        logger.error(
+            "Failed to rename the container back after the database refused: "
+            f"{old_container_name} is STRANDED under agent-{new_name} while the "
+            f"database kept its old name. Rename the container by hand or stop it "
+            f"and let the next start recreate it: {e}")
 
 
 def _move_avatars(old_name: str, new_name: str) -> None:
