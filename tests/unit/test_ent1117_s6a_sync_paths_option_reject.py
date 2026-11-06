@@ -102,6 +102,9 @@ def test_shared_table_covers_both_decisions_and_the_divergence_edges():
     rejected = {c["path"] for c in _CASES if not c["accept"]}
     assert {"-f", "--force", "-", "-f\nx"} <= rejected
     assert {" -f", "\t-f", "\n-f", "x\n-f", "", "./-x", "\ufeff-f"} <= accepted
+    # Every Unicode dash already probed against git, so a check that also
+    # refused one of them (on either side) fails a shared row.
+    assert {"\u2212f", "\u2010f", "\u2011f", "\u2013f", "\u2014f", "\ufe63f", "\uff0df"} <= accepted
 
 
 def test_model_caps_a_long_element_in_the_message():
