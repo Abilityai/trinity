@@ -6,6 +6,7 @@ PostgreSQL, so the command builds the schema itself and never imports
 """
 from __future__ import annotations
 
+import importlib
 import os
 import sqlite3
 import subprocess
@@ -156,7 +157,12 @@ def test_enterprise_percent_error_does_not_print_the_password(tool, monkeypatch,
 
     monkeypatch.setitem(sys.modules, "enterprise.backend._alembic_runner", SimpleNamespace(upgrade_to_head=boom))
     monkeypatch.setattr(tool, "_module_available", lambda name: True)
-    monkeypatch.setattr("db.alembic_runner.upgrade_to_head", lambda **kwargs: None)
+    # Patch the module `build_postgres_schema` will import (the sys.modules
+    # entry), not the `db` package attribute: a test that pops `db.*` from
+    # sys.modules leaves that attribute on a stale copy, and the string form
+    # then patches the copy while the code imports a fresh, unpatched module.
+    monkeypatch.setattr(importlib.import_module("db.alembic_runner"), "upgrade_to_head",
+                        lambda **kwargs: None)
     with pytest.raises(SystemExit) as exc:
         tool.build_postgres_schema()
     assert exc.value.code == tool.EXIT_USAGE

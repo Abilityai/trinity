@@ -1903,16 +1903,21 @@ def require_interactive(current_user: User = Depends(get_current_user)) -> User:
     return current_user
 
 
-def _spawned_by_caller(agent_name: str, target_agent: str) -> bool:
+def _spawned_by_caller(agent_name: str, target_agent: str, *, strict: bool = False) -> bool:
     """Whether ``agent_name`` spawned ``target_agent`` with the key it holds NOW.
 
     A name-only match is forgeable via name reuse; the key id is stable and
     cascade-deletes with the parent (trinity-enterprise#69 Part 2). Fails
-    closed: any lookup error is "not spawned by the caller".
+    closed: any lookup error is "not spawned by the caller". ``strict`` raises
+    the lookup error instead, for a caller whose own failure direction is the
+    opposite (the in-container peer check fails OPEN, trinity-enterprise#925 —
+    a closed answer there would refuse a parent's turn during a blip).
     """
     try:
         info = db.get_agent_ephemeral_info(target_agent)
     except Exception:
+        if strict:
+            raise
         return False
     if not isinstance(info, dict) or info.get("spawned_by_agent") != agent_name:
         return False
@@ -1922,6 +1927,8 @@ def _spawned_by_caller(agent_name: str, target_agent: str) -> bool:
     try:
         parent_key = db.get_agent_mcp_api_key(agent_name)
     except Exception:
+        if strict:
+            raise
         return False
     return bool(parent_key) and parent_key.id == expected_key_id
 
