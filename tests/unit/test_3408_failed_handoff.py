@@ -191,7 +191,13 @@ def _is_the_handoff_failure(error):
     every teardown step logs its own failure instead of raising it."""
     if isinstance(error, UnicodeEncodeError):
         return True
-    return isinstance(error, HTTPException) and "surrogates not allowed" in str(error.detail)
+    # The 500 names the class only (trinity#4284); the text stays in the log,
+    # and the original exception rides on `__cause__` (the site raises `from e`).
+    return (
+        isinstance(error, HTTPException)
+        and str(error.detail).endswith(": UnicodeEncodeError")
+        and "surrogates not allowed" in str(error.__cause__)
+    )
 
 
 def _assert_released(registry, child):
