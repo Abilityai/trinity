@@ -315,7 +315,11 @@ async def export_agent_data(
         except Exception as exc:
             _safe_unlink(tmp_path)
             logger.exception("data export failed for %s", agent_name)
-            raise HTTPException(status_code=500, detail=f"Data export failed: {exc}")
+            # #4284: the class name in the body; logger.exception above has the rest.
+            raise HTTPException(
+                status_code=500,
+                detail=f"Data export failed ({exc.__class__.__name__} — details in backend logs)",
+            )
 
     # Capture complete (lock released). Audit, then stream the temp file out and
     # delete it once the response is fully sent.
@@ -496,7 +500,11 @@ async def import_agent_data(
         except Exception as exc:
             idempotency_service.fail(decision)
             logger.exception("data import failed for %s", agent_name)
-            raise HTTPException(status_code=502, detail=f"Data import failed: {exc}")
+            # #4284: the class name in the body; logger.exception above has the rest.
+            raise HTTPException(
+                status_code=502,
+                detail=f"Data import failed ({exc.__class__.__name__} — details in backend logs)",
+            )
 
         idempotency_service.complete(decision, None, response.model_dump())
     finally:
