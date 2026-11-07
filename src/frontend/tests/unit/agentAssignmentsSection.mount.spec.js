@@ -17,6 +17,7 @@ import AgentAssignmentsSection from '@/components/AgentAssignmentsSection.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useEnterpriseStore } from '@/stores/enterprise'
 import { replacePrimarySteps, seatLine, driftNote, writeError } from '@/utils/assignments'
+import { candidateAnswer, pickPerson, typePerson } from './helpers/pickPerson'
 
 const AGENT = 'scout'
 const ANN = { id: 'a1', user_id: 1, display_name: 'Ann Lee', role_id: 'cfo', kind: 'primary', drift_state: 'unknown', proactive_consent: true, proactive_consent_state: 'consented' }
@@ -31,9 +32,14 @@ const USERS = [
 let roster
 let canonRoles
 function serve() {
-  api.get.mockImplementation(async (url) => {
+  api.get.mockImplementation(async (url, cfg) => {
     if (url === '/api/users') return { data: USERS }
     if (url === `/api/agents/${AGENT}/canon/roles`) return { data: canonRoles }
+    // ent#1154: the pickers' scoped read
+    if (url.endsWith('/candidates')) {
+      const held = (kind) => (roster.assignments || []).filter((a) => a.kind === kind).map((a) => a.user_id)
+      return { data: candidateAnswer(USERS, held)(cfg?.params) }
+    }
     return { data: roster }
   })
 }
@@ -122,25 +128,24 @@ describe('writes', () => {
   it('adds a person picked by name, with their own seat, and reloads', async () => {
     const w = render()
     await flushPromises()
-    const options = q(w, 'add-user').findAll('option').map((o) => o.text())
-    expect(options).toContain('Cat Moe')
-    expect(options).not.toContain('Dan Off')                      // suspended
+    await typePerson(w, 'add-user', 'da')
+    expect(w.findAll('[role="option"]')).toHaveLength(0)          // suspended
     expect(q(w, 'add-role').element.value).toBe('')               // ent#814: never the primary's seat by default
-    await q(w, 'add-user').setValue('3')
-    await q(w, 'add-role').setValue('cfo')
     await q(w, 'add-kind').setValue('viewer')
+    await pickPerson(w, 'add-user', 'ca', 'Cat Moe')
+    await q(w, 'add-role').setValue('cfo')
     await q(w, 'assignment-add-form').trigger('submit')
     await flushPromises()
     expect(api.post).toHaveBeenCalledWith(`/api/enterprise/assignments/agents/${AGENT}`, { user_id: 3, role_id: 'cfo', kind: 'viewer' })
     expect(q(w, 'add-role').element.value).toBe('')     // ent#814: the seat leaves with the person it was for
-    expect(api.get.mock.calls.filter(([u]) => u.startsWith('/api/enterprise/assignments')).length).toBe(2)
+    expect(api.get.mock.calls.filter(([u]) => u.startsWith('/api/enterprise/assignments') && !u.endsWith('/candidates')).length).toBe(2)
   })
 
   it('surfaces the backend error by name when a write is refused', async () => {
     api.post.mockRejectedValueOnce(conflict('That assignment already exists, or this agent already has a primary human.'))
     const w = render()
     await flushPromises()
-    await q(w, 'add-user').setValue('2')
+    await pickPerson(w, 'add-user', 'ca', 'Cat Moe')
     await q(w, 'assignment-add-form').trigger('submit')
     await flushPromises()
     expect(w.text()).toContain('That assignment already exists, or this agent already has a primary human.')
@@ -203,7 +208,8 @@ describe('a row\'s kind select and Remove at phone width (#3663)', () => {
 describe('replacing the primary', () => {
   async function replaceWith(w, userId, oldBecomes) {
     await q(w, 'assignment-replace').trigger('click')
-    await q(w, 'replace-user').setValue(String(userId))
+    const name = USERS.find((u) => u.id === userId).name
+    await pickPerson(w, 'replace-user', name.slice(0, 2).toLowerCase(), name)
     await q(w, 'replace-old-becomes').setValue(oldBecomes)
     await q(w, 'assignment-replace-form').trigger('submit')
     await flushPromises()
@@ -361,7 +367,7 @@ describe('seats (trinity-enterprise#811)', () => {
     roster = { agent_name: AGENT, assignments: [], mine: null, primary: null }
     const w = render()
     await flushPromises()
-    await q(w, 'add-user').setValue('3')
+    await pickPerson(w, 'add-user', 'ca', 'Cat Moe')
     expect(q(w, 'add-submit').attributes('disabled')).toBeUndefined()
     await q(w, 'assignment-add-form').trigger('submit')
     await flushPromises()
@@ -426,7 +432,7 @@ describe('canon seats, drift and consent (trinity-enterprise#817)', () => {
     const list = w.find(`datalist#canon-roles-${AGENT}`)
     expect(list.findAll('option').map((o) => o.attributes('value'))).toEqual(['cfo', 'head-of-sales'])
     expect(q(w, 'add-role').attributes('list')).toBe(`canon-roles-${AGENT}`)
-    await q(w, 'add-user').setValue('3')
+    await pickPerson(w, 'add-user', 'ca', 'Cat Moe')
     await q(w, 'add-role').setValue('not-in-canon')
     await q(w, 'assignment-add-form').trigger('submit')
     await flushPromises()
