@@ -132,7 +132,7 @@ RUN pip install --no-cache-dir \
     jsonschema==4.26.0 \
     websocket-client==1.9.2 \
     helicone-helpers==1.2.1 \
-    black==26.5.1 \
+    black==26.10.1 \
     mkdocs==1.6.1 \
     mkdocs-material==9.7.7 \
     "mkdocstrings[python]==0.29.1" \
@@ -227,6 +227,9 @@ RUN mkdir -p /opt/trinity/models && \
     test "$actual" = "634d0f66c29dc934c8fa72b8a4fe91dd4d420a22f1d82a241058d4316e659a99" || { echo "embedding model sha256 mismatch: $actual"; exit 1; } && \
     chown -R 1000:1000 /opt/trinity/models
 ENV HF_HUB_OFFLINE=1
+
+# #4175: refuse SQLite inside the image; db/engine.py reads this.
+ENV TRINITY_REQUIRE_POSTGRES=1
 
 # Ensure all files are readable
 RUN chmod -R 644 /app/*.py /app/alembic.ini && \

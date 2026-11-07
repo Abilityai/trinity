@@ -409,5 +409,28 @@ class PlatformAuditService:
         return hashlib.sha256(content.encode()).hexdigest()
 
 
+def principal_actor(current_user: Any) -> Dict[str, Any]:
+    """The actor kwargs for `log` when a principal may be an AGENT's key.
+
+    `log` ranks `actor_user` above `actor_agent_name`, so passing an agent
+    key's principal would file the agent's act as its owner's own — the "the
+    agent did it" vs "the person did it" line (Tandem R29). For an agent
+    principal the agent is the actor, the owner rides as `actor_email`, and the
+    key is named explicitly. Shared by the capability audit
+    (`dependencies._audit_capability`) and the template-source bound
+    (trinity-enterprise#591), so the two rows attribute identically.
+    """
+    agent = getattr(current_user, "agent_name", None)
+    if not agent:
+        return {"actor_user": current_user}
+    return {
+        "actor_agent_name": agent,
+        "actor_email": getattr(current_user, "email", None),
+        "mcp_key_id": getattr(current_user, "mcp_key_id", None),
+        "mcp_key_name": getattr(current_user, "mcp_key_name", None),
+        "mcp_scope": getattr(current_user, "mcp_scope", None),
+    }
+
+
 # Global instance — import as `from services.platform_audit_service import platform_audit_service`
 platform_audit_service = PlatformAuditService()

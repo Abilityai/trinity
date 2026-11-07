@@ -39,6 +39,7 @@ import logging
 import os
 import re
 import subprocess
+import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -1572,7 +1573,13 @@ class CodexRuntime(AgentRuntime):
         except HTTPException:
             raise
         except TimeoutError as exc:
-            raise HTTPException(status_code=504, detail=str(exc))
+            # trinity#4284: every timeout this path owns is already a 504
+            # HTTPException, so this one is foreign and its text is not ours to
+            # return. "timed out" stays: the backend reads it.
+            _log_foreign("[Codex] timeout", exc)
+            raise HTTPException(
+                status_code=504, detail=f"Codex execution timed out ({type(exc).__name__})"
+            ) from exc
         except (BrokenPipeError, ConnectionResetError) as pipe_err:
             logger.info("[Codex] subprocess pipe closed before completion: %s", pipe_err)
             raise HTTPException(
@@ -1580,8 +1587,8 @@ class CodexRuntime(AgentRuntime):
                 detail="Agent subprocess closed before the chat could complete",
             )
         except Exception as exc:  # noqa: BLE001
-            logger.error("[Codex] execution error: %s", exc)
-            raise HTTPException(status_code=500, detail=f"Execution error: {exc}")
+            _log_foreign("[Codex] execution error", exc)
+            raise HTTPException(status_code=500, detail=f"Execution error: {type(exc).__name__}") from exc
 
         # Track thread id for the next continue_session turn.
         if session_id:
@@ -1640,7 +1647,11 @@ class CodexRuntime(AgentRuntime):
         except HTTPException:
             raise
         except TimeoutError as exc:
-            raise HTTPException(status_code=504, detail=str(exc))
+            # trinity#4284: foreign, as in execute() above.
+            _log_foreign("[Codex] timeout", exc)
+            raise HTTPException(
+                status_code=504, detail=f"Codex execution timed out ({type(exc).__name__})"
+            ) from exc
         except (BrokenPipeError, ConnectionResetError) as pipe_err:
             # 502 (not 503) so the SUB-003 auth-switch isn't tripped by an early
             # child exit — parity with the Claude/Gemini headless paths (#474).
@@ -1650,10 +1661,20 @@ class CodexRuntime(AgentRuntime):
                 detail="Agent subprocess closed before task could complete",
             )
         except Exception as exc:  # noqa: BLE001
-            logger.error("[Codex] task execution error: %s", exc)
-            raise HTTPException(status_code=500, detail=f"Task execution error: {exc}")
+            _log_foreign("[Codex] task execution error", exc)
+            raise HTTPException(status_code=500, detail=f"Task execution error: {type(exc).__name__}") from exc
 
         return response, log, metadata, session_id
+
+
+def _log_foreign(what: str, exc: BaseException) -> None:
+    """Log an exception this runtime did not raise itself, traceback included
+    and credential-scrubbed. Its text stays in the log; the answer names only
+    the class (trinity#4284)."""
+    logger.error(
+        "%s (%s): %s", what, type(exc).__name__,
+        sanitize_text("".join(traceback.format_exception(exc))),
+    )
 
 
 # Global Codex runtime instance (singleton, mirrors claude/gemini).

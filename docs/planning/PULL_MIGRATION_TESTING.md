@@ -208,6 +208,10 @@ Run on **both** engines (SQLite supported until EOS 2026-09-01), even though loc
 | T8.1 | Poison-park item renders in Operating Room | `poison-{eid}` visible + actionable. |
 | T8.2 | Feature-flag surface | `mcp_agent_chat_pull_enabled` / `redelivery_governor_enabled` correct in `/api/settings/feature-flags`. |
 | T8.3 | Standalone scheduler blind spot | `src/scheduler/database.py` writes the same table with raw non-CAS SQL, outside the #1082 AST guard. Verify it never touches leased/pull rows. |
+| T8.4 | Queue wait is readable (#4257) | A queued `/task` receipt carries `queued_at`, `queue_position` and `wait_reason`; on an idle pilot the reason is `worker_claim`, and `queued_at` still matches the original admission after a claim + release. |
+| T8.5 | Stall alert fires and clears (#4257) | Park a pilot's head past `queue_stall_alert_minutes` (lower it to 5 for the run): exactly one pending `dispatch_queue_stalled` row per agent within one maintenance tick, re-read updates it in place, and claiming the head clears it on the next tick. |
+| T8.6 | De-piloted worker is visible, not silent (#4257) | Remove a running pilot from `PULL_MODE_PILOT_AGENTS` and restart the backend: the worker's claims are refused, one WARNING per status per process on the worker side, `agent:pull_claim_denied:{name}` climbs, and the alert context shows recent polls WITH refusals. An unauthenticated `GET /api/internal/next-task?agent_name=<anything>` must create no such key and emit no WARNING. |
+| T8.7 | A push agent at capacity is not alerted as a drain (#4257) | Push agent, `max_parallel=1`, one long turn running and a second `/task` queued past the threshold: the alert reason is `capacity`, never `backlog_drain`. |
 
 ---
 

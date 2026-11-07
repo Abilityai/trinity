@@ -692,6 +692,20 @@ class CapacityManager:
         """
         await self._backlog.expire_stale(max_age_hours=max_age_hours)
 
+        # #4257: name the waits before anything drains, so a head that has sat
+        # past the threshold is measured as it was found. Pure observability —
+        # it files/clears one alert per agent and never claims a row, because on
+        # a pull pilot the backend is deliberately NOT a consumer of this queue
+        # (#1766: one owner, or the two race). Errors are swallowed inside
+        # `run_once`; the extra try is the belt against an import failure, since
+        # a monitor must never block the drain tick.
+        try:
+            from services import queue_stall_service
+
+            queue_stall_service.run_once()
+        except Exception as e:  # noqa: BLE001
+            logger.debug("[Capacity] queue stall monitor skipped: %s", e)
+
         # #1085: while the re-delivery governor's shared-cause pause is armed,
         # skip the active orphan drain + the breaker-backstop re-fail. Both push
         # backlog forward / fail queued rows — during a fleet outage we hold that

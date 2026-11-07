@@ -53,10 +53,10 @@ By default, Telegram bots have **Privacy Mode enabled**. This means:
 
 ## How It Works
 
-### Connect Bot to Agent (Agent Detail -> Sharing Tab)
+### Connect Bot to Agent (Agent Detail -> Channels Tab)
 
 1. Open the agent detail page
-2. Select the **Sharing** tab and find the **Telegram** row under **Channels**
+2. Select the **Channels** tab and find the **Telegram** row under **Channels**
 3. Click **Configure** — the Telegram configuration opens in a dialog
 4. Paste your bot token and click **Connect Bot**
 5. Trinity validates the token and registers the webhook
@@ -106,7 +106,7 @@ A Telegram-triggered task can run for minutes or hours. Three layers of feedback
 2. **Typing indicator** — the standard Telegram "typing…" state.
 3. **Elapsed-time note** — if the turn passes 30 seconds, the bot posts a quiet "⏳ Working on it — N min elapsed" message (sent without a notification) and edits it in place about every minute. It is deleted when the turn finishes; if deletion isn't possible it is edited to a neutral "✔ Done." or "⚠️ Finished with an error."
 
-This is **on by default** per bot binding, and can be turned off in the Telegram dialog on the agent's Sharing tab. In groups it fires on @mentions and replies — a bot in `observe` mode stays silent, since a visible reaction would give away that it is listening.
+This is **on by default** per bot binding, and can be turned off in the Telegram dialog on the agent's Channels tab. In groups it fires on @mentions and replies — a bot in `observe` mode stays silent, since a visible reaction would give away that it is listening.
 
 If Telegram refuses any of it (reactions disabled for the chat, missing permissions), the rest still works and the turn is unaffected.
 
@@ -153,7 +153,7 @@ When a bot joins a Telegram group, Trinity automatically creates a group config.
 
 ### View and Manage Groups
 
-1. Go to Agent Detail -> **Sharing** tab
+1. Go to Agent Detail -> **Channels** tab
 2. Connected groups appear in the **Telegram Groups** section
 3. Each group shows:
    - Group name and type (group/supergroup)
@@ -199,7 +199,7 @@ Notes:
 
 By default, anyone in a group can chat with the bot. To require at least one verified member before the bot responds:
 
-1. Go to Agent Detail -> **Sharing** tab -> **Channel Access Policy**
+1. Go to Agent Detail -> **Channels** tab -> **Channel Access Policy**
 2. Set **Group auth mode** to "Any verified member"
 3. When someone @mentions the bot in an unverified group, the bot will prompt for verification
 4. Once any group member completes `/login`, the group is unlocked for everyone
@@ -292,7 +292,7 @@ Set **Public URL** under **Settings → General** to your Trinity instance's pub
 **Trinity docs:**
 
 - [Slack Integration](slack-integration.md) · [WhatsApp Integration](whatsapp-integration.md)
-- [Agent Sharing](../sharing-and-access/agent-sharing.md) — the Sharing tab that hosts the Telegram dialog
+- [Agent Sharing](../sharing-and-access/agent-sharing.md) — the Channels tab that hosts the Telegram dialog
 - [Public Links](../sharing-and-access/public-links.md)
 - [Voice Replies](../advanced/voice-replies.md) — spoken replies across channels
 

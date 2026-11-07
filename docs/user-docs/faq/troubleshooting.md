@@ -242,7 +242,7 @@ The agent failed that turn. Visitors are only ever shown this plain line, with t
 
 ## A copied public link is just `/chat/…` with no host
 
-Older releases built the link from `FRONTEND_URL`, which is empty by default, so the Sharing panel showed and copied a bare path. Current releases resolve it against the address you are browsing, so the copied link is a full URL. For links that must use a different public address (behind a tunnel, say), set `FRONTEND_URL` in `.env` (or `PUBLIC_CHAT_URL` for public chat links) and recreate the backend. See [Public Links](../sharing-and-access/public-links.md).
+Older releases built the link from `FRONTEND_URL`, which is empty by default, so the Channels tab showed and copied a bare path. Current releases resolve it against the address you are browsing, so the copied link is a full URL. For links that must use a different public address (behind a tunnel, say), set `FRONTEND_URL` in `.env` (or `PUBLIC_CHAT_URL` for public chat links) and recreate the backend. See [Public Links](../sharing-and-access/public-links.md).
 
 ## A Workspace link opens with no message box
 
