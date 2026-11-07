@@ -142,13 +142,15 @@ scrub all fields.
   the TOP, **before delivery AND persist**.
 - `routers/voice.py` `_save_transcript` — transcript entry text scrubbed before
   persist.
+- `routers/sessions.py` needs **no** direct wiring: its assistant write persists
+  the applier's already-scrubbed outputs (verified, transitively covered).
 
 ### Speech sinks (text handed to a third-party TTS provider)
 
-These persist nothing durable but send agent text off-platform, so each scrubs
-**before** anything reads the text — the shared cost cap (`TTS_MAX_CHARS`, inside
-`tts_service`) therefore judges the scrubbed text. All fail open like
-`send_message`: a store outage speaks the text as given.
+These send agent text off-platform, so each scrubs **before** anything reads
+the text — the shared cost cap (`TTS_MAX_CHARS`, inside `tts_service`) therefore
+judges the scrubbed text. All fail open like `send_message`: a store outage
+speaks the text as given.
 
 - `voice_reply_service.send_voice_reply` (in-session voice note) and
   `send_proactive_voice` (addressed voice note — also before its audit
@@ -157,9 +159,13 @@ These persist nothing durable but send agent text off-platform, so each scrubs
   before streaming TTS and the `spoken` frame sent to the browser.
 - `client_portal.service.synthesize_portal_tts` — Workspace read-aloud. The reply
   was scrubbed when saved, but the client sends the text back, so a value staged
-  after the save would otherwise reach the provider (#4359).
-- `routers/sessions.py` needs **no** direct wiring: its assistant write persists
-  the applier's already-scrubbed outputs (verified, transitively covered).
+  after the save would otherwise reach the provider (#4359). Scrubbed
+  before the request text is stripped, so a value staged with edge whitespace
+  still matches.
+
+**Not covered (residual):** `services/gemini_voice.py` returns an agent task's
+`response_text` to Gemini Live as a tool result on the non-Workspace voice paths,
+with no scrub call — agent text reaching a speech provider outside this list.
 
 ## Drift guard
 

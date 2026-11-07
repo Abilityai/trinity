@@ -190,3 +190,22 @@ async def test_scrub_that_shrinks_the_text_under_the_cap_is_spoken(seam):
     assert audio == b"MP3"
     assert provider.sent == ["x" * (cap - 20) + MARK]
     assert len(provider.sent[0]) <= cap
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value, text", [
+    pytest.param("plum-orchid-velvet ", "Your key is plum-orchid-velvet ", id="trailing-space"),
+    pytest.param(" plum-orchid-velvet", " plum-orchid-velvet is your key", id="leading-space"),
+])
+async def test_a_value_with_edge_whitespace_is_scrubbed_before_the_strip(seam, value, text):
+    """The Workspace secret field stages a value as typed, edge whitespace included
+    (credential_sink only refuses an all-blank one). Stripping the text first would
+    break the exact match at the text's edge and send the raw value to the provider,
+    so the scrub must see the text as the client sent it."""
+    _stage(seam, value)
+    with _world() as provider:
+        audio = await _speak(text)
+    assert audio == b"MP3"
+    assert len(provider.sent) == 1
+    assert value.strip() not in provider.sent[0]
+    assert MARK in provider.sent[0]

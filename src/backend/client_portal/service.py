@@ -1663,6 +1663,17 @@ async def synthesize_portal_tts(agent_name: str, email: str, text: str,
 
     if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
+    # #4359 (the ent#279 seam): remove staged credential values before the text
+    # reaches the TTS provider, the same way send_message and the voice sends do.
+    # Scrub BEFORE the strip: a staged value can carry edge whitespace, and
+    # stripping first breaks the exact match at the text's edge. The shared cost
+    # cap inside synthesize_mp3 then judges the scrubbed text. Fail-open: with the
+    # store down get_staged_values() returns [] and the text is spoken as given.
+    from services.runtime_secret_scrub import get_staged_values, scrub_text
+
+    _staged = get_staged_values()
+    if _staged and text:
+        text = scrub_text(_staged, text)
     body = (text or "").strip()
     if not body:
         raise ClientPortalError(400, "Nothing to speak")
@@ -1676,16 +1687,6 @@ async def synthesize_portal_tts(agent_name: str, email: str, text: str,
     if not voice_id:
         raise ClientPortalError(404, "This agent has no voice configured")
 
-    # #4359 (the ent#279 seam): remove staged credential values before the text
-    # reaches the TTS provider, the same way send_message and the voice sends do.
-    # The shared cost cap inside synthesize_mp3 then judges the scrubbed text.
-    # Fail-open: with the store down get_staged_values() returns [] and the text
-    # is spoken as given.
-    from services.runtime_secret_scrub import get_staged_values, scrub_text
-
-    _staged = get_staged_values()
-    if _staged:
-        body = scrub_text(_staged, body)
     audio = await tts_service.synthesize_mp3(body, voice_id)
     if not audio:
         # Over the char cap or a provider hiccup — fail-soft as a 422 so the client
