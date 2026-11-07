@@ -255,6 +255,9 @@ export interface SshConnectionInfo {
   host: string;
   port: number;
   user: string;
+  // trinity-enterprise#1168: the host interface Docker publishes this agent's
+  // SSH port on ("0.0.0.0" = every interface; null when unknown).
+  bind_address?: string | null;
 }
 
 export interface SshAccessResponse {
@@ -264,6 +267,9 @@ export interface SshAccessResponse {
   connection: SshConnectionInfo;
   expires_at: string;
   expires_in_hours: number;
+  // trinity-enterprise#1168: always present (possibly empty) — e.g. "bound to
+  // loopback, jump through the host" or "recreate to apply the binding".
+  warnings?: string[];
   instructions: string[];
 }
 

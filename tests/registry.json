@@ -1,6 +1,18 @@
 {
   "test_files": [
     {
+      "file": "unit/test_1168_agent_ssh_bind.py",
+      "feature": "trinity-enterprise#1168",
+      "added": "2026-11-07",
+      "categories": [
+        "agent",
+        "unit",
+        "security",
+        "docker"
+      ],
+      "description": "trinity-enterprise#1168: agent SSH listener posture. AGENT_SSH_BIND_ADDRESS resolver (loopback default, IP literal only, invalid → loopback + one ERROR, specific-IP WARNING); agent_ssh_port_binding tuple form; by-name AST guard that every container create with ports= uses the helper, rejects publish_all_ports/host_config/port_bindings and bans a bare '22/tcp' under services/** outside the leaf (planted-violation meta-tests); the grant endpoint's decision table over Docker's actual PortBindings (every interface → detected host + recreate warning; loopback → 127.0.0.1 + -J hint only for SSH_HOST/FRONTEND_URL sources; specific IP → that IP, disagreeing SSH_HOST named; no mapping → detected host), warnings[] always a list and repeated in instructions; on-demand sshd start before key injection (root exec, /var/run/sshd, zombie-safe pgrep --runstates) and a 500 when it fails; ENABLE_SSH=false at all three create sites; boot sweep names every-interface containers and stops idle sshd as root only when ssh_access_enabled is off, fail-open; four-file wiring (3 compose files with :- default, .env.example beside SSH_HOST, start.sh --provision, compose render); Dockerfile pins (passwd -l, drop-in COPY, sshd -t/-T build assertion before USER developer) and drop-in directives; MCP types carry bind_address/warnings."
+    },
+    {
       "file": "unit/test_4331_trailing_newline_names.py",
       "feature": "#4331",
       "added": "2026-11-07",

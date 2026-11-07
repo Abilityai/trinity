@@ -330,6 +330,11 @@ services:
       - TELEGRAM_GROUP_CONTEXT_MAX_AGE_HOURS=${TELEGRAM_GROUP_CONTEXT_MAX_AGE_HOURS:-}
       # SSH access host override
       - SSH_HOST=${SSH_HOST:-}
+      # trinity-enterprise#1168: host interface the backend publishes each agent's
+      # SSH port on. Unset/blank = 127.0.0.1 (loopback); an IP literal, or
+      # 0.0.0.0 for every interface. Creation-time — existing agents adopt on
+      # recreate. Without this line the .env value is inert (the #1039 class).
+      - AGENT_SSH_BIND_ADDRESS=${AGENT_SSH_BIND_ADDRESS:-}
       # Host telemetry (/api/telemetry) — container-stats cache freshness (s) and
       # max concurrent Docker stat fetches per refresh. Without these lines the
       # .env knobs are inert (the #1039 packaging-gap class).

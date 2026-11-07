@@ -527,6 +527,17 @@ async def _init_docker_and_system_agent() -> None:
         except Exception as e:
             logger.error(f"Error checking agents: {e}")
 
+        # trinity-enterprise#1168: one pass over existing agent containers —
+        # log the resolved SSH bind address, name containers still publishing
+        # SSH on every interface, stop idle listeners where SSH access is off.
+        # Fail-open inside; inside THIS phase (not a new one) because
+        # test_1028 pins the phase list by name.
+        try:
+            from services.ssh_service import sweep_agent_ssh_posture
+            await sweep_agent_ssh_posture()
+        except Exception as e:
+            logger.warning(f"Agent SSH posture sweep skipped: {e}")
+
         # Auto-deploy system agent (Phase 11.1)
         try:
             result = await system_agent_service.ensure_deployed()

@@ -15,6 +15,7 @@ Security: Private keys are NEVER generated or handled server-side.
 Clients generate their own keypairs and supply only the public key.
 """
 
+import asyncio
 import os
 import json
 import logging
@@ -26,8 +27,32 @@ import redis
 
 from services.docker_service import docker_client, get_agent_container
 from services.docker_utils import container_exec_run
+from services.agent_ssh_binding import (
+    AGENT_SSH_BIND_ADDRESS_ENV,
+    is_all_interfaces,
+    published_ssh_host_ip,
+    resolve_agent_ssh_bind_address_detail,
+)
 
 logger = logging.getLogger(__name__)
+
+# trinity-enterprise#1168: agent containers are created with ENABLE_SSH=false, so
+# startup.sh starts no sshd; the grant path starts one on demand with this exec.
+# Root, because the privilege-separation directory and the daemon are root's —
+# and `mkdir -p /var/run/sshd` is load-bearing: startup.sh creates it only when
+# it starts sshd itself, and sshd refuses to start without it (G1). Idempotent:
+# a container from an older image that already runs sshd is left alone.
+# `--runstates RSD` (procps-ng ≥ 3.3.16; bookworm ships 4.0.2) is load-bearing:
+# the container's PID 1 does not reap an exec-started sshd that the boot sweep
+# later stops, so a `[sshd] <defunct>` zombie stays in the process table and a
+# bare `pgrep -x sshd` would match it and skip the start (verified live).
+SSHD_START_CMD = [
+    "sh", "-c",
+    "mkdir -p /var/run/sshd && chmod 0755 /var/run/sshd && "
+    "(pgrep -x --runstates RSD sshd >/dev/null || /usr/sbin/sshd)",
+]
+# `pkill -x sshd` exits 1 when nothing matched; that is success for a stop.
+SSHD_STOP_CMD = ["sh", "-c", "pkill -x sshd || true"]
 
 # Configuration
 SSH_ACCESS_DEFAULT_TTL_HOURS = int(os.getenv("SSH_ACCESS_DEFAULT_TTL_HOURS", "4"))
@@ -167,6 +192,31 @@ class SshService:
     # SSH_ACCESS_MAX_TTL_HOURS, so the branch is dead within a day of deploy —
     # it exists so the last legacy credentials still get locked rather than
     # left set. Nothing writes `auth_type="password"` any more.
+
+    async def ensure_sshd_running(self, agent_name: str) -> bool:
+        """Start the agent container's sshd if it is not already running
+        (trinity-enterprise#1168).
+
+        Containers are created with ``ENABLE_SSH=false`` so no listener exists
+        before a grant; this is the grant path's first step, before the key is
+        injected. Runs as root (see ``SSHD_START_CMD``). Returns False — and the
+        caller refuses the grant — when the container is missing, the exec
+        fails, or sshd exits non-zero, so a grant never reports a connection
+        that nothing is listening for.
+        """
+        container = get_agent_container(agent_name)
+        if not container:
+            logger.error(f"Container not found for agent: {agent_name}")
+            return False
+        try:
+            result = await container_exec_run(container, SSHD_START_CMD, user="root")
+        except Exception as e:
+            logger.error(f"Error starting sshd in {agent_name}: {e}")
+            return False
+        if result.exit_code != 0:
+            logger.error(f"Failed to start sshd in {agent_name}: {result.output}")
+            return False
+        return True
 
     async def clear_container_password(self, agent_name: str) -> bool:
         """
@@ -488,8 +538,19 @@ class SshService:
 
 
 def get_ssh_host() -> str:
+    """The host IP/domain for SSH connections — see `get_ssh_host_detail`."""
+    return get_ssh_host_detail()[0]
+
+
+def get_ssh_host_detail() -> tuple[str, str]:
     """
-    Get the host IP/domain for SSH connections.
+    Get the host IP/domain for SSH connections, and where it came from.
+
+    Returns ``(host, source)``; the source is one of ``ssh_host``,
+    ``frontend_url``, ``tailscale``, ``host_docker_internal``, ``gateway``,
+    ``localhost``. The grant endpoint uses it to decide whether a jump-host
+    hint makes sense (trinity-enterprise#1168): only the first two name a host
+    an admin can dial from their own machine.
 
     Priority:
     1. SSH_HOST environment variable (explicit configuration)
@@ -510,7 +571,7 @@ def get_ssh_host() -> str:
     ssh_host = os.getenv("SSH_HOST")
     if ssh_host:
         logger.debug(f"SSH host from SSH_HOST env: {ssh_host}")
-        return ssh_host
+        return ssh_host, "ssh_host"
 
     # Option 2: Extract host from FRONTEND_URL (production deployment)
     # FRONTEND_URL is set to production domain like "https://trinity.abilityai.dev"
@@ -522,7 +583,7 @@ def get_ssh_host() -> str:
             # Only use if it's not localhost/127.0.0.1
             if host and host not in ("localhost", "127.0.0.1", ""):
                 logger.debug(f"SSH host from FRONTEND_URL: {host}")
-                return host
+                return host, "frontend_url"
         except Exception as e:
             logger.debug(f"Failed to parse FRONTEND_URL: {e}")
 
@@ -537,7 +598,7 @@ def get_ssh_host() -> str:
         if result.returncode == 0 and result.stdout.strip():
             ip = result.stdout.strip()
             logger.debug(f"SSH host from Tailscale: {ip}")
-            return ip
+            return ip, "tailscale"
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
@@ -546,7 +607,7 @@ def get_ssh_host() -> str:
         ip = socket.gethostbyname("host.docker.internal")
         if ip and not ip.startswith("172.") and not ip.startswith("127."):
             logger.debug(f"SSH host from host.docker.internal: {ip}")
-            return ip
+            return ip, "host_docker_internal"
     except socket.gaierror:
         pass
 
@@ -568,7 +629,7 @@ def get_ssh_host() -> str:
                     # Gateway is often the Docker host, but filter Docker IPs
                     if not gateway_ip.startswith("172."):
                         logger.debug(f"SSH host from default gateway: {gateway_ip}")
-                        return gateway_ip
+                        return gateway_ip, "gateway"
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
@@ -577,7 +638,89 @@ def get_ssh_host() -> str:
         "Could not detect SSH host IP. Falling back to localhost. "
         "Set SSH_HOST or FRONTEND_URL environment variable for proper host detection."
     )
-    return "localhost"
+    return "localhost", "localhost"
+
+
+async def sweep_agent_ssh_posture() -> Dict[str, Any]:
+    """One boot-time pass over agent containers (trinity-enterprise#1168).
+
+    Two things, both about containers that already exist and so never pass
+    through the fixed create path until they are recreated:
+
+    1. **Name every container still publishing SSH on every interface** — one
+       WARNING listing them, when the configured bind address is not itself
+       every interface. Stopped containers are included: `docker start`
+       re-applies the same `HostConfig`.
+    2. **Stop idle listeners.** Where `ssh_access_enabled` is false no grant can
+       be issued, so a running sshd serves nobody; `pkill -x sshd` as root in
+       each RUNNING container. The grant path restarts it on demand once the
+       setting is on, so this is safe to run on every boot.
+
+    Also logs one INFO line with the resolved bind address and its source, so
+    the posture can be read from the boot log. Fail-open throughout: a Docker
+    fault or one failing exec is logged and the sweep goes on; nothing here can
+    block readiness. Returns ``{checked, all_interfaces, stopped}``.
+    """
+    report: Dict[str, Any] = {"checked": 0, "all_interfaces": [], "stopped": []}
+    configured, source = resolve_agent_ssh_bind_address_detail()
+    logger.info(
+        "Agent SSH ports are published on %s (%s=%s, source: %s)",
+        configured, AGENT_SSH_BIND_ADDRESS_ENV, configured, source,
+    )
+    if not docker_client:
+        return report
+
+    def _sweep() -> None:
+        from services.settings_service import get_ops_setting
+
+        try:
+            ssh_enabled = bool(get_ops_setting("ssh_access_enabled", as_type=bool))
+        except Exception as e:  # noqa: BLE001 — an unreadable setting must not stop listeners
+            logger.warning(f"SSH posture sweep: could not read ssh_access_enabled ({e}); leaving listeners alone")
+            ssh_enabled = True
+        try:
+            containers = docker_client.containers.list(all=True, filters={"label": "trinity.platform=agent"})
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"SSH posture sweep skipped: could not list agent containers ({e})")
+            return
+        for container in containers:
+            report["checked"] += 1
+            name = (getattr(container, "name", "") or "").removeprefix("agent-")
+            try:
+                container.reload()  # list() returns a summary without HostConfig.PortBindings
+            except Exception:  # noqa: BLE001
+                pass
+            published = published_ssh_host_ip(getattr(container, "attrs", None))
+            if is_all_interfaces(published) and not is_all_interfaces(configured):
+                report["all_interfaces"].append(name)
+            if ssh_enabled or getattr(container, "status", None) != "running":
+                continue
+            try:
+                result = container.exec_run(SSHD_STOP_CMD, user="root")
+                if result.exit_code == 0:
+                    report["stopped"].append(name)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"SSH posture sweep: could not stop sshd in {name} ({e})")
+
+    try:
+        await asyncio.to_thread(_sweep)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"SSH posture sweep failed: {e}")
+    if report["all_interfaces"]:
+        logger.warning(
+            "%d agent container(s) still publish SSH on every host interface "
+            "(created before %s=%s applied): %s. Recreate them to apply the "
+            "binding — see docs/migrations/AGENT_SSH_BIND_2026-11.md.",
+            len(report["all_interfaces"]), AGENT_SSH_BIND_ADDRESS_ENV, configured,
+            ", ".join(sorted(report["all_interfaces"])),
+        )
+    if report["stopped"]:
+        logger.info(
+            "Stopped idle sshd in %d agent container(s) (ssh_access_enabled is off; "
+            "a grant starts it again on demand): %s",
+            len(report["stopped"]), ", ".join(sorted(report["stopped"])),
+        )
+    return report
 
 
 # Singleton instance
