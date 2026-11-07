@@ -452,7 +452,9 @@ class TestDecisionTable:
         assert d.host == "127.0.0.1" and d.bind_address == "127.0.0.1"
         assert d.command == "ssh -p 2222 developer@127.0.0.1"
         assert len(d.warnings) == 1
-        assert "-J" in d.warnings[0] and "ssh.example.com" in d.warnings[0]
+        # the full jump command, not a substring of the host (CodeQL reads a bare
+        # hostname `in` check as URL sanitisation)
+        assert re.search(r"ssh -J <your-user>@ssh\.example\.com -p 2222 developer@127\.0\.0\.1", d.warnings[0])
         assert ENV_KEY in d.warnings[0]
 
     @pytest.mark.parametrize("source", ["tailscale", "host_docker_internal", "gateway", "localhost"])
@@ -470,7 +472,8 @@ class TestDecisionTable:
         d = _binding().decide_ssh_connection(_attrs("100.64.0.5"), 2222, "ssh.example.com", "ssh_host")
         assert d.host == "100.64.0.5" and d.bind_address == "100.64.0.5"
         assert d.command == "ssh -p 2222 developer@100.64.0.5"
-        assert len(d.warnings) == 1 and "SSH_HOST" in d.warnings[0] and "ssh.example.com" in d.warnings[0]
+        assert len(d.warnings) == 1
+        assert re.search(r"SSH_HOST=ssh\.example\.com disagrees .* \(100\.64\.0\.5\)", d.warnings[0])
 
     def test_specific_ip_matching_detected_host_is_silent(self):
         d = _binding().decide_ssh_connection(_attrs("100.64.0.5"), 2222, "100.64.0.5", "tailscale")
@@ -587,7 +590,7 @@ class TestRouter:
         resp = await ssh.call()
         assert resp["connection"]["host"] == "127.0.0.1"
         assert resp["connection"]["command"] == "ssh -p 2222 developer@127.0.0.1"
-        assert "-J" in resp["warnings"][0] and "ssh.example.com" in resp["warnings"][0]
+        assert re.search(r"ssh -J <your-user>@ssh\.example\.com -p 2222 developer@127\.0\.0\.1", resp["warnings"][0])
         assert f"Connect: {resp['connection']['command']}" in resp["instructions"]
 
     @pytest.mark.asyncio
