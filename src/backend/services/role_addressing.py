@@ -16,9 +16,20 @@ Resolution order:
 2. No provider answer ⇒ the core defaults: ``primary`` → the agent's owner;
    ``operator`` → the operators (no person recorded); ``approver`` / ``viewer``
    → refused until someone fills them.
-3. A provider that answers "nobody" for ``primary`` falls back to the operators
-   (the ruling: an ask to primary goes to operator when no primary is
-   assigned). The owner stands in only when no provider answers at all.
+3. A provider that answers "nobody" for ``primary`` is the operators HERE —
+   :func:`resolve` is also the rule that decides who may approve a gated skill
+   (``skill_gate_service``), and an address is not a grant (ent#904). The
+   ADDRESSING surfaces — an ask, a message, a voice note, a proposal — read
+   :func:`resolve_addressee` instead, which stands the agent's owner in for
+   that one arm (abilityai/trinity-enterprise#1134, ruling 1 of 2026-11-07:
+   no primary assigned → the owner, never silently the operator queue). The
+   owner is the core default when no provider answers at all.
+
+An ask — and only an ask — may also name an addressing TARGET the platform
+resolves from the turn, ``project`` (:data:`ASK_TARGETS`, ent#1134 ruling 2):
+who a project reaches is enterprise knowledge, so a resolver is registered
+through :func:`register_target_resolver` and :func:`resolve_target` refuses
+``project_unavailable`` when none is.
 
 An unknown role, or a role nobody fills, is refused LOUDLY (``RoleRefused``) —
 never dropped, never defaulted to "whoever".
@@ -28,7 +39,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from database import db
 from services.assignment_provider import ROLE_ID_RE  # one regex: the seam validates with it too
@@ -46,6 +57,15 @@ ROLES = ("primary", "approver", "viewer", "operator")
 #: :func:`resolve` — what a report or a message may address — still do not
 #: know it, so those two surfaces refuse a role id ``invalid_to``.
 ROLE_ID_PREFIX = "role:"
+
+#: Addressing TARGETS an ask may name beside the kinds and ``role:<id>``
+#: (abilityai/trinity-enterprise#1134). A target is resolved by the PLATFORM
+#: from the raising turn — never from anything the agent supplies — through a
+#: resolver registered per word (:func:`register_target_resolver`). ``project``
+#: reaches the steward, then the creator, of the project the turn's chat or
+#: room is linked to. Not a role: :func:`resolve` refuses it ``invalid_to``, so
+#: a report or a message cannot address one.
+ASK_TARGETS = ("project",)
 
 
 def parse_role_id(value: Any) -> Optional[str]:
@@ -99,12 +119,16 @@ class Resolution:
     every one of them (trinity-enterprise#816).
     ``resolved`` — False when the role fell back to the operators (no primary
     assigned, or an owner without an email); True for ``operator`` itself.
+    ``stood_in`` — True only from :func:`resolve_addressee`, when the provider
+    answered "nobody fills primary" and the agent's owner was stood in
+    (abilityai/trinity-enterprise#1134); never set by :func:`resolve`.
     """
 
     role: str
     people: List[str] = field(default_factory=list)
     single: Optional[str] = None
     resolved: bool = True
+    stood_in: bool = False
 
 
 def owner_email(agent_name: str) -> Optional[str]:
@@ -150,6 +174,106 @@ def resolve(
         "role_unassigned", role,
         f"Nobody fills the {role} role for this agent yet.",
     )
+
+
+def resolve_addressee(
+    agent_name: str,
+    role: str,
+    *,
+    owner_lookup: Optional[Callable[[str], Optional[str]]] = None,
+) -> Resolution:
+    """:func:`resolve` for an ADDRESSING surface — an ask, a message, a voice
+    note, a proposal's approver (abilityai/trinity-enterprise#1134, ruling 1):
+    the one rule those surfaces share, so an ask and a message addressed
+    ``to: primary`` cannot reach different people.
+
+    Identical to :func:`resolve` on every arm but one: a provider that answers
+    "nobody fills primary" stands the agent's OWNER in (``stood_in`` True)
+    instead of the operators, because the person in the chat never sees an
+    ask that went to the Operating Room. An owner with no email is still the
+    operators (``resolved`` False). The skill gate must keep reading
+    :func:`resolve`: with the stand-in there, an owner requesting a gated
+    skill with no primary seated would approve their own run (ent#904).
+    Raises ``RoleRefused`` exactly as :func:`resolve` does.
+    """
+    r = resolve(agent_name, role, owner_lookup=owner_lookup)
+    if role != "primary" or r.people:
+        return r
+    owner = (owner_lookup or owner_email)(agent_name)
+    if not owner:
+        return r
+    return Resolution(role, [owner], owner, True, stood_in=True)
+
+
+# ---------------------------------------------------------------------------
+# Addressing targets (ent#1134): the word is OSS, the resolution is registered
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TargetResolution:
+    """Who an addressing target reaches: ``people`` (one, for ``project``),
+    ``single`` when exactly one, the ``project_id`` the sink stamps on the row
+    under the platform's project key, and ``seat`` — which rule picked the
+    person (``steward`` | ``creator``), carried for the Workspace card, never
+    for the agent."""
+
+    people: List[str] = field(default_factory=list)
+    single: Optional[str] = None
+    project_id: Optional[str] = None
+    seat: Optional[str] = None
+
+
+TargetResolver = Callable[[str, Optional[str]], TargetResolution]
+
+_target_resolvers: Dict[str, TargetResolver] = {}
+
+
+def register_target_resolver(target: str, fn: TargetResolver) -> None:
+    """Register the resolver for ``target`` (one of :data:`ASK_TARGETS`). One
+    per word; a later registration replaces the earlier (a test's seam). The
+    enterprise projects module registers ``project`` when it joins the seams.
+    An unknown word is a programming error."""
+    if target not in ASK_TARGETS:
+        raise ValueError(f"register_target_resolver: target must be one of {ASK_TARGETS}, got {target!r}")
+    _target_resolvers[target] = fn
+
+
+def clear_target_resolvers() -> None:
+    """Forget every registered target resolver (tests)."""
+    _target_resolvers.clear()
+
+
+def resolve_target(target: str, agent_name: str, turn: Optional[str]) -> TargetResolution:
+    """Resolve addressing ``target`` for an ask ``agent_name`` raised in
+    ``turn`` — the PLATFORM's id of the raising execution, already validated
+    as the agent's own (``ask_service._platform_turn``), or None when the
+    platform knows no turn. Raises ``RoleRefused`` on every miss:
+
+    * ``project_unavailable`` — no resolver is registered (an OSS-only
+      install), or the resolver failed: refused, never a 500, nothing filed;
+    * the resolver's own refusals pass through by name (the enterprise
+      projects module names ``not_in_project_turn`` and
+      ``project_unreachable``), each carrying its remedy.
+    """
+    if target not in ASK_TARGETS:
+        raise RoleRefused("invalid_to", str(target), "Unknown addressing target.")
+    unavailable = RoleRefused(
+        "project_unavailable", target,
+        f"The {target} target cannot be addressed on this install right now: the module "
+        "that resolves it is not installed or could not answer. Address the ask to "
+        "primary or operator.",
+    )
+    fn = _target_resolvers.get(target)
+    if fn is None:
+        raise unavailable
+    try:
+        return fn(agent_name, turn)
+    except RoleRefused:
+        raise
+    except Exception:  # noqa: BLE001 — refused by name, never a 500 on the agent's path
+        logger.warning("[role_addressing] the %s target resolver failed for %s",
+                       target, agent_name, exc_info=True)
+        raise unavailable from None
 
 
 def resolve_role_id(agent_name: str, role_id: str) -> Resolution:
@@ -268,25 +392,25 @@ def resolve_single_recipient(
     """The one person a one-recipient send goes to (ent#606, shared by
     ``send_message`` and ``send_voice_reply`` — abilityai/trinity-enterprise#700).
 
-    ``to`` names a role, resolved by :func:`resolve`. A role nobody fills, or
-    that several people fill, raises :class:`RecipientRefused` — a send has one
-    recipient, and silently picking one of several is exactly what the ruling
-    forbids. ``recipient_email`` still works for two releases; an agent key
-    choosing a person by email is logged as deprecated (``by_agent_key``).
+    ``to`` names a role, resolved by :func:`resolve_addressee`. A role nobody
+    fills, or that several people fill, raises :class:`RecipientRefused` — a
+    send has one recipient, and silently picking one of several is exactly
+    what the ruling forbids. ``recipient_email`` still works for two releases;
+    an agent key choosing a person by email is logged as deprecated
+    (``by_agent_key``).
 
-    trinity-enterprise#904: ``primary`` with no seat written falls back to the
-    agent's owner HERE, on the one-recipient send surface only. :func:`resolve`
-    keeps the ent#606 rule (asks go to the operators, a gate approval refuses),
-    because the same resolver decides who may approve a gated skill; this is an
-    address, not a grant. Without the stand-in, an agent on a fresh enterprise
-    install has no sanctioned way to reach a person, in text or by voice.
+    trinity-enterprise#904 ruled that ``primary`` with no seat written falls
+    back to the agent's owner on the send surface; ent#1134 made that the one
+    shared rule of every addressing surface (:func:`resolve_addressee`), so
+    the stand-in no longer lives here. :func:`resolve` keeps refusing for the
+    gate — an address, not a grant.
     """
     if not to:
         if by_agent_key:
             log_email_addressing(agent_name, surface)
         return recipient_email
     try:
-        r = resolve(agent_name, to)
+        r = resolve_addressee(agent_name, to)
     except RoleRefused as e:
         raise RecipientRefused({
             "code": e.code, "role": e.role, "message": e.message + " Message primary instead."})
@@ -296,9 +420,6 @@ def resolve_single_recipient(
             "message": f"{len(r.people)} people fill the {to} role and a {noun} has "
                        "one recipient — message primary, or raise an ask."})
     if not r.single and to == "primary":
-        owner = owner_email(agent_name)
-        if owner:
-            return owner
         raise RecipientRefused({
             "code": "role_unassigned", "role": to,
             "message": "Nobody fills the primary role for this agent yet, and its owner has "
