@@ -191,19 +191,6 @@ NOT_GRANT_GUARDS: Dict[str, Tuple[str, FrozenSet[str]]] = {
         "nothing about what the agents may do",
         frozenset({"routers/systems.py::restart_system"}),
     ),
-    "routers/seat_decisions.py::_require_running_turn": (
-        "an agent's own record of a decision in the turn it is running (MCP "
-        "record_decision, trinity-enterprise#638): the check narrows an agent key "
-        "to that running turn and a person's record keeps its path; a record is "
-        "evidence, never a grant: releasing a held class is the owner's act, a "
-        "person's (trinity-enterprise#641, #719)",
-        frozenset({"routers/seat_decisions.py::record_seat_decision"}),
-    ),
-    "routers/seat_decisions.py::record_seat_decision": (
-        "the same record: an agent key's decision counts only while its turn is "
-        "running (trinity-enterprise#641); it narrows an agent and grants nothing",
-        frozenset({"routers/seat_decisions.py::record_seat_decision"}),
-    ),
     "routers/mcp_keys.py::get_mcp_api_key_endpoint": (
         "a read of one key record of the caller's own account, never its "
         "secret; the check narrows an agent key to its own key "
