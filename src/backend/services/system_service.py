@@ -50,6 +50,7 @@ from database import db
 from db_models import ScheduleCreate, SystemViewCreate
 from redis_breaker_util import LeaseState, SingleFlightLock, get_breaker_redis
 from utils.credential_sanitizer import redact_url_userinfo, sanitize_text
+from utils.log_masking import masked_traceback
 
 logger = logging.getLogger(__name__)
 
@@ -2785,8 +2786,14 @@ async def deploy_manifest(
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception(f"System deployment failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Deployment failed: {str(e)}")
+        # #4284: the class name in the body, the scrubbed traceback in the log.
+        # Git/GitHub errors can embed a PAT-bearing remote URL (learnings
+        # 2026-07-14), so `exc_info=True` would write it raw.
+        logger.error("System deployment failed: %s", masked_traceback(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Deployment failed ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 # ============================================================================
@@ -4867,8 +4874,12 @@ async def apply_manifest(
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception(f"System apply failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Apply failed: {_failure_reason(e)[0]}")
+        # #4284: the class name in the body, the scrubbed traceback in the log.
+        logger.error("System apply failed: %s", masked_traceback(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Apply failed ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 def _lock_blocker(state: LeaseState, system_name: str) -> "SystemApplyBlocker":

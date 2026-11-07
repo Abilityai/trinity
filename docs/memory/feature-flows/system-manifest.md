@@ -1831,7 +1831,7 @@ logger.info(f"Started {agents_started}/{len(created_agents)} agents for system '
 
 # Errors
 logger.error(f"Failed to create agent '{final_name}': {e.detail}")
-logger.exception(f"System deployment failed: {e}")
+logger.error("System deployment failed: %s", masked_traceback(e))  # scrubbed traceback, not exc_info (#4284)
 ```
 
 **Note**: Audit logging could be re-added if required for compliance. The infrastructure exists via `log_audit_event()` in the codebase but is not currently used in systems.py.
@@ -1978,9 +1978,11 @@ system lists under its own name, and `content-writer` alone does not make a `con
 #### Generic Deployment Error
 ```json
 {
-  "detail": "Deployment failed: Database connection lost"
+  "detail": "Deployment failed (OperationalError — details in backend logs)"
 }
 ```
+
+The body names the exception class only; the full exception and traceback go to the backend log, scrubbed of URL userinfo and credential shapes first (#4284). The apply catch-all answers the same way: `Apply failed (<Class> — details in backend logs)`.
 
 ### Not Found Errors (HTTP 404)
 
