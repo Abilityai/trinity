@@ -252,6 +252,10 @@ This is where guardrails actually *bite*. All hooks are root-owned in `/opt/trin
 
 Claude Code applies settings `env` from `~/.claude/settings.json` and the workspace `.claude/settings.json`, both agent-writable, so either could set `ANTHROPIC_BASE_URL`, a proxy or a TLS trust override and send the CLI's traffic, credential included, to another host. `hooks/write-routing-env.py` writes a root-owned `0444` policy drop-in whose `env` pins each of those names to the container's own value, or `""` when it has none; policy `env` beats user and project settings and the process env, and `""` makes the CLI use its default. The image build runs it under `env -i` (every pin empty); `startup.sh` reruns it through `sudo -E` before the agent server starts, so a proxy set on the container keeps working. Its own file, so a rejected entry voids only itself. The `.env` half of the same rule is in [credential-injection.md](credential-injection.md).
 
+### Vendor-traffic opt-out — `managed-settings.d/70-vendor-telemetry.json` (trinity-enterprise#1093)
+
+A static, root-owned `0444`, env-only drop-in setting `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `DISABLE_TELEMETRY` and `DISABLE_ERROR_REPORTING` to `1`, so Claude Code sends Anthropic no usage telemetry (including the per-file content hash on reads) and no error reports. The Dockerfile `ENV` carries the same names, because some gates fire before settings load. All three names, plus `CLAUDE_CODE_MANAGED_SETTINGS_PATH` and `CLAUDE_CODE_DISABLE_ADMIN_ENV_UNION`, are in `execution_env.PROTECTED_KEYS`. Nothing rewrites it at boot.
+
 ### Hook registration — `hooks/managed-settings.json`
 
 Each hook registers in exec form (trinity-enterprise#787): `"command": "/usr/bin/env"`, `"args": ["-i", "HOME=/home/developer", "/usr/local/bin/python3", "-I", "-S", "/opt/trinity/hooks/<hook>.py"]`, `"timeout": 30`. No shell runs, so `CLAUDE_CODE_SHELL_PREFIX` does not wrap the hook; `env -i` drops inherited `PYTHON*`/`LD_*` variables and `-I -S` drops the user site. The file's policy `env` pins `CLAUDE_CODE_SHELL_PREFIX` to `""`, and `CLAUDE_CODE_SHELL_PREFIX` is in `execution_env.PROTECTED_KEYS`, so `.env` cannot set it. The image build runs `/opt/trinity/hooks/guard002-smoke.py`, which executes each hook exactly as this file registers it (`[command] + args`) against known inputs and fails the build otherwise. None of this is a boundary against an agent using its passwordless `sudo`.
@@ -389,6 +393,7 @@ See [read-only-mode.md](read-only-mode.md).
 | Baseline | `docker/base-image/hooks/guardrails-baseline.json` | — |
 | Hook registration | `docker/base-image/hooks/managed-settings.json` | — |
 | Routing env pins | `docker/base-image/hooks/write-routing-env.py` → `/etc/claude-code/managed-settings.d/60-routing-env.json` (trinity-enterprise#1001) | `tests/unit/test_ent1001_endpoint_env.py` |
+| Vendor-traffic opt-out | `docker/base-image/hooks/managed-settings.d/70-vendor-telemetry.json` + Dockerfile `ENV` (trinity-enterprise#1093) | `tests/unit/test_ent1093_claude_vendor_telemetry.py` |
 | Registration smoke (build) | `docker/base-image/hooks/guard002-smoke.py` | — |
 | Hook lib | `docker/base-image/hooks/lib.py` | 1-103 |
 | Bash hook | `docker/base-image/hooks/bash-guardrail.py` | 1-66 |

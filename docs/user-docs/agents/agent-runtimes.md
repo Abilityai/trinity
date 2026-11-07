@@ -57,6 +57,8 @@ Every runtime talks to its provider's own API. The endpoint, proxy and TLS trust
 
 A proxy or CA configured on the container (for example by Docker's proxy settings) still applies to every runtime. Behind such a proxy, list the platform's internal hosts (`mcp-server`, `backend`, `localhost`) in the container's `NO_PROXY`, or Trinity MCP calls go through the proxy too. Using a self-hosted model or an alternative endpoint is not supported.
 
+Claude Code's own vendor traffic is off. Trinity sets `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `DISABLE_TELEMETRY` and `DISABLE_ERROR_REPORTING` to `1` in the agent image, in Claude Code's managed settings and in the container environment, so Claude Code sends Anthropic no usage telemetry or error reports and makes no update, release-notes or feedback checks. An agent's `settings.json` `env` block and its `.env` cannot turn them back on. Two side effects: features that depend on Claude Code's feature-flag fetch are unavailable (Remote Control, synced claude.ai skills and plugins), and Claude Code no longer updates plugins in the background, so a plugin from the official marketplace stays at its installed version until it is reinstalled. Trinity's own plugin is installed by the platform and is not affected. Still on: the model API calls themselves, the WebFetch domain check, and the official marketplace auto-install. An existing agent picks this up when it is recreated on the new base image, so restart agents after upgrading.
+
 ### Codex authentication
 
 A Codex agent authenticates in one of two ways, and Trinity handles the file the CLI reads its credential from:
