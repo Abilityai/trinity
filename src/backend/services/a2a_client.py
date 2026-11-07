@@ -476,6 +476,23 @@ async def _read_payment_error_and_raise(
     )
 
 
+def os_errno(exc: BaseException) -> int | None:
+    """The errno of the first OSError in ``exc``'s cause chain, or None.
+
+    httpx wraps the socket error (httpx -> httpcore -> OSError), so the errno is
+    a few links down. It is a number, so it is safe to log where the
+    exception's text is not.
+    """
+    link: BaseException | None = exc
+    for _ in range(8):
+        if link is None:
+            return None
+        if isinstance(link, OSError):
+            return link.errno
+        link = link.__cause__ or link.__context__
+    return None
+
+
 async def _read_capped(
     client: httpx.AsyncClient,
     method: str,
@@ -601,13 +618,15 @@ async def _read_capped(
         # uses — the token AND its decoded string leaves. h11 echoes an illegal
         # header value verbatim, and for a payment endpoint that value is the
         # token.
-        all_secrets = secrets if secrets is not None else ([secret] if secret else [])
-        detail = str(exc)
-        for item in all_secrets:
-            if item:
-                detail = scrub_secret_and_urls(detail, item)
-        detail = redact_url_userinfo(sanitize_text(detail))
-        logger.warning("A2A endpoint could not be reached (%s): %s", type(exc).__name__, detail)
+        #
+        # The log names the host, the class and the OS errno only. httpx's text
+        # is not logged at all: scrubbing it still derives the logged value from
+        # the credential, and the host, class and errno are what an operator
+        # needs to tell a refused port from a DNS or TLS failure.
+        logger.warning(
+            "A2A endpoint %s could not be reached (%s, errno=%s)",
+            sni, type(exc).__name__, os_errno(exc),
+        )
         raise A2ACallError(
             f"{error_prefix}_unreachable",
             f"The A2A endpoint could not be reached ({type(exc).__name__} — details in backend logs).",

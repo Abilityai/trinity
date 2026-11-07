@@ -115,11 +115,12 @@ async def request_capped(
         # The class only in the error (abilityai/trinity#4284): its detail is
         # answered at 502 by the routes that relay a refusal, and httpx's text
         # carries the resolved address, the errno and an echoed header value.
-        detail = str(exc)
-        if secret:
-            detail = a2a_client.scrub_secret_and_urls(detail, secret)
-        detail = a2a_client.redact_url_userinfo(a2a_client.sanitize_text(detail))
-        logger.warning("[aauth] the %s could not be reached (%s): %s", peer, type(exc).__name__, detail)
+        # The log names the host, the class and the OS errno, never httpx's
+        # text, which can echo the credential.
+        logger.warning(
+            "[aauth] the %s at %s could not be reached (%s, errno=%s)",
+            peer, httpx.URL(url).host, type(exc).__name__, a2a_client.os_errno(exc),
+        )
         raise EgressError(
             "unreachable",
             f"The {peer} could not be reached ({type(exc).__name__} — details in backend logs).",

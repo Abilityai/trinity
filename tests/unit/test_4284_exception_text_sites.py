@@ -54,6 +54,29 @@ def _assert_answer_clean(answer, expected: str) -> None:
     assert expected in text, f"{expected!r} missing from the answer: {text!r}"
 
 
+def _assert_log_names_host_and_class(records, needle: str) -> None:
+    """The unreachable-peer logs carry the host, the class and the errno, and
+    no part of httpx's text: that text can echo the credential."""
+    rendered = [_rendered(r) for r in records]
+    for line in rendered:
+        assert _TOKEN not in line, f"credential reached the log: {line!r}"
+        assert _MARKER not in line, f"httpx's text reached the log: {line!r}"
+    hits = [line for line in rendered if needle in line and "ConnectError" in line]
+    assert hits, f"no {needle!r} record names the host and the class: {rendered!r}"
+
+
+def test_os_errno_finds_the_socket_error_under_httpx():
+    from services.a2a_client import os_errno
+
+    inner = ConnectionRefusedError(111, "Connection refused")
+    middle = RuntimeError("transport")
+    middle.__cause__ = inner
+    outer = httpx.ConnectError("refused")
+    outer.__cause__ = middle
+    assert os_errno(outer) == 111
+    assert os_errno(httpx.ConnectError("no cause")) is None
+
+
 def _assert_log_keeps_text(records, needle: str) -> None:
     rendered = [_rendered(r) for r in records]
     for line in rendered:
@@ -603,7 +626,7 @@ def test_a2a_unreachable_502_names_the_class_not_the_text(caplog):
     assert answer.detail["reason"] == "call_unreachable"
     _assert_answer_clean(
         answer.detail, "The A2A endpoint could not be reached (ConnectError — details in backend logs).")
-    _assert_log_keeps_text(caplog.records, "A2A endpoint could not be reached")
+    _assert_log_names_host_and_class(caplog.records, "A2A endpoint peer.example.com could not be reached")
 
 
 def test_aauth_egress_unreachable_names_the_class_not_the_text(monkeypatch, caplog):
@@ -627,7 +650,7 @@ def test_aauth_egress_unreachable_names_the_class_not_the_text(monkeypatch, capl
     _assert_answer_clean(
         exc.value.detail,
         "The person server could not be reached (ConnectError — details in backend logs).")
-    _assert_log_keeps_text(caplog.records, "could not be reached")
+    _assert_log_names_host_and_class(caplog.records, "person server at ps.example.com could not be reached")
 
 
 # ---------------------------------------------------------------------------
