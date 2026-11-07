@@ -287,23 +287,23 @@ _HTTP_VERBS = {"get", "post", "put", "patch", "delete"}
 
 
 def _person_row_models() -> set[str]:
-    """Models whose instances are picker rows: they carry an `email` and a `label`.
+    """Models whose instances are picker rows — they carry an `email` and a
+    `label` — and the models that wrap a list of them (`{"people": [...]}`).
     Every `models.py` under the backend, so a private module's model is seen too."""
-    out = set()
+    fields: dict[str, set[str]] = {}
     for path in [BACKEND / "models.py", *(p for p in BACKEND.rglob("models.py")
                                          if "tests" not in p.parts and p != BACKEND / "models.py")]:
-        out |= _person_rows_in(ast.parse(path.read_text()))
-    return out
-
-
-def _person_rows_in(tree: ast.Module) -> set[str]:
-    out = set()
-    for node in tree.body:
-        if isinstance(node, ast.ClassDef):
-            fields = {s.target.id for s in node.body if isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name)}
-            if {"email", "label"} <= fields:
-                out.add(node.name)
-    return out
+        for node in ast.parse(path.read_text()).body:
+            if isinstance(node, ast.ClassDef):
+                anns = [s for s in node.body if isinstance(s, ast.AnnAssign) and isinstance(s.target, ast.Name)]
+                fields[node.name] = {s.target.id for s in anns} | {
+                    f"type:{n.id}" for s in anns for n in ast.walk(s.annotation) if isinstance(n, ast.Name)}
+    rows = {name for name, f in fields.items() if {"email", "label"} <= f}
+    while True:   # a wrapper of a wrapper is still a list of people
+        more = {name for name, f in fields.items() if any(f"type:{r}" in f for r in rows)} - rows
+        if not more:
+            return rows
+        rows |= more
 
 
 def _source_files():
@@ -393,17 +393,19 @@ def reaches_seam(path: Path, fn, depth: int = 5, seen=None) -> bool:
     if path == SEAM and fn.name == "search":
         return True
     names = _imports(_tree(path), path)
-    for call in (n for n in ast.walk(fn) if isinstance(n, ast.Call)):
+    # Every function the body REFERENCES — called, or handed on as an argument
+    # (`_people(people.for_project, ...)`) — not only the ones it calls directly.
+    for ref in ast.walk(fn):
         target = None
-        if isinstance(call.func, ast.Attribute) and isinstance(call.func.value, ast.Name):
-            mod = names.get(call.func.value.id)
+        if isinstance(ref, ast.Attribute) and isinstance(ref.value, ast.Name):
+            mod = names.get(ref.value.id)
             if mod and mod[1] is None:
-                target = (mod[0], call.func.attr)
-        elif isinstance(call.func, ast.Name):
-            if call.func.id in names and names[call.func.id][1]:
-                target = names[call.func.id]
-            elif _function(path, call.func.id):
-                target = (path, call.func.id)
+                target = (mod[0], ref.attr)
+        elif isinstance(ref, ast.Name) and ref.id != fn.name:
+            if ref.id in names and names[ref.id][1]:
+                target = names[ref.id]
+            elif _function(path, ref.id):
+                target = (path, ref.id)
         if target:
             callee = _function(*target)
             if callee and reaches_seam(target[0], callee, depth - 1, seen):

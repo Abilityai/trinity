@@ -108,7 +108,7 @@
         <OverflowTabs :tabs="TABS" :model-value="tab" data-testid="project-tabs" @update:model-value="tab = $event" />
       </div>
 
-      <ProjectTasks v-if="!guest && tab === 'tasks'" :project-id="p.id" :can-contribute="p.can?.contribute === true" :archived="Boolean(p.archived_at)" :my-email="myEmail" />
+      <ProjectTasks v-if="!guest && tab === 'tasks'" :project-id="p.id" :can-contribute="p.can?.contribute === true" :archived="Boolean(p.archived_at)" :my-email="myEmail" :members="p.members || []" />
       <ProjectLog v-if="!guest && tab === 'log'" :project-id="p.id" :can-contribute="p.can?.contribute === true" :archived="Boolean(p.archived_at)" :my-email="myEmail" />
       <ProjectMaterial v-if="!guest && tab === 'material'" :project="p" :my-email="myEmail" :agents="usableAgents" />
 

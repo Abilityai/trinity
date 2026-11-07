@@ -237,6 +237,16 @@ export const useProjectsStore = defineStore('projects', () => {
     return data.agents || []
   }
 
+  // trinity-enterprise#1155 — the person fields' scoped reads (one people search).
+  async function fetchProjectPeople(id, q, purpose) {
+    const { data } = await portalHttp.get(url(id, '/people'), { headers: headers(), params: { q, purpose } })
+    return data.people || []
+  }
+  async function fetchCompanyPeople(q) {
+    const { data } = await portalHttp.get(`${BASE}/people`, { headers: headers(), params: { q } })
+    return data.people || []
+  }
+
   const stewarding = ref({ rows: [], loaded: false, loading: false, error: null })
 
   async function fetchStewarding() {
@@ -256,5 +266,6 @@ export const useProjectsStore = defineStore('projects', () => {
     tasks, logs, fetchTasks, fetchTask, createTask, updateTask, addTaskNote, fetchLog, addLogEntry,
     addGuest, addItem, setItemAudience, removeItem, fetchReport, myItems, importCandidates, importProject,
     setHealth, linkMetric, unlinkMetric, metricOptions, stewarding, fetchStewarding,
+    fetchProjectPeople, fetchCompanyPeople,
   }
 })

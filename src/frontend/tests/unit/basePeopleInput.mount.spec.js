@@ -228,6 +228,20 @@ describe('must-pick', () => {
   })
 })
 
+describe('must-pick with accepted text (trinity-enterprise#1155)', () => {
+  it('text the caller accepts is valid without a pick, and nothing else is', async () => {
+    const { w, state } = render({ mode: 'pick', acceptText: (t) => t.startsWith('role:') })
+    await type(w, 'role:ops')
+    await input(w).trigger('blur')
+    expect(input(w).element.validity.valid).toBe(true)
+    expect(w.find('[role="alert"]').exists()).toBe(false)
+    expect(state.picked.value).toBe(null)
+    await type(w, 'pat')
+    await input(w).trigger('blur')
+    expect(input(w).element.validity.valid).toBe(false)
+  })
+})
+
 describe('when the search is unavailable', () => {
   it.each([
     ['a 403', Object.assign(new Error('403'), { response: { status: 403 } })],
@@ -278,6 +292,10 @@ describe('the pure rules', () => {
     expect(mustPickError({ mode: 'pick', text: 'pa', picked: null, matchedNone: true, noMatch })).toBe('nobody')
     expect(mustPickError({ mode: 'pick', text: 'pa', picked: null, matchedNone: false, noMatch }))
       .toContain('Choose a person from the list')
+  })
+
+  it('accepted text needs no pick', () => {
+    expect(mustPickError({ mode: 'pick', text: 'role:ops', picked: null, matchedNone: true, accepted: true })).toBe('')
   })
 
   it('rows key by email', () => {
