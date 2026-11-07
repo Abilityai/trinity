@@ -118,3 +118,35 @@ describe('projects store', () => {
     expect(s.pageState('prj_x')).toMatchObject({ loaded: false, notFound: true })
   })
 })
+
+// trinity-enterprise#1155 — the person fields' scoped reads, through the real store.
+describe('the people reads', () => {
+  it('a project people search asks the project, with the query and the purpose, and unwraps people', async () => {
+    useClientPortalStore()
+    const ROWS = [{ email: 'bob@example.com', label: 'Bob Baker' }]
+    axios.get.mockResolvedValueOnce({ data: { people: ROWS } })
+    const rows = await useProjectsStore().fetchProjectPeople('prj 1', 'bo', 'owner')
+    expect(rows).toEqual(ROWS)
+    expect(axios.get).toHaveBeenCalledTimes(1)
+    const [path, opts] = axios.get.mock.calls[0]
+    expect(path).toBe('/api/enterprise/projects/prj%201/people')
+    expect(opts.params).toEqual({ q: 'bo', purpose: 'owner' })
+  })
+
+  it('a project people search with no people field reads as nobody', async () => {
+    axios.get.mockResolvedValueOnce({ data: {} })
+    expect(await useProjectsStore().fetchProjectPeople('prj_1', 'x', 'member')).toEqual([])
+  })
+
+  it('the company people search asks the collection, with only the query, and unwraps people', async () => {
+    const ROWS = [{ email: 'carol@example.com', label: 'Carol Chen' }]
+    axios.get.mockResolvedValueOnce({ data: { people: ROWS } })
+    const rows = await useProjectsStore().fetchCompanyPeople('ca')
+    expect(rows).toEqual(ROWS)
+    const [path, opts] = axios.get.mock.calls[0]
+    expect(path).toBe('/api/enterprise/projects/people')
+    expect(opts.params).toEqual({ q: 'ca' })
+    axios.get.mockResolvedValueOnce({ data: {} })
+    expect(await useProjectsStore().fetchCompanyPeople('zz')).toEqual([])
+  })
+})

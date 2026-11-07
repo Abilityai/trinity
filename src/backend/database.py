@@ -1140,11 +1140,17 @@ class DatabaseManager:
     def list_users(self):
         return self._user_ops.list_users()
 
-    # trinity-enterprise#631 — who may be tagged in a conversation with these agents
-    def list_taggable_people(self, agent_names, query, *, exclude_email=None, limit=8):
-        return self._user_ops.list_taggable_people(agent_names, query,
-                                                   exclude_email=exclude_email, limit=limit)
+    # trinity-enterprise#1153 — the one people search; only people_search_service calls it
+    def people_scope_agent_reach(self, agent_names):
+        return self._user_ops.people_scope_agent_reach(agent_names)
 
+    def people_scope_share_candidates(self, agent_name):
+        return self._user_ops.people_scope_share_candidates(agent_name)
+
+    def search_people(self, scope, query, *, exclude_email=None, limit=8):
+        return self._user_ops.search_people(scope, query, exclude_email=exclude_email, limit=limit)
+
+    # trinity-enterprise#631 — the send-time check: may this address be tagged here
     def get_taggable_person(self, agent_names, email):
         return self._user_ops.get_taggable_person(agent_names, email)
 

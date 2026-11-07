@@ -43,6 +43,8 @@ from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional
 
 from database import db
+from services import people_search_service
+from services.people_search_service import person_label
 from models import (
     PersonMention,
     PersonMentionConversation,
@@ -59,6 +61,7 @@ MENTION_TYPE = "mention"
 MENTION_ID_PREFIX = "mention-"
 MAX_TAGS_PER_MESSAGE = 10
 PEOPLE_LIMIT = 8
+PEOPLE_RATE_LIMIT = 120     # lookups a minute, per person (the seam's budget for `@`)
 # The tagged message and what surrounds it, for a reader who may see the room.
 CONTEXT_BEFORE = 3
 CONTEXT_AFTER = 2
@@ -115,13 +118,6 @@ class Reader:
 # Who
 # ---------------------------------------------------------------------------
 
-def person_label(user: Optional[Dict]) -> str:
-    """A person's display name: `name`, else the username (often the email)."""
-    if not user:
-        return ""
-    return " ".join(str(user.get("name") or "").split()) or str(user.get("username") or "")
-
-
 def _usable(user: Optional[Dict]) -> bool:
     return bool(user) and not user.get("suspended_at")
 
@@ -168,9 +164,14 @@ def tagger_for_portal(principal, *, is_person: bool) -> Tagger:
 def taggable_people(agent_names: List[str], query: str, tagger: Tagger,
                     limit: int = PEOPLE_LIMIT) -> List[Dict]:
     """The picker's rows: `{email, label}` for accounts matching `query` that may
-    be tagged in a conversation with `agent_names`. An empty query lists no one."""
-    rows = db.list_taggable_people(agent_names, query, exclude_email=tagger.email, limit=limit)
-    return [{"email": (r.get("email") or "").strip().lower(), "label": person_label(r)} for r in rows]
+    be tagged in a conversation with `agent_names`. An empty query lists no one.
+    Through the one people search (trinity-enterprise#1153), so the bounds and
+    the per-person rate limit are the seam's."""
+    rows = people_search_service.search(
+        db.people_scope_agent_reach(agent_names), query,
+        requester_email=tagger.email, rate_key=tagger.email or tagger.username,
+        rate_limit=PEOPLE_RATE_LIMIT, limit=limit)
+    return [{"email": r["email"], "label": r["label"]} for r in rows]
 
 
 def _normalise(raw: Iterable) -> List[str]:
