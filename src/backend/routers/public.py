@@ -848,8 +848,13 @@ async def public_stream_execution(
             yield f"data: {json.dumps({'type': 'error', 'message': 'Failed to connect to agent'})}\n\n"
             yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
         except Exception as e:
-            logger.error(f"[PublicStream] Error streaming from agent {agent_name}: {e}")
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            logger.error(
+                f"[PublicStream] Error streaming from agent {agent_name}: {e}",
+                exc_info=True,
+            )
+            # py/stack-trace-exposure (ent#1117): an anonymous visitor gets
+            # the fixed #3461 sentence; the exception stays in the log.
+            yield f"data: {json.dumps({'type': 'error', 'message': _PUBLIC_FAILURE_MESSAGE})}\n\n"
             yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
 
     return StreamingResponse(
