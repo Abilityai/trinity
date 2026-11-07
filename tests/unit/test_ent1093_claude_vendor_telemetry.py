@@ -28,6 +28,27 @@ executed):
   ``CLAUDE_CODE_DISABLE_ADMIN_ENV_UNION`` keeps only the FIRST managed source's
   ``env`` instead of merging every drop-in's.
 
+Captured on the image this change builds (2.1.281, one Read turn on a 65-byte
+file through the agent server, behind a logging proxy on a network with no
+other way out; the log held host, path, field NAMES and a match boolean only):
+
+- without the opt-out, a ``tengu_file_operation`` event reaches
+  ``api.anthropic.com/api/event_logging/v2/batch``, and its base64
+  ``additional_metadata`` carries ``contentHash`` equal to the file's SHA-256;
+  logs also go to a third-party intake (``http-intake.logs.*.datadoghq.com``);
+- with it: no event-logging POST, no third-party intake, no feature-flag,
+  MCP-registry or bootstrap fetches; the model reply still arrives, and an MCP
+  tool call works on the chat and headless paths;
+- the agent writing ``""`` for all three names into ``~/.claude/settings.json``,
+  ``.claude/settings.local.json`` and ``.env`` (both settings files shown to be
+  read) changes nothing; with the drop-in removed and only the image ``ENV``
+  left, the same settings files DO cancel it and the hash is sent again. The
+  drop-in is the layer that holds;
+- ``DISABLE_TELEMETRY=1`` alone stopped event logging and the third-party
+  intake on a happy-path turn but left the MCP-registry and bootstrap fetches.
+  No error report was provoked in any run, so "error reports are off" rests on
+  the binary read above.
+
 Pinned here: the drop-in's exact content and root-owned install before the
 build's own ``claude`` runs; the image ``ENV`` carrying the same names; no other
 managed source declaring them; every managed ``env`` name being one ``.env``
