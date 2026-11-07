@@ -148,7 +148,9 @@ async def get_all_settings(
         from utils.admin_identity import ADMIN_ENV_FINGERPRINT_KEY
         return [st for st in settings if st.key != ADMIN_ENV_FINGERPRINT_KEY]
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get settings: {str(e)}")
+        # #4284: the exception text goes to the log, never the body.
+        logger.exception("Failed to get settings")
+        raise HTTPException(status_code=500, detail=f"Failed to get settings ({e.__class__.__name__} — details in backend logs)")
 
 
 @router.get("/{key}")
@@ -177,7 +179,8 @@ async def get_setting(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get setting: {str(e)}")
+        logger.exception("Failed to get setting %s", key)
+        raise HTTPException(status_code=500, detail=f"Failed to get setting ({e.__class__.__name__} — details in backend logs)")
 
 
 @router.put("/{key}", response_model=SystemSetting)
@@ -679,7 +682,8 @@ async def update_setting(
         # rather than a 500 that reads like a platform fault.
         raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update setting: {str(e)}")
+        logger.exception("Failed to update setting %s", key)
+        raise HTTPException(status_code=500, detail=f"Failed to update setting ({e.__class__.__name__} — details in backend logs)")
 
 
 async def _backfill_telegram_webhooks(public_url: str) -> None:
@@ -838,4 +842,5 @@ async def delete_setting(
 
         return {"success": True, "deleted": deleted}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete setting: {str(e)}")
+        logger.exception("Failed to delete setting %s", key)
+        raise HTTPException(status_code=500, detail=f"Failed to delete setting ({e.__class__.__name__} — details in backend logs)")

@@ -263,7 +263,7 @@ async def list_systems(current_user: User = Depends(get_current_user)):
         raise
     except Exception as e:
         logger.exception(f"Failed to list systems: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to list systems: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to list systems ({e.__class__.__name__} — details in backend logs)")
 
 
 # ============================================================================
@@ -328,7 +328,7 @@ async def get_manifest(
     except Exception as e:
         logger.exception(f"Failed to read bundled manifest '{manifest_id}': {e}")
         raise HTTPException(
-            status_code=500, detail=f"Failed to read bundled manifest: {str(e)}"
+            status_code=500, detail=f"Failed to read bundled manifest ({e.__class__.__name__} — details in backend logs)"
         )
 
 
@@ -446,7 +446,7 @@ async def get_system(
         raise
     except Exception as e:
         logger.exception(f"Failed to get system '{system_name}': {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to get system: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to get system ({e.__class__.__name__} — details in backend logs)")
 
 
 @router.post("/{system_name}/restart")
@@ -545,7 +545,7 @@ async def restart_system(
         raise
     except Exception as e:
         logger.exception(f"Failed to restart system '{system_name}': {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to restart system: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to restart system ({e.__class__.__name__} — details in backend logs)")
 
 
 @router.get("/{system_name}/manifest", response_class=PlainTextResponse)
@@ -595,4 +595,4 @@ async def get_system_manifest(
         raise
     except Exception as e:
         logger.exception(f"Failed to export manifest for system '{system_name}': {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to export manifest: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to export manifest ({e.__class__.__name__} — details in backend logs)")
