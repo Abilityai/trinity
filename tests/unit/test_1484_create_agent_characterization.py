@@ -372,6 +372,9 @@ def _user(agent_name=None, uid=7, username="eugene", role="creator"):
     u.username = username
     u.role = role
     u.agent_name = agent_name  # explicit None ⇒ spawn-provenance branches skip
+    # A person's session: a MagicMock scope would read as an unknown machine
+    # scope, which the template-source bound (ent#591) holds to the allowlist.
+    u.mcp_scope = None
     return u
 
 

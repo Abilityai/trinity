@@ -867,6 +867,21 @@ class ScheduleExecutionsMixin:
             row = conn.execute(stmt).first()
         return (row.agent_name, row.status) if row else None
 
+    def get_execution_requester(self, execution_id: str) -> Optional[tuple]:
+        """`(agent_name, status, source_agent_name, source_mcp_key_id)` of one
+        execution, or None — who a run is for, as the platform wrote it, for
+        the skill-gate hook's peer check (abilityai/trinity-enterprise#925).
+        Four columns, never the row's response or log."""
+        c = schedule_executions.c
+        stmt = select(c.agent_name, c.status, c.source_agent_name, c.source_mcp_key_id).where(
+            c.id == execution_id
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).first()
+        if not row:
+            return None
+        return (row.agent_name, row.status, row.source_agent_name, row.source_mcp_key_id)
+
     def get_execution_failure_stamp(self, execution_id: str) -> Optional[tuple]:
         """`(status, error, completed_at)` of one execution, or None (#3245).
 

@@ -199,6 +199,7 @@ async def test_proactive_failure_stops_before_suffix(wire, monkeypatch, failure)
     database.get_telegram_binding.return_value = {"id": "synthetic-binding", "bot_id": "123"}
     database.get_telegram_chat_link_by_verified_email.return_value = {"telegram_user_id": "321"}
     database.get_telegram_bot_token.return_value = "test-token"
+    database.is_channel_client_blocked.return_value = False
     monkeypatch.setattr(pm, "db", database)
     outcomes.extend([(200, {"ok": True, "result": {"message_id": 1}}), failure])
     result = await pm.ProactiveMessageService()._deliver_telegram("test-agent", "user@example.com", "a" * 10000)
@@ -228,6 +229,7 @@ async def test_proactive_auto_falls_back_after_partial_telegram_failure(wire, mo
     database.get_telegram_binding.return_value = {"id": "synthetic-binding", "bot_id": "123"}
     database.get_telegram_chat_link_by_verified_email.return_value = {"telegram_user_id": "321"}
     database.get_telegram_bot_token.return_value = "test-token"
+    database.is_channel_client_blocked.return_value = False
     monkeypatch.setattr(pm, "db", database)
     service = pm.ProactiveMessageService()
     monkeypatch.setattr(service, "check_rate_limit", lambda *a: True)

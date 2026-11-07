@@ -480,6 +480,17 @@ class AgentOperations(
         with get_engine().connect() as conn:
             return [row[0] for row in conn.execute(stmt)]
 
+    def list_agent_created_agent_names(self) -> List[str]:
+        """Live agents another agent created (`spawned_by_agent` set) — durable
+        and ephemeral alike. The template-source bound's impact read
+        (trinity-enterprise#591): which templates would a new allowlist refuse."""
+        stmt = select(agent_ownership.c.agent_name).where(
+            agent_ownership.c.spawned_by_agent.isnot(None),
+            agent_ownership.c.deleted_at.is_(None),
+        )
+        with get_engine().connect() as conn:
+            return [row[0] for row in conn.execute(stmt)]
+
     def delete_agent_ownership(self, agent_name: str) -> bool:
         """Soft-delete the agent ownership row (Issue #834 Phase 1a).
 

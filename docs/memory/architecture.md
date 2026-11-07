@@ -121,7 +121,7 @@ Two Docker bridge networks everywhere, by design — agents physically cannot ro
 
 | Network | Subnet | Members |
 |---------|--------|---------|
-| `trinity-platform-network` | 172.29.0.0/16 | redis, scheduler, vector, postgres (hosted compose; dev `--profile postgres`, #3159) |
+| `trinity-platform-network` | 172.29.0.0/16 | redis, scheduler, vector, postgres (every compose file, #3159, #4175) |
 | `trinity-agent-network` | 172.28.0.0/16 | agents (and the dev frontend) |
 | `trinity-proxy-network` (prod/hosted) | `${TRINITY_PROXY_PREFIX:-172.30.0}.0/24`, pool `.128/25` | frontend `.2` (its only network), cloudflared `.3`, backend `.4`, mcp-server (pool). Gateway `.1` is never trusted |
 

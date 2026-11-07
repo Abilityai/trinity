@@ -66,6 +66,6 @@ No backend change. Endpoints used: `GET/PUT /api/agents/{name}/timeout`, `/capac
 
 ## Not yet
 
-- Channels (ent#340) and Integrations (step 3) panes in full; the Sharing, Permissions, A2A and Payments tabs remain
+- Channels (ent#340) and Integrations (step 3) panes in full; the Channels, Permissions, A2A and Payments tabs remain
 - The autonomy dial (ent#641, PR #2984) — Guardrails shows the switch read-only until it merges
 - One shared, editable description (ent#528) — General shows the template's

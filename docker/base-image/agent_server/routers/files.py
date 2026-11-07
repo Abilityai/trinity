@@ -9,6 +9,7 @@ import os
 import secrets
 import shutil
 import stat as stat_mod
+import traceback
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -47,6 +48,30 @@ def _load_path_policy():
 
 
 _policy = _load_path_policy()
+
+
+def _log_failure(what: str, exc: BaseException) -> None:
+    """Log an unforeseen failure with its traceback, credential-scrubbed. Its
+    text stays here: the answer names only the class (trinity#4284). The
+    sanitizer comes through the package when there is one, by file path
+    otherwise, so this router stays loadable with no package context (#1795)."""
+    if __package__:
+        from ..utils.credential_sanitizer import sanitize_text
+    else:
+        import importlib.util
+        import sys
+        name = "trinity_agent_credential_sanitizer"
+        if name not in sys.modules:
+            source = Path(__file__).resolve().parent.parent / "utils" / "credential_sanitizer.py"
+            spec = importlib.util.spec_from_file_location(name, str(source))
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            sys.modules[name] = module
+        sanitize_text = sys.modules[name].sanitize_text
+    logger.error(
+        "%s (%s): %s", what, type(exc).__name__,
+        sanitize_text("".join(traceback.format_exception(exc))),
+    )
 
 
 def _home_str() -> str:
@@ -315,8 +340,8 @@ async def list_files(path: str = "/home/developer", show_hidden: bool = False):
         }
 
     except Exception as e:
-        logger.error(f"File listing error: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to list files: {str(e)}")
+        _log_failure("File listing error", e)
+        raise HTTPException(status_code=500, detail=f"Failed to list files: {type(e).__name__}") from e
 
 
 @router.get("/api/files/download")
@@ -339,8 +364,8 @@ async def download_file(path: str):
             # At most the size it had when opened: a file that grows is not read past it.
             content = f.read(st.st_size).decode("utf-8", errors="replace")
         except Exception as e:
-            logger.error(f"File download error: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to read file: {str(e)}")
+            _log_failure("File download error", e)
+            raise HTTPException(status_code=500, detail=f"Failed to read file: {type(e).__name__}") from e
     # ent#820: the backend refuses a file with more than one name below the
     # owner tier (a hard link to a credential); it needs the count to do so.
     return PlainTextResponse(content=content, headers={"X-File-Nlink": str(st.st_nlink)})
@@ -506,8 +531,8 @@ async def delete_file(path: str):
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"File delete error: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to delete: {str(e)}")
+            _log_failure("File delete error", e)
+            raise HTTPException(status_code=500, detail=f"Failed to delete: {type(e).__name__}") from e
     finally:
         os.close(parent_fd)
 
@@ -761,8 +786,8 @@ async def update_file(
             _write_text_atomic_at(parent_fd, requested_path.name, request.content)
             stat = os.stat(requested_path.name, dir_fd=parent_fd, follow_symlinks=False)
         except Exception as e:
-            logger.error(f"File update error: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to update file: {str(e)}")
+            _log_failure("File update error", e)
+            raise HTTPException(status_code=500, detail=f"Failed to update file: {type(e).__name__}") from e
     finally:
         os.close(parent_fd)
 
@@ -826,8 +851,8 @@ async def create_folder(path: str):
             os.mkdir(requested_path.name, dir_fd=parent_fd)
             stat = os.stat(requested_path.name, dir_fd=parent_fd, follow_symlinks=False)
         except Exception as e:
-            logger.error(f"Folder create error: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to create folder: {str(e)}")
+            _log_failure("Folder create error", e)
+            raise HTTPException(status_code=500, detail=f"Failed to create folder: {type(e).__name__}") from e
     finally:
         os.close(parent_fd)
 
