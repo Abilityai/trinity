@@ -681,6 +681,10 @@ def get_room(current_user, room_id: str, since_seq: int = 0) -> dict:
         "people": _people(participants),
         "history_from_seq": history_from,
         "can_seat_people": _can_seat_people(room, current_user),
+        # trinity#4302: the live offer to continue a paused mention chain
+        # (`{"seq", "next"}`) or null — derived from the transcript at read
+        # time, for every reader; the route decides who may act on it.
+        "paused_chain": _paused_chain(room, participants),
         "messages": messages,
         # trinity-enterprise#631: the caller's tags across the WHOLE room, so a
         # tag on an older message turns `read` without a full reload.
@@ -1005,6 +1009,59 @@ def _post_system_safe(room_id: str, content: str) -> None:
     except Exception:  # noqa: BLE001
         logger.warning("room %s: could not write the system line %r", room_id,
                        content, exc_info=True)
+
+
+def _names(agents: list[str]) -> str:
+    """'a' / 'a and b' / 'a, b and c' — for a line a person reads."""
+    if len(agents) <= 1:
+        return "".join(agents)
+    return f"{', '.join(agents[:-1])} and {agents[-1]}"
+
+
+def _post_pause_line(room_id: str, targets: list[str]) -> int:
+    """The stop at the chain cap, as a typed row (trinity#4302): `kind` is
+    `chain_paused`, `mentions` holds the agents that were next, and the content
+    states FACTS only. Agents read every system row as `System:` text on their
+    next wake, so the how-to-carry-on wording (Continue, or send a message) is
+    the Workspace's to render beside the control, never stored here."""
+    verb = "was" if len(targets) == 1 else "were"
+    content = (f"The agents paused after {ROOM_MAX_CHAIN_DEPTH} hand-offs and are "
+               f"waiting for a person. {_names(targets)} {verb} next.")
+    seq = db.append_message(uuid.uuid4().hex, room_id, "system", None, content,
+                            list(targets), "chain_paused", None, utc_now_iso())
+    _broadcast("room_message", {"room_id": room_id, "seq": seq})
+    return seq
+
+
+def _present_next(pause: dict, participants: list[dict]) -> list[str]:
+    """The agents a pause row named that are still seated, in the row's order."""
+    seated = {p.get("identity") for p in participants
+              if p.get("kind") == "agent" and not p.get("left_at")}
+    return [a for a in (pause.get("mentions") or []) if a in seated]
+
+
+def _paused_chain(room: dict, participants: list[dict]) -> Optional[dict]:
+    """The live Continue offer on an open room, or None (trinity#4302).
+
+    Derived at read time from the transcript — the newest `chain_paused` row
+    whose offer still stands (`db.offer_stands`: nothing conversational and no
+    later pause/continue row after it) and whose agents are still seated. Never
+    stored. An unreadable transcript gives None: no control is a smaller lie
+    than a wrong one.
+    """
+    if room.get("status") != "open":
+        return None
+    try:
+        pause = db.latest_pause(room["id"])
+        if not pause or not db.offer_stands(room["id"], pause["seq"]):
+            return None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("room %s: could not read the paused-chain offer (%s)", room["id"], e)
+        return None
+    nxt = _present_next(pause, participants)
+    if not nxt:
+        return None
+    return {"seq": int(pause["seq"]), "next": nxt}
 
 
 def _broadcast(event: str, payload: dict) -> None:
@@ -1652,11 +1709,25 @@ async def _after_landing(current_user, room_id: str, room: dict, sender_kind: st
         targets = _apply_wake_cap(room_id, sender_kind, sender_identity, targets)
 
     if targets and _chain_depth >= ROOM_MAX_CHAIN_DEPTH:
-        _post_system(room_id,
-                     f"Mention chain stopped at depth {ROOM_MAX_CHAIN_DEPTH} "
-                     f"(would have woken {', '.join(targets)}).")
-        targets = []
+        # trinity#4302: the stop is a typed row the room payload turns into an
+        # offer — a person wakes these agents from `/continue` at a fresh
+        # depth, or by posting. Nobody is woken here.
+        _post_pause_line(room_id, targets)
+        return []
 
+    return await _wake_targets(current_user, room_id, targets, _chain_depth)
+
+
+async def _wake_targets(current_user, room_id: str, targets: list[str],
+                        _chain_depth: int) -> list[str]:
+    """Wake ``targets`` in order, each at ``_chain_depth + 1``; returns them.
+
+    The one loop both a landed message (`_after_landing`) and a person's
+    Continue (`continue_chain`, at depth 0 — a fresh count) run, so the shield
+    and the per-target catch cannot drift between the two (trinity#4302). The
+    reach check and the wake cap stay with the callers, which run them in
+    different orders.
+    """
     for agent_name in targets:
         # ent#220 item 2 — SHIELDED against client-disconnect cancellation.
         #
@@ -1707,6 +1778,70 @@ async def _after_landing(current_user, room_id: str, room: dict, sender_kind: st
                               f"{agent_name} could not be woken ({type(e).__name__}).")
 
     return [t for t in targets]
+
+
+async def continue_chain(current_user, room_id: str, seq: int) -> dict:
+    """A person wakes the agents a paused chain left waiting (trinity#4302).
+
+    Order (access-first, Invariant #8; the receipt last among the checks):
+    membership (uniform 404) → person (403 `not_a_person`: an agent-callable
+    Continue would let the bounded thing lift its bound) → budgets (410, says
+    why, closes an expired/over-budget room as a post would) → the offer at
+    ``seq`` must be the room's newest pause and still stand (409
+    `room_moved_on`) → someone named must still be seated (409
+    `no_one_to_wake`) → the continuer must still reach at least one of them
+    (403 `agent_not_accessible`, nothing consumed) → the `chain_continued`
+    receipt, inserted under the offer predicate (a racer that lost gets 409
+    `room_moved_on`) → wake cap → the wakes, at depth 1 like a human post's.
+
+    The receipt is a system row: a Continue spends no message budget; the turns
+    it wakes are costed and counted as today.
+    """
+    room = _require_membership(room_id, current_user)
+    if not _is_room_person(current_user):
+        raise RoomError(403, "not_a_person", "Only a person can continue a paused conversation")
+    _enforce_budgets(room)
+
+    pause = db.latest_pause(room_id)
+    if not pause or int(pause["seq"]) != int(seq) or not db.offer_stands(room_id, seq):
+        raise RoomError(409, "room_moved_on",
+                        "The conversation has moved on since the agents paused")
+    participants = db.list_participants(room_id)
+    nxt = _present_next(pause, participants)
+    if not nxt:
+        raise RoomError(409, "no_one_to_wake", "The agents that were next have left the room")
+    reachable = [t for t in nxt if _can_still_reach(current_user, t)]
+    if not reachable:
+        raise RoomError(403, "agent_not_accessible",
+                        f"You no longer have access to {_names(nxt)}")
+
+    kind, identity = _caller(current_user)
+    receipt_seq = db.append_continue_receipt(
+        uuid.uuid4().hex, room_id, seq, f"{identity} asked {_names(reachable)} to carry on.",
+        reachable, utc_now_iso())
+    if receipt_seq is None:
+        raise RoomError(409, "room_moved_on",
+                        "The conversation has moved on since the agents paused")
+    _broadcast("room_message", {"room_id": room_id, "seq": receipt_seq})
+
+    # The receipt has LANDED: the offer is consumed and the person's action is
+    # in the record. From here nothing may fail the Continue (#3210's rule for
+    # a post) — a wake's failure is reported in the room by the wake itself.
+    try:
+        unreachable = [t for t in nxt if t not in reachable]
+        if unreachable:
+            _post_system(room_id,
+                         f"{', '.join(unreachable)} could not be reached "
+                         f"(no longer shared with the sender).")
+        targets = _apply_wake_cap(room_id, kind, identity, reachable)
+        woke = await _wake_targets(current_user, room_id, targets, 0)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("room %s: continue receipt %s landed, but the wakes failed",
+                       room_id, receipt_seq, exc_info=True)
+        _post_system_safe(room_id, "The agents were asked to carry on, but could not be "
+                                   f"woken ({type(e).__name__}).")
+        woke = []
+    return {"room_id": room_id, "seq": receipt_seq, "woke": woke}
 
 
 # --- who is mid-turn, readable after a reload -------------------------------
