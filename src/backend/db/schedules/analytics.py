@@ -62,6 +62,9 @@ _TRIGGER_BUCKETS = {
     "room": "Rooms",
     "agent": "Agent-to-agent", "fan_out": "Agent-to-agent",
     "self_task": "Agent-to-agent", "a2a": "Agent-to-agent",  # ent#157 inbound A2A tasks
+    # trinity-enterprise#1102: the wake of the agent that delegated a run, when
+    # it ends. Spend driven by agent-to-agent delegation, not by an operator.
+    "caller_wake": "Agent-to-agent",
     "voip": "Voice", "voice": "Voice",
 }
 

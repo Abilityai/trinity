@@ -372,6 +372,9 @@ def _user(agent_name=None, uid=7, username="eugene", role="creator"):
     u.username = username
     u.role = role
     u.agent_name = agent_name  # explicit None ⇒ spawn-provenance branches skip
+    # A person's session: a MagicMock scope would read as an unknown machine
+    # scope, which the template-source bound (ent#591) holds to the allowlist.
+    u.mcp_scope = None
     return u
 
 
@@ -1080,7 +1083,7 @@ async def test_2693_bundled_avatar_installed_as_default(crud_env, monkeypatch, t
     (tpl / "template.yaml").write_text("type: business-assistant\navatar_prompt: a wizard\n")
     (tpl / "avatar.png").write_bytes(_png_bytes())
     monkeypatch.setattr(crud, "_LOCAL_TEMPLATE_ROOTS", (tmp_path / "tpls", tmp_path / "tpls"))
-    monkeypatch.setattr(crud, "_AVATAR_DIR", tmp_path / "avatars")
+    monkeypatch.setattr(crud.avatar_paths, "AVATAR_DIR", tmp_path / "avatars")
 
     await crud.create_agent_internal(
         AgentConfig(name="bundled-av", template="local:avtpl"), _user(), None)
@@ -1099,7 +1102,7 @@ async def test_2693_corrupt_bundled_avatar_keeps_prompt_seed(crud_env, monkeypat
     (tpl / "template.yaml").write_text("type: business-assistant\navatar_prompt: a wizard\n")
     (tpl / "avatar.webp").write_bytes(b"not an image")
     monkeypatch.setattr(crud, "_LOCAL_TEMPLATE_ROOTS", (tmp_path / "tpls", tmp_path / "tpls"))
-    monkeypatch.setattr(crud, "_AVATAR_DIR", tmp_path / "avatars")
+    monkeypatch.setattr(crud.avatar_paths, "AVATAR_DIR", tmp_path / "avatars")
 
     await crud.create_agent_internal(
         AgentConfig(name="bad-av", template="local:avtpl"), _user(), None)

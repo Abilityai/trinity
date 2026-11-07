@@ -137,7 +137,7 @@ permissions:
 ## Entry Points
 
 ### API Endpoints
-- **Deployment**: `POST /api/systems/deploy` - Deploy system from YAML
+- **Deployment**: `POST /api/systems/deploy` - Deploy system from YAML. With an agent key and the template-source allowlist set (trinity-enterprise#591), a member outside the list refuses the whole deploy (403 `template_source_not_allowed`, `members[]`) before any create, and the dry run lists the same members in `failed[]` — one validator (`template_source_policy.manifest_refusals`)
 - **Apply** (trinity-enterprise#695): `POST /api/systems/apply` - Reconcile a live system to
   its manifest (create the absent, update the declared fields of the present, report the
   undeclared as drift; never suffix, remove or restart). `dry_run` defaults to `true`;
@@ -827,6 +827,11 @@ async def deploy_system(
         credential-sanitize + URL-userinfo redact + 500-char truncate — learnings
         2026-07-14: git errors embed PAT-bearing remote URLs) and appends a
         SystemDeployFailure {name, short_name, template, reason, status_code}.
+        Only an HTTPException's detail, a ValueError's validation text and an
+        apply step's `_Refused` keep their words; any other exception is
+        reported as `<Class> — details in backend logs`, its text logged masked,
+        because the report is the body of the 500 when every member fails
+        (abilityai/trinity#4284).
         Each failed create self-cleans via crud.py's own rollback (#1484).
      e. strict=True → abort on first failure instead, re-raising with the
         ORIGINAL status code (4xx no longer flattened to 500) and detail
@@ -915,7 +920,7 @@ Callers must check `status`/`failed[]`, not just the HTTP code.
   "name": "my-system-worker2",
   "short_name": "worker2",
   "template": "github:invalid/repo",
-  "reason": "Failed to validate GitHub repository access: repository not found",
+  "reason": "Failed to validate GitHub repository access (GitHubError, HTTP 503 — details in backend logs)",
   "status_code": 502
 }
 ```
@@ -1556,26 +1561,38 @@ All tools support MCP API key authentication when `requireApiKey=true` in server
     strict: z.boolean().optional().describe("Abort on first agent-create failure (legacy)")
   }),
   execute: async ({ manifest, dry_run, strict }, context?) => {
-    const apiClient = getClient(context?.session);
-    const response = await apiClient.request("POST", "/api/systems/deploy", {
-      manifest,
-      dry_run: dry_run || false,
-      strict: strict || false
-    });
-    return JSON.stringify(response, null, 2);
+    const apiClient = getClient(context?.session);   // a missing key still throws
+    try {
+      const response = await apiClient.request("POST", "/api/systems/deploy", {
+        manifest,
+        dry_run: dry_run || false,
+        strict: strict || false
+      });
+      return JSON.stringify(response, null, 2);      // every 2xx, verbatim
+    } catch (error) {
+      return deployFailure(error, context);          // #4027
+    }
   }
 }
 ```
 
-On a total failure the backend answers HTTP 500 with the report as the body; the
-MCP client's `ApiError` embeds that body in the tool error message, so the report
-is still visible to the calling agent (trinity-enterprise#125).
+On a total failure the backend answers HTTP 500 with the report as the body
+(trinity-enterprise#125). `deployFailure` returns that report AS the result, with
+`http_status: 500` and `success: false` added, rather than letting the client's
+`ApiError` reach the caller as a thrown tool error (#4027). It shares
+`bodyAsResult` with `apply_system`: every non-2xx JSON object body (a 400 manifest
+error, a `strict` abort with its `created[]`, a 401, a 422) comes back the same
+way, and anything else as `{success: false, http_status, detail}`. A 403 is stamped
+`denied` through `accessDenied`; every other failure is stamped `failed` through
+`audit.ts::toolFailed` (`HTTP 500: status 'failed'`). A missing API key or a lost
+connection, which carry no HTTP status, still throw.
 
 #### apply_system
 The reconcile verb (trinity-enterprise#695), proxying `POST /api/systems/apply`. A NEW tool
 rather than a `mode` argument on `deploy_system`: a released `deploy_system` has no `mode` in
 its schema, so `mode: "apply"` sent to an older instance would be dropped and run create
-(suffixing the fleet), while an unknown tool name fails closed. `deploy_system` is unchanged.
+(suffixing the fleet), while an unknown tool name fails closed. `deploy_system`'s request and
+2xx results are unchanged; its non-2xx answers return since #4027 (above).
 ```typescript
 {
   name: "apply_system",
@@ -1607,7 +1624,7 @@ contract cannot silently break the tool:
 | 2xx | the body, verbatim | `success: true`, whatever the report's own `status` (`invalid`, `partial`) |
 | 404 / 405 (no apply route: an older build) | `{success: false, not_available: true, http_status, error, detail}`; `error` says not to fall back to `deploy_system` | `success: false`, no `denied`; `error: "HTTP <s>: apply route absent (not_available)"` (#4026) |
 | 403 | `{success: false, not_permitted: true, http_status: 403, error, detail}` through `access.ts::accessDenied`; hint "apply is human-only: run it with a person's credential" | `success: false, denied: true` (#2807) |
-| any other non-2xx with a JSON object body (the 409 / 503 / 500 apply reports, 400, 401, 422) | that body AS the result, plus `http_status` and `success: false`, so `status`, `blockers[]` and `failed[]` arrive intact | `success: false`, no `denied`, stamped through `audit.ts::toolFailed` (#4026); `error` is `HTTP <s>: status '<report status>'`, else `HTTP <s>: <string detail>` (capped at 200 characters), else `HTTP <s>` |
+| any other non-2xx with a JSON object body (the 409 / 503 / 500 apply reports, 400, 401, 422) | that body AS the result, plus `http_status` and `success: false`, so `status`, `blockers[]` and `failed[]` arrive intact | `success: false`, no `denied`, stamped through `audit.ts::toolFailed` (#4026); `error` is `HTTP <s>: status '<report status>'`, else `HTTP <s>: <string detail>` (capped at 200 characters), else `HTTP <s>` (`httpAuditReason`, through the `bodyAsResult` that `deploy_system` shares, #4027) |
 | a JSON scalar, array or null, or a non-JSON body | `{success: false, http_status, detail}` (the raw value) | `success: false`, no `denied`; `error: "HTTP <s>"` (the raw body never reaches the row) |
 | no HTTP status (missing API key, transport failure) | `{success: false, error}`, plus a `note` on a real run whose request went out (writes may have landed; run a dry run, then re-apply) | `success: false`, no `denied`; `error` is the client error, plus ` (real run, outcome unknown)` when the request went out |
 
@@ -1850,7 +1867,7 @@ logger.info(f"Started {agents_started}/{len(created_agents)} agents for system '
 
 # Errors
 logger.error(f"Failed to create agent '{final_name}': {e.detail}")
-logger.exception(f"System deployment failed: {e}")
+logger.error("System deployment failed: %s", masked_traceback(e))  # scrubbed traceback, not exc_info (#4284)
 ```
 
 **Note**: Audit logging could be re-added if required for compliance. The infrastructure exists via `log_audit_event()` in the codebase but is not currently used in systems.py.
@@ -1997,9 +2014,11 @@ system lists under its own name, and `content-writer` alone does not make a `con
 #### Generic Deployment Error
 ```json
 {
-  "detail": "Deployment failed: Database connection lost"
+  "detail": "Deployment failed (OperationalError — details in backend logs)"
 }
 ```
+
+The body names the exception class only; the full exception and traceback go to the backend log, scrubbed of URL userinfo and credential shapes first (#4284). The apply catch-all answers the same way: `Apply failed (<Class> — details in backend logs)`.
 
 ### Not Found Errors (HTTP 404)
 

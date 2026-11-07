@@ -13,7 +13,7 @@
           emailed code. A platform role applies to every agent: <span class="font-medium">user</span>
           works in the Workspace only, <span class="font-medium">operator</span> and above also get
           the operator UI. External clients who reach the agent through channels are managed on the
-          <span class="font-medium">Sharing</span> tab.
+          <span class="font-medium">Channels</span> tab.
           A share lets them chat with the agent, see their own conversations, and browse and edit its
           files, except credentials, runtime config and its instructions.
         </template>
@@ -21,7 +21,7 @@
           People this agent is shared with. They use it in the Workspace, signing in with an
           emailed code; whether someone also gets the operator UI is their platform role, which an
           admin sets in Settings → Access. External clients who reach the agent through channels are
-          managed on the <span class="font-medium">Sharing</span> tab.
+          managed on the <span class="font-medium">Channels</span> tab.
           A share lets them chat with the agent, see their own conversations, and browse and edit its
           files, except credentials, runtime config and its instructions.
         </template>
@@ -44,13 +44,21 @@
          "name@compan"); `min-w-0` lets it give way in the row layout, where its
          intrinsic width plus the button once pushed the page past 390px. -->
     <form @submit.prevent="addOperator" class="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
-      <input
+      <!-- trinity-enterprise#450: suggestions over the input, never a picker. Any
+           address can still be typed, and Enter submits it unless a row is chosen —
+           BasePeopleInput's suggest-and-allow mode (trinity-enterprise#1153). -->
+      <BasePeopleInput
+        ref="addField"
         v-model="newEmail"
+        class="w-full sm:w-auto sm:flex-1 min-w-0"
         type="email"
         required
         placeholder="name@company.com"
         :disabled="adding"
-        class="w-full sm:w-auto sm:flex-1 min-w-0 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+        :fetch="lookUpCandidates"
+        :no-match="noMatchMessage"
+        aria-label="Email of the person to add"
+        data-testid="access-add-email"
       />
       <button
         type="submit"
@@ -162,6 +170,19 @@
               @click="askProvision(op)"
             >Give a platform account</BaseButton>
           </div>
+          <!-- trinity-enterprise#459: the width holds across the button's labels. -->
+          <BaseButton
+            v-if="op.status === 'pending'"
+            variant="secondary"
+            size="sm"
+            class="min-w-[7rem]"
+            :disabled="!op.invite_available || (!!inviting && inviting !== op.email)"
+            :loading="inviting === op.email"
+            loading-label="Sending…"
+            :title="op.invite_available ? undefined : INVITE_UNAVAILABLE"
+            data-testid="access-resend-invite"
+            @click="resendInvite(op)"
+          >{{ invitedEmail === op.email ? 'Invite sent' : 'Resend invite' }}</BaseButton>
           <!-- #1577: per-recipient proactive-messaging toggle (allow_proactive
                on agent_sharing). The flag rides on the sharing row, which exists
                pre-resolution, so a pending invite can be pre-authorized too. -->
@@ -195,6 +216,7 @@
     >
       <span class="font-medium">Proactive</span> lets the agent message a user without being
       prompted (e.g. Telegram alerts). The agent owner always receives proactive messages.
+      <span v-if="invitesUnavailable" data-testid="access-invite-unavailable">{{ INVITE_UNAVAILABLE }}</span>
     </p>
 
     <ConfirmDialog
@@ -220,8 +242,10 @@ import { useUsersStore } from '../stores/users'
 import { viewState } from '../utils/loadingState'
 import { writeError } from '../utils/assignments'
 import { PLATFORM_ROLES, WORKSPACE_ONLY_ROLE_LABEL, platformRoleLabel } from '../utils/workspaceOnly'
+import { noMatchMessage } from '../utils/accessCandidates'
 import AgentAssignmentsSection from './AgentAssignmentsSection.vue'
 import BaseButton from './base/BaseButton.vue'
+import BasePeopleInput from './base/BasePeopleInput.vue'
 import BaseSelect from './base/BaseSelect.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import InlineError from './InlineError.vue'
@@ -239,12 +263,16 @@ const auth = useAuthStore()
 const enterprise = useEnterpriseStore()
 const users = useUsersStore()
 
+const INVITE_UNAVAILABLE = "Resend invite is off because email isn't set up for sign-in here, so tell people how to sign in yourself."
+
 const operators = ref([])
 const hasLoaded = ref(false)
 const loadError = ref('')
 const adding = ref(false)
 const removing = ref('')
 const savingProactive = ref('')   // #1577: email whose proactive toggle is in flight
+const inviting = ref('')          // ent#459: email whose invitation is in flight
+const invitedEmail = ref('')      // ent#459: the last one that went out
 const newEmail = ref('')
 const message = ref(null)
 
@@ -253,6 +281,7 @@ const view = computed(() => viewState({
   error: loadError.value,
   count: operators.value.length,
 }))
+const invitesUnavailable = computed(() => operators.value.some((op) => op.status === 'pending' && !op.invite_available))
 // What the serves section warns from: nothing until a list has loaded.
 const people = computed(() => (hasLoaded.value ? operators.value : null))
 
@@ -276,21 +305,62 @@ function restart() {
   hasLoaded.value = false
   loadError.value = ''
   message.value = null
+  inviting.value = ''
+  invitedEmail.value = ''
   rowError.value = { email: '', message: '' }
   confirming.value = null
   pendingRole.value = null
   return load()
 }
 
+// trinity-enterprise#459: the share stands either way; say whether the mail went.
+function addedMessage(email, invitation) {
+  if (invitation === 'sent') return { type: 'success', text: `Added ${email} and emailed them an invitation.` }
+  if (invitation === 'invalid_address') {
+    return { type: 'error', text: `Added ${email}, but no invitation went out because it isn't a single email address. Remove it and add the person again.` }
+  }
+  if (invitation === 'unavailable') {
+    return { type: 'error', text: `Added ${email}. No invitation went out because email isn't set up for sign-in here, so tell them how to sign in yourself.` }
+  }
+  if (invitation === 'rate_limited') {
+    return { type: 'error', text: `Added ${email}. No invitation went out because too many were sent recently. Use Resend invite later.` }
+  }
+  if (invitation === 'failed') {
+    return { type: 'error', text: `Added ${email}, but the invitation email failed. Use Resend invite to try again.` }
+  }
+  return { type: 'success', text: `Added ${email}.` }
+}
+
+async function resendInvite(op) {
+  inviting.value = op.email
+  invitedEmail.value = ''
+  rowError.value = { email: '', message: '' }
+  try {
+    await agentsStore.resendInvite(props.agentName, op.email)
+    invitedEmail.value = op.email
+  } catch (e) {
+    const detail = e?.response?.data?.detail
+    rowError.value = { email: op.email, message: detail?.message || writeError(e, "Couldn't send the invitation.") }
+  } finally {
+    inviting.value = ''
+  }
+}
+
+// --- trinity-enterprise#450: suggestions over the add field (BasePeopleInput, #1153)
+const addField = ref(null)
+const lookUpCandidates = (q) => agentsStore.getAccessCandidates(props.agentName, q)
+
 async function addOperator() {
   const email = newEmail.value.trim()
   if (!email) return
+  addField.value?.close()
   adding.value = true
   message.value = null
   try {
-    await agentsStore.shareAgent(props.agentName, email)
+    const share = await agentsStore.shareAgent(props.agentName, email)
     newEmail.value = ''
-    message.value = { type: 'success', text: `Added ${email}.` }
+    message.value = addedMessage(email, share?.invitation)
+    if (share?.invitation === 'sent') invitedEmail.value = email.toLowerCase()
     await load()
   } catch (e) {
     message.value = { type: 'error', text: e?.response?.data?.detail || 'Failed to add this person.' }

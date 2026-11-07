@@ -34,7 +34,7 @@ As an admin, I want to control who can access the platform via an email whitelis
 - **UI**: `src/frontend/src/views/Login.vue:38-123` - Email login form with 2-step verification
 - **UI**: `src/frontend/src/views/Settings.vue:291-390` - Email Whitelist management section
 - **API**: `POST /api/auth/email/request` - Request verification code (lines 140-198 in auth.py)
-- **API**: `POST /api/auth/email/verify` - Verify code and login (lines 201-268 in auth.py)
+- **API**: `POST /api/auth/email/verify` - Verify code and login (lines 201-268 in auth.py); the SPA sends `"client": "web"`, which mints the `interactive` claim the terms gate asks (ent#1107, `feature-flows/terms-of-use.md`); the hand-off (#4157) carries the same field
 - **API**: `POST /api/auth/email/handoff` - Redeem the Workspace code page's one-time hand-off instead of a second code (`routers/auth.py::redeem_email_login_handoff`, #4157)
 - **API**: `POST /api/users/me/email/code` + `PUT /api/users/me/email` - Bind a sign-in email to the signed-in account (routers/users.py, trinity-enterprise#720)
 - **API**: `GET /api/settings/email-whitelist` - List whitelisted emails (`routers/settings/whitelist.py::list_email_whitelist`)

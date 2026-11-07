@@ -35,6 +35,8 @@ export const TAB_ALIASES = Object.freeze({
   credentials: 'settings',
   folders: 'settings',
   access: 'settings',
+  // trinity-enterprise#225: the Sharing tab is called Channels.
+  sharing: 'channels',
 })
 
 export function buildTabs({
@@ -95,7 +97,8 @@ export function buildTabs({
   // Access control tabs - hide for system agent (system agent has full access).
   // trinity-enterprise#891: the Access tab is Settings › People now.
   if (canShare && !isSystem) {
-    tabs.push({ id: 'sharing', label: 'Sharing' })
+    // trinity-enterprise#225: renamed from Sharing; `sharing` stays an alias.
+    tabs.push({ id: 'channels', label: 'Channels' })
     tabs.push({ id: 'permissions', label: 'Permissions' })
   }
 

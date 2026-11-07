@@ -35,6 +35,8 @@ from services import credential_requirements_service
 # vendored into the agent image (Invariant #5, byte-identical parity test).
 from services.credential_paths import disallowed_paths
 
+from utils.log_masking import masked_text
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["credentials"])
@@ -77,9 +79,11 @@ async def get_agent_credentials_status(
             payload = response.json()
 
     except httpx.RequestError as e:
+        # #4284: an httpx error can name the internal container host.
+        logger.warning(f"Credential status for agent {agent_name} could not reach agent server", exc_info=True)
         raise HTTPException(
             status_code=503,
-            detail=f"Failed to connect to agent: {str(e)}"
+            detail=f"Failed to connect to agent ({e.__class__.__name__} — details in backend logs)"
         )
 
     # #1999/#2010: the agent reports per-key `env_drift` — variable NAMES — and
@@ -136,7 +140,8 @@ async def get_agent_env_drift(
             response.raise_for_status()
             payload = response.json()
     except httpx.RequestError as e:
-        raise HTTPException(status_code=503, detail=f"Failed to connect to agent: {str(e)}")
+        logger.warning(f"Env drift for agent {agent_name} could not reach agent server", exc_info=True)
+        raise HTTPException(status_code=503, detail=f"Failed to connect to agent ({e.__class__.__name__} — details in backend logs)")
 
     return {
         "agent_name": agent_name,
@@ -452,6 +457,18 @@ async def inject_credentials(
                 timeout=30.0
             )
 
+            if response.status_code >= 500:
+                # abilityai/trinity#4284: an agent on an older base image
+                # answers its 500s with its exception text; that goes to the
+                # log. A 4xx is the agent's refusal and is relayed below.
+                logger.warning("Credential injection for %s: the agent answered %s: %s",
+                               agent_name, response.status_code,
+                               masked_text(response.text[:2000]))
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=(f"Agent rejected credential injection (the agent answered "
+                            f"{response.status_code} — details in backend logs)"),
+                )
             if response.status_code != 200:
                 error_detail = response.json().get("detail", "Unknown error")
                 raise HTTPException(
@@ -462,9 +479,10 @@ async def inject_credentials(
             agent_response = response.json()
 
     except httpx.RequestError as e:
+        logger.warning(f"Credential injection for agent {agent_name} could not reach agent server", exc_info=True)
         raise HTTPException(
             status_code=503,
-            detail=f"Failed to connect to agent: {str(e)}"
+            detail=f"Failed to connect to agent ({e.__class__.__name__} — details in backend logs)"
         )
 
     # SEC-001: audit credential injection
@@ -559,17 +577,18 @@ async def export_credentials(
         # reachable. Surfaces 503 instead of 500.
         logger.warning(
             f"Credential export for agent {agent_name} could not reach "
-            f"agent server: {e}"
+            f"agent server: {e}",
+            exc_info=True,
         )
         raise HTTPException(
             status_code=503,
-            detail=f"Failed to connect to agent: {str(e)}"
+            detail=f"Failed to connect to agent ({e.__class__.__name__} — details in backend logs)"
         )
     except Exception as e:
         logger.exception(
             f"Credential export for agent {agent_name} failed unexpectedly"
         )
-        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Export failed ({e.__class__.__name__} — details in backend logs)")
 
 
 @router.post("/agents/{agent_name}/credentials/import", dependencies=[Depends(require_interactive)])
@@ -637,17 +656,18 @@ async def import_credentials(
         # programmer errors that warrant a 500.
         logger.warning(
             f"Credential import for agent {agent_name} could not reach "
-            f"agent server: {e}"
+            f"agent server: {e}",
+            exc_info=True,
         )
         raise HTTPException(
             status_code=503,
-            detail=f"Failed to connect to agent: {str(e)}"
+            detail=f"Failed to connect to agent ({e.__class__.__name__} — details in backend logs)"
         )
     except Exception as e:
         logger.exception(
             f"Credential import for agent {agent_name} failed unexpectedly"
         )
-        raise HTTPException(status_code=500, detail=f"Import failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Import failed ({e.__class__.__name__} — details in backend logs)")
 
 
 @router.get("/credentials/encryption-key")

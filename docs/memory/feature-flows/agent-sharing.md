@@ -1,7 +1,7 @@
 # Feature: Agent Sharing
 
 ## Overview
-Collaboration feature enabling agent owners to share agents with team members via email. Supports three access levels: Owner (full control), Shared (limited access), and Admin (full control over all agents). The Sharing tab now includes Team Sharing, Channel Access Policy, Pending Access Requests, Slack/Telegram channel bindings, and Public Links in a unified interface.
+Collaboration feature enabling agent owners to share agents with team members via email. Supports three access levels: Owner (full control), Shared (limited access), and Admin (full control over all agents). The Channels tab now includes Team Sharing, Channel Access Policy, Pending Access Requests, Slack/Telegram channel bindings, and Public Links in a unified interface.
 
 > **Cross-channel allow-list (Issue #311)**: As of 2026-04-12, `agent_sharing` is the **unified cross-channel allow-list**, not a web-only construct. The same email shared on this page admits that user across Telegram, Slack, and web public links whenever the agent's access policy requires a verified email. See [unified-channel-access-control.md](unified-channel-access-control.md) for the gate semantics and channel adapter details.
 
@@ -9,7 +9,7 @@ Collaboration feature enabling agent owners to share agents with team members vi
 As an agent owner, I want to share my agents with team members so that they can use the agents from any channel (web, Slack, Telegram) without having full ownership permissions.
 
 ## Entry Points
-- **UI**: `src/frontend/src/views/AgentDetail.vue:429-432` - Sharing tab (owners only, hidden for system agents)
+- **UI**: `src/frontend/src/views/AgentDetail.vue:429-432` - Channels tab (owners only, hidden for system agents)
 - **API**: `POST /api/agents/{name}/share` - Share agent
 - **API**: `DELETE /api/agents/{name}/share/{email}` - Remove share
 - **API**: `GET /api/agents/{name}/shares` - List shares
@@ -131,7 +131,7 @@ async getAgentShares(name) {
 
 ### Tab Visibility (`src/frontend/src/views/AgentDetail.vue:506-509`)
 
-The Sharing tab is only shown to users who can share and hidden for system agents:
+The Channels tab is only shown to users who can share and hidden for system agents:
 ```javascript
 if (agent.value?.can_share && !isSystem) {
   tabs.push({ id: 'sharing', label: 'Sharing' })
@@ -153,6 +153,8 @@ All endpoints are gated by `OwnedAgentByName` (owner or admin).
 |------|----------|--------|---------|
 | 53-94 | `/api/agents/{agent_name}/share` | POST | Share agent with email |
 | 97-119 | `/api/agents/{agent_name}/share/{email}` | DELETE | Remove share |
+| | `/api/agents/{agent_name}/access/candidates` | GET | Accounts to suggest in the Access tab's add field, by `?q=` (trinity-enterprise#450) |
+| | `/api/agents/{agent_name}/share/{email}/invite` | POST | Email a pending person their invitation again (trinity-enterprise#459) |
 | 122-133 | `/api/agents/{agent_name}/shares` | GET | List shares |
 | 140-146 | `/api/agents/{agent_name}/access-policy` | GET | Get `{require_email, open_access}` (Issue #311) |
 | 149-157 | `/api/agents/{agent_name}/access-policy` | PUT | Update policy (delegates to `db.set_access_policy`) |
@@ -391,6 +393,31 @@ def delete_agent_ownership(self, agent_name: str) -> bool:
 |-------|---------|
 | `agent_shared` | `{name, shared_with}` |
 | `agent_unshared` | `{name, removed_user}` |
+
+### Suggesting people when adding one (trinity-enterprise#450)
+
+`AccessPanel.vue` → `stores/agents.js::getAccessCandidates` → `GET /api/agents/{agent_name}/access/candidates?q=` → `services/access_candidate_service.py::suggest` → `services/people_search_service.py::search` (the one people search, trinity-enterprise#1153) over the scope `db.people_scope_share_candidates` → `db.search_people`.
+
+- **Gate:** `OwnedAgentByName` and `require_interactive`, so a key can't read it. A non-admin owner can, which is why this isn't `GET /api/users`, an admin-only list of every account.
+- **Bounds:** 2 to 64 characters, 8 rows, 60 lookups a minute per person. `rate_limited` is a 429. A query under the minimum costs nothing and returns nobody.
+- **Who's offered:** accounts matching a prefix of the email or username, or a word of the name. Not the roster, the owner, the person typing, suspended accounts, or accounts with no email.
+- **What a row carries:** `email`, `label`, and `role` for an admin only.
+- **The field:** `PortalTypeahead` opens below it after a 200 ms pause. Only the newest answer can open it. Arrows choose a row, Enter takes the chosen row, and Enter with none chosen submits the text. Esc or leaving the field closes it. A failed lookup leaves the plain input.
+- **Known limit:** the people offered aren't on the agent yet, so an owner can still find accounts by trying prefixes.
+
+### Telling a pending person (trinity-enterprise#459)
+
+A share to an address with no account emails them, and **Resend invite** on their Pending row in `AccessPanel.vue` sends it again (`POST /api/agents/{name}/share/{email}/invite`). Both go through `services/agent_invite_service.py`:
+
+1. **Is it pending?** `get_agent_operator_access`. A person with an account gets no mail on share, and `not_pending` on resend.
+1. **Is it one address?** The share field is free text, and this makes it a recipient, so a list or a header is `invalid_address`. The share itself is unchanged.
+2. **Can it be delivered?** Email sign-in on, `email_service.can_deliver()` (so `console` is no), and `login_policy_gate.email_code_allowed_for(email)`. The same verdict reaches the roster as `invite_available`, which disables the button and states the reason.
+3. **Quota.** 3 an hour per (agent, address) and 30 an hour per inviter, in `rate_limiter`, shared by both paths. Steps 1 and 2 run first, so a refused call spends none.
+4. **Send.** `email_service.send_html`, bounded by a timeout. The mail names the inviter and agent, and links to `/workspace`. It has no code; the person requests one there.
+
+The share stands whatever happens to its mail: the response's `invitation` is `sent`, `not_needed`, `invalid_address`, `unavailable`, `rate_limited` or `failed`, and the panel says so. Every attempt writes an `agent_invite` audit row. Test: `tests/unit/test_ent459_operator_invite.py`.
+
+The access-request approval path (`decide_access_request_endpoint`) also writes a share and sends no invitation.
 
 ### No platform login (trinity-enterprise#837)
 Until #837, a share (and an access-request approval) also wrote a login whitelist row at

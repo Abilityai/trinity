@@ -40,6 +40,11 @@ AGENT_AUTH_HEADER = "X-Trinity-Agent-Token"
 _TOKEN_DOMAIN_PREFIX = b"trinity-agent-auth:v1:"
 
 
+class AgentAuthSecretMissing(RuntimeError):
+    """The backend has no AGENT_AUTH_SECRET: an operator misconfiguration,
+    raised only with the platform's own remediation sentence."""
+
+
 def _agent_auth_secret() -> bytes:
     """Return the master secret as bytes, or raise if unset/empty.
 
@@ -50,7 +55,7 @@ def _agent_auth_secret() -> bytes:
     """
     secret = os.getenv("AGENT_AUTH_SECRET")
     if not secret:
-        raise RuntimeError(
+        raise AgentAuthSecretMissing(
             "AGENT_AUTH_SECRET is not set. The backend cannot derive per-agent "
             "auth tokens for the in-container agent server (#1159). start.sh "
             "auto-generates it on first boot; ensure it is set in .env and that "

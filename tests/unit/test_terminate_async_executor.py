@@ -206,11 +206,12 @@ def live_child():
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_signal_error_keeps_the_generic_500_with_its_text(
+async def test_signal_error_keeps_the_generic_500_naming_the_class(
     real_registry, live_child, monkeypatch
 ):
-    """reason "error" (the stop could not even be sent) keeps the existing
-    generic 500 whose detail is the error text, and the child stays owned."""
+    """reason "error" (the stop could not even be sent) keeps the generic 500,
+    and the child stays owned. The detail names the exception class, not its
+    text (abilityai/trinity#4284)."""
     from fastapi import HTTPException
 
     real_registry.register("signal-error-exec", live_child)
@@ -224,7 +225,7 @@ async def test_signal_error_keeps_the_generic_500_with_its_text(
         await terminate_execution("signal-error-exec")
 
     assert exc_info.value.status_code == 500
-    assert exc_info.value.detail == "denied"
+    assert exc_info.value.detail == "Termination failed: PermissionError"
     assert live_child.poll() is None, "control: nothing stopped the child"
     assert real_registry.is_execution_running("signal-error-exec")
 

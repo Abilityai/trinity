@@ -67,6 +67,7 @@ from utils.credential_sanitizer import sanitize_dict, sanitize_execution_log, sa
 from services.runtime_secret_scrub import get_staged_values, scrub_obj, scrub_text
 from services.tool_call_summary import extract_tool_calls
 from utils.helpers import utc_now_iso
+from utils.log_masking import masked_text, masked_traceback
 # #2314 — the execution result vocabulary lives in its own module now (pure
 # dataclasses + enum, zero collaborators, so anything may import it without a
 # cycle). Re-exported here because ~80 call sites and 83 test files say
@@ -151,6 +152,38 @@ def _served_person_for(execution_id: Optional[str], triggered_by: Optional[str])
     except Exception as e:  # noqa: BLE001
         logger.debug(f"_served_person_for({execution_id}) failed: {e}")
         return None
+
+
+def auto_memory_off_for_row(agent_name: str, row: Any) -> bool:
+    """#4156: whether the agent must spawn this turn with Claude Code's shared
+    auto-memory off — ``memory_subject.keeps_shared_auto_memory``, negated.
+
+    Read off the row (the ORM-ish row or a pull claim's dict), so the push, the
+    `/api/chat` and the pull wire agree. Fail-CLOSED: a row that is missing or
+    cannot be judged turns it off — a wrong "off" costs one turn the agent's
+    own auto-memory notes, a wrong "on" is the cross-user leak."""
+    from services import memory_service, memory_subject
+
+    if row is None:
+        return True
+    try:
+        return not memory_subject.keeps_shared_auto_memory(
+            row, memory_service.owner_email(agent_name), memory_service.owner_id(agent_name))
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[#4156] auto-memory rule failed for {agent_name}, turning it off: {type(e).__name__}")
+        return True
+
+
+def auto_memory_off_for(agent_name: str, execution_id: Optional[str]) -> bool:
+    """`auto_memory_off_for_row` for a dispatch that holds only the id."""
+    if not execution_id:
+        return True
+    try:
+        row = db.get_execution(execution_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"[#4156] execution {execution_id} unreadable, auto-memory off: {type(e).__name__}")
+        return True
+    return auto_memory_off_for_row(agent_name, row)
 
 
 def _default_model_for(agent_name: str) -> Optional[str]:
@@ -292,9 +325,13 @@ _AUTONOMOUS_TRIGGERS = frozenset(
     # named, into it after the fact), so no person reads it live. `skill_gate`
     # is the `operator_response` shape: the wake of a requester after someone
     # else decided its gated request, run with nobody reading its reply.
+    #
+    # trinity-enterprise#1102: `caller_wake` is the `operator_ending` shape for
+    # a delegation — the platform wakes the agent that delegated a run when
+    # that run ends, from the terminal fan-out, with nobody reading its reply.
     {"schedule", "webhook", "loop", "event", "fan_out", "agent", "reminder",
      "a2a", "operator_response", "operator_ending", "retry", "self_task",
-     "skill_gate"}
+     "skill_gate", "caller_wake"}
 )
 
 
@@ -1459,6 +1496,26 @@ def _with_switch(
 _TIMEOUT_ATTRIBUTION_GRACE_S = 30
 
 
+# The phrases the execution error's readers match, case and all: the sync
+# /task mapper (`chat_execution_service._map_task_failure`), the public and
+# inline-auth chats and the client portal answer 429 on "at capacity" and 504
+# on "timed out".
+_READER_PHRASES = ("timed out", "at capacity")
+
+
+def _exception_words(exc: BaseException) -> str:
+    """The class of ``exc``, plus each reader phrase its text holds.
+
+    The text itself stays in the log (abilityai/trinity#4284): this message is
+    the execution's error, which the sync routes answer at 5xx. A reader phrase
+    survives exactly as the readers match it, so each answers the status it
+    gave the exception's own text.
+    """
+    text = str(exc)
+    said = [phrase for phrase in _READER_PHRASES if phrase in text]
+    return type(exc).__name__ + (f": {', '.join(said)}" if said else "")
+
+
 def _classify_timeout_failure(
     elapsed_s: int,
     timeout_seconds: Optional[int],
@@ -1486,7 +1543,7 @@ def _classify_timeout_failure(
     limit_desc = (
         f"{timeout_seconds} seconds" if timeout_seconds is not None else "unset"
     )
-    detail = f" ({type(exc).__name__}: {exc})" if exc is not None else ""
+    detail = f" ({_exception_words(exc)})" if exc is not None else ""
     return (
         f"Task execution aborted after {elapsed_s}s of {limit_desc} allowed{detail}",
         TaskExecutionErrorCode.NETWORK,
@@ -1939,6 +1996,11 @@ class TaskExecutionService:
                 # payload (`{**payload, ...}`), so they keep it too.
                 "max_turns": max_turns,
             }
+            # #4156: a turn serving someone other than the owner spawns with
+            # Claude Code's shared auto-memory off. Sent only when set, so an
+            # owner / headless turn's payload is unchanged.
+            if auto_memory_off_for(agent_name, execution_id):
+                payload["disable_auto_memory"] = True
 
             response = await self._call_agent_with_retries(
                 agent_name=agent_name,
@@ -2023,8 +2085,11 @@ class TaskExecutionService:
             raise
 
         except Exception as e:
-            error_msg = str(e)
-            logger.error(f"[TaskExecService] Unexpected error executing task on {agent_name}: {error_msg}")
+            error_msg = f"Task execution failed ({_exception_words(e)} — details in backend logs)"
+            logger.error(
+                "[TaskExecService] Unexpected error executing task on %s: %s",
+                agent_name, masked_traceback(e),
+            )
             # #671/H4: CAS-gate the terminal write; complete the activity only
             # if we won.
             await _write_terminal_and_gate(
@@ -3048,7 +3113,8 @@ class TaskExecutionService:
         )
         logger.error(
             f"[TaskExecService] TIMEOUT on {agent_name} after {elapsed}s "
-            f"(limit={effective_limit}s, configured={timeout_seconds}s): {error_msg}"
+            f"(limit={effective_limit}s, configured={timeout_seconds}s): {error_msg}; "
+            f"{masked_text(str(exc)) if exc is not None else ''}"
         )
 
         # Issue #61: Terminate the execution on the agent to prevent orphaned

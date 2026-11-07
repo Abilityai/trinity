@@ -1271,8 +1271,10 @@ async def stream_execution_log(
             yield f"data: {json.dumps({'type': 'error', 'message': 'Agent connection timed out', 'retryable': True})}\n\n"
             yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
         except Exception as e:
-            logger.error(f"[Stream] Error streaming from agent {name}: {e}")
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            logger.error(f"[Stream] Error streaming from agent {name}: {e}", exc_info=True)
+            # py/stack-trace-exposure (ent#1117, the #1917 pattern).
+            message = f"Stream error ({e.__class__.__name__} — details in backend logs)"
+            yield f"data: {json.dumps({'type': 'error', 'message': message})}\n\n"
             yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
 
     return StreamingResponse(

@@ -57,6 +57,19 @@ class GitHubError(Exception):
         self.status = status
 
 
+def github_error_words(error_class: type, status: Optional[int]) -> str:
+    """The words an answer gives for a ``GitHubError``: its class, GitHub's
+    status when it answered one, and where the rest went.
+
+    Built from the class and the status only. The status tells a refused token
+    from an outage; the error's text stays in the log, because a network
+    error's text is httpx's, and for a header-unsafe token httpx echoes the
+    ``Authorization`` value there (abilityai/trinity#4284).
+    """
+    note = f", HTTP {status}" if status else ""
+    return f"{error_class.__name__}{note} — details in backend logs"
+
+
 class GitHubService:
     """
     Service for GitHub API interactions.

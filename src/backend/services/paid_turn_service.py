@@ -34,6 +34,8 @@ from typing import Any, Awaitable, Callable, Optional, Union
 # what a test must be able to patch; nothing patches an exception class).
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
 
+from utils.log_masking import masked_traceback
+
 logger = logging.getLogger(__name__)
 
 #: Strong references to in-flight detached settle tasks (C1). The settle must
@@ -372,7 +374,10 @@ async def run_paid_turn(
             verify=verify_result,
         )
     except Exception as e:
-        logger.error(f"Task execution failed for paid request on {agent_name}: {e}")
+        # abilityai/trinity#4284: the paid route returns this payload as its
+        # 500 body, to a payer; the exception's text stays in the log.
+        logger.error("Task execution failed for paid request on %s: %s",
+                     agent_name, masked_traceback(e))
         # Nothing dispatched — release the claim so a legitimate retry re-executes.
         idem.fail(decision)
         # Don't settle — caller keeps credits
@@ -382,7 +387,7 @@ async def run_paid_turn(
             status_code=500,
             payload={
                 "detail": "Task execution failed",
-                "error": str(e),
+                "error": f"{type(e).__name__} — details in backend logs",
                 "payment": {"settled": False, "reason": "Execution failed — no charge"},
             },
             verify=verify_result,

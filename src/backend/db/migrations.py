@@ -5877,6 +5877,29 @@ def _migrate_agent_sync_state_git_stats_at(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_ownership_wake_on_ending(cursor, conn):
+    """ent#1102 — per-agent wake-on-ending override (tri-state).
+
+    Adds ``wake_on_ending INTEGER`` to ``agent_ownership``, deliberately WITHOUT
+    a default: NULL means "no opinion, follow the instance default"
+    (``wake_on_ending_default``, ON), 0 means "never wake me", 1 means "always".
+
+    No backfill. ent#790's flip is the instance default, not a bulk edit of
+    every row's ``operator_resume_enabled`` — rewriting owner intent in place is
+    the #1945 mistake, and the resolver (``services/wake_policy.py``) already
+    reads a pre-existing ``operator_resume_enabled = 1`` as an explicit opt-in.
+
+    Mirrored by Alembic revision 0121_agent_ownership_wake_on_ending.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "wake_on_ending",
+        "ALTER TABLE agent_ownership ADD COLUMN wake_on_ending INTEGER",
+    )
+    conn.commit()
+
+
 def _migrate_agent_memory_facts(cursor, conn):
     """trinity-enterprise#1022 (MEM-002) — retrieval memory facts.
 
@@ -5980,6 +6003,59 @@ def _migrate_agent_memory_provenance(cursor, conn):
     )
     conn.commit()
     print("Created agent_memory_fact_events table and updated_by_execution_id (trinity-enterprise#1022)")
+
+def _migrate_terms_acceptances_table(cursor, conn):
+    """Terms of use per instance (trinity-enterprise#1107).
+
+    One row per (person, terms version) — which text they accepted and when.
+    The OSS home of the record the ent#1054 invite door kept privately; an
+    optional module's own migration copies its rows across. The text itself is
+    a `system_settings` row with a shipped default (`services/terms_defaults.py`),
+    so no seed is needed here. Schema is also in db/schema.py for fresh installs;
+    mirrored by Alembic revision 0119_terms_acceptances.
+
+    Ruling A(1): a Workspace portal session (the emailed-code sign-in) has no
+    `users` row, so `user_id` is nullable and a session row is keyed by
+    (email, version) through a partial unique index — UNIQUE(user_id, version)
+    alone treats two NULL user_ids as distinct. The entry shipped in no release
+    before this shape, so the DDL changed in place; a development database
+    that ran the earlier NOT NULL shape is rebuilt here (rows kept).
+    """
+    cursor.execute("PRAGMA table_info(terms_acceptances)")
+    cols = {row[1]: row for row in cursor.fetchall()}
+    create = """
+        CREATE TABLE IF NOT EXISTS {name} (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            email TEXT,
+            terms_version TEXT NOT NULL,
+            accepted_at TEXT NOT NULL,
+            door TEXT,
+            actor_ip TEXT,
+            UNIQUE(user_id, terms_version)
+        )
+    """
+    indexes = (
+        "CREATE INDEX IF NOT EXISTS idx_terms_acceptances_email ON terms_acceptances(email)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_terms_acceptances_email_version "
+        "ON terms_acceptances(email, terms_version) WHERE user_id IS NULL",
+    )
+    if cols and cols["user_id"][3]:  # notnull: the pre-ruling shape — rebuild, rows kept
+        _atomic_rebuild(
+            cursor, conn, "terms_acceptances",
+            create.format(name="terms_acceptances_new"),
+            "INSERT INTO terms_acceptances_new (id, user_id, email, terms_version, accepted_at, door, actor_ip) "
+            "SELECT id, user_id, email, terms_version, accepted_at, door, actor_ip FROM terms_acceptances",
+            indexes=indexes,
+        )
+        print("Rebuilt terms_acceptances with a nullable user_id (trinity-enterprise#1107)")
+        return
+    cursor.execute(create.format(name="terms_acceptances"))
+    for sql in indexes:
+        cursor.execute(sql)
+    conn.commit()
+    print("Created terms_acceptances table (trinity-enterprise#1107)")
+
 def run_loop_runs_stale_cleanup(run, *, now_iso: str) -> int:
     """#4058 — close every `running` loop-run row no terminal can advance.
 
@@ -6149,6 +6225,27 @@ def _migrate_access_requests_requester_identity(cursor, conn):
                          f"ALTER TABLE access_requests ADD COLUMN {column} TEXT")
 
 
+def _migrate_channel_client_blocks(cursor, conn):
+    """trinity-enterprise#21 — an owner's per-agent block on one external
+    channel client, checked by the channel access gate on every message.
+    Schema is also in db/schema.py for fresh installs; mirrored by Alembic
+    revision 0122_channel_client_blocks.
+    """
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS channel_client_blocks (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            channel TEXT NOT NULL,
+            client_id TEXT NOT NULL,
+            blocked_at TEXT NOT NULL,
+            blocked_by_id INTEGER,
+            blocked_by_email TEXT,
+            reason TEXT,
+            UNIQUE(agent_name, channel, client_id)
+        )
+    """)
+
+
 def run_mcp_external_access_backfill(run, *, now_iso: str) -> bool:
     """abilityai/trinity-enterprise#1101 — an install that already has users
     was serving `/mcp` to off-box clients before the switch existed, so it
@@ -6193,6 +6290,17 @@ def _migrate_mcp_external_access_backfill(cursor, conn):
     if run_mcp_external_access_backfill(_run, now_iso=utc_now_iso()):
         conn.commit()
         logger.info("Existing install: external MCP access kept on (ent#1101)")
+
+
+def _migrate_public_user_memory_writes_section(cursor, conn):
+    """trinity-enterprise#962 — the write history records which half of the
+    memory blob a row changed: `notes` (every row before this migration) or
+    `summary` (the background summarizer, now recorded). Schema is also in
+    db/schema.py for fresh installs; mirrored by Alembic revision
+    0120_public_user_memory_writes_section.
+    """
+    _safe_add_column(cursor, "public_user_memory_writes", "section",
+                     "ALTER TABLE public_user_memory_writes ADD COLUMN section TEXT NOT NULL DEFAULT 'notes'")
 
 
 MIGRATIONS = [
@@ -6383,4 +6491,8 @@ MIGRATIONS = [
     ("operator_resume_default_on", _migrate_operator_resume_default_on),
     ("operator_queue_wake_state", _migrate_operator_queue_wake_state),
     ("mcp_external_access_backfill", _migrate_mcp_external_access_backfill),
+    ("terms_acceptances_table", _migrate_terms_acceptances_table),
+    ("public_user_memory_writes_section", _migrate_public_user_memory_writes_section),
+    ("agent_ownership_wake_on_ending", _migrate_agent_ownership_wake_on_ending),
+    ("channel_client_blocks", _migrate_channel_client_blocks),
 ]

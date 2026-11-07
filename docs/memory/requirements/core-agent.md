@@ -2145,7 +2145,10 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   is tuned against (90-day retention per agent).
 - **Owner view**: `GET/DELETE /api/agents/{name}/retrieval-memory/facts…` and
   `GET …/retrieval-memory/events` (owner + human-only); forget is a recorded
-  soft delete.
+  soft delete. A person's facts are browsed per person in Agent Settings →
+  Person memory (trinity-enterprise#962, MEM-001's owner view): their live
+  facts, each fact's journal (`events?fact_id=`), Forget behind a confirm, and
+  the owner search scoped to that person (`user_email`).
 - **Flow**: `docs/memory/feature-flows/retrieval-memory.md`
 
 ## 6. Activity Monitoring
@@ -4194,7 +4197,9 @@ to localStorage in the clear.
   platform-stamped `X-Trinity-Execution-Id` (#2392, which MCP `record_decision`
   forwards and the model cannot set; `manual` or absent is refused) — else 422
   `not_this_turn` — and that execution must be `running`, else 422
-  `turn_not_running`. A person's own record keeps its path. And when **every** record
+  `decision_turn_not_live` (trinity-enterprise#1062, which also made these doors the
+  agent's own: a person is refused `agent_only` and decides through the client-portal
+  routes). And when **every** record
   in a class's window is agent-written (no person-written record), the evidence must
   span **`STABLE_MIN_DAYS` (3) distinct days** of `created_at`, else the class is
   blocked `agent_only_evidence_too_recent`, so one burst of turns (or self-tasks)
@@ -4384,7 +4389,10 @@ to localStorage in the clear.
   keeps it.
 - **AC-2 — the strip holds still**: while the snapshot names the agent on stage,
   the tabs are drawn in its order. A reply, a send, or a poll that re-sorts the
-  thread list changes a badge only. A chat born mid-visit sits directly after Main
+  thread list changes a badge only — with one exception (#4349): a chat that goes
+  from read to unread while you are on the agent moves to directly after Main, so a
+  reply under "N more" is never invisible; the open chat keeps its exact slot, and a
+  further reply to an already-unread chat moves nothing. A chat born mid-visit sits directly after Main
   (the provisional tab's slot), born chats among themselves by creation time. A
   closed chat drops out and the gap closes; Undo returns it to its own slot. A
   deep-linked archived chat is drawn at its arrival slot. The switch-chat keys and
@@ -4444,3 +4452,5 @@ to localStorage in the clear.
   which `room_is_user_facing` counts as internal (#363).
 - **FR-7 — "New room" is its own door.** Beside New chat; it opens the agent picker in room
   words and always creates a room, even with one agent.
+- **What a collaborator reads**: the room payload and list drop `cost`, `max_cost_usd`, each message's `execution_id`, and other participants' session and cursor fields. A moderator, an admin and an agent keep them. A collaborator keeps their own cursor.
+- **A reply outlives its waker**: an engine reply lands even if the person who woke it has since left or been removed. That person still cannot read the room.

@@ -317,7 +317,8 @@ def portal_auth_verify(body: PortalAuthVerify, request: Request):
                          detail="Too many sign-in attempts.")
     check_otp_rate_limit(otp_scope)  # raises 429 past the cap, before any comparison
 
-    token = service.portal_signin_verify(email, body.code)
+    from routers.auth import SPA_CLIENT  # the one spelling of the SPA's declaration
+    token = service.portal_signin_verify(email, body.code, interactive=body.client == SPA_CLIENT)
     if not token:
         record_otp_attempt(otp_scope, success=False)
         # #4157: a correct code here now leads to a platform session (via the
@@ -843,6 +844,8 @@ async def portal_agent_page(
 @router.get("/agents/{agent_name}/memory", response_model=PortalAgentMemory)
 def portal_agent_memory(
     agent_name: str,
+    before: Optional[str] = Query(default=None, max_length=200,
+                                  description="Cursor from the previous page's next_before (ent#962)"),
     principal: PortalPrincipal = Depends(get_portal_principal),
 ):
     """What this agent remembers about YOU, and what changed it (ent#637).
@@ -854,7 +857,11 @@ def portal_agent_memory(
     """
     email = principal.email
     _require_roster(agent_name, email, principal.is_platform)
-    return agent_page.memory(agent_name, email)
+    try:
+        return agent_page.memory(agent_name, email, before=before)
+    except agent_page.InvalidMemoryCursor:
+        raise HTTPException(status_code=422, detail={"code": "invalid_cursor",
+                                                     "message": "That page cursor is not valid. Reload the memory view."})
 
 
 @router.post("/agents/{agent_name}/memory/writes/{write_id}/undo",
@@ -1856,16 +1863,19 @@ def portal_people(agent_name: str, q: str = Query("", max_length=64),
     accounts on this instance that can already reach it, matching `q`.
 
     The ent#450 shape: roster-scoped first (uniform 404), a query required,
-    capped, rate-limited — a picker, never a directory. A platform person only:
+    capped, rate-limited by the one people search (ent#1153) — a picker, never
+    a directory. A platform person only:
     an external client is refused by name (the colleagues it would list are the
     organisation's, an internal fact — #78)."""
-    from services import rate_limiter
+    from services import people_search_service as pss
     _require_roster(agent_name, principal.email, principal.is_platform)
-    rate_limiter.enforce(f"portal_people:{principal.email}", 120, 60)
     try:
         return service.chat_people(principal, agent_name, q)
     except service.ChatTagError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
+    except pss.PeopleSearchLimited as e:   # the seam's per-person budget (ent#1153)
+        raise HTTPException(status_code=429, detail=pss.RATE_LIMITED_DETAIL,
+                            headers={"Retry-After": str(e.retry_after)})
 
 
 @router.get("/agents/{agent_name}/history", response_model=PortalHistory)

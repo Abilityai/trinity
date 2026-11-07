@@ -51,6 +51,7 @@ from database import db
 from db_models import ScheduleCreate, SystemViewCreate
 from redis_breaker_util import LeaseState, SingleFlightLock, get_breaker_redis
 from utils.credential_sanitizer import redact_url_userinfo, sanitize_text
+from utils.log_masking import masked_traceback
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,7 @@ MANIFEST_NAMING_MODES = ("prefixed", "bare")
 # the create route's `[a-z0-9_.-]` charset (`sanitize_agent_name`), including a
 # chained `_N` suffix from `get_next_agent_name` (`writer_2`, `writer_2_2`). An
 # exported suffixed member must parse again, in both naming modes.
-MANIFEST_KEY_RE = re.compile(r"^[a-z0-9]([a-z0-9_.-]*[a-z0-9_.])?$")
+MANIFEST_KEY_RE = re.compile(r"^[a-z0-9]([a-z0-9_.-]*[a-z0-9_.])?\Z")
 
 # #2373: the per-agent equivalent. `parse_manifest` reads exactly these and
 # dropped everything else silently.
@@ -356,7 +357,7 @@ def validate_manifest(manifest: SystemManifest) -> List[str]:
     warnings = []
 
     # Validate system name
-    if not re.match(r'^[a-z0-9][a-z0-9-]{0,48}[a-z0-9]$|^[a-z0-9]{1,2}$', manifest.name):
+    if not re.match(r'^[a-z0-9][a-z0-9-]{0,48}[a-z0-9]\Z|^[a-z0-9]{1,2}\Z', manifest.name):
         raise ValueError(
             f"Invalid system name '{manifest.name}': must be 1-50 chars, "
             "lowercase alphanumeric and hyphens, start/end with alphanumeric"
@@ -2187,6 +2188,20 @@ def _preflight_template(
     return None
 
 
+def _platform_worded() -> Tuple[type, ...]:
+    """The classes a deploy or apply step raises with the platform's own words
+    only: the apply steps' refusals (``<code>: <message>``) and the sentences
+    the create path and apply's writes raise past their own catch-alls (lazy:
+    the apply modules import this one)."""
+    from services.agent_auth import AgentAuthSecretMissing
+    from services.assignment_provider import SeatWriterUnavailable
+    from services.git_service.provisioning import GitInstanceReservationError
+    from services.skill_assignment_service import SkillSetUnresolved
+    from services.system_apply import gates, grants, seats
+    return (gates._Refused, grants._Refused, seats._Refused, AgentAuthSecretMissing,
+            GitInstanceReservationError, SeatWriterUnavailable, SkillSetUnresolved)
+
+
 def _failure_reason(exc: Exception) -> Tuple[str, Optional[int]]:
     """Normalize an agent-create exception into a (reason, status_code) pair.
 
@@ -2195,6 +2210,27 @@ def _failure_reason(exc: Exception) -> Tuple[str, Optional[int]]:
     at this exit point because git/GitHub errors can embed PAT-bearing remote
     URLs (learnings 2026-07-14) and the deploy report is a durable response
     surface (trinity-enterprise#125).
+
+    Three kinds of exception keep their words (abilityai/trinity#4284):
+
+    - an HTTPException, whose detail the platform wrote where it raised it;
+    - any ValueError. The validators raise one (``ManifestError``,
+      ``ScheduleValidationError``, ``normalize_cpu`` / ``normalize_memory``,
+      pydantic's ``ValidationError`` from ``ScheduleCreate``) and its text
+      tells the manifest's author what to change. A library's ValueError keeps
+      its text too (requests' ``InvalidURL`` carries the URL, and
+      ``ScheduleValidationError`` quotes croniter's error): the type cannot
+      tell the two apart, so that text is only sanitized, redacted and capped
+      below, like every reason;
+    - the classes in ``_platform_worded``, raised only with the platform's own
+      sentences: the apply steps' refusals, whose ``<code>: <message>`` the
+      report's readers branch on, and the sentences create and apply's writes
+      raise past their own catch-alls.
+
+    Anything else is an unforeseen failure (Docker, the database, the
+    filesystem, a library) and answers its class name only: the report is the
+    body of a 500 when every member fails (``routers/systems.py``), and that
+    text belongs in the log, which gets it here, masked.
     """
     status_code: Optional[int] = None
     if isinstance(exc, HTTPException):
@@ -2206,8 +2242,11 @@ def _failure_reason(exc: Exception) -> Tuple[str, Optional[int]]:
                 reason = json.dumps(detail, default=str)
         else:
             reason = str(detail)
-    else:
+    elif isinstance(exc, (ValueError,) + _platform_worded()):
         reason = str(exc)
+    else:
+        logger.warning("System manifest step failed: %s", masked_traceback(exc))
+        reason = f"{type(exc).__name__} — details in backend logs"
     reason = sanitize_text(redact_url_userinfo(reason))
     return reason[:_REASON_MAX_LEN], status_code
 
@@ -2368,6 +2407,12 @@ async def deploy_manifest(
             and not may_set_prompt
             and db.get_setting_value("trinity_prompt") != manifest.prompt
         )
+        # trinity-enterprise#591: one validator for the preview and the write.
+        from services import template_source_policy
+        bound_refused, bound_allowed = template_source_policy.manifest_refusals(
+            current_user,
+            [(final, short, manifest.agents[short].template) for short, final in agent_names.items()],
+        )
         if declared_only:
             # The response contract is pinned (ent#695 AC6), so the skip is
             # listed where every caller already reads: the warnings.
@@ -2409,6 +2454,12 @@ async def deploy_manifest(
                     for short_name, final_name in agent_names.items()
                 ) if failure is not None
             ]
+            # trinity-enterprise#591: exactly the members the write refuses.
+            preview_failed.extend(
+                SystemDeployFailure(name=final, short_name=short, template=template or "",
+                                    reason=refusal.message, status_code=403)
+                for final, short, template, refusal in bound_refused
+            )
 
             # ent#126 (AC #2): the preview must show permission topology and
             # schedules, not just agent names. Both come from the pure resolvers
@@ -2491,6 +2542,22 @@ async def deploy_manifest(
                 # changing a shipped field's meaning would mislead any existing
                 # consumer. Callers count the new arrays instead.
             )
+
+        # trinity-enterprise#591: a refused member refuses the whole deploy,
+        # before anything is created (ruled 2026-11-06), naming every one.
+        if bound_refused:
+            await template_source_policy.audit_refusal(
+                request, current_user, code=template_source_policy.CODE_SOURCE,
+                members=[short for _, short, _, _ in bound_refused],
+            )
+            raise HTTPException(status_code=403, detail={
+                "code": template_source_policy.CODE_SOURCE,
+                "message": template_source_policy.manifest_message(bound_refused),
+                "members": [{"name": final, "short_name": short, "template": refusal.source}
+                            for final, short, _, refusal in bound_refused],
+                "allowed_sources": bound_allowed,
+                **({"list_unreadable": True} if bound_refused[0][3].list_unreadable else {}),
+            })
 
         # 5. Create all agents — best-effort by default (trinity-enterprise#125):
         # a per-agent failure is collected and the remaining agents still
@@ -2797,8 +2864,14 @@ async def deploy_manifest(
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception(f"System deployment failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Deployment failed: {str(e)}")
+        # #4284: the class name in the body, the scrubbed traceback in the log.
+        # Git/GitHub errors can embed a PAT-bearing remote URL (learnings
+        # 2026-07-14), so `exc_info=True` would write it raw.
+        logger.error("System deployment failed: %s", masked_traceback(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Deployment failed ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 # ============================================================================
@@ -5020,8 +5093,12 @@ async def apply_manifest(
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception(f"System apply failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Apply failed: {_failure_reason(e)[0]}")
+        # #4284: the class name in the body, the scrubbed traceback in the log.
+        logger.error("System apply failed: %s", masked_traceback(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Apply failed ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 def _lock_blocker(state: LeaseState, system_name: str) -> "SystemApplyBlocker":

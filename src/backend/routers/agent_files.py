@@ -1,4 +1,4 @@
-# mcp: files.ts (share_file → /shared-files) + permissions.ts (get_agent_permissions → /permissions?strict=true, ent#991; the permission writes are deliberately unexposed — granting an edge is human-only) + pipelines.ts (list_agent_pipelines, get_agent_pipeline_state → /files) + metrics.ts (refresh_metric_definitions → /metrics/definitions/refresh, ent#478; get_metrics → /metrics — ent#479, and another agent's with `agent` through a permission grant, ent#727; get_objectives → /objectives, ent#666; the metric declaration routes (/metrics/declarations, ent#1006) are deliberately unexposed — an agent edits its own template.yaml in-container and calls refresh_metric_definitions; the definitions READ is deliberately unexposed — get_metrics carries each definition — not forgotten; the peer-skill grant routes, ent#662, are deliberately unexposed — granting is admin + interactive, human-only)
+# mcp: files.ts (share_file → /shared-files) + permissions.ts (get_agent_permissions → /permissions?strict=true, ent#991; the permission writes are deliberately unexposed — granting an edge is human-only) + pipelines.ts (list_agent_pipelines, get_agent_pipeline_state → /files) + metrics.ts (refresh_metric_definitions → /metrics/definitions/refresh, ent#478; get_metrics → /metrics — ent#479, and another agent's with `agent` through a permission grant, ent#727; get_objectives → /objectives, ent#666; the metric declaration routes (/metrics/declarations, ent#1006) are deliberately unexposed — an agent edits its own template.yaml in-container and calls refresh_metric_definitions; the definitions READ is deliberately unexposed — get_metrics carries each definition — not forgotten; the peer-skill grant routes, ent#662, are deliberately unexposed — granting is admin + interactive, human-only; the peer-skill enforcement read, ent#925, is deliberately unexposed — it is the Permissions panel's line, answered only for a person who may manage the agent's skills)
 """Agent file management, info, and folder endpoints."""
 import logging
 import os
@@ -9,7 +9,7 @@ from sqlalchemy.exc import DBAPIError, OperationalError
 
 from models import User
 from database import db
-from dependencies import get_current_user, AuthorizedAgentByName, OwnedAgentByName, require_person_or_capability, reject_agent_principal, assert_agent_owner, assert_own_agent, is_interactive_principal, require_admin, reject_non_interactive_principal, require_person
+from dependencies import get_current_user, AuthorizedAgentByName, OwnedAgentByName, require_person_or_capability, reject_agent_principal, assert_agent_owner, assert_own_agent, is_interactive_principal, require_admin, reject_non_interactive_principal, require_person, is_person_principal, can_manage_agent_skills
 from services.tool_access_guard import assert_tool_allowed
 from services.agent_auth import agent_httpx_client
 from services import (
@@ -21,6 +21,8 @@ from services import (
     objectives_read_budget,
     peer_skill_policy,
     rate_limiter,
+    skill_gate_map_service,
+    wake_policy,
 )
 from services.docker_service import get_agent_container, kind_from_labels
 from services.docker_utils import container_reload
@@ -49,6 +51,7 @@ from models import (
     FileUpdateRequest,
     MetricDeclarationRequest,
     ObjectiveJoinRead,
+    PeerSkillEnforcementResponse,
     ShareFileMcpRequest,
     ShareFileResponse,
     SharedFileInfo,
@@ -105,7 +108,11 @@ async def get_agent_playbooks_endpoint(
     except agent_skills_listing.SkillsListUnavailable as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch playbooks: {str(e)}")
+        logger.error(f"Failed to fetch playbooks for agent {agent_name}: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch playbooks ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 @router.get("/{agent_name}/info")
@@ -113,7 +120,22 @@ async def get_agent_info_endpoint(
     agent_name: AuthorizedAgentByName,
     request: Request
 ):
-    """Get template info and metadata for an agent."""
+    """Get template info and metadata for an agent, plus its wake policy.
+
+    ent#1102: the `wake_on_ending` block is stamped on EVERY answer, including
+    the stopped-agent and degraded-template branches below. The policy is a
+    platform fact that does not depend on the container being up — and a
+    stopped agent is exactly the state an owner is in when they are wondering
+    why nothing woke up.
+    """
+    info = await _agent_template_info(agent_name, request)
+    verdict = wake_policy.resolve(agent_name)
+    info["wake_on_ending"] = {"effective": verdict.enabled, "source": verdict.source}
+    return info
+
+
+async def _agent_template_info(agent_name: str, request: Request) -> dict:
+    """The template metadata itself, from the agent server or from the labels."""
     import httpx
 
     container = get_agent_container(agent_name)
@@ -168,6 +190,7 @@ async def get_agent_info_endpoint(
     except httpx.TimeoutException:
         raise HTTPException(status_code=504, detail="Agent is starting up, please try again")
     except Exception as e:
+        logger.warning(f"Could not fetch template info for agent {agent_name}: {e}", exc_info=True)
         labels = container.labels
         return {
             "has_template": bool(labels.get("trinity.template")),
@@ -179,7 +202,11 @@ async def get_agent_info_endpoint(
             },
             "kind": kind_from_labels(labels),
             "status": "running",
-            "message": f"Could not fetch template info: {str(e)}"
+            # py/stack-trace-exposure (ent#1117, the #1917 pattern).
+            "message": (
+                f"Could not fetch template info "
+                f"({e.__class__.__name__} — details in backend logs)"
+            ),
         }
 
 
@@ -395,6 +422,24 @@ async def get_agent_peer_skills(
     declares; what an admin assigned needs a grant — `not_granted` counts what
     the edge does not reach."""
     return peer_skill_policy.peer_skills_view(agent_name, viewer=current_user)
+
+
+@router.get("/{agent_name}/peer-skills/enforcement", response_model=PeerSkillEnforcementResponse)
+async def get_agent_peer_skill_enforcement(
+    agent_name: AuthorizedAgentByName,
+    current_user: User = Depends(get_current_user),
+):
+    """Does this agent hold peer skill grants inside itself
+    (abilityai/trinity-enterprise#925)? For the Permissions panel's one line:
+    `reachable` when a peer could reach one of its library skills without a
+    grant, and the in-agent hook's state (ent#754) then. Answered only for a
+    person who may manage the agent's skills — one `/health` read per panel
+    load, and only when reachable; everyone else gets nulls."""
+    if not (is_person_principal(current_user) and can_manage_agent_skills(current_user, agent_name)):
+        return {"reachable": None, "hook": None}
+    reachable = peer_skill_policy.could_reach(agent_name)
+    hook = await skill_gate_map_service.hook_status(agent_name) if reachable else None
+    return {"reachable": reachable, "hook": hook}
 
 
 async def _set_peer_skill_grant(agent_name: str, target: str, skill: str, granted: bool,

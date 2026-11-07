@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "date": "2026-11-06",
+  "mode": "diff",
+  "scope": "trinity-enterprise#450 access tab account suggestions",
+  "phases_run": [
+    0,
+    1,
+    2,
+    9,
+    12,
+    13,
+    14
+  ],
+  "attack_surface": {
+    "new_routes": [
+      "GET /api/agents/{agent_name}/access/candidates"
+    ]
+  },
+  "findings": [
+    {
+      "severity": "MEDIUM",
+      "confidence": 10,
+      "status": "FIXED",
+      "category": "access-control",
+      "title": "A user-scoped key could search the instance's accounts",
+      "file": "src/backend/routers/sharing.py"
+    }
+  ],
+  "accepted_risks": [
+    {
+      "title": "An agent owner can find accounts by trying prefixes",
+      "bounds": "2-character minimum, 8 rows, 60 lookups a minute per person, session only, role for admins only"
+    }
+  ],
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 1,
+    "low": 0,
+    "open": 0
+  }
+}

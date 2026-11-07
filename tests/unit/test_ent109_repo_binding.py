@@ -45,6 +45,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import logging
+
 import pytest
 
 os.environ.setdefault("REDIS_URL", "redis://test:test@redis:6379")
@@ -217,7 +219,7 @@ def bind_env(monkeypatch):
     async def fake_recreate(agent_name, container, owner):
         order.append("recreate")
         if state["recreate_raises"]:
-            raise RuntimeError("docker exploded")
+            raise state.get("recreate_error") or RuntimeError("docker exploded")
 
     lifecycle = SimpleNamespace(recreate_container_with_updated_config=fake_recreate)
     monkeypatch.setitem(sys.modules, "services.agent_service.lifecycle", lifecycle)
@@ -687,6 +689,29 @@ class TestOrdering:
             await _bind()
         assert exc.value.code == "BIND_PAT_PERSIST_FAILED"
         assert "recreate" not in bind_env.order
+
+    @pytest.mark.asyncio
+    async def test_recreate_failure_names_the_class_not_the_text(self, bind_env, caplog):
+        """abilityai/trinity#4284: a Docker error's text can name internals and
+        the token baked into the container's env. The 502 names the class; the
+        log keeps the text with the held token masked."""
+        marker = "docker-internal-marker-4284"
+        bind_env.state["recreate_raises"] = True
+        bind_env.state["recreate_error"] = RuntimeError(
+            f"{marker} https://x-access-token:{PAT}@github.com/acme/x.git"
+        )
+        caplog.set_level(logging.WARNING)
+        with pytest.raises(BindError) as exc:
+            await _bind()
+        assert exc.value.code == "BIND_RECREATE_FAILED"
+        assert exc.value.status_code == 502
+        assert marker not in exc.value.message and PAT not in exc.value.message
+        assert "(RuntimeError — details in backend logs)" in exc.value.message
+        assert "idempotent" in exc.value.message.lower()
+        logged = [logging.Formatter("%(message)s").format(r) for r in caplog.records]
+        assert any(marker in line for line in logged), logged
+        assert not any(PAT in line for line in logged), logged
+        bind_env.state["recreate_raises"] = False
 
     @pytest.mark.asyncio
     async def test_recreate_failure_warns_against_a_plain_restart(self, bind_env):

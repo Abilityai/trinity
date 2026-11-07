@@ -392,7 +392,8 @@ def test_nvm_shared_reader_reads_but_cannot_write(seeded, _no_docker):
 
 
 def test_avatar_path_builds_within_root_for_valid_name():
-    from routers.avatar import AVATAR_DIR, _avatar_path
+    from routers.avatar import _avatar_path
+    from utils.avatar_paths import AVATAR_DIR
 
     p = _avatar_path("my-agent_1.2", "_ref.png")
     assert p == AVATAR_DIR / "my-agent_1.2_ref.png"

@@ -464,6 +464,18 @@ page if demand emerges.
     amber badge for `status=queued`.
 - MCP `get_execution_result` polling transparently surfaces the `queued`
   status without tool changes.
+- #4257: a claim no longer clears `queued_at` — `claim_next_queued` and
+  `release_claim_to_queued` (`db/schedules/queue.py`) keep it, and `started_at`
+  is what says the row left the queue (never read `queued_at IS NOT NULL` as
+  "is queued"). The dispatch receipt for a queued row carries three new keys,
+  `queued_at` / `queue_position` / `wait_reason`
+  (`chat_execution_service._queue_wait_fields`). A head that stops moving is
+  detected by `services/queue_stall_service.py` off the 60 s capacity sweep
+  and filed as the `dispatch_queue_stalled` platform alert (threshold
+  `queue_stall_alert_minutes`, 5–1440, default 30) — see
+  [`architecture/execution.md`](../architecture/execution.md) Capacity & Backlog.
+  `GET /executions/{id}` / MCP `get_execution_result` do not carry the three
+  keys yet (trinity#4274).
 
 ## Failure Modes
 

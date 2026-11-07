@@ -1,0 +1,149 @@
+[
+  {
+    "id": "old-writer-windows-path",
+    "origin": "old panel writer, value C:\\path",
+    "rhs": "\"C:\\path\"",
+    "panel": "C:\\path",
+    "agent": "C:\\path"
+  },
+  {
+    "id": "old-writer-backslash-then-quote",
+    "origin": "old panel writer, value a\\\"b",
+    "rhs": "\"a\\\\\"b\"",
+    "panel": "a\\\"b",
+    "agent": "a\\\"b"
+  },
+  {
+    "id": "old-writer-trailing-backslash",
+    "origin": "old panel writer, value x\\",
+    "rhs": "\"x\\\"",
+    "panel": "x\\",
+    "agent": "x\\"
+  },
+  {
+    "id": "old-writer-double-backslash",
+    "origin": "old panel writer, value a\\\\b (the line that lost a backslash)",
+    "rhs": "\"a\\\\b\"",
+    "panel": "a\\b",
+    "agent": "a\\b"
+  },
+  {
+    "id": "old-writer-embedded-quote",
+    "origin": "old panel writer, value a\"b",
+    "rhs": "\"a\\\"b\"",
+    "panel": "a\"b",
+    "agent": "a\"b"
+  },
+  {
+    "id": "single-quoted",
+    "origin": "hand-written",
+    "rhs": "'abc'",
+    "panel": "abc",
+    "agent": "abc"
+  },
+  {
+    "id": "single-quoted-backslash",
+    "origin": "hand-written",
+    "rhs": "'a\\b'",
+    "panel": "a\\b",
+    "agent": "a\\b"
+  },
+  {
+    "id": "single-quoted-escapes-kept",
+    "origin": "hand-written",
+    "rhs": "'a\\\\b \\\"'",
+    "panel": "a\\\\b \\\"",
+    "agent": "a\\\\b \\\""
+  },
+  {
+    "id": "unquoted",
+    "origin": "hand-written",
+    "rhs": "abc",
+    "panel": "abc",
+    "agent": "abc"
+  },
+  {
+    "id": "unquoted-backslashes",
+    "origin": "hand-written",
+    "rhs": "a\\\\b",
+    "panel": "a\\\\b",
+    "agent": "a\\\\b"
+  },
+  {
+    "id": "unquoted-inner-quote",
+    "origin": "hand-written",
+    "rhs": "a\"b",
+    "panel": "a\"b",
+    "agent": "a\"b"
+  },
+  {
+    "id": "double-quoted-bare-inner-quote",
+    "origin": "hand-written",
+    "rhs": "\"a\"b\"",
+    "panel": "a\"b",
+    "agent": "a\"b"
+  },
+  {
+    "id": "double-quoted-unknown-escape",
+    "origin": "hand-written",
+    "rhs": "\"a\\n\\t\"",
+    "panel": "a\\n\\t",
+    "agent": "a\\n\\t"
+  },
+  {
+    "id": "lone-double-quote",
+    "origin": "edge",
+    "rhs": "\"",
+    "panel": "\"",
+    "agent": "\""
+  },
+  {
+    "id": "lone-single-quote",
+    "origin": "edge",
+    "rhs": "'",
+    "panel": "",
+    "agent": "'"
+  },
+  {
+    "id": "empty-double",
+    "origin": "edge",
+    "rhs": "\"\"",
+    "panel": "",
+    "agent": ""
+  },
+  {
+    "id": "empty-single",
+    "origin": "edge",
+    "rhs": "''",
+    "panel": "",
+    "agent": ""
+  },
+  {
+    "id": "empty",
+    "origin": "edge",
+    "rhs": "",
+    "panel": "",
+    "agent": ""
+  },
+  {
+    "id": "mismatched-quotes",
+    "origin": "edge",
+    "rhs": "\"abc'",
+    "panel": "\"abc'",
+    "agent": "\"abc'"
+  },
+  {
+    "id": "unterminated-double",
+    "origin": "edge",
+    "rhs": "\"abc",
+    "panel": "\"abc",
+    "agent": "\"abc"
+  },
+  {
+    "id": "unterminated-single",
+    "origin": "edge",
+    "rhs": "'abc",
+    "panel": "'abc",
+    "agent": "'abc"
+  }
+]

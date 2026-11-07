@@ -145,7 +145,9 @@ async def get_ops_settings(
             "settings": ops_config
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get ops settings: {str(e)}")
+        # #4284: the exception text goes to the log, never the body.
+        logger.exception("Failed to get ops settings")
+        raise HTTPException(status_code=500, detail=f"Failed to get ops settings ({e.__class__.__name__} — details in backend logs)")
 
 
 @router.put("/ops/config")
@@ -233,7 +235,8 @@ async def update_ops_settings(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update ops settings: {str(e)}")
+        logger.exception("Failed to update ops settings")
+        raise HTTPException(status_code=500, detail=f"Failed to update ops settings ({e.__class__.__name__} — details in backend logs)")
 
 
 @router.post("/ops/reset")
@@ -307,4 +310,5 @@ async def reset_ops_settings(
             "skipped": list(RETENTION_OPS_KEYS),
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to reset ops settings: {str(e)}")
+        logger.exception("Failed to reset ops settings")
+        raise HTTPException(status_code=500, detail=f"Failed to reset ops settings ({e.__class__.__name__} — details in backend logs)")

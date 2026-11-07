@@ -16,6 +16,7 @@ from utils.helpers import parse_iso_timestamp, to_utc_iso
 from utils.addressee import normalize_addressee_email
 from db_models import WebFileUpload  # noqa: F401 — re-exported for router imports
 from db_models import SubscriptionCredential
+from db_models import AgentShare
 
 
 # Fork-to-own destination: "owner/name". Owner per GitHub rules (alphanumeric +
@@ -497,6 +498,14 @@ class User(BaseModel):
     # agent created could reach `/task` looking like the admin in a browser.
     # `dependencies.is_person_principal` refuses it.
     is_event_loopback: bool = False
+    # trinity-enterprise#1107 (ruling A): True only on a JWT carrying the
+    # `interactive` claim — the session the SPA declared at sign-in
+    # (`client=web` on `/api/token`, `"client": "web"` on the email verify).
+    # The terms gate asks exactly these sessions; a token without the claim
+    # (the CLI, curl, a harness, a session minted before the claim existed) is
+    # never asked. A UX/record contract the client declares, not a security
+    # boundary — nothing is authorized by it. False on every other branch.
+    interactive_session: bool = False
     # trinity-enterprise#629 + #164: the agents a capability fence admitted an
     # agent key to on THIS request (`dependencies._admit_capability_reach`).
     # Private, so it is never serialized and never set from a token: the only
@@ -515,6 +524,11 @@ class User(BaseModel):
     # trinity-enterprise#872: `dependencies.principal_reach`'s per-request memo of
     # an agent key's fleet reach. Private, never serialized; None until read.
     _fleet_reach: Optional[set] = PrivateAttr(default=None)
+    # trinity-enterprise#1024: the agent an ADMIN's user-scoped MCP key acts on
+    # behalf of, admitted from `X-Trinity-Act-As-Agent` by
+    # `dependencies.admit_act_as` and by nothing else. Private and never
+    # serialized, like the turn above; read through `act_as_agent_of`.
+    _act_as_agent: Optional[str] = PrivateAttr(default=None)
 
 
 class Token(BaseModel):
@@ -1980,6 +1994,27 @@ class ClientRosterEntry(BaseModel):
     verified_email: Optional[str] = None
     message_count: int = 0
     last_active: Optional[str] = None
+    # trinity-enterprise#21 — the per-client controls. `client_id` is the
+    # channel-native sender id the controls key on. `access`: `blocked` (the
+    # owner blocked this client on this agent), `granted` (their verified email
+    # is shared on this agent — revocable), `pending` (an access request awaits
+    # a decision, `access_request_id`), else `none` (the agent's policy decides).
+    client_id: str = ""
+    access: str = "none"
+    access_request_id: Optional[str] = None
+    blocked_at: Optional[str] = None
+    blocked_by_email: Optional[str] = None
+    block_reason: Optional[str] = None
+
+
+class ChannelClientRef(BaseModel):
+    """One external channel client on one agent (trinity-enterprise#21)."""
+    channel: str = Field(..., max_length=32)
+    client_id: str = Field(..., min_length=1, max_length=256)
+
+
+class ChannelClientBlockRequest(ChannelClientRef):
+    reason: Optional[str] = Field(None, max_length=500)
 
 
 class AgentDataImportResponse(BaseModel):
@@ -2017,6 +2052,15 @@ class SkillsLibraryAutomationUpdate(BaseModel):
     auto_sync_enabled: Optional[bool] = None
     auto_sync_interval_seconds: Optional[int] = None
     auto_reinject_enabled: Optional[bool] = None
+
+
+class QueueStallAlertMinutesUpdate(BaseModel):
+    """Body for PUT /api/settings/queue-stall-alert-minutes (#4257).
+
+    Range (5–1440) is enforced in the router so an out-of-range value returns a
+    400 with a descriptive message rather than a generic 422.
+    """
+    value: int
 
 
 class MaxParallelTasksCeilingUpdate(BaseModel):
@@ -2274,8 +2318,41 @@ class OperatorResumeUpdate(BaseModel):
     Per-agent rather than per-item deliberately — a dispatch spends money, and an
     agent-declared per-item flag would let the agent make answering costly for
     whoever answers, including an external Workspace client (ent#430 AC #3).
+
+    ent#1102 widens this to the tri-state ``mode``, which is the same switch for
+    both wake paths (an answered ask AND the end of a run this agent delegated —
+    ``services/wake_policy.py`` is the only reader of either column). Three
+    states, not two, because the instance default is ON: "nobody has said" has
+    to be distinguishable from "the owner said off", or flipping the default
+    silently discards the second.
+
+    ``enabled`` is the ent#329 body and stays accepted — an older client, the
+    MCP surface and the current Settings control all send it. It is NOT a
+    synonym for ``mode``: ``enabled`` writes the boolean column as before AND
+    records the same answer in the tri-state, because a person who moves the
+    switch has expressed an opinion either way. Exactly one of the two must be
+    present; both, or neither, is a named 422 rather than a silent precedence
+    rule nobody can see from the request.
     """
-    enabled: bool
+
+    mode: Optional[Literal["default", "on", "off"]] = None
+    enabled: Optional[bool] = None
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> "OperatorResumeUpdate":
+        if (self.mode is None) == (self.enabled is None):
+            raise ValueError(
+                "send exactly one of `mode` ('default' | 'on' | 'off') or the "
+                "legacy `enabled` (true | false)"
+            )
+        return self
+
+    @property
+    def wake_override(self) -> Optional[bool]:
+        """The tri-state value this body writes: None clears the override."""
+        if self.mode is not None:
+            return {"default": None, "on": True, "off": False}[self.mode]
+        return self.enabled
 
 
 class MemoryOptOutUpdate(BaseModel):
@@ -2360,6 +2437,87 @@ class MemorySearchResponse(BaseModel):
     agent_name: str
     scope: str            # "agent" | "person"
     hits: list[MemorySearchHit]
+
+
+class PersonMemoryPerson(BaseModel):
+    """One person with memory on an agent, as the owner's list shows them
+    (trinity-enterprise#962). `user_email` is the verified identity the memory
+    is keyed on; `channel*` is what an access request captured, as the channel
+    reported it (ent#737), or None. `fact_count` is None when the person's
+    scope is the agent scope (the current owner's own turns)."""
+    user_email: str
+    last_changed_at: Optional[str] = None
+    has_notes: bool = False
+    has_summary: bool = False
+    write_count: int = 0
+    fact_count: Optional[int] = 0
+    agent_scope: bool = False
+    channel: Optional[str] = None
+    channel_name: Optional[str] = None
+    channel_handle: Optional[str] = None
+
+
+class PersonMemoryPeople(BaseModel):
+    """A page of the people with memory on an agent, newest change first."""
+    agent_name: str
+    total: int
+    offset: int
+    limit: int
+    people: list[PersonMemoryPerson]
+
+
+class PersonMemoryWrite(BaseModel):
+    """One write to a person's memory (trinity-enterprise#962). `section` is
+    which half it changed; `text` is what it left and `previous_text` what
+    Undo restores. `undoable` is the latest open write of its section, decided
+    server-side. `undone_by` is who undid it — the owner's view only."""
+    id: str
+    section: Literal["notes", "summary"]
+    kind: Literal["scheduled_run", "conversation", "summarizer"]
+    execution_id: Optional[str] = None
+    schedule_name: Optional[str] = None
+    written_at: str
+    undone_at: Optional[str] = None
+    undone_by: Optional[str] = None
+    undone_by_operator: bool = False
+    undoable: bool = False
+    text: str = ""
+    previous_text: str = ""
+
+
+class PersonMemoryHistory(BaseModel):
+    """A page of a person's write history; `next_before` is the cursor for the
+    next page (None on the last)."""
+    writes: list[PersonMemoryWrite]
+    next_before: Optional[str] = None
+
+
+class PersonMemoryDetail(BaseModel):
+    """One person's memory on an agent, for the owner (trinity-enterprise#962)."""
+    agent_name: str
+    user_email: str
+    agent_scope: bool = False
+    notes: str = ""
+    summary: str = ""
+    updated_at: Optional[str] = None
+    channel: Optional[str] = None
+    channel_name: Optional[str] = None
+    channel_handle: Optional[str] = None
+    history: PersonMemoryHistory
+
+
+class PersonMemoryUndoRequest(BaseModel):
+    """Whose write it is. The write id alone would do, but the undo primitive is
+    keyed on (agent, person, write) — an id from another person is the uniform
+    404, never a cross-person revert."""
+    user_email: str = Field(..., min_length=1, max_length=320)
+
+
+class PersonMemoryUndoResult(BaseModel):
+    """What Undo did: both sections as they now stand."""
+    write_id: str
+    notes: str = ""
+    summary: str = ""
 
 
 class MemoryFactEventOut(BaseModel):
@@ -3617,6 +3775,29 @@ class GitSyncRequest(BaseModel):
     paths: Optional[List[str]] = None  # Specific paths to sync
     strategy: Optional[str] = "normal"  # "normal", "pull_first", "force_push"
 
+    @field_validator("paths")
+    @classmethod
+    def _reject_option_like_paths(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        # The agent server passes `paths` to `git add`. An agent created on an
+        # older base image runs `git add <paths>` without `--`, so an element
+        # like `-f` is read as an option and force-stages an ignored file such
+        # as `.env`, which the sync then pushes (ent#1117). Refuse it here, at
+        # the edge every caller crosses. A dash elsewhere (`sub/-x.md`) is fine.
+        # The element is echoed so the caller can find it (the 422 handler
+        # drops `input`), but capped: the request body bounds nothing. Both
+        # echoes go through repr(): a raw lone surrogate (legal as a JSON
+        # escape) cannot be UTF-8 encoded, and pydantic-core then raises
+        # while building the error, which is a 500 instead of this 422.
+        for i, path in enumerate(v or []):
+            if path.startswith("-"):
+                shown = path if len(path) <= 200 else path[:200] + "\u2026"
+                raise ValueError(
+                    f"paths[{i}] {shown!r} starts with '-' and would be read by "
+                    "git as an option; name a file that starts with '-' as "
+                    f"{'./' + shown!r}"
+                )
+        return v
+
 
 class GitPullRequest(BaseModel):
     """Request body for git pull operation."""
@@ -4267,6 +4448,17 @@ class SkillGateCheckResponse(BaseModel):
     message: Optional[str] = None
 
 
+class PeerSkillEnforcementResponse(BaseModel):
+    """`GET /api/agents/{agent_name}/peer-skills/enforcement`
+    (abilityai/trinity-enterprise#925): does the agent enforce peer skill
+    grants inside itself? `reachable` — a peer could reach one of its library
+    skills without a grant; `hook` — the ent#754 hook state, read only when
+    reachable. Both null for anyone but a person who may manage the agent's
+    skills."""
+    reachable: Optional[bool] = None
+    hook: Optional[str] = None
+
+
 class SkillGateSetRequest(BaseModel):
     """`PUT /api/agents/{agent_name}/skill-gates/{skill_name}` (trinity-enterprise#753).
 
@@ -4780,6 +4972,17 @@ class TemplateRegistryUpdate(BaseModel):
     """
     url: Optional[str] = None
     enabled: Optional[bool] = None
+
+
+class AgentCreationAllowlistUpdate(BaseModel):
+    """PUT body for `/api/settings/agent-creation-allowlist` (trinity-enterprise#591).
+
+    The whole list, replacing the saved one; `[]` clears it (unbounded). Items
+    are typed `Any` on purpose: every entry is judged by
+    `template_source_policy.parse_entries`, so a non-string gets the same named,
+    per-entry reason as a malformed source instead of Pydantic's generic 422.
+    """
+    entries: List[Any]
 
 
 class AAuthSettingsUpdate(BaseModel):
@@ -5990,6 +6193,8 @@ class SkillSetMember(BaseModel):
     version: Optional[str] = None
     # The source that wins this member when it is NOT the set's own source.
     shadowed_source: Optional[str] = None
+    # trinity-enterprise#736: the library is retiring this member (ent#672).
+    deprecated: bool = False
 
 
 class SkillSetInfo(BaseModel):
@@ -6010,6 +6215,10 @@ class AgentSkillSetMember(BaseModel):
     state: str  # assigned | conflict | not_assigned | missing_upstream
     version: Optional[str] = None
     shadowed_source: Optional[str] = None
+    # trinity-enterprise#736: `deprecation` is the ent#672 code
+    # (`deprecated` | `deprecated:<successor>`) an assign note names; None when live.
+    deprecated: bool = False
+    deprecation: Optional[str] = None
 
 
 class AgentSkillSetStatus(BaseModel):
@@ -6335,3 +6544,66 @@ class NeverminedDelegationBind(BaseModel):
         if any(c in v for c in "\r\n"):
             raise ValueError("provider must be a single line")
         return v or None
+
+
+# --- Terms of use per instance (trinity-enterprise#1107) --------------------
+
+class TermsCurrent(BaseModel):
+    """What the terms screen and the Settings editor read."""
+    required: bool          # the gate's switch (on by default)
+    version: str            # the version a person accepts
+    title: str
+    text: str               # markdown — the shipped default until replaced
+    is_default: bool        # the shipped text is in force
+    accepted: bool          # the caller has an acceptance row for `version`
+
+
+class TermsAccept(BaseModel):
+    version: str = Field(..., max_length=100)
+
+
+class TermsAccepted(BaseModel):
+    accepted: bool
+    created: bool           # False when this person had already accepted this version
+    version: str
+    accepted_at: str
+
+
+class TermsUpdate(BaseModel):
+    """`PUT /api/terms` — any subset; a text or title save stamps a new version.
+    Validated at the boundary AND at the sink (`terms_service.validate_*`),
+    because the generic `PUT /api/settings/{key}` is refused for these keys."""
+    title: Optional[str] = None
+    text: Optional[str] = None
+    required: Optional[bool] = None
+
+
+class TermsAcceptance(BaseModel):
+    id: int
+    user_id: Optional[int] = None   # None: a Workspace portal session (ruling A(1))
+    email: Optional[str] = None
+    terms_version: str
+    accepted_at: str
+    door: Optional[str] = None
+    actor_ip: Optional[str] = None
+
+
+class AgentShareResult(AgentShare):
+    """A new share, and whether its invitation went out (trinity-enterprise#459)."""
+    # sent | not_needed | invalid_address | unavailable | rate_limited | failed
+    invitation: str = "not_needed"
+
+
+class AccessCandidate(BaseModel):
+    """A registered account the Access tab's add field can suggest (trinity-enterprise#450).
+
+    Only what the row shows. `role` is set for an admin reader and absent for
+    everyone else, so the list can't be used to find the admins."""
+    email: str
+    label: str
+    role: Optional[str] = None
+
+
+class AgentInviteResult(BaseModel):
+    email: str
+    sent: bool = True

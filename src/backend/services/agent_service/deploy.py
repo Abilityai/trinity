@@ -37,6 +37,7 @@ from services.template_service import (
 from services.docker_service import get_agent_container
 from services.docker_utils import container_stop, container_start, agent_volume_labels
 from utils.helpers import sanitize_agent_name
+from utils.log_masking import masked_traceback
 from dependencies import agent_may_reach
 from services.settings_service import get_agent_quota_for_role
 from redis_breaker_util import SingleFlightLock  # #1920 shared single-flight lock
@@ -705,10 +706,20 @@ def _prepopulate_workspace_from_template(version_name: str, template_dir: Path) 
             f"Pre-populated workspace volume {workspace_vol} from {template_dir}"
         )
     except Exception as e:
+        # #4284: the class name in the body, the scrubbed traceback in the log.
+        # A deploy handles `.env` content and template sources, so the log copy
+        # goes through the shared mask: `exc_info=True` would write it raw.
+        logger.error(
+            "Failed to pre-populate workspace for %s: %s",
+            version_name, masked_traceback(e),
+        )
         raise HTTPException(
             status_code=500,
             detail={
-                "error": f"Failed to pre-populate workspace for {version_name}: {e}",
+                "error": (
+                    f"Failed to pre-populate workspace for {version_name} "
+                    f"({e.__class__.__name__} — details in backend logs)"
+                ),
                 "code": "WORKSPACE_PREPOP_FAILED",
             },
         )
@@ -1427,10 +1438,12 @@ async def deploy_local_agent_logic(
         _remove_partial_deploy(dest_created)
         _cleanup_deploy_volume(volume_created)
         await _restart_stopped_previous(previous_stopped_name)
+        # #4284: the class name in the body, the scrubbed traceback in the log.
+        logger.error("Local agent deploy failed: %s", masked_traceback(e))
         raise HTTPException(
             status_code=500,
             detail={
-                "error": f"Failed to deploy local agent: {str(e)}",
+                "error": f"Failed to deploy local agent ({e.__class__.__name__} — details in backend logs)",
                 "code": "DEPLOY_FAILED",
             }
         )

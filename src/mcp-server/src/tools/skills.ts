@@ -116,8 +116,9 @@ interface SkillDelivery {
   // #2914: names refused because the agent already has its own skill dir of
   // that name. Present whenever at least one requested name collided.
   conflicts?: string[];
-  // ent#672: `warnings` is present only for a deprecated skill and carries
-  // lifecycle codes only — `deprecated` or `deprecated:<successor>`.
+  // ent#672: a deprecated skill's `warnings` lead with `deprecated` or
+  // `deprecated:<successor>`, on every outcome. #3136: when the injection ran,
+  // the same list carries its public codes (`missing_binary:<name>`, …).
   skills: Record<string, { status: string; error?: string; warnings?: string[] }>;
 }
 
@@ -261,7 +262,8 @@ export function createSkillsTools(
       name: "list_skill_sets",
       description:
         "List the skill sets the library's sources declare: each set's name, source, status " +
-        "(`ok` | `partial` | `invalid` — only `ok` can be assigned), members with their versions, " +
+        "(`ok` | `partial` | `invalid` — only `ok` can be assigned), members with their versions " +
+        "(each with `deprecated` when the library is retiring it), " +
         "problem codes, prerequisites and suggested schedules. Assign one with " +
         "assign_skill_to_agent using `set:<name>`; get_agent_skills lists the sets an agent holds.",
       parameters: z.object({}),
@@ -290,8 +292,10 @@ export function createSkillsTools(
         "sync_agent_skills is the manual retry. " +
         "A deprecated skill is still assigned and delivered; its entry in `delivery.skills` then carries " +
         "`warnings` with `deprecated:<successor>` (only when the author's note is shaped like a skill name — it is not checked against the library) or bare `deprecated` — on " +
-        "every outcome, a stopped agent included. That list holds lifecycle codes only; dependency " +
-        "warnings are on sync_agent_skills. " +
+        "every outcome, a stopped agent included. When the injection ran, the same list also carries " +
+        "the codes sync_agent_skills reports: `missing_binary:<name>` / `missing_env:<KEY>` (a declared " +
+        "dependency this agent lacks), `packages_not_checked` and the like — codes only; " +
+        "`pending_start` and `in_progress` carry none. " +
         "Called with an agent key, this needs the skill-management permission an instance admin grants (it covers the calling agent's OWN skills too); without it the call is refused with `skill_management_not_permitted` and nothing changes. " +
         "Skills teach agents specific behaviors defined in SKILL.md files. " +
         "Pass `set:<name>` to assign a library skill SET — every member is assigned and delivered in " +

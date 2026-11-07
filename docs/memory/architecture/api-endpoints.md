@@ -79,6 +79,10 @@
 
 | GET | `/api/agents/{name}/retrieval-memory/search` | Owner search over one scope (`q`, `k≤50`, `user_email` omitted = the agent scope): ranked hits with the rendered line, relevance, score and provenance; 422 `query_empty`/`invalid_email`/`memory_off`, 503 `memory_unavailable` (owner + human-only, trinity-enterprise#1028) |
 | POST | `/api/agents/{name}/retrieval-memory/search` | The agent door behind MCP `search_memory`: `{execution_id, query, k}`, scope resolved from the execution by the whose-memory rule (never from the caller); the agent's own key only — an agent key searches only its own agent and a human is refused 403 `agent_only` (owner door above); the named run must be `running` (422 `memory_turn_not_live`) and the only live scope on the agent (422 `memory_turn_ambiguous`); 422 `memory_no_subject` with the reason; every search journaled with the query, hits or none (trinity-enterprise#1028) |
+| GET | `/api/agents/{name}/person-memory` | Everyone with memory on the agent — notes or summary, any history row, or live person-scope facts — newest change first, with channel identity and counts (MEM-001 owner view, trinity-enterprise#962; owner/admin + `require_person`) |
+| GET | `/api/agents/{name}/person-memory/person` | One person (`user_email`): notes, summary, identity, first history page; never creates the row, 404 `person_not_found` |
+| GET | `/api/agents/{name}/person-memory/writes` | A page of one person's write history, both sections (`user_email`, `before` keyset cursor, 422 `invalid_cursor`) |
+| POST | `/api/agents/{name}/person-memory/writes/{write_id}/undo` | Undo one write `{user_email}` — the person's primitive, latest-first per section, `undone_by` = the operator; `409 not_latest` / `already_undone`, audit `person_memory_undo` |
 | POST | `/api/agents/{name}/user-memory` | The agent door behind MCP `write_user_memory`: write per-user memory blob; email resolved from execution_id server-side (MEM-001, #888) — user-facing triggers, or a `schedule` run addressed to a seat via ent#498's stamp (ent#637); the agent's own key only — a human past the operator floor is refused 403 `agent_only`; the named run must be `running` (422 `memory_turn_not_live`) and the only live scope on the agent (422 `memory_turn_ambiguous`, #4121); every write records a `public_user_memory_writes` row |
 | POST | `/api/agents/{name}/decisions` | Record a seat decision — why a thing was approved/deferred/killed — for the seat the execution serves (seat from `execution_id`, never sent; `Idempotency-Key` honoured; grammar receipts `decision_prose_only` / `decision_is_a_note` / `unknown_citation`; `scope: direction` → kept as `routed` with the canon hint). No person email in the answer (trinity-enterprise#638) |
 | GET | `/api/agents/{name}/decisions?execution_id=` | The seat's standing decisions (criterion first, active by default, `include_history`) + evidence stats; email-free (trinity-enterprise#638) |
@@ -142,7 +146,7 @@
 | POST | `/api/agents/{name}/voip/call` | JWT/MCP (`AuthorizedAgent`) | Place outbound call; rate-limited + daily-capped; optional `Idempotency-Key`. Returns `{call_id, status:"ringing", twilio_call_sid}` |
 | WS | `/api/voip/voice/{call_id}` | Call-bound ticket | Twilio Media Streams audio bridge — see [VoIP](integrations.md#voip-telephony-voip-001-1056) |
 
-The per-agent VoIP config + voice-picker UI lives in the agent Settings/Sharing tab (`components/VoipChannelPanel.vue`), shown only when the platform `voip_available` flag is true (frontend reads it via `stores/sessions.js`); the underlying CRUD/voice endpoints are OSS and ungated (#28).
+The per-agent VoIP config + voice-picker UI lives in the agent Settings/Channels tab (`components/VoipChannelPanel.vue`), shown only when the platform `voip_available` flag is true (frontend reads it via `stores/sessions.js`); the underlying CRUD/voice endpoints are OSS and ungated (#28).
 
 ### Activities (1 endpoint)
 | Method | Path | Description |
@@ -179,7 +183,7 @@ The per-agent VoIP config + voice-picker UI lives in the agent Settings/Sharing 
 ### Templates (2 endpoints)
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/templates` / `/api/templates/{id}` | List templates / template details |
+| GET | `/api/templates` / `/api/templates/{id}` | List templates / template details. The list adds `allowed_for_agents` per entry for an agent key while the template-source allowlist is set (trinity-enterprise#591) |
 
 ### System Manifests (ent#126)
 | Method | Path | Auth | Description |
@@ -195,9 +199,12 @@ The per-agent VoIP config + voice-picker UI lives in the agent Settings/Sharing 
 |--------|------|-------------|
 | POST | `/api/agents/{name}/share` | Share agent |
 | DELETE | `/api/agents/{name}/share/{email}` | Remove share |
+| GET | `/api/agents/{name}/access/candidates` | Accounts to suggest in the Access tab's add field, by `?q=`: signed-in session only, owner or admin, bounded (trinity-enterprise#450) |
+| POST | `/api/agents/{name}/share/{email}/invite` | Email a pending person their invitation again (trinity-enterprise#459). Share itself also sends it |
 | GET | `/api/agents/{name}/shares` | List shares |
 | GET | `/api/agents/{name}/access` | Operator (Trinity-user) access roster for the **Access tab** (trinity-enterprise#17). Resolves each `agent_sharing` allow-list email against `users`: resolved → **active** operator (`username`/`role`/`last_active`), unresolved → **pending** invite. Read-only typed view over `agent_sharing`; add/remove reuse `/share` + `/share/{email}`. Drawing the operator-vs-client line on the read path is this endpoint's job (strict client roster is the Sharing redesign #18/#20) |
-| GET | `/api/agents/{name}/clients` | External-client roster: channel users who've messaged the agent, aggregated across Telegram + WhatsApp, sorted by `last_active` desc (never-active last). Owner-only, read-only, DB-sourced (renders when agent stopped). Slack/VoIP additive (#20) |
+| GET | `/api/agents/{name}/clients` | External-client roster: channel users who've messaged the agent, aggregated across Telegram + WhatsApp, sorted by `last_active` desc (never-active last). Owner-only, DB-sourced (renders when agent stopped). Each row carries `client_id` + `access` (blocked/granted/pending/none). Slack/VoIP additive (#20, ent#21) |
+| POST | `/api/agents/{name}/clients/block` · `/unblock` · `/revoke` | Per-client controls (trinity-enterprise#21): block/unblock one channel client on this agent (`channel_client_blocks`, enforced first in the channel router), or revoke their share. Owner/admin + `require_person`; audited |
 | GET/PUT | `/api/agents/{name}/public-prompt` | Owner-only per-agent custom instructions (`public_channel_system_prompt`, 4000-char cap) folded into the system prompt for **public-facing surfaces only** — public links, channel router (Slack/Telegram/WhatsApp), x402 paid chat — via `platform_prompt_service.build_public_channel_caller_prompt` (composes with the MEM-001 memory block). NOT applied to authenticated chat, schedules, loops, or a2a. Text counterpart of `voice_system_prompt` (#1205) |
 | GET/PUT | `/api/agents/{name}/access-policy` | Cross-channel access policy: `require_email` / `open_access` flags |
 | GET | `/api/agents/{name}/access-requests` | Pending access requests |
@@ -226,11 +233,23 @@ Token lifecycle: `secrets.token_urlsafe(32)` stored in `agent_schedules.webhook_
 
 **Creation gate (#1445):** schedule *and* webhook creation require a **live owning agent** — `db.is_agent_live(name)` checks an `agent_ownership` row with `deleted_at IS NULL` (no `users` join, so it matches the token-lookup predicate exactly). A nonexistent / soft-deleted agent returns **404** (non-owners get a uniform **403** whether or not the agent exists — no enumeration oracle); enforced at both the router (`create_schedule`/`generate_webhook`) and the db chokepoint (`db/schedules.py:create_schedule` → `None`). This closes the orphan-schedule class (an admin's `can_user_access_agent` is unconditionally `True`, so admin callers could otherwise mint a schedule + real token on a never-created agent) so a webhook token always resolves to a schedule of a live agent — the invariant the #1423 token-lookup INNER JOIN assumes.
 
+### Terms of use (trinity-enterprise#1107, 5 endpoints)
+
+| Endpoint | Method | Gate | Purpose |
+|---|---|---|---|
+| `/api/terms/current` | GET | `require_person`, `@workspace_route` + `@terms_route` | `{required, version, title, text, is_default, accepted}` — the shipped default until replaced |
+| `/api/terms/accept` | POST | `require_interactive`, both marks | `{version}` → `{accepted, created, version, accepted_at}`; 403 `invite_expired`/`invite_revoked` when a registered provider's door is closed (`terms_gate.assert_door_open`); 409 `version_stale`; schedules the acceptance hooks after the response |
+| `/api/terms/acceptances` | GET | `require_admin` | the record: `?email=`, `?limit=` (≤1000) |
+| `/api/terms` | PUT | `require_admin` + interactive | any of `{title, text, required}`; a text/title save stamps a new version; 422 `terms_text_empty` / `terms_text_too_large` / `terms_title_too_long` |
+| `/api/terms/restore-default` | POST | `require_admin` + interactive | the one action that brings the shipped text back |
+
+The four `terms_*` keys are refused on `PUT` and `DELETE /api/settings/{key}` (422) so the validated route is the only writer; an identical text+title save stamps no version.
+
 ### Auth, Users & MCP (21 endpoints)
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/auth/mode` | Auth mode config (unauthenticated) |
-| POST | `/api/token` | Admin login — `username` accepts `admin` OR the admin's registered email + password (#82); form-encoded |
+| POST | `/api/token` | Admin login — `username` accepts `admin` OR the admin's registered email + password (#82); form-encoded. `client=web` (the SPA) mints `interactive: true`, the claim the terms gate asks (ent#1107); the CLI sends nothing |
 | POST | `/api/auth/email/request` / `/verify` | Request email code / verify and login |
 | POST | `/api/auth/logout` | Revoke the caller's JWT — blacklists its `jti` in Redis until the token's own expiry, so an exfiltrated 7-day token dies on logout (#187). Idempotent; MCP-key callers are a no-op (keys revoke via key management) |
 | GET | `/api/auth/validate` | Validate JWT (for nginx auth_request) — also rejects a `jti` revoked via logout (#187) |
@@ -468,6 +487,7 @@ All four require `X-Internal-Secret` **AND** `MCP_INLINE_AUTH_ENABLED`; with the
 | Method | Path | Description |
 |--------|------|-------------|
 | GET/PUT/DELETE | `/api/settings/template-registry` | Remote template-registry URL + toggle (TMPL-002, ent#14). GET admin-only (adds a live `status` block — fail-open makes a broken registry invisible in the catalog, so this is the only place an operator can see it, plus `hard_disabled` and `suppressed_by_github_templates`); PUT/DELETE admin **+ `reject_agent_principal`** (an agent-scoped key resolves to its owner *carrying the owner's role*, so a bare admin gate would let any agent repoint the platform's registry), URL SSRF-validated, audit-logged. All four keys 422-blocked on the generic `PUT`/`DELETE /{key}`. Registered before `/{key}` (Invariant #4) |
+| GET/PUT | `/api/settings/agent-creation-allowlist` | Template sources for agent-created agents (trinity-enterprise#591). GET admin-only: `entries`, `bounded`, `stored_invalid`, `not_bundled`, `hidden`, `in_use` (templates live agent-created agents use, allowed/refused; `null` when unreadable). PUT admin **+ interactive** (`assert_interactive_admin`), validated per entry (422 `invalid_template_sources`), audited; `[]` clears. Key 422-blocked on the generic `PUT`/`DELETE /{key}`. Registered before `/{key}` |
 | GET/PUT/DELETE | `/api/settings/mcp-url` | Get (any auth user) / set / reset-to-auto-detect (admin-only) MCP server URL |
 | GET | `/api/settings/public-chat-url` | Admin-only read of the public chat URL; answers `{key, value: null}` when unset instead of the generic getter's 404 (#2202) |
 | GET | `/api/settings/feature-flags` | Public-safe UI gating flags (any auth user): `session_tab_enabled`, `voice_available` (`VOICE_ENABLED && ` the Gemini key — Settings → env, resolved per request since ent#582), `voip_available` (#1056), `brain_orb_available` (runtime-resolved: `system_settings` override → `BRAIN_ORB_ENABLED` env opt-in → OFF; gates the Brain Orb page — #58/#85), `brain_orb_voice_available` (`base && voice && GEMINI_API_KEY`, all but the key runtime-resolved, default OFF; gates the client-held voice tile — #60/#85), `mcp_agent_chat_pull_enabled` (#946 observability-only; routing gate is the MCP server's own `MCP_AGENT_CHAT_PULL_ENABLED`, default OFF), `redelivery_governor_enabled` (#1085 observability-only; default OFF), `canary_enabled` (#2217 observability-only — whether the canary harness is enabled; last-cycle/stale/sink detail stays admin-only on `GET /api/canary/status`; default OFF), `tts_available` (ent#117 — an ElevenLabs key resolves via stored setting → `ELEVENLABS_API_KEY` env; gates the voice config UI + `send_voice_reply`), `a2a_outbound_available` (#736 — the outbound-A2A kill switch: `system_settings` → `A2A_OUTBOUND_ENABLED` env → **OFF**; both call routes 404 when off, so this is observability/UI gating, not the enforcement), `install_source` / `marketplace_install` / `hardening_guide_eligible` / `install_tls_posture` (#2380 — how this instance was installed, whether it came from a vendor listing, the gate for the first-run overlay's `secure` step, formerly the hardening guide (a separate set: the marketplace sources plus `do-script`), and what URL posture it *advertises*. A string on a mostly-boolean surface, the `platform_default_model` precedent; both booleans are resolved server-side so the browser holds no copy of which provenances count), `telemetry_sharing_enabled` / `_hard_disabled` / `_dismissed` / `_first_value` (ent#12/ent#437 — the four booleans the first-run overlay's `sharing` step gates on (ent#581; formerly the Finish-setup consent card), served here so the step decides from a document the page already awaits and never calls the admin status route on a load it will not act on; fail-safe in the hidden direction), `claude_auth_configured` (platform Anthropic key OR any subscription — `subscription_service.is_claude_auth_configured`, shared with the ent#582 first-credential check), `enterprise_features` (registered enterprise modules; empty in OSS-only or `TRINITY_OSS_ONLY=1`) (#847) |

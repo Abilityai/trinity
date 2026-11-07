@@ -71,6 +71,7 @@ from services.settings_service import (
     AGENT_DEFAULT_REQUIRE_EMAIL,
     get_agent_default_require_email,
     MAX_PARALLEL_TASKS_CEILING_KEY,
+    QUEUE_STALL_ALERT_MINUTES_KEY,
     MAX_PARALLEL_TASKS_CEILING_DEFAULT,
     MAX_PARALLEL_TASKS_CEILING_MIN,
     MAX_PARALLEL_TASKS_CEILING_MAX,
@@ -114,6 +115,13 @@ from services.subscription_headroom_alerts import (
 )
 
 
+# trinity-enterprise#1107 — the terms of use are written only through
+# `PUT /api/terms` / `POST /api/terms/restore-default` (admin + interactive,
+# validated by name, audited by version). Blocked on the generic PUT so an
+# empty or oversized text, or a hand-typed version, cannot reach the sink.
+from services.terms_service import SETTING_KEYS as TERMS_SETTING_KEYS
+
+
 
 router = APIRouter()
 
@@ -140,7 +148,9 @@ async def get_all_settings(
         from utils.admin_identity import ADMIN_ENV_FINGERPRINT_KEY
         return [st for st in settings if st.key != ADMIN_ENV_FINGERPRINT_KEY]
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get settings: {str(e)}")
+        # #4284: the exception text goes to the log, never the body.
+        logger.exception("Failed to get settings")
+        raise HTTPException(status_code=500, detail=f"Failed to get settings ({e.__class__.__name__} — details in backend logs)")
 
 
 @router.get("/{key}")
@@ -169,7 +179,8 @@ async def get_setting(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get setting: {str(e)}")
+        logger.exception("Failed to get setting %s", key)
+        raise HTTPException(status_code=500, detail=f"Failed to get setting ({e.__class__.__name__} — details in backend logs)")
 
 
 @router.put("/{key}", response_model=SystemSetting)
@@ -219,9 +230,32 @@ async def update_setting(
             detail=f"{key} is recorded by the platform at boot and is not writable through the API.",
         )
 
+    # trinity-enterprise#1107: the terms text, title, version and switch.
+    if key in TERMS_SETTING_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} is set via PUT /api/terms (admin + interactive-only, validated, "
+                "audit-logged; POST /api/terms/restore-default restores the shipped text)"
+            ),
+        )
+
     # #506: the fleet ceiling must go through the dedicated range-validated
     # route; block the generic PUT so it can't be written to junk/out-of-range
     # (same pattern as the skills_library_url SSRF special-case below).
+    # #4257: same reason as the ceiling below — the generic PUT takes an
+    # unvalidated string, and a junk threshold here either silences the stall
+    # monitor or makes it file on every tick. The getter clamps as a backstop,
+    # but the named 422 is what tells a caller where the validated route is.
+    if key == QUEUE_STALL_ALERT_MINUTES_KEY:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "queue_stall_alert_minutes must be set via "
+                "PUT /api/settings/queue-stall-alert-minutes (range-validated 5–1440)"
+            ),
+        )
+
     if key == MAX_PARALLEL_TASKS_CEILING_KEY:
         raise HTTPException(
             status_code=422,
@@ -352,6 +386,13 @@ async def update_setting(
                 "(HTTPS + SSRF validated, admin + human-only, audit-logged)"
             ),
         )
+    # trinity-enterprise#591: validated per entry, interactive-admin only.
+    from services.template_source_policy import SETTING_KEY as ALLOWLIST_KEY
+
+    if key == ALLOWLIST_KEY:
+        raise HTTPException(status_code=422, detail=(
+            f"{key} must be set via PUT /api/settings/agent-creation-allowlist "
+            "(validated, admin + interactive-only, audit-logged)"))
 
     from config import OPS_SETTINGS_VALIDATION
     from services.settings_service import RETENTION_OPS_KEYS
@@ -641,7 +682,8 @@ async def update_setting(
         # rather than a 500 that reads like a platform fault.
         raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update setting: {str(e)}")
+        logger.exception("Failed to update setting %s", key)
+        raise HTTPException(status_code=500, detail=f"Failed to update setting ({e.__class__.__name__} — details in backend logs)")
 
 
 async def _backfill_telegram_webhooks(public_url: str) -> None:
@@ -731,6 +773,19 @@ async def delete_setting(
             ),
         )
 
+    # trinity-enterprise#1107: deleting `terms_version` alone would make the
+    # shipped version name a custom text (nobody asked again); deleting the
+    # text brings the default back without the audit row restore-default
+    # writes. The terms routes are the only writer on BOTH verbs.
+    if key in TERMS_SETTING_KEYS:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"{key} is set via PUT /api/terms (admin + interactive-only, validated, "
+                "audit-logged; POST /api/terms/restore-default restores the shipped text)"
+            ),
+        )
+
     # ent#14: blocked here as well as on PUT, unlike the #1644 retention acks.
     # Deleting an ack re-arms a guard and therefore fails safe; deleting
     # `template_registry_enabled` reverts it to its default of ON, which
@@ -747,6 +802,12 @@ async def delete_setting(
                 "(admin + human-only, audit-logged)"
             ),
         )
+    from services.template_source_policy import SETTING_KEY as ALLOWLIST_KEY
+
+    if key == ALLOWLIST_KEY:  # trinity-enterprise#591, as on PUT
+        raise HTTPException(status_code=422, detail=(
+            f"{key} must be cleared via PUT /api/settings/agent-creation-allowlist "
+            "with an empty list (admin + interactive-only, audit-logged)"))
 
     try:
         deleted = db.delete_setting(key)
@@ -781,4 +842,5 @@ async def delete_setting(
 
         return {"success": True, "deleted": deleted}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete setting: {str(e)}")
+        logger.exception("Failed to delete setting %s", key)
+        raise HTTPException(status_code=500, detail=f"Failed to delete setting ({e.__class__.__name__} — details in backend logs)")

@@ -12,6 +12,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from models import (
     AccessPolicy, AccessPolicyUpdate, AccessRequest, AccessRequestDecision,
     User, ClientRosterEntry, PublicChannelPrompt, PublicChannelPromptUpdate,
+    AccessCandidate, AgentInviteResult, AgentShareResult,
+    ChannelClientRef, ChannelClientBlockRequest,
 )
 from database import db, AgentShare, AgentOperatorAccess, AgentShareRequest
 from dependencies import (
@@ -19,8 +21,11 @@ from dependencies import (
     reject_non_interactive_principal, require_interactive, require_person,
 )
 from services.docker_service import get_agent_container
-from services import access_request_service
-from services.client_roster_service import get_client_roster
+from services import (
+    access_candidate_service, access_request_service, agent_invite_service, client_roster_service,
+    people_search_service,
+)
+from services.client_roster_service import ClientControlError, get_client_roster
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services.proactive_message_service import proactive_message_service
 
@@ -82,7 +87,7 @@ def set_websocket_manager(ws_manager):
     manager = ws_manager
 
 
-@router.post("/{agent_name}/share", response_model=AgentShare,
+@router.post("/{agent_name}/share", response_model=AgentShareResult,
              dependencies=[Depends(require_interactive)])
 async def share_agent_endpoint(
     agent_name: OwnedAgentByName,
@@ -136,7 +141,54 @@ async def share_agent_endpoint(
         details={"shared_with": share_request.email},
     )
 
-    return share
+    # trinity-enterprise#459: tell a pending person. The share stands either way.
+    invitation = await agent_invite_service.invite_on_share(
+        agent_name, share_request.email, current_user.username)
+    if invitation in (agent_invite_service.SENT, agent_invite_service.FAILED):
+        await _audit_invite(request, current_user, agent_name, share_request.email, "share", invitation)
+
+    return AgentShareResult(**share.model_dump(), invitation=invitation)
+
+
+async def _audit_invite(request: Request, current_user, agent_name: str, email: str,
+                        trigger: str, outcome: str) -> None:
+    await platform_audit_service.log(
+        event_type=AuditEventType.AUTHORIZATION,
+        event_action="agent_invite",
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        target_type="agent",
+        target_id=agent_name,
+        endpoint=request.scope["path"],
+        request_id=getattr(request.state, "request_id", None),
+        details={"shared_with": email, "trigger": trigger, "outcome": outcome},
+    )
+
+
+@router.post("/{agent_name}/share/{email}/invite", response_model=AgentInviteResult,
+             dependencies=[Depends(require_interactive)])
+async def resend_agent_invite_endpoint(
+    agent_name: OwnedAgentByName,
+    email: str,
+    request: Request,
+    current_user: CurrentUser,
+):
+    """Email a pending person their invitation again (trinity-enterprise#459).
+
+    INTERACTIVE, as share is: it sends mail on the owner's behalf. Works on a
+    stopped agent, since the roster is DB-sourced.
+    """
+    reject_non_interactive_principal(current_user)
+    try:
+        await agent_invite_service.resend_invite(agent_name, email, current_user.username)
+    except agent_invite_service.InviteRefused as e:
+        if e.code == "invite_not_sent":
+            await _audit_invite(request, current_user, agent_name, email, "resend", agent_invite_service.FAILED)
+        headers = {"Retry-After": str(e.retry_after)} if e.retry_after else None
+        raise HTTPException(status_code=e.status_code, detail={"code": e.code, "message": e.message}, headers=headers)
+    await _audit_invite(request, current_user, agent_name, email, "resend", agent_invite_service.SENT)
+    return AgentInviteResult(email=email.strip().lower())
 
 
 @router.delete("/{agent_name}/share/{email}", dependencies=[Depends(require_person)])
@@ -211,7 +263,29 @@ async def get_agent_access_endpoint(
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    return db.get_agent_operator_access(agent_name)
+    return agent_invite_service.mark_invite_available(db.get_agent_operator_access(agent_name))
+@router.get("/{agent_name}/access/candidates", response_model=list[AccessCandidate],
+            response_model_exclude_none=True, dependencies=[Depends(require_interactive)])
+async def get_access_candidates_endpoint(
+    agent_name: OwnedAgentByName,
+    current_user: CurrentUser,
+    q: str = "",
+):
+    """Accounts to suggest in the Access tab's add field (trinity-enterprise#450).
+
+    INTERACTIVE, as share is, so a key can't script a search of the instance's
+    accounts. Works on a stopped agent, since it reads the database.
+    """
+    try:
+        return access_candidate_service.suggest(agent_name, q, current_user)
+    except access_candidate_service.CandidateLookupLimited as e:
+        raise HTTPException(
+            status_code=429,
+            detail=people_search_service.RATE_LIMITED_DETAIL,
+            headers={"Retry-After": str(e.retry_after)},
+        )
+
+
 @router.get("/{agent_name}/public-prompt", response_model=PublicChannelPrompt)
 async def get_public_channel_prompt_endpoint(
     agent_name: OwnedAgentByName,
@@ -250,16 +324,106 @@ async def get_client_roster_endpoint(
     agent_name: OwnedAgentByName,
     current_user: CurrentUser,
 ):
-    """External-client roster for the Sharing tab (#20).
+    """External-client roster for the Channels tab (#20).
 
     Lists outside users (no Trinity account) who have messaged the agent through
     a channel, aggregated across channels and ordered by most-recent activity.
     DB-sourced — renders even when the agent container is stopped — so there is
     deliberately no container existence check here (`OwnedAgentByName` already
-    enforces the agent exists and the caller owns it). Read-only; per-client
-    block/revoke/approve controls are a separate follow-up (#21).
+    enforces the agent exists and the caller owns it). Each row carries its
+    access state for the per-client controls below (trinity-enterprise#21).
     """
     return get_client_roster(agent_name)
+
+
+# ---------------------------------------------------------------------------
+# Per-client controls (trinity-enterprise#21). Owner (or admin) of the agent,
+# a person (`require_person`, trinity-enterprise#719) — the same gate as
+# unsharing, because revoke IS an unshare and block is its stronger form. The
+# effect is this agent only, so ownership is the right authority (contrast the
+# platform-wide portal block, which is admin-only). Static paths under
+# `/clients/`, so no catch-all ordering concern (Invariant #4).
+# ---------------------------------------------------------------------------
+
+async def _audit_client_control(request: Request, current_user, action: str,
+                                agent_name: str, details: dict) -> None:
+    await platform_audit_service.log(
+        event_type=AuditEventType.AUTHORIZATION,
+        event_action=action,
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        target_type="agent",
+        target_id=agent_name,
+        endpoint=request.scope["path"],
+        request_id=getattr(request.state, "request_id", None),
+        details=details,
+    )
+
+
+@router.post("/{agent_name}/clients/block", dependencies=[Depends(require_person)])
+async def block_channel_client_endpoint(
+    agent_name: OwnedAgentByName,
+    body: ChannelClientBlockRequest,
+    request: Request,
+    current_user: CurrentUser,
+):
+    """Stop one channel client reaching this agent. The channel access gate
+    drops their messages without a reply; their share and history are kept."""
+    assert_person(current_user)
+    user = db.get_user_by_username(current_user.username)
+    try:
+        result = client_roster_service.block_client(
+            agent_name, body.channel, body.client_id,
+            actor_id=(user or {}).get("id"),
+            actor_email=getattr(current_user, "email", None),
+            reason=body.reason,
+        )
+    except ClientControlError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    await _audit_client_control(request, current_user, "channel_client_block", agent_name,
+                                {"channel": body.channel, "client_id": body.client_id,
+                                 "reason": result.get("reason")})
+    return result
+
+
+@router.post("/{agent_name}/clients/unblock", dependencies=[Depends(require_person)])
+async def unblock_channel_client_endpoint(
+    agent_name: OwnedAgentByName,
+    body: ChannelClientRef,
+    request: Request,
+    current_user: CurrentUser,
+):
+    """Lift a block. Restores exactly what the client had before it."""
+    assert_person(current_user)
+    try:
+        result = client_roster_service.unblock_client(agent_name, body.channel, body.client_id)
+    except ClientControlError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    await _audit_client_control(request, current_user, "channel_client_unblock", agent_name,
+                                {"channel": body.channel, "client_id": body.client_id})
+    return result
+
+
+@router.post("/{agent_name}/clients/revoke", dependencies=[Depends(require_person)])
+async def revoke_channel_client_endpoint(
+    agent_name: OwnedAgentByName,
+    body: ChannelClientRef,
+    request: Request,
+    current_user: CurrentUser,
+):
+    """Remove a granted client's access to this agent (their share). Under a
+    restricted policy their next message asks for access again."""
+    assert_person(current_user)
+    try:
+        result = client_roster_service.revoke_client(
+            agent_name, body.channel, body.client_id, actor_username=current_user.username)
+    except ClientControlError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    await _audit_client_control(request, current_user, "channel_client_revoke", agent_name,
+                                {"channel": body.channel, "client_id": body.client_id,
+                                 "removed_email": result["email"]})
+    return result
 
 
 # ---------------------------------------------------------------------------
