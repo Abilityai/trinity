@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from models import (
     AccessPolicy, AccessPolicyUpdate, AccessRequest, AccessRequestDecision,
     User, ClientRosterEntry, PublicChannelPrompt, PublicChannelPromptUpdate,
-    AgentInviteResult, AgentShareResult,
+    AccessCandidate, AgentInviteResult, AgentShareResult,
     ChannelClientRef, ChannelClientBlockRequest,
 )
 from database import db, AgentShare, AgentOperatorAccess, AgentShareRequest
@@ -21,7 +21,9 @@ from dependencies import (
     reject_non_interactive_principal, require_interactive, require_person,
 )
 from services.docker_service import get_agent_container
-from services import access_request_service, agent_invite_service, client_roster_service
+from services import (
+    access_candidate_service, access_request_service, agent_invite_service, client_roster_service,
+)
 from services.client_roster_service import ClientControlError, get_client_roster
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services.proactive_message_service import proactive_message_service
@@ -261,6 +263,28 @@ async def get_agent_access_endpoint(
         raise HTTPException(status_code=404, detail="Agent not found")
 
     return agent_invite_service.mark_invite_available(db.get_agent_operator_access(agent_name))
+@router.get("/{agent_name}/access/candidates", response_model=list[AccessCandidate],
+            response_model_exclude_none=True, dependencies=[Depends(require_interactive)])
+async def get_access_candidates_endpoint(
+    agent_name: OwnedAgentByName,
+    current_user: CurrentUser,
+    q: str = "",
+):
+    """Accounts to suggest in the Access tab's add field (trinity-enterprise#450).
+
+    INTERACTIVE, as share is, so a key can't script a search of the instance's
+    accounts. Works on a stopped agent, since it reads the database.
+    """
+    try:
+        return access_candidate_service.suggest(agent_name, q, current_user)
+    except access_candidate_service.CandidateLookupLimited as e:
+        raise HTTPException(
+            status_code=429,
+            detail={"code": "rate_limited", "message": "Too many lookups. Try again shortly."},
+            headers={"Retry-After": str(e.retry_after)},
+        )
+
+
 @router.get("/{agent_name}/public-prompt", response_model=PublicChannelPrompt)
 async def get_public_channel_prompt_endpoint(
     agent_name: OwnedAgentByName,

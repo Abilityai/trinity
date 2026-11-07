@@ -1572,6 +1572,11 @@
   "path": "/api/agents/{agent_name}/access-requests/{request_id}/decide",
   "tier": "owner"
  },
+ "sharing.py::get_access_candidates_endpoint": {
+  "method": "GET",
+  "path": "/api/agents/{agent_name}/access/candidates",
+  "tier": "owner"
+ },
  "sharing.py::get_access_policy_endpoint": {
   "method": "GET",
   "path": "/api/agents/{agent_name}/access-policy",

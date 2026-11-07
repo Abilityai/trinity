@@ -8544,6 +8544,17 @@
       "description": "Assign keeps the injection's warnings (#3136): _deliver_assigned carries public codes (missing_binary / missing_env / packages_not_checked, ...) for injected / fallback / unchanged, dropping free-text details by the #2991 rule shared with public_skills_result (skill_packaging.public_warnings); the ent#672 deprecation stamp merges (one lifecycle code first) instead of overwriting; the whole chain through the real injection + dependency probe and the POST assign route body; regression guards: a clean skill's report is byte-identical, conflict / failed / unassigned_meanwhile / stopped carry no injection codes."
     },
     {
+      "file": "unit/test_ent450_access_candidates.py",
+      "feature": "trinity-enterprise#450",
+      "added": "2026-11-06",
+      "categories": [
+        "backend",
+        "unit",
+        "access-control"
+      ],
+      "description": "Account suggestions for the Access tab's add field, through the real sharing router over the unit DB: who may read (session only, owner or admin), who is offered, the bounds, and that a row carries role only for an admin."
+    },
+    {
       "file": "unit/test_ent459_operator_invite.py",
       "feature": "trinity-enterprise#459",
       "added": "2026-11-05",
