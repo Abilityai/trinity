@@ -23,6 +23,7 @@ from dependencies import (
 from services.docker_service import get_agent_container
 from services import (
     access_candidate_service, access_request_service, agent_invite_service, client_roster_service,
+    people_search_service,
 )
 from services.client_roster_service import ClientControlError, get_client_roster
 from services.platform_audit_service import platform_audit_service, AuditEventType
@@ -280,7 +281,7 @@ async def get_access_candidates_endpoint(
     except access_candidate_service.CandidateLookupLimited as e:
         raise HTTPException(
             status_code=429,
-            detail={"code": "rate_limited", "message": "Too many lookups. Try again shortly."},
+            detail=people_search_service.RATE_LIMITED_DETAIL,
             headers={"Retry-After": str(e.retry_after)},
         )
 

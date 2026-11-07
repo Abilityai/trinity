@@ -125,6 +125,7 @@ Shared primitives are the unit of consistency: **compose them, never re-implemen
 | BaseButton | `components/base/BaseButton.vue` | `ConfirmDialog.vue` actions · TemplateRegistryPanel Save/Reset |
 | BaseInput | `components/base/BaseInput.vue` | TemplateRegistryPanel registry URL |
 | BaseSelect | `components/base/BaseSelect.vue` | `ResourceModal.vue` memory/CPU (`field`) · `PortalConversation.vue` model picker (`ghost`, #2662) · `SkillCard.vue` approver picker (`field`, `size="sm"`, trinity-enterprise#754) |
+| BasePeopleInput | `components/base/BasePeopleInput.vue` | `AccessPanel.vue` add field (`suggest`, trinity-enterprise#1153) |
 | BaseToggle | `components/base/BaseToggle.vue` | TemplateRegistryPanel enable switch |
 | BaseTextarea | `components/base/BaseTextarea.vue` | `SystemInstallPanel.vue` manifest editor (mono) |
 | BaseBadge | `components/base/BaseBadge.vue` | TemplateRegistryPanel status + Default chips · `SkillCard.vue` author-mode chip (`size="sm"`, trinity-enterprise#754) |
@@ -159,6 +160,20 @@ The dark tinted-ground recipe `token-500 at 16%` is expressible as `token-500/16
 
 - **Do:** label + help + named error with example.
 - **Don't:** a bare red border with no message — color is not an error message.
+
+### BasePeopleInput
+
+The people-picker form field (trinity-enterprise#1153): BaseInput's anatomy and recipe with a suggestion list opening **below** the control (`PortalTypeahead` in `plain` mode — the composer popup stays the composer's). It takes a `fetch(q)` function, never a URL, so each surface wires its own scoped read and the server decides who may appear (`services/people_search_service.py`, the one people search). Rows read the name first, the email second, and the role only when the row carries one. Decisions are pure in `base/peopleInput.js`.
+
+**Two modes:**
+- **`suggest`** (suggest-and-allow, default) — any text submits; a row is accepted only by ↑↓ + Enter or a click, and a plain Enter is left to the form. For an invite field, where an outside address is legitimate.
+- **`pick`** (must-pick) — the field is natively invalid (`setCustomValidity`) until a person is chosen, so the form will not submit; once the field is left, unchosen text shows a named message — the caller's `noMatch(text)` when the server said no one matches, else "Choose a person from the list". A chosen person is confirmed under the field (`Name · email`). Bind `v-model:picked`; editing the text after a pick drops it.
+
+**Keyboard:** ↑↓ move (wrapping), Enter accepts only a highlighted row, Esc and blur dismiss. Asks from 2 characters after a 200ms pause; only the newest answer shows.
+**Degradation:** a 403 or a network failure leaves a plain input with no error wall and stops asking for the session (`usePeoplePicker`'s `unavailable`, emitted as `unavailable` so a surface can fall back); a 429 is a pause, not a verdict.
+
+- **Do:** `<BasePeopleInput v-model="email" v-model:picked="person" mode="pick" :fetch="(q) => store.candidates(agent, q)" :no-match="inviteHint" />`
+- **Don't:** a native `<select>` of every account, or a free-text email box where the person must exist.
 
 ### BaseSelect
 

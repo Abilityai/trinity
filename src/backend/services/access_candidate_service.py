@@ -5,40 +5,34 @@ picker this can't be limited to people the agent already reaches. An owner could
 find accounts on the instance by trying prefixes. These bounds slow that down and
 don't prevent it: a minimum query, a row cap, a per-person rate limit, and no role
 for anyone but an admin.
+
+The match, the exclusions and the bounds are the one people search's
+(`people_search_service`, trinity-enterprise#1153); this module supplies only the
+scope (not the owner, not already on the roster) and its own limits.
 """
 from typing import List
 
 from database import db
 from models import AccessCandidate
-from services import rate_limiter
+from services import people_search_service
 
 MIN_QUERY = 2
 MAX_QUERY = 64
 LIMIT = 8
-RATE_LIMIT = 60
-WINDOW_SECONDS = 60
+RATE_LIMIT = 60             # lookups a minute, per person
 
 
-class CandidateLookupLimited(Exception):
-    def __init__(self, retry_after: int):
-        super().__init__("Too many lookups")
-        self.retry_after = retry_after
+# The seam's own exception; the router turns it into the named 429.
+CandidateLookupLimited = people_search_service.PeopleSearchLimited
 
 
 def suggest(agent_name: str, query: str, current_user) -> List[AccessCandidate]:
-    q = (query or "").strip()[:MAX_QUERY]
-    if len(q) < MIN_QUERY:
-        return []
-    result = rate_limiter.check(f"access-candidates:{current_user.username}", RATE_LIMIT, WINDOW_SECONDS)
-    if not result.allowed:
-        raise CandidateLookupLimited(result.retry_after)
     is_admin = current_user.role == "admin"
-    rows = db.list_share_candidates(agent_name, q, exclude_email=current_user.email, limit=LIMIT)
+    rows = people_search_service.search(
+        db.people_scope_share_candidates(agent_name), (query or "").strip()[:MAX_QUERY],
+        requester_email=current_user.email, rate_key=current_user.username,
+        rate_limit=RATE_LIMIT, min_query=MIN_QUERY, limit=LIMIT)
     return [
-        AccessCandidate(
-            email=row["email"].strip().lower(),
-            label=row.get("name") or row["username"],
-            role=row["role"] if is_admin else None,
-        )
+        AccessCandidate(email=row["email"], label=row["label"], role=row["role"] if is_admin else None)
         for row in rows
     ]
