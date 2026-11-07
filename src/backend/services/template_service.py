@@ -1473,7 +1473,7 @@ def _local_templates_dir() -> Path:
 #:   * template_service → crud would close an import cycle (crud imports this
 #:     module).
 #: `tests/unit/test_1759_template_root_parity.py` pins the two patterns equal.
-_LOCAL_TEMPLATE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
+_LOCAL_TEMPLATE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*\Z")
 
 
 def contained_template_dir(name, root: Path) -> Optional[Path]:

@@ -229,7 +229,7 @@ def test_the_mirrored_grammar_matches_crud_and_the_scope_allowlist():
     from services.agent_service import crud
     import dependencies
     tsp = _tsp()
-    assert crud._LOCAL_TEMPLATE_NAME_RE.pattern == f"^{tsp._LOCAL_NAME_RE.pattern}$"
+    assert crud._LOCAL_TEMPLATE_NAME_RE.pattern == f"^{tsp._LOCAL_NAME_RE.pattern}\\Z"
     part = tsp._GH_PART_RE.pattern
     assert crud._GITHUB_REPO_PATH_RE.pattern == f"^{part}/{part}$"
     assert crud._GITHUB_REF_RE.pattern == f"^{tsp._GH_REF_RE.pattern}$"
