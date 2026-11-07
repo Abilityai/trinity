@@ -700,6 +700,7 @@ This feature does not emit real-time events.
 | File too large | 413 | "File too large: {size} bytes (max 104857600)" | Agent Server |
 | File read error (an OS error opening a path component) | 500 | "Failed to read file: {error}" | Agent Server |
 | Unforeseen failure (list, download, delete, update, mkdir) | 500 | "Failed to list files: {ErrorClass}", "Failed to read file: {ErrorClass}", "Failed to delete: {ErrorClass}", "Failed to update file: {ErrorClass}", "Failed to create folder: {ErrorClass}" — the exception text goes only to the agent log, credential-scrubbed (trinity#4284) | Agent Server |
+| Agent answered 5xx (any file route) | the agent's status | "Failed to list files (the agent answered {status} — details in backend logs)", and the same for download, delete, preview, update and create-folder. The agent's body goes only to the backend log, masked: an agent on an older base image answers its 500s with its exception text (trinity#4284). A 4xx is still relayed as the agent wrote it | Backend |
 | Network timeout (list) | 504 | "File listing timed out" | Backend (30s) |
 | Network timeout (download) | 504 | "File download timed out" | Backend (60s) |
 | Network timeout (delete) | 504 | "File deletion timed out" | Backend (30s) |

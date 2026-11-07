@@ -59,6 +59,8 @@ from services.docker_service import get_agent_container
 from services.docker_utils import container_get_archive
 from services.platform_audit_service import AuditEventType, platform_audit_service
 
+from utils.log_masking import masked_text
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/agents", tags=["agent-data"])
@@ -474,9 +476,14 @@ async def import_agent_data(
                         data={"paths": json.dumps(["data/**"])},
                     )
                 if resp.status_code != 200:
+                    # abilityai/trinity#4284: the agent's body (on an older
+                    # base image, its exception text) goes to the log only.
+                    logger.warning("Data import for %s: the agent's restore answered %s: %s",
+                                   agent_name, resp.status_code, masked_text(resp.text[:2000]))
                     raise HTTPException(
                         status_code=502,
-                        detail=f"Agent restore failed ({resp.status_code}): {resp.text[:500]}",
+                        detail=(f"Agent restore failed (the agent answered "
+                                f"{resp.status_code} — details in backend logs)"),
                     )
                 result = resp.json()
             # `manifest.json` is our own tar-root artifact, outside the data/**

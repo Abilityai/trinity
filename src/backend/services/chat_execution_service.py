@@ -29,6 +29,7 @@ import asyncio
 import httpx
 import json
 import logging
+import re
 import uuid
 from collections import namedtuple
 from datetime import datetime
@@ -114,6 +115,7 @@ from utils.credential_sanitizer import (
     sanitize_response,
 )
 from utils.helpers import utc_now_iso
+from utils.log_masking import masked_text
 from db.write_params import ChatMessageFields, ExecutionResult, TaskExecutionFields
 
 logger = logging.getLogger(__name__)
@@ -3346,6 +3348,35 @@ async def _close_dispatch_activity_cancelled(task_execution_id, cancel_won):
         )
 
 
+# The agent's terminate route answers its 5xx with one of its own sentences
+# (docker/base-image/agent_server/routers/chat.py): `termination_unconfirmed:
+# ...` (#3408), which tells the caller the termination can be retried, or the
+# process registry's `Termination failed: <class>`. An agent on an older base
+# image answered the registry's raw exception text there instead, so at a 5xx
+# only those sentences are passed on (abilityai/trinity#4284).
+_AGENT_TERMINATE_5XX = re.compile(
+    r"termination_unconfirmed: |Termination failed(: [A-Za-z_][A-Za-z0-9_.]*)?\Z"
+)
+
+
+def _terminate_refusal_detail(name: str, status: int, detail) -> str:
+    """What the caller is told when the agent refused a terminate.
+
+    A 4xx is the agent's refusal and is relayed as the agent wrote it. A 5xx
+    is relayed only when it is one of the agent's own sentences; anything else
+    answers a fixed sentence with the agent's status, and the body goes to the
+    log, masked.
+    """
+    if status < 500:
+        return detail if detail is not None else "Termination failed"
+    if isinstance(detail, str) and _AGENT_TERMINATE_5XX.match(detail):
+        return detail
+    logger.warning(
+        "[Terminate] agent '%s' answered %s: %s", name, status, masked_text(str(detail)),
+    )
+    return f"Termination failed (the agent answered {status} — details in backend logs)"
+
+
 async def _proxy_terminate_and_finalize(
     name, execution_id, task_execution_id, current_user, actor_kind="operator",
     on_ended=None,
@@ -3366,7 +3397,8 @@ async def _proxy_terminate_and_finalize(
             raise ChatDispatchError(404, "Execution not found in agent")
         if response.status_code != 200:
             raise ChatDispatchError(
-                response.status_code, result.get("detail", "Termination failed")
+                response.status_code,
+                _terminate_refusal_detail(name, response.status_code, result.get("detail")),
             )
 
         # Release capacity for THIS execution (CAPACITY-CONSOLIDATE #428).

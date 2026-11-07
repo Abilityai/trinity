@@ -35,6 +35,8 @@ from services import credential_requirements_service
 # vendored into the agent image (Invariant #5, byte-identical parity test).
 from services.credential_paths import disallowed_paths
 
+from utils.log_masking import masked_text
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["credentials"])
@@ -455,6 +457,18 @@ async def inject_credentials(
                 timeout=30.0
             )
 
+            if response.status_code >= 500:
+                # abilityai/trinity#4284: an agent on an older base image
+                # answers its 500s with its exception text; that goes to the
+                # log. A 4xx is the agent's refusal and is relayed below.
+                logger.warning("Credential injection for %s: the agent answered %s: %s",
+                               agent_name, response.status_code,
+                               masked_text(response.text[:2000]))
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=(f"Agent rejected credential injection (the agent answered "
+                            f"{response.status_code} — details in backend logs)"),
+                )
             if response.status_code != 200:
                 error_detail = response.json().get("detail", "Unknown error")
                 raise HTTPException(

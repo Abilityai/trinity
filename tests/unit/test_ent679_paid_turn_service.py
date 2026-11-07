@@ -20,6 +20,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import anyio
+import json
+import logging
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src" / "backend"))
@@ -506,6 +508,25 @@ async def test_execution_exception_releases_the_claim_and_charges_nothing():
     # The verify row is annotated with why nothing was charged.
     assert ctx.db.logs[-1]["action"] == "verify"
     assert "dispatch exploded" in ctx.db.logs[-1]["error"]
+
+
+async def test_execution_exception_answer_names_the_class_not_the_text(caplog):
+    """abilityai/trinity#4284: the paid route returns this payload as its 500
+    body, to a payer. The exception's text stays in the log."""
+    marker = "internal-host-203.0.113.7-marker-4284"
+
+    async def _boom():
+        raise RuntimeError(marker)
+
+    caplog.set_level(logging.ERROR)
+    outcome, _ctx = await _drive(execute=_boom)
+
+    assert outcome.status_code == 500
+    body = json.dumps(outcome.payload)
+    assert marker not in body
+    assert outcome.payload["detail"] == "Task execution failed"
+    assert outcome.payload["error"] == "RuntimeError — details in backend logs"
+    assert any(marker in logging.Formatter("%(message)s").format(r) for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------

@@ -796,6 +796,11 @@ async def deploy_system(
         credential-sanitize + URL-userinfo redact + 500-char truncate — learnings
         2026-07-14: git errors embed PAT-bearing remote URLs) and appends a
         SystemDeployFailure {name, short_name, template, reason, status_code}.
+        Only an HTTPException's detail, a ValueError's validation text and an
+        apply step's `_Refused` keep their words; any other exception is
+        reported as `<Class> — details in backend logs`, its text logged masked,
+        because the report is the body of the 500 when every member fails
+        (abilityai/trinity#4284).
         Each failed create self-cleans via crud.py's own rollback (#1484).
      e. strict=True → abort on first failure instead, re-raising with the
         ORIGINAL status code (4xx no longer flattened to 500) and detail
@@ -884,7 +889,7 @@ Callers must check `status`/`failed[]`, not just the HTTP code.
   "name": "my-system-worker2",
   "short_name": "worker2",
   "template": "github:invalid/repo",
-  "reason": "Failed to validate GitHub repository access: repository not found",
+  "reason": "Failed to validate GitHub repository access (GitHubError, HTTP 503 — details in backend logs)",
   "status_code": 502
 }
 ```
