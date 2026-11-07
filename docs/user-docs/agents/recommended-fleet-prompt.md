@@ -25,7 +25,7 @@ The platform instructions also tell every agent, on every runtime, **not to run 
 
 On most agents this rule is advisory: nothing blocks the command. On a Claude Code agent with gated skills, the [Bash guardrail](agent-guardrails.md#1-bash-command-blocking) also refuses it. You don't need to add it to your Trinity prompt. If an agent of yours relies on a skill that runs `claude -p` (or another CLI) for a sub-step, rewrite that step to use one of the paths above.
 
-> **Note:** Deploying a [system manifest](../collaboration/system-manifest.md#things-the-preview-will-make-you-confirm) with a top-level `prompt:` key **replaces** the Trinity prompt for every agent on the instance. If you have adopted the prompt below, check a manifest's preview before you deploy it.
+> **Note:** Deploying a [system manifest](../collaboration/system-manifest.md#things-the-preview-will-make-you-confirm) with a top-level `prompt:` key **replaces** the Trinity prompt for every agent on the instance when an admin deploys it (anyone else's deploy leaves the prompt unchanged). If you have adopted the prompt below, check a manifest's preview before you deploy it as an admin.
 
 ### What Belongs There and What Doesn't
 

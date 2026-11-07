@@ -7,7 +7,41 @@
 import { z } from "zod";
 import { TrinityClient, ApiError } from "../client.js";
 import { accessDenied, type DenyCallContext } from "../access.js";
+import { toolFailed } from "../audit.js";
 import type { McpAuthContext } from "../types.js";
+
+/** The longest backend `detail` an audit reason carries (#4026): a row reason is a label, not a transcript. */
+const AUDIT_DETAIL_MAX = 200;
+
+/**
+ * A SHORT audit-row reason for an HTTP failure (#4026): the status, then the
+ * body's own `status` (an apply / teardown report) or its string `detail`
+ * (capped), else the bare status. `body` is the PARSED body; anything that is
+ * not a JSON object yields the bare status, so a raw HTML page never reaches
+ * the row.
+ */
+function httpAuditReason(status: number, body: unknown): string {
+  const obj =
+    body !== null && typeof body === "object" && !Array.isArray(body)
+      ? (body as Record<string, unknown>)
+      : undefined;
+  if (typeof obj?.status === "string" && obj.status) return `HTTP ${status}: status '${obj.status}'`;
+  if (typeof obj?.detail === "string" && obj.detail) {
+    const d = obj.detail;
+    return `HTTP ${status}: ${d.length > AUDIT_DETAIL_MAX ? `${d.slice(0, AUDIT_DETAIL_MAX)}…` : d}`;
+  }
+  return `HTTP ${status}`;
+}
+
+/** `JSON.parse`, or `undefined` for a body that is not JSON. */
+function parseJsonOrUndefined(text: string | undefined): unknown {
+  if (!text) return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
 
 /**
  * Collapse a teardown refusal into an honest, actionable shape (ent#454).
@@ -25,8 +59,15 @@ import type { McpAuthContext } from "../types.js";
  * failure it cannot reason about. The `{success: false, …flags}` shape is the
  * `call_a2a_agent` / `fetch_credential` precedent, where the flags ARE the
  * structure.
+ *
+ * Audit (#4026): a returned result is not a thrown one, so each branch stamps
+ * the call's outcome out-of-band, leaving the caller's JSON untouched. The 403
+ * is an authorization refusal and goes through `accessDenied` (`denied`, the
+ * #3435 precedent); every other branch, the `failed` report included, through
+ * `toolFailed`. Each row's reason is short: the status, the backend's own
+ * `status` or `detail` (`httpAuditReason`), then the flags.
  */
-function teardownFailure(error: unknown): string {
+function teardownFailure(error: unknown, context: DenyCallContext | undefined): string {
   const status = error instanceof ApiError ? error.status : undefined;
   const raw = error instanceof Error ? error.message : String(error);
   // `ApiError.body` is the raw response body, retained verbatim for exactly
@@ -42,7 +83,7 @@ function teardownFailure(error: unknown): string {
     try {
       const report = JSON.parse(body);
       if (report && report.status === "failed") {
-        return JSON.stringify(report, null, 2);
+        return toolFailed(context, report, httpAuditReason(500, report));
       }
     } catch {
       // Not JSON — fall through to the flag shape below.
@@ -76,7 +117,24 @@ function teardownFailure(error: unknown): string {
     flags.bad_request = true;
   }
 
-  return JSON.stringify({ success: false, error: message, detail: raw, ...flags }, null, 2);
+  const envelope = { success: false, error: message, detail: raw, ...flags };
+  if (status === 403) {
+    // The row names the backend's own cause (a licensing / human-only detail,
+    // or a `failed` report whose members were all refused), so the 403s stay
+    // distinguishable there; the caller's paragraph is the same for all.
+    return accessDenied(context, envelope, httpAuditReason(403, parseJsonOrUndefined(body)));
+  }
+  // The row carries the backend's own detail and then the flags the caller was
+  // given, so a route that is absent ("Not Found") and a serving route that
+  // found no such system read differently on the row even where the caller's
+  // message does not tell them apart.
+  const flagNames = Object.keys(flags);
+  const auditReason =
+    status === undefined
+      ? raw
+      : httpAuditReason(status, parseJsonOrUndefined(body))
+        + (flagNames.length > 0 ? ` (${flagNames.join(", ")})` : "");
+  return toolFailed(context, envelope, auditReason);
 }
 
 /**
@@ -105,10 +163,15 @@ export const applySystemAccess = (auth: any): boolean =>
  * Every other non-2xx with a JSON OBJECT body (the 409 / 503 / 500 apply
  * reports, a 400, 401 or 422) IS the result: the body comes back with
  * `http_status` and `success: false` added, so `status`, `blockers[]` and
- * `failed[]` reach the caller intact. Those are not authorization denials and
- * are NOT stamped as such: `ToolOutcome` has no non-denial kind yet
- * (types.ts). Anything else (a JSON scalar, array or null, or a non-JSON body)
- * comes back as `{success: false, http_status, detail}`.
+ * `failed[]` reach the caller intact. Anything else (a JSON scalar, array or
+ * null, or a non-JSON body) comes back as `{success: false, http_status,
+ * detail}`.
+ *
+ * Audit (#4026): every branch but the 403 is a returned failure that is NOT an
+ * authorization denial, so it is stamped through `toolFailed` (`success:
+ * false`, no `denied`) with a short reason: `httpAuditReason`, built here for
+ * 404/405 and, for the generic tail, through `bodyAsResult` (shared with
+ * deploy_system, #4027). A raw non-object body never reaches the row.
  */
 function applyFailure(
   error: unknown,
@@ -128,27 +191,16 @@ function applyFailure(
         + "Apply is idempotent: run apply_system with dry_run: true to see where the "
         + "system stands, then re-apply.";
     }
-    return JSON.stringify(result, null, 2);
+    return toolFailed(context, result, sentRealRun ? `${message} (real run, outcome unknown)` : message);
   }
 
   const status = error.status;
-  let body: unknown;
-  let isJson = true;
-  try {
-    body = JSON.parse(error.body);
-  } catch {
-    isJson = false;
-  }
-  const isObject = isJson && body !== null && typeof body === "object" && !Array.isArray(body);
-  // FastAPI's own refusals are `{detail}`: surface that, else the whole body.
-  const detail = !isJson
-    ? error.body
-    : isObject && "detail" in (body as Record<string, unknown>)
-      ? (body as Record<string, unknown>).detail
-      : body;
+  const errorBody = readErrorBody(error);
+  const { detail } = errorBody;
 
   if (status === 404 || status === 405) {
-    return JSON.stringify(
+    return toolFailed(
+      context,
       {
         success: false,
         not_available: true,
@@ -161,8 +213,7 @@ function applyFailure(
           + "members one at a time with the per-agent tools.",
         detail,
       },
-      null,
-      2
+      `HTTP ${status}: apply route absent (not_available)`
     );
   }
 
@@ -179,14 +230,74 @@ function applyFailure(
     });
   }
 
-  if (isObject) {
-    return JSON.stringify(
-      { ...(body as Record<string, unknown>), http_status: status, success: false },
-      null,
-      2
-    );
+  const { envelope, auditReason } = bodyAsResult(status, errorBody);
+  return toolFailed(context, envelope, auditReason);
+}
+
+/** An `ApiError` body, read once: the parsed value, whether it is a JSON object, and its `detail`. */
+interface ErrorBody {
+  body: unknown;
+  isObject: boolean;
+  detail: unknown;
+}
+
+function readErrorBody(error: ApiError): ErrorBody {
+  // `JSON.parse` never yields `undefined`, so `undefined` here means "not JSON".
+  const body = parseJsonOrUndefined(error.body);
+  const isJson = body !== undefined;
+  const isObject = isJson && body !== null && typeof body === "object" && !Array.isArray(body);
+  // FastAPI's own refusals are `{detail}`: surface that, else the whole body.
+  const detail = !isJson
+    ? error.body
+    : isObject && "detail" in (body as Record<string, unknown>)
+      ? (body as Record<string, unknown>).detail
+      : body;
+  return { body, isObject, detail };
+}
+
+/**
+ * A non-2xx answer whose body IS the result (ent#695 apply, #4027 deploy).
+ *
+ * A JSON OBJECT body comes back with `http_status` and `success: false`
+ * added, so a report's `status` and `failed[]` reach the caller intact;
+ * anything else (a JSON scalar, array or null, or a non-JSON body) becomes
+ * `{success: false, http_status, detail}`.
+ *
+ * The audit reason is `httpAuditReason`'s (#4026), which gives anything that
+ * is not a JSON object the bare status, so a raw body never reaches the row.
+ */
+function bodyAsResult(
+  status: number,
+  { body, isObject, detail }: ErrorBody
+): { envelope: Record<string, unknown>; auditReason: string } {
+  const envelope = isObject
+    ? { ...(body as Record<string, unknown>), http_status: status, success: false }
+    : { success: false, http_status: status, detail };
+  return { envelope, auditReason: httpAuditReason(status, body) };
+}
+
+/**
+ * Map a deploy failure onto the result the caller reads (#4027).
+ *
+ * A create-mode deploy in which every member failed answers 500 with the
+ * full report as its body (ent#125), and that report is the only actionable
+ * output: it comes back AS the result, through the same `bodyAsResult` as
+ * apply, as does every other non-2xx (a 400 manifest error, a `strict`
+ * abort, a 422). Only the audit label differs: a 403 is an authorization
+ * refusal, stamped `denied` through `accessDenied` exactly as the thrown 403
+ * it replaces was; everything else is stamped `failed` through `toolFailed`.
+ *
+ * No HTTP status at all (a missing API key, a lost connection) still throws,
+ * as it always has: those are not deploy results.
+ */
+function deployFailure(error: unknown, context: DenyCallContext | undefined): string {
+  if (!(error instanceof ApiError)) {
+    throw error;
   }
-  return JSON.stringify({ success: false, http_status: status, detail }, null, 2);
+  const { envelope, auditReason } = bodyAsResult(error.status, readErrorBody(error));
+  return error.status === 403
+    ? accessDenied(context, envelope, auditReason)
+    : toolFailed(context, envelope, auditReason);
 }
 
 /**
@@ -233,11 +344,15 @@ export function createSystemTools(
         "Agents are created with naming pattern '{system}-{agent}' (e.g., 'content-production-orchestrator'); " +
         "with `naming: bare` the agent key is the full agent name. " +
         "Supports permission presets: 'full-mesh', 'orchestrator-workers', 'none', or explicit rules. " +
+        "While the instance limits agent-created agents to a list of template sources, an agent key's manifest with a member outside it is refused as a whole (403 `template_source_not_allowed`, `members[]`), and a dry run lists those members in `failed[]`. " +
         "Deploy is best-effort: check `status` ('deployed' | 'partial' | 'failed') and `failed[]` " +
         "in the response — a partial deploy still creates the remaining agents. " +
         "`deploy: false` members are skipped and listed in `agents_declared_only[]`; a manifest whose every " +
         "member is `deploy: false` is refused with a 400 `nothing_to_deploy` (use apply_system to report on them). " +
-        "Pass strict: true to restore abort-on-first-error.",
+        "Pass strict: true to restore abort-on-first-error. " +
+        "A `failed` deploy (no member created) comes back as that report with `http_status: 500` and " +
+        "`success: false`; any other result without `status` (e.g. a 400 manifest error, a 403, a `strict` abort) " +
+        "has `success: false`, `http_status` and the backend's `detail` when it sent one.",
       parameters: z.object({
         manifest: z
           .string()
@@ -246,7 +361,7 @@ export function createSystemTools(
             "name: system-name\n" +
             "naming: bare  # optional: agent keys are full agent names; default prefixed ('{name}-{agent}')\n" +
             "description: System description\n" +
-            "prompt: System-wide instructions (optional)\n" +
+            "prompt: System-wide instructions (optional; applied for an admin only, skipped with a prompt_requires_admin warning for any other caller)\n" +
             "agents:\n" +
             "  orchestrator:\n" +
             "    template: github:Org/repo\n" +
@@ -281,35 +396,41 @@ export function createSystemTools(
       }),
       execute: async (
         { manifest, dry_run, strict }: { manifest: string; dry_run?: boolean; strict?: boolean },
-        context?: { session?: McpAuthContext }
+        context?: DenyCallContext
       ) => {
         const authContext = context?.session;
+        // Outside the try, as before: a missing API key still throws (#4027 scope).
         const apiClient = getClient(authContext);
 
         // Call backend deploy endpoint
-        const response = await apiClient.request<{
-          status: string; // "deployed" | "partial" | "failed" | "valid" (dry_run) | "invalid" (dry_run, #1841)
-          system_name: string;
-          agents_created: string[];
-          agents_to_create?: Array<{ name: string; short_name: string; template: string }>;
-          prompt_updated: boolean;
-          permissions_configured?: number;
-          schedules_created?: number;
-          warnings: string[];
-          failed?: Array<{
-            name: string;
-            short_name: string;
-            template: string;
-            reason: string;
-            status_code?: number;
-          }>;
-        }>("POST", "/api/systems/deploy", {
-          manifest,
-          dry_run: dry_run || false,
-          strict: strict || false,
-        });
+        try {
+          const response = await apiClient.request<{
+            status: string; // "deployed" | "partial" | "failed" | "valid" (dry_run) | "invalid" (dry_run, #1841)
+            system_name: string;
+            agents_created: string[];
+            agents_to_create?: Array<{ name: string; short_name: string; template: string }>;
+            prompt_updated: boolean;
+            permissions_configured?: number;
+            schedules_created?: number;
+            warnings: string[];
+            failed?: Array<{
+              name: string;
+              short_name: string;
+              template: string;
+              reason: string;
+              status_code?: number;
+            }>;
+          }>("POST", "/api/systems/deploy", {
+            manifest,
+            dry_run: dry_run || false,
+            strict: strict || false,
+          });
 
-        return JSON.stringify(response, null, 2);
+          return JSON.stringify(response, null, 2);
+        } catch (error) {
+          // A `failed` deploy is a 500 whose body IS the report (#4027).
+          return deployFailure(error, context);
+        }
       },
     },
 
@@ -521,7 +642,7 @@ export function createSystemTools(
           agents?: string[];
           strict?: boolean;
         },
-        context?: { session?: McpAuthContext }
+        context?: DenyCallContext
       ) => {
         const authContext = context?.session;
         const apiClient = getClient(authContext);
@@ -544,7 +665,7 @@ export function createSystemTools(
           );
           return JSON.stringify(response, null, 2);
         } catch (error) {
-          return teardownFailure(error);
+          return teardownFailure(error, context);
         }
       },
     },
@@ -555,7 +676,8 @@ export function createSystemTools(
     // A NEW tool rather than a `mode` on deploy_system: a released
     // deploy_system has no `mode` in its schema, so `mode: "apply"` sent to an
     // older instance would be dropped and run CREATE (suffixing the fleet),
-    // while an unknown tool name fails closed. deploy_system is untouched.
+    // while an unknown tool name fails closed. deploy_system's request and
+    // 2xx results are untouched (its non-2xx answers return, #4027).
     // ========================================================================
     applySystem: {
       name: "apply_system",

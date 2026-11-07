@@ -41,7 +41,7 @@ import { z } from "zod";
 import { ApiError, TrinityClient, operatorQueueListTarget } from "../client.js";
 import { SOMETHING_ELSE } from "../types.js";
 import type { McpAuthContext, OperatorAskCreate } from "../types.js";
-import { accessDenied, HUMAN_ONLY_KEYS_NOT_SHOWN, humanOnlyToolAccess, resolveActingAgent } from "../access.js";
+import { ACT_AS_PARAM_DESCRIPTION, accessDenied, actingClient, HUMAN_ONLY_KEYS_NOT_SHOWN, humanOnlyToolAccess, resolveActingAgent } from "../access.js";
 
 /**
  * Pure helper: keep only items whose agent is in the allowed set. Used to gate
@@ -113,7 +113,7 @@ const askOperatorParameters = z.object({
     .max(256)
     .describe(
       "An id YOU choose for this ask: letters, digits, '.', '_', ':' or '-'. Raising again with the same id returns the first receipt as status replayed, with differs naming any field that is not the same, so a retry never makes a second ask; use a NEW request_id for a new ask. " +
-        "The receipt: status (created | replayed), id, to_role (the role it went to, never a person's email), resolved (true when a person's Workspace will show the ask — every person the role resolves to, when several fill it; false when nobody could be named and it went to the operators), ask_status, and wakes_on_ending (true when your owner has turned on waking you when your asks end).",
+        "The receipt: status (created | replayed), id, to_role (the role it went to, never a person's email), resolved (true when a person's Workspace will show the ask — every person the role resolves to, when several fill it; false when nobody could be named and it went to the operators), ask_status, and wakes_on_ending (true by default: a person's answer or cancel wakes you with one turn, so never ask the person to write to you again after answering; an expiry wakes nobody — read it on your next turn; false only when your owner switched the wake off).",
     ),
   title: z
     .string()
@@ -206,6 +206,20 @@ const askForCredentialParameters = z.object({
     .string()
     .optional()
     .describe("An ISO-8601 time WITH a timezone, at least 15 minutes out. When it passes unanswered the ask ends denied by timeout."),
+  destination: z
+    .object({
+      instance_url: z.string().min(1).max(512).describe("The other Trinity's base URL (https://host, no path)."),
+      agent_name: z.string().min(1).max(64).describe("The agent there that the credential is for."),
+      key_env: z
+        .string()
+        .min(1)
+        .max(64)
+        .describe("The NAME of the variable in YOUR OWN environment that holds your key to that Trinity. The key itself never travels: the platform reads it by name when it delivers."),
+    })
+    .optional()
+    .describe(
+      "trinity-enterprise#1109: where the value LANDS when that is not you — an agent on another Trinity you hold a key to. The instance must be one an admin has registered as an outbound A2A endpoint on this Trinity (Settings → Integrations → Outbound A2A endpoints; scheme, host and port must match) and outbound A2A must be switched on. The person's field says so in plain words, the value is merged into that agent's .env there under your key, nothing is kept here, and your wake says it was delivered (it is never in your environment). Left out, the value is stored in your own environment as before. Refusals: 422 destination_not_approved / destination_outbound_disabled (ask an admin) / destination_url_invalid / destination_agent_invalid / destination_key_env_invalid (reason says which).",
+    ),
 });
 
 /** trinity-enterprise#901: what an agent sends to withdraw one of its own asks. */
@@ -560,8 +574,9 @@ export function createOperatorQueueTools(
         "re-ask the same action without new information. A dismissed ask is the " +
         "person you addressed choosing not to answer (response empty): do not " +
         "proceed, and do not raise the same ask again straight away. Acts as the agent your " +
-        "key belongs to — there is no agent parameter.",
+        "key belongs to (admin keys: agent_name).",
       parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         request_id: z
           .string()
           .min(1)
@@ -569,13 +584,13 @@ export function createOperatorQueueTools(
           .describe("The id you gave the ask when you raised it."),
       }),
       execute: async (
-        params: { request_id: string },
+        params: { request_id: string; agent_name?: string },
         context?: { session?: McpAuthContext },
       ) => {
         const authContext = context?.session;
         let agentName: string;
         try {
-          agentName = resolveActingAgent(authContext, "The get_my_ask tool");
+          agentName = resolveActingAgent(authContext, "The get_my_ask tool", params.agent_name);
         } catch (error) {
           return JSON.stringify(
             { success: false, error: error instanceof Error ? error.message : String(error) },
@@ -583,7 +598,7 @@ export function createOperatorQueueTools(
             2,
           );
         }
-        const apiClient = getClient(authContext);
+        const apiClient = actingClient(getClient(authContext), authContext, agentName);
         try {
           const ask = await apiClient.getMyAsk(agentName, params.request_id);
           return JSON.stringify(ask, null, 2);
@@ -634,16 +649,20 @@ export function createOperatorQueueTools(
         "invalid_<field> for a malformed field, and each field's description names its " +
         "other codes and the fix. 429 rate_limited or queue_full: too " +
         "many open asks, wait for some to end. Acts as the agent your key belongs to; " +
-        "there is no agent parameter.",
-      parameters: askOperatorParameters,
+        "admin keys pass agent_name.",
+      // ent#1024: `agent_name` is the TOOL's, never the body's — extended here
+      // so `askOperatorParameters.shape` (the body allowlist below) stays as is.
+      parameters: askOperatorParameters.extend({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
+      }),
       execute: async (
-        params: OperatorAskCreate,
+        params: OperatorAskCreate & { agent_name?: string },
         context?: { session?: McpAuthContext },
       ) => {
         const authContext = context?.session;
         let agentName: string;
         try {
-          agentName = resolveActingAgent(authContext, "The ask_operator tool");
+          agentName = resolveActingAgent(authContext, "The ask_operator tool", params.agent_name);
         } catch (error) {
           return JSON.stringify(
             { success: false, error: error instanceof Error ? error.message : String(error) },
@@ -660,7 +679,7 @@ export function createOperatorQueueTools(
             .filter((k) => given[k] !== undefined)
             .map((k) => [k, given[k]]),
         ) as unknown as OperatorAskCreate;
-        const apiClient = getClient(authContext);
+        const apiClient = actingClient(getClient(authContext), authContext, agentName);
         try {
           const receipt = await apiClient.raiseAsk(agentName, body, authContext?.executionId);
           return JSON.stringify(receipt, null, 2);
@@ -700,15 +719,30 @@ export function createOperatorQueueTools(
         "as {success: false, status, code, message}: 422 no_person (no single person " +
         "to ask — ask from a chat with them), 422 invalid_credential_name (a malformed " +
         "or reserved name; reason says which), 429 rate_limited or queue_full. Acts " +
-        "as the agent your key belongs to; there is no agent parameter.",
+        "as the agent your key belongs to; there is no agent parameter. For an " +
+        "agent on another Trinity you hold a key to, set destination (see the parameter).",
       parameters: askForCredentialParameters,
       execute: async (
-        params: { name: string; why: string; request_id?: string; expires_at?: string },
+        params: {
+          name: string;
+          why: string;
+          request_id?: string;
+          expires_at?: string;
+          destination?: { instance_url: string; agent_name: string; key_env: string };
+        },
         context?: { session?: McpAuthContext },
       ) => {
         const authContext = context?.session;
         let agentName: string;
         try {
+          // trinity-enterprise#1024: credentials stay out of act-as, so this tool
+          // has no agent_name, and resolveActingAgent's "pass agent_name" is wrong here.
+          if (authContext?.scope === "user") {
+            throw new Error(
+              "The ask_for_credential tool: this call requires an agent-scoped key. Asking for a " +
+                "credential is not available on behalf of an agent, so a user-scoped key can't use it.",
+            );
+          }
           agentName = resolveActingAgent(authContext, "The ask_for_credential tool");
         } catch (error) {
           return JSON.stringify(
@@ -721,12 +755,23 @@ export function createOperatorQueueTools(
         // agent passes — least of all a value — reaches the backend.
         const turn = authContext?.executionId;
         const derived = `credential-${params.name}${turn ? `-${turn}` : ""}`.replace(/[^A-Za-z0-9._:-]/g, "-").slice(0, 256);
+        // trinity-enterprise#1109: the destination's three declared fields
+        // only — the key's NAME, never a key.
+        const destination = params.destination
+          ? {
+              credential_destination: {
+                instance_url: params.destination.instance_url,
+                agent_name: params.destination.agent_name,
+                key_env: params.destination.key_env,
+              },
+            }
+          : {};
         const body: OperatorAskCreate = {
           request_id: params.request_id ?? derived,
           type: "credential",
           title: `Needs ${params.name}`,
           question: params.why,
-          context: { credential_name: params.name },
+          context: { credential_name: params.name, ...destination },
           to: "primary",
           ...(params.expires_at === undefined ? {} : { expires_at: params.expires_at }),
         };
@@ -762,16 +807,18 @@ export function createOperatorQueueTools(
         "is not one of your own asks (a gate's approval or the platform's alarm is " +
         "not yours to withdraw); 422 invalid_reason for a blank reason or one over " +
         "500 characters. A queue-file entry cannot be withdrawn. Acts as the agent " +
-        "your key belongs to — there is no agent parameter.",
-      parameters: withdrawAskParameters,
+        "your key belongs to (admin keys: agent_name).",
+      parameters: withdrawAskParameters.extend({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
+      }),
       execute: async (
-        params: { request_id: string; reason: string },
+        params: { request_id: string; reason: string; agent_name?: string },
         context?: { session?: McpAuthContext },
       ) => {
         const authContext = context?.session;
         let agentName: string;
         try {
-          agentName = resolveActingAgent(authContext, "The withdraw_ask tool");
+          agentName = resolveActingAgent(authContext, "The withdraw_ask tool", params.agent_name);
         } catch (error) {
           return JSON.stringify(
             { success: false, error: error instanceof Error ? error.message : String(error) },
@@ -781,7 +828,7 @@ export function createOperatorQueueTools(
         }
         // Only the reason travels in the body: the backend refuses unknown
         // keys (`extra="forbid"`), and the row's state is the backend's to set.
-        const apiClient = getClient(authContext);
+        const apiClient = actingClient(getClient(authContext), authContext, agentName);
         try {
           const receipt = await apiClient.withdrawAsk(agentName, params.request_id, { reason: params.reason });
           return JSON.stringify(receipt, null, 2);

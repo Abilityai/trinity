@@ -60,6 +60,9 @@ _BACKEND = str(_REPO / "src" / "backend")
 if _BACKEND not in sys.path:
     sys.path.insert(0, _BACKEND)
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # `_ent695_lua`
+import _ent695_lua as lua  # noqa: E402
+
 pytestmark = pytest.mark.unit
 
 OWNER = "owner-1066-sink@example.com"
@@ -154,7 +157,7 @@ def world(real_db, monkeypatch):
     import services.credential_sink as sink
     import services.runtime_secret_scrub as scrub
 
-    fake = fakeredis.FakeStrictRedis(decode_responses=True)
+    fake = lua.with_lua(fakeredis.FakeStrictRedis(decode_responses=True))
     monkeypatch.setattr(scrub, "get_breaker_redis", lambda: fake)
     monkeypatch.setattr(scrub, "_enc_svc", lambda: _FakeEnc())
     monkeypatch.setattr(scrub, "_redis_down_until", 0.0, raising=False)
@@ -181,6 +184,10 @@ def world(real_db, monkeypatch):
     monkeypatch.setattr(svc, "_websocket_manager", None)
     monkeypatch.setattr(svc, "_observers", [events.append])
     monkeypatch.setattr(real_db, "get_operator_resume_enabled", lambda a: False, raising=False)
+    # ent#1102: the wake is decided by `wake_policy.resolve`, whose first read
+    # is the tri-state column and whose instance default is ON — so "the owner
+    # has not opted in" is said as an explicit OFF there, or the sink wakes.
+    monkeypatch.setattr(real_db, "get_wake_on_ending", lambda a: False, raising=False)
 
     return SimpleNamespace(db=real_db, sink=sink, scrub=scrub, fake=fake, agent=agent,
                            status=status, audit=audit, events=events, invalidated=invalidated)
@@ -695,7 +702,7 @@ class TestTheAskSide:
 # delivery step are the only moves the module may make with it.
 _ALLOWED_VALUE_CALLEES = {"len", "isinstance", "strip", "encode", "splitlines",
                           "stage_secret", "unstage_secret", "set_keys", "_check_value",
-                          "_deliver", "set_env_value"}
+                          "_deliver", "_deliver_remote", "set_env_value"}
 
 
 def test_the_sink_module_never_interpolates_the_value():

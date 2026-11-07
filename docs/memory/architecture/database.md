@@ -12,6 +12,10 @@
 
 ## Database Schema
 
+### PostgreSQL by default, SQLite refused in images (#4175, HOST-023)
+
+Every compose file defaults `DATABASE_URL` to the bundled `postgres` service. The images set `TRINITY_REQUIRE_POSTGRES=1`, which arms two refusals in `db/engine.py`: `refuse_sqlite_backend` (from `init_database`, before any file is touched; `TRINITY_ALLOW_SQLITE=1` opens it) and `refuse_empty_postgres_beside_sqlite` (from `alembic_runner.upgrade_to_head`, under the advisory lock, when `trinity.db` has data and `users` is absent or empty; nothing opens it). An `upgrade_to_head` that fires this cannot have built anything. `db/sqlite_to_postgres.py` is the only caller of `allow_sqlite_source=True`, and it must never import `database`, whose import runs `init_database()`. Outside an image the unit tier keeps running on SQLite until the runner is removed.
+
 ### SQLite (`/data/trinity.db`)
 
 **Orphan tables (#3432):** installs upgraded from before #3432 — SQLite and PostgreSQL alike — may carry `process_schedules` and `process_schedule_executions`, which the scheduler's boot path created ad hoc outside both migration tracks; the scheduler no longer creates or reads them, nothing else references them, and they are deliberately left in place (no migration), so #746 autogenerate will surface them as unknown tables.
@@ -137,6 +141,8 @@ CREATE TABLE access_requests (
 ```
 
 Access-control flow (#311): `ChannelAdapter.resolve_verified_email()` maps native channel identity → verified email; `message_router` runs a single gate — owner/admin/`agent_sharing` → `open_access` → upsert pending `access_requests` row. Approval inserts into `agent_sharing`, whitelists the email (if email auth on), and fires a fire-and-forget notification on the requester's originating channel (telegram/slack/whatsapp only; bypasses `allow_proactive` and per-recipient rate limit — the user initiated the request; outcome audit-logged; delivery failure never rolls back the approval) (#951). Group chats bypass the gate; agents with both policy flags off retain legacy permissive behavior.
+
+**channel_client_blocks** (trinity-enterprise#21 — an owner's per-agent block on one channel client): `id`, `agent_name`, `channel`, `client_id` (the channel-native sender id the router sees), `blocked_at`, `blocked_by_id`, `blocked_by_email`, `reason`; `UNIQUE(agent_name, channel, client_id)`. Read by `message_router` before every other gate step; CASCADE in the agent-cleanup registry.
 
 **mcp_api_keys:**
 ```sql
@@ -543,7 +549,8 @@ purge paths in `db/agent_shared_files.py` (`delete_expired_and_revoked` and
 
 **public_user_memory_writes** (ent#637 — every write to the MEM-001 `agent_notes` section,
 so a person can see that a scheduled run touched their memory and undo it; also ent#419's
-"write history with rollback" layer):
+"write history with rollback" layer; since trinity-enterprise#962 the summarizer's
+`conversation_summary` changes too, marked by `section`):
 ```sql
 CREATE TABLE public_user_memory_writes (
     id TEXT PRIMARY KEY,
@@ -556,7 +563,9 @@ CREATE TABLE public_user_memory_writes (
     new_notes TEXT NOT NULL DEFAULT '',
     written_at TEXT NOT NULL,
     undone_at TEXT,
-    undone_by TEXT
+    undone_by TEXT,                        -- the person, or the operator (ent#962)
+    section TEXT NOT NULL DEFAULT 'notes'  -- 'notes' | 'summary' (ent#962); a summary row's
+                                           -- previous_/new_notes hold SUMMARY text
 );
 CREATE INDEX idx_public_user_memory_writes_lookup ON public_user_memory_writes(agent_name, user_email, written_at);
 ```
@@ -619,11 +628,18 @@ CREATE INDEX idx_agent_memory_fact_events_execution ON agent_memory_fact_events(
 ```
 Both tracks: SQLite `public_user_memory_writes_table`, Alembic `0066_public_user_memory_writes`;
 `AgentRef("public_user_memory_writes", "agent_name", Policy.CASCADE)`. Written only by
-`db/public_links.py::write_user_memory_agent_notes`, in the same transaction as the notes
-replace, so `previous_notes` is what the row held at that instant. Not keyed to
+`db/public_links.py::write_user_memory_agent_notes` (`section='notes'`) and
+`update_user_memory_conversation_summary` (`section='summary'`, `triggered_by='summarizer'`,
+only when the text changed; a compare-and-set on `expected_previous`), each in the same
+transaction as the blob replace and under the row lock (`_read_blob_for_update`: PostgreSQL
+`FOR UPDATE`, SQLite the RESERVED-lock no-op write), so `previous_notes` is what the row held
+at that instant. `section` is the ent#962 column, both tracks (SQLite
+`public_user_memory_writes_section`, Alembic `0120`). Not keyed to
 `public_user_memory.id` — that row is created on demand; `(agent_name, user_email)` is the
 identity. Undo (`undo_user_memory_write`) is latest-first over the open (`undone_at IS NULL`)
-writes of one `(agent, email)`; a foreign write id is `not_found`, never a 403 (Invariant #8).
+writes of one `(agent, email)` **within the write's section**; a foreign write id is
+`not_found`, never a 403 (Invariant #8). Readers default to `section='notes'`; the Alembic downgrade deletes the summary rows before dropping the column, so no summary text is ever relabelled as notes. No retention:
+rows live until the agent is deleted (a bound is a follow-up).
 
 **agent_role_readiness** (ent#527 / #663 — the agent owner's readiness stamp for a role companion):
 ```sql
@@ -687,6 +703,22 @@ CREATE TABLE seat_ask_class_state (
 CREATE INDEX idx_seat_ask_class_state_seat ON seat_ask_class_state(agent_name, seat_email);
 ```
 Both tracks: SQLite `seat_ask_class_state_table`, Alembic `0113_seat_ask_class_state`
+
+**terms_acceptances** (trinity-enterprise#1107 — terms of use per instance):
+```sql
+CREATE TABLE terms_acceptances (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    email TEXT,
+    terms_version TEXT NOT NULL,
+    accepted_at TEXT NOT NULL,
+    door TEXT,                -- the invitation id an optional module binds the row to, else NULL
+    actor_ip TEXT,
+    UNIQUE(user_id, terms_version)
+);
+CREATE INDEX idx_terms_acceptances_email ON terms_acceptances(email);
+```
+One row per (person, terms version): the record of which text they accepted and when; a version bump asks again. The text itself is four `system_settings` rows (`terms_required`, `terms_title`, `terms_text`, `terms_version`) resolved with a shipped default — no seed row. `email` is nullable (an admin account may have none). Both tracks: SQLite `terms_acceptances_table`, Alembic `0119_terms_acceptances`. An optional module that kept its own record before copies it across through its own migration (an INSERT is data, never an ALTER).
 (← `0107_skill_sources_follow_bundled_pin`); `AgentRef(..., Policy.CASCADE)`. The row holds only what was EARNED —
 the instance level, the agent's autonomy switch and the clock are ANDed at read
 time (`services/autonomy_dial_service.live_verdict`), never materialised. The
@@ -1350,8 +1382,8 @@ successful-looking sync. Revocation = cut a new tag without the offending skill.
 - **Subscription-headroom keys** (#471): `subscription:headroom:{id}` (JSON provider snapshot, 7d TTL, best-effort DEL on subscription delete) + `subscription:headroom_probe:{sid}` (probe `SingleFlightLock` #1920). Subscription-id-keyed, deliberately not `agent:*` (the #1560 name-keyed registry doesn't apply); ambient probing is fail-CLOSED on an unanswered Redis read — see `subscription_headroom_service`.
 - **Ephemeral-agent keys** (trinity-enterprise#69): `ephemeral:quota:{owner_id}` (owner-keyed atomic ghost-quota counter — deliberately not `agent:*`, so the #1560 name-keyed registry doesn't apply) and `ephemeral:discard:{name}` (SETNX+TTL discard lock, acquired/released through `SingleFlightLock` #1920). Both fail-open.
 - **System-seed provisioning lock** (trinity-enterprise#124, hardened #1920): `system_seed:provision` (SETNX + 600s TTL) — one first-run seeding pass at a time; acquired + released through `SingleFlightLock` so the release is ownership-checked (unique per-acquire token + compare-and-delete), no longer a tokenless `delete` that could remove a successor's lock. Not `agent:*`-named; fail-open; the reserved-name existence backstop is the real duplicate guard.
-- **Single-flight lock consolidation (#1920).** The SETNX single-flight sites — `ops:fleet_restart`, `ephemeral:discard:{name}`, `skill_inject:{name}`, `skills:library:sync`, `system_seed:provision`, `cornelius:provision`, `compat_fix:{name}`, and the later `agent:deploy_op:{base_name}` (#2060) — now share ONE ownership-checked primitive, `redis_breaker_util.SingleFlightLock` (mint-per-acquire token, GET-then-DELETE compare-and-delete). This unifies the **single-flight family only**: **four lock idioms remain** after this change — the shared `SingleFlightLock`, the async Lua-CAD `ResumeLock` (`session_turn_service.py`), the two verbatim leader leases (`monitoring:leader` / `opqueue:leader`, stable cross-cycle worker id), and canary's Lua-CAD leader lease (`canary:leader`, #1881) — kept separate by design. A static guard (`tests/unit/test_1920_no_hand_rolled_single_flight.py`) fails CI when a new hand-rolled `set(..., nx=True, ex=...)` single-flight lock appears outside `SingleFlightLock` with no allowlist entry.
-- **Fleet-restart lock** (#1860, hardened #1919): `ops:fleet_restart` — SETNX + 2100s TTL single-flight guard for `POST /api/ops/fleet/restart` (409 on contention); TTL is sized above the slowest single agent (skill injection alone is bounded by `skill_service._INJECT_LOCK_TTL_SECONDS`=1800 — constants comment-linked). The live loop's per-agent refresh is an **ownership-checked pre-action gate** (GET-compare → EXPIRE, never a bare EXPIRE): a **foreign** token (concurrent caller took the lock after a lapse) stops the run — partial results stand, `summary`/audit carry `stopped_early="lease_lost_foreign"` + `processed` vs `total`; an **absent** token (lapsed, unclaimed) is re-acquired via SETNX and the run continues (`lease_reacquired` audited); acquire sits inside the `try/finally` so nothing can leak the lock. Release is compare-and-delete (shared `redis_breaker_util.lock_token_matches`), attempted even after detected loss (foreign-safe by construction). Not `agent:*`-named (fleet-scoped, #1560 registry doesn't apply); fail-open when Redis is down (a refresh Redis error is throttle-logged, never treated as loss).
+- **Single-flight lock consolidation (#1920).** The SETNX single-flight sites — `ops:fleet_restart`, `ephemeral:discard:{name}`, `skill_inject:{name}`, `skills:library:sync`, `system_seed:provision`, `cornelius:provision`, `compat_fix:{name}`, and the later `agent:deploy_op:{base_name}` (#2060) — now share ONE ownership-checked primitive, `redis_breaker_util.SingleFlightLock` (mint-per-acquire token; renew and release each one Lua compare-and-mutate script, #4028). This unifies the **single-flight family only**: **four lock idioms remain** after this change — the shared `SingleFlightLock`, the async Lua-CAD `ResumeLock` (`session_turn_service.py`), the two verbatim leader leases (`monitoring:leader` / `opqueue:leader`, stable cross-cycle worker id), and canary's Lua-CAD leader lease (`canary:leader`, #1881, on the same shared lease scripts since #4028) — kept separate by design. A static guard (`tests/unit/test_1920_no_hand_rolled_single_flight.py`) fails CI when a new hand-rolled `set(..., nx=True, ex=...)` single-flight lock appears outside `SingleFlightLock` with no allowlist entry.
+- **Fleet-restart lock** (#1860, hardened #1919): `ops:fleet_restart` — SETNX + 2100s TTL single-flight guard for `POST /api/ops/fleet/restart` (409 on contention); TTL is sized above the slowest single agent (skill injection alone is bounded by `skill_service._INJECT_LOCK_TTL_SECONDS`=1800 — constants comment-linked). The live loop's per-agent refresh is an **ownership-checked pre-action gate**, one Lua script (`refresh_if_owned(retake_lapsed=True)`, #4028): a **foreign** token (concurrent caller took the lock after a lapse) stops the run — partial results stand, `summary`/audit carry `stopped_early="lease_lost_foreign"` + `processed` vs `total`; an **absent** token (lapsed, unclaimed at the refresh) is re-taken with `SET NX` in the same script and the run continues (`lease_reacquired` audited — not proof nobody ran inside the lapse); acquire sits inside the `try/finally` so nothing can leak the lock. Release is the Lua compare-and-delete, attempted even after detected loss (foreign-safe by construction). Not `agent:*`-named (fleet-scoped, #1560 registry doesn't apply); fail-open when Redis is down (a refresh Redis error is throttle-logged, never treated as loss).
 - **SSH-port reservations + first-run seed pass lock** (#2215): `port_alloc:{port}` — transient per-port reservation bridging the allocator's check and `containers.run` (SETNX + TTL 600s at allocation; SET no-NX by `reserve_port_for_recreate` across the recreate gap). **No release path by design**: once the container exists its `trinity.ssh-port` label is the durable truth (Invariant #11), so the key self-expires; deliberately not `agent:*` (port-keyed, and no lifecycle event should clear it — clearing on an agent event would un-reserve a port mid-create; the `ephemeral:quota:` precedent). `first_run_seed:provision` — pass-level lock serialising BOTH first-run seeders across workers (SETNX, uuid token, TTL 900s, `lock_token_matches` compare-and-delete release, fail-open; loser skips the whole pass). Both fail open; neither is in the #1560 registry.
 
 ---

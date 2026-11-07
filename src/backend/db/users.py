@@ -14,6 +14,7 @@ are unaffected.
 
 import logging
 import secrets
+from dataclasses import dataclass
 from typing import Optional, Dict, List, Any
 
 from sqlalchemy import and_, func, insert, or_, select, update
@@ -29,6 +30,16 @@ logger = logging.getLogger(__name__)
 # trinity-enterprise#720 — `users.email` is unique on its lower-cased value.
 # The index is created by both migration tracks and by `db/schema.py`.
 EMAIL_UNIQUE_INDEX = "idx_users_email_unique"
+
+
+@dataclass(frozen=True)
+class PeopleScope:
+    """Who may appear in a people search (trinity-enterprise#1153): a picker's
+    `kind` (also its rate-limit budget) and the conditions over `users` that
+    bound it. Built by a `people_scope_*` method, never by a caller's own SQL."""
+    kind: str
+    conds: tuple = ()
+    empty: bool = False
 
 
 class EmailInUseError(Exception):
@@ -379,44 +390,83 @@ class UserOperations:
     # never disagree with what the picker offered.
 
     @staticmethod
-    def _taggable_conds(agent_names: List[str]) -> list:
+    def _reach_cond(agent_names: List[str]):
+        """Can already reach one of these agents: an admin, an owner or a sharee."""
         agents = sorted({a for a in (agent_names or []) if a})
         owners = select(agent_ownership.c.owner_id).where(agent_ownership.c.agent_name.in_(agents))
         sharees = select(func.lower(agent_sharing.c.shared_with_email)).where(
             agent_sharing.c.agent_name.in_(agents))
+        return or_(
+            users.c.role == "admin",
+            users.c.id.in_(owners),
+            func.lower(users.c.email).in_(sharees),
+        )
+
+    @staticmethod
+    def _taggable_conds(agent_names: List[str]) -> list:
         return [
             users.c.email.isnot(None),
             users.c.email != "",
             users.c.suspended_at.is_(None),
-            or_(
-                users.c.role == "admin",
-                users.c.id.in_(owners),
-                func.lower(users.c.email).in_(sharees),
-            ),
+            UserOperations._reach_cond(agent_names),
         ]
 
     _TAGGABLE_COLUMNS = (users.c.username, users.c.name, users.c.email)
 
-    def list_taggable_people(self, agent_names: List[str], query: str, *,
-                             exclude_email: Optional[str] = None, limit: int = 8) -> List[Dict]:
-        """Accounts matching `query` (a prefix of the email, the username, or a
-        word of the display name) that may be tagged in a conversation with
-        `agent_names`. Bounded: an empty query or no agents matches nothing."""
+    # ------------------------------------------------------- trinity-enterprise#1153
+    # One people search behind every picker. A caller says only WHO MAY APPEAR, as
+    # a scope built here (the SQL stays in this layer); `search_people` applies the
+    # rest — the match, the suspended/no-email/asker exclusions, the order and the
+    # cap — so no picker can drift into a list of every account. Only
+    # `services/people_search_service.search` calls it (a static guard pins that).
+
+    @staticmethod
+    def people_scope_agent_reach(agent_names: List[str]) -> "PeopleScope":
+        """People who can already reach one of these agents: owner, sharee or an
+        admin (who may be tagged in a conversation with them, ent#631)."""
+        if not any(agent_names or []):
+            return PeopleScope("agent_reach", empty=True)
+        return PeopleScope("agent_reach", (UserOperations._reach_cond(agent_names),))
+
+    @staticmethod
+    def people_scope_share_candidates(agent_name: str) -> "PeopleScope":
+        """People this agent could be shared with (ent#450): not its owner and not
+        already on its roster."""
+        owners = select(agent_ownership.c.owner_id).where(
+            agent_ownership.c.agent_name == agent_name, agent_ownership.c.owner_id.isnot(None))
+        sharees = select(func.lower(agent_sharing.c.shared_with_email)).where(
+            agent_sharing.c.agent_name == agent_name)
+        return PeopleScope("share_candidates", (
+            users.c.id.notin_(owners),
+            func.lower(users.c.email).notin_(sharees),
+        ))
+
+    def search_people(self, scope: "PeopleScope", query: str, *,
+                      exclude_email: Optional[str] = None, limit: int = 8) -> List[Dict]:
+        """Accounts in `scope` matching `query`: a prefix of the email, the
+        username, or a word of the display name. Never suspended, never without an
+        email, never `exclude_email`. An empty query or scope matches nothing."""
         q = (query or "").strip().lower()
-        if not q or not agent_names:
+        if not q or scope.empty:
             return []
         esc = q.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         name = func.lower(func.coalesce(users.c.name, ""))
-        conds = self._taggable_conds(agent_names) + [or_(
-            func.lower(users.c.email).like(f"{esc}%", escape="\\"),
-            func.lower(users.c.username).like(f"{esc}%", escape="\\"),
-            name.like(f"{esc}%", escape="\\"),
-            name.like(f"% {esc}%", escape="\\"),
-        )]
+        conds = [
+            users.c.email.isnot(None),
+            users.c.email != "",
+            users.c.suspended_at.is_(None),
+            *scope.conds,
+            or_(
+                func.lower(users.c.email).like(f"{esc}%", escape="\\"),
+                func.lower(users.c.username).like(f"{esc}%", escape="\\"),
+                name.like(f"{esc}%", escape="\\"),
+                name.like(f"% {esc}%", escape="\\"),
+            ),
+        ]
         exclude = normalize_email(exclude_email)
         if exclude:
             conds.append(func.lower(users.c.email) != exclude)
-        stmt = (select(*self._TAGGABLE_COLUMNS).where(and_(*conds))
+        stmt = (select(users.c.id, users.c.username, users.c.name, users.c.email, users.c.role).where(and_(*conds))
                 .order_by(func.lower(func.coalesce(users.c.name, users.c.username)), users.c.id)
                 .limit(max(1, int(limit))))
         with get_engine().connect() as conn:

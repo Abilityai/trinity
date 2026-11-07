@@ -21,7 +21,12 @@ from sqlalchemy import select, insert, update, delete
 from .engine import get_engine
 from .tables import mcp_api_keys, users, agent_ownership
 from db_models import McpApiKey, McpApiKeyCreate, McpApiKeyWithSecret
-from utils.helpers import utc_now_iso
+from utils.helpers import utc_now_iso, iso_cutoff
+
+# #4259: a just-minted agent key has no ownership row yet (crud mints it before
+# the container, registers the owner after). Keys younger than this are never
+# treated as orphaned, whatever the ownership table says.
+ORPHANED_KEY_GRACE_SECONDS = 600
 
 
 # Columns selected for the JOIN read paths: every mcp_api_keys column (the old
@@ -277,6 +282,19 @@ class McpKeyOperations:
             row = conn.execute(stmt).mappings().first()
             return self._row_to_mcp_api_key(row) if row else None
 
+    def get_agent_name_for_agent_key(self, key_id: str) -> Optional[str]:
+        """The agent an AGENT-scoped key belongs to, else None (a user, system,
+        connector or portal key; an unknown id). Active or not: a key rotated
+        or deactivated after it made a request still names who made it
+        (abilityai/trinity-enterprise#925 — the peer a run is for)."""
+        stmt = select(mcp_api_keys.c.agent_name).where(
+            mcp_api_keys.c.id == key_id,
+            mcp_api_keys.c.scope == "agent",
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).first()
+        return (row.agent_name or None) if row else None
+
     def list_active_agent_key_ids(self, agent_name: str) -> List[str]:
         """Ids of the agent's ACTIVE ``scope='agent'`` keys (#1854).
 
@@ -407,12 +425,25 @@ class McpKeyOperations:
         with get_engine().begin() as conn:
             return conn.execute(stmt).rowcount or 0
 
-    def deactivate_orphaned_agent_keys(self) -> int:
+    def deactivate_orphaned_agent_keys(self) -> List[str]:
         """Deactivate per-agent keys whose agent is not live (#1745 backfill).
 
         "Not live" = no `agent_ownership` row at all, or one carrying
         `deleted_at`. Idempotent — only flips rows that are still active, so it
-        finds nothing once an instance is clean.
+        finds nothing once an instance is clean. Returns one agent name per
+        key revoked (sorted; an agent with an agent AND a connector key appears
+        twice), so the caller keeps the key count and can name the agents.
+
+        **Start-up grace (#4259).** `crud.create_agent` mints the key BEFORE
+        the container exists and writes the ownership row only after it does,
+        so for a few seconds a healthy new agent looks exactly like a ghost.
+        A sweep landing in that window revoked the key one second after it was
+        minted; the agent's first MCP call failed 401 and nothing repaired it.
+        A key younger than `ORPHANED_KEY_GRACE_SECONDS` is therefore skipped —
+        by its own `created_at` (ISO-Z, compared against a Python-computed
+        cutoff per Invariant #16), never by container state. The window is
+        bounded: a key the create path failed to roll back is still revoked
+        on the first tick after it.
 
         This is not hypothetical: on the instance where the bug was found, 12 of
         17 active agent-scoped keys were already orphaned, 10 of them from
@@ -421,18 +452,25 @@ class McpKeyOperations:
         live = select(agent_ownership.c.agent_name).where(
             agent_ownership.c.deleted_at.is_(None)
         )
-        stmt = (
-            update(mcp_api_keys)
-            .where(
-                mcp_api_keys.c.agent_name.isnot(None),
-                mcp_api_keys.c.scope.in_(("agent", "connector")),
-                mcp_api_keys.c.is_active == 1,
-                mcp_api_keys.c.agent_name.notin_(live),
-            )
-            .values(is_active=0)
+        orphaned = (
+            mcp_api_keys.c.agent_name.isnot(None),
+            mcp_api_keys.c.scope.in_(("agent", "connector")),
+            mcp_api_keys.c.is_active == 1,
+            mcp_api_keys.c.agent_name.notin_(live),
+            mcp_api_keys.c.created_at < iso_cutoff(seconds=ORPHANED_KEY_GRACE_SECONDS),
         )
         with get_engine().begin() as conn:
-            return conn.execute(stmt).rowcount or 0
+            rows = conn.execute(
+                select(mcp_api_keys.c.id, mcp_api_keys.c.agent_name).where(*orphaned)
+            ).fetchall()
+            if not rows:
+                return []
+            conn.execute(
+                update(mcp_api_keys)
+                .where(mcp_api_keys.c.id.in_([r.id for r in rows]))
+                .values(is_active=0)
+            )
+            return sorted(r.agent_name for r in rows)
 
     def validate_mcp_api_key(
         self, api_key: str, *, track_usage: bool = True

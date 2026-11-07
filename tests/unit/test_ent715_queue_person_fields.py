@@ -76,6 +76,7 @@ MACHINE_ROW_KEYS = frozenset({
     "disposition", "disposed_at", "disposed_by", "disposition_reason", "batch_id",
     "raised_by", "channel", "to_role", "proposal", "supersedes_expired",
     "replaces", "replaced_by",  # #3247
+    "wake_state",  # abilityai/trinity-enterprise#1108 AC #4 — pending (agent not yet woken) | woken | None
     "aging", "aged_since",
     "subject", "last_seen_at",
 })
@@ -866,6 +867,9 @@ _ROW_ACCESSORS = frozenset({
     "read_operator_queue_address", "list_pending_role_addressed_operator_queue_items",
     "create_person_mention", "list_person_mentions_for", "get_person_mention",
     "mark_person_mention_read", "list_person_mentions_by_prefix",
+    # abilityai/trinity-enterprise#1108 AC #4: the agent's own answered asks whose
+    # wake is still owed — re-dispatched into its own turn on start.
+    "list_operator_queue_pending_wakes",
 })
 _NON_ROW_ACCESSORS = frozenset({
     "create_operator_queue_item", "create_operator_queue_item_with_outcome",   # ids (test_1677)
@@ -879,6 +883,11 @@ _NON_ROW_ACCESSORS = frozenset({
     "set_operator_queue_sync_state", "set_operator_queue_delivery_state",
     "drop_operator_queue_addressee",   # trinity-enterprise#981: a boolean, did the address change
     "readdress_operator_queue_item",   # trinity-enterprise#1095: a boolean, did the CAS write land
+    # abilityai/trinity-enterprise#1108 AC #4: a boolean / a count — the wake's status
+    "set_operator_queue_wake_state", "mark_operator_queue_wakes_woken",
+    # abilityai/trinity-enterprise#1102: request ids only — the caller's wake
+    # names which asks the ended run parked, never a title or a question.
+    "list_pending_ask_ids_for_execution",
 })
 
 #: What happens to the rows each reader gets.
@@ -898,7 +907,13 @@ _TAGS = "services/person_mention_service.py"
 _ALERTS = "services/platform_alerts.py"
 _PROMPT = "services/platform_prompt_service.py"
 _GATE = "services/skill_gate_service.py"
+_STALL = "services/queue_stall_service.py"
+_ORS = "services/operator_resume_service.py"
 _ROW_READERS = {
+    (_ORS, "redispatch_pending_wakes"): (
+        "agent", "abilityai/trinity-enterprise#1108 AC #4: the agent's own answered asks whose wake "
+                 "is still owed, each handed to `maybe_dispatch_resume` — the ent#329 frame reaches "
+                 "the agent that raised the ask and nobody else; who answered stays in the audit row"),
     (_PORTAL_ASKS, "_discussed_in"): (
         "addressee", "the ask a chat discusses: addressed to the viewer in SQL, then the roster"),
     (_PORTAL_ASKS, "_linked_request_id"): (
@@ -977,6 +992,9 @@ _ROW_READERS = {
     (_ALERTS, "clear"): ("internal", "ends a condition's pending row (#3246); returns a count"),
     (_ALERTS, "observe"): ("internal", "records a reading on a condition's row (#3246); returns an outcome"),
     (_ALERTS, "reconcile"): ("internal", "ends the rows whose condition cleared (#3246); returns a count"),
+    (_STALL, "_agents_with_pending_alerts"): (
+        "internal", "the agents whose stall row outlived its stalled head (#4257): the subject "
+                    "prefix and `agent_name` only, and a list of agent names is all that leaves"),
     (_PROMPT, "_resolve_ended_asks"): (
         "agent", "the agent's own ended asks for its prompt: reserved prefixes excluded in SQL"),
     (_PROMPT, "_resolve_pending_asks"): (

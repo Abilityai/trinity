@@ -11,7 +11,11 @@
     "rule": "Never regenerate to make a red run green: a difference is a create-mode behaviour change and needs its own issue. See the test module docstring.",
     "regenerated_by": [
       "trinity-enterprise#1022 agent_ownership.memory_opt_out",
-      "#4130 SystemDeployResponse.agents_declared_only"
+      "#4130 SystemDeployResponse.agents_declared_only",
+      "abilityai/trinity#4025 trinity_prompt written for an admin only",
+      "abilityai/trinity-enterprise#1108",
+      "abilityai/trinity-enterprise#1102",
+      "abilityai/trinity#4284"
     ]
   },
   "cases": {
@@ -184,7 +188,7 @@
               "memory_limit": null,
               "memory_opt_out": 0,
               "open_access": 0,
-              "operator_resume_enabled": 0,
+              "operator_resume_enabled": null,
               "owner_id": 1,
               "public_channel_model": null,
               "public_channel_system_prompt": null,
@@ -202,7 +206,8 @@
               "use_platform_api_key": 1,
               "voice_name": null,
               "voice_system_prompt": null,
-              "volume_base_name": null
+              "volume_base_name": null,
+              "wake_on_ending": null
             },
             {
               "a2a_exposed": 0,
@@ -233,7 +238,7 @@
               "memory_limit": null,
               "memory_opt_out": 0,
               "open_access": 0,
-              "operator_resume_enabled": 0,
+              "operator_resume_enabled": null,
               "owner_id": 1,
               "public_channel_model": null,
               "public_channel_system_prompt": null,
@@ -251,7 +256,8 @@
               "use_platform_api_key": 1,
               "voice_name": null,
               "voice_system_prompt": null,
-              "volume_base_name": null
+              "volume_base_name": null,
+              "wake_on_ending": null
             },
             {
               "a2a_exposed": 0,
@@ -282,7 +288,7 @@
               "memory_limit": null,
               "memory_opt_out": 0,
               "open_access": 0,
-              "operator_resume_enabled": 0,
+              "operator_resume_enabled": null,
               "owner_id": 1,
               "public_channel_model": null,
               "public_channel_system_prompt": null,
@@ -300,7 +306,8 @@
               "use_platform_api_key": 1,
               "voice_name": null,
               "voice_system_prompt": null,
-              "volume_base_name": null
+              "volume_base_name": null,
+              "wake_on_ending": null
             }
           ],
           "removed": []
@@ -631,7 +638,7 @@
               "memory_limit": null,
               "memory_opt_out": 0,
               "open_access": 0,
-              "operator_resume_enabled": 0,
+              "operator_resume_enabled": null,
               "owner_id": 1,
               "public_channel_model": null,
               "public_channel_system_prompt": null,
@@ -649,7 +656,8 @@
               "use_platform_api_key": 1,
               "voice_name": null,
               "voice_system_prompt": null,
-              "volume_base_name": null
+              "volume_base_name": null,
+              "wake_on_ending": null
             },
             {
               "a2a_exposed": 0,
@@ -680,7 +688,7 @@
               "memory_limit": null,
               "memory_opt_out": 0,
               "open_access": 0,
-              "operator_resume_enabled": 0,
+              "operator_resume_enabled": null,
               "owner_id": 1,
               "public_channel_model": null,
               "public_channel_system_prompt": null,
@@ -698,7 +706,8 @@
               "use_platform_api_key": 1,
               "voice_name": null,
               "voice_system_prompt": null,
-              "volume_base_name": null
+              "volume_base_name": null,
+              "wake_on_ending": null
             }
           ],
           "removed": []
@@ -794,7 +803,7 @@
     "failed": {
       "status_code": 500,
       "content_type": "application/json",
-      "body": "{\"status\":\"failed\",\"system_name\":\"doomed\",\"agents_created\":[],\"agents_to_create\":null,\"agents_declared_only\":[],\"prompt_updated\":false,\"permissions_configured\":0,\"schedules_created\":0,\"tags_configured\":0,\"system_view_created\":null,\"warnings\":[],\"failed\":[{\"name\":\"doomed-one\",\"short_name\":\"one\",\"template\":\"local:default\",\"reason\":\"git clone failed: https://***@git.example.com/org/agent.git\",\"status_code\":null},{\"name\":\"doomed-two\",\"short_name\":\"two\",\"template\":\"github:example-org/missing-repo\",\"reason\":\"Template repository not found\",\"status_code\":404},{\"name\":\"doomed-three\",\"short_name\":\"three\",\"template\":\"local:default\",\"reason\":\"quota exceeded: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"status_code\":null}],\"permission_edges\":null,\"schedules_preview\":null,\"system_view_requested\":false}",
+      "body": "{\"status\":\"failed\",\"system_name\":\"doomed\",\"agents_created\":[],\"agents_to_create\":null,\"agents_declared_only\":[],\"prompt_updated\":false,\"permissions_configured\":0,\"schedules_created\":0,\"tags_configured\":0,\"system_view_created\":null,\"warnings\":[],\"failed\":[{\"name\":\"doomed-one\",\"short_name\":\"one\",\"template\":\"local:default\",\"reason\":\"RuntimeError — details in backend logs\",\"status_code\":null},{\"name\":\"doomed-two\",\"short_name\":\"two\",\"template\":\"github:example-org/missing-repo\",\"reason\":\"Template repository not found\",\"status_code\":404},{\"name\":\"doomed-three\",\"short_name\":\"three\",\"template\":\"local:default\",\"reason\":\"quota exceeded: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\",\"status_code\":null}],\"permission_edges\":null,\"schedules_preview\":null,\"system_view_requested\":false}",
       "create_calls": [
         {
           "config": {
@@ -1009,7 +1018,7 @@
               "memory_limit": null,
               "memory_opt_out": 0,
               "open_access": 0,
-              "operator_resume_enabled": 0,
+              "operator_resume_enabled": null,
               "owner_id": 1,
               "public_channel_model": null,
               "public_channel_system_prompt": null,
@@ -1027,7 +1036,8 @@
               "use_platform_api_key": 1,
               "voice_name": null,
               "voice_system_prompt": null,
-              "volume_base_name": null
+              "volume_base_name": null,
+              "wake_on_ending": null
             }
           ],
           "removed": []
@@ -1045,7 +1055,7 @@
     "deployed_by_creator_over_foreign_name": {
       "status_code": 200,
       "content_type": "application/json",
-      "body": "{\"status\":\"deployed\",\"system_name\":\"gold\",\"agents_created\":[\"gold-lead_2\",\"gold-helper\",\"gold-watcher\"],\"agents_to_create\":null,\"agents_declared_only\":[],\"prompt_updated\":true,\"permissions_configured\":4,\"schedules_created\":2,\"tags_configured\":8,\"system_view_created\":\"<generated system_views.id: Gold System>\",\"warnings\":[\"Agent 'helper': ignored unknown key(s): credentials. Recognised per-agent keys are: folders, kind, resources, schedules, tags, template.\",\"Ignored unknown top-level key(s): trinity_prompt. Recognized keys are: agents, default_tags, description, name, permissions, prompt, system_view.\",\"Agent 'gold-lead' already exists, will create 'gold-lead_2'\"],\"failed\":[],\"permission_edges\":null,\"schedules_preview\":null,\"system_view_requested\":true}",
+      "body": "{\"status\":\"deployed\",\"system_name\":\"gold\",\"agents_created\":[\"gold-lead_2\",\"gold-helper\",\"gold-watcher\"],\"agents_to_create\":null,\"agents_declared_only\":[],\"prompt_updated\":false,\"permissions_configured\":4,\"schedules_created\":2,\"tags_configured\":8,\"system_view_created\":\"<generated system_views.id: Gold System>\",\"warnings\":[\"Agent 'helper': ignored unknown key(s): credentials. Recognised per-agent keys are: folders, kind, resources, schedules, tags, template.\",\"Ignored unknown top-level key(s): trinity_prompt. Recognized keys are: agents, default_tags, description, name, permissions, prompt, system_view.\",\"Agent 'gold-lead' already exists, will create 'gold-lead_2'\",\"prompt_requires_admin: this manifest's `prompt:` is not applied for this caller. It replaces the platform-wide prompt every agent receives, so only an admin may set it; the rest of the manifest is unaffected by this.\"],\"failed\":[],\"permission_edges\":null,\"schedules_preview\":null,\"system_view_requested\":true}",
       "create_calls": [
         {
           "config": {
@@ -1187,7 +1197,7 @@
               "memory_limit": null,
               "memory_opt_out": 0,
               "open_access": 0,
-              "operator_resume_enabled": 0,
+              "operator_resume_enabled": null,
               "owner_id": 2,
               "public_channel_model": null,
               "public_channel_system_prompt": null,
@@ -1205,7 +1215,8 @@
               "use_platform_api_key": 1,
               "voice_name": null,
               "voice_system_prompt": null,
-              "volume_base_name": null
+              "volume_base_name": null,
+              "wake_on_ending": null
             },
             {
               "a2a_exposed": 0,
@@ -1236,7 +1247,7 @@
               "memory_limit": null,
               "memory_opt_out": 0,
               "open_access": 0,
-              "operator_resume_enabled": 0,
+              "operator_resume_enabled": null,
               "owner_id": 2,
               "public_channel_model": null,
               "public_channel_system_prompt": null,
@@ -1254,7 +1265,8 @@
               "use_platform_api_key": 1,
               "voice_name": null,
               "voice_system_prompt": null,
-              "volume_base_name": null
+              "volume_base_name": null,
+              "wake_on_ending": null
             },
             {
               "a2a_exposed": 0,
@@ -1285,7 +1297,7 @@
               "memory_limit": null,
               "memory_opt_out": 0,
               "open_access": 0,
-              "operator_resume_enabled": 0,
+              "operator_resume_enabled": null,
               "owner_id": 2,
               "public_channel_model": null,
               "public_channel_system_prompt": null,
@@ -1303,7 +1315,8 @@
               "use_platform_api_key": 1,
               "voice_name": null,
               "voice_system_prompt": null,
-              "volume_base_name": null
+              "volume_base_name": null,
+              "wake_on_ending": null
             }
           ],
           "removed": []
@@ -1454,16 +1467,6 @@
               "agent_name": "gold-watcher",
               "created_at": "<timestamp>",
               "tag": "gold-team"
-            }
-          ],
-          "removed": []
-        },
-        "system_settings": {
-          "added": [
-            {
-              "key": "trinity_prompt",
-              "updated_at": "<timestamp>",
-              "value": "You are part of the gold system."
             }
           ],
           "removed": []
@@ -1954,7 +1957,7 @@
               "memory_limit": null,
               "memory_opt_out": 0,
               "open_access": 0,
-              "operator_resume_enabled": 0,
+              "operator_resume_enabled": null,
               "owner_id": 1,
               "public_channel_model": null,
               "public_channel_system_prompt": null,
@@ -1972,7 +1975,8 @@
               "use_platform_api_key": 1,
               "voice_name": null,
               "voice_system_prompt": null,
-              "volume_base_name": null
+              "volume_base_name": null,
+              "wake_on_ending": null
             },
             {
               "a2a_exposed": 0,
@@ -2003,7 +2007,7 @@
               "memory_limit": null,
               "memory_opt_out": 0,
               "open_access": 0,
-              "operator_resume_enabled": 0,
+              "operator_resume_enabled": null,
               "owner_id": 1,
               "public_channel_model": null,
               "public_channel_system_prompt": null,
@@ -2021,7 +2025,8 @@
               "use_platform_api_key": 1,
               "voice_name": null,
               "voice_system_prompt": null,
-              "volume_base_name": null
+              "volume_base_name": null,
+              "wake_on_ending": null
             },
             {
               "a2a_exposed": 0,
@@ -2052,7 +2057,7 @@
               "memory_limit": null,
               "memory_opt_out": 0,
               "open_access": 0,
-              "operator_resume_enabled": 0,
+              "operator_resume_enabled": null,
               "owner_id": 1,
               "public_channel_model": null,
               "public_channel_system_prompt": null,
@@ -2070,7 +2075,8 @@
               "use_platform_api_key": 1,
               "voice_name": null,
               "voice_system_prompt": null,
-              "volume_base_name": null
+              "volume_base_name": null,
+              "wake_on_ending": null
             }
           ],
           "removed": []

@@ -16,8 +16,34 @@ from services import file_path_policy as _policy
 from services.docker_service import execute_command_in_container, get_agent_container
 from services.docker_utils import container_reload
 from .helpers import agent_http_request
+from utils.log_masking import masked_text
 
 logger = logging.getLogger(__name__)
+
+
+def _agent_failure(response: httpx.Response, what: str, *, agent_detail: bool = False) -> HTTPException:
+    """The answer for an agent's non-200, at the agent's status.
+
+    An agent 5xx gets a fixed sentence and its body goes to the log: an agent
+    on an older base image answers its 500s with its exception text, and this
+    relay is the only thing between that text and the caller
+    (abilityai/trinity#4284). A 4xx is the agent's refusal (a missing file, a
+    path the policy refuses) and is relayed as before; ``agent_detail`` takes
+    its ``detail`` field rather than the whole body.
+    """
+    if response.status_code >= 500:
+        logger.warning("%s: the agent answered %s: %s", what, response.status_code,
+                       masked_text(response.text[:2000]))
+        return HTTPException(
+            status_code=response.status_code,
+            detail=f"{what} (the agent answered {response.status_code} — details in backend logs)",
+        )
+    if agent_detail:
+        return HTTPException(
+            status_code=response.status_code,
+            detail=response.json().get("detail", f"{what}: {response.text}"),
+        )
+    return HTTPException(status_code=response.status_code, detail=f"{what}: {response.text}")
 
 
 # trinity-enterprise#820: every path class and the tier x verb table live in ONE
@@ -615,10 +641,7 @@ async def list_agent_files_logic(
             data["hidden_withheld"] = hidden_withheld
             return data
         else:
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=f"Failed to list files: {response.text}"
-            )
+            raise _agent_failure(response, "Failed to list files")
     except httpx.ConnectError:
         # Agent server not ready - return 503 so tests can skip
         raise HTTPException(
@@ -630,7 +653,12 @@ async def list_agent_files_logic(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list files: {str(e)}")
+        # #4284: the #1917 pattern — class name out, full exception to the log.
+        logger.error("Failed to list files for agent %s", agent_name, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to list files ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 async def download_agent_file_logic(
@@ -678,10 +706,7 @@ async def download_agent_file_logic(
             return PlainTextResponse(content=response.text)
         else:
             await _raise_if_link_refusal(response, request, current_user, agent_name, path)
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=f"Failed to download file: {response.text}"
-            )
+            raise _agent_failure(response, "Failed to download file")
     except httpx.ConnectError:
         # Agent server not ready - return 503 so tests can skip
         raise HTTPException(
@@ -693,7 +718,12 @@ async def download_agent_file_logic(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to download file: {str(e)}")
+        # #4284: the #1917 pattern — class name out, full exception to the log.
+        logger.error("Failed to download file for agent %s", agent_name, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to download file ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 async def delete_agent_file_logic(
@@ -753,10 +783,7 @@ async def delete_agent_file_logic(
                                   unverified_image=not verified)
             return result
         else:
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=response.json().get("detail", f"Failed to delete: {response.text}")
-            )
+            raise _agent_failure(response, "Failed to delete", agent_detail=True)
     except httpx.ConnectError:
         # Agent server not ready - return 503 so tests can skip
         raise HTTPException(
@@ -768,7 +795,12 @@ async def delete_agent_file_logic(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete file: {str(e)}")
+        # #4284: the #1917 pattern — class name out, full exception to the log.
+        logger.error("Failed to delete file for agent %s", agent_name, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to delete file ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 async def preview_agent_file_logic(
@@ -813,10 +845,7 @@ async def preview_agent_file_logic(
         )
         if response.status_code != 200:
             await _raise_if_link_refusal(response, request, current_user, agent_name, path)
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=response.json().get("detail", f"Failed to preview: {response.text}")
-            )
+            raise _agent_failure(response, "Failed to preview", agent_detail=True)
 
         await _refuse_hardlinked_read(response, request, current_user, agent_name, path)
         content_type = response.headers.get("content-type", "application/octet-stream")
@@ -840,7 +869,12 @@ async def preview_agent_file_logic(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to preview file: {str(e)}")
+        # #4284: the #1917 pattern — class name out, full exception to the log.
+        logger.error("Failed to preview file for agent %s", agent_name, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to preview file ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 async def update_agent_file_logic(
@@ -910,10 +944,7 @@ async def update_agent_file_logic(
                                   unverified_image=not verified)
             return result
         else:
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=response.json().get("detail", f"Failed to update: {response.text}")
-            )
+            raise _agent_failure(response, "Failed to update", agent_detail=True)
     except httpx.ConnectError:
         # Agent server not ready - return 503 so tests can skip
         raise HTTPException(
@@ -925,7 +956,12 @@ async def update_agent_file_logic(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update file: {str(e)}")
+        # #4284: the #1917 pattern — class name out, full exception to the log.
+        logger.error("Failed to update file for agent %s", agent_name, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to update file ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 async def create_agent_folder_logic(
@@ -993,10 +1029,7 @@ async def create_agent_folder_logic(
                                   unverified_image=not verified)
             return result
         else:
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=response.json().get("detail", f"Failed to create folder: {response.text}")
-            )
+            raise _agent_failure(response, "Failed to create folder", agent_detail=True)
     except httpx.ConnectError:
         # Agent server not ready - return 503 so tests can skip
         raise HTTPException(
@@ -1008,4 +1041,9 @@ async def create_agent_folder_logic(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to create folder: {str(e)}")
+        # #4284: the #1917 pattern — class name out, full exception to the log.
+        logger.error("Failed to create folder for agent %s", agent_name, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create folder ({e.__class__.__name__} — details in backend logs)",
+        )

@@ -24,7 +24,7 @@ Install Trinity, log in as the admin, and meet the starter fleet a fresh install
 - At least 8 GB of RAM
 - A modern web browser
 
-**Database.** A local install runs on SQLite, which reached end-of-support on 2026-09-01: it still works, but PostgreSQL is now the supported backend. A fresh server or one-click install (`start.sh --hosted`) starts on a bundled PostgreSQL automatically; an existing SQLite install stays on SQLite until you migrate. See [Backup and Restore](../guides/deploying/backup-and-restore.md) and the [SQLite → PostgreSQL guide](../../migrations/SQLITE_TO_POSTGRES.md).
+**Database.** A local install runs on a bundled PostgreSQL container, and `./scripts/deploy/start.sh` generates its password. SQLite reached end-of-support on 2026-09-01, and an existing `trinity.db` is refused at start until it moves: see `docs/migrations/SQLITE_TO_POSTGRES.md`.
 
 ### Installation
 
@@ -118,7 +118,7 @@ Seeded agents appear on the Dashboard as soon as they exist; closing first-run s
 |---------|-----|
 | Web UI | http://localhost |
 | Backend API docs | http://localhost:8000/docs |
-| MCP Server | http://localhost:8080/mcp (on a server install also `https://trinity.your-domain.com/mcp`) |
+| MCP Server | http://localhost:8080/mcp (on a server install also `https://trinity.your-domain.com/mcp`). Clients outside the Trinity server — Claude Code on your laptop included — need **External MCP access** turned on once under Settings → MCP Keys; a fresh install starts with it off. See [MCP Server](../integrations/mcp-server.md#external-mcp-access) |
 
 ### Stopping and Starting
 
@@ -205,7 +205,7 @@ Both calls take a signed-in browser session; no MCP key can change a sign-in ide
 - Email login requires a configured email service. Without one, codes are written to the backend log and the login page says so; admin password login always works.
 - Trinity requires Docker. It cannot run without it.
 - Seeding Cornelius needs outbound access to GitHub at first boot; a failed pass is retried on the next start.
-- SQLite is past its end-of-support date (2026-09-01) and PostgreSQL is the supported backend. A local install still defaults to SQLite, so plan a move to PostgreSQL for any instance you keep.
+- PostgreSQL is the database backend. See [Single-Server Deployment → Database backend](../guides/deploying/single-server.md#database-backend).
 
 ## See Also
 

@@ -46,6 +46,7 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, 
 from database import db
 from db.operator_queue import OUTCOME_UNKNOWN
 from services import operator_resume_service
+from services import wake_policy
 from services.operator_queue_choices import (
     SOMETHING_ELSE,
     NotOffMenuError,
@@ -939,7 +940,7 @@ def raise_ask(
     pre = _named_addressees(addressees, to_role_override, raised_by, named)
     if raised_by != "gate" and (attach_chat is not True or platform_context is not None):
         raise ValueError("raise_ask: only a gate raise may skip the chat or attach platform context")
-    norm = _validated_ask(ask, oqs, raised_by=raised_by)
+    norm = _validated_ask(ask, oqs, raised_by=raised_by, agent_name=agent_name)
     existing = db.get_operator_queue_item_for_agent_by_request_id(agent_name, norm["request_id"])
     if existing:
         return _replay(existing, norm, oqs, raised_by)
@@ -1018,7 +1019,7 @@ def raise_ask(
         supersedes_expired=predecessor["id"] if predecessor else None,
         # #3130: the cap counts the agent's own asks, never the platform's rows
         # about it (its flood alarm above all).
-        exclude_request_id_prefixes=oqs._RESERVED_ID_PREFIXES,
+        exclude_request_id_prefixes=oqs.reserved_id_prefixes(),
         replaces=target["id"] if target else None,
         # T8 (#3247): an AGENT's approval with a non-empty proposal only. A
         # question or an alert is never guarded; a missing or empty proposal is
@@ -1082,6 +1083,7 @@ def raise_ask(
             "type": norm["type"],
             "to_role": to_role,
             **({"replaces": replaced["id"]} if replaced else {}),
+            **_acted_by(actor_user),
         },
     }]
     trigger = _broadcast_payload({"type": "operator_queue_new",
@@ -1108,6 +1110,7 @@ def raise_ask(
                 "agent_name": agent_name,
                 "request_id": replaced["request_id"],
                 "replaced_by": row["id"],
+                **_acted_by(actor_user),
             },
         }]
         ending_trigger = _broadcast_payload({"type": "operator_queue_cancelled",
@@ -1167,7 +1170,8 @@ def _too_large(field: str, limit: int, unit: str) -> AskRejected:
                        field=field, limit=limit, unit=unit)
 
 
-def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]:
+def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent",
+                   agent_name: str = "") -> Dict[str, Any]:
     """The static half of validation — nothing here depends on the clock or
     the database, so a replay is checked right after it.
 
@@ -1192,7 +1196,7 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]
             raise AskRejected(
                 422, "invalid_request_id",
                 f"A gate raise's request_id must start with {oqs.GATE_ASK_ID_PREFIX!r}.")
-    elif lowered.startswith(oqs._RESERVED_ID_PREFIXES):
+    elif lowered.startswith(oqs.reserved_id_prefixes()):
         raise AskRejected(422, "reserved_request_id",
                           "That request_id prefix is reserved for the platform's own alerts and asks.")
     kind = ask.get("type") or "question"
@@ -1247,7 +1251,7 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]
     if not isinstance(context, Mapping):
         raise AskRejected(422, "invalid_context", "context must be an object.")
     if kind == "credential":
-        from services import credential_ask_policy
+        from services import credential_ask_policy, credential_destination
         problem = credential_ask_policy.credential_name_problem(context.get("credential_name"))
         if problem is not None:
             raise AskRejected(
@@ -1257,6 +1261,20 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent") -> Dict[str, Any]
                 f"{credential_ask_policy.CREDENTIAL_NAME_MAX} characters that the platform "
                 "and the agent runtime do not reserve.",
                 reason=problem)
+        if credential_destination.CONTEXT_KEY in context:
+            # trinity-enterprise#1109: where the value lands when that is not
+            # this agent — validated here, by name (shape, the outbound A2A
+            # switch, the admin's endpoint registry for THIS agent; no
+            # resolver call on the loop), and stored normalised.
+            try:
+                stored = credential_destination.validate(
+                    context[credential_destination.CONTEXT_KEY], agent_name=agent_name)
+            except credential_destination.DestinationProblem as exc:
+                raise AskRejected(422, exc.code, exc.message, reason=exc.reason) from None
+            context = {**context, credential_destination.CONTEXT_KEY: stored}
+    elif isinstance(context, Mapping) and "credential_destination" in context:
+        raise AskRejected(422, "destination_on_non_credential",
+                          "Only a credential ask carries a destination.")
     # The workspace thread is platform-written: an agent that could author it
     # would choose which conversation its ask claims to belong to (ent#429), and
     # whether it is drawn in that chat at all (ent#734).
@@ -1531,6 +1549,7 @@ def withdraw(agent_name: str, request_id: str, reason: Any, *,
             "agent_name": agent_name,
             "request_id": row["request_id"],
             "has_reason": True,
+            **_acted_by(actor_user),
         },
     }]
     trigger = _broadcast_payload({"type": "operator_queue_cancelled",
@@ -1726,13 +1745,28 @@ def _receipt(
         "replaces": replaces_request_id,
         "replaced_by": request_id_of(row.get("replaced_by")),
         "disposed_by": row.get("disposed_by"),
+        # abilityai/trinity-enterprise#1108 AC #4: `pending` = the answer landed
+        # but the agent was not running ("agent not yet woken" — its next start
+        # delivers it); `woken` = a turn carried it; None = no wake owed yet.
+        "wake_state": row.get("wake_state"),
         # trinity-enterprise#901: which ending the agent authored, if any —
         # derived here, once, never inferred client-side from `replaced_by`.
         "agent_ending": agent_ending_kind(row),
+        # trinity-enterprise#1109: where a credential lands when that is not
+        # this agent — the agent and the host, never the key's variable name.
+        "credential_destination": _destination_view(row),
     }
     if differs is not None:
         receipt["differs"] = differs
     return receipt
+
+
+def _destination_view(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    if row.get("type") != "credential":
+        return None
+    from services import credential_destination
+    return credential_destination.public_view(
+        credential_destination.destination_of(row.get("context")))
 
 
 # ---------------------------------------------------------------------------
@@ -1756,6 +1790,18 @@ def _conflict_code(row: Dict[str, Any]) -> str:
     """Why an answer's compare-and-set lost. Still `pending` means the deadline
     refused it (the respond predicate's only other clause)."""
     return "expired" if row.get("status") == "pending" else "not_pending"
+
+
+def _acted_by(actor_user: Any) -> Dict[str, Any]:
+    """`{"acted_by": "user:<id>"}` when an admin's user key acted on behalf of
+    the agent (trinity-enterprise#1024), else nothing — so the agent's own rows
+    keep exactly their shape, and an admin acting as an agent never reads as the
+    agent. An id, never text (the audit-row rule above)."""
+    from dependencies import act_as_agent_of
+
+    if actor_user is not None and act_as_agent_of(actor_user):
+        return {"acted_by": f"user:{actor_user.id}"}
+    return {}
 
 
 def _actor_fields(actor: Actor) -> Dict[str, Any]:
@@ -1817,7 +1863,8 @@ def _ended(
 
 
 def _opted_in(agent_name: str) -> bool:
-    """Has this agent's owner opted in to being woken by its asks' endings?
+    """Does this agent wake when its asks end? On unless its owner switched it
+    off (abilityai/trinity-enterprise#1108).
 
     Read ONCE per agent per event, before anything is scheduled, so an agent
     that has not opted in costs one flag read and nothing else (ent#329). The
@@ -1826,7 +1873,7 @@ def _opted_in(agent_name: str) -> bool:
     Unreadable ⇒ not opted in: never "spend" on a flag nobody could read.
     """
     try:
-        return bool(db.get_operator_resume_enabled(agent_name))
+        return bool(wake_policy.resolve(agent_name).enabled)
     except Exception:  # noqa: BLE001
         logger.warning("[AskService] resume opt-in unreadable for %s; not waking it",
                        agent_name, exc_info=True)
@@ -1837,8 +1884,9 @@ def _wake_filer(event: EndingEvent) -> None:
     """The default observer — wake the agent that raised the ask (ent#329).
 
     An answer keeps its ent#329 resume, one per ask, framed with the answer. A
-    cancel or an expiry wakes the agent through `spawn_ending_dispatch`, one
-    dispatch per agent per event. Only agents whose owner opted in are woken.
+    cancel or a dismissal wakes the agent through `spawn_ending_dispatch`, one
+    dispatch per agent per event; an expiry wakes nobody (ent#1108 ruling).
+    Only agents whose owner has not switched the wake off are woken.
     A platform-minted row opened no loop for the agent to resume and carries text
     withheld from it by design (ent#499), so an answer to one never dispatches;
     the ending wake applies the same rule itself. An ending the agent authored
@@ -1864,6 +1912,14 @@ def _wake_filer(event: EndingEvent) -> None:
                 response_text=row.get("response_text"),
                 responded_by_email=event.actor_email,
             )
+        return
+    # abilityai/trinity-enterprise#1108 (merge-train ruling): an expiry wakes
+    # nobody. The wake is on by default now, and the sweep spending an owner's
+    # turn by default — for a timeout nobody chose — is out; the issue names
+    # answers and cancellations. The expired row is still committed, announced
+    # and read on the agent's next turn (the readback, the Execution Context
+    # line, `get_my_ask`), and the rider reaches it there.
+    if event.disposition == EXPIRED:
         return
     # #3247: an ending the agent authored itself (it replaced the ask) wakes
     # nobody — the agent holds the receipt in the same turn (ent#329's spend

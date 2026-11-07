@@ -25,7 +25,7 @@ Set the ElevenLabs key under **Settings → General → Voice (ElevenLabs)** (st
 
 1. Open the agent's **Settings** tab and pick **Channels** in the rail → **Voice replies** (under *How it speaks outside*).
 2. Turn **voice replies on** and pick a **voice** — or rely on the platform default voice. Enabling with neither an agent voice nor a platform default is rejected.
-3. Set the **per-channel allow flags** in each channel's own panel on the **Sharing** tab (Telegram, Slack, WhatsApp). Each channel is independent; leave a channel off to keep it text-only.
+3. Set the **per-channel allow flags** in each channel's own panel on the **Channels** tab (Telegram, Slack, WhatsApp). Each channel is independent; leave a channel off to keep it text-only.
 
 ### 3. Agent — opt a reply into voice
 

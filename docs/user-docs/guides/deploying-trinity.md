@@ -88,6 +88,8 @@ Then connect:
 # API Key: (your MCP API key from Settings → MCP Keys)
 ```
 
+On a fresh install, turn on **External MCP access** under Settings → MCP Keys first: until an admin does, every client outside the Trinity server — Claude Code on the same machine included — is refused with `external_mcp_access_off`. See [MCP Server](../integrations/mcp-server.md#external-mcp-access).
+
 Alternatively, for email-verified login: when prompted, enter your email and follow the verification code flow.
 
 ### Step 6: Deploy your first agent
@@ -141,7 +143,7 @@ It installs Docker, Caddy with a certificate for the instance's IP, and the host
 |---------|-----|-----|
 | Web UI | http://localhost | `https://trinity.your-domain.com` |
 | Backend API docs | http://localhost:8000/docs | `http://your-server:8000/docs` |
-| MCP Server | http://localhost:8080/mcp | `https://trinity.your-domain.com/mcp` — the production frontend proxies `/mcp` to the MCP server, so an install that exposes only 80/443 still serves MCP (port 8080 also works where it is reachable) |
+| MCP Server | http://localhost:8080/mcp | `https://trinity.your-domain.com/mcp` — the production frontend proxies `/mcp` to the MCP server, so an install that exposes only 80/443 still serves MCP (port 8080 also works where it is reachable; a fresh install publishes it on `127.0.0.1` only). Outside clients need External MCP access on (Settings → MCP Keys) |
 
 ## Managing Services (Self-Hosted)
 

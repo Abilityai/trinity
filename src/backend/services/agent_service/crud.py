@@ -52,11 +52,14 @@ from services import git_service
 from services.settings_service import get_anthropic_api_key, resolve_github_pat, resolve_github_pat_candidates, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email, get_ephemeral_agent_quota, get_ephemeral_ttl_ceiling_seconds
 from services.entitlement_service import entitlement_service
 from services import rate_limiter
+from services import template_source_policy
 from . import ephemeral as ephemeral_service
-from services.github_service import GitHubService, GitHubError
+from services.github_service import GitHubService, GitHubError, github_error_words
 from services.agent_auth import derive_agent_token
 from utils.helpers import parse_iso_timestamp, sanitize_agent_name, to_utc_iso, utc_now_iso
 from utils.safe_yaml import HardenedYamlError, load_template_yaml
+from utils import avatar_paths
+from utils.log_masking import masked_traceback
 from .fork_to_own import (
     SAVED_TOKEN_TIERS, fork_pat_required, fork_template_to_own_repo, saved_token_message,
     saved_token_needs_a_session,
@@ -79,7 +82,7 @@ logger = logging.getLogger(__name__)
 # block path traversal (`..`, `/`, `\`, leading dots) so the templates
 # directory join in `create_agent_internal` can't escape into arbitrary
 # filesystem reads (CodeQL py/path-injection on #950 PR).
-_LOCAL_TEMPLATE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
+_LOCAL_TEMPLATE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*\Z")
 
 # Allowed chars in a template-declared credential-file path. Unlike
 # `_LOCAL_TEMPLATE_NAME_RE` this is a *relative path*, so `/` is permitted —
@@ -268,6 +271,52 @@ def _safe_cred_file_path(relative_path: str, root: Path) -> Path:
             },
         )
     return candidate
+
+
+#: Where `_stage_config_files` writes an agent's config, its credentials file
+#: and its template-generated credential files before they are bind-mounted.
+#: Read at call time, so a test can point it at a temporary directory.
+_STAGING_ROOT = "/tmp"
+
+
+def _staging_path(filename: str) -> Path:
+    """`_STAGING_ROOT/<filename>`, proven to stay inside the staging root.
+
+    Every staging file name embeds the agent name, which is caller input and is
+    only sanitized when the caller does not pass `skip_name_sanitization`. The
+    barrier is the shape CodeQL's `py/path-injection` query recognises: the base
+    is normalised and given a trailing separator (so a sibling sharing its
+    prefix is outside it), the joined path is normalised and must start with it.
+    A NUL byte survives both, so it is refused by name.
+
+    A staging name is one path component (`agent-<name>` plus a separator-free
+    suffix), so a separator in it is refused too: `agent-x/../agent-victim-creds`
+    normalises to agent `victim`'s own staging directory, which is inside the
+    root, so containment alone would let one agent's name overwrite another's
+    files. No legitimate agent name carries one: `sanitize_agent_name` maps it
+    away, and Docker refuses it in the `agent-<name>` container name.
+
+    Raises `HTTPException(400)` with code `INVALID_AGENT_NAME`.
+    """
+    refusal = HTTPException(
+        status_code=400,
+        detail={
+            "error": (
+                "The agent name is not a plain name: it must be a single path "
+                "component, with no path separator or NUL byte."
+            ),
+            "code": "INVALID_AGENT_NAME",
+        },
+    )
+    if "\x00" in filename:
+        raise refusal
+    if os.sep in filename or (os.altsep and os.altsep in filename):
+        raise refusal
+    base = os.path.join(os.path.normpath(str(_STAGING_ROOT)), "")
+    fullpath = os.path.normpath(os.path.join(base, filename))
+    if not fullpath.startswith(base):
+        raise refusal
+    return Path(fullpath)
 
 
 def _fork_destination_in_use_message(destination: str, bound_agent: str, username: str) -> str:
@@ -1357,12 +1406,18 @@ async def _validate_github_access(
                         ),
                     )
                 if outcome != "ok":
+                    logger.warning(
+                        "GitHub repository access check failed for %s (git "
+                        "transport: %s): %s", github_repo_for_agent, outcome,
+                        masked_traceback(e, github_pat_for_agent),
+                    )
                     raise HTTPException(
                         status_code=502,
                         detail=(
-                            f"Failed to validate GitHub repository access: {e} "
-                            f"(the git transport could not confirm read access "
-                            f"to '{github_repo_for_agent}' either)."
+                            f"Failed to validate GitHub repository access "
+                            f"({github_error_words(type(e), getattr(e, 'status', None))}); "
+                            f"the git transport could not confirm read access to "
+                            f"'{github_repo_for_agent}' either."
                         ),
                     )
                 logger.info(
@@ -1410,9 +1465,18 @@ async def _validate_github_access(
     except HTTPException:
         raise
     except GitHubError as e:
+        # abilityai/trinity#4284: a network error's text is httpx's, which
+        # echoes a header-unsafe token. The log keeps it, masked.
+        logger.warning(
+            "GitHub repository access check failed for %s: %s",
+            github_repo_for_agent, masked_traceback(e, github_pat_for_agent),
+        )
         raise HTTPException(
             status_code=502,
-            detail=f"Failed to validate GitHub repository access: {e}"
+            detail=(
+                f"Failed to validate GitHub repository access "
+                f"({github_error_words(type(e), getattr(e, 'status', None))})"
+            ),
         )
     except Exception as e:
         # Log but don't block creation for transient network errors
@@ -2021,7 +2085,10 @@ def _stage_config_files(
                 },
             )
 
-    cred_files_dir = Path(f"/tmp/agent-{config.name}-creds")
+    # All three are proven inside the staging root before the first write.
+    cred_files_dir = _staging_path(f"agent-{config.name}-creds")
+    config_path = _staging_path(f"agent-{config.name}.yaml")
+    credentials_path = _staging_path(f"agent-{config.name}-credentials.json")
     cred_files_dir.mkdir(exist_ok=True)
 
     # Write template-generated files (.env, .mcp.json, etc.)
@@ -2042,11 +2109,9 @@ def _stage_config_files(
         }
     }
 
-    config_path = Path(f"/tmp/agent-{config.name}.yaml")
     with open(config_path, "w") as f:
         yaml.dump(agent_config, f)
 
-    credentials_path = Path(f"/tmp/agent-{config.name}-credentials.json")
     with open(credentials_path, "w") as f:
         json.dump({}, f)  # CRED-002: Empty credentials, injected after creation
 
@@ -2641,7 +2706,6 @@ async def _broadcast_agent_created(agent_status: AgentStatus, ws_manager) -> Non
 
 _BUNDLED_AVATAR_NAMES = ("avatar.webp", "avatar.png")
 _BUNDLED_AVATAR_MAX_BYTES = 2 * 1024 * 1024
-_AVATAR_DIR = Path("/data/avatars")  # routers/avatar.py AVATAR_DIR
 
 
 def _install_bundled_avatar(config: AgentConfig) -> None:
@@ -2657,13 +2721,13 @@ def _install_bundled_avatar(config: AgentConfig) -> None:
         return
     # Both paths come from request fields. `_resolve_local_template_dir` and
     # agent-name validation already contain them, but CodeQL's
-    # `py/path-injection` can't follow those callees — so each final path is
-    # normalized and prefix-checked right here (the `routers/avatar.py
-    # _avatar_path` barrier), as plain strings with no Path rebuild after it.
+    # `py/path-injection` can't follow those callees — so the destination goes
+    # through the avatar store's own barrier (`utils.avatar_paths`), and the
+    # source is normalized and prefix-checked right here, as a plain string
+    # with no Path rebuild after it.
     template_roots = tuple(os.path.join(str(r.resolve()), "") for r in _LOCAL_TEMPLATE_ROOTS)
-    avatar_root = os.path.join(str(_AVATAR_DIR), "")
-    dest = os.path.normpath(os.path.join(avatar_root, f"{config.name}.webp"))
-    if not dest.startswith(avatar_root):
+    dest = avatar_paths.avatar_path_or_none(config.name, ".webp")
+    if dest is None:
         return
     template_dir = str(_resolve_local_template_dir(config.template[6:]))
     for filename in _BUNDLED_AVATAR_NAMES:
@@ -2681,7 +2745,7 @@ def _install_bundled_avatar(config: AgentConfig) -> None:
         with Image.open(io.BytesIO(data)) as img:
             if img.width * img.height > 4096 * 4096:
                 raise ValueError(f"bundled avatar is {img.width}x{img.height}, max 4096x4096")
-        os.makedirs(avatar_root, exist_ok=True)
+        avatar_paths.ensure_avatar_store()
         with open(dest, "wb") as f:
             f.write(optimize_avatar(data))
         logger.info(f"[AVATAR-003] Installed bundled avatar from {config.template} for {config.name}")
@@ -3668,6 +3732,11 @@ async def create_agent_internal(
 
     if not config.name:
         raise HTTPException(status_code=400, detail="Invalid agent name - must contain at least one alphanumeric character")
+
+    # trinity-enterprise#591: the template-source bound — the choke point every
+    # creation path shares (fork, copy, clone, system-deploy members). Before the
+    # ghost pre-gates, which spend a per-parent spawn-rate token.
+    await template_source_policy.enforce(request, current_user, config)
 
     # trinity-enterprise#69: ephemeral "ghost" pre-gates. All BEFORE any side
     # effect (no partial state on refusal). Mutates config.name to the suffixed

@@ -148,11 +148,11 @@ Retention windows are configurable per data type — execution logs and rows, he
 
 ## Should I use SQLite or PostgreSQL?
 
-PostgreSQL. SQLite reached end-of-support on September 1, 2026: it no longer receives schema migrations or fixes, and it stays the zero-config default only for local development. A fresh hosted install (`start.sh --hosted`, and every one-click image) starts on the PostgreSQL container bundled in the hosted compose file with nothing to configure. A source-built production install points `DATABASE_URL` at a PostgreSQL server you operate (`DATABASE_URL=postgresql://trinity:your-postgres-password@your-db-host:5432/trinity`), and the dev compose bundles one behind `--profile postgres`. Migrating an existing instance's data is a deliberate cutover — the Trinity Ops Agent has a dedicated migration skill for it, and a full guide ships in the repo under `docs/migrations/`. See [Single-Server Deployment → Database backend](../guides/deploying/single-server.md#database-backend).
+PostgreSQL. SQLite reached end-of-support on September 1, 2026. Every compose file runs a bundled PostgreSQL container with nothing to configure, and the Trinity images refuse to boot on SQLite. To use a server you operate, set `DATABASE_URL=postgresql://trinity:your-postgres-password@your-db-host:5432/trinity`. Moving existing data takes one command: see `docs/migrations/SQLITE_TO_POSTGRES.md` and [Single-Server Deployment → Database backend](../guides/deploying/single-server.md#database-backend).
 
-## I upgraded my hosted install — did it move me to PostgreSQL?
+## I upgraded and Trinity refuses to start. Why?
 
-No. When `start.sh --hosted` finds an existing `trinity.db`, it writes an empty `DATABASE_URL=` to `.env`, so the install stays on SQLite and never boots an empty PostgreSQL beside your data. It still generates `POSTGRES_PASSWORD` and starts an idle `trinity-postgres` container, because the hosted compose file needs both. Every run then prints a warning that SQLite reached end-of-support, with a pointer to the migration guide. Moving is a separate step you choose: the Ops Agent's `/migrate-to-postgres` skill, or `docs/migrations/SQLITE_TO_POSTGRES.md`. See [Upgrading](../guides/deploying/upgrading.md).
+Your install has data in `trinity.db`, and Trinity will not come up on an empty PostgreSQL beside it. Run the copy command in `docs/migrations/SQLITE_TO_POSTGRES.md`, then start the stack. To stay on SQLite for this release only, set both `DATABASE_URL=` (empty) and `TRINITY_ALLOW_SQLITE=1` in `.env`. See [Upgrading](../guides/deploying/upgrading.md).
 
 ## Can I roll a hosted install on the bundled PostgreSQL back to an older release?
 
@@ -176,7 +176,7 @@ No — and by default none of it is. Public exposure is only required for inboun
 
 ## Can MCP clients connect if only ports 80 and 443 are open?
 
-Yes. The production frontend proxies `/mcp` to the MCP server, so an install that exposes only 80/443 — a tunnel, a reverse proxy, the DigitalOcean 1-Click — serves MCP at the same hostname as the web UI: point Claude Code at `https://trinity.your-domain.com/mcp` with an MCP API key from Settings → MCP Keys (port 8080 also works wherever it is reachable). **Settings → MCP Keys → MCP Server URL** sets the URL the UI shows to users; leave it empty to derive it from the hostname — `https://<host>/mcp` when the proxy reports HTTPS, `http://<host>:8080/mcp` otherwise. The dev Vite server does not proxy `/mcp` — locally the endpoint is `http://localhost:8080/mcp`. See [Single-Server Deployment → Connect from Claude Code](../guides/deploying/single-server.md#connect-from-claude-code).
+Yes. The production frontend proxies `/mcp` to the MCP server, so an install that exposes only 80/443 — a tunnel, a reverse proxy, the DigitalOcean 1-Click — serves MCP at the same hostname as the web UI: point Claude Code at `https://trinity.your-domain.com/mcp` with an MCP API key from Settings → MCP Keys, once an admin has turned on **External MCP access** on that page (a fresh install starts with it off; an upgraded install kept it on). Port 8080 also works wherever it is reachable — a fresh install publishes it on `127.0.0.1` only (`MCP_BIND_ADDRESS`). **Settings → MCP Keys → MCP Server URL** sets the URL the UI shows to users; leave it empty to derive it from the request — `<origin>/mcp` through a proxy that sends `X-Forwarded-Proto`, the raw `:8080` port otherwise. The dev Vite server does not proxy `/mcp` — locally the endpoint is `http://localhost:8080/mcp`. See [Single-Server Deployment → Connect from Claude Code](../guides/deploying/single-server.md#connect-from-claude-code).
 
 ## Why does my webhook URL show http:// instead of https://?
 

@@ -1,0 +1,79 @@
+{
+  "version": "1.2.3",
+  "date": "2026-11-06",
+  "mode": "diff",
+  "gate": 8,
+  "scope": "feature/591-template-source-bound vs origin/dev 8b59fdbb1 (trinity-enterprise#591)",
+  "phases_run": [
+    0,
+    1,
+    2,
+    7,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14
+  ],
+  "stack_cve_quicklist": [],
+  "attack_surface": {
+    "new_routes": [
+      "GET /api/settings/agent-creation-allowlist",
+      "PUT /api/settings/agent-creation-allowlist"
+    ],
+    "changed_routes": [
+      "POST /api/agents",
+      "POST /api/agents/deploy-local",
+      "POST /api/systems/deploy",
+      "GET /api/templates",
+      "PUT/DELETE /api/settings/{key}"
+    ],
+    "websocket": 0,
+    "mcp_tools_added": 0,
+    "webhooks": 0
+  },
+  "findings": [],
+  "hypotheses": [
+    {
+      "title": "A repo entry, pinned or not, is only as strong as who can push to it (a pin is a name)",
+      "category": "agentic-supply-chain",
+      "asi": "ASI04",
+      "status": "stated limit"
+    },
+    {
+      "title": "The bound is create-time, not containment",
+      "category": "agentic-privilege",
+      "asi": "ASI03",
+      "status": "stated limit"
+    },
+    {
+      "title": "trinity-system is unbounded",
+      "category": "agentic-privilege",
+      "asi": "ASI03",
+      "status": "ruled"
+    }
+  ],
+  "coverage_gaps": [
+    "image-internal Docker pass (diff mode; stack not rebuilt by operator request)",
+    "test_2996_route_census_runtime + test_ent873 need `import main` (host venv lacks opentelemetry.exporter); covered by /verify-local",
+    "phases 3, 4, 5, 6, 8 skipped: no diff overlap",
+    "no live PostgreSQL"
+  ],
+  "supply_chain_summary": {
+    "scanner": "none (no dependency changes in the diff)",
+    "changed_manifests": []
+  },
+  "filter_stats": {
+    "candidates": 0,
+    "reported": 0
+  },
+  "totals": {
+    "critical": 0,
+    "high": 0,
+    "medium": 0,
+    "low": 0,
+    "supported": 0
+  },
+  "trend": "diff run; not compared"
+}

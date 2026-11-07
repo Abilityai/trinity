@@ -196,7 +196,7 @@ any of those 401s -> PublicChat.vue endPublicSession()
 
 | File | Line | Description |
 |------|------|-------------|
-| `src/frontend/src/components/SharingPanel.vue` | 82-83 | Embeds PublicLinksPanel within Sharing tab |
+| `src/frontend/src/components/SharingPanel.vue` | 82-83 | Embeds PublicLinksPanel within Channels tab |
 | `src/frontend/src/components/SharingPanel.vue` | 92 | Import statement for PublicLinksPanel |
 | `src/frontend/src/components/PublicLinksPanel.vue` | 1-503 | Owner management panel |
 | `src/frontend/src/views/PublicChat.vue` | 1-786 | Public chat interface (PUB-003 intro, PUB-004 header metadata, PUB-005 session persistence, PUB-006 bottom-aligned messages, THINK-001 dynamic status) |
@@ -1715,7 +1715,7 @@ let streamReader = null                    // SSE reader reference
 ## Per-User Persistent Memory (MEM-001)
 
 **Status**: Implemented 2026-03-19 (#147). Split storage + channel injection: 2026-05-18 (#895).
-**Issues**: #147 (initial), #888 (`write_user_memory` MCP tool), #895 (split storage + channel injection), trinity-enterprise#637 (write history + undo), trinity-enterprise#419 (anti-poisoning gates: the write-boundary screen, the trust envelope, one-to-one channel writes)
+**Issues**: #147 (initial), #888 (`write_user_memory` MCP tool), #895 (split storage + channel injection), trinity-enterprise#637 (write history + undo), trinity-enterprise#419 (anti-poisoning gates: the write-boundary screen, the trust envelope, one-to-one channel writes), trinity-enterprise#962 (the owner's view, summary history, per-section undo)
 
 When a public link requires email verification, the agent accumulates a persistent memory of facts about each verified user. This memory is injected into the system prompt on every request so the agent can personalize responses across sessions.
 
@@ -1901,6 +1901,77 @@ Wired into the same step in `_handle_message_inner` (`src/backend/adapters/messa
 | `src/backend/adapters/message_router.py` | Memory injection + counter + summarizer trigger on the channel-adapter path (#895) |
 
 ---
+
+### Owner view, summary history and per-section undo (trinity-enterprise#962)
+
+The agent's owner (or an admin) reads any person's memory on the agent — the case ent#637's
+Workspace view cannot reach: public-link visitors and channel users with no Workspace roster.
+
+**Readers** — the ent#638 seat-decision rule. `routers/person_memory.py`, four routes, each
+`OwnedAgentByName` (owner-or-admin via `can_user_share_agent`, the uniform 404 otherwise) with
+`dependencies=[Depends(require_person)]` (agent / system / connector keys refused 403 on the
+principal, before any lookup of the agent). A shared user and any assignment kind gain nothing.
+
+| Method | Path | Answer |
+|--------|------|--------|
+| GET | `/api/agents/{name}/person-memory?offset&limit` | `PersonMemoryPeople` — the union below, newest change first |
+| GET | `…/person-memory/person?user_email=` | `PersonMemoryDetail` — notes, summary, ent#737 identity, first history page; 404 `person_not_found` |
+| GET | `…/person-memory/writes?user_email=&before=` | `PersonMemoryHistory` — a page, both sections; 422 `invalid_cursor` |
+| POST | `…/person-memory/writes/{write_id}/undo` `{user_email}` | `PersonMemoryUndoResult`; 409 `not_latest` / `already_undone`, 404 `not_found`; audit `person_memory_undo` |
+
+**Who is listed** — `db/public_links.py::list_user_memory_people`: one grouped `UNION ALL` over
+history rows, live person-scope facts (`agent_memory_facts.user_email != ''`) and non-empty
+memory blobs with no history (a pre-#962 summary). "Last change" is the newest write or fact;
+the memory row's `updated_at`, bumped on every message, counts only for a row with no history.
+Sections present and counts are read for the page's slice only (`IN`). The service
+(`services/person_memory_service.py::list_people`) marks the current owner's row
+`agent_scope` (their turns feed the MEM-002 agent scope, so `fact_count = None`) and joins the
+channel identity an access request captured (`requester_name` / `requester_handle` /
+`channel`), as the channel reported it.
+
+**Summary history** — `update_user_memory_conversation_summary(…, expected_previous=)`, the
+summarizer's one writer: under the row lock it compares the stored summary with the one the
+summarizer read before its ~30 s model call; a mismatch (an undo landed meanwhile) drops the
+write and returns `False`. An unchanged summary writes nothing; a change writes the blob and a
+`section='summary'`, `triggered_by='summarizer'` history row in one transaction.
+`platform_prompt_service.summarize_user_memory_background` passes `expected_previous`. Stated
+limit: the summarizer rebuilds from the latest 20 messages every 5, so an undone summary can be
+derived again while that conversation is recent.
+
+**Undo** — `person_memory_service.undo_write` → `db.undo_public_user_memory_write(…, undone_by,
+section)`: latest-first **within the write's section**, restoring that half of the blob only.
+The Workspace calls it with `undone_by` = the person and `section='notes'`; the owner route with
+`undone_by` = the operator's email (username fallback) and no pin. Every read-modify-write of
+the blob (notes write, summary write, undo) takes `_read_blob_for_update` first.
+
+**Paging** — `history_page`: keyset cursor `<written_at>|<id>` (`before` → `next_before`),
+`limit + 1` read to know whether a next page exists; `undoable` = the latest open write of the
+row's section, read from the store (`latest_open_user_memory_writes`), never from the page.
+`undone_by_operator` = undone by someone other than the person (case-insensitive); the
+Workspace projection (`agent_page.memory`) drops `undone_by` itself.
+
+**Frontend** — Agent Settings → Guardrails → Memory → **Person memory**
+(`components/agent-settings/PersonMemorySection.vue`, store `stores/personMemory.js`): the
+people list (skeleton / failed / "No one has memory with this agent yet." / a bounded list
+with its total and Load more), each row the email, the channel identity line and the counts.
+A row opens `PersonMemoryModal.vue` (a wide `BaseModal`): Notes and Summary as plain text,
+History (bounded, Load more by cursor, Undo on the latest write of each section behind
+`ConfirmDialog`, Cancel focused; after an Undo the store re-reads as many rows as were shown)
+and Facts (`retrieval-memory.md` → Frontend). One post-flush watcher re-homes focus on Close
+when Undo or Forget disables or unmounts the focused control. The person's Workspace panel
+(`portal/PortalAgentMemory.vue`) gains Load more (`?before=`, bounded list), shows every
+change as the lines it added and removed (`utils/lineDiff.js`, a whole-line LCS of
+`previous_notes` → `notes`; "No change to the text" when none), explains Undo on the
+undoable row, and reads "Undone by an operator of this agent" on a write someone else
+undid.
+
+**Tests** — `tests/unit/test_ent962_person_memory_owner_view.py`: the readers rule through the
+real dependency chain, the summarizer CAS driven through `summarize_user_memory_background`,
+per-section undo, the shared primitive, paging, the people union, non-creating reads, the live
+route table, both migration tracks. `src/frontend/tests/unit/personMemory.mount.spec.js` and
+`portalAgentMemory.spec.js` (mounted): the list's faces, Undo / Forget behind the confirm,
+plain-text rendering, the person-scoped search, the focus re-home, cursor paging, the
+operator line.
 
 ## Chat History for Logged-In Users (#587)
 

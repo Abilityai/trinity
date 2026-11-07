@@ -42,7 +42,7 @@ me a platform account.
 ```
 get_current_user(request, token)                    dependencies.py
   └─ resolve_platform_user_unfloored(request, token)   every scope fence, the suspension check,
-                                                       then the terms gate (ent#1054, auth.md §2.13)
+                                                       then the terms gate (ent#1054; every person on a declared session since ent#1107, auth.md §2.13)
   └─ enforce_operator_floor(request, user)
         is_workspace_only_role(user.role)?  no  → return     (operator, creator, admin)
         user.connector_agent set → return     (the ent#46 fence already confined it)

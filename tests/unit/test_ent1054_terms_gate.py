@@ -9,9 +9,15 @@ route reached through `get_current_user` (the `/ws` ticket mint included).
 
 The rules the tests pin:
 
-* no provider → byte-identical behaviour (OSS-only builds never change);
-* operator and above are NEVER gated — the provider is not even consulted, so a
-  gate fault can never lock an admin out;
+* no provider → the instance's own decision applies (trinity-enterprise#1107:
+  the terms are an OSS setting with a shipped default, gating every person);
+* a VISIT is a session the SPA declared at sign-in — a JWT carrying the
+  `interactive` claim (ruling A on ent#1107); a token without it (the CLI, a
+  harness, a pre-change session) is never gated, whatever the role;
+* operator and above are gated on their VISITS too (ent#1107) — a provider
+  fault falls back to the instance decision for them, so a broken optional
+  module cannot lock an admin out, while their machine credentials (a
+  user-scoped key) are never gated;
 * a Workspace-only person is refused with 403 `{"code": "terms_required", ...}`
   on every door while the provider says so, and the provider's own reason
   (`invite_expired`, `invite_revoked`) is passed through;
@@ -41,6 +47,32 @@ pytestmark = pytest.mark.unit
 BACKEND = pathlib.Path(__file__).resolve().parents[2] / "src" / "backend"
 
 
+@pytest.fixture(autouse=True)
+def _clean_terms_state():
+    """trinity-enterprise#1107: the instance decision reads real rows, so start
+    and end every test with no terms configured and no acceptance."""
+    from database import db
+    from db.engine import get_engine
+
+    def reset():
+        for key in ("terms_required", "terms_version", "terms_text", "terms_title"):
+            try:
+                db.delete_setting(key)
+            except Exception:  # noqa: BLE001
+                pass
+        with get_engine().begin() as conn:
+            conn.exec_driver_sql("DELETE FROM terms_acceptances")
+
+    reset()
+    yield
+    reset()
+
+
+def _switch_off():
+    from database import db
+    db.set_setting("terms_required", "false")
+
+
 def _row(role, username="member"):
     return {
         "id": 7, "username": username, "email": f"{username}@example.com",
@@ -55,13 +87,14 @@ def jwt_as(monkeypatch):
     from config import ALGORITHM, SECRET_KEY
     from jose import jwt
 
-    def make(role, username="member"):
+    def make(role, username="member", interactive=True):
         monkeypatch.setattr(
             database.db, "get_user_by_username", lambda name, *_a, **_k: _row(role, name)
         )
-        return jwt.encode(
-            {"sub": username, "exp": int(time.time()) + 300}, SECRET_KEY, algorithm=ALGORITHM
-        )
+        claims = {"sub": username, "exp": int(time.time()) + 300}
+        if interactive:
+            claims["interactive"] = True  # what the SPA's sign-in mints (ent#1107, ruling A)
+        return jwt.encode(claims, SECRET_KEY, algorithm=ALGORITHM)
 
     return make
 
@@ -169,16 +202,28 @@ def _probe_app():
 # --------------------------------------------------------------------------- #
 
 class TestWithoutAProvider:
-    def test_a_user_passes_a_workspace_route_exactly_as_before(self, jwt_as):
+    def test_a_user_is_gated_by_the_instance_decision(self, jwt_as):
+        """trinity-enterprise#1107: no provider is not "no gate" any more — the
+        shipped default terms are outstanding until accepted."""
         from services import terms_gate
 
         terms_gate.clear_provider()
         assert terms_gate.get_provider() is None
         r = _probe_app().get("/api/probe/workspace", headers=_bearer(jwt_as("user")))
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"]["code"] == "terms_required"
+
+    def test_a_user_passes_a_workspace_route_once_the_switch_is_off(self, jwt_as):
+        from services import terms_gate
+
+        terms_gate.clear_provider()
+        _switch_off()
+        r = _probe_app().get("/api/probe/workspace", headers=_bearer(jwt_as("user")))
         assert r.status_code == 200, r.text
         assert r.json() == {"who": "member"}
 
     def test_the_floor_still_refuses_a_user_off_its_routes(self, jwt_as):
+        _switch_off()
         r = _probe_app().get("/api/probe/plain", headers=_bearer(jwt_as("user")))
         assert r.status_code == 403
         assert r.json()["detail"]["code"] == "workspace_only"
@@ -267,19 +312,45 @@ class TestTheRefusalOnEveryDoor:
 # Who is never gated
 # --------------------------------------------------------------------------- #
 
-class TestWhoIsNeverGated:
+class TestWhoIsGatedAndWhoIsNot:
     @pytest.mark.parametrize("role", ["operator", "creator", "admin"])
-    def test_operator_and_above_are_never_consulted(self, jwt_as, provider, role):
+    def test_operator_and_above_are_gated_on_their_visits(self, jwt_as, provider, role):
+        """trinity-enterprise#1107: every person's first visit, the admin's included."""
         p = provider(REQUIRED)
         r = _probe_app().get("/api/probe/plain", headers=_bearer(jwt_as(role)))
-        assert r.status_code == 200, r.text
-        assert p.seen == []
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"]["code"] == "terms_required"
+        assert p.seen == [("member", role)]
 
     @pytest.mark.parametrize("role", ["operator", "admin"])
-    def test_a_raising_provider_cannot_lock_an_operator_out(self, jwt_as, provider, role):
+    def test_a_raising_provider_falls_back_to_the_instance_decision_for_an_operator(
+        self, jwt_as, provider, role
+    ):
+        """A broken optional module must not lock an administrator out: the
+        door layer is ignored for them and the instance decision stands —
+        the shipped default is outstanding (accept it), or the switch is off."""
+        from services import terms_defaults
+
         provider(RuntimeError("the provider is broken"))
         r = _probe_app().get("/api/probe/plain", headers=_bearer(jwt_as(role)))
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"]["code"] == "terms_required"
+        assert r.json()["detail"]["version"] == terms_defaults.DEFAULT_TERMS_VERSION
+        _switch_off()
+        r = _probe_app().get("/api/probe/plain", headers=_bearer(jwt_as(role)))
         assert r.status_code == 200, r.text
+
+    def test_an_operators_user_scoped_key_is_not_gated(self, agent_key_as, provider):
+        """A machine credential of operator-and-above is for automation, not a
+        visit: an ops key keeps working while the admin has not signed in."""
+        import dependencies as deps
+
+        p = provider(REQUIRED)
+        user = asyncio.run(
+            deps.resolve_platform_user_unfloored(_plain_request(), agent_key_as("admin", scope="user"))
+        )
+        assert user.role == "admin" and user.mcp_scope == "user"
+        assert p.seen == []
 
     def test_an_agent_key_of_a_workspace_only_owner_is_untouched(self, agent_key_as, provider):
         """The agent's own runtime (heartbeat, reports, asks) keeps working while
@@ -292,6 +363,100 @@ class TestWhoIsNeverGated:
         )
         assert user.agent_name == "atlas"
         assert p.seen == []
+
+
+# --------------------------------------------------------------------------- #
+# The interactive claim: what the SPA declares at sign-in is what is gated
+# --------------------------------------------------------------------------- #
+
+class TestTheInteractiveClaim:
+    """ent#1107, ruling A: the gate is a UX/record contract, not a security
+    boundary, so the SPA declares the session interactive at sign-in
+    (`client=web`), the JWT carries `interactive: true`, and only such a
+    session is gated. The CLI, curl, a CI harness and a pre-change token carry
+    no claim and are never asked."""
+
+    @pytest.mark.parametrize("role", ["user", "operator", "admin"])
+    def test_a_session_without_the_claim_is_not_gated(self, jwt_as, provider, role):
+        p = provider(REQUIRED)
+        path = "/api/probe/workspace" if role == "user" else "/api/probe/plain"
+        r = _probe_app().get(path, headers=_bearer(jwt_as(role, interactive=False)))
+        assert r.status_code == 200, r.text
+        assert p.seen == []
+
+    def test_a_session_with_the_claim_is_gated_whatever_the_role(self, jwt_as, provider):
+        p = provider(REQUIRED)
+        r = _probe_app().get("/api/probe/plain", headers=_bearer(jwt_as("admin")))
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"]["code"] == "terms_required"
+        assert p.seen == [("member", "admin")]
+
+    def test_the_resolver_marks_the_principal(self, jwt_as):
+        """`User.interactive_session` is the claim, read by the resolver only —
+        True on a declared session, False on a bare token."""
+        import dependencies as deps
+
+        _switch_off()
+        declared = asyncio.run(deps.resolve_platform_user_unfloored(_plain_request(), jwt_as("admin")))
+        assert declared.interactive_session is True
+        bare = asyncio.run(
+            deps.resolve_platform_user_unfloored(_plain_request(), jwt_as("admin", interactive=False))
+        )
+        assert bare.interactive_session is False
+
+    def _auth_client(self, monkeypatch):
+        """The real auth router with the sign-in's side effects stubbed: rate
+        limits, setup, the account lookup, the audit row."""
+        from fastapi import FastAPI
+        import database
+        import routers.auth as auth
+
+        async def _no_audit(*_a, **_k):
+            return None
+
+        admin = {"id": 1, "username": "admin", "email": "admin@example.com", "role": "admin",
+                 "password": "x", "suspended_at": None, "name": None, "picture": None}
+        monkeypatch.setattr(auth, "check_login_rate_limit", lambda *_a, **_k: None)
+        monkeypatch.setattr(auth, "record_login_attempt", lambda *_a, **_k: None)
+        monkeypatch.setattr(auth, "record_otp_attempt", lambda *_a, **_k: None)
+        monkeypatch.setattr(auth, "is_setup_completed", lambda: True)
+        monkeypatch.setattr(auth, "authenticate_user", lambda *_a, **_k: dict(admin))
+        monkeypatch.setattr(auth, "_require_email_login_open", lambda: None)
+        monkeypatch.setattr(auth, "_email_allow_listed", lambda *_a, **_k: True)
+        monkeypatch.setattr(auth.login_policy_gate, "email_code_allowed", lambda: True)
+        monkeypatch.setattr(auth.platform_audit_service, "log", _no_audit)
+        monkeypatch.setattr(database.db, "update_last_login", lambda *_a, **_k: None)
+        monkeypatch.setattr(database.db, "verify_login_code", lambda *_a, **_k: {"email": "admin@example.com"})
+        monkeypatch.setattr(database.db, "get_or_create_email_user", lambda *_a, **_k: dict(admin))
+        app = FastAPI()
+        app.include_router(auth.router)
+        return TestClient(app)
+
+    @staticmethod
+    def _claims(token):
+        from config import ALGORITHM, SECRET_KEY
+        from jose import jwt
+
+        return jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+
+    def test_the_password_sign_in_mints_the_claim_only_for_the_spa(self, monkeypatch):
+        client = self._auth_client(monkeypatch)
+        spa = client.post("/api/token", data={"username": "admin", "password": "x", "client": "web"})
+        assert spa.status_code == 200, spa.text
+        assert self._claims(spa.json()["access_token"]).get("interactive") is True
+        cli = client.post("/api/token", data={"username": "admin", "password": "x"})
+        assert cli.status_code == 200, cli.text
+        assert "interactive" not in self._claims(cli.json()["access_token"])
+
+    def test_the_email_sign_in_mints_the_claim_only_for_the_spa(self, monkeypatch):
+        client = self._auth_client(monkeypatch)
+        spa = client.post("/api/auth/email/verify",
+                          json={"email": "admin@example.com", "code": "123456", "client": "web"})
+        assert spa.status_code == 200, spa.text
+        assert self._claims(spa.json()["access_token"]).get("interactive") is True
+        other = client.post("/api/auth/email/verify", json={"email": "admin@example.com", "code": "123456"})
+        assert other.status_code == 200, other.text
+        assert "interactive" not in self._claims(other.json()["access_token"])
 
 
 # --------------------------------------------------------------------------- #

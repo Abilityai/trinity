@@ -17,12 +17,13 @@
        overlap. The parent wrapper deliberately carries no z-index, so it creates
        no stacking context of its own. -->
   <div
-    class="absolute bottom-full left-0 right-0 mb-2 z-30 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 shadow-xl overflow-hidden"
+    :class="placement === 'below' ? 'top-full mt-2' : 'bottom-full mb-2'"
+    class="absolute left-0 right-0 z-30 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900 shadow-xl overflow-hidden"
     @mousedown.prevent
   >
     <div class="flex items-center justify-between px-3 py-1.5 border-b border-gray-100 dark:border-gray-800">
       <span class="text-[11px] font-semibold uppercase tracking-wide text-gray-400">{{ heading }}</span>
-      <span class="text-[11px] text-gray-500 dark:text-gray-400 hidden sm:block">
+      <span v-if="!plain" class="text-[11px] text-gray-500 dark:text-gray-400 hidden sm:block">
         <kbd class="px-1 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-[10px] font-mono">↑↓</kbd>
         move
         <kbd class="ml-1.5 px-1 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-[10px] font-mono">Tab</kbd>
@@ -34,6 +35,7 @@
 
     <ul
       v-if="rows.length"
+      :id="listId || undefined"
       ref="listEl"
       role="listbox"
       :aria-label="heading"
@@ -41,6 +43,7 @@
     >
       <li
         v-for="(row, i) in rows"
+        :id="listId ? `${listId}-${i}` : undefined"
         :key="row.key"
         role="option"
         :aria-selected="i === activeIndex"
@@ -51,7 +54,7 @@
         @mousedown="$emit('pick', i)"
         @mouseenter="$emit('hover', i)"
       >
-        <span class="shrink-0 mt-0.5 text-xs font-mono font-semibold text-action-primary-600 dark:text-action-primary-400">{{ kind }}</span>
+        <span v-if="!plain" class="shrink-0 mt-0.5 text-xs font-mono font-semibold text-action-primary-600 dark:text-action-primary-400">{{ kind }}</span>
         <span class="min-w-0 flex-1">
           <!-- Interpolation, never raw HTML: titles and descriptions are
                agent/operator-authored text arriving in a new place. -->
@@ -99,6 +102,12 @@ const props = defineProps({
   // trinity-enterprise#631: an `@` popup that also offers people names itself
   // so ("Agents and people"); empty keeps the kind's own heading.
   title: { type: String, default: '' },
+  // trinity-enterprise#450: a form field near the top of a page, not a composer
+  // at the bottom. `below` opens downward; `plain` drops the trigger character and
+  // the composer's key hints; `listId` lets the input point at the active row.
+  placement: { type: String, default: 'above' },
+  plain: { type: Boolean, default: false },
+  listId: { type: String, default: '' },
 })
 defineEmits(['pick', 'hover'])
 

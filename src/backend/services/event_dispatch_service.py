@@ -592,7 +592,8 @@ def spawn_task_terminal_event(
     * ``emit_task_terminal_event`` (#1578) — the agent.task.* pub/sub emit.
     * ``_terminal_side_effects`` — the orchestration primitives that used to hold
       their state in a coroutine and now react to terminals instead: the loop
-      advance (#2523) and the fan-out join (#2524).
+      advance (#2523), the fan-out join (#2524), the gated-run completion
+      report (#3520) and the delegating caller's wake (ent#1102).
 
     Both hang HERE rather than inside the emit, because the emit returns early
     when no event subscription matches — the common case — so anything nested
@@ -610,6 +611,17 @@ def spawn_task_terminal_event(
         ),
     )
     _spawn_named("#2523/#2524", _terminal_side_effects(execution_id))
+    # abilityai/trinity-enterprise#1108 AC #4: the answer wakes this turn's
+    # prompt carried are owed no longer once the turn SUCCEEDED — marked here,
+    # at the terminal, never at compose time. A sibling for the same reason as
+    # the side effects above; fail-open like them.
+    try:
+        from services import operator_resume_service
+        _spawn_named(
+            "ent#1108", operator_resume_service.mark_carried_wakes(execution_id, terminal_status),
+        )
+    except Exception as e:  # noqa: BLE001 — never affect the billed terminal
+        logger.debug("ent#1108 carried-wake mark not spawned for %s: %s", execution_id, e)
     # trinity-enterprise#1022: retrieval memory capture — a sibling for the same
     # reason as the side effects above, never nested inside the emit. The
     # service decides whose memory from the row, and is a cheap no-op while the
@@ -651,6 +663,15 @@ async def _terminal_side_effects(execution_id: Optional[str]) -> None:
         await report_completion_on_terminal(execution_id)
     except Exception as e:  # noqa: BLE001
         logger.warning("[#3520] gated-run completion report failed for %s: %s", execution_id, e)
+    try:
+        # ent#1102: the agent that DELEGATED this run is woken, so it never has
+        # to poll for an ending the platform already knows about. Its own guard,
+        # like every sibling above: a wake that faults must not cost the others.
+        from services.caller_wake_service import maybe_wake_caller
+
+        await maybe_wake_caller(execution_id)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[ent#1102] caller wake failed for %s: %s", execution_id, e)
 
 
 def _spawn_named(tag: str, coro: "Any") -> None:

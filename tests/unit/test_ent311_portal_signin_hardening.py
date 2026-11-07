@@ -64,7 +64,7 @@ def env(tmp_path, monkeypatch):
 
     # The email "bob@example.com" with the right code verifies; everything else
     # fails. No DB, no email dispatch.
-    def _verify(email, code):
+    def _verify(email, code, **_kw):  # `interactive=` (ent#1107) is the SPA's declaration, not under test here
         return "TOKEN" if (email == "bob@example.com" and code == "424242") else None
 
     monkeypatch.setattr(service, "portal_signin_verify", _verify)

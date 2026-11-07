@@ -69,7 +69,7 @@ First check that Docker is actually running — Trinity can't start without it. 
 
 ## Where do I find the web UI, the API, and the interactive API docs?
 
-The web UI is at http://localhost, the backend API with interactive Swagger docs is at http://localhost:8000/docs, and the MCP server is at http://localhost:8080/mcp. Local and production deployments use the same ports; on a server install the production frontend also proxies `/mcp`, so MCP is reachable at the web UI's own hostname (`https://trinity.your-domain.com/mcp`). See [Setup](../getting-started/setup.md).
+The web UI is at http://localhost, the backend API with interactive Swagger docs is at http://localhost:8000/docs, and the MCP server is at http://localhost:8080/mcp. Local and production deployments use the same ports; on a server install the production frontend also proxies `/mcp`, so MCP is reachable at the web UI's own hostname (`https://trinity.your-domain.com/mcp`). Clients outside the Trinity server — Claude Code on your laptop included — are refused until an admin turns on **External MCP access** under Settings → MCP Keys; a fresh install starts with it off. See [Setup](../getting-started/setup.md) and [MCP Server](../integrations/mcp-server.md#external-mcp-access).
 
 ## How is the web UI organized?
 
@@ -109,7 +109,7 @@ It is the system agent, a platform orchestrator Trinity deploys for you. It is d
 
 ## Which database does a new install use?
 
-A local install from `./scripts/deploy/start.sh` runs on SQLite. SQLite reached end-of-support on 2026-09-01, and PostgreSQL is now the supported backend. A fresh server or one-click install (`start.sh --hosted`) starts on a bundled PostgreSQL automatically, while an existing SQLite install stays on SQLite until you migrate it. See [Setup → Prerequisites](../getting-started/setup.md#prerequisites) and the [Deployment FAQ](deployment-and-upgrades.md).
+Every install starts on a bundled PostgreSQL. SQLite reached end-of-support on 2026-09-01, and an existing SQLite install refuses to start until you copy its data. See [Setup → Prerequisites](../getting-started/setup.md#prerequisites) and the [Deployment FAQ](deployment-and-upgrades.md).
 
 ## What is a template?
 

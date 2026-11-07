@@ -1,0 +1,355 @@
+"""Tell the caller when a run it delegated has ended (ent#1102).
+
+An agent that calls ``chat_with_agent`` with ``async=true`` gets a receipt, not
+an answer. Before this it had no way to learn the answer had arrived, so it
+polled — the retrospective behind ruling D4 measured that: $246 of polling, 13
+re-dispatches, 10 operator nudges, for runs that had already finished. The fix
+is to push once instead of being polled many times.
+
+**Where this hangs, and why.** ``event_dispatch_service._terminal_side_effects``
+is the one fan-out every CAS-won terminal writer already calls — 16 sites — so
+one guarded sibling there covers task, chat, pull, fan-out and all three cleanup
+paths without any of them changing. It is deliberately NOT nested inside
+``emit_task_terminal_event``: that returns early when no event subscription
+matches, which is the common case, so anything inside it would almost never run.
+And it is deliberately not armed by the MCP client at receipt time — the
+terminal knows the run ended; the client does not.
+
+**What it will not do.** The wake spends a billed turn on an agent that did not
+schedule it, so every one of these is a hard stand-down:
+
+* no ``source_agent_name`` — a human's run has no delegating agent to tell;
+* the caller IS the callee (a self-task), or the row is a ``fan_out`` leg (the
+  #2524 join is the batch's own reaction);
+* the row's own trigger is one of the four reserved platform triggers. A wake's
+  end never wakes anyone, so no chain here can sustain itself; and a platform
+  turn's end — an answered ask, an ended ask, an event dispatch — is not a
+  delegation's end;
+* ``wake_policy.resolve`` says no (per-agent tri-state → instance default), or
+  could not be read at all;
+* the caller already holds a matching ``agent.task.*`` subscription on the
+  callee, which the emit dispatches on — exactly one turn per ending (AC 6);
+* the caller's container is stopped or missing: nothing auto-starts an agent, so
+  that wake would be a FAILED execution and nothing else. Audited as
+  ``skipped_not_running``; the ending stays readable through
+  ``get_execution_result`` when the caller next runs.
+
+**The storm bound.** The idempotency key is ``caller_wake:{caller}:{bucket}``
+over a 15-second window, NOT the callee's execution id. A cleanup sweep can
+terminate hundreds of stale rows in one cycle, and keying per callee would bill
+one turn for each. One turn per caller per window instead, and the frame says
+plainly that other runs may have ended in the same window — so the caller reads
+``list_recent_executions`` rather than being told a half-truth.
+
+**The hop is bounded.** ``chain_depth = callee + 1``, so a wake is governed by
+the same ``inter_agent_max_chain_depth`` setting as the call chain it answers
+(#2806/#2973) rather than being an unbounded side channel around it.
+
+Never raises: this runs on the path of an already-billed terminal.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from typing import Any, List, Optional
+
+from utils.credential_sanitizer import sanitize_text
+
+logger = logging.getLogger(__name__)
+
+TRIGGERED_BY_CALLER_WAKE = "caller_wake"
+
+# A platform turn's end is not a delegation's end. ``caller_wake`` itself is
+# first in this set: that is the recursion break, and it is why a wake chain
+# cannot be self-sustaining no matter how the agents are wired.
+RESERVED_TRIGGERS = frozenset({
+    TRIGGERED_BY_CALLER_WAKE,
+    "event",              # event_dispatch_service.RESERVED_EVENT_TRIGGER
+    "operator_response",  # operator_resume_service.TRIGGERED_BY
+    "operator_ending",    # operator_resume_service.TRIGGERED_BY_ENDING
+})
+
+# One wake per caller per window. 15s is short enough that a caller waiting on
+# one delegation is woken promptly, and long enough that a sweep of hundreds of
+# stale rows collapses into a handful of turns.
+WAKE_BUCKET_SECONDS = 15
+
+# The same cap and chokepoint the #1578 event payload uses, for the same reason.
+SUMMARY_MAX = 2000
+ASK_IDS_MAX = 10
+
+
+def _bucket_for(now: float) -> int:
+    return int(now // WAKE_BUCKET_SECONDS)
+
+
+def _idempotency_key(caller: str, now: Optional[float] = None) -> str:
+    return f"caller_wake:{caller}:{_bucket_for(now if now is not None else time.time())}"
+
+
+# --- seams (each one its own function so a test can stub it) ---------------
+
+def _read_row(execution_id: str):
+    from database import db
+
+    return db.get_execution(execution_id)
+
+
+def _resolve_policy(agent_name: str):
+    from services.wake_policy import resolve
+
+    return resolve(agent_name)
+
+
+def _caller_subscribes_to(caller: str, callee: str, terminal_status: Any) -> bool:
+    """True when the emit will already dispatch a turn on the caller.
+
+    Shares the read the emit does (``find_matching_event_subscriptions``), so
+    the two cannot disagree about who is subscribed. Fails OPEN — if the read
+    breaks we would rather risk the second turn than lose the wake, because the
+    duplicate is visible and the silence is not.
+    """
+    from database import db
+    from services.event_dispatch_service import _event_type_for_status
+
+    try:
+        event_type = _event_type_for_status(terminal_status)
+        subs = db.find_matching_event_subscriptions(callee, event_type) or []
+    except Exception:  # noqa: BLE001
+        return False
+    for sub in subs:
+        target = sub.get("agent_name") if isinstance(sub, dict) else getattr(sub, "agent_name", None)
+        if target == caller:
+            return True
+    return False
+
+
+async def _container_state(agent_name: str) -> Optional[str]:
+    """``running`` / ``stopped`` / ``missing`` / ``None`` when Docker was unaskable.
+
+    Read off the event loop (#2196): the Docker SDK call blocks, and on the loop
+    it would stall every request on this worker.
+    """
+    from services.docker_utils import agent_container_state_async
+
+    return await agent_container_state_async(agent_name)
+
+
+def _pending_ask_ids(execution_id: str) -> List[str]:
+    from database import db
+
+    try:
+        return list(db.list_pending_ask_ids_for_execution(execution_id, ASK_IDS_MAX) or [])
+    except Exception:  # noqa: BLE001 — an enrichment, never the reason to skip
+        logger.debug("ent#1102: pending-ask read failed for %s", execution_id)
+        return []
+
+
+def _begin_idempotency(scope: str, key: str):
+    from services import idempotency_service
+
+    return idempotency_service.begin(scope, key)
+
+
+def _complete_idempotency(decision, execution_id) -> None:
+    from services import idempotency_service
+
+    idempotency_service.complete(decision, execution_id, None)
+
+
+def _fail_idempotency(decision) -> None:
+    from services import idempotency_service
+
+    idempotency_service.fail(decision)
+
+
+def _agent_scope(agent_name: str) -> str:
+    from services import idempotency_service
+
+    return idempotency_service.make_agent_scope(agent_name)
+
+
+async def _dispatch_wake(**kwargs):
+    from services.task_execution_service import dispatch_and_await_terminal
+
+    return await dispatch_and_await_terminal(**kwargs)
+
+
+async def _audit(**details) -> None:
+    """The wake's receipt: ids, enums and the deciding policy layer — never the
+    callee's words. Best-effort; an audit failure must not break the terminal.
+
+    Mirrors ``operator_resume_service._audit_ending``, including ``source
+    ="system"``: no person asked for this turn, so there is no actor to name.
+    """
+    from services.platform_audit_service import AuditEventType, platform_audit_service
+
+    try:
+        await platform_audit_service.log(
+            event_type=AuditEventType.EXECUTION,
+            event_action="caller_wake_dispatch",
+            source="system",
+            actor_email=None,
+            target_type="agent",
+            target_id=details.get("caller"),
+            details=details,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("ent#1102: wake audit write failed for %s", details.get("caller"))
+
+
+# --- the frame -------------------------------------------------------------
+
+def _summary_of(row) -> str:
+    raw = getattr(row, "error", None) or getattr(row, "response", None) or ""
+    if not raw:
+        return ""
+    # Redact credentials at this single chokepoint, then cap — the #1578 order:
+    # sanitize a bounded slice, then truncate, so a secret cannot survive by
+    # sitting past the cap.
+    return sanitize_text(str(raw)[: SUMMARY_MAX * 2])[:SUMMARY_MAX]
+
+
+def _framed_wake(row, ask_ids: List[str]) -> str:
+    callee = getattr(row, "agent_name", "?")
+    execution_id = getattr(row, "id", "?")
+    status = getattr(row, "status", "?")
+    status = status.value if hasattr(status, "value") else str(status)
+    summary = _summary_of(row)
+
+    lines = [
+        f"A run you delegated to `{callee}` has ended: `{execution_id}` → **{status}**.",
+        "",
+        "You are being woken because it ended — this is the push you were promised "
+        "by the receipt. Do not poll for it and do not set a reminder for it.",
+    ]
+    if ask_ids:
+        lines += [
+            "",
+            f"It stopped at {len(ask_ids)} unanswered ask(s): "
+            + ", ".join(f"`{a}`" for a in ask_ids)
+            + ". The run ended with those still pending, so its work is NOT finished — "
+            "read them with `list_operator_queue` before deciding what to do.",
+        ]
+    if summary:
+        lines += ["", "Its own words on how it ended:", "", summary]
+    lines += [
+        "",
+        f"Read the full result with `get_execution_result('{callee}', '{execution_id}')`. "
+        "Other delegated runs may have ended in the same window as this one — "
+        "`list_recent_executions` is the complete list.",
+    ]
+    return "\n".join(lines)
+
+
+# --- the hook --------------------------------------------------------------
+
+async def maybe_wake_caller(execution_id: Optional[str]) -> Optional[str]:
+    """Wake the agent that delegated ``execution_id``, at most once per window.
+
+    Returns the wake's execution id, or None when nothing is owed a wake, the
+    caller has not opted in, is not running, the window was already claimed, or
+    the dispatch failed. Never raises — the terminal is already recorded.
+    """
+    if not execution_id:
+        return None
+
+    try:
+        row = _read_row(execution_id)
+    except Exception as e:  # noqa: BLE001 — fail-open on the billed terminal path
+        logger.debug("ent#1102: get_execution(%s) failed: %s", execution_id, e)
+        return None
+    if row is None:
+        return None
+
+    caller = getattr(row, "source_agent_name", None)
+    callee = getattr(row, "agent_name", None)
+    # The caller is read from the row's principal-derived column and nowhere
+    # else. `derive_source_and_trigger` writes it from the authenticated agent
+    # principal, so no header, body field or event payload can name a third
+    # agent to bill (SELF-EXEC-001).
+    if not caller or not callee or caller == callee:
+        return None
+    if getattr(row, "fan_out_id", None):
+        return None
+
+    triggered_by = getattr(row, "triggered_by", None)
+    if triggered_by and str(triggered_by) in RESERVED_TRIGGERS:
+        return None
+
+    verdict = _resolve_policy(caller)
+    if not verdict.enabled:
+        logger.debug(
+            "ent#1102: %s not woken for %s — %s", caller, execution_id, verdict.reason
+        )
+        return None
+
+    terminal_status = getattr(row, "status", None)
+    if _caller_subscribes_to(caller, callee, terminal_status):
+        # AC 6: the emit is already dispatching a turn on this caller for this
+        # very terminal. One ending, one turn.
+        return None
+
+    try:
+        state = await _container_state(caller)
+    except Exception:  # noqa: BLE001 — "could not ask" is None, never a raise
+        state = None
+    if state in ("stopped", "missing"):
+        await _audit(caller=caller, callee=callee, callee_execution_id=execution_id,
+                     execution_id=None, status="skipped_not_running", error=None,
+                     policy_source=verdict.source)
+        return None
+
+    idem = None
+    try:
+        idem = _begin_idempotency(_agent_scope(caller), _idempotency_key(caller))
+    except Exception:  # noqa: BLE001
+        logger.exception("ent#1102: idempotency begin failed — dispatching anyway")
+
+    if idem is not None and getattr(idem, "replay", False):
+        logger.info(
+            "ent#1102: %s already woken in this window — no second wake for %s",
+            caller, execution_id,
+        )
+        return None
+
+    ask_ids = _pending_ask_ids(execution_id)
+    try:
+        chain_depth = int(getattr(row, "chain_depth", None) or 0) + 1
+    except (TypeError, ValueError):
+        chain_depth = 1
+
+    try:
+        result = await _dispatch_wake(
+            agent_name=caller,
+            message=_framed_wake(row, ask_ids),
+            # ent#751: the skill gate reads person text only, and no person
+            # wrote this — the platform did. ent#886/#715: no source_user_email.
+            request_text="",
+            triggered_by=TRIGGERED_BY_CALLER_WAKE,
+            chain_depth=chain_depth,
+        )
+    except Exception as exc:  # noqa: BLE001
+        if idem is not None:
+            try:
+                _fail_idempotency(idem)
+            except Exception:  # noqa: BLE001
+                logger.exception("ent#1102: idempotency release failed")
+        logger.exception("ent#1102: wake raised for caller=%s callee=%s", caller, execution_id)
+        await _audit(caller=caller, callee=callee, callee_execution_id=execution_id,
+                     execution_id=None, status="dispatch_error", error=type(exc).__name__,
+                     policy_source=verdict.source)
+        return None
+
+    if idem is not None:
+        try:
+            _complete_idempotency(idem, result.execution_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("ent#1102: idempotency complete failed")
+
+    await _audit(caller=caller, callee=callee, callee_execution_id=execution_id,
+                 execution_id=result.execution_id, status=result.status,
+                 error=result.error, policy_source=verdict.source,
+                 ask_ids=ask_ids, chain_depth=chain_depth)
+    return result.execution_id

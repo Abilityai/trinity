@@ -50,6 +50,7 @@ from database import db
 from db_models import ScheduleCreate, SystemViewCreate
 from redis_breaker_util import LeaseState, SingleFlightLock, get_breaker_redis
 from utils.credential_sanitizer import redact_url_userinfo, sanitize_text
+from utils.log_masking import masked_traceback
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +78,7 @@ MANIFEST_NAMING_MODES = ("prefixed", "bare")
 # the create route's `[a-z0-9_.-]` charset (`sanitize_agent_name`), including a
 # chained `_N` suffix from `get_next_agent_name` (`writer_2`, `writer_2_2`). An
 # exported suffixed member must parse again, in both naming modes.
-MANIFEST_KEY_RE = re.compile(r"^[a-z0-9]([a-z0-9_.-]*[a-z0-9_.])?$")
+MANIFEST_KEY_RE = re.compile(r"^[a-z0-9]([a-z0-9_.-]*[a-z0-9_.])?\Z")
 
 # #2373: the per-agent equivalent. `parse_manifest` reads exactly these and
 # dropped everything else silently.
@@ -87,13 +88,15 @@ _KNOWN_AGENT_KEYS = frozenset({
     "skills", "skill_sets", "grants", "gates",  # trinity-enterprise#1030
     "seat", "person_seats",  # trinity-enterprise#1030 CP4
     "deploy",  # trinity-enterprise#1030 CP5
+    "credentials",  # trinity-enterprise#1109: variable NAMES the member needs
 })
 
 # trinity-enterprise#1030: the per-agent twin of `_UNLISTED_MANIFEST_KEYS` —
 # read, never unknown, but left out of the pinned "Recognised per-agent keys
 # are:" text.
 _UNLISTED_AGENT_KEYS = frozenset({"skills", "skill_sets", "grants", "gates",
-                                  "seat", "person_seats", "deploy"})
+                                  "seat", "person_seats", "deploy",
+                                  "credentials"})  # trinity-enterprise#1109
 
 # trinity-enterprise#1030 CP5 (T6 = A): nothing platform-side records a
 # `deploy: false` member, so no export can carry one. Every export says so in
@@ -233,6 +236,13 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
             raise ValueError(f"Agent '{agent_name}' missing required field: template")
 
         extra = sorted(str(k) for k in set(agent_config.keys()) - _KNOWN_AGENT_KEYS)
+        # trinity-enterprise#1109: `credentials:` is read ONLY as a list of
+        # variable names. The older map form (`credentials: {KEY: value}`,
+        # which this parser never read) stays what it was — an unknown key,
+        # warned about and dropped — so a manifest that deployed yesterday
+        # deploys byte-identically today and no value is ever read from one.
+        if "credentials" in agent_config and not isinstance(agent_config["credentials"], list):
+            extra = sorted(extra + ["credentials"])
         if extra:
             unknown_agent_keys[str(agent_name)] = extra
 
@@ -243,6 +253,22 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
                 raise ValueError(f"Agent '{agent_name}' {list_key} must be a list of names")
         if "deploy" in agent_config and not isinstance(agent_config["deploy"], bool):
             raise ValueError(f"Agent '{agent_name}' deploy must be true or false")
+        credentials = agent_config.get("credentials")
+        if not isinstance(credentials, list):
+            credentials = None  # the legacy map form: unknown, warned, dropped (above)
+        if credentials is not None:
+            # trinity-enterprise#1109: names only, each one a variable a
+            # credential ask may fill (so a value pasted here is refused by
+            # shape, and a reserved name by policy).
+            from services import credential_ask_policy
+            for position, entry in enumerate(credentials, start=1):
+                problem = credential_ask_policy.credential_name_problem(entry)
+                if problem is not None:
+                    # Named by POSITION, never echoed: a value pasted where a
+                    # name belongs would otherwise come back in the error.
+                    raise ValueError(
+                        f"Agent '{agent_name}' credentials: entry {position} is not a variable "
+                        f"name the platform can set ({problem})")
 
         agents[agent_name] = SystemAgentConfig(
             template=agent_config["template"],
@@ -260,6 +286,7 @@ def parse_manifest(yaml_str: str) -> SystemManifest:
             person_seats=apply_seats.parse_person_seats(
                 agent_name, agent_config.get("person_seats")),
             deploy=agent_config.get("deploy", True),  # trinity-enterprise#1030 CP5
+            credentials=credentials,  # trinity-enterprise#1109
         )
 
     # Parse permissions
@@ -329,7 +356,7 @@ def validate_manifest(manifest: SystemManifest) -> List[str]:
     warnings = []
 
     # Validate system name
-    if not re.match(r'^[a-z0-9][a-z0-9-]{0,48}[a-z0-9]$|^[a-z0-9]{1,2}$', manifest.name):
+    if not re.match(r'^[a-z0-9][a-z0-9-]{0,48}[a-z0-9]\Z|^[a-z0-9]{1,2}\Z', manifest.name):
         raise ValueError(
             f"Invalid system name '{manifest.name}': must be 1-50 chars, "
             "lowercase alphanumeric and hyphens, start/end with alphanumeric"
@@ -2160,6 +2187,20 @@ def _preflight_template(
     return None
 
 
+def _platform_worded() -> Tuple[type, ...]:
+    """The classes a deploy or apply step raises with the platform's own words
+    only: the apply steps' refusals (``<code>: <message>``) and the sentences
+    the create path and apply's writes raise past their own catch-alls (lazy:
+    the apply modules import this one)."""
+    from services.agent_auth import AgentAuthSecretMissing
+    from services.assignment_provider import SeatWriterUnavailable
+    from services.git_service.provisioning import GitInstanceReservationError
+    from services.skill_assignment_service import SkillSetUnresolved
+    from services.system_apply import gates, grants, seats
+    return (gates._Refused, grants._Refused, seats._Refused, AgentAuthSecretMissing,
+            GitInstanceReservationError, SeatWriterUnavailable, SkillSetUnresolved)
+
+
 def _failure_reason(exc: Exception) -> Tuple[str, Optional[int]]:
     """Normalize an agent-create exception into a (reason, status_code) pair.
 
@@ -2168,6 +2209,27 @@ def _failure_reason(exc: Exception) -> Tuple[str, Optional[int]]:
     at this exit point because git/GitHub errors can embed PAT-bearing remote
     URLs (learnings 2026-07-14) and the deploy report is a durable response
     surface (trinity-enterprise#125).
+
+    Three kinds of exception keep their words (abilityai/trinity#4284):
+
+    - an HTTPException, whose detail the platform wrote where it raised it;
+    - any ValueError. The validators raise one (``ManifestError``,
+      ``ScheduleValidationError``, ``normalize_cpu`` / ``normalize_memory``,
+      pydantic's ``ValidationError`` from ``ScheduleCreate``) and its text
+      tells the manifest's author what to change. A library's ValueError keeps
+      its text too (requests' ``InvalidURL`` carries the URL, and
+      ``ScheduleValidationError`` quotes croniter's error): the type cannot
+      tell the two apart, so that text is only sanitized, redacted and capped
+      below, like every reason;
+    - the classes in ``_platform_worded``, raised only with the platform's own
+      sentences: the apply steps' refusals, whose ``<code>: <message>`` the
+      report's readers branch on, and the sentences create and apply's writes
+      raise past their own catch-alls.
+
+    Anything else is an unforeseen failure (Docker, the database, the
+    filesystem, a library) and answers its class name only: the report is the
+    body of a 500 when every member fails (``routers/systems.py``), and that
+    text belongs in the log, which gets it here, masked.
     """
     status_code: Optional[int] = None
     if isinstance(exc, HTTPException):
@@ -2179,13 +2241,16 @@ def _failure_reason(exc: Exception) -> Tuple[str, Optional[int]]:
                 reason = json.dumps(detail, default=str)
         else:
             reason = str(detail)
-    else:
+    elif isinstance(exc, (ValueError,) + _platform_worded()):
         reason = str(exc)
+    else:
+        logger.warning("System manifest step failed: %s", masked_traceback(exc))
+        reason = f"{type(exc).__name__} — details in backend logs"
     reason = sanitize_text(redact_url_userinfo(reason))
     return reason[:_REASON_MAX_LEN], status_code
 
 
-def _configured_preview(cfg: SystemAgentConfig) -> Dict[str, Dict[str, int]]:
+def _configured_preview(cfg: SystemAgentConfig) -> Dict[str, Any]:
     """trinity-enterprise#1030 CP6: what a created member is configured with
     after create — counts per group, for the preview's one line. Empty (no
     key at all) when the member declares none of them. A held-back write is
@@ -2196,7 +2261,41 @@ def _configured_preview(cfg: SystemAgentConfig) -> Dict[str, Dict[str, int]]:
         "seat": 1 if cfg.seat else 0, "person_seats": len(cfg.person_seats or []),
     }
     counts = {k: v for k, v in counts.items() if v}
-    return {"configured": counts} if counts else {}
+    out: Dict[str, Any] = {"configured": counts} if counts else {}
+    if cfg.credentials:
+        # trinity-enterprise#1109: the names themselves, so whoever reads the
+        # preview back knows what to ask for before apply.
+        out["credentials"] = list(cfg.credentials)
+    return out
+
+
+# #4025: what a caller `_caller_passes_admin_gate` refuses gets instead of
+# the write. In `warnings[]` because the response contract is pinned (the ent#695
+# create-mode golden), as #4130 did for `deploy: false`; the code is apply's.
+PROMPT_REQUIRES_ADMIN_WARNING = (
+    "prompt_requires_admin: this manifest's `prompt:` is not applied for this "
+    "caller. It replaces the platform-wide prompt every agent receives, so only "
+    "an admin may set it; the rest of the manifest is unaffected by this."
+)
+
+
+def _caller_passes_admin_gate(current_user: User) -> bool:
+    """Would this caller pass the settings route's admin gate, which guards `trinity_prompt`?
+
+    Exactly `assert_admin` with no scope opt-in (#4025): an admin JWT, or an
+    admin's `user` / `system` key. A creator, any agent key (one an admin owns
+    included: it carries the owner's role, which is how `require_role("creator")`
+    and `capability_fence("agents.manage")` admitted it to deploy), a connector
+    or a portal-delegate key may not. One predicate for deploy and apply, so the
+    two modes cannot disagree about who may change every agent's instructions.
+    """
+    from dependencies import assert_admin
+
+    try:
+        assert_admin(current_user)
+    except HTTPException:
+        return False
+    return True
 
 
 async def deploy_manifest(
@@ -2261,6 +2360,23 @@ async def deploy_manifest(
                 "creates nothing. Remove deploy: false from a member, or use apply to "
                 "report on them"))
         all_warnings = validation_warnings + name_warnings
+        # #4025: decided once, before the preview, so the preview predicts the write.
+        # The refusal is reported only when it withholds a change: a prompt that
+        # already matches is apply's `unchanged`, not a refusal. That tells a
+        # non-admin whether a guessed prompt matches, which apply's verdict already
+        # does, and every agent they own receives the prompt anyway.
+        may_set_prompt = _caller_passes_admin_gate(current_user)
+        prompt_refused = (
+            bool(manifest.prompt)
+            and not may_set_prompt
+            and db.get_setting_value("trinity_prompt") != manifest.prompt
+        )
+        # trinity-enterprise#591: one validator for the preview and the write.
+        from services import template_source_policy
+        bound_refused, bound_allowed = template_source_policy.manifest_refusals(
+            current_user,
+            [(final, short, manifest.agents[short].template) for short, final in agent_names.items()],
+        )
         if declared_only:
             # The response contract is pinned (ent#695 AC6), so the skip is
             # listed where every caller already reads: the warnings.
@@ -2270,6 +2386,8 @@ async def deploy_manifest(
 
         # 4. If dry_run, return preview
         if dry_run:
+            if prompt_refused:
+                all_warnings.append(PROMPT_REQUIRES_ADMIN_WARNING)
             agents_to_create = [
                 {
                     "name": final_name,
@@ -2300,6 +2418,12 @@ async def deploy_manifest(
                     for short_name, final_name in agent_names.items()
                 ) if failure is not None
             ]
+            # trinity-enterprise#591: exactly the members the write refuses.
+            preview_failed.extend(
+                SystemDeployFailure(name=final, short_name=short, template=template or "",
+                                    reason=refusal.message, status_code=403)
+                for final, short, template, refusal in bound_refused
+            )
 
             # ent#126 (AC #2): the preview must show permission topology and
             # schedules, not just agent names. Both come from the pure resolvers
@@ -2367,7 +2491,7 @@ async def deploy_manifest(
                 agents_created=[],
                 agents_to_create=agents_to_create,
                 agents_declared_only=declared_only,
-                prompt_updated=bool(manifest.prompt),
+                prompt_updated=bool(manifest.prompt) and may_set_prompt,
                 warnings=all_warnings,
                 failed=preview_failed,
                 permission_edges=dict(edges),
@@ -2378,6 +2502,22 @@ async def deploy_manifest(
                 # changing a shipped field's meaning would mislead any existing
                 # consumer. Callers count the new arrays instead.
             )
+
+        # trinity-enterprise#591: a refused member refuses the whole deploy,
+        # before anything is created (ruled 2026-11-06), naming every one.
+        if bound_refused:
+            await template_source_policy.audit_refusal(
+                request, current_user, code=template_source_policy.CODE_SOURCE,
+                members=[short for _, short, _, _ in bound_refused],
+            )
+            raise HTTPException(status_code=403, detail={
+                "code": template_source_policy.CODE_SOURCE,
+                "message": template_source_policy.manifest_message(bound_refused),
+                "members": [{"name": final, "short_name": short, "template": refusal.source}
+                            for final, short, _, refusal in bound_refused],
+                "allowed_sources": bound_allowed,
+                **({"list_unreadable": True} if bound_refused[0][3].list_unreadable else {}),
+            })
 
         # 5. Create all agents — best-effort by default (trinity-enterprise#125):
         # a per-agent failure is collected and the remaining agents still
@@ -2464,11 +2604,18 @@ async def deploy_manifest(
         # 6b. Update trinity_prompt (if provided) — moved after the create loop
         # (trinity-enterprise#125) so a totally-failed deploy never mutates the
         # platform-wide prompt; injection happens at agent start (step 12).
+        # #4025: only for a caller the settings route's admin gate admits.
         prompt_updated = False
-        if manifest.prompt:
+        if manifest.prompt and may_set_prompt:
             db.set_setting("trinity_prompt", manifest.prompt)
             prompt_updated = True
             logger.info(f"Updated trinity_prompt for system '{manifest.name}'")
+        elif prompt_refused:
+            all_warnings.append(PROMPT_REQUIRES_ADMIN_WARNING)
+            logger.warning(
+                f"Not applying the prompt of system '{manifest.name}': "
+                f"'{current_user.username}' is not an admin (#4025)"
+            )
 
         # 6c. Scope post-create configuration to the agents that were actually
         # created (the config functions skip short_names missing from the map).
@@ -2677,8 +2824,14 @@ async def deploy_manifest(
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception(f"System deployment failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Deployment failed: {str(e)}")
+        # #4284: the class name in the body, the scrubbed traceback in the log.
+        # Git/GitHub errors can embed a PAT-bearing remote URL (learnings
+        # 2026-07-14), so `exc_info=True` would write it raw.
+        logger.error("System deployment failed: %s", masked_traceback(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Deployment failed ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 # ============================================================================
@@ -2948,7 +3101,7 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
     `member_name_unavailable`; free -> create. Never "absent -> create" for a
     taken name, so apply cannot suffix.
     """
-    from dependencies import agent_may_reach, assert_admin, is_interactive_admin
+    from dependencies import agent_may_reach, is_interactive_admin
 
     from services import docker_service
     from services.agent_service.crud import agent_name_is_taken
@@ -2956,11 +3109,7 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
     system = manifest.name
     blockers: List[SystemApplyBlocker] = []
 
-    try:
-        assert_admin(current_user)
-        caller_is_admin = True
-    except HTTPException:
-        caller_is_admin = False
+    caller_is_admin = _caller_passes_admin_gate(current_user)
 
     snapshot = ApplySnapshot(
         system_name=system,
@@ -3400,7 +3549,7 @@ APPLY_FIELD_CLASSES = frozenset({"reconciled", "report-only", "create-only", "in
 APPLY_FIELD_CLASSIFICATION: Dict[str, Tuple[str, str]] = {
     "SystemManifest.name": ("reconciled", "the system tag and every member's name"),
     "SystemManifest.description": ("inert", "neither mode stores it"),
-    "SystemManifest.prompt": ("reconciled", "admin only (P-F exception 3)"),
+    "SystemManifest.prompt": ("reconciled", "admin only, the same gate as deploy"),
     "SystemManifest.agents": ("reconciled", "absent -> create, present -> update"),
     "SystemManifest.permissions": ("reconciled", "edges added; extras reported, never removed"),
     "SystemManifest.default_tags": ("reconciled", "added, never replaced"),
@@ -3423,6 +3572,8 @@ APPLY_FIELD_CLASSIFICATION: Dict[str, Tuple[str, str]] = {
                                 "gate map's own write; undeclared gates reported, never cleared"),
     "SystemAgentConfig.seat": ("reconciled", "the canon seat the agent holds, written only through "
                                "an assignment module's optional writer; unobserved without it"),
+    "SystemAgentConfig.credentials": ("report-only", "variable NAMES the member needs; parsed and "
+                                                      "previewed, never written (trinity-enterprise#1109)"),
     "SystemAgentConfig.deploy": ("report-only", "false names a member without running it "
                                  "(declared_only): template_in_catalog / template_not_in_catalog / "
                                  "declared_only_member_live reported; never created, reconciled "
@@ -4069,7 +4220,7 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
                         "removes it")
             drift.append(SystemApplyDrift(name=member, evidence=evidence, note=note))
 
-    # The platform prompt (P-F exception 3).
+    # The platform prompt: admin only, the same gate as deploy.
     prompt_op = None
     if not manifest.prompt:
         prompt = SystemApplyPromptVerdict(verdict="not_declared")
@@ -4230,7 +4381,7 @@ class ApplyLeaseKeeper:
 
     def _renew(self) -> LeaseState:
         issued = time.monotonic()
-        state = self._lock.refresh_if_owned_atomic()
+        state = self._lock.refresh_if_owned()
         if state is LeaseState.OWNED:
             self._deadline = issued + self._ttl - self._margin
         return state
@@ -4748,7 +4899,7 @@ async def apply_manifest(
             )
         finally:
             await lease.stop()
-            lock.release_if_owned_atomic()
+            lock.release_if_owned()
 
         if not outcome.failed:
             status = "applied"
@@ -4761,8 +4912,12 @@ async def apply_manifest(
     except HTTPException:
         raise
     except Exception as e:
-        logger.exception(f"System apply failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Apply failed: {_failure_reason(e)[0]}")
+        # #4284: the class name in the body, the scrubbed traceback in the log.
+        logger.error("System apply failed: %s", masked_traceback(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Apply failed ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 def _lock_blocker(state: LeaseState, system_name: str) -> "SystemApplyBlocker":

@@ -34,6 +34,9 @@ Admin-only page for managing system-wide configuration including API keys (Anthr
   - `GET /api/settings/mcp-url` - Get MCP URL config (any auth user) (#76)
   - `PUT /api/settings/mcp-url` - Set custom MCP URL (admin-only) (#76)
   - `DELETE /api/settings/mcp-url` - Reset MCP URL to auto-detect (admin-only) (#76)
+  - `GET /api/settings/mcp-external-access` - External MCP access state `{enabled, source, env_value, advertised_url, raw_port_bind_address}` (any auth user) (trinity-enterprise#1101)
+  - `PUT /api/settings/mcp-external-access` - Turn it on/off, body `{enabled: bool}` (admin-only, audit-logged) (trinity-enterprise#1101)
+  - `DELETE /api/settings/mcp-external-access` - Clear the row so `MCP_EXTERNAL_ACCESS` / default decide (admin-only, audit-logged) (trinity-enterprise#1101)
   - `POST /api/agents/avatars/generate-defaults` - Generate avatars for agents without one (AVATAR-003, see [agent-avatars.md](agent-avatars.md))
 
 ---
@@ -52,6 +55,7 @@ Admin-only page for managing system-wide configuration including API keys (Anthr
 | Email Whitelist | 291-390 | Table of whitelisted emails with add/remove |
 | SSH Access Toggle | 392-430 | Toggle switch for enabling SSH access |
 | MCP Server URL | 1089-1149 | Configure external MCP URL with custom/auto-detect badge (#76) |
+| External MCP access | `components/settings/McpKeysTab.vue` (MCP Keys tab) | `BaseToggle` (admin) or read-only status line, the source line (settings / environment / default), **Clear** when a Settings value is saved, and an off-state callout in place of the connection snippet; the snippet URL is the server's `advertised_url` (trinity-enterprise#1101) |
 | Default Avatars | 1054-1092 | Generate AI avatars for agents without custom ones (AVATAR-003) |
 
 **Key Reactive State**
@@ -544,6 +548,22 @@ The knobs themselves: [agent-custom-metrics.md](agent-custom-metrics.md).
 
 ---
 
+## External MCP access (trinity-enterprise#1101)
+
+Instance-wide switch: may clients outside the server reach `/mcp`? Off on a fresh install; agents are never affected.
+
+| Route | Auth | Does |
+|---|---|---|
+| `GET /api/settings/mcp-external-access` | any authenticated user | `{enabled, source, env_value, advertised_url, raw_port_bind_address}` — `source` is `settings` \| `environment` \| `default`; `env_value` is the raw `MCP_EXTERNAL_ACCESS` even when a row overrides it; `raw_port_bind_address` is `MCP_BIND_ADDRESS` (null = every interface) |
+| `PUT /api/settings/mcp-external-access` | `assert_admin` | writes `system_settings['mcp_external_access']` (`StrictBool` body), audit `CONFIGURATION`/`settings_change` |
+| `DELETE /api/settings/mcp-external-access` | `assert_admin` | deletes the row; audited when one was removed |
+
+All three live in `routers/settings/mcp_url.py` (above the `/{key}` catch-all, which refuses this key with 422). Resolution: `settings_service.is_mcp_external_access_enabled()` — row (both directions) → `MCP_EXTERNAL_ACCESS` opt-in → off. Upgraded installs get the row `'true'` from the `mcp_external_access_backfill` migration (SQLite) / Alembic `0118_mcp_external_access_backfill`, written only when a `users` row exists. The MCP server enforces it — off-box `/mcp` → `403 external_mcp_access_off`, no verdict → `503 external_mcp_access_unverified` — reading `GET /api/internal/mcp-external-access`; see [mcp-server.md](../architecture/mcp-server.md) and `requirements/mcp.md` §7.8.
+
+**UI row.** Settings → MCP Keys (`McpKeysTab.vue`): `fetchExternalAccess()` on mount (alongside the key list); the block renders only once loaded, so a fresh page never flashes "off". Admins get the `BaseToggle` (`setExternalAccess` → PUT) and **Clear** when `source === 'settings'` (`clearExternalAccess` → DELETE); others see a read-only label. Source line: "On — set here", "On — `MCP_EXTERNAL_ACCESS=true` in the environment; a value saved here overrides it", "Off — set here; agents are unaffected", "Off — default for a fresh install; agents are unaffected". Off → a warning callout replaces the connection snippet, and the new-key dialog's config is prefixed with the same warning. A failed write shows the backend `detail` inline. The exposed-agent panel (`McpExposedPanel.vue`) reads `ConnectorStatus.external_access` and disables **Copy connection config** / **Regenerate & copy** with the reason when it is explicitly `enabled: false`. Tests: `tests/unit/test_ent1101_external_mcp_access.py`, `src/frontend/tests/unit/mcpKeysExternalAccess.mount.spec.js`, `src/frontend/tests/unit/mcpExposedPanelExternalAccess.spec.js`.
+
+---
+
 ## Related Flows
 
 - **Downstream**: [template-registry.md](template-registry.md) - Remote registry for the GitHub half of the catalog (TMPL-002)
@@ -640,6 +660,7 @@ The knobs themselves: [agent-custom-metrics.md](agent-custom-metrics.md).
 
 | Date | Change |
 |------|--------|
+| 2026-11-05 | **External MCP access (trinity-enterprise#1101)**: three `/api/settings/mcp-external-access` routes in Entry Points, the MCP Keys UI row, and a new section (resolution, migration, the UI states). |
 | 2026-09-29 | **Retention tab (trinity-enterprise#671)**: new section — the `quotas` block, the metric-point rows, the `utils/retentionFields.js` field model (changed-fields-only Save, env-sourced rows read-only, edition-gated rows) and the inline save error. |
 | 2026-08-04 | **TMPL-002 Remote Template Registry (trinity-enterprise#14)**: new section + endpoint table for `GET/PUT/DELETE /api/settings/template-registry`; the TMPL-001 section's *"ent#14 will repoint this seam"* sentence is now past tense and names the constant as the fail-open floor. Full vertical in the new [template-registry.md](template-registry.md). |
 | 2026-03-08 | **AVATAR-003 Default Avatars**: Added Default Avatars card documentation. New UI section (lines 1054-1092), state refs, generateDefaultAvatars() method, test case. Backend endpoint documented in agent-avatars.md. |

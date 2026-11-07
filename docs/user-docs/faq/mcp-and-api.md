@@ -4,7 +4,7 @@
 
 ## What is the Trinity MCP server?
 
-The MCP server exposes Trinity's agent orchestration as callable tools over the Model Context Protocol (Streamable HTTP) — at `http://localhost:8080/mcp` on a local install, or `https://your-domain.com/mcp` behind the production frontend. Any MCP client — Claude Code, another agent, or your own tooling — can use it to create and manage agents, chat with them, run schedules and loops, check fleet health, and more. Authentication is an API key sent as a Bearer token. See [MCP Server](../integrations/mcp-server.md).
+The MCP server exposes Trinity's agent orchestration as callable tools over the Model Context Protocol (Streamable HTTP) — at `http://localhost:8080/mcp` on a local install, or `https://your-domain.com/mcp` behind the production frontend — for clients outside the Trinity server, once an admin turns on External MCP access. Any MCP client — Claude Code, another agent, or your own tooling — can use it to create and manage agents, chat with them, run schedules and loops, check fleet health, and more. Authentication is an API key sent as a Bearer token. See [MCP Server](../integrations/mcp-server.md).
 
 ## How do I create an MCP API key?
 
@@ -32,11 +32,17 @@ Add Trinity as an MCP server in your Claude Code configuration (`.mcp.json`) usi
 }
 ```
 
-The **Settings → MCP Keys** page shows a ready-made connection snippet with the URL for your install, and once connected Trinity's tools appear in your client's tool list. See [MCP Server](../integrations/mcp-server.md).
+The **Settings → MCP Keys** page shows a ready-made connection snippet with the URL for your install, and once connected Trinity's tools appear in your client's tool list. On a fresh install — local development included — an admin first turns on **External MCP access** on that same page; until then Claude Code on your laptop is refused with `external_mcp_access_off`, because any client outside the Trinity server counts as outside, even one on the same host. See [MCP Server](../integrations/mcp-server.md#external-mcp-access).
 
 ## Which URL should I point my MCP client at — port 8080 or my domain?
 
-On a local install use `http://localhost:8080/mcp`, the MCP server's own published port. On a production install behind the frontend use `https://your-domain.com/mcp`: the frontend proxies `/mcp` to the MCP server, so a host that exposes only ports 80/443 (a firewalled server, a one-click cloud image) serves MCP without opening 8080. The URL Trinity advertises — in the MCP Keys connection snippet and in an exposed agent's **Copy connection config** — is auto-detected from the request: `https://<host>/mcp` when the proxy in front of Trinity reports HTTPS (`X-Forwarded-Proto: https`, which a Cloudflare Tunnel sends), otherwise `http://<host>:8080/mcp`. When that is wrong for your install, an admin sets the real one under **Settings → MCP Keys → MCP Server URL** (it must end in `/mcp`, and **Auto-detect** shows what would be advertised otherwise). See [MCP Server](../integrations/mcp-server.md#which-url-to-use).
+On a local install use `http://localhost:8080/mcp`, the MCP server's own published port. On a production install behind the frontend use `https://your-domain.com/mcp`: the frontend proxies `/mcp` to the MCP server, so a host that exposes only ports 80/443 (a firewalled server, a one-click cloud image) serves MCP without opening 8080. The URL Trinity advertises — in the MCP Keys connection snippet and in an exposed agent's **Copy connection config** — is auto-detected from the request: `<origin>/mcp` when the request came through a proxy that sends `X-Forwarded-Proto` (the bundled frontend always does, and so does a Cloudflare Tunnel), otherwise the raw port — `http://127.0.0.1:8080/mcp` when `MCP_BIND_ADDRESS` is set, as it is on a fresh install, else `http://<host>:8080/mcp`. Either URL answers an outside client only while External MCP access is on. When that is wrong for your install, an admin sets the real one under **Settings → MCP Keys → MCP Server URL** (it must end in `/mcp`, and **Auto-detect** shows what would be advertised otherwise). See [MCP Server](../integrations/mcp-server.md#which-url-to-use).
+
+## Why does my client get external_mcp_access_off?
+
+External MCP access is off on that instance. It starts off on every fresh install, and while it is off the MCP server refuses every client outside the Trinity server with `403`, header `X-Trinity-Refusal: external_mcp_access_off` and a JSON-RPC error (`-32003`). "Outside" means anything that is not an agent on the instance: Claude Code on your laptop, a client reaching `/mcp` through the web frontend or a tunnel, and a client on the published `:8080` port — even from the Trinity host itself. An admin turns it on under **Settings → MCP Keys → External MCP access**; it applies within about ten seconds, with no restart. `MCP_EXTERNAL_ACCESS=true` in `.env` also turns it on, but a value saved in Settings wins over it. Agents on the instance are never refused. An install that already had users when it upgraded kept it on.
+
+A `503` with `external_mcp_access_unverified` is different: the MCP server could not read the setting from the backend yet (it is still starting, or `INTERNAL_API_SECRET` is not set). Retry after the `Retry-After` interval. See [MCP Server — External MCP Access](../integrations/mcp-server.md#external-mcp-access).
 
 ## How many MCP tools are there, and what can they do?
 

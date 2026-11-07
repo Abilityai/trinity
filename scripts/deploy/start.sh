@@ -778,6 +778,9 @@ provision_site() {
     set_env_key FRONTEND_PORT 8081
     # ...and only Caddy, on this host, needs to reach it (trinity-enterprise#873).
     set_env_key FRONTEND_BIND_ADDRESS 127.0.0.1
+    # The MCP server's raw :8080 likewise: off-box MCP clients use the web
+    # door's /mcp (trinity-enterprise#1101). A --hosted upgrade never moves it.
+    set_env_key MCP_BIND_ADDRESS 127.0.0.1
     set_env_key TRINITY_INSTALL_SOURCE "$provenance"
     if [ -n "${TRINITY_IMAGE_TAG:-}" ]; then
         set_env_key TRINITY_IMAGE_TAG "$TRINITY_IMAGE_TAG"
@@ -1496,7 +1499,24 @@ docker volume inspect "${_project}_trinity-data" >/dev/null 2>&1 && _dev_volume=
 _hosted_db=0
 [ -f "${_data_path}/trinity.db" ] && _hosted_db=1
 
-if [ "$HOSTED" = "1" ] && [ "$_hosted_db" = "0" ] && [ "$_dev_volume" = "1" ]; then
+# #4175: the dev `trinity-data` volume always exists, and stays empty on PostgreSQL.
+dev_volume_has_db() {
+    local volume
+    volume="$(compose_project_name)_trinity-data"
+    docker volume inspect "$volume" >/dev/null 2>&1 || return 1
+    docker run --rm -v "${volume}:/v:ro" alpine test -s /v/trinity.db >/dev/null 2>&1
+}
+
+# db.sqlite_to_postgres leaves the marker beside the file it copied.
+dev_volume_needs_copy() {
+    local volume
+    volume="$(compose_project_name)_trinity-data"
+    docker volume inspect "$volume" >/dev/null 2>&1 || return 1
+    docker run --rm -v "${volume}:/v:ro" alpine \
+        sh -c 'test -s /v/trinity.db && test ! -e /v/trinity.db.copied-to-postgres' >/dev/null 2>&1
+}
+
+if [ "$HOSTED" = "1" ] && [ "$_hosted_db" = "0" ] && [ "$_dev_volume" = "1" ] && dev_volume_has_db; then
     echo "❌ Refusing to start: this checkout has a dev-stack database that --hosted cannot see." >&2
     echo "" >&2
     echo "   Found: docker volume '${_project}_trinity-data' (written by docker-compose.yml)" >&2
@@ -1685,19 +1705,15 @@ if [ "$_log_src" = "file" ]; then
 fi
 # -----------------------------------------------------------------------------
 
-# --- Hosted database: bundled PostgreSQL (#3159, HOST-022) ------------------
-# SQLite reached end-of-support on 2026-09-01 (#1278). A fresh hosted install
-# gets the bundled `postgres` service; an install that already has
-# /data/trinity.db stays on SQLite, pinned by an explicit empty DATABASE_URL
-# (the hosted compose default treats unset and empty differently). An existing
-# DATABASE_URL line, or one in the shell, is a decision already made and is
-# never touched. POSTGRES_PASSWORD is generated either way because the hosted
-# compose file does not render without it; on a SQLite install the postgres
-# container runs idle. Called after the data-switch guard so a refused run
-# writes nothing, and before `compose pull`, which renders the file.
-ensure_hosted_database() {
-    [ "$HOSTED" = "1" ] || return 0
-    local data_path
+# --- Database: bundled PostgreSQL (#3159, #4175, HOST-022, HOST-023) ---------
+# Every compose file runs PostgreSQL by default. An install whose store holds a
+# SQLite database is refused before `compose pull`, because the compose default
+# would otherwise point it at an empty server; the backend refuses that state
+# too, for every path that does not run this script. POSTGRES_PASSWORD is written
+# first, even on a refusal: the copy command needs the file to render. An existing
+# non-empty DATABASE_URL is a decision already made and is never touched.
+ensure_database() {
+    local data_path url_set=0 url="" allow has_sqlite=0 password
     data_path="${TRINITY_DATA_PATH:-$(env_value TRINITY_DATA_PATH)}"
     data_path="${data_path:-./trinity-data}"
 
@@ -1705,32 +1721,78 @@ ensure_hosted_database() {
         # The postgres image applies the password only when it initialises an
         # empty volume, so a new one would lock the backend out of its data.
         if docker volume inspect "$(compose_project_name)_postgres-data" >/dev/null 2>&1; then
-            echo "ERROR: the PostgreSQL volume already exists but POSTGRES_PASSWORD is missing from .env." >&2
-            echo "       Restore the original password to .env; a new one cannot open the existing data." >&2
-            return 1
-        fi
-        set_env_key POSTGRES_PASSWORD "$(openssl rand -hex 24)"
-        echo "Auto-generated POSTGRES_PASSWORD"
-    fi
-
-    if [ -z "${DATABASE_URL+x}" ] \
-        && ! grep -qE '^[[:space:]]*(export[[:space:]]+)?DATABASE_URL=' .env 2>/dev/null; then
-        if [ -f "${data_path}/trinity.db" ]; then
-            set_env_key DATABASE_URL ""
+            if [ "$HOSTED" = "1" ]; then
+                echo "ERROR: the PostgreSQL volume already exists but POSTGRES_PASSWORD is missing from .env." >&2
+                echo "       Restore the original password to .env; a new one cannot open the existing data." >&2
+                return 1
+            fi
+            # Dev compose used this default before #4175.
+            set_env_key POSTGRES_PASSWORD trinity
+            echo "Existing dev PostgreSQL volume: POSTGRES_PASSWORD set to its previous default in .env."
         else
-            set_env_key DATABASE_URL "postgresql://trinity:$(env_value POSTGRES_PASSWORD)@postgres:5432/trinity"
-            echo "Fresh install: database is the bundled PostgreSQL (DATABASE_URL written to .env)."
+            set_env_key POSTGRES_PASSWORD "$(openssl rand -hex 24)"
+            echo "Auto-generated POSTGRES_PASSWORD"
         fi
     fi
 
-    if [ -z "${DATABASE_URL-$(env_value DATABASE_URL)}" ] && [ -f "${data_path}/trinity.db" ]; then
-        echo "⚠️  This install runs on SQLite (${data_path}/trinity.db), which reached end-of-support"
-        echo "    on 2026-09-01. It stays on SQLite. To move to PostgreSQL, see"
-        echo "    docs/migrations/SQLITE_TO_POSTGRES.md"
+    if [ -n "${DATABASE_URL+x}" ]; then
+        url_set=1
+        url="$DATABASE_URL"
+    elif grep -qE '^[[:space:]]*(export[[:space:]]+)?DATABASE_URL=' .env 2>/dev/null; then
+        url_set=1
+        url="$(env_value DATABASE_URL)"
     fi
+    [ -z "$url" ] || return 0
+
+    allow="${TRINITY_ALLOW_SQLITE:-$(env_value TRINITY_ALLOW_SQLITE)}"
+    if [ "$HOSTED" = "1" ]; then
+        [ -s "${data_path}/trinity.db" ] && [ ! -e "${data_path}/trinity.db.copied-to-postgres" ] && has_sqlite=1
+    else
+        dev_volume_needs_copy && has_sqlite=1
+    fi
+
+    if [ "$url_set" = "1" ] && [ "$allow" = "1" ]; then
+        echo "⚠️  This install runs on SQLite, which reached end-of-support on 2026-09-01 and"
+        echo "    leaves Trinity in a later release. Move it: docs/migrations/SQLITE_TO_POSTGRES.md"
+        return 0
+    fi
+    if [ "$url_set" = "1" ] || [ "$has_sqlite" = "1" ]; then
+        echo "❌ Refusing to start: SQLite reached end-of-support on 2026-09-01." >&2
+        if [ "$has_sqlite" = "1" ]; then
+            echo "" >&2
+            if [ "$url_set" = "1" ]; then
+                echo "   This install has a SQLite database. Remove the DATABASE_URL= line from .env (an" >&2
+                echo "   empty value selects SQLite), get this release's image, then copy it to PostgreSQL:" >&2
+            else
+                echo "   This install has a SQLite database. Get this release's image, then copy it to PostgreSQL:" >&2
+            fi
+            if [ "$HOSTED" = "1" ]; then
+                echo "       docker compose ${COMPOSE_FILES[*]:-} pull backend" >&2
+            else
+                echo "       docker compose ${COMPOSE_FILES[*]:-} build backend" >&2
+            fi
+            echo "       docker compose ${COMPOSE_FILES[*]:-} run --rm backend python -m db.sqlite_to_postgres" >&2
+            echo "   then re-run this script. Details: docs/migrations/SQLITE_TO_POSTGRES.md" >&2
+            echo "" >&2
+            echo "   To stay on SQLite for this release only, set both DATABASE_URL= (empty) and" >&2
+            echo "   TRINITY_ALLOW_SQLITE=1 in .env." >&2
+        else
+            echo "   DATABASE_URL is empty in .env, which selects SQLite. Remove that line to use" >&2
+            echo "   the bundled PostgreSQL, or set a postgresql:// URL." >&2
+        fi
+        return 1
+    fi
+
+    local user=trinity db=trinity
+    if [ "$HOSTED" != "1" ]; then
+        user="$(env_value POSTGRES_USER)"; user="${user:-trinity}"
+        db="$(env_value POSTGRES_DB)"; db="${db:-trinity}"
+    fi
+    set_env_key DATABASE_URL "postgresql://${user}:$(env_value POSTGRES_PASSWORD)@postgres:5432/${db}"
+    echo "Database is the bundled PostgreSQL (DATABASE_URL written to .env)."
 }
 
-ensure_hosted_database
+ensure_database
 
 # --- The ingress network's subnet is free (trinity-enterprise#873) ------------
 # Hosted adds a third Docker network, trinity-proxy-network, on
@@ -1918,7 +1980,23 @@ fi
 echo "Access points:"
 echo "  - Web UI:       ${WEB_UI_URL}"
 echo "  - Backend API:  http://localhost:8000/docs"
-echo "  - MCP Server:   http://localhost:8080/mcp"
+# trinity-enterprise#1101: where an MCP client connects depends on the raw
+# port's bind (shell over .env, as compose resolves it). Loopback means the
+# web door's /mcp is the way in, and only once External MCP access is on.
+_mcp_bind="${MCP_BIND_ADDRESS:-$(env_value MCP_BIND_ADDRESS)}"
+case "$_mcp_bind" in
+    127.0.0.1|::1|localhost)
+        echo "  - MCP Server:   ${WEB_UI_URL}/mcp once an admin turns on External MCP access (Settings → MCP Keys); the container port is published on ${_mcp_bind} only" ;;
+    ""|0.0.0.0|::)
+        echo "  - MCP Server:   http://localhost:8080/mcp"
+        echo "                  (clients off this host need External MCP access on: Settings → MCP Keys)" ;;
+    *:*)
+        echo "  - MCP Server:   http://[${_mcp_bind}]:8080/mcp"
+        echo "                  (clients off this host need External MCP access on: Settings → MCP Keys)" ;;
+    *)
+        echo "  - MCP Server:   http://${_mcp_bind}:8080/mcp"
+        echo "                  (clients off this host need External MCP access on: Settings → MCP Keys)" ;;
+esac
 echo ""
 
 # --- Next steps card (#39) ----------------------------------------------------

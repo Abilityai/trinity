@@ -147,6 +147,12 @@ class AgentOperations(
                 is_system=1 if is_system else 0,
                 execution_timeout_seconds=3600,
                 require_email=1 if require_email else 0,
+                # abilityai/trinity-enterprise#1108: same reasoning again —
+                # the column is tri-state (NULL = platform default ON, 0 =
+                # the owner's OFF) and an upgraded SQLite instance keeps the
+                # ent#329 ``DEFAULT 0`` baked into the column, so an OMITTED
+                # column would stamp every new agent as an explicit OFF.
+                operator_resume_enabled=None,
             )
             if is_ephemeral:
                 values.update(
@@ -469,6 +475,17 @@ class AgentOperations(
         stmt = select(agent_ownership.c.agent_name).where(
             agent_ownership.c.spawned_by_agent == agent_name,
             agent_ownership.c.spawned_by_key_id == key_id,
+            agent_ownership.c.deleted_at.is_(None),
+        )
+        with get_engine().connect() as conn:
+            return [row[0] for row in conn.execute(stmt)]
+
+    def list_agent_created_agent_names(self) -> List[str]:
+        """Live agents another agent created (`spawned_by_agent` set) — durable
+        and ephemeral alike. The template-source bound's impact read
+        (trinity-enterprise#591): which templates would a new allowlist refuse."""
+        stmt = select(agent_ownership.c.agent_name).where(
+            agent_ownership.c.spawned_by_agent.isnot(None),
             agent_ownership.c.deleted_at.is_(None),
         )
         with get_engine().connect() as conn:

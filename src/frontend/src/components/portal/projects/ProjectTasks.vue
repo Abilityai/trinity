@@ -12,7 +12,11 @@
   people who may (contributors on a live project). Objectives and task-log
   bodies render as markdown through the shared renderer (#3692).
 
-  #867: contributors change a task's owner here — free text, blank clears it.
+  #867: contributors change a task's owner here — blank clears it.
+  trinity-enterprise#1155: the owner is picked from the project's own people
+  (must-pick, over `GET /projects/{id}/people?purpose=owner`); a `role:<id>`
+  owner and the owner already on the task are still taken as typed. Rows and
+  the detail name the owner.
 -->
 <template>
   <div class="space-y-4" data-testid="project-tasks">
@@ -53,7 +57,7 @@
               <span class="font-mono text-xs text-gray-500 dark:text-gray-400 tabular-nums">{{ t.id }}</span>
               <span class="min-w-0 flex-1 truncate text-sm text-gray-900 dark:text-gray-100">{{ t.title }}</span>
               <BaseBadge v-if="t.priority === 'p1'" variant="urgent">P1</BaseBadge>
-              <span v-if="t.owner || t.agent" class="hidden sm:inline max-w-[10rem] truncate text-xs text-gray-500 dark:text-gray-400">{{ t.agent || t.owner }}</span>
+              <span v-if="t.owner || t.agent" class="hidden sm:inline max-w-[10rem] truncate text-xs text-gray-500 dark:text-gray-400">{{ t.agent || ownerLabel(t.owner) }}</span>
               <BaseBadge :variant="TASK_STATUS_BADGE[t.status] || 'neutral'">{{ taskStatusLabel(t.status) }}</BaseBadge>
             </button>
             <BaseButton
@@ -79,7 +83,18 @@
         <BaseTextarea id="task-objective" v-model="form.objective" label="Objective (optional)" :rows="2" />
         <BaseTextarea id="task-dod" v-model="form.done_definition" label="Definition of done (optional)" :rows="3" mono placeholder="- [ ] Brief reviewed by two leads" />
         <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-          <BaseInput id="task-owner" v-model="form.owner" label="Owner (optional)" placeholder="name@your-company.com" />
+          <BasePeopleInput
+            id="task-owner"
+            ref="createOwnerField"
+            v-model="form.owner"
+            v-model:picked="createPicked"
+            mode="pick"
+            label="Owner (optional)"
+            placeholder="Type a name or email"
+            :fetch="ownerLookup"
+            :no-match="noOwnerMatch"
+            :accept-text="isRoleOwner"
+          />
           <BaseSelect id="task-priority" v-model="form.priority" label="Priority">
             <option value="p1">P1 — high</option>
             <option value="p2">P2 — normal</option>
@@ -107,7 +122,7 @@
           <BaseBadge :variant="TASK_STATUS_BADGE[task.status] || 'neutral'">{{ taskStatusLabel(task.status) }}</BaseBadge>
         </div>
         <dl class="grid grid-cols-2 gap-x-4 gap-y-1 text-sm sm:grid-cols-4">
-          <div><dt class="text-xs text-gray-500 dark:text-gray-400">Owner</dt><dd class="truncate text-gray-900 dark:text-gray-100">{{ task.owner || '—' }}</dd></div>
+          <div><dt class="text-xs text-gray-500 dark:text-gray-400">Owner</dt><dd class="truncate text-gray-900 dark:text-gray-100">{{ task.owner ? ownerLabel(task.owner) : '—' }}</dd></div>
           <div><dt class="text-xs text-gray-500 dark:text-gray-400">Agent</dt><dd class="truncate text-gray-900 dark:text-gray-100">{{ task.agent || '—' }}</dd></div>
           <div><dt class="text-xs text-gray-500 dark:text-gray-400">Priority</dt><dd class="uppercase text-gray-900 dark:text-gray-100">{{ task.priority }}</dd></div>
           <div><dt class="text-xs text-gray-500 dark:text-gray-400">Updated</dt><dd class="text-gray-900 dark:text-gray-100" :title="formatLocalDateTime(task.updated_at)">{{ formatRelativeTime(task.updated_at) }}</dd></div>
@@ -127,12 +142,18 @@
               <option value="p1">P1</option><option value="p2">P2</option><option value="p3">P3</option>
             </BaseSelect>
           </div>
-          <BaseInput
+          <BasePeopleInput
             id="task-owner-edit"
+            ref="editOwnerField"
             v-model="edit.owner"
+            v-model:picked="editPicked"
+            mode="pick"
             label="Owner"
-            placeholder="name@your-company.com"
+            placeholder="Type a name or email"
             maxlength="320"
+            :fetch="ownerLookup"
+            :no-match="noOwnerMatch"
+            :accept-text="isKeptOwner"
             :disabled="task.status === 'done'"
             :help="task.status === 'done' ? 'Reopen the task to change its owner.' : 'Leave blank for no owner.'"
             data-testid="project-task-owner"
@@ -168,6 +189,7 @@ import { computed, reactive, ref, watch } from 'vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
+import BasePeopleInput from '@/components/base/BasePeopleInput.vue'
 import BaseModal from '@/components/base/BaseModal.vue'
 import BaseSelect from '@/components/base/BaseSelect.vue'
 import BaseTextarea from '@/components/base/BaseTextarea.vue'
@@ -187,6 +209,8 @@ const props = defineProps({
   canContribute: { type: Boolean, default: false },
   archived: { type: Boolean, default: false },
   myEmail: { type: String, default: '' },
+  // The project's members `{email, label}` — names an owner on a row.
+  members: { type: Array, default: () => [] },
 })
 
 const store = useProjectsStore()
@@ -198,6 +222,22 @@ const actionError = ref('')
 const form = reactive({ title: '', objective: '', done_definition: '', owner: '', priority: 'p2' })
 const formError = ref({})
 const edit = reactive({ status: '', priority: 'p2', owner: '', note: '' })
+const createPicked = ref(null)
+const editPicked = ref(null)
+const createOwnerField = ref(null)
+const editOwnerField = ref(null)
+
+const ownerLookup = (q) => store.fetchProjectPeople(props.projectId, q, 'owner')
+const noOwnerMatch = (t) => `No one on this project matches “${t}”. Add them as a member first.`
+const isRoleOwner = (t) => /^role:\S+$/i.test(t)
+const isKeptOwner = (t) => isRoleOwner(t) || (!!task.value?.owner && t === task.value.owner)
+const member = (email) => props.members.find((m) => m.email === String(email || '').toLowerCase())
+const ownerLabel = (owner) => member(owner)?.label || owner
+// The owner a task opens with, as a chosen person when they are on the project.
+function ownerPerson(owner) {
+  const m = owner && member(owner)
+  return m ? { email: m.email, label: m.label || m.email } : null
+}
 
 const state = computed(() => store.tasks[props.projectId] || { rows: [], loaded: false, error: null })
 const view = computed(() => viewState({ hasLoaded: state.value.loaded, error: state.value.error, count: state.value.rows.length }))
@@ -221,6 +261,7 @@ watch(() => props.projectId, load, { immediate: true })
 
 function openCreate() {
   Object.assign(form, { title: '', objective: '', done_definition: '', owner: '', priority: 'p2' })
+  createPicked.value = null
   formError.value = {}
   actionError.value = ''
   createOpen.value = true
@@ -228,7 +269,8 @@ function openCreate() {
 
 async function create() {
   formError.value = form.title.trim() ? {} : { title: 'Give the task a title, e.g. "Draft the launch brief".' }
-  if (formError.value.title) return
+  const ownerOk = !!createOwnerField.value?.validate()
+  if (formError.value.title || !ownerOk) return
   busy.value = true
   actionError.value = ''
   try {
@@ -263,14 +305,20 @@ async function openTask(id) {
   taskOpen.value = true
   try {
     task.value = await store.fetchTask(props.projectId, id)
-    Object.assign(edit, { status: task.value.status, priority: task.value.priority, owner: task.value.owner || '', note: '' })
+    resetEdit()
   } catch (err) {
     taskOpen.value = false
     actionError.value = projectErrorMessage(err)
   }
 }
 
+function resetEdit() {
+  editPicked.value = ownerPerson(task.value.owner)
+  Object.assign(edit, { status: task.value.status, priority: task.value.priority, owner: task.value.owner || '', note: '' })
+}
+
 async function saveTask() {
+  if (editOwnerField.value && !editOwnerField.value.validate()) return
   const body = {}
   if (edit.status !== task.value.status) body.status = edit.status
   if (edit.priority !== task.value.priority && task.value.status !== 'done') body.priority = edit.priority
@@ -282,7 +330,7 @@ async function saveTask() {
   try {
     await store.updateTask(props.projectId, task.value.id, body)
     task.value = await store.fetchTask(props.projectId, task.value.id)
-    Object.assign(edit, { status: task.value.status, priority: task.value.priority, owner: task.value.owner || '', note: '' })
+    resetEdit()
   } catch (err) {
     actionError.value = projectErrorMessage(err)
   } finally {

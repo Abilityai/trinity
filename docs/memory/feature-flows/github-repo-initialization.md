@@ -672,7 +672,9 @@ async def initialize_github_sync(
     except GitHubError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to initialize GitHub sync: {str(e)}")
+        # The PAT is masked out of the logged traceback (utils.log_masking).
+        _log_redacted_failure("GitHub sync initialize", agent_name, e, github_pat)
+        raise HTTPException(status_code=500, detail=f"Failed to initialize GitHub sync ({e.__class__.__name__} — details in backend logs)")
 ```
 
 ### Docker Service - Command Execution
@@ -969,9 +971,10 @@ None - this is a one-time configuration operation
 | Invalid PAT format | 400 | "Invalid token format" | Use PAT starting with ghp_ or github_pat_ |
 | Owner not found | 400 | "Owner '{owner}' not found on GitHub" | Check owner name |
 | Repo creation failed | 400 | "Failed to create repository: {message}" | Check PAT permissions |
-| Git command failed | 500 | "Git initialization failed: {error}" | Check container logs |
-| Git verification failed | 500 | "Git initialization verification failed" | Check container state |
+| Git command failed | 400 | "Git initialization failed: {error}" | Check container logs |
+| Git verification failed | 400 | "Git initialization failed: Git initialization verification failed" | Check container state |
 | GitHubError | 400 | Exception message | Check PAT and permissions |
+| Unexpected failure | 500 | "Failed to initialize GitHub sync ({ExceptionClass} — details in backend logs)"; the traceback is logged with the PAT masked | Check backend logs |
 
 ---
 

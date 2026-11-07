@@ -788,7 +788,9 @@ async def assign_subscription_to_agent(
             await start_agent_internal(agent_name)
             restart_result = "success"
         except Exception as e:
-            restart_result = f"failed: {e}"
+            logger.error(..., exc_info=True)
+            # ent#1117: the class name, not the exception text
+            restart_result = f"failed: {e.__class__.__name__} — details in backend logs"
 
     return {
         "success": True,
@@ -816,7 +818,7 @@ async def clear_agent_subscription(agent_name: str, ...):
         await start_agent_internal(agent_name)  # Recreates container with API key
 ```
 
-Response includes `restart_result` field ("success" or "failed: {error}").
+Response includes `restart_result` field ("success" or "failed: {ExceptionClass} — details in backend logs"; the exception and its traceback go to the backend log).
 
 ---
 
@@ -1339,7 +1341,7 @@ MCP client methods: `src/mcp-server/src/client.ts:1079-1196`
 | Subscription not found (usage) | 404 | "Subscription not found" |
 | Usage query failure | 500 | "Failed to retrieve usage data" |
 | Subscription usage exhausted | 429 | "Subscription usage limit: [reset message]. To resolve: (1) wait for reset, (2) set ANTHROPIC_API_KEY, or (3) assign different subscription" |
-| Failed registration | 500 | "Failed to register subscription: {error}" |
+| Failed registration | 500 | "Failed to register subscription ({ExceptionClass} — details in backend logs)"; the logged traceback masks the token |
 
 ### Rate Limit Detection
 

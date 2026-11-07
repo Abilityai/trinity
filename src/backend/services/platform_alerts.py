@@ -99,10 +99,12 @@ class Kind:
     """One kind of platform alert.
 
     ``prefix`` is the request-id prefix its rows carry; it must fall under a
-    platform-reserved prefix (`operator_queue_service._RESERVED_ID_PREFIXES`)
-    so an agent cannot mint a row into it. Kinds may share a prefix (two
-    conditions under one family) — they then share a lifetime class. ``event``
-    kinds have no subject: every observation is its own row.
+    platform-reserved prefix (`operator_queue_service.reserved_id_prefixes()`
+    — the OSS literal, plus whatever an external emitter reserved through
+    `reserve_id_prefix`) so an agent cannot mint a row into it. ``register``
+    enforces that; a builtin below is covered by the literal. Kinds may share a
+    prefix (two conditions under one family) — they then share a lifetime
+    class. ``event`` kinds have no subject: every observation is its own row.
 
     ``escalates(new_context, ended_context)`` (#4048) is a kind's own "this
     reading is worse" rule: True breaks a person's snooze. Unlike a material
@@ -203,6 +205,11 @@ _BUILTIN_KINDS = (
     # re-reads of the SAME episode only; a new episode differs and files.
     Kind("queue_flood", "queue-flood-", _D, CLEARS_HOOK, budgeted_type="queue_flood",
          material_keys=("episode_started_at",)),
+    # #4257: the episode is the admission of the head that started the stall,
+    # so a person's ending snoozes re-reads of THAT stall only; a later one
+    # after the queue recovered carries a different marker and files.
+    Kind("dispatch_queue_stalled", "queue-stall-", _D, CLEARS_HOOK,
+         material_keys=("episode_started_at",)),
     Kind("alert_budget", "alert-budget-", _D, CLEARS_HOOK, material_keys=("filled_by",)),
     Kind("skill_not_found", "skill-not-found-", _D, CLEARS_HOOK, budgeted_type="skill_not_found"),
     Kind("effect_unguarded", "effect-unguarded-", _D, CLEARS_LIFETIME_ONLY,
@@ -226,9 +233,27 @@ def register(kind: Kind) -> None:
 
     A duplicate name is refused: two emitters silently sharing a kind would
     share subjects, and one's clear would end the other's alert.
+
+    The prefix must be platform-reserved (trinity-enterprise#1111, T4). `Kind`
+    has always DOCUMENTED that requirement and never checked it, so a kind
+    registered from outside this repo could mint rows under a prefix an agent
+    is free to author — and then the agent can pre-create the id of the alert
+    about itself and swallow it through ON CONFLICT DO NOTHING (#1632, #2744).
+    An external emitter reserves its prefix with
+    `operator_queue_service.reserve_id_prefix` first. Imported inside the
+    function: this module is a stdlib-only leaf that `operator_queue_service`
+    itself imports, and a module-level import would close that ring.
     """
     if kind.name in KINDS:
         raise ValueError(f"platform alert kind {kind.name!r} is already registered")
+    from services import operator_queue_service as _oq
+
+    if not kind.prefix.startswith(_oq.reserved_id_prefixes()):
+        raise ValueError(
+            f"platform alert kind {kind.name!r}: prefix {kind.prefix!r} is not "
+            f"platform-reserved — call operator_queue_service.reserve_id_prefix"
+            f"({kind.prefix!r}) first, or an agent can author (and so suppress) "
+            f"its own alert's id")
     KINDS[kind.name] = kind
 
 

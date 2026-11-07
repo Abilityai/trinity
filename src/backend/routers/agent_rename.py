@@ -1,9 +1,13 @@
 # mcp: agents.ts (rename_agent)
-"""Agent rename endpoint (RENAME-001)."""
+"""Agent rename endpoint (RENAME-001).
+
+The gates, the name sanitiser and the HTTP mapping live here; the rename
+itself is `services/agent_service/rename.py::rename_agent_now`
+(trinity-enterprise#1111, T3), so a platform caller acting with `actor=None`
+runs the same steps rather than a second copy of them.
+"""
 import re
-import json
 import logging
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
@@ -11,9 +15,12 @@ from models import RenameAgentRequest, User
 from database import db
 from dependencies import get_current_user, reject_agent_principal, require_person
 from services.docker_service import get_agent_container
-from services.docker_utils import container_stop, container_rename
-from services.image_generation_prompts import AVATAR_EMOTIONS
-from services.platform_audit_service import platform_audit_service, AuditEventType
+from services.agent_service.rename import (
+    AgentContainerMissing,
+    RenameRefused,
+    SystemAgentRefused,
+    rename_agent_now,
+)
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -126,155 +133,45 @@ async def rename_agent_endpoint(
             ),
         )
 
-    # Get the container
-    container = get_agent_container(agent_name)
-    if not container:
-        raise HTTPException(status_code=404, detail="Agent not found")
-
-    # Check if agent is running - we need to stop it to rename
-    was_running = container.status == "running"
-
     try:
-        # Stop container if running
-        if was_running:
-            await container_stop(container)
-
-        # Rename Docker container
-        old_container_name = f"agent-{agent_name}"
-        new_container_name = f"agent-{sanitized_name}"
-        await container_rename(container, new_container_name)
-
-        # Container env and labels change only on recreate. The next start's
-        # recreate re-bakes AGENT_NAME and the trinity.agent-name label from the
-        # new name (#3813, check_agent_name_env_matches).
-        #
-        # #1159: the running container still carries TRINITY_AGENT_AUTH_TOKEN=
-        # derive(old_name); under the new name that token is stale and would 401
-        # once enforcement is on (Codex #4). No extra work here — the rename
-        # leaves the agent stopped, and the next start_agent_internal recreate is
-        # forced by check_agent_auth_token_env_matches (token mismatch) and
-        # re-injects derive(new_name). Same recreate-on-next-start path the label/
-        # volume changes above already depend on.
-
-        # Docker volumes are NOT renamed: Docker supports neither renaming a
-        # volume nor editing its (immutable) labels, so copying gigabytes of
-        # `/home/developer` on every rename is the only alternative. The agent
-        # keeps its existing `agent-{old_name}-*` volumes and the container
-        # carries the same mounts forward (recreate_container_with_updated_config
-        # rebuilds the mount set from the old container's Mounts).
-        #
-        # #1664: that makes the volume's own identity (name + `trinity.agent-name`
-        # label) permanently stale, which the #1581 orphan sweep once read as
-        # "this volume's agent no longer exists" — and force-removed the LIVE
-        # agent's home volume during a recreate gap. `db.rename_agent` therefore
-        # pins `agent_ownership.volume_base_name = old_name` atomically with the
-        # rename; the sweep resolves ownership from that, never from the volume.
-        # Anything that needs this agent's volume names must ask
-        # `db.get_volume_base_name(agent)` — NOT f"agent-{agent_name}-workspace".
-
-        # Update database references
-        if not db.rename_agent(agent_name, sanitized_name):
-            # Rollback container rename
-            await container_rename(container, old_container_name)
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to update database. Agent name may already be taken."
-            )
-
-        # trinity-enterprise#751: a gated request approved for the old name must
-        # not run under the new one. The rename re-keyed the records; cancel the
-        # pending ones and tell their requesters. Best effort.
-        try:
-            from services import skill_gate_service
-            await skill_gate_service.cancel_pending_for_agent(
-                sanitized_name, actor_email=current_user.email, actor_user=current_user,
-                reason="agent_renamed")
-        except Exception as e:
-            logger.warning(f"Failed to cancel gated requests after renaming {agent_name}: {e}")
-
-        # #1560 / RELIABILITY-004 (#307): every per-agent Redis keyspace is keyed
-        # by name, so a rename orphans all of them under the old name — the
-        # heartbeat `seen` marker (no TTL), both circuit breakers, and the slot
-        # ZSET. The new name is swept too: it may have been used by an agent that
-        # the retention purge has since removed, whose breaker verdict would
-        # otherwise be inherited here. The container is stopped for the whole
-        # rename, so neither sweep can race an in-flight execution's slot. The
-        # renamed container re-establishes its own state on next beat/dispatch.
-        # Best-effort.
-        try:
-            from services.agent_runtime_state import clear_agent_runtime_state
-            await clear_agent_runtime_state(agent_name)
-            await clear_agent_runtime_state(sanitized_name)
-        except Exception as e:
-            logger.warning(f"Failed to clear Redis runtime state on rename {agent_name} -> {sanitized_name}: {e}")
-
-        # Rename cached avatar, reference, and emotion image files (AVATAR-001, AVATAR-002)
-        try:
-            for ext in (".webp", ".png"):
-                old_path = Path("/data/avatars") / f"{agent_name}{ext}"
-                new_path = Path("/data/avatars") / f"{sanitized_name}{ext}"
-                if old_path.exists():
-                    old_path.rename(new_path)
-            # Reference stays .png
-            old_ref = Path("/data/avatars") / f"{agent_name}_ref.png"
-            new_ref = Path("/data/avatars") / f"{sanitized_name}_ref.png"
-            if old_ref.exists():
-                old_ref.rename(new_ref)
-            for emotion in AVATAR_EMOTIONS:
-                for ext in (".webp", ".png"):
-                    old_path = Path("/data/avatars") / f"{agent_name}_emotion_{emotion}{ext}"
-                    new_path = Path("/data/avatars") / f"{sanitized_name}_emotion_{emotion}{ext}"
-                    if old_path.exists():
-                        old_path.rename(new_path)
-        except Exception as e:
-            logger.warning(f"Failed to rename avatar for agent {agent_name}: {e}")
-
-        # Broadcast rename event
-        event = {
-            "event": "agent_renamed",
-            "type": "agent_renamed",
-            "name": sanitized_name,
-            "data": {
-                "old_name": agent_name,
-                "new_name": sanitized_name
-            }
-        }
-        if manager:
-            await manager.broadcast(json.dumps(event))
-        if filtered_manager:
-            await filtered_manager.broadcast_filtered(event)
-
-        # SEC-001: audit rename
-        await platform_audit_service.log(
-            event_type=AuditEventType.AGENT_LIFECYCLE,
-            event_action="rename",
-            source="api",
-            actor_user=current_user,
-            actor_ip=request.client.host if request.client else None,
-            target_type="agent",
-            target_id=sanitized_name,
-            endpoint=request.scope["path"],
-            request_id=getattr(request.state, "request_id", None),
-            details={"old_name": agent_name, "new_name": sanitized_name},
+        result = await rename_agent_now(
+            agent_name,
+            sanitized_name,
+            actor=current_user,
+            audit_ctx={
+                "actor_ip": request.client.host if request.client else None,
+                "endpoint": request.scope["path"],
+                "request_id": getattr(request.state, "request_id", None),
+            },
+            ws_manager=manager,
+            filtered_ws_manager=filtered_manager,
         )
-
-        # Restart agent if it was running
-        # Note: Container needs to be recreated for new volume mount
-        # This will be done on explicit start
-
-        return {
-            "message": f"Agent renamed from '{agent_name}' to '{sanitized_name}'",
-            "old_name": agent_name,
-            "new_name": sanitized_name,
-            "was_running": was_running,
-            "note": "Agent needs to be restarted to apply all changes" if was_running else None
-        }
-
+    except SystemAgentRefused:
+        raise HTTPException(status_code=403, detail="System agents cannot be renamed")
+    except AgentContainerMissing:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    except RenameRefused:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to update database. Agent name may already be taken."
+        )
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to rename agent {agent_name}: {e}")
+        # abilityai/trinity#4284 (the #1917 pattern): a Docker or DB failure's
+        # text names internals. The log keeps it; the caller gets the class name.
+        logger.error(f"Failed to rename agent {agent_name}: {e}", exc_info=True)
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to rename agent: {str(e)}"
+            detail=f"Failed to rename agent ({e.__class__.__name__} — details in backend logs)"
         )
+
+    # The agent is left stopped: the next start recreates the container so the
+    # new name reaches AGENT_NAME, the label and the auth token.
+    return {
+        "message": f"Agent renamed from '{agent_name}' to '{sanitized_name}'",
+        "old_name": agent_name,
+        "new_name": sanitized_name,
+        "was_running": result.was_running,
+        "note": "Agent needs to be restarted to apply all changes" if result.was_running else None
+    }

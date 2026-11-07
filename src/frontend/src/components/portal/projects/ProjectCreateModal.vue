@@ -55,13 +55,18 @@
           <option value="company">Company</option>
         </BaseSelect>
       </div>
-      <BaseInput
+      <BasePeopleInput
         v-if="form.steward === 'person'"
         id="project-steward-email"
+        ref="stewardField"
         v-model="form.steward_email"
-        type="email"
-        label="Steward's email"
-        placeholder="name@your-company.com"
+        v-model:picked="stewardPicked"
+        mode="pick"
+        label="Steward"
+        placeholder="Type a name or email"
+        :fetch="(q) => store.fetchCompanyPeople(q)"
+        :no-match="(t) => `No one at your company matches “${t}”.`"
+        :accept-text="isInitialSteward"
         :error="errors.steward"
       />
       <!-- Both texts sit in one grid cell, the other one invisible, so the line
@@ -104,6 +109,7 @@
 import { reactive, ref, watch } from 'vue'
 import BaseModal from '@/components/base/BaseModal.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
+import BasePeopleInput from '@/components/base/BasePeopleInput.vue'
 import BaseTextarea from '@/components/base/BaseTextarea.vue'
 import BaseSelect from '@/components/base/BaseSelect.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
@@ -128,7 +134,11 @@ const form = reactive({ name: '', goal: '', steward: 'me', steward_email: '', vi
 const errors = ref({})
 const submitError = ref('')
 const saving = ref(false)
+const stewardField = ref(null)
+const stewardPicked = ref(null)
 let initial = {}
+// The steward already on the project stays valid without being picked again.
+const isInitialSteward = (t) => !!initial.steward_email && t.toLowerCase() === initial.steward_email.toLowerCase()
 
 watch(() => props.modelValue, (open) => {
   if (!open) return
@@ -143,13 +153,16 @@ watch(() => props.modelValue, (open) => {
         visibility: 'members', tracker_url: '',
       })
   initial = { ...form }
+  const held = form.steward_email && (p?.members || []).find((m) => m.email === form.steward_email)
+  stewardPicked.value = form.steward_email ? { email: form.steward_email, label: held?.label || form.steward_email } : null
   errors.value = {}
   submitError.value = ''
 }, { immediate: true })
 
 async function submit() {
   errors.value = validateProjectForm(form)
-  if (Object.keys(errors.value).length) return
+  const stewardOk = form.steward !== 'person' || !!stewardField.value?.validate()
+  if (Object.keys(errors.value).length || !stewardOk) return
   const all = {
     name: form.name.trim(),
     goal: form.goal.trim(),

@@ -339,6 +339,7 @@ import CredentialSetupChecklist from './CredentialSetupChecklist.vue'
 import InlineError from './InlineError.vue'
 import LoadFailed from './LoadFailed.vue'
 import BaseButton from './base/BaseButton.vue'
+import { formatEnvLine, unquoteEnvValue } from '../utils/envFile'
 
 const props = defineProps({
   agentName: {
@@ -493,23 +494,13 @@ const parseEnvText = (text) => {
     const eqIndex = trimmed.indexOf('=')
     if (eqIndex > 0) {
       const key = trimmed.substring(0, eqIndex).trim()
-      let value = trimmed.substring(eqIndex + 1).trim()
-      // Remove surrounding quotes
-      const wasDoubleQuoted = value.startsWith('"') && value.endsWith('"') && value.length >= 2
-      if (wasDoubleQuoted ||
-          (value.startsWith("'") && value.endsWith("'"))) {
-        value = value.slice(1, -1)
-      }
-      // ent#127: UNESCAPE what `formatEnvContent` escaped. Without this the
-      // read-merge-write round-trip is lossy in one direction only: the writer
-      // emits `\"` for every `"`, the reader strips the surrounding quotes but
-      // never unescapes, so a value containing a quote grows one backslash PER
-      // SUBMIT — for every other credential in the file, not just the one being
-      // edited. Latent while Quick Inject was a rare bulk paste; the per-row
-      // checklist makes read-merge-write the normal interaction.
-      if (wasDoubleQuoted) {
-        value = value.replace(/\\(["\\])/g, '$1')
-      }
+      // ent#127: strip the quotes AND unescape what `formatEnvContent`
+      // escaped. Without the unescape the read-merge-write round-trip is lossy
+      // in one direction only: a value containing a quote grows one backslash
+      // PER SUBMIT — for every other credential in the file, not just the one
+      // being edited. The per-row checklist makes read-merge-write the normal
+      // interaction.
+      const value = unquoteEnvValue(trimmed.substring(eqIndex + 1).trim())
       if (key) {
         credentials[key] = value
       }
@@ -521,19 +512,12 @@ const parseEnvText = (text) => {
 const formatEnvContent = (credentials) => {
   const lines = ['# Credential file - managed by Trinity', '']
   for (const [key, value] of Object.entries(credentials)) {
-    // Escape quotes in values. `parseEnvText` unescapes this (ent#127), so the
-    // UI round-trip is now stable.
-    //
-    // RESIDUAL, deliberately not changed here: the AGENT's own reader
-    // (`agent_server/routers/credentials.py`) strips quote characters and does
-    // not unescape, so a value containing a `"` reaches the agent with the
-    // backslash. Escaping for a format nobody unescapes is a pre-existing
-    // defect in its own right; widening the escaping would make the agent-side
-    // mismatch worse, not better. NOT filed on either tracker as of this
-    // writing — said plainly rather than as "filed separately", because a
-    // comment asserting a follow-up exists is exactly why nobody re-checks.
-    const escapedValue = String(value).replace(/"/g, '\\"')
-    lines.push(`${key}="${escapedValue}"`)
+    // The agent's own encoding (#2023): `\` and `"` escaped, backslash first.
+    // `parseEnvText` reverses it here, and the agent's `unquote_env_value`
+    // reverses it when it reads the file, so every credential this rewrite
+    // carries over reaches the agent exactly as it was. Both sides are held
+    // to one table: tests/fixtures/ent1117-env-escape-cases.json.
+    lines.push(formatEnvLine(key, value))
   }
   return lines.join('\n') + '\n'
 }

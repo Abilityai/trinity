@@ -162,12 +162,14 @@ from db.telegram_channels import TelegramChannelOperations
 from db.whatsapp_channels import WhatsAppChannelOperations
 from db.voip import VoipOperations
 from db.access_requests import AccessRequestOperations
+from db.channel_client_blocks import ChannelClientBlockOperations
 from db.audit import PlatformAuditOperations
 from db.canary import CanaryOperations
 from db.compatibility import CompatibilityOperations
 from db.metric_definitions import MetricDefinitionOperations
 from db.metric_points import MetricPointOperations
 from db.sync_state import SyncStateOperations
+from db.terms import TermsOperations  # trinity-enterprise#1107 terms acceptances
 from db.idempotency import IdempotencyOperations
 from db.loops import LoopOperations
 
@@ -211,6 +213,10 @@ def init_database():
         # it needs only `system_settings`; placed last so none is implied.
         _record_install_source_engine()
         return
+
+    # #4175: before mkdir and connect, so a refused boot creates nothing.
+    from db.engine import refuse_sqlite_backend
+    refuse_sqlite_backend()
 
     db_path = Path(DB_PATH)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -960,10 +966,11 @@ def _ensure_admin_user(cursor, conn):
             from utils.password_validation import validate_password_strength
             pw_errors = validate_password_strength(admin_password)
             if pw_errors:
-                print(f"WARNING: ADMIN_PASSWORD does not meet complexity requirements:")
-                for err in pw_errors:
-                    print(f"         - {err}")
-                print("         Recommended: 12+ chars with uppercase, lowercase, digits, and special characters")
+                # The rules, never which ones failed: the failures give away the
+                # password's length, its missing character classes and whether
+                # it is on the public common-password list (trinity-enterprise#1117).
+                print("WARNING: ADMIN_PASSWORD does not meet complexity requirements:")
+                print("         Rules: 12-128 characters; at least one uppercase, lowercase, digit and special character; not a common password")
         except ImportError:
             pass  # password_validation module not available during early init
 
@@ -1088,6 +1095,7 @@ class DatabaseManager:
         self._whatsapp_channel_ops = WhatsAppChannelOperations()
         self._voip_ops = VoipOperations()
         self._access_request_ops = AccessRequestOperations()
+        self._channel_client_block_ops = ChannelClientBlockOperations()
         self._audit_ops = PlatformAuditOperations()
         self._canary_ops = CanaryOperations()
         self._compatibility_ops = CompatibilityOperations()  # #668 agent compatibility
@@ -1096,6 +1104,7 @@ class DatabaseManager:
         self._sync_state_ops = SyncStateOperations()  # #389 sync health
         self._idempotency_ops = IdempotencyOperations()  # RELIABILITY-006, #525
         self._loop_ops = LoopOperations()  # #740 sequential agent loops
+        self._terms_ops = TermsOperations()  # trinity-enterprise#1107 terms acceptances
 
     # =========================================================================
     # User Management (delegated to db/users.py)
@@ -1131,11 +1140,17 @@ class DatabaseManager:
     def list_users(self):
         return self._user_ops.list_users()
 
-    # trinity-enterprise#631 — who may be tagged in a conversation with these agents
-    def list_taggable_people(self, agent_names, query, *, exclude_email=None, limit=8):
-        return self._user_ops.list_taggable_people(agent_names, query,
-                                                   exclude_email=exclude_email, limit=limit)
+    # trinity-enterprise#1153 — the one people search; only people_search_service calls it
+    def people_scope_agent_reach(self, agent_names):
+        return self._user_ops.people_scope_agent_reach(agent_names)
 
+    def people_scope_share_candidates(self, agent_name):
+        return self._user_ops.people_scope_share_candidates(agent_name)
+
+    def search_people(self, scope, query, *, exclude_email=None, limit=8):
+        return self._user_ops.search_people(scope, query, exclude_email=exclude_email, limit=limit)
+
+    # trinity-enterprise#631 — the send-time check: may this address be tagged here
     def get_taggable_person(self, agent_names, email):
         return self._user_ops.get_taggable_person(agent_names, email)
 
@@ -1211,6 +1226,10 @@ class DatabaseManager:
     def list_agents_spawned_by_key(self, agent_name: str, key_id: str) -> List[str]:
         """ent#629: live agents spawned by `agent_name` with key `key_id`."""
         return self._agent_ops.list_agents_spawned_by_key(agent_name, key_id)
+
+    def list_agent_created_agent_names(self) -> List[str]:
+        """ent#591: live agents another agent created (the bound's impact read)."""
+        return self._agent_ops.list_agent_created_agent_names()
 
     def purge_agent_ownership(self, agent_name: str):
         return self._agent_ops.purge_agent_ownership(agent_name)
@@ -1508,8 +1527,23 @@ class DatabaseManager:
     def get_operator_resume_enabled(self, agent_name: str) -> bool:
         return self._agent_ops.get_operator_resume_enabled(agent_name)
 
-    def set_operator_resume_enabled(self, agent_name: str, enabled: bool) -> bool:
+    def set_operator_resume_enabled(self, agent_name: str, enabled) -> bool:
         return self._agent_ops.set_operator_resume_enabled(agent_name, enabled)
+
+    def get_operator_resume_override(self, agent_name: str):
+        # ent#1102: the raw tri-state read `wake_policy` makes (ent#1108 made
+        # the column NULL / 0 / 1); `get_operator_resume_enabled` COALESCEs.
+        return self._agent_ops.get_operator_resume_override(agent_name)
+
+    # --- wake on ending, tri-state (ent#1102) ---
+    # None = no opinion, follow the instance default. Read only through
+    # services/wake_policy.py, never directly.
+
+    def get_wake_on_ending(self, agent_name: str):
+        return self._agent_ops.get_wake_on_ending(agent_name)
+
+    def set_wake_on_ending(self, agent_name: str, enabled) -> bool:
+        return self._agent_ops.set_wake_on_ending(agent_name, enabled)
 
     def get_mcp_exposed_agents(self):
         return self._agent_ops.get_mcp_exposed_agents()
@@ -1680,6 +1714,20 @@ class DatabaseManager:
     def get_queued_count(self, agent_name: str) -> int:
         return self._schedule_ops.get_queued_count(agent_name)
 
+    # Queue-visibility reads (#4257): the receipt's depth, the stall monitor's
+    # one scan, and the conversation-serialisation half of the wait reason.
+    # Read-only — they return counts, rows and conversation keys, never writes.
+    def count_queued_ahead(
+        self, agent_name: str, queued_at: Optional[str], execution_id: str
+    ) -> int:
+        return self._schedule_ops.count_queued_ahead(agent_name, queued_at, execution_id)
+
+    def oldest_queued_head_per_agent(self):
+        return self._schedule_ops.oldest_queued_head_per_agent()
+
+    def agents_with_running_conversation(self, agent_name: str):
+        return self._schedule_ops.agents_with_running_conversation(agent_name)
+
     def cancel_queued_execution(
         self, execution_id: str, reason: str = "cancelled", status: str = "cancelled"
     ) -> bool:
@@ -1791,9 +1839,14 @@ class DatabaseManager:
         """#1745: activate/deactivate an agent's per-agent MCP keys."""
         return self._mcp_key_ops.set_agent_keys_active(agent_name, active)
 
-    def deactivate_orphaned_agent_keys(self) -> int:
-        """#1745: deactivate per-agent keys whose agent is no longer live."""
+    def deactivate_orphaned_agent_keys(self) -> List[str]:
+        """#1745: deactivate per-agent keys whose agent is no longer live;
+        returns the agents whose keys were revoked (#4259 skips keys still
+        inside the start-up grace window)."""
         return self._mcp_key_ops.deactivate_orphaned_agent_keys()
+
+    def get_agent_name_for_agent_key(self, key_id: str):
+        return self._mcp_key_ops.get_agent_name_for_agent_key(key_id)
 
     def delete_agent_mcp_api_key(self, agent_name: str):
         return self._mcp_key_ops.delete_agent_mcp_api_key(agent_name)
@@ -2004,6 +2057,9 @@ class DatabaseManager:
 
     def get_execution_gate_state(self, execution_id: str):
         return self._schedule_ops.get_execution_gate_state(execution_id)
+
+    def get_execution_requester(self, execution_id: str):
+        return self._schedule_ops.get_execution_requester(execution_id)
 
     def get_execution_failure_stamp(self, execution_id: str):
         """`(status, error, completed_at)` or None — the #3245 liveness read."""
@@ -2961,6 +3017,9 @@ class DatabaseManager:
     def recent_peer_messages(self, caller_agent: str, target_agent: str, since: str, limit: int = 500):
         return self._peer_skill_grant_ops.recent_peer_messages(caller_agent, target_agent, since, limit)
 
+    def recent_in_container_peer_refusals(self, since: str, limit: int = 2000):
+        return self._peer_skill_grant_ops.recent_in_container_peer_refusals(since, limit)
+
     def delete_agent_peer_skill_grants(self, agent_name: str):
         return self._peer_skill_grant_ops.delete_agent_peer_skill_grants(agent_name)
 
@@ -3231,11 +3290,16 @@ class DatabaseManager:
     def get_public_user_memory_agent_notes(self, agent_name: str, user_email: str) -> str:
         return self._public_link_ops.get_user_memory_agent_notes(agent_name, user_email)
 
+    def get_public_user_memory(self, agent_name: str, user_email: str):
+        # ent#962: a read that never creates the row (the owner's view).
+        return self._public_link_ops.get_user_memory(agent_name, user_email)
+
     def update_public_user_memory_conversation_summary(
-        self, agent_name: str, user_email: str, conversation_summary: str
+        self, agent_name: str, user_email: str, conversation_summary: str,
+        *, expected_previous: str = None,
     ) -> bool:
         return self._public_link_ops.update_user_memory_conversation_summary(
-            agent_name, user_email, conversation_summary
+            agent_name, user_email, conversation_summary, expected_previous=expected_previous
         )
 
     # ent#637: the write boundary records history; the person reads + undoes it.
@@ -3294,15 +3358,23 @@ class DatabaseManager:
     def prune_memory_fact_events(self, agent_name: str, *, before_iso: str) -> int:
         return self._memory_fact_ops.prune_memory_fact_events(agent_name, before_iso=before_iso)
 
-    def list_public_user_memory_writes(self, agent_name: str, user_email: str, limit: int = 20) -> list:
-        return self._public_link_ops.list_user_memory_writes(agent_name, user_email, limit)
+    def list_public_user_memory_writes(self, agent_name: str, user_email: str, limit: int = 20, **kwargs) -> list:
+        # ent#962: `before=` (keyset cursor) and `section=` (default `notes`).
+        return self._public_link_ops.list_user_memory_writes(agent_name, user_email, limit, **kwargs)
+
+    def latest_open_public_user_memory_writes(self, agent_name: str, user_email: str) -> dict:
+        return self._public_link_ops.latest_open_user_memory_writes(agent_name, user_email)
 
     def undo_public_user_memory_write(
-        self, agent_name: str, user_email: str, write_id: str, *, undone_by: str
+        self, agent_name: str, user_email: str, write_id: str, *, undone_by: str, section: str = None
     ) -> str:
         return self._public_link_ops.undo_user_memory_write(
-            agent_name, user_email, write_id, undone_by=undone_by
+            agent_name, user_email, write_id, undone_by=undone_by, section=section
         )
+
+    def list_public_user_memory_people(self, agent_name: str, *, limit: int = 50, offset: int = 0) -> dict:
+        # ent#962: everyone with memory on the agent, for the owner's view.
+        return self._public_link_ops.list_user_memory_people(agent_name, limit=limit, offset=offset)
 
     # =========================================================================
     # Agent Tags (delegated to db/tags.py) - ORG-001
@@ -4162,6 +4234,12 @@ class DatabaseManager:
         return self._operator_queue_ops.list_pending_asks_for_agent(
             agent_name, limit, exclude_request_id_prefixes)
 
+    def list_pending_ask_ids_for_execution(self, execution_id: str, limit: int = 10):
+        """ent#1102: the asks one execution parked and never got answered."""
+        return self._operator_queue_ops.list_pending_ask_ids_for_execution(
+            execution_id, limit
+        )
+
     def list_recent_operator_queue_endings(self, agent_name, since, limit,
                                            exclude_request_id_prefixes=None):
         # trinity-enterprise#611: ids + endings for the Execution Context line.
@@ -4265,6 +4343,16 @@ class DatabaseManager:
 
     def set_operator_queue_delivery_state(self, item_id, state, detail, now):
         return self._operator_queue_ops.set_delivery_state(item_id, state, detail, now)
+
+    # abilityai/trinity-enterprise#1108 AC #4 — the answer wake's status
+    def set_operator_queue_wake_state(self, item_id, state):
+        return self._operator_queue_ops.set_wake_state(item_id, state)
+
+    def list_operator_queue_pending_wakes(self, agent_name):
+        return self._operator_queue_ops.list_pending_wakes_for_agent(agent_name)
+
+    def mark_operator_queue_wakes_woken(self, agent_name, request_ids):
+        return self._operator_queue_ops.mark_wakes_woken(agent_name, request_ids)
 
     def mark_operator_queue_unconfirmed(self, detail, now, agent_name=None, exclude_agents=None,
                                         exclude_request_id_prefixes=None):
@@ -4388,6 +4476,23 @@ class DatabaseManager:
 
     def delete_access_requests_for_agent(self, agent_name: str):
         return self._access_request_ops.delete_for_agent(agent_name)
+
+    # =========================================================================
+    # Channel client blocks (trinity-enterprise#21)
+    # =========================================================================
+
+    def block_channel_client(self, agent_name, channel, client_id, blocked_by_id, blocked_by_email, reason=None):
+        return self._channel_client_block_ops.block(
+            agent_name, channel, client_id, blocked_by_id, blocked_by_email, reason)
+
+    def unblock_channel_client(self, agent_name, channel, client_id):
+        return self._channel_client_block_ops.unblock(agent_name, channel, client_id)
+
+    def is_channel_client_blocked(self, agent_name, channel, client_id):
+        return self._channel_client_block_ops.is_blocked(agent_name, channel, client_id)
+
+    def list_channel_client_blocks(self, agent_name):
+        return self._channel_client_block_ops.list_for_agent(agent_name)
 
     # =========================================================================
     # Platform Audit Log (SEC-001 / Issue #20 — Phase 1)
@@ -4728,6 +4833,32 @@ class DatabaseManager:
 
     def list_due_loops(self, now: str, *, limit: int = 100):
         return self._loop_ops.list_due_loops(now, limit=limit)
+
+
+    # =========================================================================
+    # Terms acceptances (trinity-enterprise#1107 — delegated to db/terms.py)
+    # =========================================================================
+
+    def insert_terms_acceptance(self, user_id, email, terms_version: str, accepted_at: str,
+                                *, door=None, actor_ip=None):
+        return self._terms_ops.insert_terms_acceptance(
+            user_id, email, terms_version, accepted_at, door=door, actor_ip=actor_ip
+        )
+
+    def get_terms_acceptance(self, user_id: int, terms_version: str):
+        return self._terms_ops.get_terms_acceptance(user_id, terms_version)
+
+    def get_terms_acceptance_by_email(self, email: str, terms_version: str):
+        return self._terms_ops.get_terms_acceptance_by_email(email, terms_version)
+
+    def terms_acceptances_for_user(self, user_id: int):
+        return self._terms_ops.terms_acceptances_for_user(user_id)
+
+    def terms_acceptances_for_email(self, email: str):
+        return self._terms_ops.terms_acceptances_for_email(email)
+
+    def list_terms_acceptances(self, limit: int = 200):
+        return self._terms_ops.list_terms_acceptances(limit)
 
 
 # Global database manager instance

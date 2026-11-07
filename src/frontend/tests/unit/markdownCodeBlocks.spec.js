@@ -234,7 +234,8 @@ describe('the sanitizer keeps what the decorator emits', () => {
       resolve(here, '../../node_modules/dompurify/dist/purify.cjs.js'), 'utf8',
     )
     const tags = new Set()
-    for (const m of purify.matchAll(/'([a-z0-9-]+)'/g)) tags.add(m[1])
+    // Either quote style: the dist switched from '…' to "…" literals in 3.4.16.
+    for (const m of purify.matchAll(/['"]([a-z0-9-]+)['"]/g)) tags.add(m[1])
     // Fail loudly rather than vacuously if the dist shape ever changes.
     expect(tags.size, 'scraped nothing from the installed DOMPurify').toBeGreaterThan(100)
     for (const t of CODE_BLOCK_VOCAB.tags) expect(tags.has(t), `tag ${t}`).toBe(true)

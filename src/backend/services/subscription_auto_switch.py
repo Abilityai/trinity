@@ -1799,8 +1799,10 @@ async def _restart_agent(agent_name: str) -> str:
         await start_agent_internal(agent_name)
         return "success"
     except Exception as e:
-        logger.error(f"[SUB-003] Failed to restart agent '{agent_name}': {e}")
-        return f"failed: {e}"
+        logger.error(f"[SUB-003] Failed to restart agent '{agent_name}': {e}", exc_info=True)
+        # py/stack-trace-exposure (ent#1117): this reaches the assign route's
+        # response. Keep the `failed:` prefix callers read; the text is logged.
+        return f"failed: {e.__class__.__name__} — details in backend logs"
 
 
 async def _hot_reload_subscription_token(agent_name: str) -> str:

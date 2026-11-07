@@ -725,6 +725,11 @@ class TestResumeDeliversIntoTheChat:
         monkeypatch.setattr(tes, "dispatch_and_await_terminal", _dispatch)
         monkeypatch.setattr(ors, "_audit", _no_audit)
         monkeypatch.setattr(real_db, "get_operator_resume_enabled", lambda a: True)
+        # ent#1102: the resolver fails closed for an agent with no ownership row; say "on" there.
+        monkeypatch.setattr(real_db, "get_wake_on_ending", lambda a: True, raising=False)
+        # abilityai/trinity-enterprise#1108 AC #4: the wake asks Docker first.
+        import services.docker_service as docker_service
+        monkeypatch.setattr(docker_service, "agent_container_state", lambda name: "running")
 
         await ors.maybe_dispatch_resume(real_db.get_operator_queue_item(uid), response="EU",
                                         responded_by_email=email)
@@ -755,6 +760,11 @@ class TestResumeDeliversIntoTheChat:
         monkeypatch.setattr(tes, "dispatch_and_await_terminal", _dispatch)
         monkeypatch.setattr(ors, "_audit", _no_audit)
         monkeypatch.setattr(real_db, "get_operator_resume_enabled", lambda a: True)
+        # ent#1102: the resolver fails closed for an agent with no ownership row; say "on" there.
+        monkeypatch.setattr(real_db, "get_wake_on_ending", lambda a: True, raising=False)
+        # abilityai/trinity-enterprise#1108 AC #4: the wake asks Docker first.
+        import services.docker_service as docker_service
+        monkeypatch.setattr(docker_service, "agent_container_state", lambda name: "running")
 
         await ors.maybe_dispatch_resume(real_db.get_operator_queue_item(uid), response="EU",
                                         responded_by_email=email)

@@ -43,7 +43,7 @@ TIERS = {"owner", "accessor", "self", "public", "internal", "resource"}
 LEGACY = "legacy"
 # Lower this number when a legacy accessor row is tightened or removed. It may
 # never be raised: a new accessor route carries a real reason instead.
-LEGACY_ACCESSOR_BASELINE = 115
+LEGACY_ACCESSOR_BASELINE = 113
 
 OWNER_GATE = re.compile(
     r"\b(OwnedAgentByName|OwnedAgent|assert_agent_owner|get_owned_agent\w*|assert_admin|"

@@ -48,7 +48,7 @@ echo 'TRINITY_IMAGE_TAG=v0.9.5' >> .env
 What `--hosted` changes, and nothing else:
 
 - **Compose file.** `docker-compose.hosted.yml` — `docker-compose.prod.yml` with every `build:` block replaced by a GHCR `image:` reference. Same ports, volumes, networks, `.env` keys and security posture; a CI guard fails the build if the two files ever disagree. The one deliberate difference is the database (next bullet).
-- **Database.** The hosted file adds a bundled PostgreSQL service (`trinity-postgres`, `postgres:16-alpine`, on the platform network only — agents cannot reach it). `start.sh --hosted` generates `POSTGRES_PASSWORD` into `.env`. On a fresh install it also writes a `DATABASE_URL` pointing at the bundled server. On an install that already has a `trinity.db` it writes an empty `DATABASE_URL=` instead, so the install stays on SQLite and prints a pointer to the migration guide. A `DATABASE_URL` you set yourself is never touched. Details: [Database backend](#database-backend).
+- **Database.** Like the prod file, the hosted file runs a bundled PostgreSQL service (`trinity-postgres`, `postgres:16-alpine`, on the platform network only — agents cannot reach it). `start.sh --hosted` generates `POSTGRES_PASSWORD` and writes `DATABASE_URL` into `.env`. An install with data in `trinity.db` is refused until it moves. See [Database backend](#database-backend).
 - **Image tag.** `TRINITY_IMAGE_TAG` selects the image set (default `latest`). Precedence: a value in the shell or CI → `.env` → `latest`. Put it in `.env`: that is where the pin survives a reboot and whoever runs the next upgrade. Each release publishes `v0.9.0`, `0.9.0`, `0.9`, `latest` and `sha-<short>` for one digest, so either version spelling works. A pre-release tag (for example `v0.9.5-rc1`) publishes its own tags but never moves `latest`.
 - **Agent base image.** The backend creates agent containers from the local tag `trinity-agent-base:latest`, which is not a compose service. `start.sh --hosted` pulls `ghcr.io/abilityai/trinity-agent-base:<tag>` and tags it locally before bringing the stack up. A bare `docker compose -f docker-compose.hosted.yml up -d` starts a platform that cannot create a single agent and does not fail until the first agent-create.
 - **No fallback to building.** A failed pull is fatal and the message names the likely causes: the tag is not published (check the release list), the GHCR package is private (`denied` / `unauthorized` — a publishing fault, report it), or no route to `ghcr.io`. Drop `--hosted` to build from source instead.
@@ -183,32 +183,23 @@ The automatic database backups land in `backups/` under this directory — see [
 
 #### Database backend
 
-SQLite reached **end-of-support on September 1, 2026**: it no longer receives schema migrations or fixes. **PostgreSQL is the backend for every new server install.**
+SQLite reached **end-of-support on September 1, 2026**, and the Trinity images refuse to boot on it. **PostgreSQL is the backend for every server install.**
 
-**Hosted installs** (`start.sh --hosted`, and every one-click image) start on the PostgreSQL service bundled in `docker-compose.hosted.yml` (releases after v0.9.5). You configure nothing: `start.sh --hosted` generates `POSTGRES_PASSWORD` and writes the matching `DATABASE_URL` to `.env`. How the hosted file reads `DATABASE_URL`:
+Both server files run the bundled PostgreSQL service. `start.sh --hosted` generates `POSTGRES_PASSWORD`; running `docker-compose.prod.yml` directly, set it yourself (`openssl rand -hex 24`), because the file does not render without it. The `DATABASE_URL` value in `.env` selects the database:
 
-| `.env` line | Database |
+| `.env` | Database |
 |---|---|
 | No `DATABASE_URL` line | The bundled PostgreSQL |
-| `DATABASE_URL=` (present, empty) | SQLite, in `trinity.db` under `TRINITY_DATA_PATH` |
 | `DATABASE_URL=postgresql://…` | That server — bundled or one you operate |
+| `DATABASE_URL=` (present, empty) | SQLite, refused unless `TRINITY_ALLOW_SQLITE=1` is also set (this release only) |
 
-An existing hosted install that already has a `trinity.db` is **not** moved: the first `start.sh --hosted` run after upgrading writes `DATABASE_URL=` so the platform never boots an empty PostgreSQL beside your populated SQLite file, and it prints a warning on every run until you migrate. The `trinity-postgres` container still starts, idle.
-
-> **Never lose `POSTGRES_PASSWORD`.** The PostgreSQL image applies the password only when it initialises an empty volume. If the `postgres-data` volume exists but `.env` has no `POSTGRES_PASSWORD`, `start.sh --hosted` refuses to run rather than generate a new one that cannot open your data. Back it up with the rest of `.env`.
-
-**Source-built production** (`docker-compose.prod.yml`) ships no PostgreSQL service. Point `DATABASE_URL` at an operator-managed instance (a managed cloud database or your own server):
-
-```
-DATABASE_URL=postgresql://trinity:your-postgres-password@your-db-host:5432/trinity
-```
+An existing install with data in `trinity.db` refuses to boot rather than come up on an empty database. Move it with the copy command in `docs/migrations/SQLITE_TO_POSTGRES.md`. A PostgreSQL container you started by hand must adopt the bundled service: the same guide covers it, and no data is copied.
 
 Notes for both server files:
 
 - Both the backend and the scheduler pick it up (`DB_POOL_SIZE` and `DB_MAX_OVERFLOW` tune the pool; defaults 10 and 20).
-- On prod, selection is non-sticky and non-destructive: comment `DATABASE_URL` out and the next restart is back on SQLite. On hosted, an absent line means the bundled PostgreSQL, so use `DATABASE_URL=` to select SQLite.
 - A fresh PostgreSQL database is initialized automatically on first boot (Alembic-managed migrations).
-- **Migrating an existing SQLite instance?** Use the Trinity Ops Agent's `/migrate-to-postgres` skill ([ops-agent guide](ops-agent.md)) — a validate-then-cutover flow that never writes to your SQLite file, so rollback is one line. The repo's `docs/migrations/SQLITE_TO_POSTGRES.md` covers the manual path, including moving a hosted install onto its bundled server. New-instance setup details: `docs/POSTGRESQL_SETUP.md`.
+- **Migrating an existing SQLite instance?** Follow `docs/migrations/SQLITE_TO_POSTGRES.md`. The copy never writes to your SQLite file.
 - On PostgreSQL, the automatic backups are `pg_dump` archives, and a manual backup is `pg_dump` too — never a copy of `trinity.db`. See [Backup and Restore](backup-and-restore.md).
 
 On every backend boot, a versioned migration runner brings the schema up to date (the bespoke SQLite runner or Alembic for PostgreSQL). The runner is crash-safe and concurrency-safe: a cross-process lock serialises it so multiple workers and the scheduler cannot race each other, and table rebuilds run inside a transaction that rolls back cleanly on a mid-migration crash. If a migration is still pending or has failed, the backend's `/health` endpoint returns `503` with a `migrations` block (`applied`, `expected`, `first_pending`) naming the stuck migration — so a 503 from `curl http://localhost:8000/health` during an upgrade is actionable, not opaque. On SQLite, the backend takes a `pre-migration-<timestamp>.db` copy into `backups/` before any migration runs.
@@ -254,11 +245,11 @@ Then connect from your Claude Code session:
 ```bash
 /trinity:connect
 # URL: https://trinity.your-domain.com/mcp   (the production frontend proxies /mcp to the MCP server)
-#      or http://your-server:8080/mcp        (the MCP server's own port, where it is reachable)
+#      or http://your-server:8080/mcp        (the MCP server's own port, where it is reachable — a fresh install publishes it on 127.0.0.1 only)
 # API Key: (your MCP API key)
 ```
 
-The `/mcp` proxy on the production nginx means an install that exposes only ports 80/443 — a tunnel, a reverse proxy, the DigitalOcean 1-Click — still serves MCP at the same hostname as the web UI. **Settings → MCP Keys → MCP Server URL** sets the URL the UI shows to users; leave it empty to derive it from the hostname.
+The `/mcp` proxy on the production nginx means an install that exposes only ports 80/443 — a tunnel, a reverse proxy, the DigitalOcean 1-Click — still serves MCP at the same hostname as the web UI. It answers clients outside the server only while **External MCP access** is on (**Settings → MCP Keys**, admin); a fresh install starts with it off, so turn it on before you connect — see [MCP Server](../../integrations/mcp-server.md#external-mcp-access). **Settings → MCP Keys → MCP Server URL** sets the URL the UI shows to users; leave it empty to derive it from the hostname.
 
 ## Restart vs. Down
 
@@ -585,9 +576,11 @@ Every key in `.env.example`, with the compose files that forward it. **A key a c
 
 | Key | Forwarded by | What it does |
 |---|---|---|
-| `DATABASE_URL` (commented) | dev · prod · hosted | `postgresql://…` switches the backend and scheduler to PostgreSQL. Dev and prod: unset = SQLite. Hosted: unset = the bundled PostgreSQL, empty = SQLite (see [Database backend](#database-backend)). Keep the `.env.example` line commented: `start.sh --hosted` treats any uncommented line, even an empty one, as a choice already made. |
+| `DATABASE_URL` (commented) | dev · prod · hosted | Unset = the bundled PostgreSQL. `postgresql://…` = that server. Empty = SQLite, refused unless `TRINITY_ALLOW_SQLITE=1` (see [Database backend](#database-backend)). Keep the line commented: `start.sh` reads an uncommented one, even empty, as a choice already made. |
 | `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` (commented) | dev · prod · hosted | PostgreSQL connection pool (defaults 10 / 20). |
-| `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` (commented) | dev (`--profile postgres`) · hosted | Credentials of the bundled PostgreSQL container. Hosted fixes the database and user at `trinity` and requires `POSTGRES_PASSWORD` (`start.sh --hosted` generates it). |
+| `POSTGRES_PASSWORD` | dev · prod · hosted | Required; the files do not render without it. `start.sh` generates it. `POSTGRES_DB` and `POSTGRES_USER` are dev only; prod and hosted fix both at `trinity`. |
+| `TRINITY_POSTGRES_VOLUME` (commented) | prod · hosted | Reuses an existing data volume with no copy. |
+| `TRINITY_ALLOW_SQLITE` (commented) | dev · prod · hosted | With `DATABASE_URL=` (empty), keeps this release on SQLite. Removed in a later release. |
 
 ### Logs, backups, retention
 

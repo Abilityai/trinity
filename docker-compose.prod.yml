@@ -326,6 +326,13 @@ services:
       # (no env_file merge), so without this the .env lever never reaches the
       # container and the feature is un-flippable (#1056/#1039 class).
       - MCP_INLINE_AUTH_ENABLED=${MCP_INLINE_AUTH_ENABLED:-false}
+      # ent#1101 external MCP access. MCP_BIND_ADDRESS is the interface the MCP
+      # server's raw :8080 is published on (see mcp-server); the backend reads it
+      # so the advertised URL and the status payload are honest about that port.
+      # MCP_EXTERNAL_ACCESS is the env opt-in under the Settings → MCP Keys
+      # switch (the backend is its only resolver). Wired here or both are inert.
+      - MCP_BIND_ADDRESS=${MCP_BIND_ADDRESS:-}
+      - MCP_EXTERNAL_ACCESS=${MCP_EXTERNAL_ACCESS:-}
       # Pull / work-stealing pilot opt-in (#1081 Phase 2) + lease-reaper poison
       # cap (#429/#1402). Backend-only, process-env (needs a backend restart).
       # PULL_MODE_PILOT_AGENTS empty = pull fully dark; MAX_REDELIVERY default 3.
@@ -402,12 +409,13 @@ services:
       - TEMPLATE_REGISTRY_URL=${TEMPLATE_REGISTRY_URL:-https://raw.githubusercontent.com/Abilityai/trinity-templates/main/registry.yaml}
       # Internal API shared secret (C-003) - for scheduler/agent communication
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET}
-      # Configurable database backend (#300, experimental) — mirrors
-      # docker-compose.yml; without these lines the .env lever is inert in prod
-      # (the #1039/#1056 packaging-gap class). Unset → SQLite at /data/trinity.db.
-      # Prod compose ships no postgres service: a postgresql:// URL must point at
-      # an operator-managed PostgreSQL instance (see docs/POSTGRESQL_SETUP.md).
-      - DATABASE_URL=${DATABASE_URL:-}
+      # UNSET resolves to the bundled PostgreSQL. Set-but-EMPTY (`DATABASE_URL=`)
+      # selects SQLite, which the image refuses unless TRINITY_ALLOW_SQLITE=1
+      # (#4175). Any other postgresql:// URL points at an operator-managed server
+      # (docs/POSTGRESQL_SETUP.md).
+      - DATABASE_URL=${DATABASE_URL-postgresql://trinity:${POSTGRES_PASSWORD}@postgres:5432/trinity}
+      # #4175: time-boxed. With DATABASE_URL= (empty), keeps this release on SQLite.
+      - TRINITY_ALLOW_SQLITE=${TRINITY_ALLOW_SQLITE:-}
       - DB_POOL_SIZE=${DB_POOL_SIZE:-10}
       - DB_MAX_OVERFLOW=${DB_MAX_OVERFLOW:-20}
       # Fire-and-forget dispatch (#1083). When true, eligible autonomous turns
@@ -506,6 +514,8 @@ services:
       # + deletes archived originals.
       - trinity-logs:/data/logs
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
       vector:
@@ -703,6 +713,32 @@ services:
       retries: 5
       start_period: 5s
 
+  postgres:
+    image: postgres:16-alpine
+    container_name: trinity-postgres
+    logging: *default-logging
+    restart: unless-stopped
+    expose:
+      - "5432"
+    environment:
+      - POSTGRES_DB=trinity
+      - POSTGRES_USER=trinity
+      - "POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env (generate with openssl rand -hex 24; start.sh does this). Existing SQLite install: see docs/migrations/SQLITE_TO_POSTGRES.md}"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - trinity-platform   # Issue #589: PostgreSQL is NOT on agent network
+    security_opt:
+      - no-new-privileges:true
+    # TCP probe: the image's first-boot init runs a socket-only temporary
+    # server, so a socket probe can report ready before the real server listens.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U trinity -d trinity"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
   # Scheduler - dedicated service for cron-based agent task execution
   # Prevents duplicate executions that occurred with multiple backend workers
   scheduler:
@@ -714,9 +750,11 @@ services:
     restart: unless-stopped
     environment:
       - DATABASE_PATH=/data/trinity.db
-      # #300: when set to a postgresql:// URL the scheduler reads/writes Postgres
-      # (the same DB the backend uses); unset → shared SQLite at DATABASE_PATH.
-      - DATABASE_URL=${DATABASE_URL:-}
+      # #300/#3159: the same database the backend uses — see the backend's
+      # DATABASE_URL comment for why the default uses `-` with no colon.
+      - DATABASE_URL=${DATABASE_URL-postgresql://trinity:${POSTGRES_PASSWORD}@postgres:5432/trinity}
+      # #4175: time-boxed. With DATABASE_URL= (empty), keeps this release on SQLite.
+      - TRINITY_ALLOW_SQLITE=${TRINITY_ALLOW_SQLITE:-}
       # Scheduler uses the same `backend` ACL user (identical access patterns).
       - "REDIS_URL=redis://backend:${REDIS_BACKEND_PASSWORD:?REDIS_BACKEND_PASSWORD must be set in .env}@redis:6379"
       - HEALTH_PORT=8001
@@ -733,6 +771,8 @@ services:
     volumes:
       - ${TRINITY_DATA_PATH:-./trinity-data}:/data
     depends_on:
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
       backend:
@@ -814,7 +854,9 @@ services:
     logging: *default-logging
     restart: unless-stopped
     ports:
-      - "8080:8080"
+      # ent#1101: MCP_BIND_ADDRESS unset publishes on every interface, as
+      # before; fresh installs set 127.0.0.1 (.env.example, provision_site).
+      - "${MCP_BIND_ADDRESS:+${MCP_BIND_ADDRESS}:}8080:8080"
     environment:
       - NODE_ENV=production
       - MCP_PORT=8080
@@ -867,11 +909,15 @@ services:
     networks:
       # MCP server straddles both networks: agents call http://mcp-server:8080/mcp
       # via Docker DNS on the agent network; backend reaches it on platform network.
-      - trinity-platform
-      - trinity-agent
+      trinity-platform:
+      trinity-agent:
       # trinity-enterprise#873: nginx proxies /mcp here over the ingress network
-      # (dynamic address from its pool; never a trusted forwarder).
-      - trinity-proxy
+      # (never a trusted forwarder). ent#1101: a reserved address, outside the
+      # dynamic pool, that cloudflared's host mappings point at — so a tunnel
+      # rule aimed straight at this container arrives over the ingress network
+      # (an off-box caller) rather than over the agent network.
+      trinity-proxy:
+        ipv4_address: ${TRINITY_PROXY_PREFIX:-172.30.0}.5
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -909,6 +955,9 @@ services:
     extra_hosts:
       - "backend:${TRINITY_PROXY_PREFIX:-172.30.0}.4"
       - "trinity-backend:${TRINITY_PROXY_PREFIX:-172.30.0}.4"
+      # ent#1101: the same for a rule aimed at the MCP server.
+      - "mcp-server:${TRINITY_PROXY_PREFIX:-172.30.0}.5"
+      - "trinity-mcp-server:${TRINITY_PROXY_PREFIX:-172.30.0}.5"
     depends_on:
       frontend:
         condition: service_healthy
@@ -952,6 +1001,9 @@ volumes:
   agent-configs:
   redis-data:
   trinity-logs:  # Vector log storage
+  postgres-data:  # PostgreSQL data (#3159)
+    # TRINITY_POSTGRES_VOLUME adopts an existing volume with no data copy.
+    name: ${TRINITY_POSTGRES_VOLUME:-${COMPOSE_PROJECT_NAME}_postgres-data}
   # trinity-data: using bind mount via TRINITY_DATA_PATH env var
 
 networks:
