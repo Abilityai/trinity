@@ -159,4 +159,20 @@ describe('when the candidate read is unavailable', () => {
     await flushPromises()
     expect(api.post).toHaveBeenCalledWith(BASE, expect.objectContaining({ user_id: 3 }))
   })
+
+  it('New primary falls back to the select too, never a blank field', async () => {
+    candidates = () => { throw Object.assign(new Error('403'), { response: { status: 403 } }) }
+    const w = render()
+    await flushPromises()
+    await q(w, 'assignment-replace').trigger('click')
+    await typePerson(w, 'replace-user', 'ca')
+    await flushPromises()
+    const select = q(w, 'replace-user-select')
+    expect(select.element.tagName).toBe('SELECT')
+    expect(select.findAll('option').map((o) => o.text())).toContain('Cat Moe · creator')
+    await select.setValue('3')
+    await q(w, 'assignment-replace-form').trigger('submit')
+    await flushPromises()
+    expect(api.post).toHaveBeenCalledWith(BASE, expect.objectContaining({ user_id: 3, kind: 'primary' }))
+  })
 })

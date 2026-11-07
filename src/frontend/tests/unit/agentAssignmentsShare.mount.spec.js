@@ -233,6 +233,42 @@ describe('assigning someone shares the agent with them', () => {
     expect(ax.post).not.toHaveBeenCalledWith(SHARE('other'), expect.anything(), expect.anything())
   })
 
+  // ent#1154: the picked row carries who the person is, so the share does not
+  // depend on the users list having them (personFor's picked-row branch).
+  describe('when the users list does not have the picked person', () => {
+    beforeEach(() => {
+      const answer = api.get.getMockImplementation()
+      api.get.mockImplementation(async (url, cfg) => {
+        if (url === '/api/users') return { data: USERS.filter((u) => u.id !== 3) }
+        return answer(url, cfg)
+      })
+    })
+
+    it('adding shares with the picked row\'s address and names them from it', async () => {
+      const { w, reloadPeople } = render()
+      await flushPromises()
+      await q(w, 'add-kind').setValue('viewer')
+      await pickPerson(w, 'add-user', 'ca', 'Cat Moe')
+      await q(w, 'assignment-add-form').trigger('submit')
+      await flushPromises()
+      expect(api.post).toHaveBeenCalledWith(BASE, { user_id: 3, kind: 'viewer' })
+      expect(ax.post).toHaveBeenCalledWith(SHARE(), { email: 'cat@example.com' }, expect.anything())
+      expect(q(w, 'assignments-share-note').text()).toBe('Shared with Cat Moe so they can use it in the Workspace.')
+      expect(reloadPeople).toHaveBeenCalled()
+    })
+
+    it('replacing the primary shares with the picked row too', async () => {
+      const { w } = render()
+      await flushPromises()
+      await q(w, 'assignment-replace').trigger('click')
+      await pickPerson(w, 'replace-user', 'ca', 'Cat Moe')
+      await q(w, 'assignment-replace-form').trigger('submit')
+      await flushPromises()
+      expect(ax.post).toHaveBeenCalledWith(SHARE(), { email: 'cat@example.com' }, expect.anything())
+      expect(q(w, 'assignments-share-note').text()).toBe('Shared with Cat Moe so they can use it in the Workspace.')
+    })
+  })
+
   it('replacing the primary shares the agent with the new one', async () => {
     const { w } = render()
     await flushPromises()
