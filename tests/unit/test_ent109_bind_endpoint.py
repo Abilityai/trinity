@@ -664,8 +664,9 @@ class TestUnexpectedErrorIsScrubbed:
     ):
         """Belt for the class the charset guard closes at the boundary: the next
         library that echoes a credential in an exception message is not knowable
-        in advance, so the one handler that surfaces a raw exception string
-        scrubs it."""
+        in advance, so the one handler that sees a raw exception string answers
+        its class name only (#4284) and masks the PAT out of the logged
+        traceback."""
         endpoint.bind_raises = RuntimeError(
             f"Illegal header value b'Bearer {PAT}'"
         )
@@ -673,7 +674,8 @@ class TestUnexpectedErrorIsScrubbed:
             await _call(endpoint)
         assert exc.value.status_code == 500
         assert PAT not in str(exc.value.detail)
-        assert "***" in exc.value.detail["error"]
+        assert "RuntimeError" in exc.value.detail["error"]
+        assert "Illegal header value" not in exc.value.detail["error"]
 
 
 # ---------------------------------------------------------------------------

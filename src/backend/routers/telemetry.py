@@ -133,7 +133,9 @@ async def get_host_stats(current_user: User = Depends(get_current_user)):
             "timestamp": utc_now_iso()
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error getting host stats: {str(e)}")
+        # #4284: the exception text goes to the log, never the body.
+        logger.exception("Error getting host stats")
+        raise HTTPException(status_code=500, detail=f"Error getting host stats ({e.__class__.__name__} — details in backend logs)")
 
 
 def _get_single_container_stats_sync(agent_name: str) -> Dict[str, Any]:
