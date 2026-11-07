@@ -304,6 +304,48 @@ describe('trinity-enterprise#856 — the strip is frozen per arrival, by one wat
     expect(conversation(w).props('tabOrder')).toEqual({ agent: 'scout', ids: ['t1', 's3', 's2'] })
   })
 
+  it('a chat that turns unread comes after Main; the open chat keeps its slot; a second reply moves nothing', async () => {
+    const S1 = { id: 's1', session_id: 's1', agent_name: 'scout', last_message_at: '2026-09-24T10:00:00Z', unread: 0 }
+    const { w } = await boot('/workspace/c/s2', withList([SCOUT_MAIN, S3, S2, S1, SAGE_EMPTY]))
+    expect(order(w)).toEqual({ agent: 'scout', ids: ['t1', 's3', 's2', 's1'] })
+    const open = showing(w)
+    // s1 is last (the one "N more" would hide); s2 is open at index 2.
+    const hit = [SCOUT_MAIN, S3, S2, { ...S1, last_message_at: '2026-09-28T10:00:00Z', unread: 1 }, SAGE_EMPTY]
+    store.fetchAllSessions = vi.fn(async () => { store.sessionsFailed = false; return hit })
+    w.vm.threads = hit
+    await flushPromises()
+    expect(order(w).ids).toEqual(['t1', 's1', 's2', 's3'])
+    expect(order(w).ids.indexOf('s2')).toBe(2)
+    // The open chat is untouched: same chat, same mounted conversation.
+    expect(w.vm.activeSessionId).toBe('s2')
+    expect(showing(w).uid).toBe(open.uid)
+    const held = order(w)
+    w.vm.threads = hit.map((t) => (t.id === 's1' ? { ...t, unread: 2 } : t))
+    await flushPromises()
+    expect(order(w)).toBe(held)
+  })
+
+  it('a second reply in a promoted chat does not re-promote it after another chat went ahead of it', async () => {
+    const S1 = { id: 's1', session_id: 's1', agent_name: 'scout', last_message_at: '2026-09-24T10:00:00Z', unread: 0 }
+    const { w } = await boot('/workspace/c/s2', withList([SCOUT_MAIN, S3, S2, S1, SAGE_EMPTY]))
+    const s1Hit = { ...S1, last_message_at: '2026-09-28T10:00:00Z', unread: 1 }
+    const one = [SCOUT_MAIN, S3, S2, s1Hit, SAGE_EMPTY]
+    store.fetchAllSessions = vi.fn(async () => { store.sessionsFailed = false; return one })
+    w.vm.threads = one
+    await flushPromises()
+    expect(order(w).ids).toEqual(['t1', 's1', 's2', 's3'])
+    // s3 turns unread and goes ahead of s1; the open s2 keeps index 2.
+    const two = one.map((t) => (t.id === 's3' ? { ...t, last_message_at: '2026-09-29T10:00:00Z', unread: 1 } : t))
+    w.vm.threads = two
+    await flushPromises()
+    expect(order(w).ids).toEqual(['t1', 's3', 's2', 's1'])
+    // A second reply in s1 changes its badge, never its position: it was already unread.
+    const held = order(w)
+    w.vm.threads = two.map((t) => (t.id === 's1' ? { ...t, last_message_at: '2026-09-30T10:00:00Z', unread: 2 } : t))
+    await flushPromises()
+    expect(order(w)).toBe(held)
+  })
+
   it('a click on the agent you are on holds the snapshot', async () => {
     const { w } = await boot('/workspace/c/s3', withList(LIST))
     const before = order(w)
