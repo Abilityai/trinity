@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4331_trailing_newline_names.py",
+      "feature": "#4331",
+      "added": "2026-11-07",
+      "categories": [
+        "backend",
+        "unit",
+        "security"
+      ],
+      "description": "#4331: system names, manifest member keys and local template names reject a trailing newline (`\\Z` anchor instead of `$`)."
+    },
+    {
       "file": "unit/test_4156_agent_auto_memory_spawn.py",
       "feature": "#4156",
       "added": "2026-11-02",
