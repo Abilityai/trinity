@@ -81,7 +81,7 @@ logger = logging.getLogger(__name__)
 # block path traversal (`..`, `/`, `\`, leading dots) so the templates
 # directory join in `create_agent_internal` can't escape into arbitrary
 # filesystem reads (CodeQL py/path-injection on #950 PR).
-_LOCAL_TEMPLATE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
+_LOCAL_TEMPLATE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*\Z")
 
 # Allowed chars in a template-declared credential-file path. Unlike
 # `_LOCAL_TEMPLATE_NAME_RE` this is a *relative path*, so `/` is permitted —

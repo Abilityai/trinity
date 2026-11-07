@@ -78,7 +78,7 @@ MANIFEST_NAMING_MODES = ("prefixed", "bare")
 # the create route's `[a-z0-9_.-]` charset (`sanitize_agent_name`), including a
 # chained `_N` suffix from `get_next_agent_name` (`writer_2`, `writer_2_2`). An
 # exported suffixed member must parse again, in both naming modes.
-MANIFEST_KEY_RE = re.compile(r"^[a-z0-9]([a-z0-9_.-]*[a-z0-9_.])?$")
+MANIFEST_KEY_RE = re.compile(r"^[a-z0-9]([a-z0-9_.-]*[a-z0-9_.])?\Z")
 
 # #2373: the per-agent equivalent. `parse_manifest` reads exactly these and
 # dropped everything else silently.
@@ -356,7 +356,7 @@ def validate_manifest(manifest: SystemManifest) -> List[str]:
     warnings = []
 
     # Validate system name
-    if not re.match(r'^[a-z0-9][a-z0-9-]{0,48}[a-z0-9]$|^[a-z0-9]{1,2}$', manifest.name):
+    if not re.match(r'^[a-z0-9][a-z0-9-]{0,48}[a-z0-9]\Z|^[a-z0-9]{1,2}\Z', manifest.name):
         raise ValueError(
             f"Invalid system name '{manifest.name}': must be 1-50 chars, "
             "lowercase alphanumeric and hyphens, start/end with alphanumeric"
