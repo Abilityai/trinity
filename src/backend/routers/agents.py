@@ -49,6 +49,7 @@ from services.docker_utils import (
 from services import heartbeat_service
 from services import wake_policy
 from services import idempotency_service
+from services import template_source_policy
 from services.platform_audit_service import (
     platform_audit_service,
     AuditEventType,
@@ -583,6 +584,10 @@ async def create_agent_endpoint(
     """
     # Before the idempotency claim: a refused create must not hold a key.
     await _require_create_capability(request, current_user, config)
+    # trinity-enterprise#591: the template-source bound, ghosts included. Again
+    # inside `create_agent_internal` (the choke point); here so a refused create
+    # holds no claim.
+    await template_source_policy.enforce(request, current_user, config)
     idem = None
     if idempotency_key:
         scope = f"agent_create:{current_user.id}"
@@ -683,6 +688,9 @@ async def deploy_local_agent(
     branch. The scope folds the caller (another user's identical key must
     never replay a foreign deploy response).
     """
+    # trinity-enterprise#591: an upload is never on the allowlist, so a bounded
+    # caller is refused before the claim and before the archive is extracted.
+    await template_source_policy.enforce(request, current_user, upload=True)
     idem = None
     if idempotency_key:
         scope = f"agent_deploy:{current_user.id}"

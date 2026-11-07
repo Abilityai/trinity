@@ -11,6 +11,7 @@ import subprocess
 import logging
 import threading
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Optional, Tuple
 from datetime import datetime
@@ -21,6 +22,7 @@ from fastapi import HTTPException
 from ..models import ExecutionLogEntry, ExecutionMetadata
 from ..model_context import resolve_context_window
 from ..state import agent_state
+from ..utils.credential_sanitizer import sanitize_text
 from ..utils.subprocess_pgroup import EXECUTION_TAG_NAME
 from ..utils.orphan_sweep import kill_cgroup_orphans
 from .activity_tracking import start_tool_execution, complete_tool_execution
@@ -641,8 +643,13 @@ class GeminiRuntime(AgentRuntime):
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"Gemini execution error: {e}")
-            raise HTTPException(status_code=500, detail=f"Execution error: {str(e)}")
+            # trinity#4284: an exception we did not raise ourselves. Its text
+            # goes to the log, scrubbed; the answer names only the class.
+            logger.error(
+                "Gemini execution error (%s): %s",
+                type(e).__name__, sanitize_text("".join(traceback.format_exception(e))),
+            )
+            raise HTTPException(status_code=500, detail=f"Execution error: {type(e).__name__}") from e
 
     def _process_stream_line(
         self,
@@ -1169,8 +1176,14 @@ class GeminiRuntime(AgentRuntime):
         except HTTPException:
             raise
         except TimeoutError as e:
-            logger.error(f"[Headless Task] Timeout: {e}")
-            raise HTTPException(status_code=504, detail=str(e))
+            # trinity#4284: the timeouts this path owns all read "Task execution
+            # timed out after N seconds", so the answer is built from that value,
+            # never from the caught exception. "timed out" stays: the backend reads it.
+            logger.error("[Headless Task] Timeout: %s", sanitize_text(str(e)))
+            raise HTTPException(
+                status_code=504,
+                detail=f"Task execution timed out after {timeout_seconds} seconds",
+            ) from e
         except (BrokenPipeError, ConnectionResetError) as pipe_err:
             # Subprocess stdin pipe closed before write completed — Gemini CLI
             # child process exited early. Parallel surface to headless_executor.
@@ -1184,8 +1197,12 @@ class GeminiRuntime(AgentRuntime):
                 detail="Agent subprocess closed before task could complete",
             )
         except Exception as e:
-            logger.error(f"[Headless Task] Execution error: {e}")
-            raise HTTPException(status_code=500, detail=f"Task execution error: {str(e)}")
+            # trinity#4284: as in the chat path above.
+            logger.error(
+                "[Headless Task] Execution error (%s): %s",
+                type(e).__name__, sanitize_text("".join(traceback.format_exception(e))),
+            )
+            raise HTTPException(status_code=500, detail=f"Task execution error: {type(e).__name__}") from e
 
 
 # Global Gemini runtime instance

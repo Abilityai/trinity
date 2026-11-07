@@ -386,6 +386,13 @@ async def update_setting(
                 "(HTTPS + SSRF validated, admin + human-only, audit-logged)"
             ),
         )
+    # trinity-enterprise#591: validated per entry, interactive-admin only.
+    from services.template_source_policy import SETTING_KEY as ALLOWLIST_KEY
+
+    if key == ALLOWLIST_KEY:
+        raise HTTPException(status_code=422, detail=(
+            f"{key} must be set via PUT /api/settings/agent-creation-allowlist "
+            "(validated, admin + interactive-only, audit-logged)"))
 
     from config import OPS_SETTINGS_VALIDATION
     from services.settings_service import RETENTION_OPS_KEYS
@@ -795,6 +802,12 @@ async def delete_setting(
                 "(admin + human-only, audit-logged)"
             ),
         )
+    from services.template_source_policy import SETTING_KEY as ALLOWLIST_KEY
+
+    if key == ALLOWLIST_KEY:  # trinity-enterprise#591, as on PUT
+        raise HTTPException(status_code=422, detail=(
+            f"{key} must be cleared via PUT /api/settings/agent-creation-allowlist "
+            "with an empty list (admin + interactive-only, audit-logged)"))
 
     try:
         deleted = db.delete_setting(key)

@@ -6,6 +6,7 @@ PostgreSQL, so the command builds the schema itself and never imports
 """
 from __future__ import annotations
 
+import importlib
 import os
 import sqlite3
 import subprocess
@@ -95,6 +96,63 @@ def test_module_available_on_an_oss_image(tool, name, expected) -> None:
     assert tool._module_available(name) is expected
 
 
+class TestEnterpriseSnapshotMigrations:
+    """A SQLite boot applies the private module's migrations inside
+    register_enterprise. The copy must do the same on the snapshot, or a
+    data-moving migration runs on neither track."""
+
+    def _stub(self, monkeypatch, tool, register):
+        module = SimpleNamespace(register_enterprise=register, _FAILED=[])
+        monkeypatch.setitem(sys.modules, "enterprise.backend", module)
+        monkeypatch.setattr(tool, "_module_available", lambda name: True)
+        return module
+
+    def test_runs_against_the_snapshot_on_sqlite(self, tool, tmp_path: Path, monkeypatch) -> None:
+        source = tmp_path / "trinity.db"
+        _build_head(source)
+        monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@h:5432/d")
+        monkeypatch.setenv("TRINITY_REQUIRE_POSTGRES", "1")
+        monkeypatch.delenv("TRINITY_ALLOW_SQLITE", raising=False)
+        seen = {}
+
+        def register(app):
+            from db.connection import get_db_connection
+            from db.engine import is_sqlite, refuse_sqlite_backend
+
+            # A module's register imports `database`, whose SQLite branch
+            # refuses inside the image.
+            refuse_sqlite_backend()
+            seen["sqlite"] = is_sqlite()
+            with get_db_connection() as conn:
+                conn.execute("CREATE TABLE moved (v TEXT)")
+                conn.execute("INSERT INTO moved VALUES ('row')")
+                conn.commit()
+
+        self._stub(monkeypatch, tool, register)
+        snapshot = tool.prepare_snapshot(str(source))
+
+        assert seen["sqlite"] is True
+        assert sqlite3.connect(snapshot).execute("SELECT v FROM moved").fetchall() == [("row",)]
+        assert "moved" not in {r[0] for r in sqlite3.connect(source).execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert os.environ["DATABASE_URL"] == "postgresql://u:p@h:5432/d"
+        assert "TRINITY_ALLOW_SQLITE" not in os.environ
+
+    def test_a_failed_module_stops_the_copy(self, tool, tmp_path: Path, monkeypatch, capsys) -> None:
+        source = tmp_path / "trinity.db"
+        _build_head(source)
+        module = None
+
+        def register(app):
+            module._FAILED.append(("siem", "RuntimeError('x')"))
+
+        module = self._stub(monkeypatch, tool, register)
+        with pytest.raises(SystemExit) as exc:
+            tool.prepare_snapshot(str(source))
+        assert exc.value.code == tool.EXIT_SCHEMA
+        assert "siem" in capsys.readouterr().err
+
+
 def test_refuses_a_sqlite_target(tool, tmp_path: Path, monkeypatch) -> None:
     source = tmp_path / "trinity.db"
     source.write_bytes(b"x")
@@ -103,6 +161,17 @@ def test_refuses_a_sqlite_target(tool, tmp_path: Path, monkeypatch) -> None:
     with pytest.raises(SystemExit) as exc:
         tool.main()
     assert exc.value.code == tool.EXIT_USAGE
+
+
+def test_empty_database_url_says_to_remove_the_line(tool, tmp_path: Path, monkeypatch, capsys) -> None:
+    source = tmp_path / "trinity.db"
+    source.write_bytes(b"x")
+    monkeypatch.setenv("TRINITY_DB_PATH", str(source))
+    monkeypatch.setenv("DATABASE_URL", "")
+    with pytest.raises(SystemExit) as exc:
+        tool.main()
+    assert exc.value.code == tool.EXIT_USAGE
+    assert "Remove the DATABASE_URL= line" in capsys.readouterr().err
 
 
 def test_missing_source_is_named(tool, tmp_path: Path, monkeypatch) -> None:
@@ -156,7 +225,12 @@ def test_enterprise_percent_error_does_not_print_the_password(tool, monkeypatch,
 
     monkeypatch.setitem(sys.modules, "enterprise.backend._alembic_runner", SimpleNamespace(upgrade_to_head=boom))
     monkeypatch.setattr(tool, "_module_available", lambda name: True)
-    monkeypatch.setattr("db.alembic_runner.upgrade_to_head", lambda **kwargs: None)
+    # Patch the module `build_postgres_schema` will import (the sys.modules
+    # entry), not the `db` package attribute: a test that pops `db.*` from
+    # sys.modules leaves that attribute on a stale copy, and the string form
+    # then patches the copy while the code imports a fresh, unpatched module.
+    monkeypatch.setattr(importlib.import_module("db.alembic_runner"), "upgrade_to_head",
+                        lambda **kwargs: None)
     with pytest.raises(SystemExit) as exc:
         tool.build_postgres_schema()
     assert exc.value.code == tool.EXIT_USAGE

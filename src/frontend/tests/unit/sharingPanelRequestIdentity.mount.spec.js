@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * trinity-enterprise#737 — the Sharing tab's pending access requests show the
+ * trinity-enterprise#737 — the Channels tab's pending access requests show the
  * requester as a person, not a string.
  *
  * Mounted against stubbed transports; channel panels are stubbed. Pinned:
@@ -67,7 +67,7 @@ async function render() {
         ChannelDisclosure: STUB, ChannelConfigRow: STUB, PublicLinksPanel: STUB, SlackChannelPanel: STUB,
         SlackAgentBotPanel: STUB, TelegramChannelPanel: STUB, WhatsAppChannelPanel: STUB,
         VoipChannelPanel: STUB, ConnectorChannelPanel: STUB, PortalClientsPanel: STUB,
-        'router-link': { template: '<a><slot /></a>' },
+        'router-link': { props: ['to'], template: '<a :data-to="JSON.stringify(to)"><slot /></a>' },
       },
       mocks: { $route: { query: {} } },
     },
@@ -115,5 +115,23 @@ describe('pending access requests name the person (ent#737)', () => {
     await row(w, 'r1').findAll('button').find((b) => b.text() === 'Approve').trigger('click')
     await flushPromises()
     expect(ax.post).toHaveBeenCalledWith(`/api/agents/${AGENT}/access-requests/r1/decide`, { approve: true }, expect.anything())
+  })
+})
+
+// trinity-enterprise#225: the panel names itself after its tab, and points at where
+// teammates moved to rather than at the Access tab that no longer exists.
+describe('how the Channels tab introduces itself', () => {
+  it('is headed Channels and never says Share this agent', async () => {
+    const w = await render()
+    expect(w.find('h3').text()).toBe('Channels')
+    expect(w.text()).not.toContain('Share this agent')
+  })
+
+  it('sends teammates to Settings › People, not the Access tab', async () => {
+    const w = await render()
+    const link = w.find('[data-testid="channels-people-link"]')
+    expect(link.text()).toBe('Settings › People')
+    expect(JSON.parse(link.attributes('data-to'))).toEqual({ query: { tab: 'settings', section: 'people' } })
+    expect(w.text()).not.toContain('Access tab')
   })
 })

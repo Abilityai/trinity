@@ -160,7 +160,7 @@ Before adding endpoints, services, DB tables, or frontend views, review the Arch
 Long-running multi-stage work inside agents (perception → synthesis → publish → measure, etc.) is **owned by the agent**, not by Trinity. The agent runs a heartbeat skill that advances stages, retries failures, and escalates via the operator queue. Trinity's only contribution is a standardized **read surface** — agents publish `~/.trinity/pipelines/<id>.yaml` (definition) and `~/.trinity/pipeline-state/<id>/<instance>.json` (state); Trinity exposes these via thin MCP tools (`list_agent_pipelines`, `get_agent_pipeline_state`) that wrap the existing `agent_files` router. **Do not** add a DAG executor, pipeline state tables, or backend transition logic — those belong in the agent. See `docs/memory/requirements/scheduling.md` (Agent-Defined Pipelines, formerly §34) and issue #919.
 
 ### 9. Dual-Track DB Migrations (SQLite + PostgreSQL) — #1183
-Trinity supports **both** SQLite (default) and PostgreSQL, on **separate migration systems**. **Every schema change requires TWO migrations:**
+Trinity runs on PostgreSQL by default and still supports SQLite, on **separate migration systems**. **Every schema change requires TWO migrations:**
 
 1. **SQLite** → add a versioned entry to `src/backend/db/migrations.py` (bespoke runner: PRAGMA + `INSERT OR IGNORE`, tracked in `schema_migrations`).
 2. **PostgreSQL** → add a new **Alembic** revision under `src/backend/migrations/versions/` (`init_database()`'s non-SQLite branch runs `db/alembic_runner.upgrade_to_head()`).
@@ -240,7 +240,7 @@ project_trinity/
 | Category | File | Description |
 |----------|------|-------------|
 | Backend | `src/backend/main.py` | FastAPI app, ~500 endpoints across 72 routers |
-| Backend | `src/backend/database.py` | SQLite persistence |
+| Backend | `src/backend/database.py` | Database facade (PostgreSQL by default, SQLite still supported) |
 | Backend | `src/backend/routers/credentials.py` | Credential injection (CRED-002) |
 | Frontend | `src/frontend/src/views/AgentDetail.vue` | Agent detail page |
 | Frontend | `src/frontend/src/stores/agents.js` | Agent state management |
@@ -322,7 +322,7 @@ curl -X POST http://localhost:8000/api/agents \
 ### Credential Pattern
 ```
 .env                    # Source of truth (KEY=VALUE)
-.mcp.json.template      # Template with ${VAR} placeholders (rendering is #2007, not yet live)
+.mcp.json.template      # Template with ${VAR} placeholders, rendered from .env into .mcp.json at every agent start (#2007)
 .mcp.json               # Written by credential injection
 ```
 

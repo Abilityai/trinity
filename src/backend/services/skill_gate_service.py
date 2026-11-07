@@ -36,6 +36,8 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from config import PORTAL_SOURCE_CHANNEL
 from database import db
 from db.skill_gates import ORIGIN_CLEARED
@@ -1126,6 +1128,34 @@ def _could_not_tell_text(subagent: Optional[str]) -> str:
             "so it was not run. Do not carry out its steps another way.")
 
 
+def peer_hook_refusal_text(skills: List[str], *, caller: str, agent_name: str,
+                           subagent: Optional[str] = None) -> str:
+    """What the executor reads when a peer's run loads a library skill that
+    peer holds no grant for (trinity-enterprise#925). A real load, not a text
+    match, so it hands back without offering a way around: no slash before a
+    name, and nothing that sends anyone to widen a grant (#3949)."""
+    one = len(skills) == 1
+    names = _and_join(skills)
+    noun = ("the skill " if one else "the skills ") + names
+    was, it, its = ("was", "it", "its") if one else ("were", "them", "their")
+    if subagent:
+        head = f"the subagent {subagent} loads {noun}, which {was} assigned"
+    else:
+        head = f"{noun} {was} assigned"
+    return (f"Not run: {head} to {agent_name} from the skills library, and this run is a "
+            f"request from the agent {caller}, which holds no grant for {it}. Do not carry out "
+            f"{its} steps another way. Tell {caller} that {names} {'is' if one else 'are'} not "
+            f"available to it on {agent_name}.")
+
+
+def peer_could_not_tell_text(*, caller: str, agent_name: str, subagent: Optional[str] = None) -> str:
+    what = (f"which skills the subagent {subagent} loads" if subagent
+            else "which skill this call loads")
+    return (f"Not run: this run is a request from the agent {caller}, which may run "
+            f"{agent_name}'s library skills only with a grant, and Trinity could not tell "
+            f"{what}. Do not carry out its steps another way.")
+
+
 async def check_invocation(agent_name: str, *, via: str, invoked: Optional[str],
                            names: List[str], resolved: bool, subagent: Optional[str] = None,
                            execution_id: Optional[str] = None, marker: Optional[bool] = None,
@@ -1133,19 +1163,28 @@ async def check_invocation(agent_name: str, *, via: str, invoked: Optional[str],
     """The in-container hook's question: may this run load these skills?
 
     `names` are every name the invoked skill (or a subagent's preloads)
-    answers to; `resolved` is False when the hook could not tell. Not gated →
-    allowed. Gated → allowed only when `execution_id` is this agent's LIVE run
-    and a gate record clears it for every gated skill the call loads (D3: the
-    execution and the skill). Every verdict is RETURNED: a raise would reach
-    the app handler as a non-200, which the hook reads as "no answer" and
-    decides by its marker. Only an unreadable gate map raises (503).
+    answers to; `resolved` is False when the hook could not tell.
+
+    First the peer rule (trinity-enterprise#925): on a run whose requester is
+    a peer agent, a library skill that peer holds no grant for is refused,
+    on every agent, gated or not — the gateway's order. Then the gate: not
+    gated → allowed; gated → allowed only when `execution_id` is this agent's
+    LIVE run and a gate record clears it for every gated skill the call loads
+    (D3: the execution and the skill). Every verdict is RETURNED: a raise
+    would reach the app handler as a non-200, which the hook reads as "no
+    answer" and decides by its marker. Only an unreadable gate map raises
+    (503); an unreadable peer read fails open instead.
     """
     gates = read_gates(agent_name)
     _heal_marker(agent_name, has_gates=bool(gates), reported=marker)
-    if not gates:
-        return {"allowed": True, "gated": False, "message": None}
     who = _one_line(subagent) if via == "subagent_preload" else None
     run = execution_id if execution_id and execution_id != "manual" else None
+    peer = await _peer_verdict(agent_name, via=via, invoked=invoked, names=names,
+                               resolved=resolved, subagent=who, run=run, current_user=current_user)
+    if peer is not None:
+        return peer
+    if not gates:
+        return {"allowed": True, "gated": False, "message": None}
     refusal = dict(via=via, subagent=who, execution_id=run, current_user=current_user)
     if not resolved:
         return await _refuse(agent_name, [], reason="could_not_tell",
@@ -1163,6 +1202,47 @@ async def check_invocation(agent_name: str, *, via: str, invoked: Optional[str],
         return {"allowed": True, "gated": True, "message": None}
     return await _refuse(agent_name, uncleared, reason="not_cleared" if live else "run_not_live",
                          text=hook_refusal_text(uncleared, no_run=False, subagent=who), **refusal)
+
+
+async def _peer_verdict(agent_name: str, *, via: str, invoked: Optional[str], names: List[str],
+                        resolved: bool, subagent: Optional[str], run: Optional[str],
+                        current_user) -> Optional[Dict[str, Any]]:
+    """The refusal, or None, for the peer rule at load (trinity-enterprise#925).
+    No run → the agent's own session: no requester. An agent holding no
+    library skill (the common case — every skill load fleet-wide asks) costs
+    one read and stops. Otherwise one row read for every id, so an unknown id
+    and another agent's run read alike. A database error fails OPEN (the
+    owner's ruling): the peer rule is silent and the gate still answers from
+    its OWN reads — the gate's clearance never rides on this fail-open read.
+    Any other error propagates."""
+    if run is None:
+        return None
+    try:
+        assigned = peer_skill_policy.library_assigned(agent_name)
+        if not assigned:
+            return None
+        row = db.get_execution_requester(run)
+        caller = peer_skill_policy.run_requester(agent_name, row)
+        if caller is None:
+            return None
+        refused, unsure = peer_skill_policy.check_load(
+            agent_name, caller, names=names, invoked=invoked, resolved=resolved,
+            assigned=assigned)
+    except SQLAlchemyError:
+        logger.warning("[SkillGate] peer check for run %s on %s could not read — letting the "
+                       "peer rule pass", run, agent_name, exc_info=True)
+        return None
+    if not refused and not unsure:
+        return None
+    text = (peer_hook_refusal_text(refused, caller=caller, agent_name=agent_name, subagent=subagent)
+            if refused else
+            peer_could_not_tell_text(caller=caller, agent_name=agent_name, subagent=subagent))
+    logger.info("[SkillGate] in-container peer refusal on %s: caller=%s via=%s skills=%s run=%s",
+                agent_name, caller, via, ",".join(refused) or "-", run)
+    await peer_skill_policy.audit_in_container_refusal(
+        caller=caller, callee=agent_name, skills=refused, via=via, subagent=subagent,
+        execution_id=run, requester_key_id=row[3], current_user=current_user)
+    return {"allowed": False, "gated": False, "message": text}
 
 
 def _cleared_skills(agent_name: str, execution_id: str) -> Tuple[set, bool]:

@@ -361,6 +361,7 @@ def _group_message(text="@bot summarise", *, observe_only=False, untagged=False,
 @contextmanager
 def _env(history=None):
     db = MagicMock()
+    db.is_channel_client_blocked.return_value = False  # ent#21: not blocked
     db.get_access_policy.return_value = {"require_email": False, "open_access": True,
                                          "group_auth_mode": "none"}
     db.get_or_create_public_chat_session.return_value = {"id": "s1", "message_count": 3}
@@ -592,6 +593,7 @@ async def test_untagged_bare_command_does_not_fire(monkeypatch):
     router.handle_message = AsyncMock()
     transport = tw.TelegramWebhookTransport(adapter, router)
     monkeypatch.setattr(tw, "db", types.SimpleNamespace(
+        is_channel_client_blocked=lambda *a: False,  # ent#21
         get_telegram_bot_token=lambda n: "tok",
         get_or_create_public_chat_session=lambda *a: {"id": "s1"},
         clear_public_chat_session=lambda sid: None))
@@ -622,6 +624,7 @@ async def test_addressed_command_still_fires(monkeypatch):
     router.handle_message = AsyncMock()
     transport = tw.TelegramWebhookTransport(adapter, router)
     monkeypatch.setattr(tw, "db", types.SimpleNamespace(
+        is_channel_client_blocked=lambda *a: False,  # ent#21
         get_telegram_bot_token=lambda n: "tok"))
     await transport._process_update(_tg_update(text="/help@bot"), {"agent_name": "analytics"})
     adapter.handle_command.assert_awaited_once()

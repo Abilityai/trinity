@@ -1,0 +1,147 @@
+/**
+ * abilityai/trinity-enterprise#1117 — `git_sync` refuses a `paths` element that
+ * git would read as an option.
+ *
+ * An agent created on an older base image stages `paths` with `git add <paths>`
+ * (no `--`), so `paths: ["-f", ".env"]` force-stages the gitignored credentials
+ * file and the same sync pushes it. The tool schema refuses any element that
+ * starts with `-`, naming it, so the call never reaches the backend. A dash
+ * anywhere else (`sub/-x.md`) is an ordinary path.
+ *
+ * Validation is driven through `parameters["~standard"].validate`, the exact
+ * seam FastMCP calls before `execute` (a failure becomes an InvalidParams
+ * error whose text is `<path>: <message>` per issue).
+ *
+ * Runner: node:test → `node --import tsx --test src/tools/*.test.ts`.
+ */
+import { describe, it } from "node:test";
+import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
+
+import { createGitTools } from "./git.js";
+import type { TrinityClient } from "../client.js";
+
+type Issue = { message: string; path?: ReadonlyArray<PropertyKey | { key: PropertyKey }> };
+
+// One table of tricky inputs, read by this file AND by the backend's test
+// (tests/unit/test_ent1117_s6a_sync_paths_option_reject.py), so the API and
+// the MCP tool cannot drift into giving a caller different answers.
+const CASES = JSON.parse(
+  readFileSync(new URL("../../../../tests/fixtures/git-sync-path-cases.json", import.meta.url), "utf8"),
+) as ReadonlyArray<{ path: string; accept: boolean; note: string }>;
+
+function issueKeys(i: Issue): PropertyKey[] {
+  return (i.path ?? []).map((p) => (typeof p === "object" ? p.key : p));
+}
+
+function makeTools(calls: unknown[][]) {
+  const fake: Partial<TrinityClient> = {
+    getBaseUrl: () => "http://localhost:8000",
+    getPermittedAgents: async () => [],
+    gitSync: async (name: string, body: unknown) => {
+      calls.push([name, body]);
+      return { success: true };
+    },
+  };
+  return createGitTools(fake as TrinityClient, false);
+}
+
+async function validate(args: unknown): Promise<{ issues?: ReadonlyArray<Issue>; value?: unknown }> {
+  const tools = makeTools([]);
+  // FastMCP's own call: tool.parameters["~standard"].validate(arguments)
+  return (await (tools.gitSync.parameters as any)["~standard"].validate(args)) as {
+    issues?: ReadonlyArray<Issue>;
+    value?: unknown;
+  };
+}
+
+describe("ent#1117 git_sync — a paths element starting with '-' is a schema error", () => {
+  for (const [paths, bad] of [
+    [["-f", ".env"], "-f"],
+    [[".env", "--force"], "--force"],
+    [["notes.md", "--pathspec-from-file=/etc/passwd"], "--pathspec-from-file=/etc/passwd"],
+    [["-"], "-"],
+  ] as const) {
+    it(`rejects ${JSON.stringify(paths)} and names '${bad}'`, async () => {
+      const result = await validate({ agent_name: "alpha", paths });
+      assert.ok(result.issues && result.issues.length > 0, "expected a schema error");
+      // The issue points at the offending element, so FastMCP renders `paths.<i>: ...`.
+      const index = (paths as readonly string[]).indexOf(bad);
+      const at = result.issues.filter((i) => {
+        const keys = issueKeys(i);
+        return keys[0] === "paths" && keys[1] === index;
+      });
+      assert.equal(at.length, 1, `issue path must be paths.${index}: ${JSON.stringify(result.issues)}`);
+      // The message must LEAD with the element. A bare substring check is
+      // vacuous for ["-"]: "'-'" is already in "starts with '-'".
+      assert.ok(
+        at[0].message.startsWith(`'${bad}' starts with '-'`),
+        `the error must name the element first: ${at[0].message}`,
+      );
+    });
+  }
+
+  for (const [n, c] of CASES.entries()) {
+    it(`shared case ${n} (${c.note}): ${c.accept ? "accepts" : "rejects"} ${JSON.stringify(c.path)}`, async () => {
+      const result = await validate({ agent_name: "alpha", paths: [c.path] });
+      if (c.accept) {
+        assert.equal(result.issues, undefined, JSON.stringify(result.issues));
+        assert.deepEqual((result.value as { paths: string[] }).paths, [c.path]);
+      } else {
+        assert.ok(result.issues && result.issues.length > 0, "expected a schema error");
+      }
+    });
+  }
+
+  // A lone surrogate is legal in a JSON request as an escape. The refusal must
+  // still serialise to valid UTF-8 JSON, which is what reaches the caller.
+  for (const bad of ["-\ud800", "-ab\udc00cd", "-" + "a".repeat(150) + "\ud800"]) {
+    it(`refuses ${JSON.stringify(bad).slice(0, 40)} with an error that is valid UTF-8 JSON`, async () => {
+      const result = await validate({ agent_name: "alpha", paths: [bad] });
+      assert.ok(result.issues && result.issues.length === 1, "expected one schema error");
+      const wire = Buffer.from(JSON.stringify({ message: result.issues[0].message }), "utf8");
+      const decoded = new TextDecoder("utf-8", { fatal: true }).decode(wire);
+      assert.equal(JSON.parse(decoded).message, result.issues[0].message);
+    });
+  }
+
+  it("cuts a long element by code points, never through a surrogate pair", async () => {
+    // 199 UTF-16 units, then an emoji (2 units): a UTF-16 cut at 200 splits it.
+    const bad = "-" + "a".repeat(198) + "\u{1F600}" + "b".repeat(50);
+    const result = await validate({ agent_name: "alpha", paths: [bad] });
+    const message = result.issues![0].message;
+    assert.ok(
+      message.startsWith(`'${Array.from(bad).slice(0, 200).join("")}\u2026' starts with '-'`),
+      message.slice(0, 260),
+    );
+    assert.ok(!/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/.test(message), "lone surrogate in message");
+  });
+
+  it("caps a long element in the message", async () => {
+    const bad = "-" + "a".repeat(10_000);
+    const result = await validate({ agent_name: "alpha", paths: [bad] });
+    assert.ok(result.issues && result.issues.length === 1, JSON.stringify(result.issues?.length));
+    const message = result.issues[0].message;
+    assert.ok(message.length < 1_000, String(message.length));
+    assert.ok(message.startsWith(`'${bad.slice(0, 200)}\u2026' starts with '-'`), message.slice(0, 300));
+  });
+
+  it("accepts a dash anywhere but the first character", async () => {
+    const paths = ["sub/-x.md", "a-b/c-d.txt", "./-leading-dash-spelt-safely.md", "x-"];
+    const result = await validate({ agent_name: "alpha", paths });
+    assert.equal(result.issues, undefined, JSON.stringify(result.issues));
+    assert.deepEqual((result.value as { paths: string[] }).paths, paths);
+  });
+
+  it("characterization: omitting paths still validates (sync everything)", async () => {
+    const result = await validate({ agent_name: "alpha" });
+    assert.equal(result.issues, undefined, JSON.stringify(result.issues));
+  });
+
+  it("execute forwards an accepted paths list unchanged", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools(calls);
+    await tools.gitSync.execute({ agent_name: "alpha", paths: ["sub/-x.md"] }, {});
+    assert.deepEqual(calls, [["alpha", { message: undefined, paths: ["sub/-x.md"], strategy: undefined }]]);
+  });
+});

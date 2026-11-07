@@ -337,7 +337,7 @@ Each `update_id` is claimed once per bot in Redis (`SET NX`, 24 h TTL) — Teleg
 
 ### Component: `src/frontend/src/components/TelegramChannelPanel.vue`
 
-Self-contained panel rendered in the Agent Detail → Sharing tab via `SharingPanel.vue`. Mirrors the `SlackChannelPanel.vue` pattern.
+Self-contained panel rendered in the Agent Detail → Channels tab via `SharingPanel.vue`. Mirrors the `SlackChannelPanel.vue` pattern.
 
 **Props**: `agentName` (String, required)
 

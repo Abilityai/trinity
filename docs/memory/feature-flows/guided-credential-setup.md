@@ -388,11 +388,12 @@ into the operator's browser. That is today's Quick Inject behaviour; the
 checklist increases its frequency. Both ends are owner-gated. Recorded rather
 than silently normalised: the *endpoint* is read-only, the *feature* is not.
 
-**Residual, unchanged deliberately:** the agent's own reader strips quote
-characters and does not unescape, so a value containing `"` reaches the agent
-with the backslash. Escaping for a format nobody unescapes is a pre-existing
-defect in its own right, and widening the escaping would make the agent-side
-mismatch worse. `formatEnvContent` also still drops author comments.
+**Escaping now agrees end to end (abilityai/trinity-enterprise#1117).** The
+panel's writer (`utils/envFile.js`) escapes `\` and `"`, and every reader
+undoes both: the panel's `parseEnvText`, the agent's `unquote_env_value`
+(#2023) and `mcp_template`'s `.mcp.json` renderer. The shared rules live in
+[credential-injection.md](credential-injection.md). `formatEnvContent` still
+drops author comments.
 
 ### 7. Cache invalidation
 
@@ -503,4 +504,5 @@ executed against fixture directories, not through `docker exec`.
 3. **`compatibility/collector.py` exec timeout** — the identical unbounded hole.
 4. **Wire `describe_setup_url` into the normalizer** so catalog consumers
    inherit it instead of re-deriving.
-5. **`formatEnvContent` ↔ agent-reader escaping mismatch** (§6 residual).
+5. ~~**`formatEnvContent` ↔ agent-reader escaping mismatch**~~ — closed by
+   abilityai/trinity-enterprise#1117 (§6).

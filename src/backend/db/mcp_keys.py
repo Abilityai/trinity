@@ -282,6 +282,19 @@ class McpKeyOperations:
             row = conn.execute(stmt).mappings().first()
             return self._row_to_mcp_api_key(row) if row else None
 
+    def get_agent_name_for_agent_key(self, key_id: str) -> Optional[str]:
+        """The agent an AGENT-scoped key belongs to, else None (a user, system,
+        connector or portal key; an unknown id). Active or not: a key rotated
+        or deactivated after it made a request still names who made it
+        (abilityai/trinity-enterprise#925 — the peer a run is for)."""
+        stmt = select(mcp_api_keys.c.agent_name).where(
+            mcp_api_keys.c.id == key_id,
+            mcp_api_keys.c.scope == "agent",
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).first()
+        return (row.agent_name or None) if row else None
+
     def list_active_agent_key_ids(self, agent_name: str) -> List[str]:
         """Ids of the agent's ACTIVE ``scope='agent'`` keys (#1854).
 

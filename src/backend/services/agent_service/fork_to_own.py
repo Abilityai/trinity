@@ -449,8 +449,9 @@ async def fork_template_to_own_repo(
             timeout=CLONE_TIMEOUT_S, auth_pat=read_pat,
         )
         if rc != 0:
+            # `out` is already scrubbed of read_pat by _run_git.
             logger.error("fork-to-own: template clone failed for %s: %s",
-                         template_repo, scrub_secret(out, read_pat))
+                         template_repo, out)
             raise _http_error(
                 502, "FORK_TEMPLATE_CLONE_FAILED",
                 f"Could not clone template '{template_repo}'. The empty "
