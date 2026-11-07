@@ -204,7 +204,9 @@ def _db_fault(monkeypatch):
     def boom(*_a, **_k):
         raise RuntimeError("disk I/O error")
     monkeypatch.setattr(db, "write_skill_gate", boom)
-    return "disk I/O error"
+    # The driver's text stays in the log: the report names the class only
+    # (abilityai/trinity#4284).
+    return "RuntimeError — details in backend logs"
 
 
 def _lose_lease_after_tag(monkeypatch):

@@ -258,6 +258,24 @@ def test_total_failure_returns_500_with_report(env):
     assert data["prompt_updated"] is False
 
 
+def test_total_failure_keeps_the_create_paths_own_sentence(env, monkeypatch):
+    """abilityai/trinity#4284: create builds the agent's env before its own
+    catch-all, so an install without AGENT_AUTH_SECRET fails every member with
+    the platform's remediation sentence, and the 500's report keeps it."""
+    monkeypatch.delenv("AGENT_AUTH_SECRET", raising=False)
+
+    async def create(config, current_user, request, **kwargs):
+        crud._apply_mcp_and_auth_env(config, {}, None, "http://mcp-server:8080/mcp")
+    env.m.create_agent.side_effect = create
+
+    resp = _deploy(env, TWO_AGENT_MANIFEST)
+
+    assert resp.status_code == 500
+    reasons = [f["reason"] for f in resp.json()["failed"]]
+    assert len(reasons) == 2
+    assert all(r.startswith("AGENT_AUTH_SECRET is not set.") for r in reasons), reasons
+
+
 def test_total_failure_never_writes_trinity_prompt(env):
     manifest = TWO_AGENT_MANIFEST + "prompt: system-wide instructions\n"
     env.m.create_agent.side_effect = Exception("docker down")
@@ -309,7 +327,9 @@ def test_strict_generic_exception_maps_to_500(env):
     resp = _deploy(env, TWO_AGENT_MANIFEST, strict=True)
 
     assert resp.status_code == 500
-    assert resp.json()["detail"]["reason"] == "docker exploded"
+    # abilityai/trinity#4284: an unforeseen exception is named by class; its
+    # text goes to the log.
+    assert resp.json()["detail"]["reason"] == "RuntimeError — details in backend logs"
 
 
 # --- reason normalization + sanitization --------------------------------------
@@ -328,12 +348,14 @@ def test_dict_detail_normalized_to_error_field(env):
     assert failure["status_code"] == 429
 
 
+_GIT_403 = ("fatal: unable to access "
+            "'https://x-access-token:ghp_0123456789abcdefghijklmnopqrstuvwxyz01@github.com/org/repo/': 403")
+
+
 def test_reason_redacts_pat_bearing_git_urls(env):
     # learnings 2026-07-14: git prints the PAT-bearing remote URL in errors.
-    _fail_agent(env, "alpha", Exception(
-        "fatal: unable to access "
-        "'https://x-access-token:ghp_0123456789abcdefghijklmnopqrstuvwxyz01@github.com/org/repo/': 403"
-    ))
+    # A detail the platform raised keeps its words, redacted.
+    _fail_agent(env, "alpha", HTTPException(status_code=400, detail=_GIT_403))
 
     resp = _deploy(env, TWO_AGENT_MANIFEST)
 
@@ -342,8 +364,19 @@ def test_reason_redacts_pat_bearing_git_urls(env):
     assert "://***@github.com" in reason
 
 
+def test_reason_of_an_unforeseen_exception_is_its_class(env):
+    # abilityai/trinity#4284: the report is the body of a 500 when every member
+    # fails, so a raw exception's text never reaches it.
+    _fail_agent(env, "alpha", Exception(_GIT_403))
+
+    resp = _deploy(env, TWO_AGENT_MANIFEST)
+
+    reason = resp.json()["failed"][0]["reason"]
+    assert reason == "Exception — details in backend logs"
+
+
 def test_reason_truncated(env):
-    _fail_agent(env, "alpha", Exception("x" * 5000))
+    _fail_agent(env, "alpha", ValueError("x" * 5000))
 
     resp = _deploy(env, TWO_AGENT_MANIFEST)
 

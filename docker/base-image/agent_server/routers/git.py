@@ -13,6 +13,7 @@ import subprocess
 import logging
 import threading
 import time
+import traceback
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -27,9 +28,20 @@ from ..utils.registered_run import GIT_NO_AUTO_MAINTENANCE, run_registered
 from .files import _read_persistent_state
 from .snapshot import build_snapshot, restore_from_tar
 
-from ..utils.credential_sanitizer import redact_url_userinfo
+from ..utils.credential_sanitizer import redact_url_userinfo, sanitize_text
 
 logger = logging.getLogger(__name__)
+
+
+def _log_git_failure(what: str, exc: BaseException) -> None:
+    """Log an unforeseen git-route failure with its traceback. Its text stays
+    here: a git error can carry a remote URL with a token in it, a path or
+    command output, so the answer names only the class (trinity#4284). URL
+    userinfo goes first, then the credential sanitizer."""
+    logger.error(
+        "%s (%s): %s", what, type(exc).__name__,
+        sanitize_text(redact_url_userinfo("".join(traceback.format_exception(exc)))),
+    )
 router = APIRouter()
 
 # S7 Layer 3 (#382): directory where we persist the last-observed remote
@@ -2126,8 +2138,8 @@ def _compute_git_status(home_dir: Path) -> Dict:
     except subprocess.TimeoutExpired:
         raise HTTPException(status_code=504, detail="Git operation timed out")
     except Exception as e:
-        logger.error(f"Git status error: {e}")
-        raise HTTPException(status_code=500, detail=f"Git status error: {str(e)}")
+        _log_git_failure("Git status error", e)
+        raise HTTPException(status_code=500, detail=f"Git status error: {type(e).__name__}") from e
 
 
 async def _run_status_computation(home_dir: Path) -> Dict:
@@ -2523,8 +2535,8 @@ async def sync_to_github(request: GitSyncRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Git sync error: {e}")
-        raise HTTPException(status_code=500, detail=f"Git sync error: {str(e)}")
+        _log_git_failure("Git sync error", e)
+        raise HTTPException(status_code=500, detail=f"Git sync error: {type(e).__name__}") from e
 
 
 @router.get("/api/git/log")
@@ -2573,8 +2585,8 @@ async def get_git_log(limit: int = 10):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Git log error: {e}")
-        raise HTTPException(status_code=500, detail=f"Git log error: {str(e)}")
+        _log_git_failure("Git log error", e)
+        raise HTTPException(status_code=500, detail=f"Git log error: {type(e).__name__}") from e
 
 
 @router.post("/api/git/pull")
@@ -2788,8 +2800,8 @@ async def pull_from_github(request: GitPullRequest = GitPullRequest()):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Git pull error: {e}")
-        raise HTTPException(status_code=500, detail=f"Git pull error: {str(e)}")
+        _log_git_failure("Git pull error", e)
+        raise HTTPException(status_code=500, detail=f"Git pull error: {type(e).__name__}") from e
 
 
 # ---------------------------------------------------------------------------

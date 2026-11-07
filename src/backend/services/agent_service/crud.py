@@ -54,11 +54,12 @@ from services.entitlement_service import entitlement_service
 from services import rate_limiter
 from services import template_source_policy
 from . import ephemeral as ephemeral_service
-from services.github_service import GitHubService, GitHubError
+from services.github_service import GitHubService, GitHubError, github_error_words
 from services.agent_auth import derive_agent_token
 from utils.helpers import parse_iso_timestamp, sanitize_agent_name, to_utc_iso, utc_now_iso
 from utils.safe_yaml import HardenedYamlError, load_template_yaml
 from utils import avatar_paths
+from utils.log_masking import masked_traceback
 from .fork_to_own import (
     SAVED_TOKEN_TIERS, fork_pat_required, fork_template_to_own_repo, saved_token_message,
     saved_token_not_for_agents,
@@ -1397,12 +1398,18 @@ async def _validate_github_access(
                         ),
                     )
                 if outcome != "ok":
+                    logger.warning(
+                        "GitHub repository access check failed for %s (git "
+                        "transport: %s): %s", github_repo_for_agent, outcome,
+                        masked_traceback(e, github_pat_for_agent),
+                    )
                     raise HTTPException(
                         status_code=502,
                         detail=(
-                            f"Failed to validate GitHub repository access: {e} "
-                            f"(the git transport could not confirm read access "
-                            f"to '{github_repo_for_agent}' either)."
+                            f"Failed to validate GitHub repository access "
+                            f"({github_error_words(type(e), getattr(e, 'status', None))}); "
+                            f"the git transport could not confirm read access to "
+                            f"'{github_repo_for_agent}' either."
                         ),
                     )
                 logger.info(
@@ -1450,9 +1457,18 @@ async def _validate_github_access(
     except HTTPException:
         raise
     except GitHubError as e:
+        # abilityai/trinity#4284: a network error's text is httpx's, which
+        # echoes a header-unsafe token. The log keeps it, masked.
+        logger.warning(
+            "GitHub repository access check failed for %s: %s",
+            github_repo_for_agent, masked_traceback(e, github_pat_for_agent),
+        )
         raise HTTPException(
             status_code=502,
-            detail=f"Failed to validate GitHub repository access: {e}"
+            detail=(
+                f"Failed to validate GitHub repository access "
+                f"({github_error_words(type(e), getattr(e, 'status', None))})"
+            ),
         )
     except Exception as e:
         # Log but don't block creation for transient network errors

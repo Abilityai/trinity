@@ -327,6 +327,10 @@ def _first_line(stderr: str, secret: str) -> str:
     return scrub_secret_and_urls(line, secret)[:240]
 
 
+class GitInstanceReservationError(RuntimeError):
+    """No branch was reserved; a collision's driver error is the cause, not the message."""
+
+
 async def reserve_and_generate_instance_id(
     agent_name: str,
     github_repo: str,
@@ -343,7 +347,8 @@ async def reserve_and_generate_instance_id(
          ``UNIQUE(github_repo, working_branch) WHERE source_mode = 0`` (Layer 2)
 
     Retries on either a remote hit or a DB IntegrityError up to
-    ``MAX_INSTANCE_ID_RETRIES`` times, then raises ``RuntimeError``.
+    ``MAX_INSTANCE_ID_RETRIES`` times, then raises ``GitInstanceReservationError``
+    (a ``RuntimeError``), as it does when the agent already has a git config.
 
     For ``source_mode=True`` the branch is the source branch (e.g. ``main``),
     the remote probe is skipped (intentional shared-branch mode), and the DB
@@ -352,10 +357,6 @@ async def reserve_and_generate_instance_id(
     Returns:
         A ``(instance_id, working_branch)`` tuple. The DB row is already
         persisted when this function returns.
-
-    Raises:
-        RuntimeError: if ``MAX_INSTANCE_ID_RETRIES`` consecutive reservations
-            collide on either the remote or the DB.
     """
     last_error: Optional[BaseException] = None
 
@@ -408,18 +409,17 @@ async def reserve_and_generate_instance_id(
             # create_git_config returns None on a plain agent_name UNIQUE
             # violation — this is a different bug (agent already has config)
             # and should not be silently retried. Surface immediately.
-            raise RuntimeError(
+            raise GitInstanceReservationError(
                 f"reserve_and_generate_instance_id: agent_git_config already "
                 f"exists for agent {agent_name!r}"
             )
 
         return instance_id, working_branch
 
-    raise RuntimeError(
-        f"reserve_and_generate_instance_id: could not reserve a fresh working "
-        f"branch for {agent_name!r} in {github_repo!r} after "
-        f"{MAX_INSTANCE_ID_RETRIES} retries (last error: {last_error!r})"
-    )
+    raise GitInstanceReservationError(  # abilityai/trinity#4284: each collision is logged above
+        f"reserve_and_generate_instance_id: could not reserve a fresh working branch for "
+        f"{agent_name!r} in {github_repo!r} after {MAX_INSTANCE_ID_RETRIES} retries"
+    ) from last_error
 
 
 async def create_git_config_for_agent(

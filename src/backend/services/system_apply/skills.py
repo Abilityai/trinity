@@ -210,7 +210,7 @@ async def run(op, actor, out, attempt, *, apply_change, acting_agent: Optional[s
 
     async def hold(step: str, skills: List[str], key) -> None:
         def refuse():
-            raise RuntimeError(apply_gates.not_written_reason(skills))
+            raise apply_gates._Refused(apply_gates.not_written_reason(skills))
         await attempt(name, short, step, refuse, key=key)
 
     if op.kind == "skill_assign":
