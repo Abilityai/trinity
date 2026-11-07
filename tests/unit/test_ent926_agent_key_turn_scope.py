@@ -83,6 +83,10 @@ def _db(monkeypatch):
     monkeypatch.setattr(dep.db, "get_execution", lambda run: EXECUTIONS.get(run))
     monkeypatch.setattr(dep.db, "get_user_by_id", lambda uid: USERS.get(uid))
     monkeypatch.setattr(dep.db, "can_user_share_agent", lambda u, a: u == "owner")
+    # ent#1148: an acting person's reads of an agent they cannot open see nothing;
+    # here every person may open every agent (that fence has its own suite,
+    # test_ent1148_caller_reads_stay_person.py).
+    monkeypatch.setattr(dep.db, "can_user_access_agent", lambda u, a: True)
     monkeypatch.setattr(dep, "agent_may_reach", lambda *a, **k: True)
     monkeypatch.setattr(dep.db, "get_schedule", lambda sid: SCHEDULES.get(sid))
     RUNNING.clear()
