@@ -1061,7 +1061,7 @@ import {
   // disagree about the number.
   totalUnread,
   // trinity-enterprise#610 §3g S4: the read's optimistic zero and its rollback.
-  optimisticRead, rollbackRead, createWriteGuard, applyStarOverrides, agentChatTabs, tabOrderFrom,
+  optimisticRead, rollbackRead, createWriteGuard, applyStarOverrides, agentChatTabs, tabOrderFrom, promoteChatInOrder, unreadSnapshot, newlyUnreadIds,
   asksHomeRoute,
   // ent#836: the per-agent ask counts the sidebar's mark reads — handed to the
   // rail's Asks signal, so the tab's mark and the row's mark cannot disagree.
@@ -2725,12 +2725,31 @@ watch([activeAgentName, pendingSession, startingNewChat], ([agent, sid, fresh]) 
 const stageAgent = computed(() => (!isInboxRoute.value && !activeRoomId.value && !activeRoomIdFromRoute.value
   && !unreachableAgent.value ? activeAgentName.value || null : null))
 const tabOrder = ref(null)   // { agent, ids } | null
+let unreadSeen = null        // per-chat unread at the last look; see the promote watcher below
 watch([stageAgent, () => threadListTrusted()], ([agent, trusted]) => {
   if (!agent) { tabOrder.value = null; return }
   const cur = tabOrder.value
   if (cur && cur.agent === agent && (cur.ids || !trusted)) return
   tabOrder.value = { agent, ids: trusted ? tabOrderFrom(threads.value, agent) : null }
+  unreadSeen = trusted ? unreadSnapshot(threads.value, agent) : null
 }, { immediate: true })
+
+// The one exception to the hold: a chat that goes from read to unread while you
+// are on the agent comes to the front of the strip (after Main), so a reply in a
+// chat under "N more" is never invisible. The open chat keeps its exact slot —
+// `promoteChatInOrder` owns that rule. `unreadSeen` is (re)taken with every
+// snapshot above, so arriving never counts as a transition.
+watch(threads, (list) => {
+  const order = tabOrder.value
+  if (!order?.ids || !unreadSeen) return
+  const activeId = activeSessionId.value || pendingSession.value || null
+  let next = order
+  for (const id of newlyUnreadIds(unreadSeen, list, order.agent, activeId)) {
+    next = promoteChatInOrder(next, list, id, activeId)
+  }
+  unreadSeen = unreadSnapshot(list, order.agent)
+  if (next !== order) tabOrder.value = next
+})
 
 // What assistive tech hears after a key move. The shell says it once; the band,
 // the tab strip and the browser-tab title say it visually.
