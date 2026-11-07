@@ -1863,16 +1863,19 @@ def portal_people(agent_name: str, q: str = Query("", max_length=64),
     accounts on this instance that can already reach it, matching `q`.
 
     The ent#450 shape: roster-scoped first (uniform 404), a query required,
-    capped, rate-limited — a picker, never a directory. A platform person only:
+    capped, rate-limited by the one people search (ent#1153) — a picker, never
+    a directory. A platform person only:
     an external client is refused by name (the colleagues it would list are the
     organisation's, an internal fact — #78)."""
-    from services import rate_limiter
+    from services import people_search_service as pss
     _require_roster(agent_name, principal.email, principal.is_platform)
-    rate_limiter.enforce(f"portal_people:{principal.email}", 120, 60)
     try:
         return service.chat_people(principal, agent_name, q)
     except service.ChatTagError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
+    except pss.PeopleSearchLimited as e:   # the seam's per-person budget (ent#1153)
+        raise HTTPException(status_code=429, detail=pss.RATE_LIMITED_DETAIL,
+                            headers={"Retry-After": str(e.retry_after)})
 
 
 @router.get("/agents/{agent_name}/history", response_model=PortalHistory)

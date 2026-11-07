@@ -45,40 +45,21 @@
          intrinsic width plus the button once pushed the page past 390px. -->
     <form @submit.prevent="addOperator" class="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
       <!-- trinity-enterprise#450: suggestions over the input, never a picker. Any
-           address can still be typed, and Enter submits it unless a row is chosen. -->
-      <div class="relative w-full sm:w-auto sm:flex-1 min-w-0">
-      <input
+           address can still be typed, and Enter submits it unless a row is chosen —
+           BasePeopleInput's suggest-and-allow mode (trinity-enterprise#1153). -->
+      <BasePeopleInput
+        ref="addField"
         v-model="newEmail"
+        class="w-full sm:w-auto sm:flex-1 min-w-0"
         type="email"
         required
         placeholder="name@company.com"
         :disabled="adding"
-        role="combobox"
-        autocomplete="off"
+        :fetch="lookUpCandidates"
+        :no-match="noMatchMessage"
         aria-label="Email of the person to add"
-        aria-autocomplete="list"
-        :aria-expanded="suggestOpen"
-        :aria-controls="suggestOpen && suggestRows.length ? suggestListId : undefined"
-        :aria-activedescendant="suggestOpen && suggestActive >= 0 ? `${suggestListId}-${suggestActive}` : undefined"
         data-testid="access-add-email"
-        @keydown="onSuggestKeydown"
-        @blur="closeSuggestions"
-        class="w-full min-w-0 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
       />
-      <PortalTypeahead
-        v-if="suggestOpen"
-        kind="@"
-        plain
-        placement="below"
-        title="People with an account"
-        :list-id="suggestListId"
-        :rows="suggestRows"
-        :active-index="suggestActive"
-        :empty-message="suggestEmpty"
-        @pick="pickSuggestion"
-        @hover="suggestActive = $event"
-      />
-      </div>
       <button
         type="submit"
         :disabled="adding || !newEmail.trim()"
@@ -252,7 +233,7 @@
 </template>
 
 <script setup>
-import { computed, ref, watch, onBeforeUnmount, onMounted } from 'vue'
+import { computed, ref, watch, onMounted } from 'vue'
 import { useAgentsStore } from '../stores/agents'
 import { useAssignmentsStore } from '../stores/assignments'
 import { useAuthStore } from '../stores/auth'
@@ -261,10 +242,10 @@ import { useUsersStore } from '../stores/users'
 import { viewState } from '../utils/loadingState'
 import { writeError } from '../utils/assignments'
 import { PLATFORM_ROLES, WORKSPACE_ONLY_ROLE_LABEL, platformRoleLabel } from '../utils/workspaceOnly'
-import { candidateRows, nextActive, noMatchMessage, wantsSuggestions } from '../utils/accessCandidates'
+import { noMatchMessage } from '../utils/accessCandidates'
 import AgentAssignmentsSection from './AgentAssignmentsSection.vue'
-import PortalTypeahead from './portal/PortalTypeahead.vue'
 import BaseButton from './base/BaseButton.vue'
+import BasePeopleInput from './base/BasePeopleInput.vue'
 import BaseSelect from './base/BaseSelect.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import InlineError from './InlineError.vue'
@@ -365,80 +346,14 @@ async function resendInvite(op) {
   }
 }
 
-// --- trinity-enterprise#450: suggestions over the add field ---------------------
-const SUGGEST_DEBOUNCE_MS = 200
-const suggestListId = 'access-add-suggestions'
-const suggestOpen = ref(false)
-const suggestRows = ref([])
-const suggestActive = ref(-1)
-const suggestEmpty = ref('')
-let suggestTimer = null
-let suggestSeq = 0        // only the newest answer may open the popup
-let pickedValue = null    // the text a pick wrote, which must not re-open it
-
-function closeSuggestions() {
-  suggestSeq += 1
-  clearTimeout(suggestTimer)
-  suggestOpen.value = false
-  suggestRows.value = []
-  suggestActive.value = -1
-  suggestEmpty.value = ''
-}
-
-async function lookUpSuggestions(text) {
-  const seq = ++suggestSeq
-  try {
-    const found = await agentsStore.getAccessCandidates(props.agentName, text.trim())
-    if (seq !== suggestSeq) return
-    suggestRows.value = candidateRows(found)
-    suggestActive.value = -1
-    suggestEmpty.value = suggestRows.value.length ? '' : noMatchMessage(text)
-    suggestOpen.value = true
-  } catch {
-    // Unavailable or rate limited: the field is the plain email input.
-    if (seq === suggestSeq) closeSuggestions()
-  }
-}
-
-watch(newEmail, (text) => {
-  if (text === pickedValue) {
-    pickedValue = null
-    return
-  }
-  closeSuggestions()
-  if (!wantsSuggestions(text)) return
-  suggestTimer = setTimeout(() => lookUpSuggestions(text), SUGGEST_DEBOUNCE_MS)
-})
-
-function pickSuggestion(index) {
-  const row = suggestRows.value[index]
-  if (!row) return
-  pickedValue = row.key
-  newEmail.value = row.key
-  closeSuggestions()
-}
-
-function onSuggestKeydown(event) {
-  if (!suggestOpen.value) return
-  if (event.key === 'Escape') {
-    event.preventDefault()
-    closeSuggestions()
-  } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-    event.preventDefault()
-    suggestActive.value = nextActive(suggestActive.value, suggestRows.value.length, event.key === 'ArrowDown' ? 1 : -1)
-  } else if (event.key === 'Enter' && suggestActive.value >= 0) {
-    // No row chosen: Enter falls through and submits what was typed.
-    event.preventDefault()
-    pickSuggestion(suggestActive.value)
-  }
-}
-
-onBeforeUnmount(closeSuggestions)
+// --- trinity-enterprise#450: suggestions over the add field (BasePeopleInput, #1153)
+const addField = ref(null)
+const lookUpCandidates = (q) => agentsStore.getAccessCandidates(props.agentName, q)
 
 async function addOperator() {
   const email = newEmail.value.trim()
   if (!email) return
-  closeSuggestions()
+  addField.value?.close()
   adding.value = true
   message.value = null
   try {

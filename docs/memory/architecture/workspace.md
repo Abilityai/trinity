@@ -1227,8 +1227,13 @@ and an external Workspace client (`tagging_unavailable`: the colleagues it would
 the organisation's, #78). `taggable_people` / `resolve_tags` share ONE predicate
 (`db.users._taggable_conds`): an account with an email, not suspended, that is an admin, an
 owner, or a sharee of one of the conversation's agents. The picker requires a query, caps
-at 8 and is rate-limited (`room_people:*`, `portal_people:*`, 120/min) — the ent#450 shape,
-never a directory. The send-time check refuses before ANY write (in a room, before the
+at 8 and is rate-limited by the one people search (`people_search_service.search`,
+trinity-enterprise#1153): both pickers go through `taggable_people` with the `agent_reach`
+scope, so the limiter key is `people-search:agent_reach:<tagger email, else username>` and
+the room `@` and the Workspace chat `@` draw on ONE shared budget per person, 120 lookups
+a minute (`PEOPLE_RATE_LIMIT`; past it, a `rate_limited` 429 with `Retry-After`). The
+picker never lists the person asking (`requester_email`). The ent#450 shape, never a
+directory. The send-time check refuses before ANY write (in a room, before the
 newcomer join): one `unknown_person` for "no account" and "no access", so it is no oracle;
 `cannot_tag_yourself`; `too_many_tags` past 10 distinct.
 

@@ -181,20 +181,20 @@ class TestTheBounds:
 
         def boom(*_a, **_k):
             raise AssertionError("spent the rate limit")
-        monkeypatch.setattr(svc.rate_limiter, "check", boom)
+        monkeypatch.setattr(svc.people_search_service.rate_limiter, "check", boom)
         assert world.emails(q) == []
 
     def test_two_characters_is_enough(self, world, monkeypatch):
         from services import access_candidate_service as svc
         seen = []
-        monkeypatch.setattr(svc.db, "list_share_candidates", lambda *a, **k: seen.append(a[1]) or [])
+        monkeypatch.setattr(svc.db, "search_people", lambda *a, **k: seen.append(a[1]) or [])
         assert world.emails("ab") == []
         assert seen == ["ab"]
 
     def test_a_long_query_is_cut(self, world, monkeypatch):
         from services import access_candidate_service as svc
         seen = []
-        monkeypatch.setattr(svc.db, "list_share_candidates", lambda *a, **k: seen.append(a[1]) or [])
+        monkeypatch.setattr(svc.db, "search_people", lambda *a, **k: seen.append(a[1]) or [])
         world.emails("a" * 500)
         assert seen == ["a" * svc.MAX_QUERY]
 
