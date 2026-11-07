@@ -4389,7 +4389,10 @@ to localStorage in the clear.
   keeps it.
 - **AC-2 — the strip holds still**: while the snapshot names the agent on stage,
   the tabs are drawn in its order. A reply, a send, or a poll that re-sorts the
-  thread list changes a badge only. A chat born mid-visit sits directly after Main
+  thread list changes a badge only — with one exception (#4349): a chat that goes
+  from read to unread while you are on the agent moves to directly after Main, so a
+  reply under "N more" is never invisible; the open chat keeps its exact slot, and a
+  further reply to an already-unread chat moves nothing. A chat born mid-visit sits directly after Main
   (the provisional tab's slot), born chats among themselves by creation time. A
   closed chat drops out and the gap closes; Undo returns it to its own slot. A
   deep-linked archived chat is drawn at its arrival slot. The switch-chat keys and

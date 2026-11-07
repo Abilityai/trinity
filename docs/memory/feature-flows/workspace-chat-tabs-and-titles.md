@@ -529,7 +529,11 @@ every fact it carries, and two sibling PRs restructure this header band next).
 
 Recency is the order you **arrive** to, not an order that re-sorts under the
 cursor (operator ruling 2026-10-09): while you are on an agent, a reply, a send
-or a poll changes a badge and never a position.
+or a poll changes a badge and never a position. The one exception (#4349): a chat
+that goes from read to unread while you are on the agent is promoted to directly
+after Main (`promoteChatInOrder`, driven by `newlyUnreadIds` against an
+`unreadSnapshot` retaken with every snapshot and after every look), while the open
+chat keeps its exact slot; a further reply to an already-unread chat moves nothing.
 
 ```
 Portal.vue (shell)
