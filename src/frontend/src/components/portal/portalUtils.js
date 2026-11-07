@@ -523,6 +523,72 @@ export function agentChatTabs(threads, agentName, { activeId = null, draft = fal
   return tabs
 }
 
+// The one exception to the ent#856 hold: a chat that goes from read to unread
+// while you are on the agent comes to the front, right after Main. Without it a
+// reply in a chat parked under "N more" lights a badge inside a closed menu —
+// the notification says there is a new message and the strip shows nowhere.
+//
+// The chat you have OPEN keeps its exact slot: the strip is `fixed-width`, so
+// the same index is the same place on screen, and a promotion can never push
+// the open chat into the overflow (or out from under the pointer). Only the
+// read→unread transition promotes; a second reply to an already-unread chat
+// moves nothing. The result is a new snapshot, so the hold continues from it.
+//
+// Rows the strip does not draw (archived ones) stay right after the tab they
+// followed, so an Undo-close still returns a chat beside its old neighbour.
+export function promoteChatInOrder(order, threads, id, activeId = null) {
+  if (!order || !Array.isArray(order.ids) || !id || id === activeId) return order
+  const seq = agentChatTabs(threads, order.agent, { activeId, order })
+    .filter((t) => t.thread && !t.pinned)
+    .map((t) => t.id)
+  if (!seq.includes(id)) return order
+  const at = activeId ? seq.indexOf(activeId) : -1
+  const drawn = seq.filter((x) => x !== id && x !== activeId)
+  drawn.unshift(id)
+  if (at >= 0) drawn.splice(at, 0, activeId)
+  const visible = new Set(seq)
+  const head = []
+  const after = new Map()
+  let anchor = null
+  for (const x of order.ids) {
+    if (visible.has(x)) { anchor = x; continue }
+    if (anchor === null) head.push(x)
+    else after.set(anchor, [...(after.get(anchor) || []), x])
+  }
+  const ids = [...head]
+  for (const x of drawn) ids.push(x, ...(after.get(x) || []))
+  // Nothing moved (the chat was already in front): keep the snapshot object, so
+  // "held" stays checkable by identity and no watcher re-fires for nothing.
+  if (ids.length === order.ids.length && ids.every((x, i) => x === order.ids[i])) return order
+  return { agent: order.agent, ids }
+}
+
+// Per-chat unread counts of one agent's non-room rows — what `newlyUnreadIds`
+// compares against to find the read→unread transition.
+export function unreadSnapshot(threads, agentName) {
+  const seen = new Map()
+  if (!agentName) return seen
+  for (const t of Array.isArray(threads) ? threads : []) {
+    if (t && !t.is_room && t.agent_name === agentName) seen.set(tabKey(t), Number(t.unread) || 0)
+  }
+  return seen
+}
+
+// The chats that went from read to unread since `seen`. A chat `seen` has never
+// counted (the list was still loading, or it was born this visit) is not a
+// transition: arriving already sorted it by recency, and a born chat already
+// sits beside Main. The open chat is read by definition and never promotes.
+export function newlyUnreadIds(seen, threads, agentName, activeId = null) {
+  if (!agentName || !seen) return []
+  return (Array.isArray(threads) ? threads : [])
+    .filter((t) => t && !t.is_room && t.agent_name === agentName)
+    .filter((t) => {
+      const id = tabKey(t)
+      return id !== activeId && seen.get(id) === 0 && (Number(t.unread) || 0) > 0
+    })
+    .map(tabKey)
+}
+
 // #2579: does this agent already have a Main chat on screen? The shell asks
 // before spending a per-agent round trip to mint one (the batch deliberately
 // never mints, so a pair whose chats predate ent#523 has no Main in the list).
