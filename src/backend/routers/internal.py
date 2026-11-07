@@ -33,6 +33,7 @@ from services import (
     heartbeat_service, idempotency_service, schedule_seat_memory, schedule_workspace_delivery,
 )
 from services.runtime_secret_scrub import get_staged_values, scrub_text
+from utils.credential_sanitizer import redact_url_userinfo, sanitize_text
 from db.write_params import ExecutionResult
 
 logger = logging.getLogger(__name__)
@@ -562,9 +563,27 @@ async def execute_task_internal(
         return result_payload
 
     except Exception as e:
-        logger.error(f"Internal task execution failed for {request.agent_name}: {e}")
+        # The claim is released first: the log scrub below reads the staged
+        # set, and releasing the claim must not depend on that read.
         idempotency_service.fail(idem)
-        raise HTTPException(status_code=500, detail=str(e))
+        # #4284: the class name in the body, the scrubbed text in the log: an
+        # execution error can echo agent output, which can hold a credential.
+        # The staged values are masked by identity with the same seam the
+        # persisted copies of agent output use, then URL userinfo and the known
+        # credential shapes. That seam replaces three renditions per value, so
+        # the cost stays linear however long or numerous the staged values are
+        # (the store caps them at 1000 but not their length).
+        logger.error(
+            "Internal task execution failed for %s (%s): %s",
+            request.agent_name, type(e).__name__,
+            sanitize_text(redact_url_userinfo(
+                scrub_text(get_staged_values(), str(e))
+            )),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal task execution failed ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 
@@ -829,8 +848,16 @@ async def log_audit_entry(request: InternalAuditRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to log audit entry: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        # #4284: a DB error here can echo the bound parameters, i.e. the tool
+        # call's details; the body carries the class name, the log scrubbed text.
+        logger.error(
+            "Failed to log audit entry (%s): %s",
+            type(e).__name__, sanitize_text(redact_url_userinfo(str(e))),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to log audit entry ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 # ---------------------------------------------------------------------------
