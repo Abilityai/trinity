@@ -23,39 +23,34 @@
       <!-- ent#661: the person's Projects list — shown only when the roster
            says this principal has the capability (internal-only).
            #3695 (operator ruling 2026-10-13): it sits directly under Inbox —
-           the two navigation DESTINATIONS together at the top, then the two
-           ACTIONS on the chat list (New chat, Search). Between New chat and
-           Search it read as a chat-list control rather than a place to go.
+           the two navigation DESTINATIONS together at the top, then the
+           ACTIONS on the chat list (New room where rooms exist, Search).
+           Between an action and Search it read as a chat-list control rather
+           than a place to go.
            #3672 (operator ruling): NO placeholder holds its slot while the
            roster is out. Most installs (every OSS one) are not entitled to
            Projects, so a held slot appeared and then vanished there — a layout
            shift on every load to spare a late pop-in on the few entitled
            installs. The link renders once the roster says `projectsAvailable`;
-           without it Inbox is followed by New chat with nothing between. -->
+           without it Inbox is followed by the next control with nothing between. -->
       <PortalSidebarProjectsLink v-if="projectsAvailable" :active="projectsActive" @open="$emit('open-projects')" />
 
-      <!-- New chat -->
-      <!-- ent#357: disabled with an empty roster. `newChat()` only resets
-           conversation state, so with no agent to chat with every branch of it
-           is a no-op — the button looked live and did nothing, which is the
-           dead-end this surface is supposed to have stopped having. -->
-      <button
-        :disabled="!roster.length"
-        :title="roster.length ? 'Start a new conversation' : 'No agents available yet'"
-        :class="NEW_CONVERSATION_CLASS"
-        @click="$emit('new-chat')"
-      >
-        <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4" /></svg>
-        New chat
-      </button>
+      <!-- #4353: there is no New chat button here any more. A roster row
+           already lands on a new chat with that agent (ent#784) and the
+           conversation header carries New chat with its hotkey (ent#451), so
+           this one was a slower route to both — and its multi-select was a
+           second door to a room, which New room below owns (ent#701: a chat is
+           one-to-one, a room has many participants, never interchangeably). -->
       <!-- trinity-enterprise#701: a room is many participants, so it gets its
            own door and its own word ("chat" is one-to-one). Shown only where
-           rooms exist — the roster's capability bit, never a feature flag. -->
+           rooms exist — the roster's capability bit, never a feature flag.
+           ent#357: disabled with an empty roster — with no agent to seat, the
+           picker it opens can only dead-end. -->
       <button
         v-if="roomsAvailable"
         :disabled="!roster.length"
         :title="roster.length ? 'Start a room with several agents, or with colleagues' : 'No agents available yet'"
-        :class="['mt-1.5', NEW_CONVERSATION_CLASS]"
+        :class="NEW_CONVERSATION_CLASS"
         data-testid="sidebar-new-room"
         @click="$emit('new-room')"
       >
@@ -413,7 +408,7 @@
           class="mt-3 px-2 py-3 text-xs"
           :class="META_INK"
           data-testid="sidebar-chats-empty"
-        >No chats yet — open an agent above, or start a new chat.</div>
+        >No chats yet — open an agent above to start a chat.</div>
       </div>
     </div>
 
@@ -539,11 +534,12 @@ const props = defineProps({
   // list update and the request; a row only edits.
   rename: { type: Function, default: null },
 })
-// New chat and New room share one recipe (trinity-enterprise#701).
+// The New room door's recipe (trinity-enterprise#701). New chat shared it until
+// #4353 took that button out of the sidebar.
 const NEW_CONVERSATION_CLASS = 'w-full flex items-center gap-2 rounded-xl border border-gray-300 dark:border-gray-700 px-3 py-2 text-sm font-medium hover:bg-white dark:hover:bg-gray-900 transition disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:bg-transparent dark:disabled:hover:bg-transparent'
 
 const emit = defineEmits([
-  'new-chat', 'new-room', 'new-chat-with-agent', 'open-agent', 'open-thread', 'toggle-star', 'open-inbox',
+  'new-room', 'new-chat-with-agent', 'open-agent', 'open-thread', 'toggle-star', 'open-inbox',
   'update:search', 'sign-out', 'open-projects', 'open-keys', 'retry-threads',
 ])
 
