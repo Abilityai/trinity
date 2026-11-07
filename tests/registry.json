@@ -8724,6 +8724,17 @@
         "workspace"
       ],
       "description": "A task's title, objective and definition of done edited from the detail form, mounted: the three fields prefill from the task and only the changed ones are sent (a cleared long field as null); a blank or over-limit value is refused inline with nothing sent, counting code points so 150 emoji pass; a legacy over-limit stored value does not block a status change; the read-only objective / DoD blocks show only when the fields are not offered; a done task shows them disabled with the reopen reason and Reopen sends the status alone; a server 422 lands under the field it names, keeping what was typed; and the create dialog refuses the same lengths."
+    },
+    {
+      "file": "../src/frontend/tests/unit/workspaceProjectsTaskLimits.spec.js",
+      "feature": "trinity-enterprise#1133",
+      "added": "2026-11-07",
+      "categories": [
+        "frontend",
+        "unit",
+        "workspace"
+      ],
+      "description": "The task-field limits the client checks (title 200, objective / definition of done 4000 code points) are pinned to the server pair from the public side, so a drift goes red in public CI: validateTaskFields executed at and one past each boundary, emoji counted as one; the backend constants are compared too when that module is checked out."
     }
   ]
 }
