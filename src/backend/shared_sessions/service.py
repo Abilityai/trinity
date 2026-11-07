@@ -2159,3 +2159,50 @@ def sweep_expired_rooms() -> int:
             _post_system(room["id"], "Room closed (expired).")
             closed += 1
     return closed
+
+
+# --- asks raised in a room (abilityai/trinity-enterprise#1135) ----------------
+#
+# An agent that raises an ask (`ask_operator`) from inside a room turn asked in
+# front of everyone in that room — so the room hears that it is waiting, hears
+# how the ask ended, and gets the continuation as a room turn. The platform
+# knows the raising turn: every room turn's execution row is stamped with this
+# room (#2792), and the ask route passes the platform-set execution id.
+
+def room_for_execution(agent_name: str, execution_id: Optional[str]) -> Optional[str]:
+    """The room ``execution_id`` is a turn of, iff it is a still-RUNNING room
+    turn of THIS agent in an open room the agent is a current participant of —
+    else None. The room analogue of ``client_portal.service.chat_for_execution``
+    (ent#734), with its trust bound: the id is a platform-set header, but the
+    agent's own process can send any of its executions' ids, so what remains
+    forgeable is another RUNNING room turn of the same agent — never another
+    agent's room, a room it is not in, or a finished turn. Raises like any
+    other read; the caller owns the fail-soft."""
+    if not execution_id:
+        return None
+    from database import db as core_db
+    from models import TaskExecutionStatus
+
+    execution = core_db.get_execution(execution_id)
+    status = getattr(execution, "status", None)
+    if (execution is None or execution.agent_name != agent_name
+            or getattr(status, "value", status) != TaskExecutionStatus.RUNNING.value
+            or execution.triggered_by != "room"
+            or getattr(execution, "source_channel", None) != ROOM_SOURCE_CHANNEL):
+        return None
+    room_id = getattr(execution, "source_channel_chat_id", None)
+    if not room_id:
+        return None
+    key = getattr(execution, "conversation_key", None)
+    if key and key != f"room:{room_id}":
+        return None
+    participant = db.get_participant(room_id, "agent", agent_name)
+    if not participant or participant.get("left_at"):
+        return None
+    room = db.get_room(room_id)
+    if not room or room["status"] != "open":
+        return None
+    expires_at = room.get("expires_at")
+    if expires_at and expires_at <= utc_now_iso():
+        return None
+    return room_id

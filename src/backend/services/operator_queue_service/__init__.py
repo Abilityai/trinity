@@ -432,11 +432,18 @@ _WORKSPACE_DISCUSSION_KEY = "workspace_discussion_id"
 _WORKSPACE_PROJECT_ID_KEY = "workspace_project_id"
 _WORKSPACE_PROJECT_TASK_KEY = "workspace_project_task"
 _WORKSPACE_PROJECT_EVENT_KEY = "workspace_project_event"
+# abilityai/trinity-enterprise#1135: the ROOM whose turn raised the ask. Beside
+# the chat attachment, never instead of it — the ask still lives in the pair's
+# Main and the Inbox. Written by `ask_service.raise_ask` from the platform-known
+# raising execution (`shared_sessions.service.room_for_execution`); read by the
+# room's ending observer and the answer wake, which return the ask to the room.
+_WORKSPACE_ROOM_KEY = "workspace_room_id"
 # Every context key the platform writes and no agent may author: stripped at both
 # ingestion boundaries and ignored when comparing an agent's content.
 _PLATFORM_CONTEXT_KEYS = frozenset({
     _WORKSPACE_THREAD_KEY, _WORKSPACE_TURN_KEY, _WORKSPACE_DISCUSSION_KEY,
     _WORKSPACE_PROJECT_ID_KEY, _WORKSPACE_PROJECT_TASK_KEY, _WORKSPACE_PROJECT_EVENT_KEY,
+    _WORKSPACE_ROOM_KEY,
 })
 
 

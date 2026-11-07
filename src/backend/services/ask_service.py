@@ -818,6 +818,26 @@ def _fresh_audience(agent_name: str, role: str, *, gate: bool) -> Optional[Tuple
     return people, (people[0] if len(people) == 1 else None)
 
 
+def _raising_room(agent_name: str, turn: Optional[str], ask_type: str) -> Optional[str]:
+    """The room whose RUNNING turn raised this ask, or None
+    (abilityai/trinity-enterprise#1135). An agent's raise only — a gate's ask is
+    a background ask (the ent#610 amendment) — and never a credential ask: a
+    secret has exactly one reader (ent#1066), and a room has many. Fail-soft,
+    the #1632 clamp contract: a lookup that fails leaves the ask where ent#734
+    puts it (its chat, or Main) and never refuses it."""
+    if not turn or ask_type == "credential":
+        return None
+    try:
+        from shared_sessions import service as rooms
+
+        return rooms.room_for_execution(agent_name, turn)
+    except Exception:  # noqa: BLE001
+        logger.warning("[AskService] could not resolve the room of the turn that raised an "
+                       "ask from %s; it is not attached to a room (ent#1135)",
+                       agent_name, exc_info=True)
+        return None
+
+
 def raise_ask(
     agent_name: str,
     ask: Mapping[str, Any],
@@ -991,6 +1011,9 @@ def raise_ask(
             context[oqs._WORKSPACE_THREAD_KEY] = thread
         if thread and in_turn:
             context[oqs._WORKSPACE_TURN_KEY] = True
+    room_id = _raising_room(agent_name, turn, norm["type"]) if raised_by == "agent" else None
+    if room_id:
+        context[oqs._WORKSPACE_ROOM_KEY] = room_id
     for key, value in (platform_context or {}).items():
         # trinity-enterprise#981: the platform's own attachment, platform keys
         # only — after the strip in `_validated_ask`, so it is the one writer.
