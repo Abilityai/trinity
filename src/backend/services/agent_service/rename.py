@@ -36,9 +36,7 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from database import db
@@ -47,12 +45,9 @@ from services.docker_service import get_agent_container
 from services.docker_utils import container_rename, container_stop
 from services.image_generation_prompts import AVATAR_EMOTIONS
 from services.platform_audit_service import AuditEventType, platform_audit_service
+from utils import avatar_paths
 
 logger = logging.getLogger(__name__)
-
-# AVATAR-001 / AVATAR-002: the cached avatar, reference and emotion images are
-# keyed by agent name on disk, so they follow the rename.
-AVATAR_DIR = Path("/data/avatars")
 
 
 @dataclass
@@ -250,40 +245,19 @@ async def _rename_container_back(container, old_container_name: str, new_name: s
             f"and let the next start recreate it: {e}")
 
 
-def _avatar_path_or_none(agent_name: str, suffix: str) -> Optional[Path]:
-    """`AVATAR_DIR/<agent_name><suffix>`, or `None` when it would leave the store.
-
-    The primitive takes `new_name` as FINAL — the route's sanitiser stayed with
-    the route (module docstring) — so the containment of every avatar path is
-    this module's own to keep, in the shape CodeQL's `py/path-injection` query
-    recognises as a barrier: normalise the base and give it a trailing
-    separator (so a sibling that merely shares its prefix, `/data/avatars2`, is
-    outside it), normalise the joined path, and require that prefix. A NUL byte
-    is refused by name because it survives both steps and reaches `rename()` as
-    a `ValueError`, which the best-effort `except` below swallows after
-    abandoning the remaining moves half-done.
-
-    Never add a `".." in name` check: `a..b` is a valid agent name.
-
-    `AVATAR_DIR` is read at call time, so a test that patches the constant
-    moves every caller. Draft #4295 lifts this same barrier into
-    `utils/avatar_paths.avatar_path_or_none` for every avatar caller in the
-    tree; when it lands, this private copy is replaced by that import.
-    """
-    filename = f"{agent_name}{suffix}"
-    if "\x00" in filename:
-        return None
-    base = os.path.join(os.path.normpath(str(AVATAR_DIR)), "")
-    fullpath = os.path.normpath(os.path.join(base, filename))
-    if not fullpath.startswith(base):
-        return None
-    return Path(fullpath)
-
-
 def _move_avatar_file(old_name: str, new_name: str, suffix: str) -> None:
-    """Move one cached image, skipping the pair if either side is refused."""
-    old_path = _avatar_path_or_none(old_name, suffix)
-    new_path = _avatar_path_or_none(new_name, suffix)
+    """Move one cached image, skipping the pair if either side is refused.
+
+    AVATAR-001 / AVATAR-002: the cached avatar, reference and emotion images
+    are keyed by agent name on disk, so they follow the rename. The primitive
+    takes `new_name` as FINAL (the route's sanitiser stayed with the route), so
+    both paths go through the avatar store's one barrier,
+    `utils.avatar_paths.avatar_path_or_none`. A refusal is `None`, never a
+    raise: a raise would reach the best-effort `except` in `_move_avatars` and
+    abandon the remaining moves half-done.
+    """
+    old_path = avatar_paths.avatar_path_or_none(old_name, suffix)
+    new_path = avatar_paths.avatar_path_or_none(new_name, suffix)
     if old_path is None or new_path is None:
         return
     if old_path.exists():
