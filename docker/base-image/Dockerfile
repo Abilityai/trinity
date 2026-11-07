@@ -314,10 +314,34 @@ RUN chown -R root:root /etc/claude-code && \
 RUN mkdir -p /etc/claude-code/managed-settings.d
 COPY ./hooks/managed-settings.d/50-skill-gate.json /etc/claude-code/managed-settings.d/50-skill-gate.json
 COPY ./hooks/managed-settings.d/60-turn-tier-guard.json /etc/claude-code/managed-settings.d/60-turn-tier-guard.json
+COPY ./hooks/managed-settings.d/70-vendor-telemetry.json /etc/claude-code/managed-settings.d/70-vendor-telemetry.json
 RUN chown -R root:root /etc/claude-code/managed-settings.d && \
     chmod 0755 /etc/claude-code/managed-settings.d && \
     chmod 0444 /etc/claude-code/managed-settings.d/50-skill-gate.json \
-                /etc/claude-code/managed-settings.d/60-turn-tier-guard.json
+                /etc/claude-code/managed-settings.d/60-turn-tier-guard.json \
+                /etc/claude-code/managed-settings.d/70-vendor-telemetry.json
+
+# trinity-enterprise#1093 — Claude Code's own vendor traffic is off: usage
+# telemetry (including an event that carries a SHA-256 of each small file the
+# agent reads), error reports, and the update/feedback/release-notes checks.
+# Nothing leaves the server without an admin opt-in, and these had none.
+#
+# Two layers, same three names, kept equal by
+# tests/unit/test_ent1093_claude_vendor_telemetry.py:
+# - the `70-vendor-telemetry.json` drop-in above, because Claude Code applies
+#   `env` from the agent-writable `~/.claude/settings.json` and
+#   `.claude/settings.local.json` over the process env, and only policy `env`
+#   beats those. Its own file: a schema-invalid entry voids only the file it is
+#   in (a file that is not JSON fails the build at guard002-smoke below);
+# - this ENV, because the CLI reads these names from the process env when each
+#   gate fires, and a gate can fire before settings are loaded.
+# The broad name alone is what gates the error sink on the pinned CLI; the two
+# narrow ones keep telemetry and error reports off if a later CLI narrows it.
+# `.env` cannot set any of them (execution_env.PROTECTED_KEYS). Both layers sit
+# before the plugin pre-install so the build's `claude` runs as agents do.
+ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
+    DISABLE_ERROR_REPORTING=1 \
+    DISABLE_TELEMETRY=1
 
 # trinity-enterprise#1001 — the routing env names (`ANTHROPIC_BASE_URL`, the
 # proxy and TLS-trust names) are pinned by their own policy drop-in, because

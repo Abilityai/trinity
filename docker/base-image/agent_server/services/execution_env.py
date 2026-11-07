@@ -104,6 +104,14 @@ PROTECTED_KEYS = frozenset({
     # extensions/commands dirs) away from the ~/.gemini/settings.json that the
     # platform keeps the usage-statistics opt-out in.
     "GEMINI_CLI_HOME", "GEMINI_CLI_SYSTEM_SETTINGS_PATH", "GEMINI_CLI_SYSTEM_DEFAULTS_PATH",
+    # trinity-enterprise#1093: Claude Code's vendor-traffic opt-out, set in the
+    # image (ENV + a managed drop-in), so `.env` cannot blank it. The last two
+    # would detach the managed drop-ins' `env` (this opt-out and the #1001
+    # routing pins) from the CLI: one relocates the managed-settings path (a stub
+    # on 2.1.281, but that is its only purpose), the other keeps only the first
+    # managed source's `env` instead of merging every drop-in's.
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "DISABLE_TELEMETRY", "DISABLE_ERROR_REPORTING",
+    "CLAUDE_CODE_MANAGED_SETTINGS_PATH", "CLAUDE_CODE_DISABLE_ADMIN_ENV_UNION",
 })
 
 # Prefix-matched companions to PROTECTED_KEYS: `GIT_CONFIG_KEY_<n>` /
