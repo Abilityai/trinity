@@ -22,7 +22,7 @@
     "@xterm/xterm": "^5.5.0",
     "axios": "^1.20.0",
     "chart.js": "^4.4.7",
-    "dompurify": "^3.4.11",
+    "dompurify": "^3.4.17",
     "js-yaml": "^5.4.3",
     "marked": "^18.1.0",
     "mermaid": "^12.1.0",
@@ -52,6 +52,6 @@
     "@rollup/rollup-linux-arm64-musl": "^4.64.5"
   },
   "overrides": {
-    "dompurify": "^3.4.11"
+    "dompurify": "^3.4.17"
   }
 }
