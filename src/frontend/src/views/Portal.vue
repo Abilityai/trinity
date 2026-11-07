@@ -197,7 +197,6 @@
           :searching="searching"
           :search-results="searchResults"
           :rename="renameChat"
-          @new-chat="newChat"
           @new-room="newRoom"
           @new-chat-with-agent="newChatWithAgent"
           @open-agent="openAgentPage"
@@ -252,7 +251,6 @@
             :searching="searching"
             :search-results="searchResults"
             :rename="renameChat"
-            @new-chat="() => { mobileNav = false; newChat() }"
             @new-room="() => { mobileNav = false; newRoom() }"
             @new-chat-with-agent="(n) => { mobileNav = false; newChatWithAgent(n) }"
             @open-agent="(n) => { mobileNav = false; openAgentPage(n) }"
@@ -1729,6 +1727,10 @@ const composerFocusMode = ref('always')
 // trinity-enterprise#701: which door opened the picker — 'chat' or 'room'.
 const pickerMode = ref('chat')
 
+// #4353: no sidebar button calls this any more — a roster row lands on a new
+// chat (ent#784) and the header carries New chat (ent#451). Its one caller is
+// ⌘J / Ctrl+J with nothing on stage (`newChatFromKey`), where a single-select
+// picker is the only way to say WHICH agent.
 function newChat() {
   if (guardLeaveCall(() => newChat())) return   // ent#551: ask, then leave
   pickerMode.value = 'chat'
@@ -1784,9 +1786,12 @@ function escapeStage() {
 
 async function onPickerConfirm(agentNames) {
   if (!agentNames.length) return
-  // ONE agent stays a portal thread: that path resumes, streams and reattaches
-  // (ent#358/#286). TWO OR MORE needs a room — the only substrate that models
-  // several agents and @mention-waking.
+  // A CHAT stays a portal thread: that path resumes, streams and reattaches
+  // (ent#358/#286). A ROOM is the only substrate that models several agents
+  // and @mention-waking. Since #4353 the picker's chat mode is single-select,
+  // so the mode alone decides; the length check stays as the belt to that
+  // brace — a two-name confirm in chat mode would otherwise file a room under
+  // the word "chat".
   if (agentNames.length === 1 && pickerMode.value !== 'room') {
     pickerOpen.value = false
     newChatWithAgent(agentNames[0])

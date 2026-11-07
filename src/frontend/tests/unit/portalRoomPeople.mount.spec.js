@@ -224,14 +224,24 @@ describe('picker', () => {
     w.unmount()
   })
 
-  it('New chat says chat for one agent and room once several are picked', async () => {
+  it('#4353: chat mode is single-select even where rooms exist — a chat is one-to-one', async () => {
+    // ⌘J with nothing on stage opens the picker in chat mode. It used to
+    // multi-select there and start a ROOM on a second tick — the thing New
+    // room owns (ent#701). Now a second pick replaces the first.
     const w = mountPicker({ mode: 'chat' })
     expect(w.text()).toContain('Start a chat')
-    await w.findAll('[role="checkbox"]')[0].trigger('click')
+    expect(w.text()).toContain('Pick an agent to chat with.')
+    expect(w.findAll('[role="checkbox"]')).toHaveLength(0)
+    const rows = w.findAll('[aria-pressed]')
+    expect(rows).toHaveLength(2)
+    await rows[0].trigger('click')
     expect(w.findAll('button').some((b) => b.text() === 'Start chat')).toBe(true)
-    await w.findAll('[role="checkbox"]')[1].trigger('click')
-    expect(w.text()).toContain('2 agents — this starts a room')
-    expect(w.findAll('button').some((b) => b.text() === 'Start room')).toBe(true)
+    await rows[1].trigger('click')
+    expect(w.text()).not.toContain('this starts a room')
+    expect(w.text()).toContain('1 agent')
+    expect(w.findAll('button').some((b) => b.text() === 'Start room')).toBe(false)
+    await w.findAll('button').find((b) => b.text() === 'Start chat').trigger('click')
+    expect(w.emitted('confirm')).toEqual([[['scout']]])
     w.unmount()
   })
 })
