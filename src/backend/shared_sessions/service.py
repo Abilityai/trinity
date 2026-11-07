@@ -2206,3 +2206,158 @@ def room_for_execution(agent_name: str, execution_id: Optional[str]) -> Optional
     if expires_at and expires_at <= utc_now_iso():
         return None
     return room_id
+
+
+# The ask title is agent text spoken in the platform's voice (a system line):
+# quoted, whitespace-collapsed and capped, whatever cap the raise applied.
+ASK_LINE_TITLE_MAX_CHARS = 120
+
+# Privacy rule (requirements/security.md §26.12): who an ask waits on, or who
+# ended it, is named by participant identity only when that person is SEATED in
+# this room; anyone else is a role word — never a non-member's email.
+_ASK_ROLE_WORDS = {
+    "primary": "its primary",
+    "approver": "its approver",
+    "viewer": "its viewer",
+    "operator": "an operator",
+}
+
+
+def _ask_title(title) -> str:
+    text = " ".join(str(title or "").split())
+    if len(text) > ASK_LINE_TITLE_MAX_CHARS:
+        text = text[:ASK_LINE_TITLE_MAX_CHARS - 1] + "…"
+    return f"“{text}”"
+
+
+def _ask_role_words(to_role) -> str:
+    from services import role_addressing
+
+    if role_addressing.parse_role_id(to_role) is not None:
+        return f"the {role_addressing.role_label(to_role)} role"
+    return _ASK_ROLE_WORDS.get(str(to_role or ""), "an operator")
+
+
+def _seated_identity(room_id: str, email: Optional[str]) -> Optional[str]:
+    """The participant identity of the person behind ``email`` when they are
+    seated in this room now, else None. A Workspace client is seated by its
+    email; a platform account by its username."""
+    email = (email or "").strip().lower()
+    if not email:
+        return None
+    seat = db.get_participant(room_id, WORKSPACE_KIND, email)
+    if seat and not seat.get("left_at"):
+        return seat["identity"]
+    from database import db as core_db
+
+    user = core_db.get_user_by_email(email)
+    username = (user or {}).get("username")
+    if username:
+        seat = db.get_participant(room_id, "user", username)
+        if seat and not seat.get("left_at"):
+            return seat["identity"]
+    return None
+
+
+def _ask_context(row: dict) -> dict:
+    context = row.get("context")
+    if isinstance(context, str):
+        try:
+            import json
+            context = json.loads(context)
+        except ValueError:
+            return {}
+    return context if isinstance(context, dict) else {}
+
+
+def ask_room_of(row: dict) -> Optional[str]:
+    """The room an ask was raised in (the platform key), or None."""
+    from services.operator_queue_service import _WORKSPACE_ROOM_KEY
+
+    room_id = _ask_context(row).get(_WORKSPACE_ROOM_KEY)
+    return room_id if isinstance(room_id, str) and room_id else None
+
+
+def post_ask_raised_line(room_id: str, agent_name: str, row: dict) -> None:
+    """One system line while the ask is open: who asked what, waiting on whom.
+    Never raises — the ask stands whether or not the room heard about it."""
+    try:
+        people = row.get("resolved_to") or []
+        if isinstance(people, str):
+            people = [people]
+        addressee = row.get("addressed_to_email") or (people[0] if len(people) == 1 else None)
+        who = (_seated_identity(room_id, addressee) if addressee else None) \
+            or _ask_role_words(row.get("to_role"))
+        _post_system(room_id, f"{agent_name} asked: {_ask_title(row.get('title'))} — "
+                              f"waiting on {who}.")
+    except Exception:  # noqa: BLE001
+        logger.warning("room %s: could not post the line for an ask %s raised",
+                       room_id, agent_name, exc_info=True)
+
+
+def _ending_who(room_id: str, row: dict, actor_email: Optional[str]) -> str:
+    seated = _seated_identity(room_id, actor_email)
+    if seated:
+        return seated
+    actor = (actor_email or "").strip().lower()
+    if actor and actor == (row.get("addressed_to_email") or "").strip().lower():
+        return _ask_role_words(row.get("to_role"))
+    return "an operator"
+
+
+def _ending_clause(event, row: dict, room_id: str) -> str:
+    """How one ask ended, in the room's words — the disposition and a coarse
+    who; never the answer, the notes or the cancel reason."""
+    from services import ask_service
+
+    kind = ask_service.agent_ending_kind(row)
+    if kind == ask_service.REPLACED:
+        return "was replaced by a newer ask"
+    if kind == ask_service.WITHDRAWN:
+        return f"was withdrawn by {row.get('agent_name')}"
+    if event.disposition == ask_service.EXPIRED:
+        return "expired — denied by timeout"
+    verb = {ask_service.ANSWERED: "answered", ask_service.DISMISSED: "dismissed"}.get(
+        event.disposition, "cancelled")
+    return f"was {verb} by {_ending_who(room_id, row, event.actor_email)}"
+
+
+def on_ask_ending(event) -> None:
+    """The ask sink's ending observer (abilityai/trinity-enterprise#1135): one
+    system line per (room, agent, ending event) for the asks raised in a room —
+    every disposition, whether or not a wake runs (a stopped agent, an owner who
+    switched the wake off, an expiry and an agent's own replace or withdraw all
+    still leave the room showing how the ask ended). The ONE writer of ending
+    lines; the return turn never posts one. Best-effort per room."""
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for row in event.rows or ():
+        room_id = ask_room_of(row)
+        if room_id and row.get("agent_name"):
+            groups.setdefault((room_id, row["agent_name"]), []).append(row)
+    for (room_id, agent_name), rows in groups.items():
+        try:
+            if len(rows) == 1:
+                row = rows[0]
+                content = (f"{agent_name}'s ask {_ask_title(row.get('title'))} "
+                           f"{_ending_clause(event, row, room_id)}.")
+            else:
+                from services.operator_resume_service import ENDING_LIST_MAX
+
+                clause = _ending_clause(event, rows[0], room_id)
+                clause = clause.replace("was ", "were ", 1)
+                titles = "; ".join(_ask_title(r.get("title")) for r in rows[:ENDING_LIST_MAX])
+                more = (f"; …and {len(rows) - ENDING_LIST_MAX} more"
+                        if len(rows) > ENDING_LIST_MAX else "")
+                content = f"{len(rows)} asks by {agent_name} {clause}: {titles}{more}."
+            _post_system(room_id, content)
+        except Exception:  # noqa: BLE001 — the ending is committed; a line never undoes it
+            logger.warning("room %s: could not post how %s's ask ended", room_id,
+                           agent_name, exc_info=True)
+
+
+def register_ask_observers() -> None:
+    """Hook the ending observer into the ask sink. Called from `main.py`
+    beside the skill gate's (not at import: the unit island pops modules)."""
+    from services import ask_service
+
+    ask_service.register_ending_observer(on_ask_ending)

@@ -1082,6 +1082,12 @@ def raise_ask(
     row = out["row"]
     if out["outcome"] == "replayed":   # a concurrent call with the same id won
         return _replay(row, norm, oqs, raised_by)
+    if room_id:
+        # ent#1135: the room where the agent asked hears that it is waiting —
+        # only now, so a refused ask leaves no trace there. Never raises.
+        from shared_sessions import service as rooms
+
+        rooms.post_ask_raised_line(room_id, agent_name, row)
     replaced = out.get("predecessor") if target else None
 
     audit = [{
