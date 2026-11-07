@@ -106,10 +106,11 @@ PROTECTED_KEYS = frozenset({
     "GEMINI_CLI_HOME", "GEMINI_CLI_SYSTEM_SETTINGS_PATH", "GEMINI_CLI_SYSTEM_DEFAULTS_PATH",
     # trinity-enterprise#1093: Claude Code's vendor-traffic opt-out, set in the
     # image (ENV + a managed drop-in), so `.env` cannot blank it. The last two
-    # would detach the managed drop-ins' `env` (this opt-out and the #1001
-    # routing pins) from the CLI: one relocates the managed-settings path (a stub
-    # on 2.1.281, but that is its only purpose), the other keeps only the first
-    # managed source's `env` instead of merging every drop-in's.
+    # could detach the `/etc/claude-code` file tier's `env` (this opt-out and the
+    # #1001 routing pins) from the CLI: one relocates the managed-settings path (a
+    # stub on 2.1.281, but that is its only purpose); the other keeps only the
+    # highest admin tier's `env` (an org's remote managed settings, when present)
+    # instead of merging every tier's.
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "DISABLE_TELEMETRY", "DISABLE_ERROR_REPORTING",
     "CLAUDE_CODE_MANAGED_SETTINGS_PATH", "CLAUDE_CODE_DISABLE_ADMIN_ENV_UNION",
 })

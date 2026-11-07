@@ -321,10 +321,11 @@ RUN chown -R root:root /etc/claude-code/managed-settings.d && \
                 /etc/claude-code/managed-settings.d/60-turn-tier-guard.json \
                 /etc/claude-code/managed-settings.d/70-vendor-telemetry.json
 
-# trinity-enterprise#1093 — Claude Code's own vendor traffic is off: usage
-# telemetry (including an event that carries a SHA-256 of each small file the
-# agent reads), error reports, and the update/feedback/release-notes checks.
-# Nothing leaves the server without an admin opt-in, and these had none.
+# trinity-enterprise#1093 — Claude Code's usage telemetry (including an event
+# that carries a SHA-256 of each small file the agent reads), error reports and
+# the update/feedback/release-notes checks are off. Nothing leaves the server
+# without an admin opt-in, and these had none. Still on: the model API, Claude
+# Code's own settings and policy-limits reads, and the WebFetch domain check.
 #
 # Two layers, same three names, kept equal by
 # tests/unit/test_ent1093_claude_vendor_telemetry.py:
@@ -333,12 +334,13 @@ RUN chown -R root:root /etc/claude-code/managed-settings.d && \
 #   `.claude/settings.local.json` over the process env, and only policy `env`
 #   beats those. Its own file: a schema-invalid entry voids only the file it is
 #   in (a file that is not JSON fails the build at guard002-smoke below);
-# - this ENV, because the CLI reads these names from the process env when each
-#   gate fires, and a gate can fire before settings are loaded.
+# - this ENV, as defence in depth: the CLI's gates read `process.env`, and this
+#   puts the values there before any settings are read, in `docker inspect`, and
+#   in every process the platform starts (an SSH login gets the drop-in only).
 # The broad name alone is what gates the error sink on the pinned CLI; the two
 # narrow ones keep telemetry and error reports off if a later CLI narrows it.
 # `.env` cannot set any of them (execution_env.PROTECTED_KEYS). Both layers sit
-# before the plugin pre-install so the build's `claude` runs as agents do.
+# before the plugin pre-install, so that install runs with them on.
 ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
     DISABLE_ERROR_REPORTING=1 \
     DISABLE_TELEMETRY=1

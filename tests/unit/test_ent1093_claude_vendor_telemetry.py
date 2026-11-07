@@ -19,14 +19,17 @@ executed):
 - the internal error sink returns early only on ``DISABLE_ERROR_REPORTING`` or
   the ``essential-traffic`` level, so ``DISABLE_TELEMETRY`` alone leaves it on;
 - every gate reads ``process.env`` when it fires, and settings ``env`` reaches
-  ``process.env`` at init, so a value must be in the real process env (image
-  ``ENV``) as well as in managed settings;
+  ``process.env`` at init. The image ``ENV`` is defence in depth (no gate was
+  seen firing before settings load); it also puts the values in
+  ``docker inspect``;
 - Claude Code applies ``env`` from the agent-writable ``~/.claude/settings.json``
   and ``.claude/settings.local.json`` over the process env; only managed
   (policy) ``env`` beats them. The managed path is fixed at ``/etc/claude-code``
-  (its override resolver is a stub), and
-  ``CLAUDE_CODE_DISABLE_ADMIN_ENV_UNION`` keeps only the FIRST managed source's
-  ``env`` instead of merging every drop-in's.
+  (its override resolver is a stub). The CLI merges ``managed-settings.json``
+  and the sorted drop-ins into one file tier, then unions ``env`` across admin
+  tiers (an org's remote managed settings, MDM, file);
+  ``CLAUDE_CODE_DISABLE_ADMIN_ENV_UNION`` keeps only the highest tier's ``env``,
+  which drops the whole file tier when an org's remote tier is present.
 
 Captured on the image this change builds (2.1.281, one Read turn on a 65-byte
 file through the agent server, behind a logging proxy on a network with no
@@ -145,7 +148,7 @@ def test_the_image_installs_it_root_owned_and_read_only():
 
 
 def test_the_image_env_carries_the_same_names():
-    """The process-env layer: a gate that fires before settings load still sees it."""
+    """The process-env layer, defence in depth beside the drop-in."""
     envs = [ins for ins in _instructions() if ins.startswith("ENV ")
             and any(name in ins for name in OPT_OUT)]
     assert len(envs) == 1, envs
@@ -153,8 +156,8 @@ def test_the_image_env_carries_the_same_names():
     assert pairs == OPT_OUT
 
 
-def test_both_layers_are_in_place_before_the_build_runs_claude():
-    """The plugin pre-install is the build's own `claude`; it runs as agents do."""
+def test_both_layers_are_in_place_before_the_plugin_pre_install():
+    """The build's plugin pre-install is a `claude` run; it must run with them on."""
     pre_install = _index(lambda ins: "claude plugin marketplace add" in ins and ins.startswith("RUN "))
     copy = _index(lambda ins: ins.startswith("COPY ") and _DROP_IN in ins)
     env = _index(lambda ins: ins.startswith("ENV ") and "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" in ins)
