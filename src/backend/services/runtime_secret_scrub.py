@@ -8,9 +8,8 @@ covering arbitrary values that the pattern-based `utils/credential_sanitizer`
 the producer delivered; only the persisted copy is scrubbed.
 
 Mechanism-only by design — this file names no consumer (it is a SEAM file grepped
-by the enterprise-docs-guard). Its one enterprise consumer stages a fetched
-credential before delivering it; here that is just "a value someone asked us to
-scrub".
+by the enterprise-docs-guard). Producers on both editions stage a credential
+before delivering it; here that is just "a value someone asked us to scrub".
 
 Store (Redis, GLOBAL — cross-agent relay is always correct to scrub regardless of
 whose text the value appears in):
@@ -33,8 +32,10 @@ Failure asymmetry (deliberate, documented in the enterprise threat model):
     delivered during the outage (stage side is closed), so the open scrub side
     never widens exposure beyond turns already in flight.
 
-Behaviour-neutral for OSS: no staged values ⇒ `get_staged_values()` returns `[]`
-⇒ every scrub call is a no-op.
+Behaviour-neutral when nothing is staged: `get_staged_values()` returns `[]` ⇒
+every scrub call is a no-op. Do not read that as "a no-op on OSS" — OSS code
+stages values too, so every sink that hands agent text onward (a message table,
+a log, a TTS provider) must scrub on every edition.
 """
 
 from __future__ import annotations

@@ -1655,7 +1655,8 @@ async def synthesize_portal_tts(agent_name: str, email: str, text: str,
                                 include_owned: bool = False) -> bytes:
     """Text-to-speech for a portal reply (voice mode, #78). Roster-scoped (miss →
     404). Reuses the shared ElevenLabs `tts_service` with the agent's configured
-    voice. Raises ClientPortalError when voice isn't available (no key / no voice)
+    voice. Staged credential values are scrubbed from the text before synthesis
+    (#4359). Raises ClientPortalError when voice isn't available (no key / no voice)
     or synthesis fails / the text exceeds the shared cost cap — the client then
     just keeps the text reply. Returns MP3 bytes (played directly in the browser)."""
     from services import tts_service
@@ -1675,6 +1676,16 @@ async def synthesize_portal_tts(agent_name: str, email: str, text: str,
     if not voice_id:
         raise ClientPortalError(404, "This agent has no voice configured")
 
+    # #4359 (the ent#279 seam): remove staged credential values before the text
+    # reaches the TTS provider, the same way send_message and the voice sends do.
+    # The shared cost cap inside synthesize_mp3 then judges the scrubbed text.
+    # Fail-open: with the store down get_staged_values() returns [] and the text
+    # is spoken as given.
+    from services.runtime_secret_scrub import get_staged_values, scrub_text
+
+    _staged = get_staged_values()
+    if _staged:
+        body = scrub_text(_staged, body)
     audio = await tts_service.synthesize_mp3(body, voice_id)
     if not audio:
         # Over the char cap or a provider hiccup — fail-soft as a 422 so the client

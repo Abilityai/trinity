@@ -142,6 +142,22 @@ scrub all fields.
   the TOP, **before delivery AND persist**.
 - `routers/voice.py` `_save_transcript` — transcript entry text scrubbed before
   persist.
+
+### Speech sinks (text handed to a third-party TTS provider)
+
+These persist nothing durable but send agent text off-platform, so each scrubs
+**before** anything reads the text — the shared cost cap (`TTS_MAX_CHARS`, inside
+`tts_service`) therefore judges the scrubbed text. All fail open like
+`send_message`: a store outage speaks the text as given.
+
+- `voice_reply_service.send_voice_reply` (in-session voice note) and
+  `send_proactive_voice` (addressed voice note — also before its audit
+  `message_preview`) — #4228.
+- `direct_voice_service._speak_sentence` — each sentence of a direct voice call,
+  before streaming TTS and the `spoken` frame sent to the browser.
+- `client_portal.service.synthesize_portal_tts` — Workspace read-aloud. The reply
+  was scrubbed when saved, but the client sends the text back, so a value staged
+  after the save would otherwise reach the provider (#4359).
 - `routers/sessions.py` needs **no** direct wiring: its assistant write persists
   the applier's already-scrubbed outputs (verified, transitively covered).
 
@@ -157,6 +173,12 @@ function that persists agent-authored text into the named tables
 must call the scrub seam or appear on an explicit allowlist with a one-line
 justification — so a future persistence writer that ships un-wired is a CI
 failure, not a silent leak.
+
+The negative scan cannot see sinks that write none of those tables (the speech
+sinks above, the agent HTTP-error log line), so `_REQUIRED_SCRUBBERS` pins them
+**positively** by name with no allowlist escape — along with the direct
+table-writing sinks, so a scrub removal plus an allowlist entry cannot exempt
+them. Deleting the scrub call in any of them fails `test_direct_sinks_still_scrub`.
 
 ## Error Handling
 
@@ -198,6 +220,11 @@ failure, not a silent leak.
   the persisted `execution_log` / `tool_calls` / `response_snapshot`) and the
   `:6390` cross-worker two-client propagation test land **with** the chokepoint
   wiring, alongside the parity guard.
+- `tests/unit/test_4228_voice_reply_scrub.py` / `tests/unit/test_4359_portal_tts_scrub.py`
+  — the speech sinks: a staged value with no credential-pattern shape never
+  reaches synthesis (#4359 asserts on the provider request body itself), nothing
+  staged is byte-identical, a store outage fails open, and the real cost cap
+  judges the scrubbed length in both directions.
 
 ## Related Flows
 
