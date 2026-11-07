@@ -466,7 +466,7 @@ class UserOperations:
         exclude = normalize_email(exclude_email)
         if exclude:
             conds.append(func.lower(users.c.email) != exclude)
-        stmt = (select(users.c.username, users.c.name, users.c.email, users.c.role).where(and_(*conds))
+        stmt = (select(users.c.id, users.c.username, users.c.name, users.c.email, users.c.role).where(and_(*conds))
                 .order_by(func.lower(func.coalesce(users.c.name, users.c.username)), users.c.id)
                 .limit(max(1, int(limit))))
         with get_engine().connect() as conn:

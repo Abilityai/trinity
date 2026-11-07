@@ -26,6 +26,7 @@ vi.mock('axios', () => ({ default: ax }))
 import AgentAssignmentsSection from '@/components/AgentAssignmentsSection.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useEnterpriseStore } from '@/stores/enterprise'
+import { candidateAnswer, pickPerson, typePerson } from './helpers/pickPerson'
 
 const AGENT = 'scout'
 const BASE = `/api/enterprise/assignments/agents/${AGENT}`
@@ -47,6 +48,7 @@ const PEOPLE = () => [
 ]
 
 let roster
+let candidatesDown
 function jwtFor(sub) {
   const b64 = (o) => btoa(JSON.stringify(o)).replace(/=+$/, '').replace(/\+/g, '-').replace(/\//g, '_')
   return `${b64({ alg: 'HS256' })}.${b64({ sub })}.sig`
@@ -73,9 +75,18 @@ const rowFor = (w, name) => w.findAll('li').find((li) => li.text().includes(name
 const refused = (status, detail) => Object.assign(new Error(String(status)), { response: { status, data: { detail } } })
 const shares = () => ax.post.mock.calls.filter(([u]) => u.endsWith('/share'))
 
+// ent#1154: the Person field is a picker over the scoped read. An account with no
+// email is never a picker row, so it is reached the way an admin still can: the
+// select the field falls back to when that read is down.
 async function add(w, userId, kind = 'viewer') {
-  await q(w, 'add-user').setValue(String(userId))
+  const u = USERS.find((x) => x.id === userId)
   await q(w, 'add-kind').setValue(kind)
+  if (!u.email) {
+    candidatesDown = true
+    await typePerson(w, 'add-user', 'no')
+  }
+  if (q(w, 'add-user-select').exists()) await q(w, 'add-user-select').setValue(String(userId))
+  else await pickPerson(w, 'add-user', u.name.slice(0, 2).toLowerCase(), u.name)
   await q(w, 'assignment-add-form').trigger('submit')
   await flushPromises()
 }
@@ -84,8 +95,14 @@ beforeEach(() => {
   setActivePinia(createPinia())
   for (const fn of [...Object.values(api), ...Object.values(ax)]) fn.mockReset()
   roster = { agent_name: AGENT, assignments: [ANN, BOB], mine: null, primary: 'Ann Lee' }
-  api.get.mockImplementation(async (url) => {
+  candidatesDown = false
+  api.get.mockImplementation(async (url, cfg) => {
     if (url === '/api/users') return { data: USERS }
+    if (url.endsWith('/candidates')) {
+      if (candidatesDown) throw Object.assign(new Error('403'), { response: { status: 403 } })
+      const held = (kind) => roster.assignments.filter((a) => a.kind === kind).map((a) => a.user_id)
+      return { data: candidateAnswer(USERS, held)(cfg?.params) }
+    }
     if (url.endsWith('/canon/roles')) return { data: { roles: [], reason: 'no_canon', message: 'none' } }
     return { data: roster }
   })
@@ -109,9 +126,12 @@ describe('each person\'s platform role is shown', () => {
   it('in the pickers', async () => {
     const { w } = render()
     await flushPromises()
-    const options = q(w, 'add-user').findAll('option').map((o) => o.text())
-    expect(options).toContain('Cat Moe · Workspace only')
-    expect(options).toContain('Bob Ray · operator')
+    await q(w, 'add-kind').setValue('viewer')
+    await typePerson(w, 'add-user', 'ca')
+    expect(w.findAll('[role="option"]')[0].text()).toContain('Cat Moe')
+    expect(w.findAll('[role="option"]')[0].text()).toContain('Workspace only')
+    await typePerson(w, 'add-user', 'bo')
+    expect(w.findAll('[role="option"]')[0].text()).toMatch(/Bob Ray.*operator/)
   })
 
   it('from the people list when the viewer cannot read the users list', async () => {
@@ -204,7 +224,7 @@ describe('assigning someone shares the agent with them', () => {
     api.post.mockImplementationOnce(() => new Promise((ok) => { release = () => ok({ data: {} }) }))
     const { w } = render()
     await flushPromises()
-    await q(w, 'add-user').setValue('3')
+    await pickPerson(w, 'add-user', 'ca', 'Cat Moe')
     await q(w, 'assignment-add-form').trigger('submit')
     await w.setProps({ agentName: 'other' })
     release()
@@ -213,11 +233,47 @@ describe('assigning someone shares the agent with them', () => {
     expect(ax.post).not.toHaveBeenCalledWith(SHARE('other'), expect.anything(), expect.anything())
   })
 
+  // ent#1154: the picked row carries who the person is, so the share does not
+  // depend on the users list having them (personFor's picked-row branch).
+  describe('when the users list does not have the picked person', () => {
+    beforeEach(() => {
+      const answer = api.get.getMockImplementation()
+      api.get.mockImplementation(async (url, cfg) => {
+        if (url === '/api/users') return { data: USERS.filter((u) => u.id !== 3) }
+        return answer(url, cfg)
+      })
+    })
+
+    it('adding shares with the picked row\'s address and names them from it', async () => {
+      const { w, reloadPeople } = render()
+      await flushPromises()
+      await q(w, 'add-kind').setValue('viewer')
+      await pickPerson(w, 'add-user', 'ca', 'Cat Moe')
+      await q(w, 'assignment-add-form').trigger('submit')
+      await flushPromises()
+      expect(api.post).toHaveBeenCalledWith(BASE, { user_id: 3, kind: 'viewer' })
+      expect(ax.post).toHaveBeenCalledWith(SHARE(), { email: 'cat@example.com' }, expect.anything())
+      expect(q(w, 'assignments-share-note').text()).toBe('Shared with Cat Moe so they can use it in the Workspace.')
+      expect(reloadPeople).toHaveBeenCalled()
+    })
+
+    it('replacing the primary shares with the picked row too', async () => {
+      const { w } = render()
+      await flushPromises()
+      await q(w, 'assignment-replace').trigger('click')
+      await pickPerson(w, 'replace-user', 'ca', 'Cat Moe')
+      await q(w, 'assignment-replace-form').trigger('submit')
+      await flushPromises()
+      expect(ax.post).toHaveBeenCalledWith(SHARE(), { email: 'cat@example.com' }, expect.anything())
+      expect(q(w, 'assignments-share-note').text()).toBe('Shared with Cat Moe so they can use it in the Workspace.')
+    })
+  })
+
   it('replacing the primary shares the agent with the new one', async () => {
     const { w } = render()
     await flushPromises()
     await q(w, 'assignment-replace').trigger('click')
-    await q(w, 'replace-user').setValue('3')
+    await pickPerson(w, 'replace-user', 'ca', 'Cat Moe')
     await q(w, 'assignment-replace-form').trigger('submit')
     await flushPromises()
     expect(ax.post).toHaveBeenCalledWith(SHARE(), { email: 'cat@example.com' }, expect.anything())
