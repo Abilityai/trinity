@@ -165,7 +165,8 @@ speaks the text as given.
 
 **Not covered (residual):** `services/gemini_voice.py` returns an agent task's
 `response_text` to Gemini Live as a tool result on the non-Workspace voice paths,
-with no scrub call — agent text reaching a speech provider outside this list.
+with no scrub call — agent text reaching a speech provider outside this list
+(tracked in #4362).
 
 ## Drift guard
 
