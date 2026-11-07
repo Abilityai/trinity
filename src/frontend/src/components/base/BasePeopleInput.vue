@@ -101,6 +101,9 @@ const props = defineProps({
   title: { type: String, default: 'People with an account' },
   // (text) => the line shown when the server said no one matches.
   noMatch: { type: Function, default: defaultNoMatch },
+  // pick mode only: (text) => true for text taken WITHOUT a pick — an escape
+  // hatch for a value that is not a person (a task owner's `role:<id>`).
+  acceptText: { type: Function, default: null },
   type: { type: String, default: 'text' },
   disabled: { type: Boolean, default: false },
   id: { type: String, default: '' },
@@ -142,6 +145,7 @@ const open = computed(() =>
 
 const pickError = computed(() => mustPickError({
   mode: props.mode, text: text.value, picked: chosen.value, matchedNone: matchedNone.value, noMatch: props.noMatch,
+  accepted: !!text.value && !!props.acceptText?.(text.value),
 }))
 const shownError = computed(() => props.error || (touched.value ? pickError.value : ''))
 const chosenLine = computed(() =>

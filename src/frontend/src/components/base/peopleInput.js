@@ -53,12 +53,14 @@ export function defaultNoMatch(text) {
 
 /**
  * A must-pick field's named validation: '' when it is fine (suggest mode, empty,
- * or a person was chosen). Text the server said matches no one gets `noMatch`;
+ * accepted by the caller, or a person was chosen). Text the server said matches no one gets `noMatch`;
  * anything else unchosen is told to pick from the list.
  */
-export function mustPickError({ mode, text, picked, matchedNone, noMatch = defaultNoMatch }) {
+export function mustPickError({ mode, text, picked, matchedNone, noMatch = defaultNoMatch, accepted = false }) {
   if (mode !== 'pick') return ''
   const t = String(text || '').trim()
-  if (!t || isPickedText(t, picked)) return ''
+  // `accepted`: text the caller takes without a pick (trinity-enterprise#1155 —
+  // a task owner written `role:<id>`, or the value the field opened with).
+  if (!t || accepted || isPickedText(t, picked)) return ''
   return matchedNone ? noMatch(t) : CHOOSE_FROM_LIST
 }
