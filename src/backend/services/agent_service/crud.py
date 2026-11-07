@@ -52,6 +52,7 @@ from services import git_service
 from services.settings_service import get_anthropic_api_key, resolve_github_pat, resolve_github_pat_candidates, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email, get_ephemeral_agent_quota, get_ephemeral_ttl_ceiling_seconds
 from services.entitlement_service import entitlement_service
 from services import rate_limiter
+from services import template_source_policy
 from . import ephemeral as ephemeral_service
 from services.github_service import GitHubService, GitHubError
 from services.agent_auth import derive_agent_token
@@ -3660,6 +3661,11 @@ async def create_agent_internal(
 
     if not config.name:
         raise HTTPException(status_code=400, detail="Invalid agent name - must contain at least one alphanumeric character")
+
+    # trinity-enterprise#591: the template-source bound — the choke point every
+    # creation path shares (fork, copy, clone, system-deploy members). Before the
+    # ghost pre-gates, which spend a per-parent spawn-rate token.
+    await template_source_policy.enforce(request, current_user, config)
 
     # trinity-enterprise#69: ephemeral "ghost" pre-gates. All BEFORE any side
     # effect (no partial state on refusal). Mutates config.name to the suffixed

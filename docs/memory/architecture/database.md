@@ -12,6 +12,10 @@
 
 ## Database Schema
 
+### PostgreSQL by default, SQLite refused in images (#4175, HOST-023)
+
+Every compose file defaults `DATABASE_URL` to the bundled `postgres` service. The images set `TRINITY_REQUIRE_POSTGRES=1`, which arms two refusals in `db/engine.py`: `refuse_sqlite_backend` (from `init_database`, before any file is touched; `TRINITY_ALLOW_SQLITE=1` opens it) and `refuse_empty_postgres_beside_sqlite` (from `alembic_runner.upgrade_to_head`, under the advisory lock, when `trinity.db` has data and `users` is absent or empty; nothing opens it). An `upgrade_to_head` that fires this cannot have built anything. `db/sqlite_to_postgres.py` is the only caller of `allow_sqlite_source=True`, and it must never import `database`, whose import runs `init_database()`. Outside an image the unit tier keeps running on SQLite until the runner is removed.
+
 ### SQLite (`/data/trinity.db`)
 
 **Orphan tables (#3432):** installs upgraded from before #3432 — SQLite and PostgreSQL alike — may carry `process_schedules` and `process_schedule_executions`, which the scheduler's boot path created ad hoc outside both migration tracks; the scheduler no longer creates or reads them, nothing else references them, and they are deliberately left in place (no migration), so #746 autogenerate will surface them as unknown tables.
@@ -137,6 +141,8 @@ CREATE TABLE access_requests (
 ```
 
 Access-control flow (#311): `ChannelAdapter.resolve_verified_email()` maps native channel identity → verified email; `message_router` runs a single gate — owner/admin/`agent_sharing` → `open_access` → upsert pending `access_requests` row. Approval inserts into `agent_sharing`, whitelists the email (if email auth on), and fires a fire-and-forget notification on the requester's originating channel (telegram/slack/whatsapp only; bypasses `allow_proactive` and per-recipient rate limit — the user initiated the request; outcome audit-logged; delivery failure never rolls back the approval) (#951). Group chats bypass the gate; agents with both policy flags off retain legacy permissive behavior.
+
+**channel_client_blocks** (trinity-enterprise#21 — an owner's per-agent block on one channel client): `id`, `agent_name`, `channel`, `client_id` (the channel-native sender id the router sees), `blocked_at`, `blocked_by_id`, `blocked_by_email`, `reason`; `UNIQUE(agent_name, channel, client_id)`. Read by `message_router` before every other gate step; CASCADE in the agent-cleanup registry.
 
 **mcp_api_keys:**
 ```sql

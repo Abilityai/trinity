@@ -299,7 +299,7 @@ def _is_public_google_consent_match(match: "re.Match", credential_values=()) -> 
         if any(secret in value for value in query.values() for secret in credential_values):
             return False
         if (query["response_type"] != "code" or
-                not re.fullmatch(r"[A-Za-z0-9_-]+\.apps\.googleusercontent\.com", query["client_id"]) or
+                not re.fullmatch(r"^[A-Za-z0-9_-]+\.apps\.googleusercontent\.com", query["client_id"]) or
                 not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", query["state"]) or
                 query.get("access_type", "offline") not in ("offline", "online") or
                 query.get("include_granted_scopes", "true") not in ("true", "false") or

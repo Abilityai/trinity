@@ -36,6 +36,14 @@ PULL_POLL_KEY_PREFIX = "agent:pull_poll:"
 # Hygiene only: B-08 measures silence from the later of this value and the
 # container start, so an expired key cannot fire on its own.
 PULL_POLL_TTL_SECONDS = 86400
+# Per-agent count of claims the BACKEND refused (#4257), stamped by
+# `routers/internal.py` on the `_pull_authorized` 403 branch. The twin of the
+# key above, and the half it cannot see: a pool that polls happily while every
+# claim is turned away looks alive to B-08 and empty to the worker, which is
+# exactly the state a queued row can hide in. Same 24 h window, so the two
+# ages read against each other.
+PULL_CLAIM_DENIED_KEY_PREFIX = "agent:pull_claim_denied:"
+PULL_CLAIM_DENIED_TTL_SECONDS = 86400
 
 
 def _pilot_allowlist() -> Set[str]:
@@ -135,6 +143,11 @@ def pull_queue_allowance(agent_name: str) -> int:
 # creates the row before the producer gate runs, and the caller ignores the
 # result, so it is as pullable as a cron fire.
 #
+# ``caller_wake`` (trinity-enterprise#1102) is the ``operator_ending`` shape for
+# a delegation: ``caller_wake_service`` wakes the agent that delegated a run
+# when that run ends, through the same ``dispatch_and_await_terminal`` adapter,
+# for the same receipt (the audit row records ``result.status``).
+#
 # **The set is currently equal to ``_AUTONOMOUS_TRIGGERS``, and it stays an
 # explicit allow-list anyway.** That is the point of it: a trigger added to the
 # autonomous set later must be reviewed against dispatch topology rather than
@@ -147,7 +160,7 @@ def pull_queue_allowance(agent_name: str) -> int:
 PULL_REACHABLE_TRIGGERS = frozenset(
     {"agent", "event", "schedule", "webhook", "reminder", "loop", "fan_out",
      "a2a", "operator_response", "operator_ending", "retry", "self_task",
-     "skill_gate"}
+     "skill_gate", "caller_wake"}
 )
 
 

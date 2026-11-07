@@ -19,7 +19,7 @@ import { createMemoryHistory, createRouter, useRoute, useRouter } from 'vue-rout
 import { defineComponent, h, ref } from 'vue'
 import { useTabRoute } from '../../src/composables/useTabRoute'
 
-const TABS = ['overview', 'tasks', 'chat', 'git', 'sharing']
+const TABS = ['overview', 'tasks', 'chat', 'git', 'channels']
 const resolveTab = (id) => (TABS.includes(id) ? id : null)
 
 // What AgentDetail does with it: a ref the tab strip v-models, plus the two
@@ -139,7 +139,7 @@ describe('#2900 programmatic selection', () => {
   })
 
   it('a replacing selectTab moves the tab without a history entry', async () => {
-    const { vm, back, url, active } = await setup('/agents/alpha?tab=sharing')
+    const { vm, back, url, active } = await setup('/agents/alpha?tab=channels')
     vm.selectTab('overview', { replace: true })
     await flushPromises()
     expect(active()).toBe('overview')

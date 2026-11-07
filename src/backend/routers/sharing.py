@@ -13,6 +13,7 @@ from models import (
     AccessPolicy, AccessPolicyUpdate, AccessRequest, AccessRequestDecision,
     User, ClientRosterEntry, PublicChannelPrompt, PublicChannelPromptUpdate,
     AccessCandidate, AgentInviteResult, AgentShareResult,
+    ChannelClientRef, ChannelClientBlockRequest,
 )
 from database import db, AgentShare, AgentOperatorAccess, AgentShareRequest
 from dependencies import (
@@ -20,8 +21,10 @@ from dependencies import (
     reject_non_interactive_principal, require_interactive, require_person,
 )
 from services.docker_service import get_agent_container
-from services import access_candidate_service, access_request_service, agent_invite_service
-from services.client_roster_service import get_client_roster
+from services import (
+    access_candidate_service, access_request_service, agent_invite_service, client_roster_service,
+)
+from services.client_roster_service import ClientControlError, get_client_roster
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services.proactive_message_service import proactive_message_service
 
@@ -320,16 +323,106 @@ async def get_client_roster_endpoint(
     agent_name: OwnedAgentByName,
     current_user: CurrentUser,
 ):
-    """External-client roster for the Sharing tab (#20).
+    """External-client roster for the Channels tab (#20).
 
     Lists outside users (no Trinity account) who have messaged the agent through
     a channel, aggregated across channels and ordered by most-recent activity.
     DB-sourced — renders even when the agent container is stopped — so there is
     deliberately no container existence check here (`OwnedAgentByName` already
-    enforces the agent exists and the caller owns it). Read-only; per-client
-    block/revoke/approve controls are a separate follow-up (#21).
+    enforces the agent exists and the caller owns it). Each row carries its
+    access state for the per-client controls below (trinity-enterprise#21).
     """
     return get_client_roster(agent_name)
+
+
+# ---------------------------------------------------------------------------
+# Per-client controls (trinity-enterprise#21). Owner (or admin) of the agent,
+# a person (`require_person`, trinity-enterprise#719) — the same gate as
+# unsharing, because revoke IS an unshare and block is its stronger form. The
+# effect is this agent only, so ownership is the right authority (contrast the
+# platform-wide portal block, which is admin-only). Static paths under
+# `/clients/`, so no catch-all ordering concern (Invariant #4).
+# ---------------------------------------------------------------------------
+
+async def _audit_client_control(request: Request, current_user, action: str,
+                                agent_name: str, details: dict) -> None:
+    await platform_audit_service.log(
+        event_type=AuditEventType.AUTHORIZATION,
+        event_action=action,
+        source="api",
+        actor_user=current_user,
+        actor_ip=request.client.host if request.client else None,
+        target_type="agent",
+        target_id=agent_name,
+        endpoint=request.scope["path"],
+        request_id=getattr(request.state, "request_id", None),
+        details=details,
+    )
+
+
+@router.post("/{agent_name}/clients/block", dependencies=[Depends(require_person)])
+async def block_channel_client_endpoint(
+    agent_name: OwnedAgentByName,
+    body: ChannelClientBlockRequest,
+    request: Request,
+    current_user: CurrentUser,
+):
+    """Stop one channel client reaching this agent. The channel access gate
+    drops their messages without a reply; their share and history are kept."""
+    assert_person(current_user)
+    user = db.get_user_by_username(current_user.username)
+    try:
+        result = client_roster_service.block_client(
+            agent_name, body.channel, body.client_id,
+            actor_id=(user or {}).get("id"),
+            actor_email=getattr(current_user, "email", None),
+            reason=body.reason,
+        )
+    except ClientControlError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    await _audit_client_control(request, current_user, "channel_client_block", agent_name,
+                                {"channel": body.channel, "client_id": body.client_id,
+                                 "reason": result.get("reason")})
+    return result
+
+
+@router.post("/{agent_name}/clients/unblock", dependencies=[Depends(require_person)])
+async def unblock_channel_client_endpoint(
+    agent_name: OwnedAgentByName,
+    body: ChannelClientRef,
+    request: Request,
+    current_user: CurrentUser,
+):
+    """Lift a block. Restores exactly what the client had before it."""
+    assert_person(current_user)
+    try:
+        result = client_roster_service.unblock_client(agent_name, body.channel, body.client_id)
+    except ClientControlError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    await _audit_client_control(request, current_user, "channel_client_unblock", agent_name,
+                                {"channel": body.channel, "client_id": body.client_id})
+    return result
+
+
+@router.post("/{agent_name}/clients/revoke", dependencies=[Depends(require_person)])
+async def revoke_channel_client_endpoint(
+    agent_name: OwnedAgentByName,
+    body: ChannelClientRef,
+    request: Request,
+    current_user: CurrentUser,
+):
+    """Remove a granted client's access to this agent (their share). Under a
+    restricted policy their next message asks for access again."""
+    assert_person(current_user)
+    try:
+        result = client_roster_service.revoke_client(
+            agent_name, body.channel, body.client_id, actor_username=current_user.username)
+    except ClientControlError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail)
+    await _audit_client_control(request, current_user, "channel_client_revoke", agent_name,
+                                {"channel": body.channel, "client_id": body.client_id,
+                                 "removed_email": result["email"]})
+    return result
 
 
 # ---------------------------------------------------------------------------

@@ -103,6 +103,7 @@ TABLES = {
             a2a_scope TEXT DEFAULT 'public',  -- inert since ent#885; drop under #746
             a2a_keyless_internal INTEGER DEFAULT 1,  -- inert since ent#885; drop under #746
             operator_resume_enabled INTEGER,  -- tri-state since ent#1108: NULL = platform default (on), 0 = owner OFF, 1 = owner ON
+            wake_on_ending INTEGER,
             memory_opt_out INTEGER DEFAULT 0,
             tts_voice_replies_enabled INTEGER DEFAULT 0,
             tts_voice_id TEXT,
@@ -2102,6 +2103,23 @@ TABLES = {
             requester_chat_id TEXT,
             requester_thread_id TEXT,
             UNIQUE(agent_name, email)
+        )
+    """,
+
+    # -------------------------------------------------------------------------
+    # Channel client blocks (trinity-enterprise#21)
+    # -------------------------------------------------------------------------
+    "channel_client_blocks": """
+        CREATE TABLE IF NOT EXISTS channel_client_blocks (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            channel TEXT NOT NULL,
+            client_id TEXT NOT NULL,
+            blocked_at TEXT NOT NULL,
+            blocked_by_id INTEGER,
+            blocked_by_email TEXT,
+            reason TEXT,
+            UNIQUE(agent_name, channel, client_id)
         )
     """,
 
