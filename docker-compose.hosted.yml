@@ -538,6 +538,11 @@ services:
       # docker-compose.yml; without this line the .env value is inert in prod (the
       # #1039 packaging-gap class) and SSH host detection falls back to localhost.
       - SSH_HOST=${SSH_HOST:-}
+      # trinity-enterprise#1168: host interface the backend publishes each agent's
+      # SSH port on. Unset/blank = 127.0.0.1 (loopback); an IP literal, or
+      # 0.0.0.0 for every interface. Creation-time — existing agents adopt on
+      # recreate. Without this line the .env value is inert (the #1039 class).
+      - AGENT_SSH_BIND_ADDRESS=${AGENT_SSH_BIND_ADDRESS:-}
       # NOTE (#1799): a duplicate LOG_ARCHIVE_ENABLED / LOG_RETENTION_DAYS /
       # LOG_CLEANUP_HOUR trio lived here. Two separate #1039-class "mirror
       # docker-compose.yml" fixes each appended the same three vars, which broke

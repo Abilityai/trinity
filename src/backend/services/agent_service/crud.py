@@ -75,6 +75,11 @@ from .capabilities import (
     normalize_cpu,
     normalize_memory,
 )
+from services.agent_ssh_binding import (
+    AgentSshBindAddressError,
+    agent_ssh_port_binding,
+    raise_for_ssh_bind_failure,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2174,7 +2179,9 @@ def _build_base_env(config: AgentConfig) -> dict:
         'AGENT_NAME': config.name,
         'CREDENTIALS_FILE': '/config/credentials.json',
         'ANTHROPIC_API_KEY': get_anthropic_api_key(),
-        'ENABLE_SSH': 'true',
+        # trinity-enterprise#1168: no sshd until an admin asks for one — the
+        # grant endpoint starts it on demand (ssh_service.ensure_sshd_running).
+        'ENABLE_SSH': 'false',
         'ENABLE_AGENT_UI': 'true',
         'AGENT_SERVER_PORT': '8000',
         'TEMPLATE_NAME': config.template if config.template else '',
@@ -2639,41 +2646,55 @@ async def _create_agent_container(
         # (durable or ephemeral), pairing with the DB columns.
         container_labels['trinity.spawned-by'] = current_user.agent_name
 
-    return await containers_run(
-        config.base_image,
-        detach=True,
-        name=f"agent-{config.name}",
-        ports={'22/tcp': config.port},
-        volumes=volumes,
-        environment=env_vars,
-        labels=container_labels,
-        # Always apply AppArmor for additional sandboxing
-        security_opt=['apparmor:docker-default'],
-        # Always drop ALL capabilities first (defense in depth)
-        cap_drop=['ALL'],
-        # Add back only the capabilities needed for the mode
-        cap_add=FULL_CAPABILITIES if full_capabilities else RESTRICTED_CAPABILITIES,
-        read_only=False,
-        # Always apply noexec,nosuid to /tmp for security (#1098: scratch
-        # is redirected off this tiny tmpfs via the TMPDIR env var).
-        tmpfs=AGENT_TMPFS_MOUNT,
-        # #1871: bound the container's json-file log. Docker's default is
-        # unbounded, so without this the log grows until the Docker data root
-        # fills and dockerd wedges. Creation-time — see AGENT_LOG_CONFIG.
-        log_config=AGENT_LOG_CONFIG,
-        # #2541: born `unless-stopped` so the agent survives a host reboot or a
-        # daemon restart. Docker's default is `no` — 8 of 19 agents stayed dead
-        # ~42h after the 2026-09-04 power-off. Creation-time, like log_config.
-        restart_policy=AGENT_RESTART_POLICY,
-        network='trinity-agent-network',
-        # #1197: cpu/memory normalized + validated above (raises 400 on
-        # a bad template value), so these are guaranteed Docker-valid.
-        mem_limit=config.resources['memory'],
-        # #1126: nano_cpus (Linux CFS quota), NOT cpu_count — the latter
-        # is Windows-only in docker-py and left NanoCpus=0, so newly
-        # created agents never got a CPU limit on Linux.
-        nano_cpus=int(config.resources['cpu']) * 1_000_000_000,
-    )
+    try:
+        return await containers_run(
+            config.base_image,
+            detach=True,
+            name=f"agent-{config.name}",
+            # trinity-enterprise#1168: published on AGENT_SSH_BIND_ADDRESS
+            # (loopback by default), never a bare int (= every interface).
+            ports=agent_ssh_port_binding(config.port),
+            volumes=volumes,
+            environment=env_vars,
+            labels=container_labels,
+            # Always apply AppArmor for additional sandboxing
+            security_opt=['apparmor:docker-default'],
+            # Always drop ALL capabilities first (defense in depth)
+            cap_drop=['ALL'],
+            # Add back only the capabilities needed for the mode
+            cap_add=FULL_CAPABILITIES if full_capabilities else RESTRICTED_CAPABILITIES,
+            read_only=False,
+            # Always apply noexec,nosuid to /tmp for security (#1098: scratch
+            # is redirected off this tiny tmpfs via the TMPDIR env var).
+            tmpfs=AGENT_TMPFS_MOUNT,
+            # #1871: bound the container's json-file log. Docker's default is
+            # unbounded, so without this the log grows until the Docker data root
+            # fills and dockerd wedges. Creation-time — see AGENT_LOG_CONFIG.
+            log_config=AGENT_LOG_CONFIG,
+            # #2541: born `unless-stopped` so the agent survives a host reboot or a
+            # daemon restart. Docker's default is `no` — 8 of 19 agents stayed dead
+            # ~42h after the 2026-09-04 power-off. Creation-time, like log_config.
+            restart_policy=AGENT_RESTART_POLICY,
+            network='trinity-agent-network',
+            # #1197: cpu/memory normalized + validated above (raises 400 on
+            # a bad template value), so these are guaranteed Docker-valid.
+            mem_limit=config.resources['memory'],
+            # #1126: nano_cpus (Linux CFS quota), NOT cpu_count — the latter
+            # is Windows-only in docker-py and left NanoCpus=0, so newly
+            # created agents never got a CPU limit on Linux.
+            nano_cpus=int(config.resources['cpu']) * 1_000_000_000,
+        )
+    except Exception as exc:  # noqa: BLE001 — classified, then re-raised unchanged
+        # trinity-enterprise#1168: Docker's "cannot assign requested address"
+        # never names the knob that caused it. Only that one text is wrapped
+        # (as a 400 naming AGENT_SSH_BIND_ADDRESS); everything else re-raises
+        # as-is so the bind-conflict / name-conflict classifiers downstream
+        # see the original exception.
+        try:
+            raise_for_ssh_bind_failure(exc)
+        except AgentSshBindAddressError as named:
+            raise HTTPException(status_code=400, detail=str(named)) from exc
+        raise
 
 
 async def _broadcast_agent_created(agent_status: AgentStatus, ws_manager) -> None:

@@ -146,6 +146,7 @@ container = docker_client.containers.run(
     tmpfs=AGENT_TMPFS_MOUNT,  # {'/tmp': 'noexec,nosuid,size=<AGENT_TMP_SIZE>'}, default 512m
     log_config=AGENT_LOG_CONFIG,  # json-file max-size/max-file, default 10m x 3 (#1871)
     restart_policy=AGENT_RESTART_POLICY,  # {'Name': 'unless-stopped'} (#2541)
+    ports=agent_ssh_port_binding(ssh_port),  # {'22/tcp': (AGENT_SSH_BIND_ADDRESS, port)}, loopback by default (trinity-enterprise#1168 — see ssh-access.md)
     ...
 )
 ```
@@ -219,6 +220,7 @@ new_container = docker_client.containers.run(
     tmpfs=AGENT_TMPFS_MOUNT,  # {'/tmp': 'noexec,nosuid,size=<AGENT_TMP_SIZE>'}, default 512m
     log_config=AGENT_LOG_CONFIG,  # json-file max-size/max-file, default 10m x 3 (#1871)
     restart_policy=AGENT_RESTART_POLICY,  # {'Name': 'unless-stopped'} (#2541)
+    ports=agent_ssh_port_binding(ssh_port),  # {'22/tcp': (AGENT_SSH_BIND_ADDRESS, port)}, loopback by default (trinity-enterprise#1168 — see ssh-access.md)
     ...
 )
 ```

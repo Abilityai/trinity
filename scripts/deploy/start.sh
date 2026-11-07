@@ -781,6 +781,9 @@ provision_site() {
     # The MCP server's raw :8080 likewise: off-box MCP clients use the web
     # door's /mcp (trinity-enterprise#1101). A --hosted upgrade never moves it.
     set_env_key MCP_BIND_ADDRESS 127.0.0.1
+    # Agent SSH ports likewise: the provisioned firewall already drops off-box
+    # traffic to them, and the binding says so honestly (trinity-enterprise#1168).
+    set_env_key AGENT_SSH_BIND_ADDRESS 127.0.0.1
     set_env_key TRINITY_INSTALL_SOURCE "$provenance"
     if [ -n "${TRINITY_IMAGE_TAG:-}" ]; then
         set_env_key TRINITY_IMAGE_TAG "$TRINITY_IMAGE_TAG"
