@@ -21,6 +21,11 @@ groups post-pull (`TARGET_ARCHITECTURE.md` names ghost-clones the anti-pattern).
 ttl_seconds?}` (≥1 required; Pydantic `EphemeralConfig`, models.py). In
 `create_agent_internal` (crud.py), BEFORE any side effect:
 
+0. Template-source bound (trinity-enterprise#591) — while the instance's
+   allowlist is set, an agent-key spawn must name a listed source, else 403
+   `template_source_not_allowed` (checked first, so a refused spawn spends no
+   spawn-rate token; also checked at the endpoint, before the idempotency
+   claim). Flow: [self-change-grants.md](self-change-grants.md#what-an-agent-may-build-from-trinity-enterprise591).
 1. Entitlement gate — `entitlement_service.is_entitled("ephemeral_agents")` →
    403 `ephemeral_not_entitled` (registry read; the module that registers the
    id lives in the private submodule).

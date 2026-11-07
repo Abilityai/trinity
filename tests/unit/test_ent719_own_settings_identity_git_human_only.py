@@ -302,13 +302,21 @@ def _arm_voice_replies(w):
 
 
 def _arm_rename(w):
-    """The container layer is stubbed; the database rename is the real one."""
+    """The container layer is stubbed; the database rename is the real one.
+
+    ent#1111 (T3): the mutation moved to `services/agent_service/rename.py`, so
+    the Docker stubs go there. The route keeps its own `get_agent_container`
+    for the "that name is taken" 409, so both modules are stubbed.
+    """
     stopped = SimpleNamespace(status="exited", name=f"agent-{AGENT}")
-    w.monkeypatch.setattr(
-        _RENAME, "get_agent_container", lambda name: stopped if name == AGENT else None
-    )
-    w.monkeypatch.setattr(_RENAME, "container_stop", _noop)
-    w.monkeypatch.setattr(_RENAME, "container_rename", _noop)
+    import services.agent_service.rename as rename_primitive
+
+    for mod in (_RENAME, rename_primitive):
+        w.monkeypatch.setattr(
+            mod, "get_agent_container", lambda name: stopped if name == AGENT else None
+        )
+    w.monkeypatch.setattr(rename_primitive, "container_stop", _noop)
+    w.monkeypatch.setattr(rename_primitive, "container_rename", _noop)
     import services.agent_runtime_state as runtime_state
 
     w.monkeypatch.setattr(runtime_state, "clear_agent_runtime_state", _noop)

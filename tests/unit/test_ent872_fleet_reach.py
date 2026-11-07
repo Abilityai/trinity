@@ -782,6 +782,10 @@ _ALLOW = {
         "maps a role to an agent-creation quota; selects no roster",
     ("services/access_candidate_service.py", "suggest"):
         "the role compare only decides whether a row SHOWS its role; selects no fleet, and the route is require_interactive (ent#450)",
+    ("services/template_source_policy.py", "in_use"):
+        "trinity-enterprise#591 impact view: reached only via describe() from the two "
+        "/api/settings/agent-creation-allowlist routes (assert_admin / assert_interactive_admin, "
+        "both reject agent principals); returns template sources and counts, no agent names",
     ("services/ask_service.py", "may_end"):
         "an ask's ending is person-only at every route (reject_non_person_principal)",
     ("services/person_mention_service.py", "_room_access_row"):
@@ -1018,6 +1022,9 @@ _DB_EXEMPT = {
     ("services/system_service.py", "_apply_created_schedules"):
         "apply executor: schedules of a member this same run created, as its creator; the apply "
         "route is require_person, so no agent key reaches it (trinity-enterprise#695)",
+    ("services/client_roster_service.py", "revoke_client"):
+        "unshares a channel client as the owner; its only caller, POST /{agent_name}/clients/revoke, "
+        "is require_person + OwnedAgentByName (trinity-enterprise#21)",
 }
 
 

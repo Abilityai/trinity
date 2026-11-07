@@ -14,11 +14,15 @@ on:
   pull_request:
     paths:
       - 'src/mcp-server/**'
+      # Read by src/tools/git.ent1117-s6a.test.ts; the backend suite reads it too.
+      - 'tests/fixtures/git-sync-path-cases.json'
       - '.github/workflows/mcp-server-test.yml'
   push:
     branches: [dev, main]
     paths:
       - 'src/mcp-server/**'
+      # Read by src/tools/git.ent1117-s6a.test.ts; the backend suite reads it too.
+      - 'tests/fixtures/git-sync-path-cases.json'
       - '.github/workflows/mcp-server-test.yml'
 
 permissions:

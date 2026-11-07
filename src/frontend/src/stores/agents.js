@@ -607,6 +607,17 @@ export const useAgentsStore = defineStore('agents', {
       return response.data
     },
 
+    // abilityai/trinity-enterprise#925: does the agent hold peer skill grants
+    // inside itself? `{ reachable, hook }` — both null unless the caller may
+    // manage the agent's skills.
+    async getAgentPeerSkillEnforcement(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/peer-skills/enforcement`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
     // The honest upgrade (admin): agent-to-agent calls that used a library
     // skill in the last 30 days and are now refused for want of a grant.
     async getPeerSkillDrift() {

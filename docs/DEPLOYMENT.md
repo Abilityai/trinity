@@ -267,13 +267,10 @@ setting. The AMI is published in us-east-1 only.
 
 ## Configuration
 
-> **Database backend:** a hosted install (`start.sh --hosted`, every one-click
-> image) runs on the PostgreSQL service bundled in `docker-compose.hosted.yml`;
-> `start.sh --hosted` generates `POSTGRES_PASSWORD` and `DATABASE_URL` on a new
-> install and keeps an existing `trinity.db` install on SQLite (#3159, see
-> [SQLITE_TO_POSTGRES.md](migrations/SQLITE_TO_POSTGRES.md#hosted-installs-one-click-images-and-startsh---hosted)).
-> The dev and prod compose files default to SQLite; to run them on
-> **PostgreSQL**, see [POSTGRESQL_SETUP.md](POSTGRESQL_SETUP.md) (`DATABASE_URL`, #300).
+> **Database backend:** every compose file runs a bundled PostgreSQL service, and `start.sh`
+> generates `POSTGRES_PASSWORD`. Running compose directly, set it yourself. SQLite is refused at
+> boot (#4175): see [SQLITE_TO_POSTGRES.md](migrations/SQLITE_TO_POSTGRES.md) and
+> [POSTGRESQL_SETUP.md](POSTGRESQL_SETUP.md).
 
 ### Required Environment Variables
 
@@ -348,7 +345,7 @@ ADMIN_PASSWORD=your-secure-password
 │  Frontend (Vue.js)  │  Backend (FastAPI)  │  MCP Server     │
 │      Port 80        │     Port 8000       │    Port 8080    │
 ├─────────────────────────────────────────────────────────────┤
-│  Redis (secrets)    │  SQLite (data)      │  Vector (logs)  │
+│  Redis (secrets)    │  PostgreSQL (data)  │  Vector (logs)  │
 │   Internal only     │   /data volume      │    Port 8686    │
 ├─────────────────────────────────────────────────────────────┤
 │                    Agent Containers                          │
@@ -363,7 +360,7 @@ ADMIN_PASSWORD=your-secure-password
 
 | Data | Location | Backup Strategy |
 |------|----------|-----------------|
-| SQLite (users, agents) | `~/trinity-data/trinity.db` | Regular file backup |
+| PostgreSQL (users, agents) | `postgres-data` volume | Automatic `pg_dump` under `trinity-data/backups/` |
 | Redis (credentials) | Docker volume | Redis RDB snapshots |
 | Agent workspaces | Docker volumes | Per-agent backup |
 
@@ -373,9 +370,11 @@ ADMIN_PASSWORD=your-secure-password
 # Backup database
 ./scripts/deploy/backup-database.sh ./backups/
 
-# Restore from backup
+# Restore from backup (SQLite installs only)
 ./scripts/deploy/restore-database.sh ./backups/trinity_backup.db
 ```
+
+`restore-database.sh` restores a SQLite file and does not read `DATABASE_URL`. On a PostgreSQL install it writes a file the backend never reads. Restore PostgreSQL from the `pg_dump` under `trinity-data/backups/` with `pg_restore`.
 
 ## Troubleshooting
 

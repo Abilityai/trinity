@@ -1086,6 +1086,12 @@ AGENT_CALLABLE_ANY: Dict[str, Tuple[str, str, str]] = {
         "permitted targets and whether it may run each — so an agent can reason about a refusal before it is refused; "
         "targets filtered to what the viewer may open AND (for an agent key) reach; the grant itself is admin + interactive",
         _SIB_READ),
+    "routers/agent_files.py::get_agent_peer_skill_enforcement": (
+        "GET /api/agents/{agent_name}/peer-skills/enforcement",
+        "abilityai/trinity-enterprise#925: the Permissions panel's 'not enforced in-container' line; any "
+        "principal other than a person who may manage the agent's skills gets nulls, so an agent key "
+        "reads nothing and causes no /health probe",
+        _SIB_READ),
     "routers/agent_files.py::get_agent_reach": (
         "GET /api/agents/{agent_name}/reach/{target}",
         "trinity-enterprise#629: the MCP agent-to-agent gate asks, with the CALLING agent's own key, whether it may "

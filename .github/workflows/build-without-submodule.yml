@@ -73,6 +73,7 @@ jobs:
             echo "ADMIN_PASSWORD=Trinity-CI-Test-2026!Aa1"
             echo "REDIS_PASSWORD=$(openssl rand -hex 24)"
             echo "REDIS_BACKEND_PASSWORD=$(openssl rand -hex 24)"
+            echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)"
             echo "CREDENTIAL_ENCRYPTION_KEY=$(openssl rand -hex 32)"
             echo "INTERNAL_API_SECRET=$(openssl rand -hex 32)"
           } > .env

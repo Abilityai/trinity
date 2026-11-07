@@ -9,7 +9,9 @@ contract is enforced two ways here:
     nothing (the `str.find` -> -1 -> empty-slice trap);
   * a real execution round-trip: `parseEnvText` / `formatEnvContent` are
     extracted from the SFC and run under node, so the corruption fix is proven
-    rather than grepped.
+    rather than grepped. They encode and decode each value with
+    `utils/envFile.js` (trinity-enterprise#1117), which is loaded into the same
+    script, so the round trip runs the code the panel ships.
 """
 
 import json
@@ -24,6 +26,7 @@ FRONTEND = Path(__file__).resolve().parents[2] / "src" / "frontend" / "src"
 CHECKLIST = FRONTEND / "components" / "CredentialSetupChecklist.vue"
 PANEL = FRONTEND / "components" / "CredentialsPanel.vue"
 STORE = FRONTEND / "stores" / "agents.js"
+ENV_FILE_UTIL = FRONTEND / "utils" / "envFile.js"
 
 
 def _template_section(sfc: str) -> str:
@@ -214,6 +217,24 @@ def _function_source(text: str, name: str, arrow: bool = True) -> str:
     raise AssertionError("unbalanced braces extracting {0!r}".format(name))
 
 
+def _env_file_util_source() -> str:
+    """`utils/envFile.js` as a plain script, for `node -e`.
+
+    The panel imports `formatEnvLine` / `unquoteEnvValue` from it, and the
+    extracted functions call them, so they have to be defined in the script.
+    Anchored on both declarations: a rename raises here instead of leaving a
+    `ReferenceError` for every round trip to report.
+    """
+    panel = PANEL.read_text()
+    assert "import { formatEnvLine, unquoteEnvValue } from '../utils/envFile'" in panel, (
+        "the panel no longer imports the encoder from utils/envFile.js — re-anchor this test"
+    )
+    src = ENV_FILE_UTIL.read_text()
+    exports = re.findall(r"^export function (\w+) ", src, re.M)
+    assert sorted(exports) == ["formatEnvLine", "unquoteEnvValue"], exports
+    return re.sub(r"^export function ", "function ", src, flags=re.M)
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not available")
 class TestEnvRoundTrip:
     """`parseEnvText(formatEnvContent(x)) == x`.
@@ -224,6 +245,10 @@ class TestEnvRoundTrip:
     credential in the file, not just the one being edited. Latent while Quick
     Inject was a rare bulk paste; a per-row checklist makes read-merge-write the
     normal interaction.
+
+    The backslash rows are trinity-enterprise#1117: the writer escaped only
+    `"` while the reader also reverses `\\\\`, so a value containing two
+    backslashes lost one on every submit.
     """
 
     VALUES = [
@@ -235,11 +260,17 @@ class TestEnvRoundTrip:
         "has'single'quotes",
         "trailing-hash # not-a-comment",
         "",
+        "a\\\\b",
+        "C:\\path\\new",
+        "trailing-backslash\\",
+        'backslash\\"then-quote',
     ]
 
     def _round_trip(self, value, times=1):
         panel = PANEL.read_text()
         script = (
+            _env_file_util_source()
+            + "\n"
             "const parseEnvText = (text) => " + _function_source(panel, "parseEnvText") + ";\n"
             "const formatEnvContent = (credentials) => "
             + _function_source(panel, "formatEnvContent")
