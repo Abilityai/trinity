@@ -36,6 +36,7 @@ from typing import Optional
 import config
 from database import db
 from services import idempotency_service
+from services.runtime_secret_scrub import get_staged_values, scrub_text
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +203,11 @@ async def send_voice_reply(
     Raises ``idempotency_service.EffectInProgressError`` when a voice note for this
     turn is already being sent; otherwise never raises (returns a not-delivered
     result the caller reports so the agent replies with text)."""
+    # ent#279 / #4228: scrub staged credential values at the TOP, like
+    # send_message — before the cost cap judges the text and before synthesis.
+    _staged = get_staged_values()
+    if _staged:
+        text = scrub_text(_staged, text)
     channel = (channel or "").lower()
     if channel not in _SUPPORTED_CHANNELS:
         return VoiceReplyResult(False, channel, "unsupported_channel")
@@ -268,6 +274,11 @@ async def send_proactive_voice(
     from services.proactive_message_service import proactive_message_service as pms
     from services.settings_service import get_proactive_rate_limit
 
+    # ent#279 / #4228: scrub before anything reads the text — the audit preview,
+    # the cost cap and synthesis — the same order send_message uses.
+    _staged = get_staged_values()
+    if _staged:
+        text = scrub_text(_staged, text)
     recipient_email = (recipient_email or "").strip().lower()
     channel = (channel or "").lower()
     preview = (text or "")[:100]

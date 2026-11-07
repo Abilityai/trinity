@@ -32,11 +32,12 @@ Anchors, all against ``services/ + routers/ + client_portal/``:
    that scrub (voice transcript, group broadcast) — but a NEW direct writer of
    raw agent text here would be a fresh leak.
 
-3. **Positive — the direct agent-text sinks.** Four functions persist agent free
-   text (or write it to the platform log) WITHOUT going through the appliers, and
-   two of them do not write any of the anchored tables directly. They are pinned
-   by name with NO allowlist escape: each MUST still call a scrub function, so
-   removing the scrub turns CI red rather than silently re-opening the leak.
+3. **Positive — the direct agent-text sinks.** Six functions persist or deliver
+   agent free text (or write it to the platform log) WITHOUT going through the
+   appliers, and four of them do not write any of the anchored tables directly.
+   They are pinned by name with NO allowlist escape: each MUST still call a scrub
+   function, so removing the scrub turns CI red rather than silently re-opening
+   the leak.
 
 **Why agent_activities / agent_events / idempotency_keys are NOT anchored
 (deliberate, per the plan).** The plan lists seven agent-text tables; this guard
@@ -287,7 +288,7 @@ _ALLOWLIST = {
 }
 
 # Direct agent-free-text sinks pinned positively — each MUST call a scrub
-# function (NO allowlist escape). Two do not write an anchored table directly, so
+# function (NO allowlist escape). Four do not write an anchored table directly, so
 # only a positive check reaches them; the other two also pass the negative
 # message-writer anchor, and are pinned here too so a scrub-removal-plus-allowlist
 # edit can never quietly exempt them. Value = the sink it protects.
@@ -308,6 +309,14 @@ _REQUIRED_SCRUBBERS = {
         "services/chat_execution_service.py",
         "_parse_agent_http_error",
     ): "agent HTTP error body -> platform ERROR log + schedule_executions.error",
+    (
+        "services/voice_reply_service.py",
+        "send_voice_reply",
+    ): "in-session voice note text -> TTS provider + spoken audio (#4228)",
+    (
+        "services/voice_reply_service.py",
+        "send_proactive_voice",
+    ): "addressed voice note text -> TTS provider + spoken audio + audit message_preview (#4228)",
 }
 
 
@@ -392,7 +401,7 @@ class TestScrubParity:
         )
 
     def test_direct_sinks_still_scrub(self):
-        """The four direct agent-text sinks must each still call a scrub function
+        """The six direct agent-text sinks must each still call a scrub function
         — removing it must turn CI red, with no allowlist escape."""
         missing = []
         for (rel, fn_name), sink in _REQUIRED_SCRUBBERS.items():
