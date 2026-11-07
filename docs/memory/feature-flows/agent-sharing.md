@@ -396,7 +396,7 @@ def delete_agent_ownership(self, agent_name: str) -> bool:
 
 ### Suggesting people when adding one (trinity-enterprise#450)
 
-`AccessPanel.vue` → `stores/agents.js::getAccessCandidates` → `GET /api/agents/{agent_name}/access/candidates?q=` → `services/access_candidate_service.py` → `db.list_share_candidates`.
+`AccessPanel.vue` → `stores/agents.js::getAccessCandidates` → `GET /api/agents/{agent_name}/access/candidates?q=` → `services/access_candidate_service.py::suggest` → `services/people_search_service.py::search` (the one people search, trinity-enterprise#1153) over the scope `db.people_scope_share_candidates` → `db.search_people`.
 
 - **Gate:** `OwnedAgentByName` and `require_interactive`, so a key can't read it. A non-admin owner can, which is why this isn't `GET /api/users`, an admin-only list of every account.
 - **Bounds:** 2 to 64 characters, 8 rows, 60 lookups a minute per person. `rate_limited` is a 429. A query under the minimum costs nothing and returns nobody.
