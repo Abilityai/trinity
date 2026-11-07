@@ -58,6 +58,7 @@ from services.github_service import GitHubService, GitHubError
 from services.agent_auth import derive_agent_token
 from utils.helpers import parse_iso_timestamp, sanitize_agent_name, to_utc_iso, utc_now_iso
 from utils.safe_yaml import HardenedYamlError, load_template_yaml
+from utils import avatar_paths
 from .fork_to_own import (
     SAVED_TOKEN_TIERS, fork_pat_required, fork_template_to_own_repo, saved_token_message,
     saved_token_not_for_agents,
@@ -269,6 +270,52 @@ def _safe_cred_file_path(relative_path: str, root: Path) -> Path:
             },
         )
     return candidate
+
+
+#: Where `_stage_config_files` writes an agent's config, its credentials file
+#: and its template-generated credential files before they are bind-mounted.
+#: Read at call time, so a test can point it at a temporary directory.
+_STAGING_ROOT = "/tmp"
+
+
+def _staging_path(filename: str) -> Path:
+    """`_STAGING_ROOT/<filename>`, proven to stay inside the staging root.
+
+    Every staging file name embeds the agent name, which is caller input and is
+    only sanitized when the caller does not pass `skip_name_sanitization`. The
+    barrier is the shape CodeQL's `py/path-injection` query recognises: the base
+    is normalised and given a trailing separator (so a sibling sharing its
+    prefix is outside it), the joined path is normalised and must start with it.
+    A NUL byte survives both, so it is refused by name.
+
+    A staging name is one path component (`agent-<name>` plus a separator-free
+    suffix), so a separator in it is refused too: `agent-x/../agent-victim-creds`
+    normalises to agent `victim`'s own staging directory, which is inside the
+    root, so containment alone would let one agent's name overwrite another's
+    files. No legitimate agent name carries one: `sanitize_agent_name` maps it
+    away, and Docker refuses it in the `agent-<name>` container name.
+
+    Raises `HTTPException(400)` with code `INVALID_AGENT_NAME`.
+    """
+    refusal = HTTPException(
+        status_code=400,
+        detail={
+            "error": (
+                "The agent name is not a plain name: it must be a single path "
+                "component, with no path separator or NUL byte."
+            ),
+            "code": "INVALID_AGENT_NAME",
+        },
+    )
+    if "\x00" in filename:
+        raise refusal
+    if os.sep in filename or (os.altsep and os.altsep in filename):
+        raise refusal
+    base = os.path.join(os.path.normpath(str(_STAGING_ROOT)), "")
+    fullpath = os.path.normpath(os.path.join(base, filename))
+    if not fullpath.startswith(base):
+        raise refusal
+    return Path(fullpath)
 
 
 def _fork_destination_in_use_message(destination: str, bound_agent: str, username: str) -> str:
@@ -2014,7 +2061,10 @@ def _stage_config_files(
                 },
             )
 
-    cred_files_dir = Path(f"/tmp/agent-{config.name}-creds")
+    # All three are proven inside the staging root before the first write.
+    cred_files_dir = _staging_path(f"agent-{config.name}-creds")
+    config_path = _staging_path(f"agent-{config.name}.yaml")
+    credentials_path = _staging_path(f"agent-{config.name}-credentials.json")
     cred_files_dir.mkdir(exist_ok=True)
 
     # Write template-generated files (.env, .mcp.json, etc.)
@@ -2035,11 +2085,9 @@ def _stage_config_files(
         }
     }
 
-    config_path = Path(f"/tmp/agent-{config.name}.yaml")
     with open(config_path, "w") as f:
         yaml.dump(agent_config, f)
 
-    credentials_path = Path(f"/tmp/agent-{config.name}-credentials.json")
     with open(credentials_path, "w") as f:
         json.dump({}, f)  # CRED-002: Empty credentials, injected after creation
 
@@ -2634,7 +2682,6 @@ async def _broadcast_agent_created(agent_status: AgentStatus, ws_manager) -> Non
 
 _BUNDLED_AVATAR_NAMES = ("avatar.webp", "avatar.png")
 _BUNDLED_AVATAR_MAX_BYTES = 2 * 1024 * 1024
-_AVATAR_DIR = Path("/data/avatars")  # routers/avatar.py AVATAR_DIR
 
 
 def _install_bundled_avatar(config: AgentConfig) -> None:
@@ -2650,13 +2697,13 @@ def _install_bundled_avatar(config: AgentConfig) -> None:
         return
     # Both paths come from request fields. `_resolve_local_template_dir` and
     # agent-name validation already contain them, but CodeQL's
-    # `py/path-injection` can't follow those callees — so each final path is
-    # normalized and prefix-checked right here (the `routers/avatar.py
-    # _avatar_path` barrier), as plain strings with no Path rebuild after it.
+    # `py/path-injection` can't follow those callees — so the destination goes
+    # through the avatar store's own barrier (`utils.avatar_paths`), and the
+    # source is normalized and prefix-checked right here, as a plain string
+    # with no Path rebuild after it.
     template_roots = tuple(os.path.join(str(r.resolve()), "") for r in _LOCAL_TEMPLATE_ROOTS)
-    avatar_root = os.path.join(str(_AVATAR_DIR), "")
-    dest = os.path.normpath(os.path.join(avatar_root, f"{config.name}.webp"))
-    if not dest.startswith(avatar_root):
+    dest = avatar_paths.avatar_path_or_none(config.name, ".webp")
+    if dest is None:
         return
     template_dir = str(_resolve_local_template_dir(config.template[6:]))
     for filename in _BUNDLED_AVATAR_NAMES:
@@ -2674,7 +2721,7 @@ def _install_bundled_avatar(config: AgentConfig) -> None:
         with Image.open(io.BytesIO(data)) as img:
             if img.width * img.height > 4096 * 4096:
                 raise ValueError(f"bundled avatar is {img.width}x{img.height}, max 4096x4096")
-        os.makedirs(avatar_root, exist_ok=True)
+        avatar_paths.ensure_avatar_store()
         with open(dest, "wb") as f:
             f.write(optimize_avatar(data))
         logger.info(f"[AVATAR-003] Installed bundled avatar from {config.template} for {config.name}")
