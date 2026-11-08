@@ -29,8 +29,10 @@ A schedule run carries no `source_user_id`: the person behind it is the
 schedule's creator (`agent_schedules.owner_id`). A share holder may create a
 schedule (and mint its webhook), so rating every schedule run as `owner` would
 let them run their own prompt as an owner-tier turn. The creator is rated like
-any other person; a schedule that cannot be found, or that belongs to another
-agent, fails closed to `share`; one with no recorded creator is the owner's.
+any other person; one with no recorded creator is the owner's. A schedule that
+cannot be read (gone, another agent's, or a failed read) has no known creator,
+so the run fails closed to a shared `person` with no account: never a visitor,
+whom `visitor_shell` would give the shell and the owner-tier routes (#4281).
 
 A Workspace turn carries no `source_user_id` either: it is stamped with the
 signed-in person's email (`source_channel="portal"`). That email is the
@@ -255,7 +257,8 @@ def turn_actor(db, agent_name: str, execution_id: Optional[str] = None, *,
         has_schedule, schedule = _schedule_of(db, agent_name, execution)
         if has_schedule:
             if schedule is None:
-                return SHARE, VISITOR, None
+                # No known creator: a shared person, never a visitor (#4281).
+                return SHARE, PERSON, None
             creator = _field(schedule, "owner_id")
             if creator is None:
                 # No recorded creator: the owner's alone (the webhook rule, ent#875).

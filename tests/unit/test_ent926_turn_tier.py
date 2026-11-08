@@ -179,18 +179,49 @@ def test_a_schedule_the_owner_created_runs_at_owner_tier():
     assert t.turn_actor(db, AGENT, "e1") == ("owner", None, None)
 
 
-def test_a_schedule_that_is_gone_fails_closed():
-    from services import turn_tier_service as t
-    db = _sched_db(creator=False, creator_user=None, can_share=False)
-    assert t.turn_actor(db, AGENT, "e1") == ("share", "visitor", None)
+def _unreadable_schedule_db(how, trigger):
+    """A schedule-backed run whose schedule cannot be read, with the owner's
+    `visitor_shell` switch ON, the setting under which a visitor has the shell."""
+    db = _sched_db(creator=1, creator_user={"username": "owner", "role": "user"}, can_share=True,
+                   trigger=trigger)
+    if how == "gone":
+        db.get_schedule.return_value = None
+    elif how == "another_agents":  # ent#875: not this agent's, so not its creator's
+        db.get_schedule.return_value = SimpleNamespace(agent_name="agent-b", owner_id=1)
+    else:
+        db.get_schedule.side_effect = RuntimeError("db down")
+    db.get_guardrails_config.return_value = {"visitor_shell": True}
+    return db
 
 
-def test_a_schedule_of_another_agent_fails_closed():
-    """ent#875: a run naming a schedule that is not this agent's is not its creator's."""
+_UNREADABLE = ["gone", "another_agents", "read_error"]
+_SCHEDULE_TRIGGERS = ["schedule", "webhook", "retry", "validation", "manual"]
+
+
+@pytest.mark.parametrize("trigger", _SCHEDULE_TRIGGERS)
+@pytest.mark.parametrize("how", _UNREADABLE)
+def test_a_schedule_backed_turn_whose_schedule_cannot_be_read_is_never_owner_capable(how, trigger):
+    """#4281: such a run has no known creator. It rates a shared person with no
+    account, never a visitor, so `visitor_shell` cannot give it the shell, and
+    the agent key's owner-tier routes and standing work stay fenced. It used to
+    rate a visitor, which with the switch on (the default) had both (ent#926)."""
     from services import turn_tier_service as t
-    db = _sched_db(creator=1, creator_user={"username": "owner", "role": "user"}, can_share=True)
-    db.get_schedule.return_value = SimpleNamespace(agent_name="agent-b", owner_id=1)
-    assert t.turn_actor(db, AGENT, "e1") == ("share", "visitor", None)
+    db = _unreadable_schedule_db(how, trigger)
+    tier, kind, person = t.turn_actor(db, AGENT, "e1")
+    assert (tier, kind, person) == ("share", "person", None)
+    assert t.shell_allowed(db, AGENT, tier, kind) is False
+    assert t.restricts_standing_work(db, AGENT, tier, kind) is True
+    assert t.turn_person(db, AGENT, db.get_execution.return_value) is None
+
+
+@pytest.mark.parametrize("how", _UNREADABLE)
+def test_the_route_answers_no_shell_for_a_turn_whose_schedule_cannot_be_read(how):
+    """What the hook and the Gemini/Codex runtimes act on. The switch is on and
+    reaches this code: a channel turn on the same db does get the shell."""
+    db = _unreadable_schedule_db(how, "webhook")
+    assert _call(tier_db=db) == {"tier": "share", "kind": "person", "shell": False}
+    db.get_execution.return_value = _exec(user_id=None, triggered_by="slack")
+    assert _call(tier_db=db) == {"tier": "share", "kind": "visitor", "shell": True}
 
 
 def test_a_schedule_with_no_recorded_creator_is_the_owners():

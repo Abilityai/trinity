@@ -572,3 +572,27 @@ def test_an_unreadable_ledger_fails_closed(monkeypatch, visitor_shell):
     monkeypatch.setattr(dep.db, "get_running_turn_attribution", boom)
     with pytest.raises(dep.HTTPException):
         _through_auth(monkeypatch, *OWNER_ROUTE)
+
+
+# ---- #4281: a schedule-backed turn whose schedule cannot be read ---------------------
+
+
+@pytest.mark.parametrize("headers", [
+    {"X-Trinity-Execution-Id": "e-gone-cron"},
+    {},                                         # no header: the ledger decides
+])
+def test_a_schedule_backed_turn_whose_schedule_cannot_be_read_is_fenced_through_auth(
+        monkeypatch, visitor_shell, headers):
+    """It has no known creator, so it is fenced like a shared person's turn, with
+    the owner's `visitor_shell` switch ON. The switch reaches this code: a channel
+    turn under the same setting is not fenced."""
+    visitor_shell["visitor_shell"] = True
+    _running("e-visitor")
+    assert _through_auth(monkeypatch, *OWNER_ROUTE).agent_name == AGENT
+    _running("e-gone-cron")
+    with pytest.raises(dep.HTTPException) as exc:
+        _through_auth(monkeypatch, *OWNER_ROUTE, headers=headers)
+    assert exc.value.status_code == 403
+    with pytest.raises(dep.HTTPException) as exc:
+        dep._enforce_standing_work_fence(_Req("POST", "/api/agents/agent-a/reminders"), _key("e-gone-cron"))
+    assert exc.value.status_code == 403
