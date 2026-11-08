@@ -119,9 +119,34 @@ def _code(r):
     return getattr(r, "status_code", None)
 
 
+# #4281: why a schedule-backed shared turn is one; null on every other turn.
+NO_SCHEDULE = {"cause": None, "schedule": None, "creator": None, "remedy": None}
+
+
 def test_the_route_answers_the_agents_own_key():
-    # A shared person: share tier, no shell. The answer names no person.
-    assert _call() == {"tier": "share", "kind": "person", "shell": False}
+    # A shared person: share tier, no shell. The answer names no person, and a
+    # turn that is not a schedule's carries no schedule cause (#4281).
+    assert _call() == {"tier": "share", "kind": "person", "shell": False, **NO_SCHEDULE}
+
+
+def test_the_route_names_why_a_schedule_backed_turn_is_shared():
+    """#4281: the hook's refusal can name the schedule and its creator."""
+    db = _sched_db(creator=9, creator_user={"username": "mate@example.com", "role": "operator",
+                                            "name": ""}, can_share=False)
+    db.get_schedule.return_value.name = "Morning brief"
+    db.get_agent_owner.return_value = {"owner_username": "owner"}
+    assert _call(tier_db=db) == {"tier": "share", "kind": "person", "shell": False,
+                                 "cause": "creator_not_owner_tier", "schedule": "Morning brief",
+                                 "creator": "mate", "remedy": "recreate"}
+
+
+def test_an_owner_rated_schedule_turn_carries_no_cause():
+    db = _sched_db(creator=1, creator_user={"username": "owner", "role": "user"}, can_share=True)
+    db.validate_mcp_api_key.return_value = {"scope": "agent", "agent_name": AGENT}
+    from routers import agents
+    with patch.object(agents, "db", db):
+        answer = asyncio.run(agents.agent_execution_turn_tier(AGENT, "e1", _Request("Bearer trinity_mcp_k")))
+    assert answer == {"tier": "owner", "kind": None, "shell": True, **NO_SCHEDULE}
 
 
 def test_the_route_needs_a_bearer_token():
@@ -219,9 +244,10 @@ def test_the_route_answers_no_shell_for_a_turn_whose_schedule_cannot_be_read(how
     """What the hook and the Gemini/Codex runtimes act on. The switch is on and
     reaches this code: a channel turn on the same db does get the shell."""
     db = _unreadable_schedule_db(how, "webhook")
-    assert _call(tier_db=db) == {"tier": "share", "kind": "person", "shell": False}
+    assert _call(tier_db=db) == {"tier": "share", "kind": "person", "shell": False,
+                                 **NO_SCHEDULE, "cause": "schedule_unreadable"}
     db.get_execution.return_value = _exec(user_id=None, triggered_by="slack")
-    assert _call(tier_db=db) == {"tier": "share", "kind": "visitor", "shell": True}
+    assert _call(tier_db=db) == {"tier": "share", "kind": "visitor", "shell": True, **NO_SCHEDULE}
 
 
 def test_a_schedule_with_no_recorded_creator_is_the_owners():
@@ -271,7 +297,7 @@ def test_an_unreadable_setting_keeps_the_default():
 def test_the_route_tells_a_visitor_its_shell_answer():
     db = _db(execution=_exec(user_id=None, triggered_by="telegram"))
     db.get_guardrails_config.return_value = {"visitor_shell": False}
-    assert _call(tier_db=db) == {"tier": "share", "kind": "visitor", "shell": False}
+    assert _call(tier_db=db) == {"tier": "share", "kind": "visitor", "shell": False, **NO_SCHEDULE}
 
 
 # ---- a refused turn is a 403, never a retryable 503 (found live 2026-10-19) -------------

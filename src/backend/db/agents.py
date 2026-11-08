@@ -325,6 +325,39 @@ class AgentOperations(
             ).first()
             return row is not None
 
+    def get_agent_owners(self, agent_names: List[str]) -> Dict[str, Dict]:
+        """`get_agent_owner` for many agents in ONE query (#4281: the fleet
+        schedule read). Same row shape and the same INNER join on `users`, so
+        an agent whose owner has no user row has no owner here either; an agent
+        with no owner on record is absent."""
+        names = list(dict.fromkeys(n for n in agent_names if n))
+        if not names:
+            return {}
+        stmt = (
+            select(
+                agent_ownership.c.id,
+                agent_ownership.c.agent_name,
+                agent_ownership.c.owner_id,
+                users.c.username.label("owner_username"),
+                agent_ownership.c.created_at,
+                func.coalesce(agent_ownership.c.is_system, 0).label("is_system"),
+            )
+            .select_from(
+                agent_ownership.join(users, agent_ownership.c.owner_id == users.c.id)
+            )
+            .where(
+                agent_ownership.c.agent_name.in_(names),
+                agent_ownership.c.deleted_at.is_(None),
+            )
+        )
+        with get_engine().connect() as conn:
+            owners = {}
+            for row in conn.execute(stmt).mappings():
+                result = dict(row)
+                result["is_system"] = bool(result.get("is_system", 0))
+                owners.setdefault(result["agent_name"], result)
+            return owners
+
     def get_agent_owner(self, agent_name: str) -> Optional[Dict]:
         """Get the owner of an agent, including is_system flag.
 

@@ -1119,6 +1119,9 @@ class DatabaseManager:
     def get_user_by_id(self, user_id: int):
         return self._user_ops.get_user_by_id(user_id)
 
+    def get_users_by_ids(self, user_ids):
+        return self._user_ops.get_users_by_ids(user_ids)
+
     def get_user_by_email(self, email: str):
         return self._user_ops.get_user_by_email(email)
 
@@ -1205,6 +1208,9 @@ class DatabaseManager:
 
     def get_agent_owner(self, agent_name: str):
         return self._agent_ops.get_agent_owner(agent_name)
+
+    def get_agent_owners(self, agent_names):
+        return self._agent_ops.get_agent_owners(agent_names)
 
     def get_agents_by_owner(self, owner_username: str):
         return self._agent_ops.get_agents_by_owner(owner_username)

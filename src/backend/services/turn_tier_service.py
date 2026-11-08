@@ -61,10 +61,20 @@ Two more answers are `owner` with a kind, so the person stays on record
 
 A turn such an answer dispatches carries that person forward
 (`turn_origin_user_id`), and the delegation rule decides again at every hop.
+
+What tier a schedule's runs get, and why, has one home: `schedule_run_tier`
+(#4281). `turn_actor` reads its tier half, so the turn's rating and every
+schedule read agree. The cause is a separate, total function that the fences
+never call: the fences run `turn_actor` on every agent-key request, and a new
+lookup that can raise must not become a 500 there.
 """
-from typing import Callable, Optional, Tuple
+import logging
+import unicodedata
+from typing import Callable, Dict, Iterable, NamedTuple, Optional, Tuple
 
 from config import PORTAL_SOURCE_CHANNEL
+
+logger = logging.getLogger(__name__)
 
 OWNER = "owner"
 SHARE = "share"
@@ -221,6 +231,300 @@ def _schedule_of(db, agent_name: str, execution):
     return True, schedule
 
 
+# --- what tier a schedule's runs get, and why (#4281) ---------------------------
+
+# Why a schedule's runs have the tier they have. Owner tier:
+CREATOR_OWNER_TIER = "creator_owner_tier"      # the creator is an admin or the agent's owner
+NO_RECORDED_CREATOR = "no_recorded_creator"    # `owner_id` is NULL (no live row has one)
+# A shared person:
+CREATOR_NOT_OWNER_TIER = "creator_not_owner_tier"  # the creator is someone else
+AGENT_HAS_NO_OWNER = "agent_has_no_owner"      # no owner on record (its user row is gone)
+CREATOR_MISSING = "creator_missing"            # no user row for the creator
+SCHEDULE_UNREADABLE = "schedule_unreadable"    # run time only: the schedule cannot be read
+# The cause could not be looked up. The tier is computed without it and stands.
+CAUSE_UNKNOWN = "unknown"
+
+# What fixes a shared-person rating. `recreate` until the take-over route
+# exists; an agent with no owner on record 404s every owner route, admins
+# included, so only restoring its owner helps there.
+REMEDY_RECREATE = "recreate"
+REMEDY_REPAIR_AGENT_OWNER = "repair_agent_owner"
+_REMEDIES = {
+    CREATOR_NOT_OWNER_TIER: REMEDY_RECREATE,
+    CREATOR_MISSING: REMEDY_RECREATE,
+    AGENT_HAS_NO_OWNER: REMEDY_REPAIR_AGENT_OWNER,
+}
+
+SCHEDULE_LABEL_MAX = 80   # a schedule name, as the hook may show it to the model
+CREATOR_LABEL_MAX = 64    # a creator's name, as the hook may show it to the model
+READ_LABEL_MAX = 254      # a creator's name on a schedule read (an email username fits)
+
+
+class RunTier(NamedTuple):
+    """What tier a schedule's runs get, and why.
+
+    `kind` is `person` for a share tier, `member` for an owner tier the
+    registered provider gives (trinity-enterprise#1148), and None for the
+    owner's own. `creator_id` is the schedule's `owner_id` (None when it has
+    none, or the schedule could not be read), on an owner row too: it names the
+    creator, not the person a turn is for, which `turn_actor` keeps None on the
+    owner's own row."""
+    tier: str
+    kind: Optional[str]
+    cause: str
+    creator_id: Optional[int]
+
+
+def _schedule_tier(db, agent_name: str, schedule) -> Tuple[str, Optional[str], Optional[int]]:
+    """The tier half of `schedule_run_tier`: `(tier, kind, creator id)`.
+
+    The one place the creator rule lives; `turn_actor` reads it. It raises when
+    a lookup raises, as `turn_actor` always has."""
+    if schedule is None or _field(schedule, "agent_name") != agent_name:
+        # No known creator: a shared person, never a visitor (#4281).
+        return SHARE, PERSON, None
+    creator = _field(schedule, "owner_id")
+    if creator is None:
+        # No recorded creator: the owner's alone (the webhook rule, ent#875).
+        return OWNER, None, None
+    # Rated like any other person: the owner or an admin, then the registered
+    # provider's member (trinity-enterprise#1148), else a shared person.
+    tier, kind, _ = _person_tier(db, creator, agent_name)
+    return tier, kind, _int_or_none(creator)
+
+
+def schedule_run_cause(db, agent_name: str, schedule, tier: str) -> str:
+    """Why a schedule rated `tier` (from `_schedule_tier`) has that tier.
+
+    Total: a lookup that fails gives `unknown` and never raises, so it cannot
+    change the tier or fail a read. Never called on the `turn_actor` path."""
+    try:
+        if schedule is None or _field(schedule, "agent_name") != agent_name:
+            return SCHEDULE_UNREADABLE
+        creator = _field(schedule, "owner_id")
+        if creator is None:
+            return NO_RECORDED_CREATOR
+        if tier == OWNER:
+            return CREATOR_OWNER_TIER
+        uid = _int_or_none(creator)
+        if uid is None or not db.get_user_by_id(uid):
+            return CREATOR_MISSING
+        if db.get_agent_owner(agent_name) is None:
+            return AGENT_HAS_NO_OWNER
+        return CREATOR_NOT_OWNER_TIER
+    except Exception as exc:  # noqa: BLE001 - total by contract; the tier stands
+        logger.warning("[#4281] schedule run cause lookup failed for agent %s: %s", agent_name, exc)
+        return CAUSE_UNKNOWN
+
+
+def schedule_run_tier(db, agent_name: str, schedule) -> RunTier:
+    """What tier the runs of `schedule` get on `agent_name`, and why.
+
+    `schedule` is a schedule row (anything with `agent_name` and `owner_id`), or
+    None for one that cannot be read. Computed live, so a schedule that broke
+    after it was created (the creator lost admin, the agent's owner record went)
+    rates as it is now. `db` is the database or a `RunTierLookups` over it.
+
+    Raises exactly when `turn_actor` would for the same schedule (the tier
+    half is shared); the cause never raises (`schedule_run_cause`)."""
+    tier, kind, creator = _schedule_tier(db, agent_name, schedule)
+    return RunTier(tier, kind, schedule_run_cause(db, agent_name, schedule, tier), creator)
+
+
+def schedule_remedy(cause: Optional[str]) -> Optional[str]:
+    """The code of what fixes a shared-person rating, or None."""
+    return _REMEDIES.get(cause)
+
+
+def _is_unprintable(ch: str) -> bool:
+    category = unicodedata.category(ch)
+    return category[0] == "C" or category in ("Zl", "Zp")
+
+
+def bounded_label(value, limit: int) -> Optional[str]:
+    """`value` with control and format characters removed, whitespace runs
+    folded to one space, cut to `limit` characters; None when nothing is left."""
+    if not isinstance(value, str):
+        return None
+    text = " ".join("".join(" " if _is_unprintable(ch) else ch for ch in value).split())
+    return text[:limit].rstrip() or None
+
+
+def creator_label(user: Optional[Dict], *, for_turn: bool) -> Optional[str]:
+    """How to name a schedule's creator: the display name, else the username.
+
+    `for_turn` is the hook's answer, which anything holding the agent's key may
+    read: an email (a name or a username) loses its domain there, and the label
+    is cut shorter. None when there is no user."""
+    if not user:
+        return None
+    limit = CREATOR_LABEL_MAX if for_turn else READ_LABEL_MAX
+    for value in (user.get("name"), user.get("username")):
+        if for_turn and isinstance(value, str) and "@" in value:
+            value = value.split("@", 1)[0]
+        label = bounded_label(value, limit)
+        if label:
+            return label
+    return None
+
+
+def turn_schedule_detail(db, agent_name: str, execution, tier: str) -> Dict[str, Optional[str]]:
+    """The schedule fields of a turn-tier answer: `cause`, `schedule` (its
+    name), `creator` and `remedy` for a schedule-backed shared turn; all None
+    for any other turn. Never raises."""
+    detail: Dict[str, Optional[str]] = {"cause": None, "schedule": None, "creator": None, "remedy": None}
+    if tier != SHARE or _field(execution, "source_user_id") is not None:
+        return detail
+    has_schedule, schedule = _schedule_of(db, agent_name, execution)
+    if not has_schedule:
+        return detail
+    cause = schedule_run_cause(db, agent_name, schedule, tier)
+    detail["cause"] = cause
+    detail["remedy"] = schedule_remedy(cause)
+    if schedule is not None:
+        detail["schedule"] = bounded_label(_field(schedule, "name"), SCHEDULE_LABEL_MAX)
+    if cause in (CREATOR_NOT_OWNER_TIER, AGENT_HAS_NO_OWNER):
+        try:
+            detail["creator"] = creator_label(
+                db.get_user_by_id(_int_or_none(_field(schedule, "owner_id"))), for_turn=True)
+        except Exception as exc:  # noqa: BLE001 - a label is optional; the answer stands
+            logger.warning("[#4281] creator label lookup failed for agent %s: %s", agent_name, exc)
+    return detail
+
+
+def turn_tier_answer(db, agent_name: str, execution_id: Optional[str]) -> Optional[Dict]:
+    """The turn-tier route's answer, or None for a turn that is not this
+    agent's (the route's 404).
+
+    `shell` also answers whether a Gemini/Codex runtime may run the turn. No
+    person id is part of the answer. A schedule-backed shared turn names its
+    creator by label only (display name, else the username without any email
+    domain): the refusal text needs it, and only the agent's own key reads it."""
+    execution = db.get_execution(execution_id) if execution_id else None
+    tier, kind, _ = turn_actor(db, agent_name, execution=execution)
+    if tier == UNKNOWN:
+        return None
+    answer: Dict = {"tier": tier, "kind": kind, "shell": shell_allowed(db, agent_name, tier, kind)}
+    answer.update(turn_schedule_detail(db, agent_name, execution, tier))
+    return answer
+
+
+class RunTierLookups:
+    """The four lookups the rating reads, memoised for one request.
+
+    `_user_tier` and `schedule_run_cause` run on it unchanged, so a list of
+    schedules costs one user read per distinct creator and one owner read per
+    agent. `preload` fills it in two bulk queries for a fleet read (#1265
+    removed exactly this N+1 from `GET /api/ops/schedules`).
+
+    `can_user_share_agent` is the database's rule (`db/agent_settings/
+    sharing.py`) over the memo: an admin, or the username `get_agent_owner`
+    names. A parity test drives both over one table of users."""
+
+    def __init__(self, db):
+        self._db = db
+        self._users: Dict[int, Optional[Dict]] = {}
+        self._by_username: Dict[str, Optional[Dict]] = {}
+        self._owners: Dict[str, Optional[Dict]] = {}
+
+    def _remember(self, user_id, user: Optional[Dict]) -> None:
+        self._users[user_id] = user
+        if user and isinstance(user.get("username"), str):
+            self._by_username[user["username"]] = user
+
+    def preload(self, agent_names: Iterable[str], creator_ids: Iterable) -> None:
+        agents = [a for a in dict.fromkeys(agent_names) if a and a not in self._owners]
+        if agents:
+            owners = self._db.get_agent_owners(agents)
+            for agent in agents:
+                self._owners[agent] = owners.get(agent)
+        ids = [i for i in dict.fromkeys(_int_or_none(c) for c in creator_ids)
+               if i is not None and i not in self._users]
+        if ids:
+            users = self._db.get_users_by_ids(ids)
+            for uid in ids:
+                self._remember(uid, users.get(uid))
+
+    def get_user_by_id(self, user_id):
+        if user_id not in self._users:
+            self._remember(user_id, self._db.get_user_by_id(user_id))
+        return self._users[user_id]
+
+    def get_user_by_username(self, username):
+        if username not in self._by_username:
+            self._by_username[username] = self._db.get_user_by_username(username)
+        return self._by_username[username]
+
+    def get_agent_owner(self, agent_name):
+        if agent_name not in self._owners:
+            self._owners[agent_name] = self._db.get_agent_owner(agent_name)
+        return self._owners[agent_name]
+
+    def can_user_share_agent(self, username, agent_name) -> bool:
+        user = self.get_user_by_username(username)
+        if not user:
+            return False
+        if user.get("role") == "admin":
+            return True
+        owner = self.get_agent_owner(agent_name)
+        return bool(owner and owner.get("owner_username") == username)
+
+
+# What a schedule read says about its runs (`ScheduleResponse.runs_as*`).
+RUNS_AS = {OWNER: "owner", SHARE: "shared_person"}
+_RESTRICTED = "no shell commands and no tools the owner added"
+_RECREATE = ("To give them the owner's access, the agent's owner can create the schedule again "
+             "as their own and disable this one.")
+RUNS_AS_MESSAGES = {
+    CREATOR_OWNER_TIER: "Its runs have the owner's access: it was created by the agent's owner or an admin.",
+    NO_RECORDED_CREATOR: "Its runs have the owner's access: it has no recorded creator, so it is the owner's.",
+    CREATOR_NOT_OWNER_TIER: (
+        "Its runs have the access of the person who created it, who is not the agent's owner or an "
+        f"admin: {_RESTRICTED}. {_RECREATE}"),
+    CREATOR_MISSING: (
+        "The account that created it no longer exists, so its runs have a shared person's access: "
+        f"{_RESTRICTED}. {_RECREATE}"),
+    AGENT_HAS_NO_OWNER: (
+        "The agent has no owner on record, so the runs of a schedule an admin did not create have a "
+        f"shared person's access: {_RESTRICTED}. An admin needs to restore the agent's owner."),
+    CAUSE_UNKNOWN: (
+        f"Its runs have a shared person's access: {_RESTRICTED}. Trinity could not check why."),
+}
+
+
+def schedule_read_fields(lookups, agent_name: str, schedule, *, show_creator: bool,
+                         viewer_id) -> Dict:
+    """The run-tier fields of a schedule read: `runs_as`, `runs_as_reason`,
+    `created_by_you` and `created_by`.
+
+    `runs_as` is None when the tier could not be computed, never a guessed
+    `owner`. `created_by` is filled only when `show_creator` (the caller's
+    tier decides that, not this function). Never raises."""
+    creator = _int_or_none(_field(schedule, "owner_id"))
+    fields: Dict = {
+        "runs_as": None,
+        "runs_as_reason": None,
+        "created_by_you": creator is not None and creator == _int_or_none(viewer_id),
+        "created_by": None,
+    }
+    try:
+        rated = schedule_run_tier(lookups, agent_name, schedule)
+    except Exception as exc:  # noqa: BLE001 - shown as "not computed", never as owner
+        logger.warning("[#4281] could not rate schedule %s on %s: %s",
+                       _field(schedule, "id"), agent_name, exc)
+        rated = None
+    if rated is not None and rated.tier in RUNS_AS:
+        fields["runs_as"] = RUNS_AS[rated.tier]
+        fields["runs_as_reason"] = {"code": rated.cause,
+                                    "message": RUNS_AS_MESSAGES.get(rated.cause, RUNS_AS_MESSAGES[CAUSE_UNKNOWN])}
+    if show_creator and creator is not None:
+        try:
+            fields["created_by"] = creator_label(lookups.get_user_by_id(creator), for_turn=False)
+        except Exception as exc:  # noqa: BLE001 - a label is optional; the read stands
+            logger.warning("[#4281] creator label lookup failed on %s: %s", agent_name, exc)
+    return fields
+
+
 def _workspace_person(db, execution) -> Tuple[bool, Optional[int]]:
     """`(is_workspace_turn, user id)` for a Workspace turn: the platform account
     of the signed-in person it was stamped with, or None when that email has no
@@ -256,14 +560,10 @@ def turn_actor(db, agent_name: str, execution_id: Optional[str] = None, *,
         # with may create a schedule, and its runs must not be the owner's.
         has_schedule, schedule = _schedule_of(db, agent_name, execution)
         if has_schedule:
-            if schedule is None:
-                # No known creator: a shared person, never a visitor (#4281).
-                return SHARE, PERSON, None
-            creator = _field(schedule, "owner_id")
-            if creator is None:
-                # No recorded creator: the owner's alone (the webhook rule, ent#875).
-                return OWNER, None, None
-            return _person_tier(db, creator, agent_name)
+            tier, kind, creator = _schedule_tier(db, agent_name, schedule)
+            # The person a share turn, or a member's owner turn, is for. The
+            # owner's own turn names none: the creator is not who it acts for.
+            return tier, kind, (creator if kind is not None else None)
         is_workspace, person = _workspace_person(db, execution)
         if is_workspace:
             if person is None:
