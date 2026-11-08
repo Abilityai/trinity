@@ -4161,8 +4161,10 @@ to localStorage in the clear.
   options, and never for an ask addressed to `operator` on purpose (the room's line is
   trinity-enterprise#1135). An ask addressed `to: project` reaches ONE person resolved from the
   turn's own chat or room project — the steward when a reachable person, else the creator —
-  even off the agent's roster; only they answer it (an admin may cancel), its card says *To
-  you as this project's steward* (or *creator*), and a steward change moves it. It never
+  even off the agent's roster (listed, counted and answered by address; Discuss is refused
+  `not_discussable` off the roster); only they answer it (an admin may cancel), its card says
+  *To you as this project's steward* (or *creator*), and a steward change moves it and
+  re-stamps the seat. It never
   falls through: `project_unavailable`, `not_in_project_turn` or `project_unreachable` refuse
   it with nothing filed.
 - **Known properties (stated, not bugs)**:

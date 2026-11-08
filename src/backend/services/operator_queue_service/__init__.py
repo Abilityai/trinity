@@ -747,6 +747,7 @@ from .rows import (  # noqa: E402,F401
     is_owner_only,
     is_person_tag,
     is_platform_minted,
+    is_project_reach,
 )
 # alerts: the bounded-alert delegates and their outcomes, which callers outside
 # the package (and the #3254 suite) read through the package.

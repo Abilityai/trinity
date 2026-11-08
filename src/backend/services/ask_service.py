@@ -677,7 +677,8 @@ def _people_list(values: Optional[Iterable[Any]]) -> List[str]:
 
 
 def readdress_item(ask_id: str, people: Iterable[str], single: Optional[str], *,
-                   reason: str, trigger: bool = True, attach_chat: bool = True) -> bool:
+                   reason: str, trigger: bool = True, attach_chat: bool = True,
+                   platform_context: Optional[Mapping[str, Any]] = None) -> bool:
     """The PLATFORM rewrites ONE pending row's audience
     (trinity-enterprise#1095): `resolved_to` becomes `people`, the single
     Workspace addressee becomes `single`. The row is not ended and its
@@ -700,6 +701,11 @@ def readdress_item(ask_id: str, people: Iterable[str], single: Optional[str], *,
     attaches no Main for the new addressee — a project-addressed row moves to
     a steward or creator who may be off the agent's roster, and a Main is a
     roster relationship (the ent#981 reason the gate skips it).
+
+    `platform_context` (trinity-enterprise#1134) re-stamps platform keys
+    (`_PLATFORM_CONTEXT_KEYS` only; anything else is ignored) in the same
+    compare-and-set — a project row moved from its steward to its creator
+    carries the seat that picked the new reader, never the old one's.
 
     `reason` is one of `PLATFORM_READDRESS_REASONS`. An unchanged audience
     writes, audits and announces nothing. Per changed row: one audit row (ids
@@ -726,18 +732,22 @@ def readdress_item(ask_id: str, people: Iterable[str], single: Optional[str], *,
 
     raw_context = row.get("context")
     context: Optional[Dict[str, Any]] = None
-    if old_single != new_single:
+    stamps = {k: v for k, v in (platform_context or {}).items() if k in oqs._PLATFORM_CONTEXT_KEYS}
+    if old_single != new_single or stamps:
         try:
             parsed = json.loads(raw_context) if raw_context else {}
         except ValueError:
             parsed = {}
         context = dict(parsed) if isinstance(parsed, dict) else {}
+    if old_single != new_single:
         for key in (oqs._WORKSPACE_THREAD_KEY, oqs._WORKSPACE_TURN_KEY, oqs._WORKSPACE_DISCUSSION_KEY):
             context.pop(key, None)
         if new_single and attach_chat:
             thread, _ = oqs._workspace_attachment(row["agent_name"], new_single)
             if thread:
                 context[oqs._WORKSPACE_THREAD_KEY] = thread
+    if context is not None:
+        context.update(stamps)
 
     changed = bool(db.readdress_operator_queue_item(
         ask_id, new_people, new_single,

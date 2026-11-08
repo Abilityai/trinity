@@ -135,9 +135,36 @@ def test_a_resolved_primary_gets_the_normal_ask_and_no_notice(world, real_db):
 
 def test_an_explicit_operator_ask_is_never_shown(world, real_db):
     chat = _chat(world.agent, PERSON)
-    _raise(world, "n1134-op", _turn(real_db, world.agent, chat), to="operator")
+    r = _raise(world, "n1134-op", _turn(real_db, world.agent, chat), to="operator")
 
     assert _notices(_read(PERSON, chat)) == []
+    # Never STAMPED either, not merely filtered on read: an explicit operator
+    # ask may be about the person, so the row carries no chat and no reason.
+    stored = world.db.get_operator_queue_item(r["id"])["context"] or {}
+    assert not {"workspace_session_id", "workspace_raised_in_turn",
+                "workspace_operators_reason"} & set(stored), stored
+
+
+def test_every_page_of_a_chat_read_has_one_total_and_at_most_its_size(world, real_db):
+    """The notices ride page 1 INSIDE its size and are counted on every page,
+    so the total never changes from page to page; the cursor pages the asks."""
+    from client_portal.asks import service
+    chat = _chat(world.agent, PERSON)
+    world.state["owner"] = PERSON
+    asks = [_raise(world, f"n1134-pg-{i}", _turn(real_db, world.agent, chat))["id"] for i in range(3)]
+    world.state["owner"] = None
+    fell = [_raise(world, f"n1134-pgn-{i}", _turn(real_db, world.agent, chat))["id"] for i in range(2)]
+
+    first = service.list_asks_page(PERSON, is_platform=False, chat_id=chat, limit=3)
+    second = service.list_asks_page(PERSON, is_platform=False, chat_id=chat, limit=3,
+                                    cursor=first.next_cursor)
+    assert first.total == second.total == 5
+    assert len(first.items) <= 3 and len(second.items) <= 3
+    assert second.next_cursor is None
+    seen = [a.id for a in first.items + second.items]
+    assert sorted(seen) == sorted(asks + fell) and len(seen) == len(set(seen))
+    assert sorted(n.id for n in _notices(first.items)) == sorted(fell)
+    assert _notices(second.items) == []
 
 
 def test_a_background_run_leaves_no_notice(world, real_db):

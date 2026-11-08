@@ -21,7 +21,13 @@ the assignments provider and the turn-context providers plug in. The sink:
 * fences the ANSWER to `resolved_to` (ruling T4; the ent#1042 class), while a
   cancel keeps every ask's rule; the receipt never names the person;
 * `readdress_item(attach_chat=False)` moves a row without creating a Main,
-  and `project_steward_changed` is a platform re-address reason.
+  and `project_steward_changed` is a platform re-address reason; a
+  `platform_context` re-stamps the seat in the same write;
+* the Workspace reaches the steward or creator BY ADDRESS — off the agent's
+  roster they list it (page, count), answer it, and are refused Discuss by
+  name (a discussion is a chat with the agent, which only the roster opens);
+  anyone else still gets nothing and the uniform 404 (`is_project_reach`, the
+  Python twin of the list's project arm).
 
 Harness: the unit island's per-process SQLite and the real sink (the ent#1007
 shape); the target resolver is a fake registered per test.
@@ -451,6 +457,21 @@ class TestReaddress:
         assert ask_service.may_end(row, _actor(people["creator"])) is True
         assert ask_service.may_end(row, _actor(people["steward"])) is False
 
+    def test_readdress_restamps_the_seat_in_the_same_write(self, real_db, agent, people, sink):
+        """Steward → creator: the moved row's card names the seat that picked
+        its NEW reader. Only platform keys are written."""
+        from client_portal.asks.service import _project
+        from services import ask_service
+        _register(_Resolver(people["steward"]))
+        ask_id = _raise(agent)["id"]
+        assert ask_service.readdress_item(
+            ask_id, [people["creator"]], people["creator"], reason=ask_service.PROJECT_STEWARD_CHANGED,
+            attach_chat=False, platform_context={"workspace_project_seat": "creator", "evil": 1}) is True
+        row = _row(real_db, ask_id)
+        assert row["context"]["workspace_project_seat"] == "creator"
+        assert "evil" not in row["context"] and row["context"][PROJECT_KEY] == PROJECT
+        assert _project(row, viewer_email=people["creator"]).destination == {"kind": "project", "seat": "creator"}
+
     def test_readdress_with_a_chat_still_attaches_main_by_default(self, real_db, agent, people, sink):
         """The ent#1095 behaviour for a role row is unchanged."""
         from services import ask_service
@@ -460,3 +481,124 @@ class TestReaddress:
                                           reason=ask_service.PROJECT_STEWARD_CHANGED) is True
         assert sink.mains == [(agent, people["creator"])]
         assert _row(real_db, ask_id)["context"][THREAD] == f"main-{people['creator']}"
+
+
+# ===========================================================================
+# The Workspace reaches the addressee by address (C1)
+# ===========================================================================
+
+@pytest.fixture
+def roster(monkeypatch):
+    """Who is on the agent's roster: nobody, unless a test adds them."""
+    import client_portal.service as portal
+    on = set()
+    monkeypatch.setattr(portal, "agent_on_roster",
+                        lambda agent_name, email, include_owned=False: (agent_name, email) in on)
+    return on
+
+
+def _inbox(email, **kw):
+    from client_portal.asks import service
+    return service.list_asks_page(email, is_platform=False, **kw)
+
+
+def _ask_error(fn, *a, **kw):
+    from client_portal.asks.service import AskError
+    with pytest.raises(AskError) as exc:
+        fn(*a, **kw)
+    return exc.value
+
+
+@pytest.mark.parametrize("seat", ["steward", "creator"])
+class TestTheReach:
+    def test_an_off_roster_addressee_lists_it_in_the_page_and_the_count(
+            self, real_db, agent, people, roster, seat):
+        _register(_Resolver(people[seat], seat=seat))
+        ask_id = _raise(agent, kind="approval")["id"]
+        page = _inbox(people[seat])
+        assert [a.id for a in page.items] == [ask_id]
+        assert page.total == 1
+        assert page.items[0].destination == {"kind": "project", "seat": seat}
+        # narrowed to the agent, as the Inbox's per-agent filter reads it
+        assert [a.id for a in _inbox(people[seat], agent_name=agent).items] == [ask_id]
+
+    def test_an_off_roster_addressee_answers_it(self, real_db, agent, people, roster, seat):
+        from client_portal.asks import service
+        _register(_Resolver(people[seat], seat=seat))
+        ask_id = _raise(agent, kind="approval")["id"]
+        out = service.answer_ask(ask_id, people[seat], False, "approve", None)
+        assert out.status == "answered"
+        row = _row(real_db, ask_id)
+        assert (row["status"], row["response"]) == ("responded", "approve")
+
+    def test_an_off_roster_addressee_is_refused_discuss_by_name(self, real_db, agent, people, roster, seat):
+        from client_portal.asks import service
+        _register(_Resolver(people[seat], seat=seat))
+        ask_id = _raise(agent, kind="approval")["id"]
+        exc = _ask_error(service.discuss_ask, ask_id, people[seat], False)
+        assert (exc.status_code, exc.code) == (422, "not_discussable")
+        assert people[seat] not in exc.detail
+        assert "workspace_discussion_id" not in (_row(real_db, ask_id)["context"] or {})
+
+    def test_on_the_roster_the_addressee_discusses_it(self, real_db, agent, people, roster, seat):
+        from client_portal.asks import service
+        roster.add((agent, people[seat]))
+        _register(_Resolver(people[seat], seat=seat))
+        ask_id = _raise(agent, kind="approval")["id"]
+        opened = service.discuss_ask(ask_id, people[seat], False)
+        assert opened.created is True and opened.chat_id
+
+    def test_anyone_else_sees_nothing_and_gets_the_uniform_404(self, real_db, agent, people, roster, seat):
+        from client_portal.asks import service
+        _register(_Resolver(people[seat], seat=seat))
+        ask_id = _raise(agent, kind="approval")["id"]
+        roster.add((agent, people["other"]))     # even on the roster: not the addressee
+        for email in (people["other"], people["owner"]):
+            page = _inbox(email)
+            assert (page.items, page.total) == ([], 0)
+            for call in ((service.answer_ask, ask_id, email, False, "approve", None),
+                         (service.discuss_ask, ask_id, email, False)):
+                exc = _ask_error(*call)
+                assert (exc.status_code, exc.code) == (404, "not_found")
+        assert _row(real_db, ask_id)["status"] == "pending"
+
+
+class TestTheReachTwin:
+    """`is_project_reach`: the four conditions, the parsed key deciding."""
+
+    def _row(self, **over):
+        row = {"to_role": "project", "raised_by": "agent", "addressed_to_email": "s@example.com",
+               "resolved_to": json.dumps(["s@example.com"]), "context": json.dumps({PROJECT_KEY: PROJECT})}
+        row.update(over)
+        return row
+
+    def test_the_project_row_reaches_its_addressee_only(self):
+        from services.operator_queue_service import is_project_reach
+        assert is_project_reach(self._row(), "S@example.com") is True
+        assert is_project_reach(self._row(context={PROJECT_KEY: PROJECT}), "s@example.com") is True
+        assert is_project_reach(self._row(), "other@example.com") is False
+        assert is_project_reach(self._row(), "") is False
+
+    @pytest.mark.parametrize("over", [
+        {"to_role": "primary"}, {"raised_by": "gate"}, {"raised_by": None},
+        {"context": json.dumps({"x": {PROJECT_KEY: PROJECT}})}, {"context": json.dumps({PROJECT_KEY: ""})},
+        {"context": "{not json"}, {"context": None},
+    ])
+    def test_every_other_shape_does_not(self, over):
+        from services.operator_queue_service import is_project_reach
+        assert is_project_reach(self._row(**over), "s@example.com") is False
+
+    def test_the_sql_arm_needs_the_column_conditions_too(self, real_db, agent, people, roster):
+        """A `primary` row carrying the key (a look-alike the sink would have
+        stripped) is not reached through the project arm."""
+        from db.tables import operator_queue
+        from database import db
+        from db.engine import get_engine
+        with get_engine().begin() as conn:
+            conn.execute(operator_queue.insert().values(
+                id=f"q-{agent}", agent_name=agent, request_id=f"req-{agent}", type="question",
+                status="pending", title="t", question="q", created_at="2026-11-08T00:00:00Z", raised_by="agent",
+                to_role="primary", addressed_to_email=people["steward"],
+                resolved_to=json.dumps([people["steward"]]), context=json.dumps({PROJECT_KEY: PROJECT})))
+        assert db.get_operator_queue_item(f"q-{agent}")
+        assert _inbox(people["steward"]).items == []
