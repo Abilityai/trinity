@@ -8944,6 +8944,36 @@
         "unit"
       ],
       "description": "#4281 (D9): trigger_agent_schedule answers already_running only for the scheduler's running-lock 409 (#1968, the exact lock body); every other 409 (schedule_runs_as_shared_person, a coded 409 the tool has never heard of, a plain-string 409, the lock text outside the backend's envelope, a body that is not JSON) is a refusal carrying the backend's code and message. Real tool execute() over a fake TrinityClient, node:test."
+    },
+    {
+      "file": "../src/frontend/tests/unit/scheduleRunTier4281.spec.js",
+      "feature": "#4281",
+      "added": "2026-11-08",
+      "categories": [
+        "frontend",
+        "unit"
+      ],
+      "description": "#4281 slice F: the pure rules behind the Schedules tab - the run-tier badge only on runs_as shared_person (owner and null show nothing), the creator line from created_by else created_by_you, the D9 Run-now warning only for the owner tier, the D8 delivery decision (own address compared trimmed and case-insensitive, unknown viewer never own), the take-over body echoing the reviewed copy verbatim (nulls included; clear/keep with the address; an undecided delivery throws), the 409 copy per code, and slice C's restricted_turn record read from turn_integrity (string or object, unparseable -> null) worded by cause."
+    },
+    {
+      "file": "../src/frontend/tests/unit/schedulesPanelRunTier4281.mount.spec.js",
+      "feature": "#4281",
+      "added": "2026-11-08",
+      "categories": [
+        "frontend",
+        "unit"
+      ],
+      "description": "#4281 slice F, MOUNTED SchedulesPanel: badge, server reason and creator name on a shared_person row; none on null; a share holder sees 'you created this' and no Take over; a failed refresh keeps the badge; the create dialog notice below owner tier and a named save refusal shown as its message; Take over only on can_take_over; the review shows full prompt, tools, model, validation, delivery and webhook state; the POST echoes exactly the reviewed version (not a refetch), clears another person's delivery by default, keeps with the address, leaves the owner's own delivery alone; 409 changed_since_review shows the current version and the next confirm sends it; 409 run_in_progress in the dialog; webhook read failure said; initial focus not on Take over; D9 Run-now confirm; restricted-run badge in the history and the sentence in the detail modal."
+    },
+    {
+      "file": "../src/frontend/tests/unit/restrictedRunMarker4281.mount.spec.js",
+      "feature": "#4281",
+      "added": "2026-11-08",
+      "categories": [
+        "frontend",
+        "unit"
+      ],
+      "description": "#4281 slice F, MOUNTED: RestrictedRunMarker renders nothing without a restricted_turn record, a 'ran without shell' badge with the cause sentence on hover, and a line for detail views; wired into the TasksPanel row (task-run-restricted) and the ExecutionDetail page (execution-restricted-line)."
     }
   ]
 }

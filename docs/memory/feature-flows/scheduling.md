@@ -224,6 +224,33 @@ POST /api/internal/execute-task             (routers/internal.py, at_dispatch, o
 - A schedule that cannot be read mid-run (deleted) is stamped `schedule_unreadable` with no creator and files no row.
 - Take-over (slice D) calls `schedule_tier_alerts.sync` for the former and the new creator after its write.
 
+#### On the Schedules tab (#4281 slice F)
+
+```
+AgentDetail.vue  <SchedulesPanel :owner-tier="!!agent.can_share">
+SchedulesPanel.vue
+  row: utils/scheduleRunTier.js::runTierView(schedule)    runs_as shared_person only (owner/null -> nothing)
+       -> BaseBadge "Runs without shell" + runs_as_reason.message
+       -> "Created by {created_by}" | "You created this schedule" (created_by_you) | none
+       -> [Take over] when schedule.can_take_over === true
+  Take over -> openTakeOver(schedule): a COPY of the read, so a refetch cannot change what is sent
+       -> stores/schedules.js::fetchWebhookStatus   (live | none | failed, all said in the review)
+       -> ScheduleTakeOverDialog.vue (BaseModal): full prompt, tools, model, validation + prompt,
+          Workspace delivery (another person's -> clear (default) | keep), webhook, what changes
+       -> confirm: utils/scheduleRunTier.js::takeOverBody(copy, {viewerEmail, delivery})
+       -> stores/schedules.js::takeOver -> POST .../take-over (shared api client)
+          200 -> close, reload list
+          409 -> takeOverRefusalText(code) in the dialog; changed_since_review / not_restricted
+                 reload the list and show the current version (confirm disabled if nothing to adopt)
+  Run now -> requestRun: warnsOnRunNow(schedule, ownerTier) -> ConfirmDialog "this one run has your access" (D9)
+  create dialog: !ownerTier -> the share-holder notice; a named refusal on save shows detail.message
+  history row / execution modal: RestrictedRunMarker (badge / line) from exec.turn_integrity.restricted_turn
+```
+
+- `TasksPanel.vue` rows and `ExecutionDetail.vue` carry the same marker (`task-run-restricted`, `execution-restricted-line`).
+- Slice E's `guardrail_refusals` / `guardrail_reporting` are not rendered yet (follow-up).
+- Tests: `src/frontend/tests/unit/scheduleRunTier4281.spec.js`, `schedulesPanelRunTier4281.mount.spec.js`, `restrictedRunMarker4281.mount.spec.js`.
+
 ### 1b. Make Repeatable Flow (Create Schedule from Task)
 
 **User Action:** Click calendar icon on completed task in Tasks tab → Fill remaining form fields → Click "Create"

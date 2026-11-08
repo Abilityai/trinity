@@ -255,7 +255,7 @@
   - **Run now (D9)**: for a person at the agent's owner tier, Run now on a `shared_person` schedule asks first and says that this one run has their access, not the schedule's.
   - **The run**: an execution whose `turn_integrity` carries `restricted_turn` shows a "ran without shell" badge, worded by its cause, on the schedule's run history and on the Tasks list, and as a sentence on the execution's detail views. The count of refused tool calls (slice E's `guardrail_refusals`) is not shown yet.
   - **Calls**: the take-over and the webhook read it needs go through `stores/schedules.js` on the shared API client (Invariants #6, #7).
-- **Tests**: `tests/unit/test_4281_turn_actor_frozen_matrix.py` (the rule did not move), `test_4281_schedule_run_tier.py`, `test_4281_schedule_read_fields.py`; `test_ent926_turn_tier.py` (the turn-tier answer); `test_4281_restricted_run_stamp.py`, `test_4281_restricted_schedule_condition.py` (slice C); `test_4281_schedule_take_over.py` (slice D)
+- **Tests**: `tests/unit/test_4281_turn_actor_frozen_matrix.py` (the rule did not move), `test_4281_schedule_run_tier.py`, `test_4281_schedule_read_fields.py`; `test_ent926_turn_tier.py` (the turn-tier answer); `test_4281_restricted_run_stamp.py`, `test_4281_restricted_schedule_condition.py` (slice C); `test_4281_schedule_take_over.py` (slice D); frontend `scheduleRunTier4281.spec.js`, `schedulesPanelRunTier4281.mount.spec.js`, `restrictedRunMarker4281.mount.spec.js` (slice F)
 - **Architecture**: `architecture/security.md` §5g, `architecture/api-endpoints.md` (Schedules), `architecture/execution.md` (`turn_integrity`), `architecture/backend.md` (`schedule_tier_alerts.py`)
 
 ### 2.13 Agent-Key Self-Gate (INV-8, trinity-enterprise#840)
