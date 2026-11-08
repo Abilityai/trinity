@@ -10,6 +10,7 @@
 - **Status**: ✅ Implemented (2025-11-28)
 - **Description**: Cron-based automation with APScheduler
 - **Key Features**: Schedule CRUD, timezone support, execution history, manual trigger
+- **Run tier**: what tier a schedule's runs get, and why, is shown on every schedule read: `requirements/auth.md` §2.12.1 (#4281)
 - **Flow**: `docs/memory/feature-flows/scheduling.md`
 
 ### 10.2 Autonomy Mode
