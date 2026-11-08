@@ -90,6 +90,12 @@ CLEARED_KEYSPACES: Tuple[str, ...] = (
     # never the agent's own work, and a live disagreement re-increments it on
     # the next poll (<=15 s).
     "agent:pull_claim_denied:",
+    # trinity-enterprise#165: the guardrail-event forwarder's last report
+    # (`last_report_at`, `runtime`, `dropped_total`), TTL-less so a silent
+    # agent reads `stale`. Cleared ONLY on teardown (`clear_agent_runtime_state`)
+    # — clearing it on every start would make a restarted agent read `never`
+    # (the "older image" state) until its first keepalive.
+    "agent:guardrail_reporter:",
 )
 
 # Deliberately NOT cleared here, each with the reason. Registered so the parity
@@ -257,3 +263,12 @@ async def clear_agent_runtime_state(agent_name: str) -> None:
         agent_skills_listing.forget(agent_name)
     except Exception as e:  # noqa: BLE001
         logger.warning("clear_agent_runtime_state: skills-list clear failed for %s: %s", agent_name, e)
+
+    # trinity-enterprise#165: a recycled name must not read as "reporting" on the
+    # strength of its predecessor's forwarder. `clear_reporter` is fail-open.
+    try:
+        from services import guardrail_event_service
+
+        guardrail_event_service.clear_reporter(agent_name)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("clear_agent_runtime_state: guardrail reporter clear failed for %s: %s", agent_name, e)

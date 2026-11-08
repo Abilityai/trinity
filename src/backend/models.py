@@ -3300,6 +3300,58 @@ class HeartbeatPayload(BaseModel):
 
 
 # =============================================================================
+# Guardrail Event Models (routers/guardrail_events.py, trinity-enterprise#165)
+# =============================================================================
+
+
+class GuardrailEventBatch(BaseModel):
+    """The forwarder's envelope. Only the ENVELOPE is validated here: each event
+    is validated on its own by the service (one bad event never fails a batch),
+    so `events` is a plain list. Unknown top-level keys are ignored, and a newer
+    `schema` number is read event by event rather than refused (version skew).
+    """
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    schema_version: StrictInt = Field(alias="schema", ge=1)
+    runtime: Optional[str] = Field(default=None, max_length=64)
+    events: List[Any]
+    dropped: StrictInt = Field(default=0, ge=0, le=1_000_000_000)
+
+
+class GuardrailEventIngestResponse(BaseModel):
+    accepted: int
+    duplicates: int
+    rejected: int
+
+
+class GuardrailReportingState(BaseModel):
+    """`never` | `reporting` | `stale` — so "no events" is never mistaken for
+    "not reporting"."""
+    state: str
+    last_report_at: Optional[str] = None
+    runtime: Optional[str] = None
+    dropped_total: int = 0
+
+
+class GuardrailEventItem(BaseModel):
+    event_id: str
+    occurred_at: str
+    received_at: str
+    kind: str
+    hook: str
+    tool: Optional[str] = None
+    code: Optional[str] = None
+    execution_id: Optional[str] = None
+    details: Dict[str, Any] = Field(default_factory=dict)
+
+
+class GuardrailEventsPage(BaseModel):
+    events: List[GuardrailEventItem]
+    next_cursor: Optional[str] = None
+    reporting: GuardrailReportingState
+
+
+# =============================================================================
 # Audit Log Models (routers/audit_log.py)
 # =============================================================================
 
