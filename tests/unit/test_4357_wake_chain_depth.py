@@ -20,6 +20,11 @@ rows. Only the seams that would start a container are doubles: the wake's
 dispatch writes the RUNNING row ``dispatch_and_await_terminal`` would write,
 with the depth it was handed.
 
+Depth no longer bounds how many wakes follow one another, so a per-pair hourly
+wake budget does (``caller_wake_max_per_hour``, the #2973 event-budget shape):
+a wake past it is skipped and audited ``skipped_budget`` with one notification
+per window; Redis trouble fails open; a value of 0 or less is unlimited.
+
 Pinned as unchanged (AC 2): a synchronous chain is still refused past the max;
 an answered or ended ask still starts a root turn. The ``agent.task.*`` event
 depth and the loop depth stay pinned in ``test_2973_depth_new_roots.py``.
@@ -33,6 +38,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import fakeredis
 import pytest
 
 _BACKEND = Path(__file__).resolve().parents[2] / "src" / "backend"
@@ -126,8 +132,11 @@ def world(db_backend, monkeypatch):
     )
     monkeypatch.setattr(_WAKE, "_complete_idempotency", lambda *a, **k: None)
     monkeypatch.setattr(_WAKE, "_fail_idempotency", lambda *a, **k: None)
+    # The hourly wake budget (A2) counts in Redis; a fresh in-memory one per test.
+    redis = fakeredis.FakeRedis(decode_responses=True)
+    monkeypatch.setattr(_WAKE, "_wake_budget_redis", lambda: redis)
 
-    return SimpleNamespace(owner_id=owner["id"], wakes=wakes, window=window)
+    return SimpleNamespace(owner_id=owner["id"], wakes=wakes, window=window, redis=redis)
 
 
 def _principal(world, agent) -> User:
@@ -384,3 +393,105 @@ def test_an_ended_ask_starts_a_root_turn(monkeypatch):
                                            disposed_by_email=None, reason="no"))
     assert len(calls) == 1
     assert calls[0].get("chain_depth") is None
+
+
+# ---------------------------------------------------------------------------
+# A2 — the per-pair hourly wake budget replaces depth as the bound on wakes
+# ---------------------------------------------------------------------------
+
+BUDGET_KEY = "caller_wake_max_per_hour"
+
+
+@pytest.fixture
+def budget(world, monkeypatch):
+    """Records the wake audits and the budget alert; the limit is a real row."""
+    audits = []
+
+    async def _audit(**kw):
+        audits.append(kw)
+
+    alert = AsyncMock(return_value="n-1")
+    import services.monitoring_alerts as _MA
+
+    monkeypatch.setattr(_WAKE, "_audit", _audit)
+    monkeypatch.setattr(
+        _MA, "get_alert_service",
+        lambda: SimpleNamespace(alert_caller_wake_budget_exhausted=alert),
+    )
+    return SimpleNamespace(audits=audits, alert=alert)
+
+
+def _ended_delegation() -> str:
+    """A run A delegated to B, already ended — owed a wake."""
+    row = db.create_task_execution(
+        agent_name=B, message="work", triggered_by="agent",
+        fields=TaskExecutionFields(chain_depth=1, source_agent_name=A),
+    ).id
+    _end(row)
+    return row
+
+
+def test_a_wake_past_the_hourly_budget_is_skipped_and_audited(world, budget):
+    db.set_setting(BUDGET_KEY, "3")
+    woken = [asyncio.run(_WAKE.maybe_wake_caller(_ended_delegation())) for _ in range(5)]
+    assert all(woken[:3]) and woken[3:] == [None, None]
+    assert len(world.wakes) == 3
+    skipped = [a for a in budget.audits if a.get("status") == "skipped_budget"]
+    assert len(skipped) == 2
+    assert {(a["caller"], a["callee"], a["limit"]) for a in skipped} == {(A, B, 3)}
+    assert all(a["execution_id"] is None for a in skipped)
+    # One notification per window, to the agent that was not woken.
+    budget.alert.assert_awaited_once_with(A, B, 3)
+    key = f"trinity:wake_fires:{B}:{A}"
+    assert world.redis.get(key) == "5"
+    assert 0 < world.redis.ttl(key) <= 3600
+
+
+def test_the_default_budget_is_120_an_hour():
+    import config
+
+    assert config.OPS_SETTINGS_DEFAULTS[BUDGET_KEY] == "120"
+    assert config.ENV_BACKED_OPS_KEYS[BUDGET_KEY] == "CALLER_WAKE_MAX_PER_HOUR"
+    from services.settings_service import OPS_SETTINGS_DESCRIPTIONS
+
+    assert "120" in OPS_SETTINGS_DESCRIPTIONS[BUDGET_KEY]
+
+
+class _BrokenRedis:
+    def pipeline(self, *a, **k):
+        raise ConnectionError("redis is down")
+
+
+@pytest.mark.parametrize("client", [None, _BrokenRedis()], ids=["no-client", "raises"])
+def test_redis_down_the_wake_is_still_dispatched(world, budget, monkeypatch, client):
+    db.set_setting(BUDGET_KEY, "1")
+    monkeypatch.setattr(_WAKE, "_wake_budget_redis", lambda: client)
+    for _ in range(3):
+        assert asyncio.run(_WAKE.maybe_wake_caller(_ended_delegation()))
+    assert len(world.wakes) == 3
+    assert not [a for a in budget.audits if a.get("status") == "skipped_budget"]
+    budget.alert.assert_not_awaited()
+
+
+@pytest.mark.parametrize("value", ["0", "-5"])
+def test_a_budget_of_zero_or_less_is_unlimited(world, budget, value):
+    db.set_setting(BUDGET_KEY, value)
+    for _ in range(10):
+        assert asyncio.run(_WAKE.maybe_wake_caller(_ended_delegation()))
+    assert len(world.wakes) == 10
+    assert not [a for a in budget.audits if a.get("status") == "skipped_budget"]
+    # Unlimited spends nothing: no counter is written.
+    assert world.redis.keys("trinity:wake_fires:*") == []
+
+
+def test_a_collapsed_ending_does_not_spend_the_budget(world, budget):
+    """The 15 s window answers a second ending with no turn; only wakes count."""
+    db.set_setting(BUDGET_KEY, "2")
+    assert asyncio.run(_WAKE.maybe_wake_caller(_ended_delegation()))
+    world.window["replay"] = True
+    for _ in range(3):
+        assert asyncio.run(_WAKE.maybe_wake_caller(_ended_delegation())) is None
+    world.window["replay"] = False
+    assert asyncio.run(_WAKE.maybe_wake_caller(_ended_delegation()))
+    assert len(world.wakes) == 2
+    assert world.redis.get(f"trinity:wake_fires:{B}:{A}") == "2"

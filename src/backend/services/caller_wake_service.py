@@ -52,8 +52,16 @@ next delegation is ``1 + MAX(running)`` over a set that includes the wake row, s
 every delegate→wake round added two and an orchestrator working through wakes
 was refused after about four rounds. A wake is therefore at most ``max − 1`` and
 can always make one hop; a genuine chain — hops from turns still running — is
-still counted and refused by the guard exactly as before. Depth no longer bounds
-how many wakes follow one another; the window above and the wake switch do.
+still counted and refused by the guard exactly as before.
+
+**The wake budget.** Depth therefore no longer bounds how many wakes follow one
+another, so a per-pair hourly budget does: ``caller_wake_max_per_hour`` (default
+120, ``0`` or less = unlimited) wakes from one callee into one delegator per
+one-hour Redis window, the #2973 event-budget shape. It is spent only by a wake
+about to be dispatched — a collapsed window spends nothing. A wake past it is
+skipped, audited ``skipped_budget``, and the delegator gets one notification
+per window; the ending stays readable through ``get_execution_result``. Redis
+trouble fails open: the budget must not cost an agent the wake it was promised.
 
 Never raises: this runs on the path of an already-billed terminal.
 """
@@ -84,6 +92,11 @@ RESERVED_TRIGGERS = frozenset({
 # one delegation is woken promptly, and long enough that a sweep of hundreds of
 # stale rows collapses into a handful of turns.
 WAKE_BUCKET_SECONDS = 15
+
+# #4357: the per-pair hourly wake budget (the #2973 event-budget shape).
+_WAKE_BUDGET_SETTING = "caller_wake_max_per_hour"
+_WAKE_WINDOW_SECONDS = 3600
+_WAKE_KEY_PREFIX = "trinity:wake_fires:"
 
 # The same cap and chokepoint the #1578 event payload uses, for the same reason.
 SUMMARY_MAX = 2000
@@ -204,6 +217,72 @@ def _standing_depth(caller: str, callee_depth: Any) -> int:
         logger.debug("#4357: running depth unreadable for %s", caller)
         running = 0
     return max(from_callee, running, 0)
+
+
+def _wake_budget_limit() -> int:
+    """The configured cap; ``0`` or less is unlimited. The code default on any read error."""
+    from config import OPS_SETTINGS_DEFAULTS, OPS_SETTINGS_VALIDATION
+    from services.settings_service import settings_service
+
+    default = int(OPS_SETTINGS_DEFAULTS[_WAKE_BUDGET_SETTING])
+    _kind, _low, high = OPS_SETTINGS_VALIDATION[_WAKE_BUDGET_SETTING]
+    try:
+        value = settings_service.get_ops_setting(_WAKE_BUDGET_SETTING, int)
+    except Exception as e:  # noqa: BLE001 — a bad setting must not cost the wake
+        logger.warning("[#4357] %s unreadable (%s); using %d", _WAKE_BUDGET_SETTING, e, default)
+        return default
+    return min(high, value)
+
+
+def _wake_budget_redis():
+    """Separate function so tests have one obvious patch point."""
+    from routers.auth import get_redis_client
+    return get_redis_client()
+
+
+async def _within_wake_budget(callee: str, caller: str) -> Optional[int]:
+    """Spend one ``callee`` → ``caller`` wake; the cap once the hour's is spent, else None.
+
+    INCR and the TTL go in one transaction (``EXPIRE NX`` never extends a live
+    window): split, a crash between them leaves a TTL-less key that stops the
+    pair's wakes for good. Fail-OPEN on Redis trouble.
+    """
+    limit = _wake_budget_limit()
+    if limit <= 0:
+        return None
+    key = f"{_WAKE_KEY_PREFIX}{callee}:{caller}"
+    try:
+        client = _wake_budget_redis()
+        if client is None:
+            logger.warning("[#4357] Redis unavailable; caller-wake budget not enforced")
+            return None
+        pipe = client.pipeline(transaction=True)
+        pipe.incr(key)
+        pipe.expire(key, _WAKE_WINDOW_SECONDS, nx=True)
+        count, _ = pipe.execute()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[#4357] caller-wake budget check failed (%s); allowing", e)
+        return None
+
+    if count <= limit:
+        return None
+    logger.warning(
+        "[#4357] wake %s -> %s skipped: %d this hour > cap %d", callee, caller, count, limit,
+    )
+    # One alert per window. A flag (not `count == limit + 1`) so a cap lowered
+    # mid-window below the running count still alerts once.
+    try:
+        first_skip = client.set(f"{key}:alerted", 1, nx=True, ex=_WAKE_WINDOW_SECONDS)
+    except Exception:  # noqa: BLE001 — alerting is best-effort
+        first_skip = False
+    if first_skip:
+        try:
+            from services.monitoring_alerts import get_alert_service
+            await get_alert_service().alert_caller_wake_budget_exhausted(caller, callee, limit)
+        except Exception:  # noqa: BLE001 — the skip stands whether or not the alert lands
+            logger.exception("[#4357] could not raise the wake-budget alert for %s -> %s",
+                             callee, caller)
+    return limit
 
 
 async def _dispatch_wake(**kwargs):
@@ -348,6 +427,20 @@ async def maybe_wake_caller(execution_id: Optional[str]) -> Optional[str]:
             "ent#1102: %s already woken in this window — no second wake for %s",
             caller, execution_id,
         )
+        return None
+
+    capped_at = await _within_wake_budget(callee, caller)
+    if capped_at is not None:
+        # Released, not completed: no turn ran, so the window holds nothing to
+        # replay — a later ending in it is skipped by the same budget anyway.
+        if idem is not None:
+            try:
+                _fail_idempotency(idem)
+            except Exception:  # noqa: BLE001
+                logger.exception("ent#1102: idempotency release failed")
+        await _audit(caller=caller, callee=callee, callee_execution_id=execution_id,
+                     execution_id=None, status="skipped_budget", error=None,
+                     policy_source=verdict.source, limit=capped_at)
         return None
 
     ask_ids = _pending_ask_ids(execution_id)
