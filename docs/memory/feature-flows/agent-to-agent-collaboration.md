@@ -349,6 +349,20 @@ Access (`get_authorized_agent`, uniform 404) resolves before the helper, so a de
 
 ---
 
+## The Callee's Tier (trinity-enterprise#1148)
+
+A delegated turn is rated on the callee, not inherited from the caller. The callee row carries the person the caller acted for (`turn_origin_user_id` / `turn_origin_email`) and `source_agent_name` = the caller. `services/turn_tier_service.turn_actor` then answers:
+
+| Person P on the callee | Calling agent's owner on the callee | Callee turn |
+|---|---|---|
+| owner / admin | any | `owner` (as before) |
+| can open it (shared) | any | `share` / `person` — P's own tier |
+| cannot open it | owner or admin | `owner` / `delegated` / P — shell, Gemini/Codex, standing work |
+| cannot open it | anything less | `share` / `person` |
+| any lookup unreadable | — | `share` (fail closed) |
+
+The rule re-applies at every hop: a turn dispatched from a `delegated` turn carries P again. The caller's key, acting for P, reads no rows of a callee P cannot open (`dependencies.viewer_row_scope`). Detail: `architecture/security.md` §5g; requirement: `requirements/auth.md` §2.12. Tests: `tests/unit/test_ent1148_delegation_tier.py`, `test_ent1148_caller_reads_stay_person.py`.
+
 ## Backend Layer
 
 ### CORS Configuration for X-Source-Agent
