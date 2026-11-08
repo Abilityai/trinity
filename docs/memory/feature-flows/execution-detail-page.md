@@ -260,6 +260,8 @@ async def get_execution(
 
 **trinity-enterprise#754**: the handler (now `routers/schedules.py:920-938`) also takes `current_user` and returns `gate_self_approved` / `gate_self_approved_by_viewer` (`models.py:4178-4179`), read through `skill_gate_map_service.self_approved_flags` from the run's `self_approved` record in `skill_gate_requests` — see [skills-tab.md](skills-tab.md).
 
+**#4281**: the handler (`routers/schedules.py:1069`) also returns `guardrail_refusals` / `guardrail_reporting` for a schedule-backed run, read at request time through `execution_refusals.readings` (the same reading as the list — see [tasks-tab.md](tasks-tab.md)). The page does not render them yet (slice F).
+
 ### Endpoint: Get Execution Log
 
 **File**: `src/backend/routers/schedules.py:335-375`
@@ -535,6 +537,7 @@ location /api/ {
 
 | Date | Changes |
 |------|---------|
+| 2026-11-08 | **#4281 (slice E)**: the detail read carries `guardrail_refusals` / `guardrail_reporting` on a schedule-backed run (API only; not rendered yet) — [tasks-tab.md](tasks-tab.md). |
 | 2026-10-08 | **trinity-enterprise#754**: the origin card says when the run went through without approval because its requester is the approver (`ExecutionGateMarker`, from `gate_self_approved` / `gate_self_approved_by_viewer` on the detail read) — [skills-tab.md](skills-tab.md). |
 | 2026-03-04 | **Paid/Public trigger types**: Added `paid` (yellow bg/icon) and `public` (teal bg/icon) to Trigger Icon Colors table. |
 | 2026-02-21 | **PERF-001**: Added note distinguishing `ExecutionResponse` (full, used here) from `ExecutionSummary` (lightweight, used by list endpoint). Execution Detail page continues to fetch full data via `GET /api/agents/{name}/executions/{id}`. |
