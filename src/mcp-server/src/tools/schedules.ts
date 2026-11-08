@@ -714,6 +714,8 @@ export function createScheduleTools(
       description:
         "Get execution history for a specific schedule or all schedules on an agent. " +
         "Returns status, timing, cost, and context usage for each execution. " +
+        "A scheduled run also carries guardrail_refusals (tool calls the turn-tier guard refused; null = unknown) " +
+        "and guardrail_reporting (null = the count is complete; otherwise pending, stale, never, not_claude_code or unavailable). " +
         "Access control: agents can only view executions on self or permitted agents.",
       parameters: z.object({
         agent_name: z.string().describe("Agent name"),

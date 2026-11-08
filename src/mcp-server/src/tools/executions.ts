@@ -95,6 +95,8 @@ export function createExecutionTools(
       description:
         "List recent executions for an agent across all trigger types (schedule, manual, MCP, chat). " +
         "Returns execution summaries with status, timing, cost, and context usage. " +
+        "A scheduled run also carries guardrail_refusals (tool calls the turn-tier guard refused; null = unknown) " +
+        "and guardrail_reporting (null = the count is complete; otherwise pending, stale, never, not_claude_code or unavailable). " +
         "Use this to check what tasks ran recently or to find an execution_id for get_execution_result. " +
         "Access control: agents can only list executions on self or permitted agents.",
       parameters: z.object({
@@ -154,6 +156,8 @@ export function createExecutionTools(
         "Optionally include the full execution transcript (tool calls, thinking, responses). " +
         "A long `duration_ms` with a non-null `compact_metadata` is a one-off context auto-compaction " +
         "(its trigger, pre/post tokens and duration), not a degraded agent. " +
+        "A scheduled run also carries guardrail_refusals (tool calls the turn-tier guard refused; null = unknown) " +
+        "and guardrail_reporting (null = the count is complete; otherwise pending, stale, never, not_claude_code or unavailable). " +
         "Access control: agents can only view executions on self or permitted agents.",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent that ran the execution"),
@@ -200,6 +204,10 @@ export function createExecutionTools(
           context_max: execution.context_max || null,
           model_used: execution.model_used || null,
           compact_metadata: parseCompactMetadata(execution.compact_metadata),
+          // #4281: the backend's turn-tier refusal reading, forwarded as is.
+          // `??`, not `||`: a complete 0 must stay 0.
+          guardrail_refusals: execution.guardrail_refusals ?? null,
+          guardrail_reporting: execution.guardrail_reporting ?? null,
         };
 
         if (include_log) {
