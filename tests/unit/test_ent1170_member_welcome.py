@@ -83,6 +83,56 @@ class TestAddPortalMessageOnce:
                                               "2026-11-08T00:00:00Z", session_id=session)
         assert _message_count(session) == 1
 
+    def test_the_conflict_target_is_the_primary_key_on_postgresql(self, monkeypatch):
+        """PostgreSQL refuses ``ON CONFLICT (col)`` unless ``col`` carries a
+        unique or primary-key constraint. The runs above prove it against the
+        SQLite DDL; PostgreSQL is built from ``db/tables.py``. Record what the
+        helper really executes, compile it for PostgreSQL, and check the
+        conflict target and the binds against that definition."""
+        import re
+
+        from sqlalchemy.dialects import postgresql
+
+        from client_portal import db as portal_db
+        from db.tables import enterprise_portal_messages
+
+        executed = []
+
+        class _Result:
+            rowcount = 1
+
+        class _Conn:
+            def execute(self, stmt, params=None):
+                executed.append((stmt, params))
+                return _Result()
+
+        class _Begin:
+            def __enter__(self):
+                return _Conn()
+
+            def __exit__(self, *exc):
+                return False
+
+        class _Engine:
+            def begin(self):
+                return _Begin()
+
+        monkeypatch.setattr(portal_db, "get_engine", lambda: _Engine())
+        assert portal_db.add_portal_message_once("m-1", "a", "x@example.com", "assistant", "hi",
+                                                 "2026-11-08T00:00:00Z", session_id="s-1",
+                                                 source="welcome") is True
+
+        insert, params = executed[0]
+        sql = str(insert.compile(dialect=postgresql.dialect()))
+        assert sql.startswith("INSERT INTO enterprise_portal_messages")
+        target = re.search(r"ON CONFLICT \((\w+)\) DO NOTHING\s*$", sql)
+        assert target, sql
+        pk = {c.name for c in enterprise_portal_messages.primary_key.columns}
+        assert {target.group(1)} == pk
+        # Every bind the statement names is supplied (a missing one is a
+        # PostgreSQL-time error, not a SQLite one).
+        assert set(re.findall(r"%\((\w+)\)s", sql)) <= set(params)
+
 
 # --------------------------------------------------------------------------- #
 # OSS: the terms door's landing seam
