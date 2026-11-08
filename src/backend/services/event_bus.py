@@ -58,6 +58,11 @@ EID_PATTERN = re.compile(r"^\d+-\d+$")
 
 SCOPE_ALL = "all"
 SCOPE_SCOPED = "scoped"
+# trinity-enterprise#863: a control event between workers, never a client
+# event. ``_fanout`` hands it to the injected control handler and delivers it to
+# no one; ``_event_is_visible`` has no branch for it, so no slot and no replay
+# can ever see it.
+SCOPE_CONTROL = "control"
 
 # trinity-enterprise#863: how often each worker re-reads every non-admin roster
 # it holds, on top of the reads an access-changing event triggers. A code
@@ -451,6 +456,8 @@ class StreamDispatcher:
         # ent#467: injected ``(email) -> List[str]``; strong refs so a roster
         # refresh cannot be garbage-collected mid-flight.
         self._accessible_resolver: Optional[Callable] = None
+        # trinity-enterprise#863: injected ``(payload) -> None`` for SCOPE_CONTROL.
+        self._control_handler: Optional[Callable[[Dict[str, Any]], None]] = None
         self._refresh_tasks: Set[asyncio.Task] = set()
         self._roster_task: Optional[asyncio.Task] = None
         self._redis: Optional["aioredis.Redis"] = None
@@ -569,6 +576,14 @@ class StreamDispatcher:
         (Invariant #1). No resolver ⇒ ``/ws`` rosters are not re-read; a
         ``/ws/events`` slot reads through its own ``roster_resolver``."""
         self._accessible_resolver = resolver
+
+    def set_control_handler(self, handler: Optional[Callable[[Dict[str, Any]], None]]) -> None:
+        """Inject the synchronous handler for ``SCOPE_CONTROL`` entries
+        (trinity-enterprise#863: ``live_connections.handle_control``), wired
+        from ``main.py`` like the roster resolver. It runs on the reader loop,
+        so it must only queue work. No handler: a control entry is dropped,
+        and it still reaches no client."""
+        self._control_handler = handler
 
     def _maybe_invalidate_rosters(self, payload: Any) -> None:
         """Re-read non-admin rosters after an accessibility change.
@@ -762,6 +777,10 @@ class StreamDispatcher:
     async def _fanout(self, entry_id: str, fields: Dict[str, str]) -> None:
         payload = _deserialize({"data": fields.get("payload", "")})
         scope = fields.get("scope", SCOPE_ALL)
+        if scope == SCOPE_CONTROL:
+            # trinity-enterprise#863: for this worker, never for a client.
+            self._handle_control(payload)
+            return
         agent_name = fields.get("agent_name") or None
         # ent#467: derived ONCE per event, not per client — the walk is the
         # same for everyone and this loop is the hot path.
@@ -799,6 +818,15 @@ class StreamDispatcher:
                         self.resyncs_sent += 1
                     except asyncio.QueueFull:
                         pass  # will be evicted by consumer on next failure
+
+    def _handle_control(self, payload: Dict[str, Any]) -> None:
+        handler = getattr(self, "_control_handler", None)
+        if handler is None:
+            return
+        try:
+            handler(payload)
+        except Exception:  # noqa: BLE001 — one bad control event must not stop delivery
+            logger.exception("stream_dispatcher: control handler failed")
 
     # ------------------------------------------------------------------ client
 

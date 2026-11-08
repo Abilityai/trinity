@@ -196,6 +196,7 @@ from services.event_bus import (
     event_bus,
     stream_dispatcher,
     SCOPE_ALL,
+    SCOPE_CONTROL,
     SCOPE_SCOPED,
 )
 
@@ -316,6 +317,19 @@ filtered_manager = FilteredWebSocketManager()
 # `config`, and reaching into `database` from the delivery layer would invert
 # the router → service → db direction (Invariant #1).
 stream_dispatcher.set_accessible_resolver(accessible_agents_for)
+
+
+# trinity-enterprise#863 — an account or key change re-checks the live
+# connections on every worker. The writer's worker publishes one control event
+# through the bus; each worker's dispatcher hands it to its own registry, which
+# re-checks locally and publishes nothing. Injected both ways, so neither
+# module imports the other.
+async def _publish_live_connection_control(control: dict) -> None:
+    await event_bus.publish(control, scope=SCOPE_CONTROL)
+
+
+stream_dispatcher.set_control_handler(live_connections.handle_control)
+live_connections.set_control_publisher(_publish_live_connection_control)
 
 # Inject WebSocket manager into routers that need it
 set_agents_ws_manager(manager)

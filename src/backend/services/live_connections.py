@@ -48,6 +48,17 @@ connection without cancelling the task that serves it (cancelling an ASGI
 connection task makes the server log an error per close). ``reason`` is a
 :class:`CloseReason`; each door maps it to its own close code.
 
+**Other workers.** ``notify_account_changed`` and ``notify_key_changed`` also
+hand one control event to a publisher that ``main.py`` injects (the event bus,
+scope ``control``, which no client ever receives). Every worker's dispatcher
+gives that event to :func:`handle_control`, which runs the same targeted
+re-check on that worker, against its own fresh read, and publishes nothing:
+were it to notify, every worker would republish every event it read. The event
+names the account or key only; each worker decides from its own read, so the
+publishing worker's own echo closes nothing that already matches. The event
+only makes the close faster. Correctness rests on the tick, which needs no
+publisher.
+
 This module imports nothing from the event bus.
 """
 from __future__ import annotations
@@ -137,6 +148,8 @@ def _read_state(usernames: Set[str], key_ids: Set[str]) -> Tuple[Dict[str, Dict[
 
 Closer = Callable[[CloseReason], Awaitable[None]]
 StateReader = Callable[[Set[str], Set[str]], Tuple[Dict[str, Dict[str, Any]], Set[str]]]
+# Publishes one control event to every worker (injected by main.py).
+ControlPublisher = Callable[[Dict[str, str]], Awaitable[None]]
 
 
 def _verdict(entry: "LiveConnection", row: Optional[Mapping[str, Any]], key_active: bool) -> Optional[CloseReason]:
@@ -331,23 +344,29 @@ class LiveConnectionRegistry:
             self._hand_over(lambda e: e.key_id == key_id, "key")
 
     def _hand_over(self, match: Callable[[LiveConnection], bool], what: str) -> None:
+        self._on_loop(self._begin_recheck, match, f"re-check {what}")
+
+    def _on_loop(self, fn: Callable[[Any], None], arg: Any, what: str) -> None:
+        """Run ``fn(arg)`` on the registry's loop: now when called on it, else
+        handed over with ``call_soon_threadsafe``. No loop bound: nothing was
+        ever admitted on this worker, so there is nothing to do."""
         loop = self._loop
         if loop is None:
-            return  # nothing was ever admitted on this worker: nothing to close
+            return
         try:
             running = asyncio.get_running_loop()
         except RuntimeError:
             running = None
         if running is loop:
-            self._begin_recheck(match)
+            fn(arg)
             return
         if loop.is_closed() or not loop.is_running():
-            logger.warning("live connections: no running event loop to re-check %s on", what)
+            logger.warning("live connections: no running event loop to %s on", what)
             return
         try:
-            loop.call_soon_threadsafe(self._begin_recheck, match)
+            loop.call_soon_threadsafe(fn, arg)
         except RuntimeError:  # the loop closed between the check and the hand-over
-            logger.warning("live connections: event loop closed before re-checking %s", what, exc_info=True)
+            logger.warning("live connections: event loop closed before it could %s", what, exc_info=True)
 
     def _collect(self, match: Callable[[LiveConnection], bool]) -> List[LiveConnection]:
         """The entries a re-check compares. A provisional entry is marked dirty
@@ -371,6 +390,52 @@ class LiveConnectionRegistry:
         task = asyncio.get_running_loop().create_task(self._recheck(entries, immediate=True))
         self._inflight.add(task)
         task.add_done_callback(self._inflight.discard)
+
+    # ------------------------------------------------------------ other workers
+
+    def announce(self, control: Dict[str, str], publisher: Optional[ControlPublisher]) -> None:
+        """Publish ``control`` with ``publisher`` so every worker re-checks too.
+        Synchronous and safe from any thread: the publish runs on the
+        registry's loop, and a publish that fails is logged, never raised into
+        the writer. No publisher: this worker tells no one."""
+        if publisher is None:
+            return
+        if self._loop is None:
+            logger.warning(
+                "live connections: not started, so the other workers re-check %s on their next tick",
+                control.get("recheck"),
+            )
+            return
+        self._on_loop(self._begin_publish, (publisher, control), "publish a control event")
+
+    def _begin_publish(self, publish: Tuple[ControlPublisher, Dict[str, str]]) -> None:
+        publisher, control = publish
+        task = asyncio.get_running_loop().create_task(self._publish(publisher, control))
+        self._inflight.add(task)
+        task.add_done_callback(self._inflight.discard)
+
+    async def _publish(self, publisher: ControlPublisher, control: Dict[str, str]) -> None:
+        try:
+            await publisher(control)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — logged; the other workers' ticks still re-check
+            logger.warning(
+                "live connections: could not tell the other workers to re-check %s; "
+                "they re-check on their next tick", control.get("recheck"), exc_info=True,
+            )
+
+    def handle_control(self, control: Mapping[str, Any]) -> None:
+        """A control event read from the bus (any worker's, this one's
+        included): re-check this worker's matching connections. Local only;
+        it never publishes."""
+        kind = control.get("recheck") if isinstance(control, Mapping) else None
+        if kind == "account" and isinstance(control.get("username"), str) and control["username"]:
+            self.recheck_account(control["username"])
+        elif kind == "key" and isinstance(control.get("key_id"), str) and control["key_id"]:
+            self.recheck_key(control["key_id"])
+        else:
+            logger.warning("live connections: ignoring a control event it does not recognise (%r)", kind)
 
     async def revalidate(self) -> None:
         """One tick: compare every connection this worker holds."""
@@ -433,6 +498,8 @@ class LiveConnectionRegistry:
 
 # The worker's registry. Doors and writers use the module functions below.
 registry = LiveConnectionRegistry()
+# How a change is told to the other workers; injected by main.py (the bus).
+_control_publisher: Optional[ControlPublisher] = None
 
 
 def admit(
@@ -451,14 +518,33 @@ def notify_account_changed(username: str) -> None:
     """A writer changed ``username``'s account: re-check its connections now.
 
     Call after the write commits. Synchronous, safe from the event-loop thread
-    and from any other thread; returns once the re-check is queued."""
+    and from any other thread; returns once the re-check is queued. It also
+    tells every other worker to re-check the account."""
     registry.recheck_account(username)
+    if username:
+        registry.announce({"recheck": "account", "username": username}, _control_publisher)
 
 
 def notify_key_changed(key_id: str) -> None:
     """A writer changed MCP key ``key_id``: re-check the connections opened
-    with it now. Same contract as :func:`notify_account_changed`."""
+    with it now, here and on every other worker. Same contract as
+    :func:`notify_account_changed`."""
     registry.recheck_key(key_id)
+    if key_id:
+        registry.announce({"recheck": "key", "key_id": key_id}, _control_publisher)
+
+
+def handle_control(control: Mapping[str, Any]) -> None:
+    """The dispatcher's control handler: re-check this worker's connections for
+    the account or key a control event names. Never publishes."""
+    registry.handle_control(control)
+
+
+def set_control_publisher(publisher: Optional[ControlPublisher]) -> None:
+    """Inject how a change is told to the other workers (``main.py``: the event
+    bus, scope ``control``). ``None``: this worker tells no one."""
+    global _control_publisher
+    _control_publisher = publisher
 
 
 async def start() -> None:
