@@ -13,6 +13,16 @@
 > `models.TaskResultPayload.execution_time_ms`, which arrives agent-supplied on the #1083 async
 > result callback, is bounded to `[0, 2**31-1]` at the contract for the same reason.
 
+> **Updated 2026-11-08 (#4281, restricted schedule runs):** before either branch, `apply_result`
+> rates the run once (`schedule_tier_alerts.run_restriction_by_id`, total). A schedule-backed run
+> whose tier is not owner writes `turn_integrity.restricted_turn` = `{tier, kind, cause,
+> schedule_id, creator_id, shell: false}` on the SUCCESS branch (merged beside the #2467 keys by
+> `execution_integrity.with_restricted_turn`) and on the FAILED/CANCELLED branch (which wrote no
+> `turn_integrity` before). After the CAS win, both branches call `schedule_tier_alerts.after_run`,
+> which decides the creator's `schedule_runs_restricted` alert from their live schedules. An
+> owner-tier or non-schedule run passes `None` and is byte-identical. See
+> [scheduling.md](scheduling.md) §1a and `architecture/execution.md` "Restricted Schedule Runs".
+
 > **Updated 2026-09-01 (#2467, turn-integrity derivation at terminal write):** `apply_result`'s
 > SUCCESS branch now derives turn-integrity flags from the transcript it already holds —
 > `services/execution_integrity.py::derive_turn_integrity(exec_log, metadata)` (a pure leaf; the

@@ -161,6 +161,31 @@ turn_tier_service.schedule_read_fields(lookups, agent, schedule, show_creator, v
 - Create (enabled), `POST .../enable` and a PUT that turns a disabled schedule on: on a Gemini/Codex agent, a shared-person rating is 409 `schedule_cannot_run_for_creator_on_runtime` (`_refuse_if_it_could_never_run`). On Claude Code it is allowed and the response says so. The runtime comes from `docker_utils.agent_runtime_async`, which falls back to Claude Code.
 - The agent's hook reads the same answer at run time: `GET /api/agents/{name}/executions/{id}/turn-tier` adds `cause`, `schedule`, `creator`, `remedy` for a schedule-backed shared turn (`turn_tier_service.turn_tier_answer`).
 
+**A restricted run says so, and the operator is told once per creator (slice C):**
+
+```
+apply_result / pull apply_task_result      (task_execution_service.py, pull_coordination_service.py)
+   -> schedule_tier_alerts.run_restriction(db, agent, execution)
+        turn_tier_service.schedule_backed_run_tier -> RunTier   (None: not schedule-backed)
+   -> turn_integrity.restricted_turn = {tier, kind, cause, schedule_id, creator_id, shell:false}
+   -> (CAS won) schedule_tier_alerts.after_run -> sync(agent, creator_id)
+
+create | PUT | enable | disable | delete    (routers/schedules.py, after the write)
+admin pause | resume                        (routers/ops.py)
+emergency stop                              (services/fleet_ops_service.py)
+POST /api/internal/execute-task             (routers/internal.py, at_dispatch, off the loop)
+   -> schedule_tier_alerts.sync(agent, creator_id)
+        creator's LIVE enabled schedules on the agent, rated with schedule_run_tier
+        any shared person -> platform_alerts.observe(agent, "schedule_runs_restricted", creator_id)
+        none              -> platform_alerts.clear(...)
+```
+
+- One row per agent × creator: subject `schedule_runs_restricted:<creator id>`, id prefix `schedule-restricted-`, priority `medium`, 30-day net lifetime. Context: `cause`, `remedy`, `creator_id`, `schedule_ids` (≤20), `schedule_count`. The text names the creator (display name, else username), the cause, the remedy and up to 5 schedules.
+- A person's ending is final for that cause (`person_ending_is_final`, material key `cause`); a new cause files again.
+- The prefix is reserved, about-a-person and owner-only: the agent's owner tier sees it, a share holder and machine keys do not.
+- A schedule that cannot be read mid-run (deleted) is stamped `schedule_unreadable` with no creator and files no row.
+- Take-over (slice D) calls `schedule_tier_alerts.sync` for the former and the new creator after its write.
+
 ### 1b. Make Repeatable Flow (Create Schedule from Task)
 
 **User Action:** Click calendar icon on completed task in Tasks tab → Fill remaining form fields → Click "Create"
