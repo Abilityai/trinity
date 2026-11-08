@@ -500,6 +500,16 @@ fails if the agent image calls a backend path the app does not register.
    change which runtime's names are open). The settings-file routes are closed
    per runtime: see [agent-guardrails.md](agent-guardrails.md),
    [codex-runtime.md](codex-runtime.md), [gemini-runtime.md](gemini-runtime.md).
+11. **`.env` may not turn Claude Code's vendor traffic back on** (trinity-enterprise#1093,
+   `execution_env.PROTECTED_KEYS`): `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`,
+   `DISABLE_TELEMETRY` and `DISABLE_ERROR_REPORTING`, which the image sets to `1`
+   (Dockerfile `ENV` + the root-owned `managed-settings.d/70-vendor-telemetry.json`);
+   and `CLAUDE_CODE_MANAGED_SETTINGS_PATH` / `CLAUDE_CODE_DISABLE_ADMIN_ENV_UNION`,
+   which could detach the `/etc/claude-code` file tier's `env` (this opt-out and
+   the item-10 routing pins). Refused on every runtime, so a blank `""`, `0` or
+   `false` never reaches the spawn. The backend mirror
+   `credential_ask_policy._AGENT_PROTECTED_KEYS` carries the same names. See
+   [agent-guardrails.md](agent-guardrails.md#vendor-traffic-opt-out--managed-settingsd70-vendor-telemetryjson-trinity-enterprise1093).
 
 ---
 
