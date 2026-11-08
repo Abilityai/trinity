@@ -122,7 +122,7 @@ def test_the_cause_is_never_on_the_fence_path(monkeypatch):
 
 
 @pytest.mark.parametrize("cause, remedy", [
-    ("creator_not_owner_tier", "recreate"), ("creator_missing", "recreate"),
+    ("creator_not_owner_tier", "take_over"), ("creator_missing", "take_over"),
     ("agent_has_no_owner", "repair_agent_owner"), ("schedule_unreadable", None),
     ("creator_owner_tier", None), ("no_recorded_creator", None), ("unknown", None), (None, None),
 ])
@@ -193,8 +193,8 @@ def _schedule_run(sid, agent=AGENT):
 
 
 @pytest.mark.parametrize("sid, agent, cause, creator, remedy", [
-    ("s-mate", AGENT, "creator_not_owner_tier", "Mate Shared", "recreate"),
-    ("s-dangling", AGENT, "creator_missing", None, "recreate"),
+    ("s-mate", AGENT, "creator_not_owner_tier", "Mate Shared", "take_over"),
+    ("s-dangling", AGENT, "creator_missing", None, "take_over"),
     ("c-mate", ORPHAN_AGENT, "agent_has_no_owner", "Mate Shared", "repair_agent_owner"),
     ("s-deleted", AGENT, "schedule_unreadable", None, None),
 ])

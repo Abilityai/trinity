@@ -273,7 +273,7 @@ async def _refuse_if_it_could_never_run(name: str, schedule, view: _ScheduleView
         return
     way_out = ("An admin needs to restore the agent's owner first."
                if rated.cause == turn_tier_service.AGENT_HAS_NO_OWNER
-               else "The agent's owner can set it up as their own.")
+               else "The agent's owner or an admin can take it over.")
     raise HTTPException(
         status_code=status.HTTP_409_CONFLICT,
         detail={

@@ -137,7 +137,7 @@ def test_the_route_names_why_a_schedule_backed_turn_is_shared():
     db.get_agent_owner.return_value = {"owner_username": "owner"}
     assert _call(tier_db=db) == {"tier": "share", "kind": "person", "shell": False,
                                  "cause": "creator_not_owner_tier", "schedule": "Morning brief",
-                                 "creator": "mate", "remedy": "recreate"}
+                                 "creator": "mate", "remedy": "take_over"}
 
 
 def test_an_owner_rated_schedule_turn_carries_no_cause():

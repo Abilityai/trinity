@@ -244,14 +244,15 @@ SCHEDULE_UNREADABLE = "schedule_unreadable"    # run time only: the schedule can
 # The cause could not be looked up. The tier is computed without it and stands.
 CAUSE_UNKNOWN = "unknown"
 
-# What fixes a shared-person rating. `recreate` until the take-over route
-# exists; an agent with no owner on record 404s every owner route, admins
-# included, so only restoring its owner helps there.
-REMEDY_RECREATE = "recreate"
+# What fixes a shared-person rating: the agent's owner or an admin takes the
+# schedule over (`POST …/schedules/{id}/take-over`). An agent with no owner on
+# record 404s every owner route, admins included, so only restoring its owner
+# helps there.
+REMEDY_TAKE_OVER = "take_over"
 REMEDY_REPAIR_AGENT_OWNER = "repair_agent_owner"
 _REMEDIES = {
-    CREATOR_NOT_OWNER_TIER: REMEDY_RECREATE,
-    CREATOR_MISSING: REMEDY_RECREATE,
+    CREATOR_NOT_OWNER_TIER: REMEDY_TAKE_OVER,
+    CREATOR_MISSING: REMEDY_TAKE_OVER,
     AGENT_HAS_NO_OWNER: REMEDY_REPAIR_AGENT_OWNER,
 }
 
@@ -500,17 +501,17 @@ class RunTierLookups:
 # What a schedule read says about its runs (`ScheduleResponse.runs_as*`).
 RUNS_AS = {OWNER: "owner", SHARE: "shared_person"}
 _RESTRICTED = "no shell commands and no tools the owner added"
-_RECREATE = ("To give them the owner's access, the agent's owner can create the schedule again "
-             "as their own and disable this one.")
+_TAKE_OVER = ("To give them the owner's access, the agent's owner or an admin can take it over "
+              "after reviewing what it runs.")
 RUNS_AS_MESSAGES = {
     CREATOR_OWNER_TIER: "Its runs have the owner's access: it was created by the agent's owner or an admin.",
     NO_RECORDED_CREATOR: "Its runs have the owner's access: it has no recorded creator, so it is the owner's.",
     CREATOR_NOT_OWNER_TIER: (
         "Its runs have the access of the person who created it, who is not the agent's owner or an "
-        f"admin: {_RESTRICTED}. {_RECREATE}"),
+        f"admin: {_RESTRICTED}. {_TAKE_OVER}"),
     CREATOR_MISSING: (
         "The account that created it no longer exists, so its runs have a shared person's access: "
-        f"{_RESTRICTED}. {_RECREATE}"),
+        f"{_RESTRICTED}. {_TAKE_OVER}"),
     AGENT_HAS_NO_OWNER: (
         "The agent has no owner on record, so the runs of a schedule an admin did not create have a "
         f"shared person's access: {_RESTRICTED}. An admin needs to restore the agent's owner."),

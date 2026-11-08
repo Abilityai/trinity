@@ -760,6 +760,21 @@ def test_can_take_over_is_false_on_the_owners_own_schedule(client, world):
     assert read(client, world, sid)["can_take_over"] is False
 
 
+def test_the_remedy_is_take_over(client, world):
+    sid = created(client, world)
+    row = read(client, world, sid)
+    assert "take it over" in row["runs_as_reason"]["message"]
+    for cause in (
+        turn_tier_service.CREATOR_NOT_OWNER_TIER,
+        turn_tier_service.CREATOR_MISSING,
+    ):
+        assert turn_tier_service.schedule_remedy(cause) == "take_over"
+    assert (
+        turn_tier_service.schedule_remedy(turn_tier_service.AGENT_HAS_NO_OWNER)
+        == "repair_agent_owner"
+    )
+
+
 # ---- "Run now" (D9) ---------------------------------------------------------------------
 
 
