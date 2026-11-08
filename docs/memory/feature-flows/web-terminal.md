@@ -453,7 +453,7 @@ finally:
 |------------|----------------|---------|
 | Missing auth message | 4001 | "Expected auth message first" |
 | Missing token | 4001 | "Token required" |
-| Invalid token | 4001 | "Invalid token" |
+| Invalid token, or the account is missing or deactivated (`decode_token` returns `None`; abilityai/trinity-enterprise#863). Refused before any container lookup | 4001 | "Invalid token" |
 | Access denied | 4003 | "You don't have access to this agent" |
 | Admin required (System Agent) | 4003 | "Admin access required" |
 | Auth timeout (10s) | 4001 | "Authentication timeout" |

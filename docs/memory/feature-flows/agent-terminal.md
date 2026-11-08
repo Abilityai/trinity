@@ -540,7 +540,7 @@ When API key setting is changed and agent is restarted:
 |------------|----------------|---------|
 | Missing auth message | 4001 | "Expected auth message first" |
 | Missing token | 4001 | "Token required" |
-| Invalid token | 4001 | "Invalid token" |
+| Invalid token, or the account is missing or deactivated (`decode_token` returns `None`; abilityai/trinity-enterprise#863). Refused before any container lookup | 4001 | "Invalid token" |
 | No agent access | 4003 | "You don't have access to this agent" |
 | Auth timeout (10s) | 4001 | "Authentication timeout" |
 | Invalid auth JSON | 4001 | "Invalid JSON in auth message" |
