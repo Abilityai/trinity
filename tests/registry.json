@@ -8869,6 +8869,18 @@
         "unit"
       ],
       "description": "trinity#4302: a mention chain stopped at ROOM_MAX_CHAIN_DEPTH writes a typed `chain_paused` system row (mentions = who was next; plain words, no UI verb) and the room payload carries `paused_chain` {seq, next} while the offer stands (survives bookkeeping lines; ends on a conversational row, a later pause/continue row, a closed room, or every named agent having left; a collaborator seated above the row still gets it). POST /api/rooms/{id}/continue through the real router, service, db and idempotency layers over a temp SQLite DB: wakes `next` at depth 1 (a fresh count that may pause again), posts a `chain_continued` receipt that spends no message budget, hands the woken agent what it was owed; a seated collaborator, a person's user key and a Workspace client may continue, an agent key and the system key get 403 not_a_person, a non-member the uniform 404 with no key claimed, an unreachable `next` a 403 with nothing consumed, a departed `next` 409 no_one_to_wake; a closed room / a room at its message budget 410 with stop_reason and the budget named. Once per stop: a double click with an Idempotency-Key is 409 in-flight then a replay under scope room-continue:{room_id}; two workers without a key wake once (the second gets 409 room_moved_on); a stale offer_stands read is not the guard (the receipt insert is); two simultaneous receipt inserts land exactly one; a repeat after a restart (key rows gone) is 409 room_moved_on."
+    },
+    {
+      "file": "unit/test_ent165_output_scanner.py",
+      "feature": "trinity-enterprise#165",
+      "added": "2026-11-08",
+      "categories": [
+        "agent",
+        "unit",
+        "security",
+        "docker"
+      ],
+      "description": "GUARD-004: the Bash output scanner (`docker/base-image/hooks/output-scanner.py`) run under its registered `env -i ... -I -S` invocation hides credentials from the model. A hit returns a shape-preserving `updatedToolOutput` (`[REDACTED:<shape>]` in stdout, stderr, `structuredContent`, a string response; every key and boolean kept); clean and benign output (pod/package/branch names, `xoxb-test` fixtures, `.env.example` placeholders, a FILES-001 `?sig=` link) prints nothing, with the precondition that the untightened sanitizer shapes damage that corpus. A forced exception, unloadable shapes, unreadable input or output over 8 MiB withholds every top-level text field and exits 0, never 2; 8 MiB scans in under 10 s. The persisted large-output file is redacted in place, left alone when clean, cut to the notice over its cap, and refused (whole result withheld) when outside a `tool-results` dir or reached by a symlink. A failing command (`PostToolUseFailure`) gets an `additionalContext` warning and a `credential_unredacted` event. The baseline shapes are pinned as a three-class partition of `SECRET_VALUE_PATTERNS` (named, tightened, excluded) with the composer guard's names; `AIza` is in both sanitizer copies (D9) without breaking the Google consent exemption; the scanner is registered on `PostToolUseFailure`; no managed file sets `allowManagedHooksOnly` (D11); `OUTPUT_SCANNER_CLI_VERIFIED` equals the Dockerfile pin; Write/Edit/MultiEdit/NotebookEdit content and Bash commands holding `[REDACTED:` are refused (`redaction_writeback_refused`); and the build smoke passes the shipped scanner and fails a log-only one."
     }
   ]
 }
