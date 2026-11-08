@@ -8,7 +8,9 @@
  *     room's read is refreshed; an agent not on their list has no Add;
  *   - a member sees states only, and is told who can add;
  *   - a failed Add says why next to the control;
- *   - after the creator links a room with agents not on the project, the list opens.
+ *   - after the creator links a room with agents not on the project, the list opens;
+ *   - the chip's space is held while the room's read is in flight, so the
+ *     header does not shift when it lands.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { mount, flushPromises } from '@vue/test-utils'
@@ -84,6 +86,34 @@ beforeEach(() => {
 })
 
 describe('a linked room says which agents are not on the project', () => {
+  it("holds the chip's space while the room's read is in flight, then shows the chip in it", async () => {
+    let land
+    portalHttp.get.mockImplementation((url) => (url === BY_LINK
+      ? new Promise((resolve) => { land = () => resolve({ data: { project: linked() } }) })
+      : Promise.resolve({ data: { projects: [] } })))
+    header()
+    await flushPromises()
+    const slot = byTestId('project-room-agents-chip-slot')
+    expect(slot).not.toBeNull()
+    expect(slot.getAttribute('aria-hidden')).toBe('true')
+    expect(slot.classList.contains('invisible')).toBe(true)
+    expect(slot.querySelector('button, [tabindex]:not([tabindex="-1"])')).toBeNull()
+    expect(byTestId('project-room-agents-chip')).toBeNull()
+    land()
+    await flushPromises()
+    expect(byTestId('project-room-agents-chip-slot')).toBeNull()
+    expect(byTestId('project-room-agents-chip').textContent).toContain('2 not on it')
+  })
+
+  it('holds no chip space on a chat, which has no room agents', async () => {
+    portalHttp.get.mockImplementation(() => new Promise(() => {}))
+    mount(ProjectChatControls, { props: { kind: 'thread', targetId: 's1', agentName: 'scout', isMain: false },
+      attachTo: document.body })
+    await flushPromises()
+    expect(byTestId('project-chat-controls')).not.toBeNull()
+    expect(byTestId('project-room-agents-chip-slot')).toBeNull()
+  })
+
   it('shows no chip when every room agent is on it', async () => {
     reads = [linked({ room_agents: [{ agent_name: 'scout', state: 'active', can_add: false }] })]
     header()

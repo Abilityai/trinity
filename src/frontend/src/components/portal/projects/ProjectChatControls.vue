@@ -15,6 +15,8 @@
   ("2 not on it" / "1 waiting on owner") and opens "Agents in this room" —
   each agent's state, and for the creator Add (the existing add-agent route;
   another owner's agent still asks its owner). No chip when all are on it.
+  While the room's read is in flight the chip's space is held by an invisible
+  stand-in, so the header does not shift when the read lands (plan §2.6).
 
   Never rendered in Main, for an outside client, before a chat exists, or on a
   build without projects (`chatProjectActions`). Which project a chat is in
@@ -23,6 +25,12 @@
 -->
 <template>
   <div v-if="actions.show" class="flex items-center gap-1" data-testid="project-chat-controls">
+    <span
+      v-if="chipPending"
+      class="invisible inline-flex items-center rounded-md border border-transparent px-2.5 py-1 text-[12.5px] leading-[1.35]"
+      aria-hidden="true"
+      data-testid="project-room-agents-chip-slot"
+    ><BaseBadge variant="neutral" size="sm">0 not on it</BaseBadge></span>
     <template v-if="actions.linked">
       <button
         type="button"
@@ -176,6 +184,9 @@ const actions = computed(() => chatProjectActions({
   project: project.value,
 }))
 const roomAgents = computed(() => (props.kind === 'room' ? roomAgentRows(project.value) : null))
+// ent#1131: the room's read hasn't landed yet (undefined, not null = unlinked).
+const chipPending = computed(() => props.kind === 'room' && Boolean(props.targetId)
+  && store.forLink(props.kind, props.targetId) === undefined)
 const rosterAgents = computed(() => portal.agents.map((a) => a.name))
 const candidates = computed(() => store.list.filter((p) => !p.archived_at && (props.kind === 'room'
   || (p.agents || []).some((a) => a.agent_name === props.agentName && ['active', 'pending'].includes(a.state)))))
