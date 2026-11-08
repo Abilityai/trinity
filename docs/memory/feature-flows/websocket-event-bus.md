@@ -122,14 +122,32 @@ with one shared agent could mint a ticket (`POST /api/ws/ticket` is plain
   snapshot, so filtering on it would blind the operator to every agent created
   after the page loaded. `resolve_ws_identity` therefore resolves *no* roster
   for an admin.
-- **A live roster is refreshed by the stream itself.** `_maybe_invalidate_rosters`
-  watches for `agent_created` / `agent_deleted` / `agent_shared` /
-  `agent_unshared` / `agent_renamed` and re-resolves each non-admin slot in a
-  worker thread (`set_accessible_resolver`, injected from `main.py` so the
-  delivery layer never imports `database`). Because every worker reads the same
-  stream, one publish invalidates rosters on all of them with no call-site
-  edits. A missed invalidation degrades to the `/ws/events` contract — stale
-  until reconnect — never to a leak, since the stale roster is the smaller one.
+- **A live roster is re-read on an access change and once a minute**
+  (trinity-enterprise#863). `_maybe_invalidate_rosters` watches for
+  `agent_created` / `agent_deleted` / `agent_shared` / `agent_unshared` /
+  `agent_renamed` and re-resolves each non-admin slot in a worker thread: a
+  `/ws` slot by email (`set_accessible_resolver`, injected from `main.py` so the
+  delivery layer never imports `database`), a non-admin `/ws/events` slot
+  through its own `roster_resolver`. Because every worker reads the same stream,
+  one publish reaches the rosters on all of them with no call-site edits.
+  `_reread_rosters_periodically` re-reads every non-admin roster on the worker
+  every `ROSTER_REREAD_INTERVAL_S` (60 s): started and stopped by the dispatcher
+  itself, per worker with no lease, one read at a time, and nothing read while
+  no non-admin roster is held. A live roster therefore follows the database
+  within about a minute while the database is readable.
+- **A change during a read gets one more read.** A read asked for while one is
+  already in flight for that slot (`refreshing`) marks it `refresh_again`, and
+  the slot is read once more when the in-flight read ends — unless it has
+  disconnected or the dispatcher is stopping. `update_accessible_agents` (the
+  `/ws/events` `refresh` command) marks it the same way. A failed read keeps the
+  previous roster until the next read replaces it.
+- **An event-stream key's roster is its owner's, read now.** Every non-admin
+  `/ws/events` key — user keys as well as agent keys — gets
+  `ws_identity_service.event_stream_roster_reader(key_info)`, which re-reads the
+  key's owner on every call: an owner that is gone, deactivated or
+  Workspace-only reads as an empty list, and the owner's current email is the
+  one used. The `refresh` command reads through the same function. Admin keys
+  are never filtered and get no re-read.
 - **No Redis format change**: the envelope still carries a single
   `agent_name`; the set is derived from the payload at delivery, so entries
   written by a pre-ent#467 worker during a rolling deploy filter correctly.
@@ -312,9 +330,10 @@ Gate checks (see orchestration reliability plan, Tier 2.5):
 | Entry | `src/backend/main.py:538-547` | Lifespan 2s graceful drain on shutdown |
 | Client | `src/frontend/src/utils/websocket.js` | Main WebSocket client; `_eid` capture, reconnect replay, `resync_required` → REST refetch. For a Workspace-only `user` the operator stores (agents, notifications, operator queue, executions) do not follow the stream — their refetches would 403 `workspace_only`; the Workspace stores still do (trinity-enterprise#837) |
 | Client | `src/frontend/src/stores/network.js:535+` | Collaboration dashboard WS client; same contract, separate `lastEventId` |
-| Service | `src/backend/services/ws_identity_service.py` | ent#467 `/ws` identity + agent scope (`resolve_ws_identity`, `accessible_agents_for`) |
+| Service | `src/backend/services/ws_identity_service.py` | ent#467 `/ws` identity + agent scope (`resolve_ws_identity`, `accessible_agents_for`); `/ws/events` scope (`event_stream_identity`) and the owner re-read behind every non-admin event-stream roster (`event_stream_roster_reader`, trinity-enterprise#863) |
 | Tests | `tests/test_event_bus.py` | 23 unit tests — envelope, scope visibility, eviction, slow-consumer resync, monotonic cursor guard, catchup trim detection |
 | Tests | `tests/unit/test_ent467_ws_agent_scope.py` | 36 tests — payload agent-identity vocabulary, `/ws` visibility rule, both delivery paths, roster refresh, fail-closed identity, AST discovery guard over every `/ws` broadcast |
+| Tests | `tests/unit/test_ent863_event_stream_roster.py` | trinity-enterprise#863 — the real `/ws/events` handler wires the owner re-read for every non-admin key and `refresh` reads the owner's current row; the reader's owner checks and current email; a change during an in-flight read; the periodic re-read (interval, one read at a time, no read when idle, survives a failing read, stops with the dispatcher) |
 
 ## Constants
 
@@ -326,6 +345,7 @@ Gate checks (see orchestration reliability plan, Tier 2.5):
 | `EVICT_AFTER_FAILURES` | 3 | Consecutive send failures before eviction |
 | `REPLAY_GAP_LIMIT` | 5000 | Max replay size before forced resync |
 | `_FALLBACK_BUFFER_MAX` | 1024 | In-process buffer during Redis outage |
+| `ROSTER_REREAD_INTERVAL_S` | 60 | How often each worker re-reads every non-admin roster it holds (trinity-enterprise#863); a code constant, no env setting |
 
 ---
 
