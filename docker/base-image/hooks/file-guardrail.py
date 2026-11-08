@@ -56,7 +56,9 @@ def _matches_glob(path: str, patterns: list, allow: list = ()) -> str:
 REDACTION_MARK = "[REDACTED:"
 WRITEBACK_REFUSED = (
     "this holds `[REDACTED:`, the placeholder Trinity puts where it hid a credential from you; "
-    "writing it would replace the real value. Leave that value out, or ask the owner to set it")
+    "writing it would replace the real value. To change a file that holds one, use Edit on only the lines "
+    "you need, keeping the hidden value's line out of old_string and new_string; do not rewrite the whole "
+    "file, which would lose the value. If the value itself must change, ask the owner to set it")
 
 
 def _new_content(tool_input: dict) -> list:

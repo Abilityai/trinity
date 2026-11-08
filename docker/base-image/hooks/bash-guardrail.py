@@ -25,7 +25,10 @@ from lib import (  # noqa: E402
 REDACTION_MARK = "[REDACTED:"
 WRITEBACK_REFUSED = (
     "this holds `[REDACTED:`, the placeholder Trinity puts where it hid a credential from you; "
-    "a command that writes it would replace the real value. Leave that value out, or ask the owner to set it")
+    "a command that writes it would replace the real value. To change a file that holds one, change only "
+    "the lines you need (the Edit tool, or sed on those lines) and leave the hidden value's line as it is; "
+    "do not rewrite the whole file, which would lose the value. If the value itself must change, ask the "
+    "owner to set it")
 
 # Must equal `_skill_gate.MARKER` (unit-tested).
 SKILL_GATES_MARKER = "/opt/trinity/skill-gates-active"

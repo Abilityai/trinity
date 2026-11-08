@@ -9,8 +9,10 @@ cannot import under its registered interpreter and flags exits 1, which
 Claude Code treats as "let the tool run": this is where that is caught.
 
 The output scanner is checked on what it prints, not only its exit code
-(trinity-enterprise#165): a key on stdout, on stderr and in a persisted output
-file must be hidden, and a failing command must be warned about.
+(trinity-enterprise#165): a key on stdout, on stderr, in a persisted output
+file, in a Read file and in an owner MCP result must be hidden, the platform's
+own MCP server must be left alone, a failing command must be warned about, and
+the registration must reach every tool the scanner was written for.
 
 Run by the Dockerfile as root, before /logs is created for the agent user.
 It removes the log file, the read-only config, the skill-gate marker and the
@@ -18,6 +20,7 @@ persisted-output directory it writes.
 """
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -89,6 +92,34 @@ def _check_gated_rows(argv: list, failures: list) -> None:
                             f"{r.stderr.strip()[:200]}")
 
 
+# (event, tool) pairs the output scanner must be registered for, judged by the
+# CLI's matcher rule (2.1.281): letters, digits, `_` and `|` only is an exact
+# list of names; anything else is an unanchored regex.
+SCANNER_COVERAGE = (
+    ("PostToolUse", "Bash"), ("PostToolUse", "Read"), ("PostToolUse", "Grep"),
+    ("PostToolUse", "WebFetch"), ("PostToolUse", "mcp__owner__fetch"),
+    ("PostToolUseFailure", "Bash"), ("PostToolUseFailure", "mcp__owner__fetch"),
+)
+
+
+def _matcher_selects(matcher: str, tool: str) -> bool:
+    if not matcher or matcher == "*":
+        return True
+    if re.fullmatch(r"[a-zA-Z0-9_|]+", matcher):
+        return tool in [m.strip() for m in matcher.split("|") if m.strip()]
+    return re.search(matcher, tool) is not None
+
+
+def _check_scanner_coverage(managed: dict) -> list:
+    failures = []
+    for event, tool in SCANNER_COVERAGE:
+        entries = [e for e in managed.get("hooks", {}).get(event, [])
+                   if any(h.get("args", [""])[-1].endswith("/output-scanner.py") for h in e["hooks"])]
+        if not any(_matcher_selects(e.get("matcher", ""), tool) for e in entries):
+            failures.append(f"output-scanner.py: not registered for {tool} on {event}")
+    return failures
+
+
 def _scanner_run(argv: list, payload: dict):
     r = subprocess.run(argv, input=json.dumps(payload), capture_output=True, text=True, timeout=30)
     try:
@@ -133,6 +164,21 @@ def _check_output_scanner(argv: list, failures: list) -> None:
     if (r.returncode != 0 or SECRET in r.stdout or out.get("hookEventName") != "PostToolUseFailure"
             or not out.get("additionalContext")):
         fail("a failing command with a key was not warned about", r)
+    read = {"type": "text", "file": {"filePath": "/home/developer/.env", "content": "K=" + SECRET + "\n",
+                                     "numLines": 2, "startLine": 1, "totalLines": 2}}
+    r, out = _scanner_run(argv, {**base, "tool_name": "Read", "tool_input": {}, "tool_response": read})
+    if SECRET in r.stdout or out.get("updatedToolOutput") != {
+            **read, "file": {**read["file"], "content": "K=[REDACTED:sk]\n"}}:
+        fail("a key in a Read file was not redacted", r)
+    blocks = [{"type": "text", "text": "token=" + SECRET}]
+    r, out = _scanner_run(argv, {**base, "tool_name": "mcp__owner__fetch", "tool_input": {},
+                                 "tool_response": blocks})
+    if SECRET in r.stdout or out.get("updatedToolOutput") != [{"type": "text", "text": "token=[REDACTED:sk]"}]:
+        fail("a key in an owner MCP result was not redacted", r)
+    r, _ = _scanner_run(argv, {**base, "tool_name": "mcp__trinity__list_agents", "tool_input": {},
+                               "tool_response": blocks})
+    if r.returncode != 0 or r.stdout.strip():
+        fail("the platform's own MCP server was scanned", r)
     tmp = tempfile.mkdtemp(dir=SMOKE_HOME, prefix=".guard002-smoke-")
     try:
         path = os.path.join(tmp, "tool-results", "smoke.txt")
@@ -160,6 +206,7 @@ def main() -> int:
             extra = json.load(f)
         entries += [h for phase in extra.get("hooks", {}).values() for e in phase for h in e["hooks"]]
     seen = set()
+    scanned = []
     failures = []
     logs_existed = os.path.exists(os.path.dirname(LOG_PATH))
     with open(READ_ONLY_CONFIG, "w") as f:
@@ -176,12 +223,11 @@ def main() -> int:
                     failures.append(f"{hook}: exit {r.returncode}, want {want}: {r.stderr.strip()[:200]}")
             if hook == "bash-guardrail.py":
                 _check_gated_rows(argv, failures)
-            if hook == "output-scanner.py":
+            if hook == "output-scanner.py" and argv not in scanned:
+                scanned.append(argv)
                 _check_output_scanner(argv, failures)
         if "output-scanner.py" in seen:
-            failure_phase = [h for e in managed["hooks"].get("PostToolUseFailure", []) for h in e["hooks"]]
-            if not any(h.get("args", [""])[-1].endswith("/output-scanner.py") for h in failure_phase):
-                failures.append("output-scanner.py: not registered on PostToolUseFailure")
+            failures += _check_scanner_coverage(managed)
             with open(LOG_PATH) as f:
                 if '"credential_redacted"' not in f.read():
                     failures.append("output-scanner.py: no credential_redacted line")

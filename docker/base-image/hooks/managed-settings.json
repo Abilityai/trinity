@@ -72,11 +72,65 @@
             "timeout": 30
           }
         ]
+      },
+      {
+        "matcher": "Read|Grep|WebFetch",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env",
+            "args": [
+              "-i",
+              "HOME=/home/developer",
+              "/usr/local/bin/python3",
+              "-I",
+              "-S",
+              "/opt/trinity/hooks/output-scanner.py"
+            ],
+            "timeout": 30
+          }
+        ]
+      },
+      {
+        "matcher": "^mcp__",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env",
+            "args": [
+              "-i",
+              "HOME=/home/developer",
+              "/usr/local/bin/python3",
+              "-I",
+              "-S",
+              "/opt/trinity/hooks/output-scanner.py"
+            ],
+            "timeout": 30
+          }
+        ]
       }
     ],
     "PostToolUseFailure": [
       {
         "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/usr/bin/env",
+            "args": [
+              "-i",
+              "HOME=/home/developer",
+              "/usr/local/bin/python3",
+              "-I",
+              "-S",
+              "/opt/trinity/hooks/output-scanner.py"
+            ],
+            "timeout": 30
+          }
+        ]
+      },
+      {
+        "matcher": "^mcp__",
         "hooks": [
           {
             "type": "command",

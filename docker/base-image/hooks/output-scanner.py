@@ -1,7 +1,15 @@
 #!/usr/bin/env python3
-"""Keeps credentials in Bash output from the model (GUARD-004, trinity-enterprise#165).
+"""Keeps credentials in tool output from the model (GUARD-004, trinity-enterprise#165).
 
-Registered twice for `Bash` in the managed settings:
+Registered for `Bash` (both events below), for `Read|Grep|WebFetch` and for
+every `mcp__*` tool on `PostToolUse`, and for `mcp__*` on `PostToolUseFailure`.
+The platform's own `trinity` MCP server is skipped (`is_platform_mcp_tool`):
+its output is platform-authored and carries share links. Background Bash
+output is read later through `Read`, so the `Read` registration covers it.
+Strings that are binary payloads (`base64`, `image_data`, a base64 `source`'s
+`data`) are never scanned or counted: a rewritten span would only break them.
+
+For `Bash`:
 
 * `PostToolUse` (the command exited 0): the matched spans are replaced with
   `[REDACTED:<shape>]` in a copy of `tool_response`, returned as
@@ -10,17 +18,21 @@ Registered twice for `Bash` in the managed settings:
   the CLI drops a rewrite that does not match the tool's output schema. Output
   the CLI persisted to `persistedOutputPath` is redacted in that file too. Clean
   output prints nothing.
-* `PostToolUseFailure` (non-zero exit): its only decision field is
-  `additionalContext`, so a hit adds a warning not to repeat it (decision D5).
-  On the pinned CLI a failed Bash call ALSO fires `PostToolUse`, with
+* `PostToolUseFailure` (non-zero exit, or an MCP error result): its only
+  decision field is `additionalContext`, so a hit adds a warning not to repeat
+  it (decision D5). On the pinned CLI a failed Bash call ALSO fires
+  `PostToolUse`, with
   `tool_response` the error text as a plain string ("Error: Exit code N\n...").
   The Bash schema wants an object there: a string rewrite is rejected and the
   whole result becomes a `tool_use_error`, while a Bash-shaped object is
   accepted. So a string Bash response is rewritten as `{stdout, stderr,
   interrupted}` (`_as_bash`); observed live on 2.1.281, see CLI_FACTS_TO_REAUDIT.
+  An MCP error result does the same with a string; MCP output has no schema
+  check, so that string is rewritten as a string.
 
 Fails closed on content (D6): if the scan raises, its shapes cannot be loaded or
-the output is over the cap, the result is withheld. It never exits 2: on
+the output is over the cap, the result is withheld, in the shape of the tool
+that produced it (`_withheld_other` for every tool but Bash). It never exits 2: on
 `PostToolUse` that only adds stderr and the original output still reaches the
 model. A timeout or a crash before `main` cannot be caught here; the CLI then
 passes the original through.
@@ -63,6 +75,19 @@ CLI_FACTS_TO_REAUDIT = (
     "a failed Bash call fires PostToolUseFailure AND a managed PostToolUse whose tool_response is the error "
     "string; a string rewrite fails the schema and becomes a tool_use_error, a {stdout, stderr, interrupted} "
     "object is accepted (the model then sees the result without is_error)",
+    "a matcher of only letters, digits, _ and | is an exact list of tool names; any other matcher is an "
+    "UNANCHORED JavaScript regex, so `Read` as a regex would also match NotebookRead and ReadMcpResourceTool",
+    "the Read output schema: a union on `type` (text: file.content; image and pdf: file.base64; notebook: "
+    "file.cells with outputs[].image.image_data; parts; file_unchanged); the model sees file.content with "
+    "line numbers the CLI adds after the hooks",
+    "the WebFetch output schema: bytes, code, codeText, result, durationMs, url required; the model sees result",
+    "the Grep output schema: mode, numFiles, filenames required, content optional; the model sees content in "
+    "content mode and filenames otherwise",
+    "an MCP tool's tool_response is a list of Anthropic content blocks (an image is {type: image, source: "
+    "{type: base64, data}}) or a string, and a rewrite of it is not checked against any schema",
+    "an MCP result with isError fires PostToolUseFailure AND PostToolUse, whose tool_response is the error "
+    "string prefixed `Error: `; a string rewrite is accepted",
+    "background Bash output is written to a tasks/*.output file the model is told to Read",
 )
 
 PLACEHOLDER = "[REDACTED:{name}]"
@@ -71,12 +96,21 @@ PERSISTED_CAP_BYTES = 8 * 1024 * 1024
 TOOL_RESULTS_ROOT = "/home/developer"
 TOOL_RESULTS_DIR = "tool-results"
 _NAME = re.compile(r"[a-z0-9_]{1,32}")
+PLATFORM_MCP_PREFIX = "mcp__trinity__"
+# Strings that are binary payloads: Read's image/pdf `base64`, a notebook
+# output's `image_data`, and an MCP image block's `source.data`.
+BINARY_KEYS = frozenset({"base64", "image_data"})
+_OUTPUT_KIND = {"Bash": "bash", "Read": "read", "Grep": "grep", "WebFetch": "webfetch"}
 
 _DO_NOT_RERUN = "The command already ran — do not run it again to see its output.]"
 WITHHELD_ERROR = "[Output withheld: Trinity's credential check failed. " + _DO_NOT_RERUN
 WITHHELD_OVERSIZE = ("[Output withheld: the output is too large for Trinity's credential check. "
                      + _DO_NOT_RERUN)
-FAILURE_WARNING = ("The output of this failed command held a credential ({shapes}). Trinity hides it "
+_DO_NOT_REFETCH = "Do not try to get this output another way.]"
+WITHHELD_ERROR_OTHER = "[Output withheld: Trinity's credential check failed. " + _DO_NOT_REFETCH
+WITHHELD_OVERSIZE_OTHER = ("[Output withheld: the output is too large for Trinity's credential check. "
+                           + _DO_NOT_REFETCH)
+FAILURE_WARNING = ("The output of this failed call held a credential ({shapes}). Trinity hides it "
                    "where it can; if you can still see it, do not repeat, store or send it.")
 FAILURE_UNCHECKED = ("Trinity could not check the output above for credentials ({why}). "
                      "If it contains one, do not repeat, store or send it.")
@@ -120,6 +154,22 @@ def _shapes(config):
     return re.compile(boundary + "(?:" + "|".join(groups) + ")"), names, re.compile(f"(?:{escape})+")
 
 
+def is_platform_mcp_tool(tool):
+    """A tool of the platform's own `trinity` MCP server. The same test as
+    turn-tier-guard.py: a server called `trinity_` or `trinity__x` shares the
+    prefix, and neither leaves a remainder that is one plain tool name."""
+    rest = tool[len(PLATFORM_MCP_PREFIX):] if tool.startswith(PLATFORM_MCP_PREFIX) else ""
+    return bool(rest) and not rest.startswith("_") and "__" not in rest
+
+
+def _kind(tool):
+    return "mcp" if tool.startswith("mcp__") else _OUTPUT_KIND.get(tool, "tool")
+
+
+def _is_binary(container, key):
+    return key in BINARY_KEYS or (key == "data" and container.get("type") == "base64")
+
+
 def _text_size(value):
     total, stack = 0, [value]
     while stack:
@@ -127,7 +177,7 @@ def _text_size(value):
         if isinstance(item, str):
             total += len(item)
         elif isinstance(item, dict):
-            stack.extend(item.values())
+            stack.extend(v for k, v in item.items() if not _is_binary(item, k))
         elif isinstance(item, list):
             stack.extend(item)
     return total
@@ -211,7 +261,8 @@ def _redact(value, shapes, hits, skip=()):
     if isinstance(value, list):
         return [_redact(item, shapes, hits) for item in value]
     if isinstance(value, dict):
-        return {k: v if k in skip else _redact(v, shapes, hits) for k, v in value.items()}
+        return {k: v if k in skip or _is_binary(value, k) else _redact(v, shapes, hits)
+                for k, v in value.items()}
     return value
 
 
@@ -242,6 +293,43 @@ def _withheld(response, notice):
     out.setdefault("stderr", "")
     out.setdefault("interrupted", False)
     return out
+
+
+def _blank(value):
+    """Every text leaf emptied, binary payloads and everything else kept."""
+    if isinstance(value, str):
+        return ""
+    if isinstance(value, list):
+        return [_blank(item) for item in value]
+    if isinstance(value, dict):
+        return {k: v if _is_binary(value, k) else _blank(v) for k, v in value.items()}
+    return value
+
+
+def _withheld_other(response, tool, notice):
+    """The withhold for a tool other than Bash, in a shape its output schema
+    accepts, with the notice where the model reads that tool's text."""
+    if tool == "Read":
+        file = response.get("file") if isinstance(response, dict) else None
+        path = file.get("filePath") if isinstance(file, dict) else None
+        return {"type": "text", "file": {"filePath": path if isinstance(path, str) else "",
+                                         "content": notice, "numLines": 1, "startLine": 1, "totalLines": 1}}
+    if tool == "Grep":
+        return {"mode": "content", "numFiles": 0, "filenames": [], "content": notice, "numLines": 1}
+    if tool == "WebFetch":
+        out = _blank(response) if isinstance(response, dict) else {}
+        for key in ("bytes", "code", "durationMs"):
+            if not isinstance(out.get(key), (int, float)) or isinstance(out.get(key), bool):
+                out[key] = 0
+        out.setdefault("codeText", "")
+        out.setdefault("url", "")
+        out["result"] = notice
+        return out
+    if isinstance(response, str):
+        return notice
+    if isinstance(response, dict) and not tool.startswith("mcp__"):
+        return _blank(response)
+    return [{"type": "text", "text": notice}]
 
 
 def _persisted_path(response):
@@ -314,6 +402,7 @@ def _ids(data):
 
 
 def _on_success(data, shapes):
+    tool = data.get("tool_name", "")
     response = data.get("tool_response", data.get("tool_output"))
     if response is None:
         return
@@ -325,13 +414,13 @@ def _on_success(data, shapes):
     rewritten = _redact(response, shapes, hits, skip)
     persisted = _redact_persisted(path, shapes, hits) if path else None
     if persisted == "withheld":
-        log_event("scanner_oversize", tool=data.get("tool_name", ""), code="persisted_output_withheld",
+        log_event("scanner_oversize", tool=tool, code="persisted_output_withheld",
                   persisted=True, **_ids(data))
     if hits:
-        log_event("credential_redacted", tool=data.get("tool_name", ""), code="bash_output",
+        log_event("credential_redacted", tool=tool, code=_kind(tool) + "_output",
                   patterns=sorted(hits), persisted=persisted == "redacted", **_ids(data))
     if rewritten != response:
-        _emit("PostToolUse", updatedToolOutput=_as_bash(rewritten, data.get("tool_name")))
+        _emit("PostToolUse", updatedToolOutput=_as_bash(rewritten, tool))
 
 
 def _withhold_persisted(response):
@@ -351,9 +440,16 @@ def _on_failure(data, shapes):
         raise _Oversize()
     hits = {name for _, _, name in _spans(text, shapes)}
     if hits:
-        log_event("credential_unredacted", tool=data.get("tool_name", ""), code="bash_failure_output",
+        tool = data.get("tool_name", "")
+        log_event("credential_unredacted", tool=tool, code=_kind(tool) + "_failure_output",
                   patterns=sorted(hits), **_ids(data))
         _emit("PostToolUseFailure", additionalContext=FAILURE_WARNING.format(shapes=", ".join(sorted(hits))))
+
+
+def _withhold(response, tool, oversize):
+    if tool == "Bash" or tool == "":
+        return _withheld(response, WITHHELD_OVERSIZE if oversize else WITHHELD_ERROR)
+    return _withheld_other(response, tool, WITHHELD_OVERSIZE_OTHER if oversize else WITHHELD_ERROR_OTHER)
 
 
 def main() -> None:
@@ -368,6 +464,10 @@ def main() -> None:
 
     failure = data.get("hook_event_name") == "PostToolUseFailure"
     tool = data.get("tool_name", "")
+    if not isinstance(tool, str):
+        tool = ""
+    if is_platform_mcp_tool(tool):
+        return
     try:
         shapes = _shapes(load_config())
         (_on_failure if failure else _on_success)(data, shapes)
@@ -378,7 +478,7 @@ def main() -> None:
         else:
             response = _as_bash(data.get("tool_response", data.get("tool_output")), tool)
             _withhold_persisted(response)
-            _emit("PostToolUse", updatedToolOutput=_withheld(response, WITHHELD_OVERSIZE))
+            _emit("PostToolUse", updatedToolOutput=_withhold(response, tool, oversize=True))
     except Exception as exc:
         code = "persisted_output_unverifiable" if isinstance(exc, _Unverifiable) else "scanner_exception"
         log_event("scanner_error", tool=tool, code=code, error=type(exc).__name__, **_ids(data))
@@ -388,7 +488,7 @@ def main() -> None:
             response = _as_bash(data.get("tool_response", data.get("tool_output")), tool)
             if not isinstance(exc, _Unverifiable):
                 _withhold_persisted(response)
-            _emit("PostToolUse", updatedToolOutput=_withheld(response, WITHHELD_ERROR))
+            _emit("PostToolUse", updatedToolOutput=_withhold(response, tool, oversize=False))
 
 
 if __name__ == "__main__":

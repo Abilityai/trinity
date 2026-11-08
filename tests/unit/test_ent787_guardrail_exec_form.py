@@ -86,13 +86,18 @@ EXPECTED = {
             {"matcher": "Edit|Write|NotebookEdit|MultiEdit",
              "hooks": [_entry("file-guardrail.py"), _entry("read-only-guard.py")]},
         ],
+        # trinity-enterprise#165: the scanner reads what the model reads. The
+        # built-in tools are an exact list (letters and `|` only); the MCP entry
+        # is a regex, anchored because a matcher regex is unanchored (S5).
         "PostToolUse": [
             {"matcher": "Bash", "hooks": [_entry("output-scanner.py")]},
+            {"matcher": "Read|Grep|WebFetch", "hooks": [_entry("output-scanner.py")]},
+            {"matcher": "^mcp__", "hooks": [_entry("output-scanner.py")]},
         ],
-        # trinity-enterprise#165: a failing command's output cannot be rewritten,
-        # so the scanner is registered here to warn the model about it.
+        # A failing command's (or an MCP error result's) output is warned about here.
         "PostToolUseFailure": [
             {"matcher": "Bash", "hooks": [_entry("output-scanner.py")]},
+            {"matcher": "^mcp__", "hooks": [_entry("output-scanner.py")]},
         ],
     },
 }
