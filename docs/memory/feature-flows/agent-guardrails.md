@@ -22,8 +22,9 @@ root-owned `0444`) always applies and is **not** overridable by the agent or by
 owners. Owners may layer **narrow per-agent overrides** — numeric caps and
 literal substring deny-lists only; never regex, never the credential scanner —
 via `PUT /api/agents/{name}/guardrails`. A `PostToolUse` scanner additionally
-hides credential-shaped strings in `Bash` output from the model, and warns it
-about a failing command's output it cannot hide (trinity-enterprise#165).
+hides credential-shaped strings from the model in the output of `Bash`, `Read`,
+`Grep`, `WebFetch` and owner MCP tools, and warns it about a failing call's
+output it cannot hide (trinity-enterprise#165).
 
 The output scanner is the one hook that never denies: the tool has already run,
 so it withholds the output instead (exit 0).
@@ -92,10 +93,11 @@ TOOL-CALL HOOKS (PreToolUse)                  CLI INVOCATION (every chat/task)
     • extra_path_deny literals (override)
   exit 0 = allow · exit 2 = deny (fail-closed)
         ▼
-PostToolUse  Bash → output-scanner.py
+PostToolUse  Bash | Read|Grep|WebFetch | ^mcp__ → output-scanner.py
   • credential_patterns match → updatedToolOutput with [REDACTED:<shape>] (exit 0)
-  • scan error / over 8 MiB → output withheld (exit 0, never 2)
-PostToolUseFailure  Bash → output-scanner.py
+  • scan error / over 8 MiB → output withheld in the tool's shape (exit 0, never 2)
+  • mcp__trinity__<tool> (the platform's server) → not scanned
+PostToolUseFailure  Bash | ^mcp__ → output-scanner.py
   • credential_patterns match → additionalContext warning
   (2.1.281 also fires PostToolUse for it: string response → Bash-object rewrite)
         ▼
@@ -269,7 +271,12 @@ Each hook registers in exec form (trinity-enterprise#787): `"command": "/usr/bin
 | `PreToolUse` | `Bash` | `bash-guardrail.py` |
 | `PreToolUse` | `Edit\|Write\|NotebookEdit\|MultiEdit` | `file-guardrail.py`, then `read-only-guard.py` |
 | `PostToolUse` | `Bash` | `output-scanner.py` |
+| `PostToolUse` | `Read\|Grep\|WebFetch` (exact list) | `output-scanner.py` (trinity-enterprise#165 S5) |
+| `PostToolUse` | `^mcp__` (anchored regex) | `output-scanner.py` (S5; skips `mcp__trinity__*` itself) |
 | `PostToolUseFailure` | `Bash` | `output-scanner.py` (trinity-enterprise#165) |
+| `PostToolUseFailure` | `^mcp__` | `output-scanner.py` (S5) |
+
+A matcher of only letters, digits, `_` and `|` is an exact list of tool names on CLI 2.1.281; any other matcher is an **unanchored** JavaScript regex (tested against the name and its aliases). So the built-in tools are listed exactly, and the MCP matcher is anchored with `^`.
 
 ### Shared library — `hooks/lib.py` (103 lines)
 
@@ -293,7 +300,7 @@ Loads config → takes `bash_deny`, plus `gated_bash_deny` while the root-owned 
 
 `_normalise(path)` → absolute (expands `~`, prefixes `/home/developer` for relative, collapses any run of leading slashes to one — `normpath` keeps exactly two, which made `//home/developer/.ssh/x` match no absolute pattern, trinity-enterprise#792; `read-only-guard.py` normalises the same way). `_matches_glob` runs `fnmatch` against **both** the full path and the basename, so `.env` patterns catch nested copies. Checks `path_deny` (baseline globs) then `extra_path_deny` (literals). A basename on `path_allow` (`.env.example`, #3868 — names only, required by compat check K-001) skips the slash-free `path_deny` patterns (`.env.*` and the other basename rules); absolute patterns, `extra_path_deny` and a symlinked `.env.example` still deny. `deny` with `tool`, `path`, `pattern`.
 
-### Credential scanner — `hooks/output-scanner.py` (395 lines, PostToolUse + PostToolUseFailure, trinity-enterprise#165)
+### Credential scanner — `hooks/output-scanner.py` (495 lines, PostToolUse + PostToolUseFailure, trinity-enterprise#165)
 
 Requirement: GUARD-004, `requirements/security.md` §28.4. Exits 0 on every path; exit 2 on `PostToolUse` only adds stderr and the model still sees the original output.
 
@@ -309,7 +316,26 @@ Requirement: GUARD-004, `requirements/security.md` §28.4. Exits 0 on every path
 - **Write-back guard**: `file-guardrail.py` refuses a `Write`/`Edit`/`MultiEdit`/`NotebookEdit` whose new content (`content`, `new_string`, `edits[].new_string`, `new_source`) holds `[REDACTED:`, and `bash-guardrail.py` refuses a command holding it, both with `code="redaction_writeback_refused"`. An edit that removes the placeholder (only `old_string` holds it) passes.
 - **Events** (shape names only): `credential_redacted` (`patterns`, `persisted`), `credential_unredacted`, `scanner_error` and `scanner_oversize` (`code` names the cause), each with `tool`, `code`, `session_id`, `tool_use_id`. The legacy `credential_pattern_in_output` is no longer written.
 - **CLI pin**: `OUTPUT_SCANNER_CLI_VERIFIED = "2.1.281"` and `CLI_FACTS_TO_REAUDIT` list what was read from the pinned binary; `test_ent165_output_scanner.py` fails when the Dockerfile pin moves.
-- **Not covered (open)**: `run_in_background` Bash (output read later through `Read`); a user, project or plugin `PostToolUse` hook that returns `updatedToolOutput` too (rewrites start from the original and the last one wins; `allowManagedHooksOnly` stays unset, D11, pinned by a test); a hook that cannot start, times out or is schema-rejected (the CLI passes the original and records a hook error); Codex and Gemini.
+- **Not covered (open)**: tools not registered (`Glob`, `WebSearch`, `ReadMcpResourceTool`, `NotebookRead`, subagent results); `Edit`/`Write` results, whose `tool_use_result` in the stream and transcript carries the file's original content (the model sees only a success line; agent-server egress redaction covers it); a user, project or plugin `PostToolUse` hook that returns `updatedToolOutput` too (rewrites start from the original and the last one wins; `allowManagedHooksOnly` stays unset, D11, pinned by a test); a hook that cannot start, times out or is schema-rejected (the CLI passes the original and records a hook error); Codex and Gemini.
+
+### Credential scanner on other tools (trinity-enterprise#165 S5)
+
+Same hook, same shapes, same events; registered for `Read|Grep|WebFetch` and `^mcp__` (above). What differs per tool, as captured from CLI 2.1.281 in the agent base image:
+
+| Tool | `tool_response` | What is scanned | Withhold (`_withheld_other`) |
+|------|-----------------|-----------------|------------------------------|
+| `Read` | union on `type`: `text` (`file.content`), `image`/`pdf` (`file.base64`), `notebook` (`file.cells`, outputs carry `text` or `image.image_data`), `parts`, `file_unchanged` | `file.content` (line numbers are added by the CLI after the hook), cell `source` and output `text` | a `text` read: `filePath` kept, `content` = notice |
+| `Grep` | `mode`, `numFiles`, `filenames`, `content`? | `content`, `filenames` | `mode: content`, `content` = notice (schema from the binary; the image's CLI ships no Grep tool) |
+| `WebFetch` | `bytes`, `code`, `codeText`, `result`, `durationMs`, `url` | `result` (and `url`) | numbers kept, strings blanked, `result` = notice |
+| `mcp__*` | a list of Anthropic content blocks (an image is `{type: image, source: {type: base64, data}}`), or a string (structured content, an error result) | every text block / the string | a list stays `[{type: text, text: notice}]`, a string becomes the notice |
+
+- **Binary payloads** (`_is_binary`): `base64`, `image_data`, and `data` beside `type: base64` are never rewritten and never counted in `_text_size`, so a large image is not withheld as oversize text and a shape that happens to match inside base64 cannot corrupt it.
+- **Background Bash**: the call returns `backgroundTaskId` and the CLI tells the model to `Read` `…/tasks/<id>.output`; that Read is redacted.
+- **Platform MCP server**: `is_platform_mcp_tool` (the predicate in `turn-tier-guard.py`, parity-tested) makes `main()` return before anything runs; a server named `trinity_` or `trinity__x` is scanned. The matcher stays `^mcp__` because a regex cannot express that test cleanly.
+- **MCP error results**: an `isError` result fires `PostToolUseFailure` (warning, `credential_unredacted`, code `mcp_failure_output`) and `PostToolUse` with the string `Error: …`; MCP output is not schema-checked, so the string is rewritten as a string. The model then sees it without `is_error` (observed live), as with Bash.
+- **Event codes**: `<kind>_output` / `<kind>_failure_output`, kind `bash`, `read`, `grep`, `webfetch`, `mcp`.
+- **Own credential files and write-back**: a `Read` of `.env`, `.mcp.json` or `.credentials.json` is redacted, not blocked. `Write`/`Edit` to those paths was already refused by `path_deny`; elsewhere a write carrying `[REDACTED:` is refused, and both refusals (`file-guardrail.py`, `bash-guardrail.py`) now tell the model to `Edit` only the lines it needs, keeping the hidden value's line out of `old_string`/`new_string`, instead of "leave that value out", which would delete the value from the file. Live: Read `settings.yaml` → `slack_token: [REDACTED:slack]`; a whole-file `Write` was refused; the model then used `Edit` on `log_level`; the file kept the real key.
+- **Live check** (agent base image, CLI 2.1.281, hooks mounted, no image build): every row above except `Grep` reached the model redacted with no `does not match … output shape` hook error; a forced scanner error withheld `Read` (text and image), `WebFetch`, MCP text and an MCP error, each accepted by the CLI.
 
 ### Runtime config merge — `hooks/write-runtime-config.py` (83 lines)
 
@@ -379,6 +405,7 @@ See [read-only-mode.md](read-only-mode.md).
 | `tests/test_files_guardrail_bypass.py` | AISEC-C2 RCE-by-config bypass repro, `PUT /files` deny-list coverage for protected paths, credential-inject allowlist rejection |
 | `tests/unit/test_ent787_guardrail_exec_form.py` | Exec-form registration shape of the four GUARD-002 hooks, no shell-prefix wrap, each hook's verdicts under the registered invocation and a hostile env, smoke-script coverage, `CLAUDE_CODE_SHELL_PREFIX` in `PROTECTED_KEYS` (trinity-enterprise#787) |
 | `tests/unit/test_ent165_output_scanner.py` | Output scanner under its registered invocation: redaction with the structure kept (stdout, stderr, `structuredContent`, a failed call's string response as a Bash object), a benign corpus byte-identical (plus the precondition that the untightened shapes damage it), withhold on a forced exception, unloadable shapes, unreadable input and output over the cap, an 8 MiB scan under 10 s, the persisted file redacted / untouched / cut / refused, keys split by colour codes (grep, the image's grep, rg; every shape; JSON-written escapes; 500 minted MCP keys; the live turn's bytes) redacted whole with the codes kept, by the scanner and both sanitizers, a coloured benign corpus byte-identical, the one escape grammar in three places, the `PostToolUseFailure` warning, the three-class shape partition, D9 in both sanitizer copies, the failure-event registration, `allowManagedHooksOnly` unset (D11), the CLI pin, the write-back guard, and the build smoke checking the rewrite (trinity-enterprise#165) |
+| `tests/unit/test_ent165_scanner_other_tools.py` | The scanner on Read, Grep, WebFetch and MCP (S5), each case run only when a port of the CLI's matcher rule says the registration selects it: what is and is not reached, per-tool redaction with the shape kept (own `.env`/`.mcp.json`/credentials, a background `tasks/*.output`, notebook, Grep, WebFetch, MCP blocks and error string), binary payloads untouched and outside the cap, the platform server skipped by turn-tier's predicate, per-tool withhold shapes, the write-back refusal steering to Edit, and the build smoke's new checks |
 | `tests/unit/test_ent1002_nested_cli_guardrail.py` | `gated_bash_deny`: the real hook under its registered flags with the marker on and off, refuse and pass tables run on the pinned CLIs, known-limit tables, adversarial commands to 512 KB, the image smoke's marker case |
 
 ---
@@ -417,7 +444,7 @@ See [read-only-mode.md](read-only-mode.md).
 | Hook lib | `docker/base-image/hooks/lib.py` | 1-103 |
 | Bash hook | `docker/base-image/hooks/bash-guardrail.py` | 1-66 |
 | File hook | `docker/base-image/hooks/file-guardrail.py` | 1-89 |
-| Output scanner | `docker/base-image/hooks/output-scanner.py` | 1-395 |
+| Output scanner | `docker/base-image/hooks/output-scanner.py` | 1-495 |
 | Runtime merge | `docker/base-image/hooks/write-runtime-config.py` | 1-83 |
 | CLI loader | `docker/base-image/agent_server/services/_runtime_config.py` | 1-33 |
 | CLI consumer (chat) | `docker/base-image/agent_server/services/claude_code.py` | 209-222 |
