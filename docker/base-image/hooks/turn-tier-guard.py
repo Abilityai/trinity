@@ -40,9 +40,17 @@ MCP servers the owner added (`.mcp.json`, plugins) are matched too: a
 filesystem or exec server is the shell by another name, so their tools follow
 the shell's line. The platform's own `trinity` server passes here; the backend
 fences it per route from the turn header the MCP server forwards.
+
+A schedule's runs are rated by its creator, and nobody is chatting in them
+(trinity#4281). For such a run the platform's answer also says why it is not
+the owner's (`cause`, the schedule's name, its creator, a `remedy` code), and
+the refusal says that instead of describing a chat. The text keys on `cause`,
+never on `kind`. An answer with no `cause` (any other turn, or a platform from
+before #4281) gets the text it always got.
 """
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, "/opt/trinity/hooks")
@@ -104,6 +112,31 @@ SEARCH_OWNER_ONLY = (
     "owner-only files (a search with no path runs over the agent's whole home). Search "
     "a narrower folder that holds only ordinary files, or ask the agent's owner."
 )
+
+# A run refused because of its schedule (trinity#4281). The schedule's name and
+# its creator's label are text a share holder chose, so they are bounded here as
+# well as by the platform before the model reads them. The agent server's copy
+# (`agent_server/services/turn_scope.py`) states the same facts; a test pins it.
+SCHEDULE_UNREADABLE = "schedule_unreadable"
+CODE_SCHEDULE_CREATOR = "schedule_creator_tier"
+CODE_SHAPE = re.compile(r"[a-z0-9_]{1,64}")
+SCHEDULE_LABEL_MAX = 80
+CREATOR_LABEL_MAX = 64
+SCHEDULE_REMEDIES = {
+    "take_over": "the agent's owner or an admin to take it over",
+    "recreate": "the agent's owner or an admin to re-create it as their own and disable this one",
+    "repair_agent_owner": "an admin to restore this agent's owner record",
+}
+SCHEDULE_REMEDY_GENERIC = "the agent's owner or an admin to take it over or re-create it as their own"
+# What the run cannot do, and what to do instead, per refusal.
+SCHEDULE_DENIED = {
+    "shell": ("running commands is not available", "Do what you can without the shell"),
+    "mcp": ("the MCP servers the agent's owner added are not available (they can reach files "
+            "and commands the agent's own tools may not)", "Do what you can without them"),
+    "path": ("that path is owner-only", "Do what you can without it"),
+    "search": ("that search would read owner-only files (a search with no path runs over the "
+               "agent's whole home)", "Search a narrower folder that holds only ordinary files"),
+}
 
 
 def read_environ(pid) -> dict:
@@ -217,18 +250,79 @@ def ask_tier(container_env: dict, agent: str, run: str) -> str:
     return ask_turn(container_env, agent, run)[0]
 
 
+def bounded_label(value, limit: int):
+    """`value` with control, format and separator characters replaced, whitespace
+    runs folded to one space, cut to `limit` characters; None when nothing is left."""
+    if not isinstance(value, str):
+        return None
+    text = " ".join("".join(ch if ch.isprintable() else " " for ch in value).split())
+    return text[:limit].rstrip() or None
+
+
+def schedule_detail(answer: dict):
+    """Why a schedule-backed shared turn is not the owner's (trinity#4281):
+    `{cause, schedule, creator, remedy}` from the platform's answer, or None when
+    it names no cause. The labels are bounded, and an email loses its domain."""
+    cause = answer.get("cause")
+    if not isinstance(cause, str) or not CODE_SHAPE.fullmatch(cause):
+        return None
+    creator = answer.get("creator")
+    if isinstance(creator, str) and "@" in creator:
+        creator = creator.split("@", 1)[0]
+    remedy = answer.get("remedy")
+    return {"cause": cause,
+            "schedule": bounded_label(answer.get("schedule"), SCHEDULE_LABEL_MAX),
+            "creator": bounded_label(creator, CREATOR_LABEL_MAX),
+            "remedy": remedy if isinstance(remedy, str) and remedy in SCHEDULE_REMEDIES else None}
+
+
+def schedule_runs_as(cause: str, creator) -> str:
+    """Whose access a schedule's runs have, by the answer's cause."""
+    named = f", {creator}" if creator else ""
+    if cause == "creator_not_owner_tier":
+        return f"It runs with the access of the person who created it{named}, who is not this agent's owner or an admin"
+    if cause == "creator_missing":
+        return "It runs with the access of the person who created it, an account that no longer exists"
+    if cause == "agent_has_no_owner":
+        return f"This agent has no owner on record, so it runs with the access of the person who created it{named}"
+    return f"It runs with the access of the person who created it{named}, not with an owner's"
+
+
+def schedule_refusal(surface: str, detail: dict) -> str:
+    """The refusal for a run refused because of its schedule: names the schedule,
+    whose access it has and the remedy; never describes a chat."""
+    denied, instead = SCHEDULE_DENIED[surface]
+    if detail["cause"] == SCHEDULE_UNREADABLE:
+        return (f"This run is a scheduled task whose schedule can no longer be read (it was deleted or "
+                f"changed while the run was in progress), not a chat, so it does not have the agent's "
+                f"owner's access and {denied}. {instead}, and say in your answer that the schedule this "
+                f"run came from could not be read.")
+    name = f"the scheduled task '{detail['schedule']}'" if detail["schedule"] else "a scheduled task"
+    remedy = SCHEDULE_REMEDIES.get(detail["remedy"], SCHEDULE_REMEDY_GENERIC)
+    return (f"This run is {name}, not a chat. {schedule_runs_as(detail['cause'], detail['creator'])}, "
+            f"so {denied}. {instead}, and say in your answer that this schedule needs {remedy}.")
+
+
+def deny_for_schedule(detail: dict, surface: str, **fields) -> None:
+    """Refuse with the schedule's text and its own code (ent#165 forwards `code`;
+    the turn's kind is `turn_kind`, never `kind`, which ent#165 derives)."""
+    code = SCHEDULE_UNREADABLE if detail["cause"] == SCHEDULE_UNREADABLE else CODE_SCHEDULE_CREATOR
+    deny(schedule_refusal(surface, detail), cause=detail["cause"], code=code, **fields)
+
+
 def ask_turn(container_env: dict, agent: str, run: str):
-    """(tier, shell, kind) for this turn; shell is False unless the platform says
-    True; kind is `person` or `visitor` for a share turn, else None."""
+    """(tier, shell, kind, schedule) for this turn; shell is False unless the
+    platform says True; kind is `person` or `visitor` for a share turn, else
+    None; schedule is `schedule_detail` for a share turn, else None."""
     import http.client
     from urllib.parse import quote, urlsplit
 
     key = container_env.get("TRINITY_MCP_API_KEY")
     if not key or not agent:
-        return "unreachable", False, None
+        return "unreachable", False, None, None
     url = urlsplit(container_env.get("TRINITY_BACKEND_URL") or DEFAULT_BACKEND_URL)
     if url.scheme not in ("http", "https") or not url.hostname:
-        return "unreachable", False, None
+        return "unreachable", False, None, None
     port = url.port or (443 if url.scheme == "https" else 80)
     path = url.path.rstrip("/") + TURN_TIER_PATH.format(agent=quote(agent, safe=""), run=quote(run, safe=""))
     connection = http.client.HTTPSConnection if url.scheme == "https" else http.client.HTTPConnection
@@ -239,23 +333,24 @@ def ask_turn(container_env: dict, agent: str, run: str):
             response = conn.getresponse()
             body = response.read(RESPONSE_MAX_BYTES)
             if response.status == 404:
-                return "unknown", False, None
+                return "unknown", False, None, None
             if response.status != 200:
-                return "unreachable", False, None
+                return "unreachable", False, None, None
             answer = json.loads(body.decode("utf-8"))
             tier = answer.get("tier")
             if tier not in ("owner", "share"):
-                return "unreachable", False, None
+                return "unreachable", False, None, None
             kind = answer.get("kind") if answer.get("kind") in ("person", "visitor") else None
-            return tier, answer.get("shell") is True, kind
+            schedule = schedule_detail(answer) if tier == "share" else None
+            return tier, answer.get("shell") is True, kind, schedule
         except (ConnectionRefusedError, ConnectionResetError, BrokenPipeError):
             if attempt == 2:
-                return "unreachable", False, None
+                return "unreachable", False, None, None
         except Exception:  # noqa: BLE001 - timeout, DNS, malformed body: no answer
-            return "unreachable", False, None
+            return "unreachable", False, None, None
         finally:
             conn.close()
-    return "unreachable", False, None
+    return "unreachable", False, None, None
 
 
 def turn_context():
@@ -276,11 +371,14 @@ def guard_shell(tool: str, *, verb: str = "exec") -> None:
     agent, run, container = turn_context()
     if not run:
         allow()  # no platform turn: a terminal or manual shell
-    tier, shell, kind = ask_turn(container, agent, run)
+    tier, shell, kind, schedule = ask_turn(container, agent, run)
     if shell:
         allow()
     if tier == "unreachable":
         deny(COULD_NOT_CHECK, tool=tool, verb=verb, tier=tier)
+    if schedule:
+        deny_for_schedule(schedule, "mcp" if verb == "mcp" else "shell",
+                          tool=tool, verb=verb, tier=tier, turn_kind=kind)
     if verb == "mcp":
         reason = MCP_VISITOR_OFF if kind == "visitor" else MCP_OWNER_ONLY
     else:
@@ -339,13 +437,16 @@ def main() -> None:
     agent, run, container = turn_context()
     if not run:
         allow()  # no platform turn: a terminal or manual shell
-    tier = ask_tier(container, agent, run)
+    tier, _, kind, schedule = ask_turn(container, agent, run)
     verb, path, code = refused[0]
     if tier == "owner":
         log_event("turn_tier_owner", tool=tool, verb=verb, path=path)
         allow()
     if tier == "unreachable":
         deny(COULD_NOT_CHECK, tool=tool, verb=verb, path=path, tier=tier)
+    if schedule:
+        deny_for_schedule(schedule, "search" if code == SEARCH_OWNER_TIER else "path",
+                          tool=tool, verb=verb, path=path, tier=tier, rule=code, turn_kind=kind)
     deny(SEARCH_OWNER_ONLY if code == SEARCH_OWNER_TIER else OWNER_ONLY,
          tool=tool, verb=verb, path=path, tier=tier, rule=code)
 
