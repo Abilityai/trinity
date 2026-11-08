@@ -14,7 +14,7 @@ roster refresh cannot drift apart.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -137,3 +137,28 @@ def event_stream_identity(key_info: Dict[str, Any], owner: Optional[Dict[str, An
         return False, sorted(agent_reach_names(agent, owner_agent_names(role, email)))
     is_admin = role == "admin"
     return is_admin, db.get_accessible_agent_names(email, is_admin)
+
+
+def event_stream_roster_reader(key_info: Dict[str, Any]) -> Callable[[], List[str]]:
+    """A zero-arg read of the agents ``key_info``'s ``/ws/events`` socket may
+    observe now (trinity-enterprise#863).
+
+    Every call re-reads the key's owner, so the list follows the owner's
+    current account: a share removed, a role lowered, an agent spawned. It
+    applies the owner checks the door applies at connect: an owner that is
+    gone, deactivated (#995) or Workspace-only (#837) reads as an empty list.
+    The owner's current email is used, not the one the key resolved at
+    connect. A failed owner read raises; the dispatcher then keeps the
+    previous list and logs.
+    """
+    from database import db
+    from dependencies import owner_is_suspended, owner_is_workspace_only
+
+    def read() -> List[str]:
+        owner = db.get_user_by_username(key_info.get("user_id"))  # user_id is the username
+        if owner_is_suspended(owner) or owner_is_workspace_only(owner):
+            return []
+        current = dict(key_info, user_email=owner.get("email") or "")
+        return list(event_stream_identity(current, owner)[1])
+
+    return read

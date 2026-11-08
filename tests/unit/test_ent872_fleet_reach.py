@@ -570,7 +570,7 @@ def test_the_event_stream_endpoint_scopes_an_agent_key(fleet, monkeypatch):
 
 def test_an_agent_key_slot_refreshes_its_reach_on_an_access_change():
     """A spawned child appears without a reconnect; a failed re-read keeps the
-    older, smaller roster; a non-access event reads nothing."""
+    previous roster; a non-access event reads nothing."""
     from services.event_bus import SCOPE_SCOPED, StreamDispatcher, _ClientSlot
 
     calls = []

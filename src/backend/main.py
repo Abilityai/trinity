@@ -134,7 +134,7 @@ from routers.loops import (
 from services.loop_service import set_websocket_manager as set_loop_ws_manager
 from routers.webhooks import router as webhooks_router  # Webhook triggers (WEBHOOK-001, #291)
 from routers.ws_tickets import router as ws_tickets_router  # /ws ticket auth (#550)
-from services.ws_identity_service import accessible_agents_for, event_stream_identity, resolve_ws_identity  # ent#467, ent#872
+from services.ws_identity_service import accessible_agents_for, event_stream_identity, event_stream_roster_reader, resolve_ws_identity  # ent#467, ent#872, ent#863
 # Workspace / client portal — OSS core since ent#356 (was an entitled
 # enterprise module). Its own package rather than routers/: it moved
 # wholesale from the submodule, and keeping the vertical slice intact
@@ -1763,14 +1763,12 @@ async def websocket_events_endpoint(
         "message": "Listening for events. Events filtered to your accessible agents."
     })
 
-    # An agent key's roster is its reach: re-read it (owner re-resolved) when an
-    # access-changing event arrives, so a spawned child appears without a
-    # reconnect (trinity-enterprise#872).
-    roster_resolver = None
-    if key_info.get("scope") == "agent" and not is_admin:
-        def roster_resolver() -> List[str]:
-            owner = db.get_user_by_username(key_info.get("user_id"))
-            return event_stream_identity(key_info, owner)[1]
+    # Every non-admin key's roster is re-read from its owner's current row on an
+    # access change and periodically, so it follows a share, an unshare or a
+    # spawned child without a reconnect (trinity-enterprise#872, #863). Admin
+    # slots are never filtered, so they get no re-read.
+    read_roster = event_stream_roster_reader(key_info)
+    roster_resolver = None if is_admin else read_roster
 
     # Add to filtered connections manager — enables reconnect replay via #306.
     await filtered_manager.connect(
@@ -1786,8 +1784,9 @@ async def websocket_events_endpoint(
             if data == "ping":
                 await websocket.send_text("pong")
             elif data == "refresh":
-                # Refresh accessible agents list (e.g., after sharing changes)
-                _, accessible_agents = event_stream_identity(key_info, user_data)
+                # Re-read from the owner's current row, never the connect-time
+                # one (trinity-enterprise#863).
+                accessible_agents = read_roster()
                 filtered_manager.update_accessible_agents(websocket, accessible_agents)
                 await websocket.send_json({
                     "type": "refreshed",

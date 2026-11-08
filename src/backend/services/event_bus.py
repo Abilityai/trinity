@@ -30,6 +30,7 @@ stream primitive in later sprints — see
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -37,7 +38,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Set
+from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Set, Tuple
 
 try:
     import redis.asyncio as aioredis
@@ -57,6 +58,12 @@ EID_PATTERN = re.compile(r"^\d+-\d+$")
 
 SCOPE_ALL = "all"
 SCOPE_SCOPED = "scoped"
+
+# trinity-enterprise#863: how often each worker re-reads every non-admin roster
+# it holds, on top of the reads an access-changing event triggers. A code
+# constant, not an env setting: it bounds how far a live roster can lag the
+# database, and nothing about a deployment makes a different bound right.
+ROSTER_REREAD_INTERVAL_S = 60.0
 
 # In-memory fallback used when Redis is unavailable at publish time.
 # Capped to avoid unbounded growth in degraded mode.
@@ -92,9 +99,14 @@ class _ClientSlot:
     # ...and the fields each delivered event is cut to (None = the whole payload).
     allowed_fields: Optional[FrozenSet[str]] = None
     refreshing: bool = False
-    # trinity-enterprise#872: an agent key's /ws/events slot re-reads its reach
-    # through this zero-arg callable on an access-changing event (injected by
-    # main.py, like the email resolver). None = no per-slot refresh.
+    # trinity-enterprise#863: a roster read was asked for while one was already
+    # in flight. That read may have started before the change, so another one
+    # follows it.
+    refresh_again: bool = False
+    # trinity-enterprise#872/#863: a non-admin /ws/events slot re-reads its
+    # roster through this zero-arg callable (injected by main.py, like the
+    # email resolver): its key's owner, re-read on every call. None = the slot
+    # is refreshed by email (a /ws slot) or not at all (admins).
     roster_resolver: Optional[Callable[[], Iterable[str]]] = None
     queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=CLIENT_QUEUE_MAXSIZE))
     last_delivered_id: str = "0-0"
@@ -440,6 +452,7 @@ class StreamDispatcher:
         # refresh cannot be garbage-collected mid-flight.
         self._accessible_resolver: Optional[Callable] = None
         self._refresh_tasks: Set[asyncio.Task] = set()
+        self._roster_task: Optional[asyncio.Task] = None
         self._redis: Optional["aioredis.Redis"] = None
         self._last_stream_id: str = "$"   # start at live tip on boot
         self._lock = asyncio.Lock()
@@ -456,12 +469,18 @@ class StreamDispatcher:
         if self._reader_task is not None:
             return
         self._reader_task = asyncio.create_task(self._supervised_reader(), name="stream_dispatcher")
+        self._roster_task = asyncio.create_task(
+            self._reread_rosters_periodically(), name="stream_dispatcher_rosters")
 
     async def stop(self) -> None:
         self._shutting_down = True
         for slot in list(self._clients.values()):
             if slot.consumer_task:
                 slot.consumer_task.cancel()
+        if self._roster_task:
+            self._roster_task.cancel()
+            await asyncio.gather(self._roster_task, return_exceptions=True)
+            self._roster_task = None
         if self._reader_task:
             self._reader_task.cancel()
             try:
@@ -536,6 +555,10 @@ class StreamDispatcher:
         slot = self._clients.get(client_id)
         if slot:
             slot.accessible_agents = set(accessible_agents)
+            # A read already in flight may predate this roster; it must not
+            # have the last word (trinity-enterprise#863).
+            if slot.refreshing:
+                slot.refresh_again = True
 
     def set_accessible_resolver(self, resolver: Optional[Callable]) -> None:
         """Inject ``(email) -> List[str]`` used to refresh a slot's roster.
@@ -543,66 +566,87 @@ class StreamDispatcher:
         Injected from ``main.py`` rather than imported: this module's only
         import today is ``config``, and reaching into ``database`` from the
         delivery layer would invert the router → service → db direction
-        (Invariant #1). No resolver ⇒ no refresh, which degrades to
-        "roster is a connect-time snapshot" — the ``/ws/events`` contract."""
+        (Invariant #1). No resolver ⇒ ``/ws`` rosters are not re-read; a
+        ``/ws/events`` slot reads through its own ``roster_resolver``."""
         self._accessible_resolver = resolver
 
     def _maybe_invalidate_rosters(self, payload: Any) -> None:
-        """Refresh non-admin SCOPE_ALL rosters after an accessibility change.
+        """Re-read non-admin rosters after an accessibility change.
 
-        Event-triggered rather than polled: at steady state this costs
-        nothing, and the events that change accessibility (create / delete /
-        share / unshare / rename) are rare. A MISSED invalidation degrades to
-        the pre-existing ``/ws/events`` behaviour — stale until the client
-        reconnects — never to a leak, because the stale roster is the older,
-        smaller one."""
+        Event-triggered: at steady state this costs nothing, and the events
+        that change accessibility (create / delete / share / unshare / rename)
+        are rare. Each read runs as its own task, so the reader loop never
+        waits on the database. The same rosters are also re-read about once a
+        minute by ``_reread_rosters_periodically`` (trinity-enterprise#863), so
+        a live roster follows the database within about that interval while
+        the database is readable."""
         if not isinstance(payload, dict):
             return
         event = payload.get("event") or payload.get("type")
         if event not in _ACCESS_CHANGING_EVENTS:
             return
-        # An agent key's slot (trinity-enterprise#872): its roster is its reach,
-        # which a create (spawn) or delete changes; each slot re-reads its own.
-        for slot in list(self._clients.values()):
-            if slot.roster_resolver is None or slot.is_admin or slot.refreshing:
-                continue
+        for slots, read in self._claim_roster_reads():
+            self._spawn_refresh(slots, read)
+
+    def _claim_roster_reads(self) -> List[Tuple[List[_ClientSlot], Callable[[], Iterable[str]]]]:
+        """Every non-admin roster this worker holds, as ``(slots, zero-arg read)``.
+
+        A slot with its own ``roster_resolver`` (every non-admin ``/ws/events``
+        key) is read alone. ``/ws`` slots are grouped by EMAIL, not by slot:
+        several browser tabs are several slots with one roster, and an
+        agent-create would otherwise fire one DB read per tab. Admins are never
+        filtered, so their roster is never read.
+
+        Every returned slot is marked ``refreshing``. A slot whose read is
+        already in flight is not returned: it is marked to read again when that
+        read ends, because the in-flight read may have started before the
+        change that asked for this one (trinity-enterprise#863)."""
+        def claim(slot: _ClientSlot) -> bool:
+            if slot.refreshing:
+                slot.refresh_again = True
+                return False
             slot.refreshing = True
-            task = asyncio.create_task(self._refresh_slots(
-                "", [slot], lambda _email, read=slot.roster_resolver: read()))
-            self._refresh_tasks.add(task)
-            task.add_done_callback(self._refresh_tasks.discard)
+            return True
+
+        reads: List[Tuple[List[_ClientSlot], Callable[[], Iterable[str]]]] = []
+        for slot in list(self._clients.values()):
+            if slot.roster_resolver is None or slot.is_admin:
+                continue
+            if claim(slot):
+                reads.append(([slot], slot.roster_resolver))
         resolver = getattr(self, "_accessible_resolver", None)
         if resolver is None:
-            return
-        # Deduped by EMAIL, not by slot: several browser tabs are several
-        # slots with one roster, and an agent-create would otherwise fire one
-        # DB read per tab into a thread pool of ~32.
+            return reads
         by_email: Dict[str, List[_ClientSlot]] = {}
         for slot in list(self._clients.values()):
-            # Admins are never filtered, so their roster is never read.
             if slot.scope != SCOPE_ALL or slot.is_admin or not slot.email:
                 continue
-            if slot.refreshing:
-                continue
-            by_email.setdefault(slot.email, []).append(slot)
+            if slot.roster_resolver is not None:
+                continue  # read above, through its own resolver
+            if claim(slot):
+                by_email.setdefault(slot.email, []).append(slot)
         for email, slots in by_email.items():
-            for slot in slots:
-                slot.refreshing = True
-            task = asyncio.create_task(self._refresh_slots(email, slots, resolver))
-            self._refresh_tasks.add(task)
-            task.add_done_callback(self._refresh_tasks.discard)
+            reads.append((slots, functools.partial(resolver, email)))
+        return reads
+
+    def _spawn_refresh(self, slots: List[_ClientSlot], read: Callable[[], Iterable[str]]) -> None:
+        # Strong refs, so a roster read cannot be garbage-collected mid-flight.
+        task = asyncio.create_task(self._refresh_slots(slots, read))
+        self._refresh_tasks.add(task)
+        task.add_done_callback(self._refresh_tasks.discard)
 
     async def _refresh_slots(
-        self, email: str, slots: List[_ClientSlot], resolver: Callable
+        self, slots: List[_ClientSlot], read: Callable[[], Iterable[str]]
     ) -> None:
-        """Re-resolve one email's roster off the event loop, onto every slot.
+        """Re-resolve one roster off the event loop, onto every slot sharing it.
 
-        ``resolver`` is the synchronous SQLAlchemy read
-        ``db.get_accessible_agent_names``; calling it inline would block the
-        single reader loop for every connected client. A failure leaves the
-        previous roster in place — again the smaller, safer set."""
+        ``read`` is a synchronous SQLAlchemy read; calling it inline would
+        block the single reader loop for every connected client. A failure
+        leaves the previous roster in place until the next read replaces it.
+        A slot marked to read again while this read was in flight is read once
+        more, unless it has disconnected or the dispatcher is stopping."""
         try:
-            names = await asyncio.to_thread(resolver, email)
+            names = await asyncio.to_thread(read)
             if isinstance(names, (list, tuple, set)):
                 resolved = set(names)
                 for slot in slots:
@@ -612,8 +656,44 @@ class StreamDispatcher:
         except Exception as e:  # noqa: BLE001 — a refresh must never kill delivery
             logger.warning("stream_dispatcher: roster refresh failed for a client: %s", e)
         finally:
+            live = {id(s) for s in self._clients.values()}
+            again: List[_ClientSlot] = []
             for slot in slots:
                 slot.refreshing = False
+                if slot.refresh_again:
+                    slot.refresh_again = False
+                    if id(slot) in live and not self._shutting_down:
+                        again.append(slot)
+            if again:
+                for slot in again:
+                    slot.refreshing = True
+                self._spawn_refresh(again, read)
+
+    async def _reread_rosters_periodically(self) -> None:
+        """Re-read every non-admin roster on this worker about once a minute
+        (trinity-enterprise#863).
+
+        It runs in every worker with no leader lease, by design: the slots it
+        reads are this process's own. Its reads run one after another, so the
+        loop itself holds at most one thread of the default executor at a time,
+        and it reads nothing while no non-admin roster is held. A read that fails keeps
+        the previous roster; any other error is logged and the loop carries on."""
+        while not self._shutting_down:
+            await asyncio.sleep(ROSTER_REREAD_INTERVAL_S)
+            reads = self._claim_roster_reads()
+            try:
+                while reads:
+                    slots, read = reads.pop(0)
+                    await self._refresh_slots(slots, read)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 — the loop must outlive one bad cycle
+                logger.exception("stream_dispatcher: periodic roster re-read failed")
+            finally:
+                for slots, _read in reads:  # claimed but never read
+                    for slot in slots:
+                        slot.refreshing = False
+                        slot.refresh_again = False
 
     def client_count(self) -> int:
         return len(self._clients)
