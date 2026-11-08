@@ -1843,6 +1843,30 @@ channel_client_blocks = Table(
     UniqueConstraint("agent_name", "channel", "client_id"),
 )
 
+# trinity-enterprise#165 (GUARD-005) — guardrail events an agent's hooks
+# reported, pushed by the agent's own key. `execution_id` is attribution, not a
+# FK. `details` is a JSON object of the allowlisted fields (patterns, verb,
+# tier, turn_kind, rule, path, session_id, tool_use_id, kind_raw, hook_raw).
+guardrail_events = Table(
+    "guardrail_events",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("agent_name", Text, nullable=False),
+    Column("event_id", Text, nullable=False),
+    Column("occurred_at", Text, nullable=False),
+    Column("received_at", Text, nullable=False),
+    Column("kind", Text, nullable=False),
+    Column("hook", Text, nullable=False),
+    Column("tool", Text),
+    Column("code", Text),
+    Column("execution_id", Text),
+    Column("details", Text),
+    UniqueConstraint("agent_name", "event_id"),
+    Index("idx_guardrail_events_agent_occurred", "agent_name", "occurred_at"),
+    Index("idx_guardrail_events_execution", "execution_id"),
+    Index("idx_guardrail_events_received", "received_at"),
+)
+
 audit_log = Table(
     "audit_log",
     metadata,

@@ -168,6 +168,7 @@ from db.canary import CanaryOperations
 from db.compatibility import CompatibilityOperations
 from db.metric_definitions import MetricDefinitionOperations
 from db.metric_points import MetricPointOperations
+from db.guardrail_events import GuardrailEventOperations
 from db.sync_state import SyncStateOperations
 from db.terms import TermsOperations  # trinity-enterprise#1107 terms acceptances
 from db.idempotency import IdempotencyOperations
@@ -1101,6 +1102,7 @@ class DatabaseManager:
         self._compatibility_ops = CompatibilityOperations()  # #668 agent compatibility
         self._metric_definition_ops = MetricDefinitionOperations()  # ent#477 metric registry
         self._metric_point_ops = MetricPointOperations()  # ent#478 recorded points
+        self._guardrail_event_ops = GuardrailEventOperations()  # ent#165 guardrail events
         self._sync_state_ops = SyncStateOperations()  # #389 sync health
         self._idempotency_ops = IdempotencyOperations()  # RELIABILITY-006, #525
         self._loop_ops = LoopOperations()  # #740 sequential agent loops
@@ -4744,6 +4746,38 @@ class DatabaseManager:
         return self._metric_point_ops.prune_metric_points(
             retention_days, chunk_size
         )
+
+    # -------------------------------------------------------------------------
+    # Guardrail events (trinity-enterprise#165 — db/guardrail_events.py)
+    # -------------------------------------------------------------------------
+
+    def insert_guardrail_events(self, agent_name: str, rows):
+        """Insert normalized events; returns `(accepted, duplicates)`."""
+        return self._guardrail_event_ops.insert_events(agent_name, rows)
+
+    def list_guardrail_events(self, agent_name: str, **filters):
+        """Newest-first rows for one agent. See GuardrailEventOperations.list_events."""
+        return self._guardrail_event_ops.list_events(agent_name, **filters)
+
+    def latest_guardrail_event_received_at(self, agent_name: str):
+        """When the newest stored event for this agent arrived, or None."""
+        return self._guardrail_event_ops.latest_received_at(agent_name)
+
+    def count_guardrail_events_by_execution(self, agent_name: str, execution_ids):
+        """`(execution_id, kind, hook, code, n)` groups for this agent's rows."""
+        return self._guardrail_event_ops.count_by_execution(agent_name, execution_ids)
+
+    def count_guardrail_events_by_agent(self, since: str, agent_names=None):
+        """`(agent_name, kind, n)` groups for rows at or after `since`."""
+        return self._guardrail_event_ops.count_by_agent(since, agent_names)
+
+    def count_guardrail_event_candidates(self, retention_days: int, limit: int) -> int:
+        """Bounded count of rows past the window (#1644 guard)."""
+        return self._guardrail_event_ops.count_guardrail_event_candidates(retention_days, limit)
+
+    def prune_guardrail_events(self, retention_days: int = 90, chunk_size: int = 5000) -> int:
+        """Delete rows past the window, bounded per call."""
+        return self._guardrail_event_ops.prune_guardrail_events(retention_days, chunk_size)
 
     # =========================================================================
     # Idempotency keys (RELIABILITY-006, #525 — delegated to db/idempotency.py)

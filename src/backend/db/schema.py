@@ -2124,6 +2124,29 @@ TABLES = {
     """,
 
     # -------------------------------------------------------------------------
+    # Guardrail events (trinity-enterprise#165, GUARD-005)
+    # -------------------------------------------------------------------------
+    # One row per event an agent's guardrail hooks reported (a refusal, a
+    # redaction, a hook error). Agent-reported attribution: `execution_id` has
+    # no FK (execution rows have their own retention).
+    "guardrail_events": """
+        CREATE TABLE IF NOT EXISTS guardrail_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_name TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            hook TEXT NOT NULL,
+            tool TEXT,
+            code TEXT,
+            execution_id TEXT,
+            details TEXT,
+            UNIQUE(agent_name, event_id)
+        )
+    """,
+
+    # -------------------------------------------------------------------------
     # Platform Audit Log (SEC-001 / Issue #20) — Phase 1
     # -------------------------------------------------------------------------
     # Cross-cutting append-only audit trail for agent lifecycle, auth, MCP,
@@ -2306,6 +2329,11 @@ TABLES = {
 # =============================================================================
 
 INDEXES = [
+    # trinity-enterprise#165 — the per-agent read, the per-execution counts and
+    # the retention sweep (keyed on the server receive time).
+    "CREATE INDEX IF NOT EXISTS idx_guardrail_events_agent_occurred ON guardrail_events(agent_name, occurred_at)",
+    "CREATE INDEX IF NOT EXISTS idx_guardrail_events_execution ON guardrail_events(execution_id)",
+    "CREATE INDEX IF NOT EXISTS idx_guardrail_events_received ON guardrail_events(received_at)",
     "CREATE INDEX IF NOT EXISTS idx_terms_acceptances_email ON terms_acceptances(email)",
     # trinity-enterprise#1107 ruling A(1): a Workspace portal session has no
     # `users` row — its row is keyed by (email, version); UNIQUE(user_id, version)
