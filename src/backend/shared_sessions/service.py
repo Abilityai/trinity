@@ -201,6 +201,7 @@ class Waker:
 # every @mention caller ignores the return value).
 GATE_HELD = "gate_held"     # the skill gate stopped the turn (#3402)
 LOCK_BUSY = "lock_busy"     # a pilot's earlier turn here still holds the lock
+DISPATCH_RAISED = "dispatch_raised"  # the dispatch raised: a turn may have started
 
 
 # --- identity helpers --------------------------------------------------------
@@ -1955,7 +1956,8 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
     framed as data. It IS the turn's content, so the turn runs even when the
     unread delta is empty or holds only what the gate stopped. Returns the
     dispatch result when a dispatch returned, `GATE_HELD` when the skill gate
-    stopped it, else None (nothing dispatched, or the dispatch raised).
+    stopped it, `DISPATCH_RAISED` when the dispatch raised, else None (nothing
+    dispatched).
     """
     participant = db.get_participant(room_id, "agent", agent_name)
     if not participant or participant.get("left_at"):
@@ -2098,7 +2100,9 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
     except Exception as e:  # noqa: BLE001 — a failed turn is VISIBLE, never silent
         logger.warning("room %s: turn for %s raised: %s", room_id, agent_name, e)
         _post_system(room_id, f"{agent_name} could not respond ({type(e).__name__}).")
-        return None
+        # ent#1135: not None — a turn may have started before the raise, so the
+        # ask return must not fall through to a second, ordinary wake.
+        return DISPATCH_RAISED
     finally:
         _clear_agent_working(room_id, agent_name)
         _broadcast("room_participant_state",
@@ -2431,6 +2435,7 @@ def register_ask_observers() -> None:
 RETURN_DECLINED = "declined"   # nothing spent: the caller wakes the agent outside the room
 RETURN_RAN = "ran"             # a room turn was dispatched; `result` says how it went
 RETURN_HELD = "held"           # the skill gate stopped it — its own observer continues
+RETURN_RAISED = "raised"       # the room dispatch raised: the wake stays owed, no second wake
 
 
 @dataclass(frozen=True)
@@ -2501,8 +2506,10 @@ async def return_ask_to_room(room_id: str, agent_name: str, *, ask_block: str,
     `RETURN_DECLINED` when nothing was spent — the room is closed or expired,
     the agent left, the room is over budget, the agent's own wake cap is spent,
     or a pull pilot's earlier turn holds the room lock; the room then says, in
-    one clause, that the agent continues outside it (a cap writes its own line)
-    and the caller runs today's wake. Never raises."""
+    one clause, that the agent continues outside it (a cap adds that clause to
+    its own line) and the caller runs today's wake. `RETURN_RAISED` when the
+    room dispatch raised: a turn may have started, so the caller leaves the
+    wake owed rather than waking a second time. Never raises."""
     try:
         room = db.get_room(room_id)
         if not room:
@@ -2519,9 +2526,10 @@ async def return_ask_to_room(room_id: str, agent_name: str, *, ask_block: str,
                             "the room is over its message budget" if over == "max_messages"
                             else "the room is over its cost budget")
         # The cap is the agent's own sender budget in this room — never a
-        # bystander's. A cap decline writes its own line.
+        # bystander's. A cap decline writes its own line, then says where the
+        # agent continues.
         if not _apply_wake_cap(room_id, "agent", agent_name, [agent_name]):
-            return RoomReturn(RETURN_DECLINED)
+            return _decline(room_id, agent_name, "its wake limit here is spent")
         waker = _ask_waker(room_id, agent_name, actor_email)
         out = await _wake_agent(waker, room_id, agent_name, 0, ask_block=ask_block,
                                 ask_request_text=request_text)
@@ -2533,6 +2541,8 @@ async def return_ask_to_room(room_id: str, agent_name: str, *, ask_block: str,
         return _decline(room_id, agent_name, "it is still busy with an earlier turn here")
     if out == GATE_HELD:
         return RoomReturn(RETURN_HELD)
+    if out == DISPATCH_RAISED:
+        return RoomReturn(RETURN_RAISED)
     if out is None:
         return RoomReturn(RETURN_DECLINED)
     return RoomReturn(RETURN_RAN, out)

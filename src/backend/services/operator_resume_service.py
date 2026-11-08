@@ -49,6 +49,7 @@ hands them only the rows its compare-and-set won.
 import asyncio
 import hashlib
 import logging
+import os
 from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
@@ -247,15 +248,28 @@ def _workspace_destination(item: Dict[str, Any], responded_by_email: Optional[st
 
 def _return_room(item: Dict[str, Any]) -> Optional[str]:
     """The room an ask returns to (abilityai/trinity-enterprise#1135): the
-    platform-written room key, never on a credential ask. Fail-soft."""
+    platform-written room key, never on a credential ask. Fail-soft. An ask
+    with no room key never loads the room engine: every wake passes here, and
+    `shared_sessions.service` imports `platform_prompt_service`, which binds
+    `database.db` at import."""
     if item.get("type") == "credential":
         return None
     try:
+        from services.operator_queue_service import _WORKSPACE_ROOM_KEY
+        context = item.get("context")
+        if not ((isinstance(context, dict) and context.get(_WORKSPACE_ROOM_KEY))
+                or (isinstance(context, str) and _WORKSPACE_ROOM_KEY in context)):
+            return None
         from shared_sessions import service as rooms
         return rooms.ask_room_of(item)
     except Exception:  # noqa: BLE001
         logger.warning("operator-resume: room of item=%s unreadable", item.get("id"), exc_info=True)
         return None
+
+
+class RoomDispatchRaised(Exception):
+    """The room turn's dispatch raised (`RoomReturn` kind `raised`): handled as
+    the ordinary wake's dispatch error — claim released, wake left owed."""
 
 
 async def _return_to_room(item: Dict[str, Any], agent_name: str, *, ask_block, request_text: str,
@@ -406,6 +420,10 @@ async def maybe_dispatch_resume(
         return None
 
     try:
+        if returned is not None and returned.kind == "raised":
+            # The room dispatch raised (ent#1135): a turn may have started, so
+            # no second, ordinary wake — the dispatch-error rule below instead.
+            raise RoomDispatchRaised(agent_name)
         if returned is not None and returned.kind == "ran":
             result = returned.result
         else:
@@ -668,9 +686,13 @@ def _disposition_of(row: Dict[str, Any]) -> str:
 
 
 def _reclaim_stale_claim(agent_name: str, key: str, older_than: int) -> None:
-    """Reclaim an in-flight wake claim older than ``older_than`` seconds
-    (#3298 compare-and-delete), so the boot re-offer can dispatch it. A key
-    nobody holds is released again at once (this only looked). Never raises."""
+    """Reclaim an in-flight wake claim older than ``older_than`` seconds AND
+    taken before this backend booted (#3298 compare-and-delete), so the boot
+    re-offer can dispatch it. A claim taken since the boot may be a live wake
+    in any worker — the re-offer runs in whichever worker holds the poller
+    lease, and that can be one that has been up for hours — so it is never
+    taken back. A key nobody holds is released again at once (this only
+    looked). Never raises."""
     from services import idempotency_service
     from utils.helpers import parse_iso_timestamp
     try:
@@ -684,7 +706,8 @@ def _reclaim_stale_claim(agent_name: str, key: str, older_than: int) -> None:
         claimed = parse_iso_timestamp(decision.claimed_at)
         if claimed.tzinfo is None:
             claimed = claimed.replace(tzinfo=timezone.utc)
-        if (datetime.now(timezone.utc) - claimed).total_seconds() >= older_than:
+        if (claimed < _backend_booted_at()
+                and (datetime.now(timezone.utc) - claimed).total_seconds() >= older_than):
             idempotency_service.reclaim_in_flight(decision)
     except Exception:  # noqa: BLE001
         logger.warning("operator-resume: could not inspect the wake claim for agent=%s",
@@ -694,6 +717,39 @@ def _reclaim_stale_claim(agent_name: str, key: str, older_than: int) -> None:
 # abilityai/trinity-enterprise#1135 (T4): the boot re-offer, once per process.
 BOOT_RECLAIM_AGE_SECONDS = 30
 _boot_reoffer_done = False
+_booted_at: Optional[datetime] = None
+
+
+def _process_started_at(pid: str) -> Optional[datetime]:
+    """A process's start time from /proc (field 22 of `stat`, clock ticks
+    since the host's `btime`). None off Linux or when unreadable."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            ticks = int(f.read().rsplit(")", 1)[1].split()[19])
+        with open("/proc/stat") as f:
+            btime = next(int(line.split()[1]) for line in f if line.startswith("btime "))
+        return datetime.fromtimestamp(btime + ticks / os.sysconf("SC_CLK_TCK"), timezone.utc)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _backend_booted_at() -> datetime:
+    """When this backend booted: the uvicorn supervisor's start under
+    `--workers` (the parent running the same interpreter — a respawned worker
+    shares it), else this process's own start. Every live worker's wake claim
+    is younger than it; only a claim the previous backend left is older.
+    Read once per process; with /proc unreadable, this process's first read."""
+    global _booted_at
+    if _booted_at is None:
+        started = None
+        try:
+            ppid = os.getppid()
+            if ppid > 0 and os.readlink(f"/proc/{ppid}/exe") == os.readlink("/proc/self/exe"):
+                started = _process_started_at(str(ppid))
+        except OSError:
+            started = None
+        _booted_at = started or _process_started_at("self") or datetime.now(timezone.utc)
+    return _booted_at
 
 
 def redispatch_pending_wakes_after_boot(states: Optional[Dict[str, str]]) -> int:
@@ -702,8 +758,10 @@ def redispatch_pending_wakes_after_boot(states: Optional[Dict[str, str]]) -> int
     has finished (`cleanup_service.is_startup_recovery_complete`, the #748
     gate): a dispatch before the orphan reconcile would race it. One background
     re-dispatch per RUNNING agent (`spawn_on_loop` — a wake waits out its turn,
-    and the poll cycle must not), each reclaiming only in-flight claims older
-    than `BOOT_RECLAIM_AGE_SECONDS`. `states is None` (Docker could not be
+    and the poll cycle must not), each reclaiming only in-flight claims taken
+    before the backend booted (`_backend_booted_at`) and older than
+    `BOOT_RECLAIM_AGE_SECONDS`: "once per process" is not "once per boot", and a
+    long-lived worker that gains the lease must not take back a live wake. `states is None` (Docker could not be
     asked, #2196) does nothing and tries again next cycle. Returns how many
     agents were re-offered."""
     global _boot_reoffer_done
@@ -896,6 +954,10 @@ async def maybe_dispatch_ending(
         return None
 
     try:
+        if returned is not None and returned.kind == "raised":
+            # The room dispatch raised (ent#1135): a turn may have started, so
+            # no second, ordinary wake — the dispatch-error rule below instead.
+            raise RoomDispatchRaised(agent_name)
         if returned is not None and returned.kind == "ran":
             result = returned.result
         else:

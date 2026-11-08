@@ -12,7 +12,9 @@ claim would have fired a fresh turn on every boot once re-listed. Now:
 - the re-offer lists `pending` AND `owed` answered/cancelled/dismissed rows,
   one ending turn per disposition;
 - once per process, the operator-queue poller's leader cycle re-offers them
-  after startup recovery, reclaiming only in-flight claims older than 30 s.
+  after startup recovery, reclaiming only in-flight claims older than 30 s
+  that were taken before the backend booted — a long-lived worker that gains
+  the lease never takes back a sibling's live wake.
 
 Harness: the ent#611 `ask` fixture over the real per-process SQLite and the
 real idempotency table; the dispatch seam and Docker state stubbed.
@@ -24,7 +26,9 @@ from __future__ import annotations
 import ast
 import asyncio
 import pathlib
+import sys
 import uuid
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -108,6 +112,18 @@ class TestOwedBeforeSpawn:
         wake.a.svc.cancel(_raise(wake, "o-2"), actor=wake.a.svc.Actor(email=OWNER))
         wake.a.svc.dismiss(_raise(wake, "o-3"), actor=wake.a.svc.Actor(email=OWNER))
         assert seen == [("ending", ["owed"]), ("ending", ["owed"])]
+
+    def test_a_failed_owed_stamp_never_costs_the_wake(self, wake, monkeypatch):
+        """The stamp is best-effort: raising, it is logged and the spawn runs."""
+        seen = _held_spawns(wake, monkeypatch)
+
+        def _boom(rows):
+            raise RuntimeError("db write failed")
+
+        monkeypatch.setattr(wake.ors, "mark_wake_owed", _boom)
+        _answer(wake, _raise(wake, "o-1f"))
+        wake.a.svc.cancel(_raise(wake, "o-2f"), actor=wake.a.svc.Actor(email=OWNER))
+        assert seen == [("answer", None), ("ending", [None])]
 
     def test_an_opted_out_agent_is_never_owed(self, wake, monkeypatch):
         seen = _held_spawns(wake, monkeypatch)
@@ -208,6 +224,9 @@ class TestReoffer:
         unless it predates this boot; a young one is this boot's own."""
         from services import idempotency_service as idem
         _held_spawns(wake, monkeypatch)
+        # the backend booted after the claim below was taken
+        monkeypatch.setattr(wake.ors, "_booted_at",
+                            datetime.now(timezone.utc) + timedelta(hours=1))
         item = _ended(wake, f"r-5-{older_than}", "answered")
         idem.begin(idem.make_agent_scope(wake.a.agent),
                    wake.ors._idempotency_key(item, "approve", None))   # in flight, never completed
@@ -273,3 +292,82 @@ def test_the_poller_leader_cycle_runs_the_boot_reoffer_after_reading_states():
     body = ast.get_source_segment(src, cycle)
     assert body.index("if not leader:") < body.index("if states is None:") \
         < body.index("redispatch_pending_wakes_after_boot")
+
+
+def test_a_wake_with_no_room_never_loads_the_room_engine(monkeypatch):
+    """Every wake asks for its room. Loading `shared_sessions.service` there
+    imports `platform_prompt_service`, which binds `database.db` at import — so
+    an ask with no room must not load it (the ent#611 seed 3382264541 leak: a
+    first import under a stubbed `database` kept the stub for the session)."""
+    import shared_sessions
+    import services.operator_resume_service as ors
+    tried = []
+
+    class _Blocked:
+        def find_spec(self, name, path=None, target=None):
+            if name == "shared_sessions.service":
+                tried.append(name)
+                raise ImportError("the room engine was loaded")
+
+    # any import of the room engine now goes through the finder, and is seen
+    monkeypatch.delitem(sys.modules, "shared_sessions.service", raising=False)
+    monkeypatch.delattr(shared_sessions, "service", raising=False)
+    monkeypatch.setattr(sys, "meta_path", [_Blocked(), *sys.meta_path])
+    assert ors._return_room({"id": "q", "context": {"thread": "t"}}) is None
+    assert ors._return_room({"id": "q", "context": '{"thread": "t"}'}) is None
+    assert ors._return_room({"id": "q"}) is None
+    assert tried == []
+
+
+class TestLiveClaimAcrossWorkers:
+    """C1: "once per process" is not "once per boot". The poller lease can move
+    to a worker that has been up for hours (the leader crashed and was
+    respawned, a renewal missed); its first leader cycle runs the re-offer, and
+    must not take back a wake another worker is delivering right now."""
+
+    @pytest.fixture()
+    def long_lived_leader(self, wake, monkeypatch):
+        from services import cleanup_service
+        from services import idempotency_service as idem
+        offered = []
+        _held_spawns(wake, monkeypatch)
+        item = _ended(wake, "c1-1", "answered")
+        # another worker took the claim and is delivering the turn now
+        idem.begin(idem.make_agent_scope(wake.a.agent),
+                   wake.ors._idempotency_key(item, "approve", None))
+        real_datetime = wake.ors.datetime
+
+        class _FiveMinutesLater(real_datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return real_datetime.now(tz) + timedelta(minutes=5)
+
+        # five minutes into that turn: the claim is far past the 30 s age
+        monkeypatch.setattr(wake.ors, "datetime", _FiveMinutesLater)
+        monkeypatch.setattr(wake.ors, "_boot_reoffer_done", False)
+        monkeypatch.setattr(wake.ors, "spawn_on_loop", lambda factory: offered.append(factory))
+        cleanup_service.mark_startup_recovery_complete()
+        return SimpleNamespace(item=item, offered=offered)
+
+    def _reoffer(self, wake, offered):
+        assert wake.ors.redispatch_pending_wakes_after_boot({wake.a.agent: "running"}) == 1
+        for factory in offered:
+            asyncio.run(factory())
+
+    def test_a_long_lived_worker_never_re_dispatches_a_live_claim(
+            self, wake, long_lived_leader, monkeypatch):
+        # this backend booted an hour ago; the claim is five minutes old
+        monkeypatch.setattr(wake.ors, "_booted_at",
+                            datetime.now(timezone.utc) - timedelta(hours=1))
+        self._reoffer(wake, long_lived_leader.offered)
+        assert wake.calls == []
+        assert _state(wake, long_lived_leader.item) == "owed"
+
+    def test_a_claim_the_previous_backend_left_is_re_dispatched(
+            self, wake, long_lived_leader, monkeypatch):
+        # the same claim, taken before this backend booted: nobody delivers it
+        monkeypatch.setattr(wake.ors, "_booted_at",
+                            datetime.now(timezone.utc) + timedelta(minutes=1))
+        self._reoffer(wake, long_lived_leader.offered)
+        assert [c["triggered_by"] for c in wake.calls] == ["operator_response"]
+        assert _state(wake, long_lived_leader.item) == "woken"

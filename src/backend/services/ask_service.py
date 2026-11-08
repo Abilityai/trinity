@@ -1937,7 +1937,7 @@ def _wake_filer(event: EndingEvent) -> None:
                 continue
             # ent#1135 (T4): `owed` BEFORE the spawn, so a restart between this
             # ending and the turn still finds the wake owed and re-offers it.
-            operator_resume_service.mark_wake_owed([row])
+            _mark_wake_owed(lambda row=row: [row])
             operator_resume_service.spawn_resume_dispatch(
                 row,
                 response=row.get("response"),
@@ -1959,8 +1959,8 @@ def _wake_filer(event: EndingEvent) -> None:
     rows = [row for row in event.rows if row.get("disposed_by") != "agent" and _wakes(row)]
     if not rows:
         return
-    operator_resume_service.mark_wake_owed(
-        [row for row in rows if operator_resume_service._wakes_on_ending(row)])
+    _mark_wake_owed(lambda: [row for row in rows
+                             if operator_resume_service._wakes_on_ending(row)])
     operator_resume_service.spawn_ending_dispatch(
         rows,
         disposition=event.disposition,
@@ -1968,6 +1968,17 @@ def _wake_filer(event: EndingEvent) -> None:
         reason=event.reason,
         batch_id=event.batch_id,
     )
+
+
+def _mark_wake_owed(rows_of) -> None:
+    """ent#1135 (T4): stamp `owed` before a spawn. A failed stamp is logged and
+    never costs the wake: the spawn still runs and the dispatch writes its own
+    `woken` / `pending` — only a restart in between would lose it."""
+    try:
+        operator_resume_service.mark_wake_owed(rows_of())
+    except Exception:  # noqa: BLE001
+        logger.warning("ask sink: wake_state=owed not recorded — the wake is still spawned, "
+                       "but a restart before its turn would drop it", exc_info=True)
 
 
 register_ending_observer(_wake_filer)

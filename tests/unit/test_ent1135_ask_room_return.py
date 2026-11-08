@@ -266,7 +266,9 @@ class TestReturnTurn:
         assert _triggers(turn) == ["operator_response"]
         new = _new_lines(w, before)
         assert any("reached the wake limit" in line for line in new)
-        assert not any("continues outside the room" in line for line in new)
+        # the cap line alone reads as "nobody woke"; the agent does, outside
+        assert (f"{w.agent} continues outside the room: its wake limit here is spent."
+                in new)
 
     def test_a_busy_room_lock_falls_back_with_the_busy_clause(self, turn, real_db, monkeypatch):
         w = turn.w
@@ -292,6 +294,19 @@ class TestReturnTurn:
         assert w.db.get_operator_queue_item(item["id"])["wake_state"] == "woken"
         assert [a["details"]["status"] for a in turn.audit
                 if a.get("event_action") == "operator_resume_dispatch"] == ["gate_held"]
+
+    def test_a_room_dispatch_that_raises_is_owed_never_rewoken_outside(self, turn, real_db):
+        """A raise may come after the turn started (a claim or adapter timeout):
+        no second, ordinary wake — the wake stays owed, as when the ordinary
+        dispatch raises, and the next start re-offers it once."""
+        w = turn.w
+        item = _room_ask(w, real_db, "t-8r")
+        turn.state["raise"] = TimeoutError("claim budget spent")
+        _answer(turn, item)
+        assert _triggers(turn) == ["room"]
+        assert w.db.get_operator_queue_item(item["id"])["wake_state"] == "pending"
+        assert [a["details"]["status"] for a in turn.audit
+                if a.get("event_action") == "operator_resume_dispatch"] == ["dispatch_error"]
 
     def test_a_replayed_answer_runs_one_room_turn(self, turn, real_db):
         w = turn.w
@@ -358,3 +373,11 @@ class TestEndingReturn:
         items = [_room_ask(turn.w, real_db, f"x-3-{n}") for n in range(2)]
         self._end(turn, items, batch_id="b-9")
         assert _triggers(turn) == ["operator_ending"]
+
+    def test_an_ending_whose_room_dispatch_raises_is_owed_never_rewoken_outside(
+            self, turn, real_db):
+        item = _room_ask(turn.w, real_db, "x-4")
+        turn.state["raise"] = TimeoutError("claim budget spent")
+        self._end(turn, [item])
+        assert _triggers(turn) == ["room"]
+        assert turn.w.db.get_operator_queue_item(item["id"])["wake_state"] == "pending"
