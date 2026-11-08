@@ -293,6 +293,24 @@ class TestTheRow:
         assert sink.mains == []
         assert THREAD not in row["context"]
 
+    @pytest.mark.parametrize("seat", ["steward", "creator"])
+    def test_the_card_names_the_readers_seat_as_its_destination(self, real_db, agent, people, seat):
+        """The `destination` field ent#1135 shares: which rule picked this
+        reader, stamped by the platform and projected — never the agent's."""
+        from client_portal.asks.service import _project
+        _register(_Resolver(people[seat], seat=seat))
+        row = _row(real_db, _raise(agent, context={"workspace_project_seat": "creator"})["id"])
+        assert row["context"]["workspace_project_seat"] == seat
+        assert _project(row, viewer_email=people[seat]).destination == {"kind": "project", "seat": seat}
+
+    def test_a_primary_ask_has_no_destination(self, real_db, agent, people):
+        from client_portal.asks.service import _project
+        _register(_Resolver(people["steward"]))
+        row = _row(real_db, _raise(agent, to="primary",
+                                   context={"workspace_project_seat": "steward"})["id"])
+        assert "workspace_project_seat" not in (row["context"] or {})
+        assert _project(row).destination is None
+
     def test_the_receipt_names_the_target_and_never_the_person(self, agent, people):
         _register(_Resolver(people["steward"]))
         receipt = _raise(agent)

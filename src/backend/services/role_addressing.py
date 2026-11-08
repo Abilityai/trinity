@@ -145,6 +145,19 @@ def owner_email(agent_name: str) -> Optional[str]:
     return email if "@" in email else None
 
 
+def operators_reason(agent_name: str) -> Optional[str]:
+    """Why a `primary` address fell to the operators once the owner could not
+    stand in (trinity-enterprise#1134, AC4): ``owner_no_email`` — the agent has
+    an owner, who has no email; ``no_owner`` — it has none. None when the
+    ownership row cannot be read: the notice then says less, never a guess."""
+    try:
+        owner = db.get_agent_owner(agent_name)
+    except Exception:  # noqa: BLE001
+        logger.warning("[role_addressing] owner lookup failed for %s", agent_name, exc_info=True)
+        return None
+    return "owner_no_email" if (owner or {}).get("owner_username") else "no_owner"
+
+
 def resolve(
     agent_name: str,
     role: str,

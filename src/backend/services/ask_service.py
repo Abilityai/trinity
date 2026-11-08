@@ -991,6 +991,7 @@ def raise_ask(
     to_role = to_role_override or norm["to"]
     turn = _platform_turn(agent_name, platform_execution_id)
     project_id: Optional[str] = None
+    seat: Optional[str] = None
     if named:
         people, addressee, resolved = [named], named, True
     elif pre is not None:
@@ -998,7 +999,8 @@ def raise_ask(
     elif norm["to"] in role_addressing.ASK_TARGETS:
         # trinity-enterprise#1134: the platform resolves the target from the
         # turn it knows — the agent supplied the word, nothing else.
-        people, addressee, resolved, project_id = _address_target(agent_name, norm["to"], turn)
+        people, addressee, resolved, project_id, seat = _address_target(
+            agent_name, norm["to"], turn)
     else:
         people, addressee, resolved = _address(agent_name, norm["to"])
     if norm["type"] == "credential" and not addressee:
@@ -1038,11 +1040,27 @@ def raise_ask(
             context[oqs._WORKSPACE_THREAD_KEY] = thread
         if thread and in_turn:
             context[oqs._WORKSPACE_TURN_KEY] = True
+    elif not people and raised_by == "agent" and to_role == "primary" and turn:
+        # trinity-enterprise#1134 (AC4): a chat turn's `primary` ask that fell
+        # to the operators (nobody assigned, no owner who can stand in). The
+        # person in the chat is not its addressee and reads none of its
+        # content — but the chat the turn serves is stamped, with why it fell,
+        # so that chat's own read shows one content-free line. An explicit
+        # `to: operator` is never stamped: it may be ABOUT the person.
+        hit = _turn_chat(agent_name, turn)
+        if hit:
+            context[oqs._WORKSPACE_THREAD_KEY] = hit
+            context[oqs._WORKSPACE_TURN_KEY] = True
+            reason = role_addressing.operators_reason(agent_name)
+            if reason:
+                context[oqs._WORKSPACE_OPERATORS_REASON_KEY] = reason
     if project_id is not None:
         # The platform's own stamp (ent#981's key, reused): written after the
         # strip in `_validated_ask`, so an agent-authored value never survives
         # and the Workspace card shows the project exactly as a gate row does.
         context[oqs._WORKSPACE_PROJECT_ID_KEY] = project_id
+        if seat in ("steward", "creator"):
+            context[oqs._WORKSPACE_PROJECT_SEAT_KEY] = seat
     for key, value in (platform_context or {}).items():
         # trinity-enterprise#981: the platform's own attachment, platform keys
         # only — after the strip in `_validated_ask`, so it is the one writer.
@@ -1697,8 +1715,9 @@ def _address(agent_name: str, role: str) -> Tuple[List[str], Optional[str], bool
 
 
 def _address_target(agent_name: str, target: str,
-                    turn: Optional[str]) -> Tuple[List[str], Optional[str], bool, Optional[str]]:
-    """`(resolved_to, addressed_to_email, resolved, project_id)` for an
+                    turn: Optional[str]) -> Tuple[List[str], Optional[str], bool, Optional[str],
+                                                  Optional[str]]:
+    """`(resolved_to, addressed_to_email, resolved, project_id, seat)` for an
     addressing target (trinity-enterprise#1134) — `project`, resolved by the
     PLATFORM from `turn` (the validated raising execution, or None) through
     the resolver the enterprise projects module registers
@@ -1715,7 +1734,7 @@ def _address_target(agent_name: str, target: str,
         raise AskRejected(422, e.code, e.message, role=e.role)
     people = _people_list(r.people)
     single = (r.single or "").strip().lower() or None
-    return people, single, bool(people), r.project_id
+    return people, single, bool(people), r.project_id, r.seat
 
 
 def _in_turn_chat(agent_name: str, email: str, turn: Optional[str]) -> Optional[str]:
@@ -1733,6 +1752,21 @@ def _in_turn_chat(agent_name: str, email: str, turn: Optional[str]) -> Optional[
         logger.warning("[AskService] could not resolve the chat of the turn that raised a "
                        "project ask from %s; stored without a chat", agent_name, exc_info=True)
         return None
+
+
+def _turn_chat(agent_name: str, turn: str) -> Optional[str]:
+    """The chat a RUNNING Workspace chat turn serves, whoever its person is
+    (`client_portal.service.chat_of_turn`, trinity-enterprise#1134) — else
+    None. Fail-soft: a lookup that fails costs the person the notice, never
+    the ask."""
+    try:
+        from client_portal.service import chat_of_turn
+        hit = chat_of_turn(agent_name, turn)
+    except Exception:  # noqa: BLE001
+        logger.warning("[AskService] could not resolve the chat of the turn that raised an "
+                       "unaddressed ask from %s; stored without a chat", agent_name, exc_info=True)
+        return None
+    return hit[0] if hit else None
 
 
 def _owner_email(agent_name: str) -> Optional[str]:

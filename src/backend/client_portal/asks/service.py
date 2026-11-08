@@ -13,7 +13,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Union
 
 from sqlalchemy.exc import OperationalError
 
@@ -27,7 +27,7 @@ from services.operator_queue_choices import (
 )
 from utils.helpers import iso_cutoff, utc_now_iso
 
-from .models import WorkspaceAsk
+from .models import WorkspaceAsk, WorkspaceAskNotice
 
 logger = logging.getLogger(__name__)
 
@@ -266,6 +266,20 @@ def _project_attachment(context: dict) -> Optional[dict]:
             "event": event if isinstance(event, str) and event else None}
 
 
+_PROJECT_SEATS = ("steward", "creator")
+_OPERATOR_REASONS = ("owner_no_email", "no_owner")
+
+
+def _project_destination(item: dict, context: dict) -> Optional[dict]:
+    """`{"kind": "project", "seat": …}` for an ask addressed `to: project`
+    whose seat the platform stamped (trinity-enterprise#1134), else None."""
+    from services.operator_queue_service import _WORKSPACE_PROJECT_SEAT_KEY
+    seat = context.get(_WORKSPACE_PROJECT_SEAT_KEY)
+    if item.get("to_role") != "project" or seat not in _PROJECT_SEATS:
+        return None
+    return {"kind": "project", "seat": seat}
+
+
 def _project(item: dict, *, viewer_email: Optional[str] = None,
              resume_requested: Optional[bool] = None,
              is_platform: bool = False) -> WorkspaceAsk:
@@ -334,6 +348,7 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
         credential_destination=(credential_destination.public_view(
             credential_destination.destination_of(context))
             if item.get("type") == "credential" else None),
+        destination=_project_destination(item, context),
     )
 
 
@@ -394,7 +409,8 @@ _CURSOR_RE = re.compile(r"^v1:(\d{1,9})$")
 class AsksPage:
     """One page of the viewer's visible asks, the size of the whole visible set,
     and — while more remain — the cursor for the next page."""
-    items: List[WorkspaceAsk] = field(default_factory=list)
+    # trinity-enterprise#1134: a `chat_id` read appends that chat's notices.
+    items: List[Union[WorkspaceAsk, WorkspaceAskNotice]] = field(default_factory=list)
     total: int = 0
     next_cursor: Optional[str] = None
 
@@ -468,6 +484,10 @@ def list_asks_page(email: str, is_platform: bool, agent_name: Optional[str] = No
         # here, inside the same 503 boundary, on the first page only.
         discussed = (_discussed_in(chat_id, email, is_platform, agent_name)
                      if chat_id is not None and offset == 0 else [])
+        # trinity-enterprise#1134 (AC4): and the content-free notices of its
+        # own turns' asks that fell to the operators — first page only.
+        notices = (_notices_in(chat_id, email, is_platform, agent_name)
+                   if chat_id is not None and offset == 0 else [])
         allowed = {a for a in db.list_operator_queue_agent_names(**filters)
                    if _on_roster(a, email, is_platform, strict=True)}
         # trinity-enterprise#981: a row the platform raised about the viewer
@@ -499,8 +519,50 @@ def list_asks_page(email: str, is_platform: bool, agent_name: Optional[str] = No
     end = offset + len(items or [])
     next_cursor = _encode_cursor(end) if end < total else None
     seen = {a.id for a in out}
-    extra = [a for a in discussed if a.id not in seen]
+    extra = [a for a in discussed if a.id not in seen] + notices
     return AsksPage(items=out + extra, total=total + len(extra), next_cursor=next_cursor)
+
+
+def _notices_in(chat_id: str, email: str, is_platform: bool,
+                agent_name: Optional[str]) -> List[WorkspaceAskNotice]:
+    """The asks `chat_id`'s own turns raised that fell to the operators
+    (trinity-enterprise#1134, AC4), as content-free notices — for the chat's
+    OWNER only (`get_portal_session(chat, agent, viewer)`, plus the roster
+    re-check every ask read makes). Pending and ended alike, like the chat's
+    asks. Only an agent's `primary` ask with nobody resolved: an explicit
+    `to: operator` is never stamped and never shown, and an ask re-addressed
+    to a person since leaves the notice for that person's normal row. The SQL
+    match on the stored context is a prefilter; the parsed keys decide."""
+    from client_portal import db as portal_db
+    from services.operator_queue_service import (
+        _WORKSPACE_OPERATORS_REASON_KEY, _WORKSPACE_THREAD_KEY, _WORKSPACE_TURN_KEY)
+    rows = db.list_operator_queue_items(
+        agent_name=agent_name, types=_VISIBLE_KINDS, include_cleared=True,
+        context_contains=_chat_turn_fragments(chat_id), limit=PAGE_MAX,
+    ) or []
+    out, owns = [], {}
+    for row in rows:
+        context = row.get("context") if isinstance(row.get("context"), dict) else {}
+        agent = row.get("agent_name") or ""
+        if (row.get("raised_by") != "agent" or row.get("to_role") != "primary"
+                or row.get("resolved_to") or row.get("addressed_to_email")
+                or context.get(_WORKSPACE_THREAD_KEY) != chat_id
+                or context.get(_WORKSPACE_TURN_KEY) is not True):
+            continue
+        if agent not in owns:
+            owns[agent] = bool(portal_db.get_portal_session(chat_id, agent, email)
+                               and _on_roster(agent, email, is_platform, strict=True))
+        if not owns[agent]:
+            continue
+        reason = context.get(_WORKSPACE_OPERATORS_REASON_KEY)
+        destination = {"kind": "operators"}
+        if reason in _OPERATOR_REASONS:
+            destination["reason"] = reason
+        out.append(WorkspaceAskNotice(
+            notice=True, id=row["id"], agent_name=agent, kind=row.get("type") or "question",
+            status=_status_of(row), created_at=row.get("created_at") or "",
+            chat_id=chat_id, destination=destination))
+    return out
 
 
 def _discussed_in(chat_id: str, email: str, is_platform: bool,
