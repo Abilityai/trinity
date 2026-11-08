@@ -8883,6 +8883,39 @@
       "description": "GUARD-005 store against real rows (SQLite + PostgreSQL): each event validated on its own (unknown kind/hook kept as 'other' with the raw value, open code, a malformed event counted in rejected and never failing the batch, an over-long execution_id nulled, only allowlisted fields kept and free text sanitized); event_id makes a resend a duplicate, per agent; reporting state never/reporting/stale with the DB fallback and teardown-only clear; first_report_at is first-write-wins, falls back to the oldest row, never after last_report_at, and is read before the counts; a future ts is stored at the receive time with the reported value kept; keyset paging and filters; count_by_execution / count_by_agent shapes filtered by the authenticated agent; the retention count and prune share the received_at predicate; rename and hard delete follow AGENT_REFS."
     },
     {
+      "file": "../src/frontend/tests/unit/guardrailEventsSection.mount.spec.js",
+      "feature": "trinity-enterprise#165",
+      "added": "2026-11-08",
+      "categories": [
+        "frontend",
+        "guardrails",
+        "unit"
+      ],
+      "description": "Settings > Guardrails > Recent events mounted over the real store: asks for the agent's last 24 h (since, limit 50); skeleton before the first read; 'No guardrail events in the last 24 h' only while reporting; never -> older-image copy; stale -> 'Not reporting since <time>' with the earlier rows kept; Codex/Gemini (page runtime or the report's) -> Claude-Code-only copy even while keepalives read reporting; a failed read is LoadFailed and a failed refresh keeps the rows with the stale banner; rows show kind, hook . code and a <time> with an absolute title; a late read for the previous agent never lands."
+    },
+    {
+      "file": "../src/frontend/tests/unit/guardrailStatsCard.mount.spec.js",
+      "feature": "trinity-enterprise#165",
+      "added": "2026-11-08",
+      "categories": [
+        "frontend",
+        "guardrails",
+        "unit"
+      ],
+      "description": "Operations > Health 'Guardrails (24 h)' card mounted over the real store: reads /api/ops/guardrail-stats?hours=24; total and per-kind badges; 'no events' only when some agent reports; with nobody reporting the total is a dash and the card says why; every never / stopped / no-hooks agent named with its own words and tallied; failed first read is LoadFailed, a failed refresh keeps the counts with the stale banner, a refresh never re-flashes the skeleton; an empty instance says so."
+    },
+    {
+      "file": "../src/frontend/tests/unit/guardrailEventsUtils.spec.js",
+      "feature": "trinity-enterprise#165",
+      "added": "2026-11-08",
+      "categories": [
+        "frontend",
+        "guardrails",
+        "unit"
+      ],
+      "description": "utils/guardrailEvents.js: the coverage rule's order (no hooks first, from the page runtime or the report's; then reporting / stale / never; unknown runtime = Claude Code), one distinct notice per non-reporting state, the stale copy names its time, kind labels and the largest-first breakdown."
+    },
+    {
       "file": "unit/test_ent165_guardrail_stats.py",
       "feature": "trinity-enterprise#165",
       "added": "2026-11-08",
