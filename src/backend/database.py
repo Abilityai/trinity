@@ -1930,6 +1930,13 @@ class DatabaseManager:
     def purge_schedule(self, schedule_id: str):
         return self._schedule_ops.purge_schedule(schedule_id)
 
+    def reassign_schedule_creator(self, schedule_id: str, *, new_owner_id: int, expected_owner_id: int,
+                                  expected_updated_at, expected: dict, clear_delivery: bool):
+        """#4281: the take-over write (`db/schedules/crud.py`)."""
+        return self._schedule_ops.reassign_schedule_creator(
+            schedule_id, new_owner_id=new_owner_id, expected_owner_id=expected_owner_id,
+            expected_updated_at=expected_updated_at, expected=expected, clear_delivery=clear_delivery)
+
     def find_soft_deleted_schedules_past_retention(self, retention_days: int, limit: int = 5000):
         return self._schedule_ops.find_soft_deleted_schedules_past_retention(retention_days, limit)
 
@@ -1940,8 +1947,8 @@ class DatabaseManager:
         return self._schedule_ops.list_soft_deleted_schedules(agent_name, limit)
 
     # Webhook token management (WEBHOOK-001, #291)
-    def generate_webhook_token(self, schedule_id: str):
-        return self._schedule_ops.generate_webhook_token(schedule_id)
+    def generate_webhook_token(self, schedule_id: str, creator_id=None):
+        return self._schedule_ops.generate_webhook_token(schedule_id, creator_id)
 
     def get_schedule_by_webhook_token(self, token: str):
         return self._schedule_ops.get_schedule_by_webhook_token(token)

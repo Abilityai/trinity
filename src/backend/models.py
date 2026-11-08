@@ -4731,9 +4731,39 @@ class ScheduleResponse(BaseModel):
     # The creator's display name, else username: only for the agent's owner
     # tier and for an agent key that is not acting for a shared person.
     created_by: Optional[str] = None
+    # Whether THIS caller may take the schedule over (#4281): a person at the
+    # agent's owner tier who did not create it, on a schedule whose runs are a
+    # shared person's because of its creator. Defaults False, like
+    # `can_manage_webhook`.
+    can_take_over: bool = False
 
     class Config:
         from_attributes = True
+
+
+class ScheduleReviewed(BaseModel):
+    """What a schedule's runs will do, as the person taking it over read it
+    (#4281). Every field is required, null included, and is echoed verbatim
+    from the `ScheduleResponse` the person reviewed: the take-over adopts
+    exactly this, or nothing."""
+    message: str
+    allowed_tools: Optional[List[str]]
+    model: Optional[str]
+    validation_enabled: bool
+    validation_prompt: Optional[str]
+
+
+class ScheduleTakeOverRequest(BaseModel):
+    """`POST /api/agents/{name}/schedules/{id}/take-over` (#4281, D4/D8).
+
+    `expected_updated_at` is the reviewed response's `updated_at`, compared as
+    an instant. `delivery` decides a delivery to another person's Workspace:
+    `clear` removes it; `keep` keeps it only when `keep_delivery_to` repeats
+    the address. A delivery to the taker's own Workspace needs neither."""
+    expected_updated_at: datetime
+    reviewed: ScheduleReviewed
+    delivery: Optional[Literal["clear", "keep"]] = None
+    keep_delivery_to: Optional[str] = None
 
 
 class ExecutionSummary(BaseModel):

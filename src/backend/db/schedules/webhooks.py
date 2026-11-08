@@ -23,18 +23,38 @@ class ScheduleWebhooksMixin:
     # Webhook Management (WEBHOOK-001, #291)
     # =========================================================================
 
-    def generate_webhook_token(self, schedule_id: str) -> Optional[str]:
+    @staticmethod
+    def _webhook_revoked_values() -> Dict:
+        """The columns of a schedule whose webhook is revoked: no token, no
+        signing secret, both flags off. One list for `revoke_webhook_token` and
+        the take-over (#4281), so a revoke can never forget a column."""
+        return {
+            "webhook_token": None,
+            "webhook_enabled": 0,
+            "webhook_secret_encrypted": None,
+            "webhook_auth_enabled": 0,
+        }
+
+    def generate_webhook_token(self, schedule_id: str, creator_id: Optional[int] = None) -> Optional[str]:
         """Generate (or regenerate) a webhook token for a schedule.
 
         Creates a 32-byte URL-safe random token stored in the DB. Calling
         again replaces the old token, immediately invalidating the old URL.
+
+        `creator_id` is set when the caller was allowed as the schedule's
+        creator rather than as the agent's owner tier: the token is then written
+        only while that person is still the creator, so a mint authorized just
+        before a take-over cannot land after it (#4281). None = no such bound.
         """
         token = secrets.token_urlsafe(32)
         now = utc_now_iso()
+        where = [agent_schedules.c.id == schedule_id]
+        if creator_id is not None:
+            where.append(agent_schedules.c.owner_id == creator_id)
         with get_engine().begin() as conn:
             result = conn.execute(
                 update(agent_schedules)
-                .where(agent_schedules.c.id == schedule_id)
+                .where(and_(*where))
                 # ent#77: rotating the URL is a credential-rotation event — reset
                 # any prior signing secret so a leaked old secret can't sign for
                 # the new token. The caller re-enables signing explicitly.
@@ -94,13 +114,7 @@ class ScheduleWebhooksMixin:
             result = conn.execute(
                 update(agent_schedules)
                 .where(agent_schedules.c.id == schedule_id)
-                .values(
-                    webhook_token=None,
-                    webhook_enabled=0,
-                    webhook_secret_encrypted=None,
-                    webhook_auth_enabled=0,
-                    updated_at=now,
-                )
+                .values(**self._webhook_revoked_values(), updated_at=now)
             )
             return result.rowcount > 0
 

@@ -8922,6 +8922,17 @@
         "unit"
       ],
       "description": "#4281 slice C: through the real schedules, ops and operator-queue routers, the internal execute-task handler and the real platform-alert seam on SQLite: one schedule_runs_restricted row per agent x creator (two schedules, fifty schedules, three runs -> one bounded row; two creators -> two rows); delete, disable, a disabling PUT, the admin pause and the emergency stop end it, enable and resume file it again; a promoted creator is cleared and a demoted one filed by the next run; a run ending after a disable does not re-file (X7); dispatch files it with no terminal through apply_result; a person's ending is final per cause and a new cause files; four concurrent readings are one row; the owner tier sees it, a share holder and the agent's key do not; the kind's registration."
+    },
+    {
+      "file": "unit/test_4281_schedule_take_over.py",
+      "feature": "#4281",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "#4281 slice D: POST /api/agents/{name}/schedules/{id}/take-over through the real router, get_current_user, JWTs and keys on SQLite. Owner, admin and the owner's user key take over; the agent key is 403 person_required; a share holder 404; a Workspace-only person refused; an agent with no owner user row 404s for an admin. The owner adopts exactly what they reviewed: a prompt edited after the read, a prompt changed without touching updated_at, any differing echoed field, and a write landing between the check and the UPDATE are 409 schedule_changed_since_review; updated_at is compared as an instant (naive/Z/+00:00, 1us off refused). 409 while queued/running/pending_retry and on an owner-tier schedule; idempotent re-take; the webhook token and secret revoked. A creator's PUT, delete or webhook mint authorized before the take-over cannot land after it (admin writes unaffected). D8 delivery clear/keep-with-echo; audit row; can_take_over; remedy take_over; D9 agent key Run-now 409 schedule_runs_as_shared_person."
     }
   ]
 }

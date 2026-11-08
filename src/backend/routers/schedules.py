@@ -1,3 +1,4 @@
+# mcp: schedules.ts (schedule CRUD, toggle, trigger, executions); none for take-over — a human-only grant, refused to agent keys (#4281)
 """
 Schedule management routes for the Trinity backend.
 
@@ -23,6 +24,7 @@ from models import (
     ExecutionSummary,
     ScheduleAnalyticsResponse,
     ScheduleResponse,
+    ScheduleTakeOverRequest,
     ScheduleUpdateRequest,
     User,
     WebhookStatusResponse,
@@ -32,7 +34,9 @@ from dependencies import (
     agent_may_reach,
     agent_principal_name,
     capability_fence,
+    is_person_principal,
     person_or_capability_admits,
+    require_person,
     require_person_or_capability,
     agent_viewer_tier,
     VIEWER_KEY,
@@ -50,7 +54,13 @@ from dependencies import (
     resolve_source_agent,
 )
 from database import db, Schedule, ScheduleCreate, ScheduleExecution
-from services import dispatch_admission_service, schedule_tier_alerts, skill_gate_map_service, turn_tier_service
+from services import (
+    dispatch_admission_service,
+    schedule_take_over_service,
+    schedule_tier_alerts,
+    skill_gate_map_service,
+    turn_tier_service,
+)
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from utils.public_url import public_base_url
 from services.schedule_validation import (
@@ -195,11 +205,24 @@ class _ScheduleView:
         # shared person's turn (whose tier reads as share, ent#926), not to a
         # share holder (#4281, D5).
         self.show_creator = self.tier in (VIEWER_OWNER, VIEWER_KEY)
+        # Who may take a schedule over: a person at the owner tier (#4281).
+        self.owner_tier_person = self.tier == VIEWER_OWNER and _is_person(current_user)
         self.lookups = turn_tier_service.RunTierLookups(db)
 
     def run_tier_fields(self, schedule, agent_name: str) -> dict:
         return turn_tier_service.schedule_read_fields(
             self.lookups, agent_name, schedule, show_creator=self.show_creator, viewer_id=self.viewer_id)
+
+    def can_take_over(self, schedule, read_fields: dict) -> bool:
+        return schedule_take_over_service.can_take_over(
+            owner_tier_person=self.owner_tier_person, viewer_id=self.viewer_id,
+            schedule=schedule, read_fields=read_fields)
+
+
+def _is_person(current_user) -> bool:
+    """`assert_person`'s rule, as a predicate: a JWT or the person's own `user`
+    key, never an agent, system or connector key or the event loopback."""
+    return is_person_principal(current_user) and not getattr(current_user, "vouched_source_agent", None)
 
 
 def _schedule_response(schedule, agent_name: str, current_user: User,
@@ -210,13 +233,15 @@ def _schedule_response(schedule, agent_name: str, current_user: User,
     (ent#875, trinity-enterprise#719). The client has no numeric user id to compare.
     Also what tier the schedule's runs get, and who created it (#4281)."""
     view = view or _ScheduleView(agent_name, current_user)
+    run_tier = view.run_tier_fields(schedule, agent_name)
     return ScheduleResponse(
         **schedule.model_dump(),
         can_manage_webhook=(
             view.admits_webhook
             and _can_manage_webhook(schedule, agent_name, current_user, viewer_tier=view.tier)
         ),
-        **view.run_tier_fields(schedule, agent_name),
+        can_take_over=view.can_take_over(schedule, run_tier),
+        **run_tier,
     )
 
 
@@ -706,6 +731,28 @@ async def disable_schedule(
             **_ScheduleView(name, current_user).run_tier_fields(schedule, name)}
 
 
+# D9 (#4281): a manual run carries the caller as its person, so it has the
+# caller's tier, not the creator's. For a person at owner tier that is a
+# deliberate act (the UI warns). For a key it would be a per-run take-over,
+# which the take-over route refuses keys for good.
+_RUNS_AS_SHARED_PERSON = {
+    "code": "schedule_runs_as_shared_person",
+    "message": ("This schedule's runs have the access of the person who created it, who is not the "
+                "agent's owner or an admin. A key cannot run it now with the owner's access; a person "
+                "at the agent's owner tier can, or can take it over."),
+}
+
+
+def _refuse_key_run_of_a_shared_persons_schedule(name: str, schedule, current_user) -> None:
+    """409 when a non-person (an agent, system or connector key) asks to run
+    a schedule rated as a shared person's. A rating that cannot be computed
+    raises: a key is not given owner tier on a guess."""
+    if _is_person(current_user):
+        return
+    if turn_tier_service.schedule_run_tier(db, name, schedule).tier != turn_tier_service.OWNER:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=dict(_RUNS_AS_SHARED_PERSON))
+
+
 @router.post("/{name}/schedules/{schedule_id}/trigger")
 async def trigger_schedule(
     # CSO M1 (#2081) intent kept — owner-tier, matching update/delete. The
@@ -733,6 +780,7 @@ async def trigger_schedule(
             detail="Schedule not found"
         )
     _refuse_agent_third_party(current_user, getattr(schedule, "deliver_to_workspace_email", None))
+    _refuse_key_run_of_a_shared_persons_schedule(name, schedule, current_user)
 
     # #1970: the authenticated caller is in scope HERE and nowhere downstream —
     # the scheduler hop carried only the schedule id, so every manually
@@ -865,6 +913,64 @@ async def trigger_schedule(
         )
 
 
+@router.post("/{name}/schedules/{schedule_id}/take-over", response_model=ScheduleResponse,
+             dependencies=[Depends(require_person)])
+async def take_over_schedule(
+    name: OwnedAgent,
+    schedule_id: str,
+    body: ScheduleTakeOverRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """Take over a share holder's schedule in place (#4281): the caller becomes
+    its creator, so its runs have the owner's access from now on.
+
+    A grant, so a person only (`require_person`: agent, system and connector
+    keys are refused) at the agent's owner tier (`OwnedAgent`). The body echoes
+    the `updated_at` and the prompt fields of the `ScheduleResponse` the caller
+    reviewed; the schedule is adopted exactly as reviewed, or not at all
+    (409 `schedule_changed_since_review`). Also 409 while a run is in flight
+    (`schedule_run_in_progress`), when its runs already have owner tier
+    (`schedule_not_restricted`), and for an undecided delivery to another
+    person's Workspace (`schedule_delivers_to_another_person`). The webhook is
+    revoked. A caller who already is the creator gets the schedule unchanged.
+    """
+    schedule = db.get_schedule(schedule_id)
+    if not schedule or schedule.agent_name != name:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
+    try:
+        done = schedule_take_over_service.take_over(db, name, schedule, current_user, body)
+    except schedule_take_over_service.TakeOverRefused as refused:
+        raise HTTPException(status_code=refused.status_code, detail=refused.detail)
+
+    if done.changed:
+        logger.info("[#4281] schedule %s on %s taken over by user %s from user %s",
+                    schedule_id, name, current_user.id, done.previous_creator_id)
+        await platform_audit_service.log(
+            event_type=AuditEventType.AUTHORIZATION,
+            event_action="schedule_taken_over",
+            source="api",
+            actor_user=current_user,
+            actor_ip=request.client.host if request.client else None,
+            target_type="agent",
+            target_id=name,
+            endpoint=f"/api/agents/{name}/schedules/{schedule_id}/take-over",
+            request_id=getattr(request.state, "request_id", None),
+            details={
+                "schedule_id": schedule_id,
+                "previous_creator_id": done.previous_creator_id,
+                "new_creator_id": current_user.id,
+                "webhook_revoked": done.webhook_revoked,
+                "delivery_cleared": done.delivery_cleared,
+            },
+        )
+
+    fresh = db.get_schedule(schedule_id)
+    if fresh is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Schedule not found")
+    return _schedule_response(fresh, name, current_user)
+
+
 # Webhook Management Endpoints (WEBHOOK-001, #291)
 #
 # Every webhook route, the read included, takes a person or an agent holding
@@ -917,7 +1023,13 @@ async def generate_webhook(
     if not db.is_agent_live(name):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
 
-    token = db.generate_webhook_token(schedule_id)
+    # #4281: a share holder is allowed here as the schedule's creator, so the
+    # write is bound to that: a mint authorized just before a take-over cannot
+    # leave a live URL on a schedule whose runs now have owner tier.
+    as_creator = current_user.id if agent_viewer_tier(current_user, name) == VIEWER_SHARE else None
+    token = db.generate_webhook_token(schedule_id, creator_id=as_creator)
+    if not token and as_creator is not None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=dict(_WEBHOOK_FORBIDDEN_DETAIL))
     if not token:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
