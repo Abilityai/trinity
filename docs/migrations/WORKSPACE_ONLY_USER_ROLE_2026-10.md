@@ -114,8 +114,9 @@ worker within about 15 seconds; the page reconnects at the new role by itself. N
 needs a restart for that. The same applies when the account is deactivated (the page does
 not reconnect) and when an event stream's key is revoked or deleted.
 
-An open agent terminal keeps the scope it connected with until it is closed. To end every
-open terminal at once, restart the backend: everyone signs in again.
+An open agent terminal, and the admin's system-agent terminal, close on the same schedule
+and end the shell session they started in the container. A terminal does not reopen by
+itself; opening it again uses the account's current role.
 
 ## Whitelist rows written by sharing
 
