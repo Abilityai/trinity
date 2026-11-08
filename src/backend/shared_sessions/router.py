@@ -1,3 +1,4 @@
+# mcp: rooms.ts (create_room, list_rooms, read_room, post_to_room, close_room); POST /continue has no tool — person-only by ruling P6, agent keys get 403 not_a_person
 """FastAPI router for shared sessions / rooms (ent#169).
 
 Platform-wide prefix (Invariant #15): a room spans several agents, so it does
