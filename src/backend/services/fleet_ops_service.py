@@ -21,6 +21,7 @@ from dependencies import get_current_user, assert_admin, reject_agent_principal
 from services.docker_service import get_agent_container, docker_client, list_all_agents_fast
 from services.docker_utils import container_stop
 from services.agent_client import get_agent_client
+from services import schedule_tier_alerts
 from services.agent_service.lifecycle import public_skills_result, restart_agent_internal
 from services.agent_service.stats import invalidate_context_stats_cache
 from redis_breaker_util import get_breaker_redis, SingleFlightLock, LeaseState
@@ -635,6 +636,7 @@ async def emergency_stop_impl(
 
     # 1. Pause all schedules (optionally filtered by prefix)
     schedules = db.list_all_enabled_schedules()
+    paused_schedules = []
     for schedule in schedules:
         # If prefix filter is set, only pause schedules for matching agents
         if system_prefix and not schedule.agent_name.startswith(system_prefix):
@@ -643,8 +645,12 @@ async def emergency_stop_impl(
             db.set_schedule_enabled(schedule.id, False)
             # Dedicated scheduler syncs from database automatically
             results["schedules_paused"] += 1
+            paused_schedules.append(schedule)
         except Exception as e:
             results["errors"].append(f"Schedule {schedule.id}: {e}")
+    # #4281: `enabled` changed without the schedule routes, so the
+    # restricted-schedule alerts are decided here (one read per agent x creator).
+    schedule_tier_alerts.sync_schedules(paused_schedules)
 
     # 2. Stop all non-system agents IN PARALLEL
     agents = list_all_agents_fast()

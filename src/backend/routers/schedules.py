@@ -50,7 +50,7 @@ from dependencies import (
     resolve_source_agent,
 )
 from database import db, Schedule, ScheduleCreate, ScheduleExecution
-from services import dispatch_admission_service, skill_gate_map_service, turn_tier_service
+from services import dispatch_admission_service, schedule_tier_alerts, skill_gate_map_service, turn_tier_service
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from utils.public_url import public_base_url
 from services.schedule_validation import (
@@ -425,6 +425,8 @@ async def create_schedule(
     # Dedicated scheduler syncs from database automatically
     # No need to notify it directly - it will pick up new schedules on next sync cycle
 
+    # #4281: a shared person's schedule is a platform condition (one row per creator).
+    schedule_tier_alerts.sync_for(name, schedule)
     return _schedule_response(schedule, name, current_user, view)
 
 
@@ -616,6 +618,7 @@ async def update_schedule(
     # Dedicated scheduler syncs from database automatically
     # It will detect the update on next sync cycle
 
+    schedule_tier_alerts.sync_for(name, updated_schedule)  # #4281
     return _schedule_response(updated_schedule, name, current_user, view)
 
 
@@ -642,6 +645,7 @@ async def delete_schedule(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Cannot delete schedule - access denied"
         )
+    schedule_tier_alerts.sync_for(name, schedule)  # #4281
 
 
 # Schedule Control Endpoints
@@ -670,6 +674,7 @@ async def enable_schedule(
 
     # Update database - dedicated scheduler syncs automatically
     db.set_schedule_enabled(schedule_id, True)
+    schedule_tier_alerts.sync_for(name, schedule)  # #4281
 
     return {"status": "enabled", "schedule_id": schedule_id, **view.run_tier_fields(schedule, name)}
 
@@ -695,6 +700,7 @@ async def disable_schedule(
 
     # Update database - dedicated scheduler syncs automatically
     db.set_schedule_enabled(schedule_id, False)
+    schedule_tier_alerts.sync_for(name, schedule)  # #4281
 
     return {"status": "disabled", "schedule_id": schedule_id,
             **_ScheduleView(name, current_user).run_tier_fields(schedule, name)}

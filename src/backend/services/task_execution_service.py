@@ -3411,9 +3411,10 @@ class TaskExecutionService:
 
         # #4281: a schedule-backed run whose tier is not owner ran without the
         # shell. Rated once, before either branch: the record rides this
-        # terminal write's `turn_integrity`. Total: a rating that cannot be
+        # terminal write's `turn_integrity`, and the rating decides the
+        # operator's alert once the write wins. Total: a rating that cannot be
         # computed gives no record and never changes the outcome.
-        _restricted_rating, restricted_turn = schedule_tier_alerts.run_restriction_by_id(
+        restricted_rating, restricted_turn = schedule_tier_alerts.run_restriction_by_id(
             db, agent_name, eid)
 
         if envelope.status == TaskExecutionStatus.SUCCESS:
@@ -3603,6 +3604,9 @@ class TaskExecutionService:
                 status="success",
                 summary_or_error=sanitized_resp,
             )
+            # #4281: decide the creator's alert again, from their LIVE schedules,
+            # so a run that ends after its schedule was disabled files nothing.
+            schedule_tier_alerts.after_run(agent_name, restricted_rating)
 
             return TaskExecutionResult(
                 execution_id=eid or "",
@@ -3773,6 +3777,8 @@ class TaskExecutionService:
                 status=str(getattr(envelope.status, "value", envelope.status)),
                 summary_or_error=envelope.error,
             )
+            # #4281: as on the success branch.
+            schedule_tier_alerts.after_run(agent_name, restricted_rating)
 
         return TaskExecutionResult(
             execution_id=eid or "",

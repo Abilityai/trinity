@@ -32,7 +32,7 @@ from utils.helpers import utc_now_iso
 from services.platform_audit_service import platform_audit_service, AuditEventType
 
 router = APIRouter(prefix="/api/ops", tags=["operations"])
-from services import fleet_ops_service, ops_costs_service, turn_tier_service
+from services import fleet_ops_service, ops_costs_service, schedule_tier_alerts, turn_tier_service
 
 logger = logging.getLogger(__name__)
 
@@ -290,6 +290,9 @@ async def pause_all_schedules(
             paused += 1
         except Exception as e:
             logger.error(f"Failed to pause schedule {schedule.id}: {e}")
+    # #4281: this writes `enabled` without the schedule routes, so it decides
+    # the restricted-schedule alerts itself (one read per agent x creator).
+    schedule_tier_alerts.sync_schedules(schedules)
 
     return {
         "success": True,
@@ -336,6 +339,7 @@ async def resume_all_schedules(
             resumed += 1
         except Exception as e:
             logger.error(f"Failed to resume schedule {schedule.id}: {e}")
+    schedule_tier_alerts.sync_schedules(schedules)  # #4281, as pause above
 
     return {
         "success": True,
