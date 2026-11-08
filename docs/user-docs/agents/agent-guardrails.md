@@ -78,7 +78,7 @@ What the agent can rely on:
 
 What it does not cover:
 
-- **A command that fails** (exits non-zero): its output cannot be changed, so the model sees it. The model is told the output holds a credential it must not repeat, store or send, and the event is recorded.
+- **A command that fails** (exits non-zero): Claude Code does not promise that hooks can change this output. With the Claude Code version Trinity ships, the key is still hidden, but the model sees the result without its error flag; the text still starts with `Error: Exit code N`. The model is also told the output held a credential it must not repeat, store or send, and the event is recorded. A later Claude Code version may stop hiding it.
 - **A command run in the background:** its output is read later and is not scanned yet.
 - **Another hook that also rewrites the output:** a hook the agent or a template adds in its own settings can bring the original back. The scanner's change is not final in that case.
 - **A scanner that cannot run in time** (30 seconds) or whose change Claude Code rejects: the original output goes through.

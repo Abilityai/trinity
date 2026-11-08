@@ -10,8 +10,14 @@ Registered twice for `Bash` in the managed settings:
   the CLI drops a rewrite that does not match the tool's output schema. Output
   the CLI persisted to `persistedOutputPath` is redacted in that file too. Clean
   output prints nothing.
-* `PostToolUseFailure` (non-zero exit): no hook can rewrite that output, so a hit
-  only adds `additionalContext` telling the model not to repeat it (decision D5).
+* `PostToolUseFailure` (non-zero exit): its only decision field is
+  `additionalContext`, so a hit adds a warning not to repeat it (decision D5).
+  On the pinned CLI a failed Bash call ALSO fires `PostToolUse`, with
+  `tool_response` the error text as a plain string ("Error: Exit code N\n...").
+  The Bash schema wants an object there: a string rewrite is rejected and the
+  whole result becomes a `tool_use_error`, while a Bash-shaped object is
+  accepted. So a string Bash response is rewritten as `{stdout, stderr,
+  interrupted}` (`_as_bash`); observed live on 2.1.281, see CLI_FACTS_TO_REAUDIT.
 
 Fails closed on content (D6): if the scan raises, its shapes cannot be loaded or
 the output is over the cap, the result is withheld. It never exits 2: on
@@ -49,6 +55,9 @@ CLI_FACTS_TO_REAUDIT = (
     "additionalContext",
     "parallel PostToolUse rewrites all start from the original output: last write wins",
     "exit 2 on PostToolUse shows stderr to the model and the original output still goes through",
+    "a failed Bash call fires PostToolUseFailure AND a managed PostToolUse whose tool_response is the error "
+    "string; a string rewrite fails the schema and becomes a tool_use_error, a {stdout, stderr, interrupted} "
+    "object is accepted (the model then sees the result without is_error)",
 )
 
 PLACEHOLDER = "[REDACTED:{name}]"
@@ -62,8 +71,8 @@ _DO_NOT_RERUN = "The command already ran — do not run it again to see its outp
 WITHHELD_ERROR = "[Output withheld: Trinity's credential check failed. " + _DO_NOT_RERUN
 WITHHELD_OVERSIZE = ("[Output withheld: the output is too large for Trinity's credential check. "
                      + _DO_NOT_RERUN)
-FAILURE_WARNING = ("The output above contains a credential Trinity could not hide ({shapes}). "
-                   "Do not repeat, store or send it.")
+FAILURE_WARNING = ("The output of this failed command held a credential ({shapes}). Trinity hides it "
+                   "where it can; if you can still see it, do not repeat, store or send it.")
 FAILURE_UNCHECKED = ("Trinity could not check the output above for credentials ({why}). "
                      "If it contains one, do not repeat, store or send it.")
 
@@ -119,6 +128,14 @@ def _redact(value, shapes, hits, skip=()):
     if isinstance(value, dict):
         return {k: v if k in skip else _redact(v, shapes, hits) for k, v in value.items()}
     return value
+
+
+def _as_bash(response, tool):
+    """A plain-string Bash response (a failed call) as the object the Bash
+    output schema accepts; anything else unchanged."""
+    if tool == "Bash" and isinstance(response, str):
+        return {"stdout": response, "stderr": "", "interrupted": False}
+    return response
 
 
 def _withheld(response, notice):
@@ -229,7 +246,7 @@ def _on_success(data, shapes):
         log_event("credential_redacted", tool=data.get("tool_name", ""), code="bash_output",
                   patterns=sorted(hits), persisted=persisted == "redacted", **_ids(data))
     if rewritten != response:
-        _emit("PostToolUse", updatedToolOutput=rewritten)
+        _emit("PostToolUse", updatedToolOutput=_as_bash(rewritten, data.get("tool_name")))
 
 
 def _withhold_persisted(response):
@@ -274,7 +291,7 @@ def main() -> None:
         if failure:
             _emit("PostToolUseFailure", additionalContext=FAILURE_UNCHECKED.format(why="too large to check"))
         else:
-            response = data.get("tool_response", data.get("tool_output"))
+            response = _as_bash(data.get("tool_response", data.get("tool_output")), tool)
             _withhold_persisted(response)
             _emit("PostToolUse", updatedToolOutput=_withheld(response, WITHHELD_OVERSIZE))
     except Exception as exc:
@@ -283,7 +300,7 @@ def main() -> None:
         if failure:
             _emit("PostToolUseFailure", additionalContext=FAILURE_UNCHECKED.format(why="the check failed"))
         else:
-            response = data.get("tool_response", data.get("tool_output"))
+            response = _as_bash(data.get("tool_response", data.get("tool_output")), tool)
             if not isinstance(exc, _Unverifiable):
                 _withhold_persisted(response)
             _emit("PostToolUse", updatedToolOutput=_withheld(response, WITHHELD_ERROR))

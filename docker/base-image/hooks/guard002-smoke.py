@@ -113,6 +113,12 @@ def _check_output_scanner(argv: list, failures: list) -> None:
         if (r.returncode != 0 or SECRET in r.stdout or out.get("hookEventName") != "PostToolUse"
                 or out.get("updatedToolOutput") != {**response, field: "token=[REDACTED:sk]"}):
             fail(f"a key on {field} was not redacted", r)
+    # A failed call reaches PostToolUse with the error as a plain string; only a
+    # Bash-shaped object rewrite is accepted by the CLI (2.1.281).
+    r, out = _scanner_run(argv, {**base, "tool_response": "Error: Exit code 1\ntoken=" + SECRET})
+    if out.get("updatedToolOutput") != {"stdout": "Error: Exit code 1\ntoken=[REDACTED:sk]",
+                                        "stderr": "", "interrupted": False} or SECRET in r.stdout:
+        fail("a failed call's string output was not rewritten as a Bash object", r)
     clean = {**shape, "stdout": "pod/task-runner-deployment-7d9f8c6b5-x2z9q Running"}
     r, _ = _scanner_run(argv, {**base, "tool_response": clean})
     if r.returncode != 0 or r.stdout.strip():

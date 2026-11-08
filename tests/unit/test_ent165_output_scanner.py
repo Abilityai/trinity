@@ -135,9 +135,26 @@ def test_every_string_leaf_is_scanned_including_lists(tmp_path):
         {"type": "text", "text": "key [REDACTED:google]"}, {"type": "text", "text": "plain"}]
 
 
-def test_a_string_tool_response_is_redacted_as_a_string(tmp_path):
-    payload = {**_bash(), "tool_response": f"key={_SECRET}"}
+def test_a_failed_bash_call_string_response_is_rewritten_as_a_bash_object(tmp_path):
+    """Observed on CLI 2.1.281 in the agent image: a failed Bash call also fires
+    PostToolUse with `tool_response` the error STRING. A string rewrite fails
+    the Bash schema and the whole result becomes a tool_use_error; this object
+    shape was accepted and the model saw the redacted text."""
+    payload = {**_bash(), "tool_response": f"Error: Exit code 3\nfailing key: {_SECRET}"}
+    assert _rewrite(_scan(tmp_path, payload)) == {
+        "stdout": "Error: Exit code 3\nfailing key: [REDACTED:sk]", "stderr": "", "interrupted": False}
+
+
+def test_a_string_response_from_another_tool_stays_a_string(tmp_path):
+    payload = {**_bash(), "tool_name": "mcp__owner__fetch", "tool_response": f"key={_SECRET}"}
     assert _rewrite(_scan(tmp_path, payload)) == "key=[REDACTED:sk]"
+
+
+def test_a_withheld_failed_bash_call_is_a_bash_object(tmp_path):
+    payload = {**_bash(), "tool_response": "Error: Exit code 1\n" + "z" * 50}
+    rewritten = _rewrite(_scan(tmp_path, payload, overrides={"SCAN_CAP_CHARS": 10}))
+    assert rewritten == {"stdout": rewritten["stdout"], "stderr": "", "interrupted": False}
+    assert rewritten["stdout"].startswith(_TOO_LARGE)
 
 
 @pytest.mark.parametrize("payload", [
@@ -356,7 +373,8 @@ def test_a_failing_command_with_a_key_warns_the_model_and_records_it(tmp_path):
     hso = json.loads(result.stdout)["hookSpecificOutput"]
     assert hso["hookEventName"] == "PostToolUseFailure"
     assert set(hso) == {"hookEventName", "additionalContext"}
-    assert "could not hide" in hso["additionalContext"] and "do not repeat" in hso["additionalContext"].lower()
+    assert "held a credential (github)" in hso["additionalContext"]
+    assert "do not repeat" in hso["additionalContext"].lower()
     assert _GITHUB not in result.stdout
     events = _events(tmp_path, "credential_unredacted")
     assert [e["patterns"] for e in events] == [["github"]]
