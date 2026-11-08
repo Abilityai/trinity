@@ -7573,6 +7573,18 @@
       "description": "/ws/events applies the #995 account-state check the other doors apply: dependencies.owner_is_suspended truth table (executed); the handler checks it on the owner row it resolves, closes and returns before accept() (shape check, main.py is not importable in the unit island); the close is identical to an inactive key's. Mutation: removing the guard turns both placement tests red."
     },
     {
+      "file": "unit/test_ent863_event_stream_roster.py",
+      "feature": "trinity-enterprise#863",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "websocket",
+        "unit",
+        "security"
+      ],
+      "description": "An event-stream key's agent list follows access changes: the real /ws/events handler gives every non-admin key (user keys too, not only agent keys) a roster read that re-reads the key's owner, and refresh reads the owner's current row (a lowered role reads the smaller list, a deactivated owner none); after an unshare fan-out the slot no longer receives the unshared agent's events. ws_identity_service.event_stream_roster_reader re-reads on every call, reads a gone, deactivated or Workspace-only owner as an empty list, and uses the owner's current email. A change that lands while a roster read is in flight is followed by one more read (/ws and /ws/events slots, and the refresh command); a slot that disconnects is not read again. StreamDispatcher re-reads every non-admin roster about once a minute (ROSTER_REREAD_INTERVAL_S = 60) in a per-worker loop it starts and stops itself: reads run one at a time, nothing is read while no non-admin roster is held, admin slots are never read, and a failing read keeps the previous roster and the loop."
+    },
+    {
       "file": "unit/test_ent860_room_wake_access.py",
       "feature": "trinity-enterprise#860",
       "added": "2026-10-20",
