@@ -108,10 +108,14 @@ Every account whose role is `user`. They usually got it from one of these:
 
 ## Lowering a role, and open sessions
 
-A role change applies to a live connection when it reconnects. A lowered account's open
-pages keep the scope they connected with: its `/ws` stream until it reconnects (the
-Workspace reconnects it on the next refused call), and an open agent terminal until it is
-closed. To end every open session at once, restart the backend: everyone signs in again.
+A role change closes the account's open event socket (`/ws`) and event stream
+(`/ws/events`) at once on the backend worker that made the change, and on every other
+worker within about 15 seconds; the page reconnects at the new role by itself. Nothing
+needs a restart for that. The same applies when the account is deactivated (the page does
+not reconnect) and when an event stream's key is revoked or deleted.
+
+An open agent terminal keeps the scope it connected with until it is closed. To end every
+open terminal at once, restart the backend: everyone signs in again.
 
 ## Whitelist rows written by sharing
 
