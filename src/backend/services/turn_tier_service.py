@@ -337,6 +337,27 @@ def schedule_run_tier(db, agent_name: str, schedule) -> RunTier:
     return RunTier(tier, kind, schedule_run_cause(db, agent_name, schedule, tier), creator)
 
 
+def run_schedule(db, agent_name: str, execution) -> Tuple[bool, Optional[object]]:
+    """`(True, schedule-or-None)` for a schedule-backed run of `agent_name`: no
+    person started it (`source_user_id` is empty) and it names a schedule. The
+    schedule is None when it cannot be read. `(False, None)` for any other run.
+    The same test `turn_actor` applies before it rates a run by its creator."""
+    if execution is None or _field(execution, "agent_name") != agent_name:
+        return False, None
+    if _field(execution, "source_user_id") is not None:
+        return False, None
+    return _schedule_of(db, agent_name, execution)
+
+
+def schedule_backed_run_tier(db, agent_name: str, execution) -> Optional[RunTier]:
+    """`schedule_run_tier` for a schedule-backed run (`run_schedule`), None for
+    any other run. Raises when the rating raises, as `schedule_run_tier` does."""
+    is_run, schedule = run_schedule(db, agent_name, execution)
+    if not is_run:
+        return None
+    return schedule_run_tier(db, agent_name, schedule)
+
+
 def schedule_remedy(cause: Optional[str]) -> Optional[str]:
     """The code of what fixes a shared-person rating, or None."""
     return _REMEDIES.get(cause)

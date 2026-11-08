@@ -24,7 +24,7 @@ from collections.abc import Coroutine
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 from types import SimpleNamespace
 
 import httpx
@@ -49,7 +49,8 @@ from services.capacity_manager import (
     get_capacity_manager,
 )
 from services.dispatch_breaker import DispatchBreaker
-from services.execution_integrity import derive_turn_integrity
+from services.execution_integrity import derive_turn_integrity, with_restricted_turn
+from services import schedule_tier_alerts
 from services import event_dispatch_service
 from services import channel_completion_report
 from services import peer_skill_policy, skill_gate_service
@@ -342,6 +343,16 @@ _AUTONOMOUS_TRIGGERS = frozenset(
 _COMMAND_DISPLAY_MAX = 200
 
 
+
+
+def _restricted_turn_json(eid: Optional[str], record: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The `turn_integrity` value of a write that carries only the #4281
+    restriction record (a non-success terminal). None keeps the column."""
+    try:
+        return with_restricted_turn(None, record)
+    except Exception as e:  # noqa: BLE001 - a record must never fail the terminal write
+        logger.error(f"[TaskExecService] restricted-turn record dropped for {eid}: {e}")
+        return None
 
 
 async def _alert_skill_not_found(
@@ -3398,6 +3409,13 @@ class TaskExecutionService:
         # branches reuse it -- apply_result runs exactly one of them.
         _staged = get_staged_values()
 
+        # #4281: a schedule-backed run whose tier is not owner ran without the
+        # shell. Rated once, before either branch: the record rides this
+        # terminal write's `turn_integrity`. Total: a rating that cannot be
+        # computed gives no record and never changes the outcome.
+        _restricted_rating, restricted_turn = schedule_tier_alerts.run_restriction_by_id(
+            db, agent_name, eid)
+
         if envelope.status == TaskExecutionStatus.SUCCESS:
             # ---- Success-style derivation (moved from execute_task step 5/6) ----
             # ent#279: identity-scrub the RAW agent fields BEFORE the sanitize/
@@ -3452,6 +3470,15 @@ class TaskExecutionService:
                 turn_integrity_json, killed_notice = derive_turn_integrity(
                     exec_log, metadata
                 )
+            except Exception as e:  # noqa: BLE001
+                logger.error(
+                    f"[TaskExecService] turn-integrity derivation failed for {eid}: {e}"
+                )
+                turn_integrity_json, killed_notice = None, None
+            try:
+                # #4281: the restriction record sits beside the #2467 keys in
+                # one object, and survives a #2467 derivation that failed.
+                turn_integrity_json = with_restricted_turn(turn_integrity_json, restricted_turn)
                 # Transcript-derived JSON passes the same sanitizer as its
                 # siblings execution_log_json / tool_calls_json above — the
                 # leaf's charset whitelist is the primary control, this is the
@@ -3460,9 +3487,9 @@ class TaskExecutionService:
                     turn_integrity_json = sanitize_execution_log(turn_integrity_json)
             except Exception as e:  # noqa: BLE001
                 logger.error(
-                    f"[TaskExecService] turn-integrity derivation failed for {eid}: {e}"
+                    f"[TaskExecService] turn-integrity serialization failed for {eid}: {e}"
                 )
-                turn_integrity_json, killed_notice = None, None
+                turn_integrity_json = None
             if killed_notice:
                 sanitized_resp = (
                     f"{killed_notice}\n\n{sanitized_resp}"
@@ -3667,6 +3694,8 @@ class TaskExecutionService:
                     tool_calls=salvage_tool_calls_json,
                     claude_session_id=salvage_session_id,
                     retry_count=envelope.retry_count or None,
+                    # #4281: None (an owner-tier or non-schedule run) keeps the column.
+                    turn_integrity=_restricted_turn_json(eid, restricted_turn),
                     completed_at=envelope.completed_at,  # #3589
                 ),
             )
