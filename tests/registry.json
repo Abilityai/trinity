@@ -8759,7 +8759,7 @@
         "turn-tier",
         "fan-out"
       ],
-      "description": "trinity-enterprise#1148 F1: a fan-out row names the initiator's key agent (or the vouched X-Source-Agent), never its own target; a delegated turn fanning out to another agent without the header rates share, a person's own fan-out does not rise to owner after the share is revoked, and a self fan-out keeps its parent turn's tier."
+      "description": "trinity-enterprise#1148 F1: a fan-out row names the initiator's key agent (or the vouched X-Source-Agent), never its own target; a delegated turn fanning out to another agent without the header rates share, a person's own fan-out does not rise to owner after the share is revoked, and a self fan-out rates the person's own tier (share), never the delegated owner tier."
     },
     {
       "file": "unit/test_ent1148_fleet_reads_stay_person.py",
