@@ -53,7 +53,9 @@ Two more answers are `owner` with a kind, so the person stays on record
              caller's prompt. Bounded by a clamp: only when the calling agent's
              owner is owner or admin of this agent, so a share holder on A never
              gets more on B than A's owner has there. P who CAN open this agent
-             keeps P's own tier here. Every lookup fails closed to `share`.
+             keeps P's own tier here. A self-call (caller == this agent) is
+             never delegation: it rates P's own tier here. Every lookup fails
+             closed to `share`.
 
 A turn such an answer dispatches carries that person forward
 (`turn_origin_user_id`), and the delegation rule decides again at every hop.
@@ -159,9 +161,13 @@ def _person_tier(db, user_id, agent_name: str) -> Tuple[str, Optional[str], Opti
 def _delegation_runs_as_owner(db, agent_name: str, execution, person: Optional[int]) -> bool:
     """Rule A with its clamp: a row another agent dispatched for `person`, who
     cannot open `agent_name` at all, runs at this agent's own tier — when the
-    calling agent's owner is owner or admin here. Every lookup fails closed."""
+    calling agent's owner is owner or admin here. Every lookup fails closed.
+    A self-call (the caller IS this agent) is never delegation: the person
+    keeps their own tier here, so a self fan-out never rates above share."""
     caller = _field(execution, "source_agent_name")
     if not isinstance(caller, str) or not caller.strip() or person is None:
+        return False
+    if caller == agent_name:
         return False
     try:
         user = db.get_user_by_id(person)

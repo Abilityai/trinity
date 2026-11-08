@@ -361,7 +361,7 @@ A delegated turn is rated on the callee, not inherited from the caller. The call
 | cannot open it | anything less | `share` / `person` |
 | any lookup unreadable | — | `share` (fail closed) |
 
-The rule re-applies at every hop: a turn dispatched from a `delegated` turn carries P again. The caller's key, acting for P, reads no rows of a callee P cannot open (`dependencies.viewer_row_scope` on the per-agent routes, `helpers.acting_person_agents` on the fleet executions and activity reads). Detail: `architecture/security.md` §5g; requirement: `requirements/auth.md` §2.12. Tests: `tests/unit/test_ent1148_delegation_tier.py`, `test_ent1148_caller_reads_stay_person.py`, `test_ent1148_fleet_reads_stay_person.py`, `test_ent1148_fan_out_source.py`.
+A self-call (caller == callee: a self-task or self fan-out) never takes the delegation row: it is rated by P's own tier on the agent, so a self fan-out inside a `delegated` turn rates `share`. The rule re-applies at every hop: a turn dispatched from a `delegated` turn carries P again. The caller's key, acting for P, reads no rows of a callee P cannot open (`dependencies.viewer_row_scope` on the per-agent routes, `helpers.acting_person_agents` on the fleet executions and activity reads). Detail: `architecture/security.md` §5g; requirement: `requirements/auth.md` §2.12. Tests: `tests/unit/test_ent1148_delegation_tier.py`, `test_ent1148_caller_reads_stay_person.py`, `test_ent1148_fleet_reads_stay_person.py`, `test_ent1148_fan_out_source.py`.
 
 ## Backend Layer
 

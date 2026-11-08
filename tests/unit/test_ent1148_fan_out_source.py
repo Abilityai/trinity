@@ -15,8 +15,12 @@ always yes, so the clamp was vacuous:
 
 The source is now the initiator's key agent (`current_user.agent_name`) or
 the header that `resolve_source_agent` vouched for — the resolution reminders
-and loops already use — and nothing else. Rule A is unchanged; (c) pins that
-a self fan-out inside a delegated turn keeps that turn's tier.
+and loops already use — and nothing else.
+
+(c) A self-call never takes rule A (operator ruling 2026-11-08): a row whose
+caller IS the callee is rated by the person's own tier there, so a self
+fan-out inside a delegated owner-tier turn rates share, and a self fan-out
+from a share turn does not re-rate as the owner's once that share is revoked.
 """
 from __future__ import annotations
 
@@ -160,16 +164,28 @@ def test_a_persons_own_fan_out_names_no_agent_and_does_not_rise_after_revocation
     assert tts.turn_actor(revoked, B, execution=row) == ("share", "person", MATE)
 
 
-def test_a_self_fan_out_in_a_delegated_turn_keeps_that_turns_tier(router_run):
+def test_a_self_fan_out_in_a_delegated_turn_rates_share(router_run):
     """(c) The delegated owner-tier turn on B (MATE cannot open B) fans out on B
-    itself: the rows name B and rate exactly what the parent turn rated."""
+    itself: the rows name B, and a self-call never takes rule A, so they rate
+    MATE's own tier on B — share — not the parent's delegated owner tier."""
     db = _Db(owners={B: B_OWNER, "agent-a": B_OWNER}, shares=set())
     parent = tts.turn_actor(db, B, execution={"agent_name": B, "source_user_id": MATE, "source_agent_name": "agent-a",
                                               "triggered_by": "agent", "schedule_id": "__manual__"})
     assert parent == ("owner", "delegated", MATE)
     row = router_run(target=B, principal=_agent_key(B, B_OWNER), person=MATE)
     assert row["source_agent_name"] == B
-    assert tts.turn_actor(db, B, execution=row) == parent
+    assert tts.turn_actor(db, B, execution=row) == ("share", "person", MATE)
+
+
+def test_a_self_fan_out_from_a_share_turn_does_not_rise_after_revocation(router_run):
+    """(c) MATE, shared B, drives a share turn on B whose agent fans out on B
+    itself. Once the owner revokes MATE's share, MATE cannot open B and B's
+    owner owns B — the two facts rule A reads — yet the queued and running
+    self rows stay share: a self-call is never delegation."""
+    row = router_run(target=B, principal=_agent_key(B, B_OWNER), person=MATE)
+    assert row["source_agent_name"] == B
+    revoked = _Db(owners={B: B_OWNER}, shares=set())
+    assert tts.turn_actor(revoked, B, execution=row) == ("share", "person", MATE)
 
 
 def test_a_self_fan_out_in_a_share_turn_is_not_elevated(router_run):
