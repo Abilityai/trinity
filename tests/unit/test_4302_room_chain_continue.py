@@ -359,6 +359,25 @@ def test_next_agent_is_shown_what_it_missed(env):
     assert "Continue" not in prompt                  # no UI verb reaches the model
 
 
+def test_an_over_budget_transcript_after_a_continue_keeps_the_agents_ask(env):
+    """The pause and Continue rows mention who is next, but they are not the ask:
+    over budget, b's hand-off to a is still the row kept whatever the arithmetic."""
+    env.monkeypatch.setattr(rooms_service, "ROOM_MAX_CHAIN_DEPTH", 2)
+    env.replies["agent-a"] = "@agent-b your turn"
+    env.replies["agent-b"] = "@agent-a no, yours " + "detail " * 300
+    assert _post_message(env, BOB(), "@agent-a begin").status_code == 200
+    (pause,) = _of_kind(env, "chain_paused")
+    _quiet(env)
+    env.monkeypatch.setattr(rooms_service, "ROOM_TRANSCRIPT_BUDGET_CHARS", 1000)
+
+    assert _continue(env, BOB(), pause["seq"]).status_code == 200
+
+    prompt = env.calls[-1]["message"]
+    assert env.calls[-1]["agent_name"] == "agent-a"
+    assert "bob asked agent-a to carry on." in prompt
+    assert "no, yours" in prompt
+
+
 def test_continue_spends_no_message_budget(env):
     pause = _pause(env)
     _quiet(env)

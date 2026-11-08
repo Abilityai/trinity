@@ -1413,7 +1413,9 @@ def _fit_transcript(messages: list[dict], agent_name: str) -> list[dict]:
     last = len(messages) - 1
     keep = {last}
     for i in range(last, -1, -1):
-        if agent_name in (messages[i].get("mentions") or []):
+        # A pause or Continue line names who is next; it is not the ask (#4302).
+        if (messages[i].get("sender_kind") != "system"
+                and agent_name in (messages[i].get("mentions") or [])):
             keep.add(i)
             break
 
