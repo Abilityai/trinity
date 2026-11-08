@@ -4767,6 +4767,10 @@ class DatabaseManager:
         """When the oldest stored event for this agent arrived, or None."""
         return self._guardrail_event_ops.earliest_received_at(agent_name)
 
+    def guardrail_event_received_bounds_by_agent(self, agent_names):
+        """`{agent: (oldest, newest received_at)}` for the named agents that have rows."""
+        return self._guardrail_event_ops.received_at_bounds_by_agent(agent_names)
+
     def count_guardrail_events_by_execution(self, agent_name: str, execution_ids):
         """`(execution_id, kind, hook, code, n)` groups for this agent's rows."""
         return self._guardrail_event_ops.count_by_execution(agent_name, execution_ids)

@@ -1,4 +1,4 @@
-# mcp: none — the POST is the in-container forwarder's own-key ingest (not a tool); the GET is an owner UI/ops read (an MCP tool is a follow-up)
+# mcp: none — the POST is the in-container forwarder's own-key ingest (not a tool); the per-agent GET and the fleet `/api/ops/guardrail-stats` are person UI/ops reads (an MCP tool is a follow-up)
 """Guardrail events (trinity-enterprise#165, GUARD-005).
 
 `POST /api/agents/{agent_name}/guardrail-events` is called by the forwarder in
@@ -17,23 +17,36 @@ can write an agent's events. The statuses are the forwarder's contract:
 `GET /api/agents/{agent_name}/guardrail-events` is owner tier (ruling D8: the
 records name owner-only paths a shared person tried), with the uniform 404 of
 `OwnedAgentByName` (#186).
+
+`GET /api/ops/guardrail-stats?hours=` (slice S4) is the fleet read behind the
+Operations › Health card: a person only (`require_person` — an agent key carries
+its owner's role, so on an admin-owned install it would otherwise read the whole
+fleet), every live agent for an admin, the agents they OWN for anyone else.
 """
 
 import json
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import ValidationError
 
 from database import db
-from dependencies import OwnedAgentByName
-from models import GuardrailEventBatch, GuardrailEventIngestResponse, GuardrailEventsPage
+from dependencies import OwnedAgentByName, is_fleet_admin, require_person
+from models import (
+    GuardrailEventBatch,
+    GuardrailEventIngestResponse,
+    GuardrailEventsPage,
+    GuardrailStatsResponse,
+    User,
+)
 from services import guardrail_event_service, heartbeat_service
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/agents", tags=["guardrail-events"])
+# The fleet read lives beside the events it counts; registered in main.py.
+ops_router = APIRouter(prefix="/api/ops", tags=["guardrail-events"])
 
 _OWN_KEY_ONLY = "Guardrail events require the agent's own MCP key"
 
@@ -112,6 +125,24 @@ async def get_guardrail_events(
         return guardrail_event_service.list_events(
             agent_name, since=since, until=until, kind=kind,
             execution_id=execution_id, limit=limit, before=before)
+    except guardrail_event_service.GuardrailEventQueryError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail={"reason": str(exc)}) from exc
+
+
+@ops_router.get("/guardrail-stats", response_model=GuardrailStatsResponse)
+async def get_guardrail_stats(
+    current_user: User = Depends(require_person),
+    hours: int = Query(guardrail_event_service.STATS_HOURS_DEFAULT, ge=1,
+                       le=guardrail_event_service.STATS_HOURS_MAX),
+):
+    """Guardrail event counts per kind and per agent over the last `hours`, with
+    each agent's reporting state and coverage. An admin sees every live agent;
+    anyone else, the agents they own."""
+    owner = None if is_fleet_admin(current_user) else current_user.username
+    try:
+        return guardrail_event_service.fleet_stats(
+            hours, guardrail_event_service.fleet_agent_names(owner))
     except guardrail_event_service.GuardrailEventQueryError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                             detail={"reason": str(exc)}) from exc

@@ -6,7 +6,8 @@ forwarder in the agent server pushes them here under the agent's OWN key
 between the HTTP glue and the SQL (Invariant #1): per-event validation, the
 reporter liveness state, the per-agent read, and the counting seams other
 features consume (`count_by_execution` for trinity#4281, `count_by_agent` for
-the fleet view and trinity-enterprise#141).
+the fleet view and trinity-enterprise#141), and the fleet read built on them
+(`fleet_stats`, `GET /api/ops/guardrail-stats`, slice S4).
 
 Contract rules that are load-bearing (plan §6):
 
@@ -89,6 +90,17 @@ RATE_LIMIT_WINDOW_SECONDS = 60
 STALE_AFTER_SECONDS = 15 * 60
 READ_LIMIT_DEFAULT = 50
 READ_LIMIT_MAX = 200
+#: The fleet read's window: a day by default, at most the 90-day retention
+#: default (ruling D10) — a longer window would count rows already pruned.
+STATS_HOURS_DEFAULT = 24
+STATS_HOURS_MAX = 90 * 24
+#: The runtimes Trinity registers guardrail hooks on (plan §8). Every other
+#: runtime has no hook, so no event can come from it: `coverage = no_hooks`.
+#: The same names as `agent_service.helpers.CLAUDE_RUNTIME_NAMES` (a test
+#: compares them); not imported, because that package's import is heavy.
+HOOKED_RUNTIMES = frozenset({"claude-code", "claude"})
+#: `coverage`, one per agent in a fleet read, worst news first in the UI.
+COVERAGE_STATES = ("no_hooks", "never", "stale", "reporting")
 
 _EVENT_ID = re.compile(r"^[A-Za-z0-9._:-]{1,64}$")
 _TOKEN = re.compile(r"^[a-z0-9_]{1,64}$")          # kind, hook, code
@@ -367,12 +379,22 @@ def reporting_state(agent_name: str, now: Optional[datetime] = None) -> Dict[str
     last = record.get("last_report_at")
     if not last:
         last = db.latest_guardrail_event_received_at(agent_name)
+    earliest = None
+    if last and not record.get("first_report_at"):
+        earliest = db.earliest_guardrail_event_received_at(agent_name)
+    return _reporting_from(record, last, earliest, now)
+
+
+def _reporting_from(record: Dict[str, str], last: Optional[str], earliest: Optional[str],
+                    now: datetime) -> Dict[str, Any]:
+    """The reporting dict from a reporter record, the report time to use (the
+    record's own, else the newest stored row's) and the oldest stored row's
+    receive time (the coverage-start fallback). One builder for the single and
+    the batch read, so the two cannot disagree."""
     if not last:
         return {"state": "never", "last_report_at": None, "first_report_at": None,
                 "runtime": None, "dropped_total": 0}
-    first = (record.get("first_report_at")
-             or db.earliest_guardrail_event_received_at(agent_name)
-             or last)
+    first = record.get("first_report_at") or earliest or last
     # Two reports racing can write the start after a later-dated last report;
     # the agent really did report at `last`, so the earlier one is still safe.
     first = min(first, last)
@@ -383,6 +405,39 @@ def reporting_state(agent_name: str, now: Optional[datetime] = None) -> Dict[str
         "runtime": record.get("runtime"),
         "dropped_total": int(record.get("dropped_total") or 0),
     }
+
+
+def reporting_states(agent_names: Iterable[str], now: Optional[datetime] = None) -> Dict[str, Dict[str, Any]]:
+    """`reporting_state` for many agents: one Redis pipeline and one grouped DB
+    read for the agents Redis has no record of, instead of two round trips per
+    agent. Same answer as calling `reporting_state` on each name."""
+    names = list(dict.fromkeys(agent_names))
+    if not names:
+        return {}
+    now = now or utc_now()
+    records: Dict[str, Dict[str, str]] = {}
+    redis = _get_redis()
+    if redis is not None:
+        try:
+            pipe = redis.pipeline()
+            for name in names:
+                pipe.hgetall(_reporter_key(name))
+            records = {name: rec or {} for name, rec in zip(names, pipe.execute())}
+        except Exception:  # noqa: BLE001 — degrade to the DB fallback below
+            logger.warning("guardrail events: batch reporter read failed", exc_info=True)
+            records = {}
+    # The agents whose record lacks the last report or the coverage start: one
+    # grouped read gives both fallbacks (newest row, oldest row).
+    missing = [n for n in names
+               if not (records.get(n, {}).get("last_report_at")
+                       and records.get(n, {}).get("first_report_at"))]
+    bounds = db.guardrail_event_received_bounds_by_agent(missing) if missing else {}
+    out: Dict[str, Dict[str, Any]] = {}
+    for name in names:
+        record = records.get(name, {})
+        earliest, newest = bounds.get(name, (None, None))
+        out[name] = _reporting_from(record, record.get("last_report_at") or newest, earliest, now)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -505,3 +560,82 @@ def count_by_agent(hours: int, agent_names: Optional[Iterable[str]] = None) -> D
         by_kind = agents.setdefault(g["agent_name"], {"by_kind": {}})["by_kind"]
         by_kind[g["kind"]] = by_kind.get(g["kind"], 0) + g["n"]
     return {"agents": agents}
+
+
+# ---------------------------------------------------------------------------
+# Fleet read (slice S4)
+# ---------------------------------------------------------------------------
+
+def _container_runtimes() -> Optional[Dict[str, str]]:
+    """`{agent: runtime}` from the containers' runtime label in one Docker round
+    trip, or None when Docker cannot be asked. Lazy import: keeps this module
+    importable without the Docker SDK."""
+    from services.docker_service import agent_container_runtimes
+    return agent_container_runtimes()
+
+
+def coverage_of(runtime: Optional[str], state: str) -> str:
+    """One coverage word per agent. A runtime with no hooks says so before
+    anything else: its forwarder may send keepalives (`reporting`), but no hook
+    can ever produce an event, and "no events" would read as healthy. An unknown
+    runtime (no label, no report, or one this backend does not know) is the
+    platform default, Claude Code."""
+    if runtime and runtime != OTHER and runtime.lower() not in HOOKED_RUNTIMES:
+        return "no_hooks"
+    return state
+
+
+def fleet_agent_names(owner_username: Optional[str]) -> List[str]:
+    """The agents a fleet read covers: every live agent when `owner_username`
+    is None (the caller decided the principal is a fleet admin), else the live
+    agents that user OWNS — owned, not shared, the per-agent read's own tier."""
+    if owner_username is None:
+        return list(db.get_accessible_agent_names("", is_admin=True) or [])
+    return list(db.get_agents_by_owner(owner_username) or [])
+
+
+def fleet_stats(hours: int, agent_names: Iterable[str]) -> Dict[str, Any]:
+    """Counts per kind and per agent over the last `hours`, with every agent's
+    reporting state and coverage — agents with no events included, so silence
+    is visible rather than absent.
+
+    `{"hours", "since", "events", "by_kind", "coverage": {state: n},
+      "agents": [{agent_name, runtime, coverage, events, by_kind, reporting}]}`,
+    loudest agent first, then by name.
+    """
+    if not isinstance(hours, int) or isinstance(hours, bool) or not 1 <= hours <= STATS_HOURS_MAX:
+        raise GuardrailEventQueryError("invalid_hours")
+    names = sorted(set(agent_names))
+    since = iso_cutoff(hours)
+    counts = count_by_agent(hours, names)["agents"] if names else {}
+    states = reporting_states(names)
+    labels = (_container_runtimes() or {}) if names else {}
+
+    by_kind_total: Dict[str, int] = {}
+    tally = {state: 0 for state in COVERAGE_STATES}
+    agents: List[Dict[str, Any]] = []
+    for name in names:
+        by_kind = dict(counts.get(name, {}).get("by_kind", {}))
+        reporting = states[name]
+        runtime = labels.get(name) or reporting.get("runtime")
+        coverage = coverage_of(runtime, reporting["state"])
+        tally[coverage] += 1
+        for kind, n in by_kind.items():
+            by_kind_total[kind] = by_kind_total.get(kind, 0) + n
+        agents.append({
+            "agent_name": name,
+            "runtime": runtime,
+            "coverage": coverage,
+            "events": sum(by_kind.values()),
+            "by_kind": by_kind,
+            "reporting": reporting,
+        })
+    agents.sort(key=lambda a: (-a["events"], a["agent_name"]))
+    return {
+        "hours": hours,
+        "since": since,
+        "events": sum(by_kind_total.values()),
+        "by_kind": by_kind_total,
+        "coverage": tally,
+        "agents": agents,
+    }

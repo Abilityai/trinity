@@ -136,6 +136,25 @@ class GuardrailEventOperations:
         with get_engine().connect() as conn:
             return conn.execute(stmt).scalar()
 
+    def received_at_bounds_by_agent(self, agent_names: Iterable[str]) -> Dict[str, Tuple[str, str]]:
+        """`{agent: (oldest, newest received_at)}` for the named agents that
+        have rows, in one grouped query (the fleet read's reporting fallback:
+        the newest stands in for the last report, the oldest for the first)."""
+        names = list(agent_names)
+        if not names:
+            return {}
+        t = guardrail_events
+        stmt = (
+            select(t.c.agent_name,
+                   func.min(t.c.received_at).label("first"),
+                   func.max(t.c.received_at).label("last"))
+            .where(t.c.agent_name.in_(names))
+            .group_by(t.c.agent_name)
+        )
+        with get_engine().connect() as conn:
+            return {r["agent_name"]: (r["first"], r["last"])
+                    for r in conn.execute(stmt).mappings()}
+
     def count_by_execution(
         self, agent_name: str, execution_ids: Iterable[str]
     ) -> List[Dict]:

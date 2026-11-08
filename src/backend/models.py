@@ -3354,6 +3354,28 @@ class GuardrailEventsPage(BaseModel):
     reporting: GuardrailReportingState
 
 
+class GuardrailStatsAgent(BaseModel):
+    """One agent in the fleet read. `coverage` is `no_hooks` | `never` |
+    `stale` | `reporting`: an agent with no events is still listed, so silence
+    is visible."""
+    agent_name: str
+    runtime: Optional[str] = None
+    coverage: str
+    events: int
+    by_kind: Dict[str, int] = Field(default_factory=dict)
+    reporting: GuardrailReportingState
+
+
+class GuardrailStatsResponse(BaseModel):
+    """`GET /api/ops/guardrail-stats` (trinity-enterprise#165 S4)."""
+    hours: int
+    since: str
+    events: int
+    by_kind: Dict[str, int] = Field(default_factory=dict)
+    coverage: Dict[str, int] = Field(default_factory=dict)
+    agents: List[GuardrailStatsAgent]
+
+
 # =============================================================================
 # Audit Log Models (routers/audit_log.py)
 # =============================================================================

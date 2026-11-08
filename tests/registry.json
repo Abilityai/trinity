@@ -8883,6 +8883,19 @@
       "description": "GUARD-005 store against real rows (SQLite + PostgreSQL): each event validated on its own (unknown kind/hook kept as 'other' with the raw value, open code, a malformed event counted in rejected and never failing the batch, an over-long execution_id nulled, only allowlisted fields kept and free text sanitized); event_id makes a resend a duplicate, per agent; reporting state never/reporting/stale with the DB fallback and teardown-only clear; first_report_at is first-write-wins, falls back to the oldest row, never after last_report_at, and is read before the counts; a future ts is stored at the receive time with the reported value kept; keyset paging and filters; count_by_execution / count_by_agent shapes filtered by the authenticated agent; the retention count and prune share the received_at predicate; rename and hard delete follow AGENT_REFS."
     },
     {
+      "file": "unit/test_ent165_guardrail_stats.py",
+      "feature": "trinity-enterprise#165",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "unit",
+        "guardrails",
+        "security",
+        "api"
+      ],
+      "description": "GET /api/ops/guardrail-stats (S4) over the real router and a real DB: an admin sees every live agent, anyone else only the agents they own (not shared, not soft-deleted); a person only (agent/system/ops/connector/portal-delegate keys 403 even on an admin owner); per-kind and per-agent counts over the requested window, totals the sum of the rows, loudest first; every agent in scope listed with one coverage state (no_hooks from the container label or the forwarder's report, never, stale, reporting); hours bounded 1..2160 at the route and the service; the batch reporting read equals the per-agent one, DB fallback included."
+    },
+    {
       "file": "unit/test_ent165_guardrail_event_route.py",
       "feature": "trinity-enterprise#165",
       "added": "2026-11-08",
