@@ -264,6 +264,19 @@ _catchup(client_id, slot, last_event_id, catchup_max)
 
 ## Security
 
+- **Live connections follow the account** (trinity-enterprise#863,
+  `services/live_connections.py`). Each `/ws` and `/ws/events` handler
+  registers with the worker's `LiveConnectionRegistry` (`admit`) before it
+  reads the account, records the `AccessSnapshot` of the row it read
+  (`activate`), and marks the connection live once it is connected
+  (`go_live`). A re-check compares the recorded snapshot with the account's
+  current row: gone, deactivated or key inactive → closer with `ENDED` (4001);
+  role, email or password changed → `CHANGED` (4000 `scope changed`). The tick
+  runs every `RECHECK_INTERVAL_S` in every worker; `notify_account_changed` /
+  `notify_key_changed` run the same comparison at once for one account or key
+  (the role route calls the first after its write). The closer unregisters the
+  dispatcher slot before it closes the socket, so the slot's consumer never
+  sends after the close frame; the handler returns through its `finally`.
 - **Authentication**: `/ws` requires a single-use opaque ticket minted via
   `POST /api/ws/ticket` (C-002 / #550 — see `architecture.md` "WebSocket
   Security"). The 32-byte ticket has a 30s TTL and is consumed atomically
@@ -336,6 +349,8 @@ Gate checks (see orchestration reliability plan, Tier 2.5):
 | Service | `src/backend/services/ws_identity_service.py` | ent#467 `/ws` identity + agent scope (`resolve_ws_identity`, `accessible_agents_for`); `/ws/events` scope (`event_stream_identity`) and the owner re-read behind every non-admin event-stream roster (`event_stream_roster_reader`, trinity-enterprise#863) |
 | Tests | `tests/test_event_bus.py` | 23 unit tests — envelope, scope visibility, eviction, slow-consumer resync, monotonic cursor guard, catchup trim detection |
 | Tests | `tests/unit/test_ent467_ws_agent_scope.py` | 36 tests — payload agent-identity vocabulary, `/ws` visibility rule, both delivery paths, roster refresh, fail-closed identity, AST discovery guard over every `/ws` broadcast |
+| Service | `src/backend/services/live_connections.py` | trinity-enterprise#863 — per-worker registry of open `/ws` and `/ws/events` connections, the one snapshot comparison, the 15 s re-check loop and the thread-safe `notify_*` |
+| Tests | `tests/unit/test_ent863_live_connections.py` | trinity-enterprise#863 — the comparison (role/email/password → 4000; deactivated, gone or key inactive → 4001), the role route's immediate re-check, two workers, failures (tick read keeps open, immediate read closes, a raising closer), the plain-thread notify, register-before-read ordering, and the real `/ws` and `/ws/events` handlers closing with their codes and unregistering their slot |
 | Tests | `tests/unit/test_ent863_event_stream_roster.py` | trinity-enterprise#863 — the real `/ws/events` handler wires the owner re-read for every non-admin key and `refresh` reads the owner's current row; the reader's owner checks and current email; a change during an in-flight read; the periodic re-read (interval, one read at a time, no read when idle, survives a failing read, stops with the dispatcher) |
 
 ## Constants
@@ -348,6 +363,7 @@ Gate checks (see orchestration reliability plan, Tier 2.5):
 | `EVICT_AFTER_FAILURES` | 3 | Consecutive send failures before eviction |
 | `REPLAY_GAP_LIMIT` | 5000 | Max replay size before forced resync |
 | `_FALLBACK_BUFFER_MAX` | 1024 | In-process buffer during Redis outage |
+| `RECHECK_INTERVAL_S` | 15 | How often each worker re-checks every open `/ws` and `/ws/events` connection against the account's current row (trinity-enterprise#863); a code constant, no env setting |
 | `ROSTER_REREAD_INTERVAL_S` | 60 | How often each worker re-reads every non-admin roster it holds (trinity-enterprise#863); a code constant, no env setting |
 
 ---
