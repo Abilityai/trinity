@@ -401,7 +401,7 @@ def _is_the_owners_own(acting: Tuple[str, Optional[str], Optional[int]]) -> bool
     person's by rule (`member`, `delegated`) still dispatches as that person,
     so the next row records who the work is for and the delegation rule
     decides again there (trinity-enterprise#1148)."""
-    tier, kind, person = acting
+    tier, kind, person = acting[0], acting[1], acting[2]
     return tier == OWNER and not (kind in (MEMBER, DELEGATED) and person)
 
 

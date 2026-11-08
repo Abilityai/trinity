@@ -41,8 +41,11 @@ async def get_activity_timeline(
     # intentional (admins should see complete history). The prior code filtered
     # admins to Docker-present agents only via get_accessible_agents(); that
     # incidental narrowing is dropped on purpose, not by accident.
-    from services.agent_service.helpers import accessible_agent_names, viewer_own_rows
-    allowed = accessible_agent_names(current_user)
+    from services.agent_service.helpers import (
+        accessible_agent_names, acting_person_agents, viewer_own_rows,
+    )
+    # trinity-enterprise#1148: in a person's turn, only agents that person may open.
+    allowed = acting_person_agents(current_user, accessible_agent_names(current_user))
 
     # trinity-enterprise#875: an activity's details carry the first 100 characters
     # of the prompt that started it. On every agent the caller does not own, the
