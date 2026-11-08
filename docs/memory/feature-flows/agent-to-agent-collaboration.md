@@ -351,7 +351,7 @@ Access (`get_authorized_agent`, uniform 404) resolves before the helper, so a de
 
 ## The Callee's Tier (trinity-enterprise#1148)
 
-A delegated turn is rated on the callee, not inherited from the caller. The callee row carries the person the caller acted for (`turn_origin_user_id` / `turn_origin_email`) and `source_agent_name` = the caller. `services/turn_tier_service.turn_actor` then answers:
+A delegated turn is rated on the callee, not inherited from the caller. The callee row carries the person the caller acted for (`turn_origin_user_id` / `turn_origin_email`) and `source_agent_name` = the caller — the dispatching key's own agent on every path, fan-out included, never the target. `services/turn_tier_service.turn_actor` then answers:
 
 | Person P on the callee | Calling agent's owner on the callee | Callee turn |
 |---|---|---|
@@ -361,7 +361,7 @@ A delegated turn is rated on the callee, not inherited from the caller. The call
 | cannot open it | anything less | `share` / `person` |
 | any lookup unreadable | — | `share` (fail closed) |
 
-The rule re-applies at every hop: a turn dispatched from a `delegated` turn carries P again. The caller's key, acting for P, reads no rows of a callee P cannot open (`dependencies.viewer_row_scope`). Detail: `architecture/security.md` §5g; requirement: `requirements/auth.md` §2.12. Tests: `tests/unit/test_ent1148_delegation_tier.py`, `test_ent1148_caller_reads_stay_person.py`.
+The rule re-applies at every hop: a turn dispatched from a `delegated` turn carries P again. The caller's key, acting for P, reads no rows of a callee P cannot open (`dependencies.viewer_row_scope` on the per-agent routes, `helpers.acting_person_agents` on the fleet executions and activity reads). Detail: `architecture/security.md` §5g; requirement: `requirements/auth.md` §2.12. Tests: `tests/unit/test_ent1148_delegation_tier.py`, `test_ent1148_caller_reads_stay_person.py`, `test_ent1148_fleet_reads_stay_person.py`, `test_ent1148_fan_out_source.py`.
 
 ## Backend Layer
 
