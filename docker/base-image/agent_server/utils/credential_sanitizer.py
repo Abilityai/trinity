@@ -115,6 +115,9 @@ SECRET_VALUE_PATTERNS = [
     # guard-private one, so logs learn them in the same change.
     r'ops_eyJ[A-Za-z0-9_-]{40,}',     # 1Password service-account token (ops_ + base64url JSON)
     r'dop_v1_[a-f0-9]{20,}',          # DigitalOcean API token
+    # trinity-enterprise#165 (D9): the Google API key shape the Bash output
+    # scanner already matched; here too, so logs learn it in the same change.
+    r'AIza[0-9A-Za-z_-]{35}',         # Google API key
     r'Bearer\s+[a-zA-Z0-9\-_.]+',     # Bearer tokens
     r'Basic\s+[a-zA-Z0-9+/=]+',       # Basic auth
 ]

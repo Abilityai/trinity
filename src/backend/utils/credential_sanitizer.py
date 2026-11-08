@@ -41,6 +41,9 @@ SECRET_VALUE_PATTERNS = [
     # guard-private one, so logs learn them in the same change.
     r'ops_eyJ[A-Za-z0-9_-]{40,}',     # 1Password service-account token (ops_ + base64url JSON)
     r'dop_v1_[a-f0-9]{20,}',          # DigitalOcean API token
+    # trinity-enterprise#165 (D9): the Google API key shape the Bash output
+    # scanner already matched; here too, so logs learn it in the same change.
+    r'AIza[0-9A-Za-z_-]{35}',         # Google API key
     r'Bearer\s+[a-zA-Z0-9\-_.]+',     # Bearer tokens
     r'Basic\s+[a-zA-Z0-9+/=]+',       # Basic auth
 ]
@@ -487,6 +490,7 @@ _GUARD_SHAPES = {
     r'trinity_mcp_[a-zA-Z0-9]{16,}': "trinity_mcp",
     r'ops_eyJ[A-Za-z0-9_-]{40,}': "ops",
     r'dop_v1_[a-f0-9]{20,}': "dop",
+    r'AIza[0-9A-Za-z_-]{35}': "google",
 }
 _GUARD_EXCLUDED = frozenset({
     r'Bearer\s+[a-zA-Z0-9\-_.]+',
@@ -508,7 +512,7 @@ def secret_shape(text: Optional[str]) -> Optional[str]:
     """The name of the credential shape ``text`` carries, or None.
 
     The name is a short label for the client (`sk`, `github`, `slack`, `aws`,
-    `trinity_mcp`, `ops`, `dop`, `env_pair`) — never the matched text, which is
+    `trinity_mcp`, `ops`, `dop`, `google`, `env_pair`) — never the matched text, which is
     the thing the caller is refusing to repeat.
     """
     if not text:
