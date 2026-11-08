@@ -592,6 +592,176 @@ async def test_one_change_reaches_every_workers_connections_through_the_stream(p
 
 
 # ---------------------------------------------------------------------------
+# The writers: key revoke / delete, password change
+# ---------------------------------------------------------------------------
+
+
+def _request(method="POST", path="/api/mcp/keys/x/revoke"):
+    from starlette.requests import Request
+
+    return Request(
+        {
+            "type": "http",
+            "method": method,
+            "path": path,
+            "root_path": "",
+            "query_string": b"",
+            "scheme": "http",
+            "server": ("backend", 8000),
+            "client": ("127.0.0.1", 5000),
+            "headers": [(b"host", b"backend:8000")],
+        }
+    )
+
+
+@pytest.fixture
+def key_routes(monkeypatch, people):
+    import routers.mcp_keys as keys_mod
+    from models import User
+
+    async def no_audit(**_kw):
+        return None
+
+    monkeypatch.setattr(keys_mod.platform_audit_service, "log", no_audit)
+    # The route's own module object, whatever another test re-imported.
+    monkeypatch.setattr(keys_mod.live_connections, "registry", lc.registry)
+    users = {ALICE: User(id=1, username=ALICE, role="creator"), ADMIN: User(id=3, username=ADMIN, role="admin")}
+
+    async def revoke(key_id, actor=ALICE):
+        return await keys_mod.revoke_mcp_api_key_endpoint(key_id, _request(), users[actor])
+
+    async def delete(key_id, actor=ALICE):
+        return await keys_mod.delete_mcp_api_key_endpoint(key_id, _request("DELETE"), users[actor])
+
+    return revoke, delete
+
+
+@pytest.mark.asyncio
+async def test_revoking_or_deleting_a_key_closes_only_its_streams_on_every_worker(
+    worker, people, key_routes, monkeypatch
+):
+    """The route re-checks by key, never by account: the owner's browser socket,
+    open terminal and other key's stream stay open, here and on the other
+    worker, even though the account itself is unchanged."""
+    reg, published = worker
+    other = LiveConnectionRegistry()
+    revoke, delete = key_routes
+    k1, k2 = _key(people, ALICE), _key(people, ALICE)
+    closes = Closes()
+    for name, r in (("here", reg), ("there", other)):
+        _open(r, DOOR_WS, ALICE, closes.closer(f"{name}-ws"))
+        _open(r, DOOR_TERMINAL, ALICE, closes.closer(f"{name}-terminal"))
+        _open(r, DOOR_EVENT_STREAM, ALICE, closes.closer(f"{name}-k1"), key_id=k1.id)
+        _open(r, DOOR_EVENT_STREAM, ALICE, closes.closer(f"{name}-k2"), key_id=k2.id)
+    by_account = []
+    monkeypatch.setattr(reg, "recheck_account", lambda u: by_account.append(u))
+
+    await revoke(k1.id)
+    await _settle(reg)
+    for event in published.events:
+        other.handle_control(event)
+    await _settle(other)
+    assert closes.by_name() == {"here-k1": CloseReason.ENDED, "there-k1": CloseReason.ENDED}
+
+    await delete(k2.id)
+    await _settle(reg)
+    for event in published.events[1:]:
+        other.handle_control(event)
+    await _settle(other)
+    assert set(closes.by_name()) == {"here-k1", "there-k1", "here-k2", "there-k2"}
+    assert by_account == []
+    assert published.events == [{"recheck": "key", "key_id": k1.id}, {"recheck": "key", "key_id": k2.id}]
+
+
+@pytest.mark.asyncio
+async def test_an_admin_revoking_another_persons_key_closes_that_persons_stream(worker, people, key_routes):
+    """The admin, not the owner, serves the change, so only a key-scoped
+    re-check reaches the owner's stream at once."""
+    reg, _published = worker
+    revoke, _delete = key_routes
+    key = _key(people, BOB)
+    closes = Closes()
+    _open(reg, DOOR_EVENT_STREAM, BOB, closes.closer("bob-stream"), key_id=key.id)
+    _open(reg, DOOR_WS, ADMIN, closes.closer("admin-ws"))
+
+    await revoke(key.id, actor=ADMIN)
+    await _settle(reg)
+    assert closes.by_name() == {"bob-stream": CloseReason.ENDED}
+
+
+@pytest.mark.asyncio
+async def test_a_refused_key_revoke_closes_nothing_and_publishes_nothing(worker, people, key_routes):
+    from fastapi import HTTPException
+
+    reg, published = worker
+    revoke, _delete = key_routes
+    key = _key(people, BOB)
+    closes = Closes()
+    _open(reg, DOOR_EVENT_STREAM, BOB, closes.closer("bob-stream"), key_id=key.id)
+
+    with pytest.raises(HTTPException) as refused:
+        await revoke(key.id)  # ALICE does not own BOB's key
+    assert refused.value.status_code == 404
+    await _settle(reg)
+    assert closes.calls == [] and published.events == []
+
+
+@pytest.fixture
+def password_change(monkeypatch, people):
+    import fakeredis
+    from passlib.context import CryptContext
+    from services import password_service
+
+    redis = fakeredis.FakeRedis()
+    for scope in {
+        id(g): g
+        for g in (password_service.change_own_password.__globals__, password_service.revoke_user_sessions.__globals__)
+    }.values():
+        monkeypatch.setitem(scope, "get_breaker_redis", lambda: redis)
+    monkeypatch.setattr(password_service.live_connections, "registry", lc.registry)
+    people.update_user_password(ALICE, CryptContext(schemes=["bcrypt"]).hash(OLD_PASSWORD))
+
+    def change(**kw):
+        return password_service.change_own_password(ALICE, OLD_PASSWORD, NEW_PASSWORD, None, **kw)
+
+    return change
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revoke_keys, stream_reason", [(False, CloseReason.CHANGED), (True, CloseReason.ENDED)])
+async def test_a_password_change_closes_the_accounts_connections_at_once_on_every_worker(
+    worker, people, password_change, revoke_keys, stream_reason
+):
+    reg, published = worker
+    key = _key(people, ALICE)
+    closes = Closes()
+    _open(reg, DOOR_WS, ALICE, closes.closer("alice-ws"))
+    _open(reg, DOOR_EVENT_STREAM, ALICE, closes.closer("alice-stream"), key_id=key.id)
+    _open(reg, DOOR_WS, BOB, closes.closer("bob-ws"))
+
+    password_change(revoke_keys=revoke_keys)
+    await _settle(reg)
+
+    assert closes.by_name() == {"alice-ws": CloseReason.CHANGED, "alice-stream": stream_reason}
+    assert published.events == [{"recheck": "account", "username": ALICE}]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_password_change_closes_nothing(worker, people, password_change):
+    from services.password_service import PasswordChangeError
+
+    reg, published = worker
+    closes = Closes()
+    _open(reg, DOOR_WS, ALICE, closes.closer("alice-ws"))
+    with pytest.raises(PasswordChangeError):
+        from services import password_service
+
+        password_service.change_own_password(ALICE, "Wrong-Passw0rd-x!", NEW_PASSWORD, None)
+    await _settle(reg)
+    assert closes.calls == [] and published.events == []
+
+
+# ---------------------------------------------------------------------------
 # The wiring in main.py
 # ---------------------------------------------------------------------------
 
