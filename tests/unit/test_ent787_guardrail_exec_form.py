@@ -89,6 +89,11 @@ EXPECTED = {
         "PostToolUse": [
             {"matcher": "Bash", "hooks": [_entry("output-scanner.py")]},
         ],
+        # trinity-enterprise#165: a failing command's output cannot be rewritten,
+        # so the scanner is registered here to warn the model about it.
+        "PostToolUseFailure": [
+            {"matcher": "Bash", "hooks": [_entry("output-scanner.py")]},
+        ],
     },
 }
 
@@ -205,7 +210,9 @@ def test_read_only_guard_denies_under_the_registered_invocation(tmp_path):
 def test_output_scanner_still_records_a_leak_under_the_registered_invocation(tmp_path):
     result = _registered("output-scanner.py", tmp_path, payload=_SCAN)
     assert result.returncode == 0, result.stderr
-    events = [e for e in H.log_events(tmp_path) if e["event"] == "credential_pattern_in_output"]
+    # trinity-enterprise#165: it hides the key too (test_ent165_output_scanner.py).
+    assert _SECRET not in result.stdout and "[REDACTED:sk]" in result.stdout
+    events = [e for e in H.log_events(tmp_path) if e["event"] == "credential_redacted"]
     assert events and _SECRET not in json.dumps(events)
 
 

@@ -20,6 +20,13 @@ from lib import (  # noqa: E402
     run_hook,
 )
 
+# The output scanner's placeholder (output-scanner.py PLACEHOLDER). A command
+# carrying it would write it where the real value was (trinity-enterprise#165).
+REDACTION_MARK = "[REDACTED:"
+WRITEBACK_REFUSED = (
+    "this holds `[REDACTED:`, the placeholder Trinity puts where it hid a credential from you; "
+    "a command that writes it would replace the real value. Leave that value out, or ask the owner to set it")
+
 # Must equal `_skill_gate.MARKER` (unit-tested).
 SKILL_GATES_MARKER = "/opt/trinity/skill-gates-active"
 
@@ -30,6 +37,8 @@ def main() -> None:
     command = tool_input.get("command", "")
     if not command:
         allow()
+    if REDACTION_MARK in command:
+        deny(WRITEBACK_REFUSED, tool="Bash", code="redaction_writeback_refused")
 
     config = load_config()
     rows = list(config.get("bash_deny", []))
