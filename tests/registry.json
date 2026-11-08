@@ -7585,6 +7585,18 @@
       "description": "Live connections follow the account: services/live_connections.py compares the account snapshot a door recorded at connect with the current row; a changed role (raised or lowered), email or password closes with the reconnect reason (4000), a deactivated or removed account or an inactive or deleted key with the ended reason (4001). The real role route re-checks the account at once on its worker, only when the role changed; a self-change is refused and closes nothing. A second worker's tick closes what the first worker's write left stale; a tick with nothing open reads nothing; a failed tick read keeps everything open and the next tick retries; a failed read after a reported change closes that account's connections; a raising closer does not stop the others or the loop. notify_account_changed from a plain thread closes on the registry's loop. A change while a door connects refuses it, a door that opens after the change stays open, and a re-check before the door's read marks it dirty. The real /ws and /ws/events handlers close with their codes, unregister their dispatcher slot before the handler returns, log no error, and refuse a socket whose account changed while it opened. Shape: each event door registers before it reads and goes live after it connects, releases in a finally; the 15 s loop starts outside the bus's try and stops with it. The batched reads return only existing rows and active keys and skip the database for an empty set."
     },
     {
+      "file": "unit/test_ent863_terminal_close.py",
+      "feature": "trinity-enterprise#863",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "websocket",
+        "unit",
+        "security"
+      ],
+      "description": "Terminals follow the account: the real agent-terminal and system-agent-terminal handlers register with the worker's live-connection registry and close when the account's access changes (immediate re-check and periodic re-check): error frame plus 4003, the handler returns normally within 1 s without being cancelled and logs no error, the container socket is closed, the one-terminal slot and the registry entry are freed. The close cancels the session's own forwarder tasks (blocked in the browser read and the container read); input arriving during the close is not forwarded; a change while the shell starts refuses the session after the start returns. A session closed for an access change ends its shell with an exec as the terminal's user carrying the session's marker; an unchanged account and an ordinary close end nothing; a failed end is logged. The snapshot holds the role the door authorized on. Shape: each door registers in the step that authorizes it and goes live after the start, before auth_success. The end-of-shell script (Linux, /proc) ends the marked processes and their session and spares another session and a bystander."
+    },
+    {
       "file": "unit/test_ent863_event_stream_roster.py",
       "feature": "trinity-enterprise#863",
       "added": "2026-11-08",
