@@ -1045,21 +1045,31 @@
 - **Limitation**: Agents need env vars to function (e.g., `ANTHROPIC_API_KEY`). The goal is preventing accidental exposure, not defeating a determined adversary — the Docker isolation boundary is the true security layer.
 
 ### 28.5 Guardrails Dashboard & Observability (GUARD-005)
-- **Status**: ⏳ Not Started
+- **Status**: 🚧 In Progress — the event store, ingest and per-agent read are built (trinity-enterprise#165 S1); the agent-side forwarder (S2) and the fleet counts and UI (S4) are not. Stays 🚧 after S4: the blocked/allowed ratio, top blocked patterns, notifications (trinity-enterprise#141) and export below are not part of #165.
 - **Requirement ID**: GUARD-005
 - **Priority**: MEDIUM
 - **Description**: Visibility into guardrail enforcement across the fleet. Operators need to see what's being blocked, how often, and whether guardrails are causing legitimate work to fail.
 - **Key Features**:
-  - Guardrail event log: blocked action, reason, agent, timestamp, tool input
+  - Guardrail event log: what was refused or redacted, by which hook, with a stable reason code, the agent, the time and the execution it happened in. Never the tool input itself: a refused command can carry a credential.
   - Per-agent guardrail configuration display on Agent Detail page
   - Fleet-wide guardrail stats on Operating Room dashboard (blocked/allowed ratio, top blocked patterns)
   - Notifications for high-frequency blocks (may indicate misconfigured agent or attack)
   - Export guardrail events for compliance reporting
-- **Architecture**:
-  - Hook scripts write structured JSON to `/logs/guardrails.jsonl`
-  - Vector pipeline ingests guardrail logs alongside existing container logs
-  - Backend API: `GET /api/agents/{name}/guardrail-events`, `GET /api/ops/guardrail-stats`
-  - Frontend: Guardrails tab on Agent Detail, summary widget on Operating Room
+- **Transport (pushed, not read from the container)**: the hooks append records to `/logs/guardrails.jsonl`, which is a spool. A forwarder in the agent server sends them to the backend under the agent's own key. The backend never reads the file: it is on no volume, so it is lost on every recreate and readable only while the container runs. Vector does not read it either.
+  - `POST /api/agents/{name}/guardrail-events`, `Authorization: Bearer <the agent's own TRINITY_MCP_API_KEY>`. Body `{"schema": 1, "runtime": "claude-code|codex|gemini", "events": [...], "dropped": <int>}`.
+  - Only the agent's own key is accepted, the same predicate as the heartbeat (`authorize_heartbeat`): an agent-scoped key bound to the path agent, or the system agent's own key. A sibling agent's key, a user key, a connector key or no key is `403`. The route sits outside `get_current_user`, so the Workspace operator floor does not apply.
+  - Responses: `200 {"accepted", "duplicates", "rejected"}`; `403`; `413` for more than 500 events or a body over 256 KiB; `422` only when the envelope itself is malformed; `429` with `Retry-After` past the per-agent request cap.
+  - **Each event is validated on its own; one bad event never fails the batch.** Agent images and the backend upgrade independently, so a newer image must not be wedged by an older backend, and the other way round. An event whose `kind` or `hook` this backend does not know is stored with `kind="other"` / `hook="other"` and the raw value kept in its details. `code` is an open string (`^[a-z0-9_]{1,64}$`), so a new reason code needs no backend change. An event that fails its shape checks is skipped and counted in `rejected`.
+  - Resends are idempotent: `event_id` is unique per agent, and a second copy is counted in `duplicates`, not stored again.
+  - `execution_id` is attribution, not authority: an agent can run a nested CLI with any value it likes. Every read filters by the authenticated agent, and an id longer than 128 characters is stored as null.
+  - An empty `events` list is a keepalive. Every accepted POST records when the agent last reported, its runtime and the running total of records it says it dropped.
+- **Event kinds and hooks** (closed sets; the backend keeps its own copy and a test compares it with the hook library's): kinds `deny`, `credential_redacted`, `credential_unredacted`, `redaction_writeback_refused`, `scanner_error`, `hook_error`, `config_error`; hooks `bash_guardrail`, `file_guardrail`, `read_only_guard`, `turn_tier_guard`, `skill_gate`, `output_scanner`.
+- **Store**: table `guardrail_events`, one row per event, unique on `(agent_name, event_id)`. Kept for `guardrail_event_retention_days` (default 90, `0` disables the sweep), pruned through the retention blast-radius guard. Renamed with the agent and purged with its hard delete. The execution id has no foreign key: execution rows have their own retention, and an event keeps its id after the execution row is gone.
+- **Reads**:
+  - `GET /api/agents/{name}/guardrail-events?since&until&kind&execution_id&limit&before` — owner tier (an owner or an admin; an agent key for itself or an agent it spawned), uniform 404 otherwise. Returns `{events, next_cursor, reporting}`, newest first, at most 200 per page; `before` takes the previous page's `next_cursor`.
+  - `reporting.state` tells "no events" from "not reporting": `never` (no report has arrived — an older agent image never sends one), `reporting` (a report within the last 15 minutes), `stale` (reported before, silent since). With it come `last_report_at` and `runtime`.
+  - Service seams for other features: `count_by_execution(agent, execution_ids)` returns `{"reporting": {...}, "executions": {<execution_id>: {"by_kind": {...}, "by_hook_code": {"<hook>:<code>": n}}}}`, with executions that have no events left out. `count_by_agent(hours)` returns the same `by_kind` per agent. Consumers evaluate at read time, never only when an execution finishes: an event can arrive a few seconds after the hook fired.
+- **Not a tamper-proof audit trail**: the spool and the forwarder are both writable by the agent, so an agent acting deliberately can suppress or forge its own events. This is observability for honest agents and misconfigurations. Docker isolation and credential confinement stay the boundary (GUARD-004 limitation). Records still in the spool when a container stops are lost.
 
 ### 28.6 Network Egress Controls (GUARD-006)
 - **Status**: ⏳ Not Started
