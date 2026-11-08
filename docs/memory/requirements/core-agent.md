@@ -4151,6 +4151,20 @@ to localStorage in the clear.
   else sees it, and the rest of the addressee-only family keeps its roster fence. Such an ask
   opens no chat, and carries a `project` field (`{id, task_id, event}`) read only from
   platform-written context keys an agent cannot set.
+- **Who an ask reaches when nobody is primary, and `to: project` (trinity-enterprise#1134)**:
+  with nobody assigned as primary, a `primary` ask goes to the agent's owner (the one owner
+  stand-in asks, proposals, messages and voice share; the skill gate still refuses
+  `role_unassigned`). Only with no owner or an owner with no email does it fall to the
+  operators; then, if it was raised during a Workspace chat turn, that chat shows one muted,
+  content-free line where it was asked — kind, *went to the operators*, why, and that an admin
+  can assign a primary contact in the agent's Access tab — never its title, question or
+  options, and never for an ask addressed to `operator` on purpose (the room's line is
+  trinity-enterprise#1135). An ask addressed `to: project` reaches ONE person resolved from the
+  turn's own chat or room project — the steward when a reachable person, else the creator —
+  even off the agent's roster; only they answer it (an admin may cancel), its card says *To
+  you as this project's steward* (or *creator*), and a steward change moves it. It never
+  falls through: `project_unavailable`, `not_in_project_turn` or `project_unreachable` refuse
+  it with nothing filed.
 - **Known properties (stated, not bugs)**:
   - A viewer who has never read anything has no baseline, so nothing counts for them — a first
     deliverable included (the inherited #557 rule).
