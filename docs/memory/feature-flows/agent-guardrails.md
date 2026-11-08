@@ -336,6 +336,45 @@ Immutable, root-owned `0444`. Contents:
 
 ---
 
+## Guardrail event store and read (GUARD-005, trinity-enterprise#165 S1)
+
+The backend half of the guardrail event surface. The hooks' spool and the agent-server forwarder that pushes it are slice S2 (not described here). Requirement: [security.md §28.5](../requirements/security.md).
+
+```
+forwarder (agent's own TRINITY_MCP_API_KEY)
+  └─ POST /api/agents/{name}/guardrail-events          routers/guardrail_events.py
+       ├─ authorize_heartbeat (own key only) ......... 403
+       ├─ guardrail_event_service.check_rate ......... 429 + Retry-After (60 / 60 s / agent)
+       ├─ body > 256 KiB / events > 500 .............. 413
+       ├─ GuardrailEventBatch (envelope only) ........ 422
+       └─ guardrail_event_service.ingest
+            ├─ normalize_event, one at a time ........ rejected++ on a shape failure
+            ├─ db.insert_guardrail_events ............ ON CONFLICT (agent_name, event_id) DO NOTHING RETURNING id
+            └─ record_report → Redis agent:guardrail_reporter:{name}
+
+owner / admin (OwnedAgentByName, uniform 404)
+  └─ GET /api/agents/{name}/guardrail-events?since&until&kind&execution_id&limit&before
+       └─ list_events → {events, next_cursor, reporting}
+```
+
+| Piece | Where | What it decides |
+|---|---|---|
+| Ingest + read routes | `src/backend/routers/guardrail_events.py` | Status order the forwarder branches on (403 → 429 → 413 → 422 → 200). The body is read under the byte cap, never buffered past it. |
+| Validation, reporting, counts | `src/backend/services/guardrail_event_service.py` | `KINDS` / `HOOKS` (the §6.1 closed sets; unknown → `other` + `kind_raw` / `hook_raw` in `details`), the open `code` (`^[a-z0-9_]{1,64}$`), `execution_id` > 128 chars → null, the field allowlist (`patterns`, `verb`, `tier`, `turn_kind`, `rule` ≤ 200, `path` ≤ 512, `session_id`, `tool_use_id`), free text through `sanitize_text`. Reporting state: `never` / `reporting` (≤ 15 min) / `stale`; a missing Redis record falls back to the newest row's `received_at`. |
+| Store | `src/backend/db/guardrail_events.py`, table `guardrail_events` | Keyset paging on `(occurred_at, id)`; `count_by_execution` (one `IN` query, filtered by agent); `count_by_agent`; the retention count and prune share one predicate on `received_at`. |
+| Migrations | `db/migrations.py::guardrail_events_table`, Alembic `0123_guardrail_events` | Additive table + three indexes on both tracks (Invariant #9). |
+| Lifecycle | `db/agent_cleanup.py` `AGENT_REFS` (CASCADE); `services/agent_runtime_state.py` `CLEARED_KEYSPACES` | Rows rename with the agent and go with its hard delete. The reporter key is cleared on teardown only — not on start, or a restarted agent would read `never`. |
+| Retention | `guardrail_event_retention_days` (default 90, `0` off) in `config.py`; `cleanup_service._sweep_guardrail_events_retention` | Pruned by server receive time behind the #1644 guard, in bounded chunks. |
+| Censuses | `services/agent_route_tiers.json` (POST `self`, GET `owner`); `tests/unit/_route_census.py` `AGENT_CALLABLE_ANY` | Both routes classified; the frozen baseline does not grow. |
+
+**Seams for other features.** `count_by_execution(agent, execution_ids)` → `{"reporting": {...}, "executions": {id: {"by_kind": {...}, "by_hook_code": {"hook:code": n}}}}` (executions without events are absent); `count_by_agent(hours, agent_names=None)` → `{"agents": {name: {"by_kind": {...}}}}`. Consumers read at request time: an event lands a few seconds after the hook fired. Neither reads the spool.
+
+**Not covered by S1.** No forwarder exists until S2 lands, so on this slice alone every agent reads `never`. No UI, no fleet endpoint (S4), no MCP tool. Events are agent-reported, not tamper-proof.
+
+**Tests.** `tests/unit/test_ent165_guardrail_event_store.py` (real rows, SQLite + PostgreSQL), `test_ent165_guardrail_event_route.py` (real router over a real DB), `test_ent165_guardrail_event_retention.py`, `test_ent165_guardrail_event_contract.py` (enum parity with the hook library; skips until S2 adds `EVENT_KINDS` / `EVENT_HOOKS`).
+
+---
+
 ## Relationship to Read-Only Mode (CFG-007 / #887)
 
 Guardrails and read-only mode are **independent, complementary** layers:
