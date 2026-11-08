@@ -4678,6 +4678,14 @@ class ScheduleUpdateRequest(BaseModel):
         return ScheduleCreate._normalize_delivery_email(v)
 
 
+class ScheduleRunsAsReason(BaseModel):
+    """Why a schedule's runs have the tier `runs_as` names (#4281)."""
+    # creator_owner_tier | no_recorded_creator | creator_not_owner_tier |
+    # agent_has_no_owner | creator_missing | unknown (the cause could not be read)
+    code: str
+    message: str
+
+
 class ScheduleResponse(BaseModel):
     """Response model for schedule data."""
     id: str
@@ -4712,6 +4720,17 @@ class ScheduleResponse(BaseModel):
     # and the creator's id is not exposed.
     # Defaults False: a response built without the predicate claims nothing.
     can_manage_webhook: bool = False
+    # #4281: the tier this schedule's runs get, computed live from its creator
+    # (`turn_tier_service.schedule_run_tier`). `shared_person` runs have no
+    # shell and no owner-added tools. None = not computed (a lookup failed),
+    # never a guessed `owner`.
+    runs_as: Optional[Literal["owner", "shared_person"]] = None
+    runs_as_reason: Optional[ScheduleRunsAsReason] = None
+    # Whether the caller created it. The creator's id stays unexposed.
+    created_by_you: bool = False
+    # The creator's display name, else username: only for the agent's owner
+    # tier and for an agent key that is not acting for a shared person.
+    created_by: Optional[str] = None
 
     class Config:
         from_attributes = True

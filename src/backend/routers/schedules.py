@@ -11,6 +11,7 @@ defined BEFORE dynamic routes like /{name}/schedules to avoid FastAPI matching
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from typing import List, Optional
 from datetime import datetime
+from types import SimpleNamespace
 import json
 import os
 import logging
@@ -27,12 +28,15 @@ from models import (
     WebhookStatusResponse,
 )
 from dependencies import (
+    acting_turn_user_id,
     agent_may_reach,
     agent_principal_name,
     capability_fence,
     person_or_capability_admits,
     require_person_or_capability,
     agent_viewer_tier,
+    VIEWER_KEY,
+    VIEWER_OWNER,
     VIEWER_SHARE,
     row_is_viewers,
     viewer_row_scope,
@@ -46,7 +50,7 @@ from dependencies import (
     resolve_source_agent,
 )
 from database import db, Schedule, ScheduleCreate, ScheduleExecution
-from services import dispatch_admission_service, skill_gate_map_service
+from services import dispatch_admission_service, skill_gate_map_service, turn_tier_service
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from utils.public_url import public_base_url
 from services.schedule_validation import (
@@ -139,7 +143,7 @@ def _enforce_timeout_below_agent_cap(agent_name: str, requested_seconds: int) ->
         )
 
 
-def _can_manage_webhook(schedule, agent_name: str, current_user: User) -> bool:
+def _can_manage_webhook(schedule, agent_name: str, current_user: User, viewer_tier: Optional[str] = None) -> bool:
     """The share-tier half of who may mint, rotate, revoke or read a schedule's
     webhook (ent#875).
 
@@ -151,10 +155,11 @@ def _can_manage_webhook(schedule, agent_name: str, current_user: User) -> bool:
     (trinity-enterprise#719: a person, or an agent key holding the grant on an
     agent its owner owns; the system key is refused). A share holder needs to
     be the creator (`agent_schedules.owner_id`). A schedule with no recorded
-    creator is the owner's alone."""
+    creator is the owner's alone. `viewer_tier` is the caller's
+    `agent_viewer_tier`, when the request already computed it."""
     if _is_agent_third_party(current_user, getattr(schedule, "deliver_to_workspace_email", None)):
         return False
-    if agent_viewer_tier(current_user, agent_name) != VIEWER_SHARE:
+    if (viewer_tier if viewer_tier is not None else agent_viewer_tier(current_user, agent_name)) != VIEWER_SHARE:
         return True
     uid = getattr(current_user, "id", None)
     owner_id = getattr(schedule, "owner_id", None)
@@ -175,17 +180,86 @@ def _assert_can_manage_webhook(schedule, agent_name: str, current_user: User) ->
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=dict(_WEBHOOK_FORBIDDEN_DETAIL))
 
 
-def _schedule_response(schedule, agent_name: str, current_user: User) -> ScheduleResponse:
+class _ScheduleView:
+    """What one request knows about its caller on `agent_name`, computed once
+    for every schedule it answers (a list must not pay a viewer-tier or a
+    creator lookup per row, #4281)."""
+
+    def __init__(self, agent_name: str, current_user: User):
+        self.tier = agent_viewer_tier(current_user, agent_name)
+        self.admits_webhook = person_or_capability_admits(current_user, "schedules.manage", agent_name)
+        # Who "you" is: the person an agent key is acting for, else the caller.
+        acting = acting_turn_user_id(current_user)
+        self.viewer_id = acting if acting is not None else getattr(current_user, "id", None)
+        # The creator is named to the owner tier and to an agent key outside a
+        # shared person's turn (whose tier reads as share, ent#926), not to a
+        # share holder (#4281, D5).
+        self.show_creator = self.tier in (VIEWER_OWNER, VIEWER_KEY)
+        self.lookups = turn_tier_service.RunTierLookups(db)
+
+    def run_tier_fields(self, schedule, agent_name: str) -> dict:
+        return turn_tier_service.schedule_read_fields(
+            self.lookups, agent_name, schedule, show_creator=self.show_creator, viewer_id=self.viewer_id)
+
+
+def _schedule_response(schedule, agent_name: str, current_user: User,
+                       view: Optional[_ScheduleView] = None) -> ScheduleResponse:
     """The response, with `can_manage_webhook` computed by both checks the
     webhook routes enforce — the decorator's principal rule and the share-tier
     rule — so it is true exactly when this caller's webhook call would pass
-    (ent#875, trinity-enterprise#719). The client has no numeric user id to compare."""
+    (ent#875, trinity-enterprise#719). The client has no numeric user id to compare.
+    Also what tier the schedule's runs get, and who created it (#4281)."""
+    view = view or _ScheduleView(agent_name, current_user)
     return ScheduleResponse(
         **schedule.model_dump(),
         can_manage_webhook=(
-            person_or_capability_admits(current_user, "schedules.manage", agent_name)
-            and _can_manage_webhook(schedule, agent_name, current_user)
+            view.admits_webhook
+            and _can_manage_webhook(schedule, agent_name, current_user, viewer_tier=view.tier)
         ),
+        **view.run_tier_fields(schedule, agent_name),
+    )
+
+
+# D2 (#4281): Gemini CLI and Codex run no turn-tier hook, so they refuse a
+# shared person's turn before it starts (`agent_server/services/turn_scope.py`).
+# A shared-person schedule switched on there would only ever fail.
+_CANNOT_RUN_ON_RUNTIME = "schedule_cannot_run_for_creator_on_runtime"
+
+
+async def _refuse_if_it_could_never_run(name: str, schedule, view: _ScheduleView) -> None:
+    """409 when switching `schedule` on would give runs that cannot start: a
+    shared-person rating on an agent that does not run on Claude Code.
+
+    On Claude Code it is allowed and the response says how it runs (D1). The
+    runtime read never raises and falls back to Claude Code, so a Docker fault
+    warns rather than refuses. A rating that cannot be computed refuses
+    nothing here; the response shows it as not computed."""
+    try:
+        rated = turn_tier_service.schedule_run_tier(view.lookups, name, schedule)
+    except Exception as exc:  # noqa: BLE001 - the read fields show it as not computed
+        logger.warning("[#4281] could not rate a schedule on %s before enabling it: %s", name, exc)
+        return
+    if rated.tier == turn_tier_service.OWNER:
+        return
+    from services.docker_utils import agent_runtime_async
+    runtime = ((await agent_runtime_async(name)) or "claude-code").lower()
+    if runtime == "claude-code":
+        return
+    way_out = ("An admin needs to restore the agent's owner first."
+               if rated.cause == turn_tier_service.AGENT_HAS_NO_OWNER
+               else "The agent's owner can set it up as their own.")
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail={
+            "code": _CANNOT_RUN_ON_RUNTIME,
+            "message": (
+                f"This schedule's runs would have the access of a person the agent is shared with, "
+                f"and this agent runs on {runtime}, which cannot hold a run to that access, so they "
+                f"would never start. {way_out}"
+            ),
+            "runtime": runtime,
+            "cause": rated.cause,
+        },
     )
 
 
@@ -193,7 +267,8 @@ def _schedule_response(schedule, agent_name: str, current_user: User) -> Schedul
 async def list_agent_schedules(name: AuthorizedAgent, current_user: User = Depends(get_current_user)):
     """List all schedules for an agent."""
     schedules = db.list_agent_schedules(name)
-    return [_schedule_response(s, name, current_user) for s in schedules]
+    view = _ScheduleView(name, current_user)
+    return [_schedule_response(s, name, current_user, view) for s in schedules]
 
 
 _AGENT_THIRD_PARTY = {
@@ -333,6 +408,12 @@ async def create_schedule(
     _enforce_delivery_target_authority(
         current_user, name, schedule_data.deliver_to_workspace_email)
 
+    view = _ScheduleView(name, current_user)
+    if schedule_data.enabled:
+        # The creator is the caller (`db.create_schedule` records them).
+        await _refuse_if_it_could_never_run(
+            name, SimpleNamespace(id=None, agent_name=name, owner_id=getattr(current_user, "id", None)), view)
+
     schedule = db.create_schedule(name, current_user.username, schedule_data)
     if not schedule:
         raise HTTPException(
@@ -343,7 +424,7 @@ async def create_schedule(
     # Dedicated scheduler syncs from database automatically
     # No need to notify it directly - it will pick up new schedules on next sync cycle
 
-    return _schedule_response(schedule, name, current_user)
+    return _schedule_response(schedule, name, current_user, view)
 
 
 @router.get(
@@ -520,6 +601,10 @@ async def update_schedule(
         _enforce_delivery_target_authority(
             current_user, name, update_dict["deliver_to_workspace_email"])
 
+    view = _ScheduleView(name, current_user)
+    if update_dict.get("enabled") is True and not schedule.enabled:
+        await _refuse_if_it_could_never_run(name, schedule, view)
+
     updated_schedule = db.update_schedule(schedule_id, current_user.username, update_dict)
     if not updated_schedule:
         raise HTTPException(
@@ -530,7 +615,7 @@ async def update_schedule(
     # Dedicated scheduler syncs from database automatically
     # It will detect the update on next sync cycle
 
-    return _schedule_response(updated_schedule, name, current_user)
+    return _schedule_response(updated_schedule, name, current_user, view)
 
 
 @router.delete("/{name}/schedules/{schedule_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))])
@@ -570,7 +655,7 @@ async def enable_schedule(
     schedule_id: str,
     current_user: User = Depends(get_current_user),
 ):
-    """Enable a schedule."""
+    """Enable a schedule. The body also says what tier its runs get (#4281)."""
     schedule = db.get_schedule(schedule_id)
     if not schedule or schedule.agent_name != name:
         raise HTTPException(
@@ -578,11 +663,14 @@ async def enable_schedule(
             detail="Schedule not found"
         )
     _refuse_agent_third_party(current_user, getattr(schedule, "deliver_to_workspace_email", None))
+    view = _ScheduleView(name, current_user)
+    if not schedule.enabled:
+        await _refuse_if_it_could_never_run(name, schedule, view)
 
     # Update database - dedicated scheduler syncs automatically
     db.set_schedule_enabled(schedule_id, True)
 
-    return {"status": "enabled", "schedule_id": schedule_id}
+    return {"status": "enabled", "schedule_id": schedule_id, **view.run_tier_fields(schedule, name)}
 
 
 @router.post("/{name}/schedules/{schedule_id}/disable", dependencies=[Depends(capability_fence("schedules.manage", own_agent_exempt=True))])
@@ -595,7 +683,7 @@ async def disable_schedule(
     schedule_id: str,
     current_user: User = Depends(get_current_user),
 ):
-    """Disable a schedule."""
+    """Disable a schedule. The body also says what tier its runs get (#4281)."""
     schedule = db.get_schedule(schedule_id)
     if not schedule or schedule.agent_name != name:
         raise HTTPException(
@@ -607,7 +695,8 @@ async def disable_schedule(
     # Update database - dedicated scheduler syncs automatically
     db.set_schedule_enabled(schedule_id, False)
 
-    return {"status": "disabled", "schedule_id": schedule_id}
+    return {"status": "disabled", "schedule_id": schedule_id,
+            **_ScheduleView(name, current_user).run_tier_fields(schedule, name)}
 
 
 @router.post("/{name}/schedules/{schedule_id}/trigger")
