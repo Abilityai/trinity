@@ -132,6 +132,7 @@ last_task_at: Optional[str] = None            # db_models.py:855
 |-------------|--------------|---------|
 | **NavBar "Operations" link** | - | Navigate to `/operations`; the **Health** tab (admin-only) shows fleet monitoring |
 | **Operations → Health tab** (`MonitoringPanel.vue`) | `GET /api/monitoring/status` | View fleet-wide health |
+| **Operations → Health tab**, Guardrails (24 h) card (`GuardrailStatsCard.vue`, trinity-enterprise#165 S4) | `GET /api/ops/guardrail-stats?hours=24` | Guardrail event counts and which agents are not reporting — see [agent-guardrails.md](agent-guardrails.md#fleet-guardrail-counts-and-the-two-ui-surfaces-guard-005-trinity-enterprise165-s4) |
 | **Agent Row Click** | - | Navigate to agent detail |
 | **"Check All" button** | `POST /api/monitoring/check-all` | Trigger fleet-wide check (admin) |
 | **Agent refresh button** | `POST /api/monitoring/agents/{name}/check` | Trigger single agent check (admin) |
