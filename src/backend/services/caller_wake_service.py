@@ -41,9 +41,19 @@ one turn for each. One turn per caller per window instead, and the frame says
 plainly that other runs may have ended in the same window — so the caller reads
 ``list_recent_executions`` rather than being told a half-truth.
 
-**The hop is bounded.** ``chain_depth = callee + 1``, so a wake is governed by
-the same ``inter_agent_max_chain_depth`` setting as the call chain it answers
-(#2806/#2973) rather than being an unbounded side channel around it.
+**The wake stands where the delegator stood (#4357).** A wake continues the
+delegator's own work, so it carries the delegator's standing, not one more hop:
+``max(callee − 1, MAX(running caller), 0)``, NULL counted as 0. The callee row
+was stamped ``1 + MAX(running caller)`` at dispatch, so ``callee − 1`` is the
+depth the delegator stood at when it delegated; the live MAX keeps a wake from
+standing below a deep turn of the caller that is still running (a collapsed
+window can read the shallower ending). It was ``callee + 1``, and the wake turn's
+next delegation is ``1 + MAX(running)`` over a set that includes the wake row, so
+every delegate→wake round added two and an orchestrator working through wakes
+was refused after about four rounds. A wake is therefore at most ``max − 1`` and
+can always make one hop; a genuine chain — hops from turns still running — is
+still counted and refused by the guard exactly as before. Depth no longer bounds
+how many wakes follow one another; the window above and the wake switch do.
 
 Never raises: this runs on the path of an already-billed terminal.
 """
@@ -168,6 +178,32 @@ def _agent_scope(agent_name: str) -> str:
     from services import idempotency_service
 
     return idempotency_service.make_agent_scope(agent_name)
+
+
+def _running_depth(agent_name: str) -> int:
+    from database import db
+
+    return db.get_max_running_chain_depth(agent_name)
+
+
+def _standing_depth(caller: str, callee_depth: Any) -> int:
+    """The delegator's standing: ``max(callee − 1, MAX(running caller), 0)`` (#4357).
+
+    NULL (a root callee) counts as 0. A depth that is not an integer leaves the
+    live MAX as the floor — the row was read, so the caller's running turns are
+    the honest measure, never 0 under them. A MAX that cannot be read leaves
+    ``callee − 1`` alone: the wake is still owed, and this never raises.
+    """
+    try:
+        from_callee = int(callee_depth or 0) - 1
+    except (TypeError, ValueError):
+        from_callee = 0
+    try:
+        running = int(_running_depth(caller) or 0)
+    except Exception:  # noqa: BLE001 — never raise on the billed terminal path
+        logger.debug("#4357: running depth unreadable for %s", caller)
+        running = 0
+    return max(from_callee, running, 0)
 
 
 async def _dispatch_wake(**kwargs):
@@ -315,10 +351,8 @@ async def maybe_wake_caller(execution_id: Optional[str]) -> Optional[str]:
         return None
 
     ask_ids = _pending_ask_ids(execution_id)
-    try:
-        chain_depth = int(getattr(row, "chain_depth", None) or 0) + 1
-    except (TypeError, ValueError):
-        chain_depth = 1
+    callee_depth = getattr(row, "chain_depth", None)
+    chain_depth = _standing_depth(caller, callee_depth)
 
     try:
         result = await _dispatch_wake(
@@ -351,5 +385,6 @@ async def maybe_wake_caller(execution_id: Optional[str]) -> Optional[str]:
     await _audit(caller=caller, callee=callee, callee_execution_id=execution_id,
                  execution_id=result.execution_id, status=result.status,
                  error=result.error, policy_source=verdict.source,
-                 ask_ids=ask_ids, chain_depth=chain_depth)
+                 ask_ids=ask_ids, chain_depth=chain_depth,
+                 callee_chain_depth=callee_depth)
     return result.execution_id
