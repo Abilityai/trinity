@@ -140,6 +140,24 @@ curl -X PUT http://localhost:8000/api/agents/my-agent/guardrails \
 
 After updating guardrails, stop and start the agent to apply changes. The container is recreated with the new configuration.
 
+## Guardrail events
+
+Each refusal or redaction a guardrail hook makes is an event, and the platform keeps a record of it for 90 days. An event records what happened (for example *Refused* or *Credential hidden*), which hook acted, its reason code, the tool, and the time. It never records the command or the output itself.
+
+- **Settings › Guardrails › Recent events** (owners) lists this agent's events from the last 24 hours, newest first, with up to 50 shown.
+- **Operations › Health › Guardrails (24 h)** (admins) counts them across the fleet. See [Monitoring](../operations/monitoring.md#guardrails-card).
+
+An empty list is not taken as good news. Both places say which kind of silence it is:
+
+| What it says | Meaning |
+|---|---|
+| No guardrail events in the last 24 h | The agent is reporting and nothing was refused or hidden. |
+| This agent isn't reporting guardrail events (older image) | No report has ever arrived. Recreate the agent on a current image. |
+| Not reporting since *time* | The agent reported before and has been silent for more than 15 minutes. Events it sent earlier are still listed. |
+| Guardrail hooks run on the Claude Code runtime only | A Codex or Gemini agent. These hooks don't run on those runtimes, so they produce no events. |
+
+The agent itself reports its events, so this is a view for honest agents and misconfigured ones. It is not a tamper-proof audit trail: an agent acting deliberately can hide its own events. Events not yet sent when a container stops are lost.
+
 ## For Agents
 
 Headless runs (tasks, schedules, loops, MCP calls) also withhold a fixed family of Claude Code tools that promise an event after the turn ends; that list is platform-wide and merges with the per-agent disallowed tools above — see [Agent Runtimes](agent-runtimes.md#headless-runs-on-claude-code).
@@ -168,6 +186,8 @@ The agent can acknowledge the denial and try an alternative approach.
 |----------|--------|-------------|
 | `/api/agents/{name}/guardrails` | GET | Get per-agent guardrails config |
 | `/api/agents/{name}/guardrails` | PUT | Set per-agent guardrails overrides |
+| `/api/agents/{name}/guardrail-events` | GET | The agent's guardrail events and reporting state (owners and admins) |
+| `/api/ops/guardrail-stats` | GET | Guardrail event counts across the agents you own, or the whole fleet for an admin |
 
 See [Backend API Docs](http://localhost:8000/docs) for full request/response schemas.
 
@@ -183,6 +203,6 @@ See [Backend API Docs](http://localhost:8000/docs) for full request/response sch
 
 - [Agent Configuration](agent-configuration.md) -- Other per-agent settings
 - [Managing Agents](managing-agents.md) -- Start/stop to apply changes
-- [Monitoring](../operations/monitoring.md) -- View guardrail events in logs
+- [Monitoring](../operations/monitoring.md#guardrails-card) -- The fleet's guardrail event counts on the Health tab
 - [How Trinity Keeps Agents in Bounds](../guides/keeping-agents-in-bounds.md) -- The guardrails approach: where the real boundary sits, and what is available now
 - [Recommended Trinity Prompt](recommended-fleet-prompt.md) -- Fleet rules for behaviour that guardrails can't block

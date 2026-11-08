@@ -37,6 +37,20 @@ The tab shows summary cards (Total Agents, Healthy, Degraded, Unhealthy, Critica
 - Real-time WebSocket updates push health state changes as they occur.
 - Individual agent health is visible in both the agent header and the Agents listing page.
 
+### Guardrails card
+
+Below the health list, the **Guardrails (24 h)** card counts what the agents' [guardrail hooks](../agents/agent-guardrails.md#guardrail-events) refused or hid in the last 24 hours: the total, and one badge per kind (for example *Refused* or *Credential hidden*). It refreshes with the rest of the tab.
+
+The card never treats silence as good news. It says "No guardrail events in the last 24 h" only when at least one agent is reporting its guardrail events. When no agent reports, the total shows a dash and the card says why. Agents that cannot report are listed by name, each with its reason:
+
+| What the card says | Meaning |
+|---|---|
+| This agent isn't reporting guardrail events (older image) | No report has ever arrived. The agent runs an image older than the event forwarder. |
+| Not reporting since *time* | The agent reported before and has been silent since (more than 15 minutes). |
+| Guardrail hooks run on the Claude Code runtime only | A Codex or Gemini agent. It has no guardrail hooks, so it can never have an event. |
+
+The card also lists agents that had events, loudest first. Click a name to open that agent's **Settings › Guardrails**, where **Recent events** lists them.
+
 ### Enabling Monitoring
 
 The periodic health-check loop is **disabled by default**. A status badge at the top of the Health tab shows the current state: "Monitoring Active" or "Monitoring Disabled", with an **Enable monitoring** / **Disable monitoring** button next to it (admin only) — no API call needed.
@@ -223,6 +237,7 @@ Agents can query monitoring data through these MCP tools:
 | `/api/monitoring/cleanup-status` | GET | Cleanup service status (admin) |
 | `/api/monitoring/cleanup-trigger` | POST | Force a cleanup run (admin) |
 | `/api/agents/{name}/heartbeat` | POST | Agent liveness heartbeat (sent by the agent itself every ~5s) |
+| `/api/ops/guardrail-stats?hours=24` | GET | Guardrail event counts per kind and per agent, each agent's reporting state and coverage. A person only (not an agent, system or ops key). An admin sees every agent; anyone else sees the agents they own. `hours` is 1–2160 |
 
 Full API reference: http://localhost:8000/docs
 

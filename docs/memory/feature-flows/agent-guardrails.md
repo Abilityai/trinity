@@ -376,6 +376,42 @@ owner / admin (OwnedAgentByName, uniform 404)
 
 ---
 
+## Fleet guardrail counts and the two UI surfaces (GUARD-005, trinity-enterprise#165 S4)
+
+Built on the S1 read seams; nothing here reads the spool. Requirement: [security.md §28.5](../requirements/security.md).
+
+```
+Operations › Health (admin)                      Agent › Settings › Guardrails (owner, agent.can_share)
+  MonitoringPanel → GuardrailStatsCard             GuardrailsPane → GuardrailEventsSection (runtime = agent.runtime)
+    store guardrailEvents.loadFleet(24)              store guardrailEvents.loadAgent(name)
+      GET /api/ops/guardrail-stats?hours=24            GET /api/agents/{name}/guardrail-events?since=<now-24h>&limit=50
+        require_person ............. 403 for agent / system / ops / connector keys
+        is_fleet_admin ? every live agent : db.get_agents_by_owner(username)
+        guardrail_event_service.fleet_stats(hours, names)
+          count_by_agent(hours, names)          ── per-kind counts
+          reporting_states(names)               ── one Redis pipeline + one grouped DB fallback
+          _container_runtimes()                 ── docker_service.agent_container_runtimes (one round trip)
+          coverage_of(runtime, state)           ── no_hooks | never | stale | reporting
+```
+
+| Piece | Where | What it decides |
+|---|---|---|
+| Fleet route | `src/backend/routers/guardrail_events.py::ops_router` (`GET /api/ops/guardrail-stats`) | A person only (`require_person`): an agent key carries its owner's role, so on an admin-owned install it would otherwise read the whole fleet. `hours` 1–2160 (the 90-day retention default), else 422. |
+| Scope | `guardrail_event_service.fleet_agent_names` | Admin → every live agent; anyone else → the live agents they **own** (not shared — the per-agent read's owner tier, D8). |
+| Coverage | `guardrail_event_service.coverage_of` | `no_hooks` when the runtime (container label, else the forwarder's last report) is not Claude Code — before the reporting state, because a Codex/Gemini forwarder's keepalives read `reporting` while no hook can ever fire. An unknown runtime is Claude Code, the platform default. `HOOKED_RUNTIMES` is pinned equal to `agent_service.helpers.CLAUDE_RUNTIME_NAMES`. |
+| Every agent listed | `fleet_stats` | Agents with no events are rows too, so the card can name the silent ones. Loudest first, then by name. |
+| Card | `src/frontend/src/components/GuardrailStatsCard.vue` | Total + per-kind badges; the total is `—` and the card says why when no agent reports; "No guardrail events in the last 24 h" only when some agent reports; one bounded list of agents with events or a non-reporting coverage, each with its own words; rows open the agent's Settings › Guardrails. |
+| Recent events | `src/frontend/src/components/agent-settings/GuardrailEventsSection.vue` | One notice per non-reporting coverage (never / stale with its time / no hooks), then the rows (kind, `hook · code`, tool and path/rule/patterns, relative time with the absolute on hover), at most 50 with "Latest N shown". The empty copy only while reporting. |
+| Shared rule and copy | `src/frontend/src/utils/guardrailEvents.js` | `agentCoverage` mirrors `coverage_of` for the per-agent read, which carries only `reporting`. |
+
+**States, both surfaces.** Loading is a skeleton in the loaded footprint; a failed first read is `LoadFailed`, never an empty copy; a failed refresh keeps the data and raises the stale banner (`InlineError`); the Health tab's 30 s refresh reloads the card in place.
+
+**Not covered by S4.** GUARD-005 stays 🚧: the blocked/allowed ratio (allows are not forwarded), top blocked patterns, notifications (trinity-enterprise#141) and export are not part of #165. No MCP tool. The `ops` read-only key is not admitted (the route is not in its allowlist and `require_person` refuses it).
+
+**Tests.** `tests/unit/test_ent165_guardrail_stats.py` (real router over a real DB); `src/frontend/tests/unit/guardrailStatsCard.mount.spec.js`, `guardrailEventsSection.mount.spec.js`, `guardrailEventsUtils.spec.js`.
+
+---
+
 ## Relationship to Read-Only Mode (CFG-007 / #887)
 
 Guardrails and read-only mode are **independent, complementary** layers:
