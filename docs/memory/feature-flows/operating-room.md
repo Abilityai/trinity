@@ -612,6 +612,16 @@ Writers are edge-triggered (`WHERE sync_state IS NULL OR != :v …`; the rowcoun
 
 **Tests.** `tests/unit/test_ent734_ask_raising_chat.py` — chat turn → that chat; schedule / loop / agent / mcp / room / gate / no / unknown / foreign / finished execution → Main; a running turn in an archived (reset, resumed) Main → that chat; the addressee match ignores email case; another addressee's chat and a session of another pair → Main; a `public` row under a non-portal channel → Main; an agent-planted `workspace_session_id` and an agent-cited `context.execution_id` never win; a lookup failure → Main + a warning; `raised_in_turn` true for a turn in Main, false for a schedule there, an agent-planted flag stripped on both paths and never read as a rewrite, only a literal `true` projects.
 
+### An ask raised in a room comes back to that room (abilityai/trinity-enterprise#1135)
+
+**Raise.** `raise_ask` → `_raising_room(agent, turn, type)` → `shared_sessions.service.room_for_execution` (the execution must be this agent's, RUNNING, `triggered_by="room"`, `source_channel="room"`; the agent a current participant of an open, unexpired room) → `context.workspace_room_id` (a `_PLATFORM_CONTEXT_KEYS` member, stripped from agent input) beside the unchanged Main attachment → after the create, `post_ask_raised_line` ("`<agent>` asked: “`<title>`” — waiting on `<who>`."). Agent raises only; never a gate or credential ask; fail-soft.
+
+**End.** `ask_service._ended` → observers: `shared_sessions.service.on_ask_ending` (one line per room/agent/event, every disposition — answered / cancelled / dismissed / expired / replaced / withdrawn) and `_wake_filer` (stamps `wake_state='owed'`, then spawns) → `operator_resume_service.maybe_dispatch_resume` / `maybe_dispatch_ending` → `_return_to_room` → `return_ask_to_room(room, agent, ask_block=_framed_message(…, to_room=True))`: open? seated? `_budget_exceeded_reason`? the agent's own wake cap? → `_wake_agent(Waker(kind="ask"), …, ask_block)` → `_wake_agent_locked` (runs on an empty delta) → `dispatch_and_await_terminal(triggered_by="room", source_channel="room", …)` → reply posted as the agent, cursor advanced, mentions cascade under the moderator's reach. `RETURN_DECLINED` → one clause in the room + today's `operator_response` / `operator_ending` dispatch; `RETURN_HELD` (skill gate) → `woken`, no ordinary wake. Endings take the room turn only when every ask of the event sits in one room and it is not a sweep.
+
+**Restart.** `owed` → `woken` on a turn, `pending` when none ran (endings too). `list_pending_wakes_for_agent` = `pending|owed` over answered/cancelled/dismissed; the agent-start hook and, once per process, the poller's leader cycle after startup recovery (`redispatch_pending_wakes_after_boot`, reclaiming in-flight claims older than 30 s) re-offer them.
+
+**Tests.** `tests/unit/test_ent1135_ask_room_attachment.py`, `test_ent1135_ask_room_return.py`, `test_ent1135_wake_restart_survival.py`.
+
 ### Discuss and Dismiss (trinity-enterprise#747, #748)
 
 **Why.** A Workspace ask could only be closed in one go: pick an option, or type one answer. The person could neither ask the agent "why?" first nor say "this needs no decision" — a forced answer misleads the agent, and waiting for expiry is "a decision nobody made" (ent#627).
