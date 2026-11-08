@@ -7573,6 +7573,18 @@
       "description": "/ws/events applies the #995 account-state check the other doors apply: dependencies.owner_is_suspended truth table (executed); the handler checks it on the owner row it resolves, closes and returns before accept() (shape check, main.py is not importable in the unit island); the close is identical to an inactive key's. Mutation: removing the guard turns both placement tests red."
     },
     {
+      "file": "unit/test_ent863_live_connections.py",
+      "feature": "trinity-enterprise#863",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "websocket",
+        "unit",
+        "security"
+      ],
+      "description": "Live connections follow the account: services/live_connections.py compares the account snapshot a door recorded at connect with the current row; a changed role (raised or lowered), email or password closes with the reconnect reason (4000), a deactivated or removed account or an inactive or deleted key with the ended reason (4001). The real role route re-checks the account at once on its worker, only when the role changed; a self-change is refused and closes nothing. A second worker's tick closes what the first worker's write left stale; a tick with nothing open reads nothing; a failed tick read keeps everything open and the next tick retries; a failed read after a reported change closes that account's connections; a raising closer does not stop the others or the loop. notify_account_changed from a plain thread closes on the registry's loop. A change while a door connects refuses it, a door that opens after the change stays open, and a re-check before the door's read marks it dirty. The real /ws and /ws/events handlers close with their codes, unregister their dispatcher slot before the handler returns, log no error, and refuse a socket whose account changed while it opened. Shape: each event door registers before it reads and goes live after it connects, releases in a finally; the 15 s loop starts outside the bus's try and stops with it. The batched reads return only existing rows and active keys and skip the database for an empty set."
+    },
+    {
       "file": "unit/test_ent863_event_stream_roster.py",
       "feature": "trinity-enterprise#863",
       "added": "2026-11-08",
