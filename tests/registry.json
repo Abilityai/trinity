@@ -8942,6 +8942,19 @@
         "contract"
       ],
       "description": "The section-6 closed kind/hook sets: the backend copy equals the contract literal, and equals the hook library's EVENT_KINDS / EVENT_HOOKS once slice S2 adds them (skips loudly until then)."
+    },
+    {
+      "file": "unit/test_4281_execution_refusal_counts.py",
+      "feature": "#4281",
+      "added": "2026-11-08",
+      "categories": [
+        "unit",
+        "security",
+        "guardrails",
+        "scheduling",
+        "executions"
+      ],
+      "description": "#4281 slice E: a schedule-backed run the turn-tier hook refused does not read as a clean success. The execution list, detail and a schedule's history carry guardrail_refusals + guardrail_reporting, counted at READ time from the agent's guardrail events (real ingest service, fakeredis reporter, real schedules router over a real DB): an event landing after the run ended is counted on the next read; only turn_tier_guard counts (a credential redaction or a bash deny never does); a sibling agent's event naming this run is ignored; never -> null, stale -> count + stale, Gemini/Codex keepalives or no runtime on record -> null + not_claude_code (review X12), inside 10 s of the end or still running -> pending (review R11), an unreadable count -> null + unavailable with the read still 200; a run with no schedule carries neither field and is never counted; one count query per page. Reverting the change turns 15 red; a 9-mutant pass on the service is all red."
     }
   ]
 }

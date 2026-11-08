@@ -4772,6 +4772,11 @@ class ScheduleResponse(BaseModel):
         from_attributes = True
 
 
+# #4281: why an execution's `guardrail_refusals` may not be complete. The
+# values are `services/execution_refusals.py`'s READING_* constants.
+GuardrailReadingMarker = Literal["pending", "stale", "never", "not_claude_code", "unavailable"]
+
+
 class ExecutionSummary(BaseModel):
     """Lightweight execution response for list views - excludes large text fields.
 
@@ -4815,6 +4820,12 @@ class ExecutionSummary(BaseModel):
     # is that person. Booleans only — the email stays on the server.
     gate_self_approved: bool = False
     gate_self_approved_by_viewer: bool = False
+    # #4281: the turn-tier hook's refusals on a schedule-backed run, counted at
+    # read time from the agent's guardrail events (services/execution_refusals.py).
+    # `guardrail_reporting` None = the count is complete; otherwise why it may
+    # not be. Both None = not a schedule-backed run.
+    guardrail_refusals: Optional[int] = None
+    guardrail_reporting: Optional[GuardrailReadingMarker] = None
 
     # EXCLUDED (large fields - fetch via /executions/{id}):
     # - response: Optional[str]      # Full response text
@@ -4878,6 +4889,9 @@ class ExecutionResponse(BaseModel):
     # trinity-enterprise#754 — as on ExecutionSummary.
     gate_self_approved: bool = False
     gate_self_approved_by_viewer: bool = False
+    # #4281 — as on ExecutionSummary.
+    guardrail_refusals: Optional[int] = None
+    guardrail_reporting: Optional[GuardrailReadingMarker] = None
 
     class Config:
         from_attributes = True
