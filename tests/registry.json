@@ -8869,6 +8869,39 @@
         "unit"
       ],
       "description": "trinity#4302: a mention chain stopped at ROOM_MAX_CHAIN_DEPTH writes a typed `chain_paused` system row (mentions = who was next; plain words, no UI verb) and the room payload carries `paused_chain` {seq, next} while the offer stands (survives bookkeeping lines; ends on a conversational row, a later pause/continue row, a closed room, or every named agent having left; a collaborator seated above the row still gets it). POST /api/rooms/{id}/continue through the real router, service, db and idempotency layers over a temp SQLite DB: wakes `next` at depth 1 (a fresh count that may pause again), posts a `chain_continued` receipt that spends no message budget, hands the woken agent what it was owed; a seated collaborator, a person's user key and a Workspace client may continue, an agent key and the system key get 403 not_a_person, a non-member the uniform 404 with no key claimed, an unreachable `next` a 403 with nothing consumed, a departed `next` 409 no_one_to_wake; a closed room / a room at its message budget 410 with stop_reason and the budget named. Once per stop: a double click with an Idempotency-Key is 409 in-flight then a replay under scope room-continue:{room_id}; two workers without a key wake once (the second gets 409 room_moved_on); a stale offer_stands read is not the guard (the receipt insert is); two simultaneous receipt inserts land exactly one; a repeat after a restart (key rows gone) is 409 room_moved_on."
+    },
+    {
+      "file": "unit/test_4281_turn_actor_frozen_matrix.py",
+      "feature": "#4281",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "#4281: the frozen rating matrix of turn_actor over a spec'd fake built from one table of users and one ownership map (_turn_tier_world.World): a user id, the Workspace branch, every owner-configured trigger plus __manual__ and '', schedule-backed runs (live, soft-deleted, read raises, another agent's, no recorded creator), creator admin/owner/share/dangling, and an agent whose owner user row is gone. Each row x visitor_shell on/off asserts the full triple (no person id on an owner row), shell_allowed, restricts_standing_work and turn_person. Characterization: green at the base (A0, 35041e532) and after; mutants leaking the creator on an owner row (14 cases), swapping PERSON->VISITOR (8 and 18 cases) and reading the tier through get_agent_owner (4 cases) each turn it red."
+    },
+    {
+      "file": "unit/test_4281_schedule_run_tier.py",
+      "feature": "#4281",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "#4281: schedule_run_tier's cause per row (creator_owner_tier, no_recorded_creator, creator_not_owner_tier, creator_missing, agent_has_no_owner, schedule_unreadable), turn_actor as its projection, a failing cause lookup -> unknown with the tier unchanged, the cause never on the fence path, remedies, the RunTierLookups memo (one read per creator/owner; a preloaded memo makes no query), and the turn-tier answer's cause/schedule/creator/remedy fields (null on other turns, no full email, worst case <=2048 bytes)."
+    },
+    {
+      "file": "unit/test_4281_schedule_read_fields.py",
+      "feature": "#4281",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "#4281: through the real schedules and ops routers, real get_current_user and real JWTs/agent key on SQLite: list/get/create/PUT/enable/disable and GET /api/ops/schedules carry runs_as, runs_as_reason, created_by_you and created_by; a share holder and an agent key acting for one see no creator names; a demoted creator flips the flag on the next read; a dangling creator reads creator_missing; a failed rating reads null, never owner; D2: switching on a shared-person schedule on gemini-cli/codex is 409 schedule_cannot_run_for_creator_on_runtime, warn on Claude Code and on a Docker fault; a 20-schedule list costs what a 2-schedule one does, and the fleet read costs the same on 3 and 30 agents; the memo and the bulk reads agree with the database."
     }
   ]
 }

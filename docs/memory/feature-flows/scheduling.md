@@ -23,6 +23,7 @@ The Agent Scheduling feature enables users to automate agent tasks by configurin
 - **Make Repeatable** - Create schedule from existing task execution (2026-01-12)
 - **Configurable Timeout** - Per-schedule timeout (5m, 15m, 30m, 1h, 2h) (2026-02-20)
 - **Tool Restrictions** - Per-schedule allowed tools list (null = all tools) (2026-02-20)
+- **Run tier on every read** - each schedule says what access its runs get and why (`runs_as`, `runs_as_reason`, `created_by_you`, `created_by`), computed live from its creator; switching on a shared-person schedule on a Gemini/Codex agent is refused (#4281, see "Run Tier" below)
 
 **Refactored (2025-12-31):**
 - Access control via `AuthorizedAgent` dependency (not inline checks)
@@ -135,6 +136,30 @@ schedules                         validate cron expression          INSERT agent
 - `src/backend/routers/schedules.py:85-113` - create_schedule endpoint
 - `src/backend/db/schedules.py:99-168` - create_schedule() with next_run_at calculation
 - `src/scheduler/service.py:224-316` - _sync_schedules() auto-detects new schedules
+
+### 1a. Run Tier (#4281)
+
+A schedule's runs are rated by its creator (`agent_schedules.owner_id`): an admin or the agent's owner gives owner-tier runs, anyone else a shared person's (no shell, no owner-added tools). Every read says which, computed live:
+
+```
+GET/POST/PUT /api/agents/{name}/schedules[/{id}]      routers/schedules.py
+POST .../enable | .../disable                          _ScheduleView (once per request:
+GET /api/ops/schedules (routers/ops.py)                  viewer tier, "you", RunTierLookups memo)
+        |                                                       |
+        v                                                       v
+turn_tier_service.schedule_read_fields(lookups, agent, schedule, show_creator, viewer_id)
+        -> schedule_run_tier(lookups, agent, schedule) -> RunTier(tier, kind, cause, creator_id)
+             _schedule_tier  (the creator rule; turn_actor reads the same function)
+             schedule_run_cause (total: a failed lookup -> "unknown", the tier stands)
+        -> {runs_as, runs_as_reason{code,message}, created_by_you, created_by}
+```
+
+- `runs_as`: `owner` | `shared_person` | null (the tier lookup failed; never a guessed owner).
+- Causes: `creator_owner_tier`, `no_recorded_creator` (owner); `creator_not_owner_tier`, `creator_missing`, `agent_has_no_owner` (shared person); `unknown`.
+- `created_by` (display name, else username) only for viewer tier owner or key; a share holder, or an agent key acting for one, gets `created_by_you` only.
+- The fleet read preloads the memo with `db.get_agent_owners` + `db.get_users_by_ids` (two queries in all).
+- Create (enabled), `POST .../enable` and a PUT that turns a disabled schedule on: on a Gemini/Codex agent, a shared-person rating is 409 `schedule_cannot_run_for_creator_on_runtime` (`_refuse_if_it_could_never_run`). On Claude Code it is allowed and the response says so. The runtime comes from `docker_utils.agent_runtime_async`, which falls back to Claude Code.
+- The agent's hook reads the same answer at run time: `GET /api/agents/{name}/executions/{id}/turn-tier` adds `cause`, `schedule`, `creator`, `remedy` for a schedule-backed shared turn (`turn_tier_service.turn_tier_answer`).
 
 ### 1b. Make Repeatable Flow (Create Schedule from Task)
 
