@@ -224,7 +224,8 @@ def test_generic_put_routes_retention_windows_to_the_validated_endpoint():
     # table) and subscription_failure_event_retention_days (which converted a
     # hardcoded 24h sweep into a real window).
     # trinity-enterprise#478 added metrics_retention_days (recorded points).
-    assert len(RETENTION_OPS_KEYS) == 12
+    # trinity-enterprise#165 added guardrail_event_retention_days.
+    assert len(RETENTION_OPS_KEYS) == 13
 
     # And the redirect is no longer a hand-maintained subset: EVERY validated
     # ops key has exactly one write path, so a key minted tomorrow inherits the

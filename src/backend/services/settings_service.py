@@ -84,6 +84,7 @@ OPS_SETTINGS_DESCRIPTIONS = {
     "operator_queue_aging_hours": "Hours a pending operator-queue item may wait before it is marked as aging on the card and the filing agent receives a receipt (0 = disabled; default: 24, #2915)",
     "operator_queue_retention_days": "Days to retain terminal operator_queue rows (acknowledged/cancelled/expired; default: 90, 0 = disabled, #1142)",
     "agent_reminders_retention_days": "Days to retain terminal agent_reminders rows (fired/cancelled/failed; default: 90, 0 = disabled, #1296)",
+    "guardrail_event_retention_days": "Days to retain guardrail events an agent reported, counted from when they arrived (default: 90, 0 = disabled, trinity-enterprise#165)",
     "subscription_headroom_retention_days": "Days to retain subscription headroom probe history used for utilization trends (default: 30, 0 = disabled, ent#433)",
     "subscription_failure_event_retention_days": "Days to retain subscription rate-limit/auth failure events (default: 30, 0 = disabled; was a hardcoded 24h sweep before ent#433)",
     "backup_retention_days": "Days to retain database-backup artifacts in /data/backups (default: 14, bounds 1-3650 — 0 is invalid; the newest 3 artifacts are always kept; disable backups via DB_BACKUP_ENABLED=false, #2216)",
