@@ -254,7 +254,7 @@ Claude Code applies settings `env` from `~/.claude/settings.json` and the worksp
 
 ### Vendor-traffic opt-out — `managed-settings.d/70-vendor-telemetry.json` (trinity-enterprise#1093)
 
-A static, root-owned `0444`, env-only drop-in setting `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `DISABLE_TELEMETRY` and `DISABLE_ERROR_REPORTING` to `1`, so Claude Code sends Anthropic no usage telemetry (including the per-file content hash on reads) and no error reports. The Dockerfile `ENV` carries the same names, because some gates fire before settings load. All three names, plus `CLAUDE_CODE_MANAGED_SETTINGS_PATH` and `CLAUDE_CODE_DISABLE_ADMIN_ENV_UNION`, are in `execution_env.PROTECTED_KEYS`. Nothing rewrites it at boot.
+A static, root-owned `0444`, env-only drop-in setting `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `DISABLE_TELEMETRY` and `DISABLE_ERROR_REPORTING` to `1`, so Claude Code sends Anthropic no usage telemetry (including the per-file content hash on reads) and no error reports. The Dockerfile `ENV` carries the same names as defence in depth: it puts the values in `process.env` before any settings are read and in `docker inspect`. A live capture showed the drop-in is the layer that holds; with it removed, `""` in the agent's own settings file cancels the `ENV`. All three names, plus `CLAUDE_CODE_MANAGED_SETTINGS_PATH` and `CLAUDE_CODE_DISABLE_ADMIN_ENV_UNION`, are in `execution_env.PROTECTED_KEYS`. Nothing rewrites it at boot.
 
 ### Hook registration — `hooks/managed-settings.json`
 
