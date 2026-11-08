@@ -159,7 +159,45 @@ turn_tier_service.schedule_read_fields(lookups, agent, schedule, show_creator, v
 - `created_by` (display name, else username) only for viewer tier owner or key; a share holder, or an agent key acting for one, gets `created_by_you` only.
 - The fleet read preloads the memo with `db.get_agent_owners` + `db.get_users_by_ids` (two queries in all).
 - Create (enabled), `POST .../enable` and a PUT that turns a disabled schedule on: on a Gemini/Codex agent, a shared-person rating is 409 `schedule_cannot_run_for_creator_on_runtime` (`_refuse_if_it_could_never_run`). On Claude Code it is allowed and the response says so. The runtime comes from `docker_utils.agent_runtime_async`, which falls back to Claude Code.
-- The agent's hook reads the same answer at run time: `GET /api/agents/{name}/executions/{id}/turn-tier` adds `cause`, `schedule`, `creator`, `remedy` for a schedule-backed shared turn (`turn_tier_service.turn_tier_answer`).
+- The agent's hook reads the same answer at run time: `GET /api/agents/{name}/executions/{id}/turn-tier` adds `cause`, `schedule`, `creator`, `remedy` (`take_over` | `repair_agent_owner`) for a schedule-backed shared turn (`turn_tier_service.turn_tier_answer`).
+
+#### Take-over (#4281 slice D)
+
+The remedy for a creator-caused `shared_person` rating: the agent's owner or an admin becomes the creator.
+
+```
+POST /api/agents/{name}/schedules/{id}/take-over        routers/schedules.py::take_over_schedule
+  dependencies=[require_person]  (agent/system/connector keys, loopback -> 403 person_required)
+  name: OwnedAgent               (owner or admin; uniform 404 — also for an agent whose owner user row is gone)
+  body ScheduleTakeOverRequest {expected_updated_at, reviewed{message, allowed_tools, model,
+                                validation_enabled, validation_prompt}, delivery?, keep_delivery_to?}
+        |
+        v
+services/schedule_take_over_service.take_over(db, agent, schedule, taker, body)
+  taker already creator           -> no-op (200, no audit)
+  schedule_run_tier == owner      -> 409 schedule_not_restricted
+  delivery to someone else (D8)   -> clear | keep + echoed address, else 409 schedule_delivers_to_another_person
+        |
+        v
+db.reassign_schedule_creator (db/schedules/crud.py)
+  _take_over_snapshot -> compare owner_id, updated_at (as an instant), reviewed fields, delivery
+  one UPDATE pinned to that snapshot (IS NOT DISTINCT FROM per column) AND NOT EXISTS
+     an execution in queued/running/pending_retry
+  SET owner_id=taker, webhook columns revoked (_webhook_revoked_values, shared with revoke_webhook_token),
+      delivery NULL when cleared, updated_at=now
+  rowcount 0 -> in_progress (409 schedule_run_in_progress) | changed (409 schedule_changed_since_review)
+        |
+        v
+audit authorization/schedule_taken_over {schedule_id, previous_creator_id, new_creator_id,
+                                         webhook_revoked, delivery_cleared}
+-> ScheduleResponse (runs_as owner)
+```
+
+- **The former creator's in-flight writes**: `update_schedule` and `delete_schedule` add `owner_id = <caller>` for a non-admin; `generate_webhook_token(schedule_id, creator_id=)` adds it when the router allowed the caller at share tier (as creator). A write authorized just before the take-over gets rowcount 0 → 403.
+- **`ScheduleResponse.can_take_over`** (`schedule_take_over_service.can_take_over`): a person at owner tier (`_ScheduleView.owner_tier_person`), not the creator, `runs_as == shared_person` with cause `creator_not_owner_tier` or `creator_missing`.
+- **Run now (D9)**: `trigger_schedule` calls `_refuse_key_run_of_a_shared_persons_schedule` — a non-person principal on a schedule not rated owner → 409 `schedule_runs_as_shared_person` before the scheduler hop. A person's manual run has the person's tier.
+- **Not yet wired**: slice C's `schedule_tier_alerts.sync(agent, creator_id)` is to be called after a successful take-over for the previous creator and for the taker (hand-off; whichever of C/D lands second adds it).
+- Tests: `tests/unit/test_4281_schedule_take_over.py`.
 
 **A restricted run says so, and the operator is told once per creator (slice C):**
 
