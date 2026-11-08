@@ -2435,7 +2435,7 @@ def register_ask_observers() -> None:
 RETURN_DECLINED = "declined"   # nothing spent: the caller wakes the agent outside the room
 RETURN_RAN = "ran"             # a room turn was dispatched; `result` says how it went
 RETURN_HELD = "held"           # the skill gate stopped it — its own observer continues
-RETURN_RAISED = "raised"       # the room dispatch raised: the wake stays owed, no second wake
+RETURN_RAISED = "raised"       # the room dispatch raised: no wake now; it stays re-offerable
 
 
 @dataclass(frozen=True)
@@ -2508,8 +2508,9 @@ async def return_ask_to_room(room_id: str, agent_name: str, *, ask_block: str,
     or a pull pilot's earlier turn holds the room lock; the room then says, in
     one clause, that the agent continues outside it (a cap adds that clause to
     its own line) and the caller runs today's wake. `RETURN_RAISED` when the
-    room dispatch raised: a turn may have started, so the caller leaves the
-    wake owed rather than waking a second time. Never raises."""
+    room dispatch raised: a turn may have started, so the caller runs no
+    ordinary wake now — but the wake is left re-offerable, so the agent's next
+    start may wake it again. Never raises."""
     try:
         room = db.get_room(room_id)
         if not room:

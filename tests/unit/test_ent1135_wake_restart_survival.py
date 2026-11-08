@@ -12,9 +12,10 @@ claim would have fired a fresh turn on every boot once re-listed. Now:
 - the re-offer lists `pending` AND `owed` answered/cancelled/dismissed rows,
   one ending turn per disposition;
 - once per process, the operator-queue poller's leader cycle re-offers them
-  after startup recovery, reclaiming only in-flight claims older than 30 s
-  that were taken before the backend booted — a long-lived worker that gains
-  the lease never takes back a sibling's live wake.
+  after startup recovery, reclaiming only in-flight claims taken before the
+  backend booted, however young — a long-lived worker that gains the lease
+  never takes back a sibling's live wake — and re-offering only endings that
+  happened before the boot, whose own ending wake died with the old process.
 
 Harness: the ent#611 `ask` fixture over the real per-process SQLite and the
 real idempotency table; the dispatch seam and Docker state stubbed.
@@ -217,21 +218,19 @@ class TestReoffer:
         assert asyncio.run(wake.ors.redispatch_pending_wakes(wake.a.agent)) == 0
         assert wake.calls == []
 
-    @pytest.mark.parametrize("older_than,dispatched", [(0, 1), (3600, 0)])
-    def test_only_an_old_in_flight_claim_is_reclaimed(self, wake, monkeypatch,
-                                                       older_than, dispatched):
+    @pytest.mark.parametrize("booted,dispatched", [("after", 1), ("before", 0)])
+    def test_only_an_in_flight_claim_older_than_the_boot_is_reclaimed(
+            self, wake, monkeypatch, booted, dispatched):
         """A claim the dead process left in flight blocks the re-dispatch
-        unless it predates this boot; a young one is this boot's own."""
+        unless it predates this boot; one taken since is this boot's own."""
         from services import idempotency_service as idem
         _held_spawns(wake, monkeypatch)
-        # the backend booted after the claim below was taken
-        monkeypatch.setattr(wake.ors, "_booted_at",
-                            datetime.now(timezone.utc) + timedelta(hours=1))
-        item = _ended(wake, f"r-5-{older_than}", "answered")
+        shift = timedelta(hours=1) if booted == "after" else -timedelta(hours=1)
+        monkeypatch.setattr(wake.ors, "_booted_at", datetime.now(timezone.utc) + shift)
+        item = _ended(wake, f"r-5-{booted}", "answered")
         idem.begin(idem.make_agent_scope(wake.a.agent),
                    wake.ors._idempotency_key(item, "approve", None))   # in flight, never completed
-        asyncio.run(wake.ors.redispatch_pending_wakes(
-            wake.a.agent, reclaim_claims_older_than=older_than))
+        asyncio.run(wake.ors.redispatch_pending_wakes(wake.a.agent, boot_reoffer=True))
         assert len(wake.calls) == dispatched
 
 
@@ -260,19 +259,18 @@ class TestBootReoffer:
         assert wake.ors.redispatch_pending_wakes_after_boot(None) == 0
         assert wake.ors.redispatch_pending_wakes_after_boot({"a": "running"}) == 1
 
-    def test_the_offer_reclaims_with_the_boot_age(self, wake, boot, monkeypatch):
+    def test_the_offer_runs_in_boot_mode(self, wake, boot, monkeypatch):
         seen = []
 
-        async def _redispatch(agent, reclaim_claims_older_than=None):
-            seen.append((agent, reclaim_claims_older_than))
+        async def _redispatch(agent, boot_reoffer=False):
+            seen.append((agent, boot_reoffer))
             return 0
 
         monkeypatch.setattr(wake.ors, "redispatch_pending_wakes", _redispatch)
         boot.cleanup.mark_startup_recovery_complete()
         wake.ors.redispatch_pending_wakes_after_boot({"a-run": "running"})
         asyncio.run(boot.offered[0]())
-        assert seen == [("a-run", wake.ors.BOOT_RECLAIM_AGE_SECONDS)]
-        assert wake.ors.BOOT_RECLAIM_AGE_SECONDS == 30
+        assert seen == [("a-run", True)]
 
 
 def test_the_poller_leader_cycle_runs_the_boot_reoffer_after_reading_states():
@@ -342,7 +340,7 @@ class TestLiveClaimAcrossWorkers:
             def now(cls, tz=None):
                 return real_datetime.now(tz) + timedelta(minutes=5)
 
-        # five minutes into that turn: the claim is far past the 30 s age
+        # five minutes into that turn: an age alone never proves its owner dead
         monkeypatch.setattr(wake.ors, "datetime", _FiveMinutesLater)
         monkeypatch.setattr(wake.ors, "_boot_reoffer_done", False)
         monkeypatch.setattr(wake.ors, "spawn_on_loop", lambda factory: offered.append(factory))
@@ -371,3 +369,81 @@ class TestLiveClaimAcrossWorkers:
         self._reoffer(wake, long_lived_leader.offered)
         assert [c["triggered_by"] for c in wake.calls] == ["operator_response"]
         assert _state(wake, long_lived_leader.item) == "woken"
+
+
+def _reoffer_after_boot(wake, monkeypatch):
+    """Run the boot re-offer the way the poller's leader cycle does."""
+    from services import cleanup_service
+    offered = []
+    monkeypatch.setattr(wake.ors, "_boot_reoffer_done", False)
+    monkeypatch.setattr(wake.ors, "spawn_on_loop", lambda factory: offered.append(factory))
+    cleanup_service.mark_startup_recovery_complete()
+    assert wake.ors.redispatch_pending_wakes_after_boot({wake.a.agent: "running"}) == 1
+    for factory in offered:
+        asyncio.run(factory())
+
+
+class TestYoungClaimTheDeadProcessLeft:
+    """F2 (PR #4367 review): the boot comparison alone proves a claim's owner
+    is dead. A claim the old process took seconds before it went away is as
+    dead as an old one; an age floor on top left that wake owed for 24 h."""
+
+    def test_a_claim_taken_just_before_the_boot_is_re_dispatched_once(self, wake, monkeypatch):
+        from services import idempotency_service as idem
+        _held_spawns(wake, monkeypatch)
+        item = _ended(wake, "f2-1", "answered")
+        idem.begin(idem.make_agent_scope(wake.a.agent),
+                   wake.ors._idempotency_key(item, "approve", None))   # the old process's claim
+        # the backend booted a moment after that claim was taken
+        monkeypatch.setattr(wake.ors, "_booted_at",
+                            datetime.now(timezone.utc) + timedelta(seconds=1))
+        _reoffer_after_boot(wake, monkeypatch)
+        assert [c["triggered_by"] for c in wake.calls] == ["operator_response"]
+        assert _state(wake, item) == "woken"
+
+
+def _set_disposed_at(item_id, when):
+    from sqlalchemy import update
+    from db.engine import get_engine
+    from db.tables import operator_queue
+    with get_engine().begin() as conn:
+        conn.execute(update(operator_queue).where(operator_queue.c.id == item_id)
+                     .values(disposed_at=when.strftime("%Y-%m-%dT%H:%M:%S.%fZ")))
+
+
+class TestBootReofferTakesOnlyPreBootEndings:
+    """F1 (PR #4367 review): the boot re-offer regroups owed endings under a
+    fresh set key, which can never match the live ending wake's own key. So an
+    ending that happened since this backend booted — its wake is live in some
+    worker, or will turn the row `pending` itself — is left to that wake."""
+
+    def _live_ending(self, wake, rid):
+        from services import idempotency_service as idem
+        item = _ended(wake, rid, "cancelled")
+        # the live ending wake holds the claim keyed on its own event set
+        idem.begin(idem.make_agent_scope(wake.a.agent),
+                   wake.ors._ending_idempotency_key(wake.a.agent, "cancelled", [item]))
+        return item
+
+    def test_a_pre_restart_ending_is_re_offered_without_a_live_one(self, wake, monkeypatch):
+        _held_spawns(wake, monkeypatch)
+        now = datetime.now(timezone.utc)
+        old = _ended(wake, "f1a-old", "cancelled")
+        _set_disposed_at(old, now - timedelta(hours=1))
+        monkeypatch.setattr(wake.ors, "_booted_at", now - timedelta(minutes=30))
+        live = self._live_ending(wake, "f1a-live")
+        _reoffer_after_boot(wake, monkeypatch)
+        assert [c["triggered_by"] for c in wake.calls] == ["operator_ending"]
+        assert "f1a-old" in wake.calls[0]["message"]
+        assert "f1a-live" not in wake.calls[0]["message"]
+        assert _state(wake, old) == "woken"
+        assert _state(wake, live) == "owed"            # still its live wake's
+
+    def test_endings_since_the_boot_are_never_re_offered(self, wake, monkeypatch):
+        _held_spawns(wake, monkeypatch)
+        monkeypatch.setattr(wake.ors, "_booted_at",
+                            datetime.now(timezone.utc) - timedelta(minutes=30))
+        live = [self._live_ending(wake, f"f1b-{n}") for n in range(2)]
+        _reoffer_after_boot(wake, monkeypatch)
+        assert [c for c in wake.calls if c["triggered_by"] == "operator_ending"] == []
+        assert [_state(wake, i) for i in live] == ["owed", "owed"]

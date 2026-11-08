@@ -600,8 +600,7 @@ async def mark_carried_wakes(execution_id: Optional[str], terminal_status: Any) 
                        execution_id, exc_info=True)
 
 
-async def redispatch_pending_wakes(agent_name: str,
-                                   reclaim_claims_older_than: Optional[int] = None) -> int:
+async def redispatch_pending_wakes(agent_name: str, boot_reoffer: bool = False) -> int:
     """Deliver the wakes this agent missed while it was not running
     (abilityai/trinity-enterprise#1108 AC #4) — once each, through the same
     path, now that it runs. Called from the agent-start hook and, since
@@ -610,10 +609,12 @@ async def redispatch_pending_wakes(agent_name: str,
     (a stable set-keyed claim). Returns how many turns were dispatched. Never
     raises; a row that still cannot be woken stays owed for the next try.
 
-    ``reclaim_claims_older_than`` (seconds; the boot re-offer only): an
-    in-flight claim that old predates this seconds-old process — its dispatch
-    died with the previous one — so it is reclaimed (#3298) and dispatched
-    once; a younger claim is this boot's own live dispatch and is left alone."""
+    ``boot_reoffer`` (the boot re-offer only): an in-flight claim taken before
+    this backend booted died with the previous process, so it is reclaimed
+    (#3298) and dispatched once; one taken since is a live dispatch and is left
+    alone. And only endings that happened before the boot are re-offered: the
+    re-offer groups them under a fresh set key, which never matches the claim
+    of an ending wake this backend is delivering now."""
     from database import db
 
     # The container is "running" the moment it is started, but the agent server
@@ -638,16 +639,17 @@ async def redispatch_pending_wakes(agent_name: str,
         return 0
     woken = 0
     endings: Dict[str, list] = {}
+    booted_at = _backend_booted_at() if boot_reoffer else None
     for row in rows:
         disposition = _disposition_of(row)
         if disposition != "answered":
-            if disposition in ("cancelled", "dismissed"):
+            if disposition in ("cancelled", "dismissed") and not (
+                    booted_at and _ended_since(row, booted_at)):
                 endings.setdefault(disposition, []).append(row)
             continue
-        if reclaim_claims_older_than is not None:
+        if boot_reoffer:
             _reclaim_stale_claim(agent_name, _idempotency_key(
-                row["id"], row.get("response") or "", row.get("response_text")),
-                reclaim_claims_older_than)
+                row["id"], row.get("response") or "", row.get("response_text")))
         try:
             execution_id = await maybe_dispatch_resume(
                 row,
@@ -661,9 +663,9 @@ async def redispatch_pending_wakes(agent_name: str,
         if execution_id:
             woken += 1
     for disposition, group in endings.items():
-        if reclaim_claims_older_than is not None:
+        if boot_reoffer:
             _reclaim_stale_claim(agent_name, _ending_idempotency_key(
-                agent_name, disposition, [r["id"] for r in group]), reclaim_claims_older_than)
+                agent_name, disposition, [r["id"] for r in group]))
         try:
             execution_id = await maybe_dispatch_ending(group, disposition=disposition)
         except Exception:  # noqa: BLE001 — never raises; belt and braces
@@ -685,14 +687,27 @@ def _disposition_of(row: Dict[str, Any]) -> str:
     return "cancelled" if row.get("status") == "cancelled" else "answered"
 
 
-def _reclaim_stale_claim(agent_name: str, key: str, older_than: int) -> None:
-    """Reclaim an in-flight wake claim older than ``older_than`` seconds AND
-    taken before this backend booted (#3298 compare-and-delete), so the boot
-    re-offer can dispatch it. A claim taken since the boot may be a live wake
-    in any worker — the re-offer runs in whichever worker holds the poller
-    lease, and that can be one that has been up for hours — so it is never
-    taken back. A key nobody holds is released again at once (this only
-    looked). Never raises."""
+def _ended_since(row: Dict[str, Any], booted_at: datetime) -> bool:
+    """Whether a cancel or dismissal happened since this backend booted — its
+    own ending wake is this backend's to deliver. A row with no readable
+    `disposed_at` predates the ledger, so it counts as before the boot."""
+    from utils.helpers import parse_iso_timestamp
+    try:
+        return parse_iso_timestamp(row["disposed_at"]) >= booted_at
+    except Exception:  # noqa: BLE001 — absent or unreadable
+        return False
+
+
+def _reclaim_stale_claim(agent_name: str, key: str) -> None:
+    """Reclaim an in-flight wake claim taken before this backend booted
+    (#3298 compare-and-delete), so the boot re-offer can dispatch it. The boot
+    comparison is the whole proof its owner is dead, so there is no age floor:
+    a claim the old process took a second before it went away is as dead as
+    an hour-old one. A claim taken since the boot may be a live wake in any
+    worker — the re-offer runs in whichever worker holds the poller lease, and
+    that can be one that has been up for hours — so it is never taken back. A
+    key nobody holds is released again at once (this only looked). Never
+    raises."""
     from services import idempotency_service
     from utils.helpers import parse_iso_timestamp
     try:
@@ -706,8 +721,7 @@ def _reclaim_stale_claim(agent_name: str, key: str, older_than: int) -> None:
         claimed = parse_iso_timestamp(decision.claimed_at)
         if claimed.tzinfo is None:
             claimed = claimed.replace(tzinfo=timezone.utc)
-        if (claimed < _backend_booted_at()
-                and (datetime.now(timezone.utc) - claimed).total_seconds() >= older_than):
+        if claimed < _backend_booted_at():
             idempotency_service.reclaim_in_flight(decision)
     except Exception:  # noqa: BLE001
         logger.warning("operator-resume: could not inspect the wake claim for agent=%s",
@@ -715,7 +729,6 @@ def _reclaim_stale_claim(agent_name: str, key: str, older_than: int) -> None:
 
 
 # abilityai/trinity-enterprise#1135 (T4): the boot re-offer, once per process.
-BOOT_RECLAIM_AGE_SECONDS = 30
 _boot_reoffer_done = False
 _booted_at: Optional[datetime] = None
 
@@ -738,7 +751,12 @@ def _backend_booted_at() -> datetime:
     `--workers` (the parent running the same interpreter — a respawned worker
     shares it), else this process's own start. Every live worker's wake claim
     is younger than it; only a claim the previous backend left is older.
-    Read once per process; with /proc unreadable, this process's first read."""
+    Read once per process; with /proc unreadable, this process's first read.
+    `btime` is whole seconds, so this can read up to a second early — the safe
+    direction: a claim is then left owed, never a live one taken back."""
+    # Dev `uvicorn --reload` keeps its parent alive across reloads, so a
+    # reloaded worker inherits the old boot time and a claim its predecessor
+    # left reads as live (owed until the agent's next start). Dev-only.
     global _booted_at
     if _booted_at is None:
         started = None
@@ -759,9 +777,10 @@ def redispatch_pending_wakes_after_boot(states: Optional[Dict[str, str]]) -> int
     gate): a dispatch before the orphan reconcile would race it. One background
     re-dispatch per RUNNING agent (`spawn_on_loop` — a wake waits out its turn,
     and the poll cycle must not), each reclaiming only in-flight claims taken
-    before the backend booted (`_backend_booted_at`) and older than
-    `BOOT_RECLAIM_AGE_SECONDS`: "once per process" is not "once per boot", and a
-    long-lived worker that gains the lease must not take back a live wake. `states is None` (Docker could not be
+    before the backend booted (`_backend_booted_at`) and re-offering only
+    endings from before it: "once per process" is not "once per boot", and a
+    long-lived worker that gains the lease must not take back, or repeat, a
+    live wake. `states is None` (Docker could not be
     asked, #2196) does nothing and tries again next cycle. Returns how many
     agents were re-offered."""
     global _boot_reoffer_done
@@ -775,7 +794,7 @@ def redispatch_pending_wakes_after_boot(states: Optional[Dict[str, str]]) -> int
     for agent_name in agents:
         try:
             spawn_on_loop(lambda agent_name=agent_name: redispatch_pending_wakes(
-                agent_name, reclaim_claims_older_than=BOOT_RECLAIM_AGE_SECONDS))
+                agent_name, boot_reoffer=True))
         except Exception:  # noqa: BLE001
             logger.exception("operator-resume: boot re-offer not scheduled for agent=%s", agent_name)
     return len(agents)
