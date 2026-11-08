@@ -225,6 +225,22 @@
 - **Tests**: `tests/unit/test_ent926_turn_tier.py`, `test_ent926_turn_tier_hook.py`, `test_ent926_runtime_turn_scope.py`, `test_ent926_agent_key_turn_scope.py`, `test_ent926_agent_route_census.py`, `test_ent1148_delegation_tier.py`, `test_ent1148_ledger_columns_guard.py`, `test_ent1148_caller_reads_stay_person.py`, `test_ent1148_fleet_reads_stay_person.py`, `test_ent1148_fan_out_source.py`; `src/mcp-server/src/turn-context.test.ts`; `src/frontend/tests/unit/guardrailsVisitorShell.spec.js`
 - **Architecture**: `architecture/security.md` §5f, §5g
 
+#### 2.12.1 A schedule's run tier is visible, named and remediable (#4281)
+- **Status**: 🚧 In progress (one sub-bullet per slice; the rating rule of §2.12 does not change)
+- **Why**: a schedule's runs are rated by its creator (§2.12). When the creator is neither an admin nor the agent's owner, every run is a shared person's turn: no shell, no owner-added MCP servers. Nothing said so: the run still ended `success`, no read showed the creator or the tier, and nothing checked at create or enable.
+- **Refusal counts on the run (slice E)**: a schedule-backed run that the turn-tier hook refused does not read as a clean `success`. The execution list (`GET /api/agents/{name}/executions`), the detail (`…/executions/{id}`) and a schedule's history (`…/schedules/{id}/executions`) carry `guardrail_refusals` and `guardrail_reporting`, which the MCP execution tools pass through.
+  - **What is counted**: the run's turn-tier refusals only, the guardrail events stored for that execution on that agent (`security.md` §28.5) whose hook is `turn_tier_guard`, whatever their code. Another hook's decision and a credential redaction are never counted, so a redaction alone never makes a run unclean.
+  - **When**: at read time, from one count per page, never at the terminal write. An event that arrives after the run ended is counted on the next read.
+  - **`guardrail_reporting` says how far the number can be trusted**: `null` means the count is complete. Otherwise it is one of:
+    - `never`: the agent has never reported guardrail events (an image from before `security.md` §28.2.2). The count is `null`, unknown, never 0.
+    - `not_claude_code`: the reporting agent is not on Claude Code, or its runtime is not on record. Gemini and Codex agents report only keepalives, so no events is no evidence of no refusals. The count is `null`, or the number of refusals that did arrive.
+    - `stale`: the agent has not reported within the stale window (`security.md` §28.5). The count is what has arrived, and may be short.
+    - `pending`: the run is still going or ended under 10 seconds ago, inside the delivery bound (`security.md` §28.2.2). The count is what has arrived so far.
+    - `unavailable`: the counts could not be read. The count is `null`, and the execution read still answers.
+  - **Not schedule-backed** (a chat, an API task, any run with no schedule): both fields are `null`. A `null` count always carries a non-null `guardrail_reporting`, so the two cases cannot be confused.
+  - **Who sees it**: whoever may read that execution (§2.12, unchanged). The count is a number, never the events.
+  - **Limits, stated**: events are agent-reported (`security.md` §28.5), so a deliberate agent can suppress its own. Events still in an agent's spool when it stops are lost (`security.md` §28.2.2), so the count can be short with no marker. The reporter state is the agent's current one, so an agent switched to Gemini or Codex reads `not_claude_code` on its older runs too.
+
 ### 2.13 Agent-Key Self-Gate (INV-8, trinity-enterprise#840)
 - **Status**: ✅ Implemented (2026-10-23)
 - **GitHub Issues**: trinity-enterprise#840 (triggered by trinity-enterprise#839, the seat-decisions route that shipped without the gate)
