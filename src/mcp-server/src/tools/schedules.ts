@@ -95,6 +95,9 @@ export function createScheduleTools(
       description:
         "List all schedules configured for an agent with their status, last/next execution times. " +
         "Returns schedule details including cron expression, message, enabled status, and timezone. " +
+        "Each schedule also says what access its runs get: `runs_as` is `owner` or `shared_person` (runs with no shell " +
+        "and no owner-added tools, because its creator is not the agent's owner or an admin), with `runs_as_reason` " +
+        "{code, message}; `created_by_you`, and `created_by` (the creator's name) when the caller may see it. " +
         "Access control: agents can only list schedules on self or permitted agents.",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent to list schedules for"),
@@ -315,6 +318,7 @@ export function createScheduleTools(
       name: "get_agent_schedule",
       description:
         "Get detailed information about a specific schedule including full configuration and execution history timestamps. " +
+        "Includes `runs_as` (`owner` | `shared_person`), `runs_as_reason`, `created_by_you` and, when the caller may see it, `created_by`. " +
         "Access control: agents can only get schedules on self or permitted agents.",
       parameters: z.object({
         agent_name: z.string().describe("Agent name"),
