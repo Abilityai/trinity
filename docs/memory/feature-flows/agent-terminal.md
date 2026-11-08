@@ -522,6 +522,10 @@ if session_duration:
     logger.info(f"Terminal session ended for {user_email}@{agent_name} (duration: {session_duration:.1f}s)")
 ```
 
+### Access changes
+
+An open terminal closes, and its shell session in the container is ended, when the account's access changes (abilityai/trinity-enterprise#863). The mechanism is in [web-terminal.md](web-terminal.md) → Side Effects → Access changes.
+
 ### Container Recreation
 
 When API key setting is changed and agent is restarted:
@@ -547,6 +551,7 @@ When API key setting is changed and agent is restarted:
 | Existing session | 4002 | "You already have an active terminal session for this agent" |
 | Container not found | 4004 | "Agent '{name}' container not found" |
 | Container not running | 4004 | "Agent '{name}' is not running" |
+| Access changed or ended (#863) | 4003 | "Your access changed. Open the terminal again to continue." / "Your access to this terminal has ended." |
 
 ### API Key Setting Errors
 
@@ -757,6 +762,7 @@ No cleanup required - sessions terminate automatically on disconnect.
 
 | Date | Change |
 |------|--------|
+| 2026-11-08 | **Terminals follow the account** (abilityai/trinity-enterprise#863): an open terminal closes with `4003` when the account's access changes, and its shell is ended. See [web-terminal.md](web-terminal.md). |
 | 2026-02-18 | **Terminal tab repositioned**: Terminal tab moved from middle of tab list to after Git tab. New tab order in visibleTabs (line 520): Tasks, Dashboard*, Schedules, Credentials, Skills, Sharing*, Permissions*, Git*, Terminal, Folders*, Public Links*, Info. Also: Logs tab and Files tab removed from AgentDetail.vue. |
 | 2026-02-15 | **Claude Max subscription support**: Updated documentation to reflect that Claude Code now uses whatever authentication is available: (1) OAuth session from `/login` (Claude Pro/Max subscription) stored in `~/.claude.json`, or (2) `ANTHROPIC_API_KEY` environment variable. Users can log in once via web terminal with Claude Max subscription, then all subsequent headless executions use their subscription instead of API billing. Updated Test Cases 13-14 to note this authentication model. |
 | 2026-01-23 | **Line number verification**: Updated all line numbers. Corrected database schema (uses `agent_ownership` table, not separate table). Added WebGL/Canvas renderer documentation. Clarified no audit logging for terminal sessions (uses Python logger). Added `--dangerously-skip-permissions` flag documentation. Added Gemini CLI test case. Added tab switching preservation note. |
