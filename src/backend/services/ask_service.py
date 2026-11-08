@@ -1935,6 +1935,9 @@ def _wake_filer(event: EndingEvent) -> None:
         for row in event.rows:
             if is_platform_minted(row) or not _wakes(row):
                 continue
+            # ent#1135 (T4): `owed` BEFORE the spawn, so a restart between this
+            # ending and the turn still finds the wake owed and re-offers it.
+            operator_resume_service.mark_wake_owed([row])
             operator_resume_service.spawn_resume_dispatch(
                 row,
                 response=row.get("response"),
@@ -1956,6 +1959,8 @@ def _wake_filer(event: EndingEvent) -> None:
     rows = [row for row in event.rows if row.get("disposed_by") != "agent" and _wakes(row)]
     if not rows:
         return
+    operator_resume_service.mark_wake_owed(
+        [row for row in rows if operator_resume_service._wakes_on_ending(row)])
     operator_resume_service.spawn_ending_dispatch(
         rows,
         disposition=event.disposition,

@@ -2586,18 +2586,19 @@ class OperatorQueueOperations:
             return result.rowcount > 0
 
     def list_pending_wakes_for_agent(self, agent_name: str) -> List[Dict]:
-        """This agent's ANSWERED asks whose wake is still owed, oldest answer
-        first — what its next start re-dispatches. An ask that ended another
-        way never reads `pending` (only the answer wake writes it), and the
-        predicate says so anyway."""
+        """This agent's ended asks whose wake is still owed — answered,
+        cancelled or dismissed, `pending` (skipped) or `owed` (being delivered
+        when the process went away; abilityai/trinity-enterprise#1135) — oldest
+        ending first: what its next start, and the first leader cycle after a
+        boot, re-dispatch. An expiry never wakes, so it never reads owed."""
         stmt = (
             select(*self._SELECT_COLS)
             .where(
                 and_(
                     operator_queue.c.agent_name == agent_name,
-                    operator_queue.c.wake_state == "pending",
+                    operator_queue.c.wake_state.in_(("pending", "owed")),
                     or_(
-                        operator_queue.c.disposition == "answered",
+                        operator_queue.c.disposition.in_(("answered", "cancelled", "dismissed")),
                         operator_queue.c.status.in_(("responded", "acknowledged")),
                     ),
                 )
@@ -2621,7 +2622,7 @@ class OperatorQueueOperations:
                 .where(
                     and_(
                         operator_queue.c.agent_name == agent_name,
-                        operator_queue.c.wake_state == "pending",
+                        operator_queue.c.wake_state.in_(("pending", "owed")),
                         operator_queue.c.request_id.in_(ids),
                     )
                 )

@@ -50,6 +50,7 @@ import asyncio
 import hashlib
 import logging
 from collections import OrderedDict
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 from services.execution_envelope import TaskExecutionErrorCode
@@ -513,6 +514,24 @@ def _set_wake_state(db, item_id: str, state: str) -> None:
                        state, item_id, exc_info=True)
 
 
+def _set_wake_states(db, items, state: str) -> None:
+    for item in items:
+        _set_wake_state(db, item["id"], state)
+
+
+def mark_wake_owed(rows) -> None:
+    """`wake_state = owed` on each row the ask sink is about to wake
+    (abilityai/trinity-enterprise#1135, T4) — synchronously, BEFORE the spawn,
+    so a restart between the ending and the turn leaves the wake findable.
+    `owed` is "being delivered": the dispatch turns it `woken` on a turn and
+    `pending` when none ran; it renders nothing in the Workspace. Best-effort,
+    like every wake-state write."""
+    from database import db
+    for row in rows or []:
+        if row.get("id"):
+            _set_wake_state(db, row["id"], "owed")
+
+
 # abilityai/trinity-enterprise#1108 AC #4: the answer wakes a composed turn
 # carries in its Execution Context line, keyed by execution id, marked `woken`
 # when THAT execution's SUCCESS terminal lands (`mark_carried_wakes`, hung off
@@ -563,12 +582,20 @@ async def mark_carried_wakes(execution_id: Optional[str], terminal_status: Any) 
                        execution_id, exc_info=True)
 
 
-async def redispatch_pending_wakes(agent_name: str) -> int:
-    """Deliver the answer wakes this agent missed while it was not running
+async def redispatch_pending_wakes(agent_name: str,
+                                   reclaim_claims_older_than: Optional[int] = None) -> int:
+    """Deliver the wakes this agent missed while it was not running
     (abilityai/trinity-enterprise#1108 AC #4) — once each, through the same
-    path, now that it runs. Called from the agent-start hook. Returns how many
-    turns were dispatched. Never raises; a row that still cannot be woken stays
-    `pending` for the start after this one."""
+    path, now that it runs. Called from the agent-start hook and, since
+    abilityai/trinity-enterprise#1135, once after a backend boot. Answers wake
+    one turn each; cancelled and dismissed asks wake ONE turn per disposition
+    (a stable set-keyed claim). Returns how many turns were dispatched. Never
+    raises; a row that still cannot be woken stays owed for the next try.
+
+    ``reclaim_claims_older_than`` (seconds; the boot re-offer only): an
+    in-flight claim that old predates this seconds-old process — its dispatch
+    died with the previous one — so it is reclaimed (#3298) and dispatched
+    once; a younger claim is this boot's own live dispatch and is left alone."""
     from database import db
 
     # The container is "running" the moment it is started, but the agent server
@@ -592,7 +619,17 @@ async def redispatch_pending_wakes(agent_name: str) -> int:
         logger.exception("operator-resume: pending wakes unreadable for agent=%s", agent_name)
         return 0
     woken = 0
+    endings: Dict[str, list] = {}
     for row in rows:
+        disposition = _disposition_of(row)
+        if disposition != "answered":
+            if disposition in ("cancelled", "dismissed"):
+                endings.setdefault(disposition, []).append(row)
+            continue
+        if reclaim_claims_older_than is not None:
+            _reclaim_stale_claim(agent_name, _idempotency_key(
+                row["id"], row.get("response") or "", row.get("response_text")),
+                reclaim_claims_older_than)
         try:
             execution_id = await maybe_dispatch_resume(
                 row,
@@ -605,10 +642,85 @@ async def redispatch_pending_wakes(agent_name: str) -> int:
             continue
         if execution_id:
             woken += 1
+    for disposition, group in endings.items():
+        if reclaim_claims_older_than is not None:
+            _reclaim_stale_claim(agent_name, _ending_idempotency_key(
+                agent_name, disposition, [r["id"] for r in group]), reclaim_claims_older_than)
+        try:
+            execution_id = await maybe_dispatch_ending(group, disposition=disposition)
+        except Exception:  # noqa: BLE001 — never raises; belt and braces
+            logger.exception("operator-resume: ending re-dispatch raised for agent=%s", agent_name)
+            continue
+        if execution_id:
+            woken += 1
     if rows:
         logger.info("operator-resume: re-dispatched %d of %d pending wake(s) for agent=%s on start",
                     woken, len(rows), agent_name)
     return woken
+
+
+def _disposition_of(row: Dict[str, Any]) -> str:
+    """How a listed row ended. A row with no ledger value is an answer (what
+    the list held before ent#1135), unless its status says cancelled."""
+    if row.get("disposition"):
+        return row["disposition"]
+    return "cancelled" if row.get("status") == "cancelled" else "answered"
+
+
+def _reclaim_stale_claim(agent_name: str, key: str, older_than: int) -> None:
+    """Reclaim an in-flight wake claim older than ``older_than`` seconds
+    (#3298 compare-and-delete), so the boot re-offer can dispatch it. A key
+    nobody holds is released again at once (this only looked). Never raises."""
+    from services import idempotency_service
+    from utils.helpers import parse_iso_timestamp
+    try:
+        decision = idempotency_service.begin(
+            idempotency_service.make_agent_scope(agent_name), key)
+        if not decision.replay:
+            idempotency_service.fail(decision)
+            return
+        if not decision.in_flight or not decision.claimed_at:
+            return
+        claimed = parse_iso_timestamp(decision.claimed_at)
+        if claimed.tzinfo is None:
+            claimed = claimed.replace(tzinfo=timezone.utc)
+        if (datetime.now(timezone.utc) - claimed).total_seconds() >= older_than:
+            idempotency_service.reclaim_in_flight(decision)
+    except Exception:  # noqa: BLE001
+        logger.warning("operator-resume: could not inspect the wake claim for agent=%s",
+                       agent_name, exc_info=True)
+
+
+# abilityai/trinity-enterprise#1135 (T4): the boot re-offer, once per process.
+BOOT_RECLAIM_AGE_SECONDS = 30
+_boot_reoffer_done = False
+
+
+def redispatch_pending_wakes_after_boot(states: Optional[Dict[str, str]]) -> int:
+    """Re-offer the wakes a backend restart dropped — once per process, from
+    the operator-queue poller's LEADER cycle, and only after startup recovery
+    has finished (`cleanup_service.is_startup_recovery_complete`, the #748
+    gate): a dispatch before the orphan reconcile would race it. One background
+    re-dispatch per RUNNING agent (`spawn_on_loop` — a wake waits out its turn,
+    and the poll cycle must not), each reclaiming only in-flight claims older
+    than `BOOT_RECLAIM_AGE_SECONDS`. `states is None` (Docker could not be
+    asked, #2196) does nothing and tries again next cycle. Returns how many
+    agents were re-offered."""
+    global _boot_reoffer_done
+    if _boot_reoffer_done or states is None:
+        return 0
+    from services.cleanup_service import is_startup_recovery_complete
+    if not is_startup_recovery_complete():
+        return 0
+    _boot_reoffer_done = True
+    agents = sorted(name for name, state in states.items() if state == "running")
+    for agent_name in agents:
+        try:
+            spawn_on_loop(lambda agent_name=agent_name: redispatch_pending_wakes(
+                agent_name, reclaim_claims_older_than=BOOT_RECLAIM_AGE_SECONDS))
+        except Exception:  # noqa: BLE001
+            logger.exception("operator-resume: boot re-offer not scheduled for agent=%s", agent_name)
+    return len(agents)
 
 
 def _framed_ending(items, disposition: str, reason: Optional[str], *, to_room: bool = False) -> str:
@@ -734,6 +846,9 @@ async def maybe_dispatch_ending(
     except Exception:  # noqa: BLE001 — "could not ask" is None, never a raise
         state = None
     if state in ("stopped", "missing"):
+        # ent#1135 (T4): the ending wake gets the answer's lifecycle — owed
+        # until a turn runs, re-offered on the agent's next start.
+        _set_wake_states(db, items, "pending")
         await _audit_ending(
             platform_audit_service, AuditEventType, agent_name, item_ids, disposed_by_email,
             disposition=disposition, batch_id=batch_id,
@@ -772,6 +887,7 @@ async def maybe_dispatch_ending(
         )
     if returned is not None and returned.kind == "held":
         _complete_claim(idem, None)
+        _set_wake_states(db, items, "woken")
         await _audit_ending(
             platform_audit_service, AuditEventType, agent_name, item_ids, disposed_by_email,
             disposition=disposition, batch_id=batch_id,
@@ -807,6 +923,23 @@ async def maybe_dispatch_ending(
             disposition=disposition, batch_id=batch_id,
             execution_id=None, status="dispatch_error", error=type(exc).__name__,
         )
+        _set_wake_states(db, items, "pending")
+        return None
+
+    if _never_reached_the_agent(result):
+        # ent#1135 (T4): no turn ran — still owed, claim released (the
+        # answer path's rule), so the set-keyed claim cannot replay into nothing.
+        if idem is not None:
+            try:
+                idempotency_service.fail(idem)
+            except Exception:
+                logger.exception("operator-resume: idempotency release failed")
+        _set_wake_states(db, items, "pending")
+        await _audit_ending(
+            platform_audit_service, AuditEventType, agent_name, item_ids, disposed_by_email,
+            disposition=disposition, batch_id=batch_id,
+            execution_id=result.execution_id, status=result.status, error=result.error,
+        )
         return None
 
     if idem is not None:
@@ -815,6 +948,7 @@ async def maybe_dispatch_ending(
         except Exception:
             logger.exception("operator-resume: idempotency complete failed")
 
+    _set_wake_states(db, items, "woken")
     await _audit_ending(
         platform_audit_service, AuditEventType, agent_name, item_ids, disposed_by_email,
         disposition=disposition, batch_id=batch_id,
