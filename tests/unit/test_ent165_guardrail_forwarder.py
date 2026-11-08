@@ -640,3 +640,12 @@ def test_the_post_uses_the_agents_own_key_and_its_own_route(monkeypatch):
     assert seen["url"] == "http://backend:8000/api/agents/agent%20a/guardrail-events"
     assert seen["headers"] == {"Authorization": "Bearer trinity_mcp_own_key"}
     assert seen["body"]["events"] == []
+
+
+def test_a_reachable_agent_never_reads_stale():
+    """The platform marks an agent `stale` after 15 minutes of silence
+    (ent#165 S1, `STALE_AFTER_SECONDS`). A keepalive plus the longest 5xx
+    backoff must stay inside that, or a healthy agent behind a flaky backend
+    would read as not reporting."""
+    platform_stale_after = 15 * 60
+    assert ge.KEEPALIVE_SECONDS + ge.BACKOFF_MAX_SECONDS < platform_stale_after
