@@ -1,6 +1,18 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent863_socket_door_account_state.py",
+      "feature": "trinity-enterprise#863",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "auth",
+        "unit",
+        "security"
+      ],
+      "description": "Socket doors apply the #995 account-state check HTTP requests apply: the shared socket decoder dependencies.decode_token returns None for a deactivated account (users.suspended_at set; creator and admin) and the identity once the column is cleared (None or empty string); the real agent-terminal and system-agent-terminal handlers close 4001 before the container lookup for a deactivated account and reach it for a reactivated one. Stubs are patched through decode_token.__globals__ so the read row is the one asserted."
+    },
+    {
       "file": "unit/test_ent1148_delegation_tier.py",
       "feature": "trinity-enterprise#1148",
       "added": "2026-11-07",
