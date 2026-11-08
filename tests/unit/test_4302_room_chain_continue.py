@@ -478,6 +478,29 @@ def test_an_agent_or_system_key_reads_the_offer_but_may_not_continue(env, who):
     assert _get(env, BOB()).json()["paused_chain"] == {"seq": pause["seq"], "next": ["agent-a"]}
 
 
+def test_a_key_whose_tool_access_removes_post_to_room_is_refused_and_writes_nothing(env):
+    """The posting-rights check (trinity-enterprise#341) runs on Continue as on
+    `/messages`: a seated agent whose enforced tool list names `post_to_room`
+    is refused by tool access, before the membership check and the key claim —
+    not merely by the service's later `not_a_person`."""
+    from database import db as platform_db
+    from services import tool_access_profiles as tap
+    pause = _pause(env)
+    platform_db.set_guardrails_config(
+        "agent-a", {"disallowed_tools": [tap.mcp_name("post_to_room")]})
+    seen = len(env.claims)
+
+    r = _continue(env, _agent_key("agent-a"), pause["seq"], key="k-blocked")
+
+    assert r.status_code == 403, r.text
+    detail = r.json()["detail"]
+    assert isinstance(detail, str) and "post_to_room" in detail and "tool access" in detail
+    assert env.claims[seen:] == []
+    assert _of_kind(env, "chain_continued") == []
+    assert len(env.calls) == 2
+    assert _get(env, BOB()).json()["paused_chain"] == {"seq": pause["seq"], "next": ["agent-a"]}
+
+
 def test_a_non_member_gets_the_uniform_404_and_claims_no_key(env):
     pause = _pause(env)
     seen = len(env.claims)
