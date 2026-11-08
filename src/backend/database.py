@@ -1375,6 +1375,12 @@ class DatabaseManager:
     def set_autonomy_enabled(self, agent_name: str, enabled: bool):
         return self._agent_ops.set_autonomy_enabled(agent_name, enabled)
 
+    def transfer_agent_ownership(self, agent_name: str, *, to_user_id: int, expect: dict):
+        """Re-own an agent and its owner-carrying rows under a CAS (ent#1147)."""
+        return self._agent_ops.transfer_agent_ownership(
+            agent_name, to_user_id=to_user_id, expect=expect
+        )
+
     def get_all_agents_autonomy_status(self):
         return self._agent_ops.get_all_agents_autonomy_status()
 
