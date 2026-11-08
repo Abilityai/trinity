@@ -61,7 +61,12 @@ collaboration edges after a laptop sleep.
 
 **2. Single stream with `scope` field, not two streams**
 - Stream key: `trinity:events`
-- Every XADD carries `scope: "all" | "scoped"` and optional `agent_name`
+- Every XADD carries `scope: "all" | "scoped" | "control"` and optional `agent_name`
+- `scope=control` (`SCOPE_CONTROL`, trinity-enterprise#863) is a message
+  between workers, never a client event: `_fanout` hands it to the injected
+  control handler and returns before any roster read or delivery, and
+  `_event_is_visible` has no branch for it, so no `/ws` or `/ws/events` slot
+  (admins included) receives it, live or on replay
 - `_event_is_visible(slot, scope, agent_name, agent_names, event_kind)` enforces:
   - `/ws` clients (`scope=SCOPE_SCOPED` events never reach them) see a
     `scope=all` event only when **every** agent the payload names is one they
@@ -223,7 +228,9 @@ StreamDispatcher._reader_loop (single background task per process)
    │ updates self._last_stream_id
    ▼
 StreamDispatcher._fanout(entry_id, fields)
-   │ deserialize + inject _eid into payload
+   │ deserialize
+   │ scope == "control" → control handler (live_connections.handle_control), return
+   │ inject _eid into payload
    ▼
 for each slot in self._clients:
    │ if _event_is_visible(slot, scope, agent_name):
@@ -274,7 +281,17 @@ _catchup(client_id, slot, last_event_id, catchup_max)
   role, email or password changed → `CHANGED` (4000 `scope changed`). The tick
   runs every `RECHECK_INTERVAL_S` in every worker; `notify_account_changed` /
   `notify_key_changed` run the same comparison at once for one account or key
-  (the role route calls the first after its write). The closer unregisters the
+  (the role route and a password change call the first after their write; the
+  MCP key revoke and delete routes call the second, so only the streams opened
+  with that key close). Each `notify_*` also publishes one `scope=control`
+  event (`{"recheck": "account", "username": …}` or `{"recheck": "key",
+  "key_id": …}`) through the publisher `main.py` injects
+  (`_publish_live_connection_control` → `event_bus.publish`); every worker's
+  dispatcher hands it to `live_connections.handle_control`, which runs the same
+  targeted re-check against that worker's own read and publishes nothing, so
+  an event is never republished. The publishing worker reads its own event
+  too; a connection that already matches the account (one that reconnected at
+  the new scope) stays open. The closer unregisters the
   dispatcher slot before it closes the socket, so the slot's consumer never
   sends after the close frame; the handler returns through its `finally`.
 - **Authentication**: `/ws` requires a single-use opaque ticket minted via
@@ -349,8 +366,9 @@ Gate checks (see orchestration reliability plan, Tier 2.5):
 | Service | `src/backend/services/ws_identity_service.py` | ent#467 `/ws` identity + agent scope (`resolve_ws_identity`, `accessible_agents_for`); `/ws/events` scope (`event_stream_identity`) and the owner re-read behind every non-admin event-stream roster (`event_stream_roster_reader`, trinity-enterprise#863) |
 | Tests | `tests/test_event_bus.py` | 23 unit tests — envelope, scope visibility, eviction, slow-consumer resync, monotonic cursor guard, catchup trim detection |
 | Tests | `tests/unit/test_ent467_ws_agent_scope.py` | 36 tests — payload agent-identity vocabulary, `/ws` visibility rule, both delivery paths, roster refresh, fail-closed identity, AST discovery guard over every `/ws` broadcast |
-| Service | `src/backend/services/live_connections.py` | trinity-enterprise#863 — per-worker registry of open `/ws` and `/ws/events` connections, the one snapshot comparison, the 15 s re-check loop and the thread-safe `notify_*` |
+| Service | `src/backend/services/live_connections.py` | trinity-enterprise#863 — per-worker registry of open `/ws` and `/ws/events` connections, the one snapshot comparison, the 15 s re-check loop, the thread-safe `notify_*` (which also publish a control event) and `handle_control` (the receiving side, local only) |
 | Tests | `tests/unit/test_ent863_live_connections.py` | trinity-enterprise#863 — the comparison (role/email/password → 4000; deactivated, gone or key inactive → 4001), the role route's immediate re-check, two workers, failures (tick read keeps open, immediate read closes, a raising closer), the plain-thread notify, register-before-read ordering, and the real `/ws` and `/ws/events` handlers closing with their codes and unregistering their slot |
+| Tests | `tests/unit/test_ent863_control_events.py` | trinity-enterprise#863 — the control event: published once per change, handed to every worker's registry, re-checked locally and never republished; reaches no client live or on replay, admins included; the publisher's own echo closes nothing that matches; two workers over one stream; failing publish or handler contained; the real key revoke/delete routes close only that key's streams on every worker; a password change closes the account's connections; `main.py` wiring |
 | Tests | `tests/unit/test_ent863_event_stream_roster.py` | trinity-enterprise#863 — the real `/ws/events` handler wires the owner re-read for every non-admin key and `refresh` reads the owner's current row; the reader's owner checks and current email; a change during an in-flight read; the periodic re-read (interval, one read at a time, no read when idle, survives a failing read, stops with the dispatcher) |
 
 ## Constants
