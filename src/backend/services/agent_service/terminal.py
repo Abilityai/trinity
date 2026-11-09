@@ -51,13 +51,16 @@ _ACCESS_CLOSE = {
 # that outlives its leader's HUP is still found by its session. HUP first, then
 # KILL what is left. It runs as the terminal's
 # own user: a container root without CAP_SYS_PTRACE cannot read another user's
-# environment, and the user's processes are the ones it must find. Exit status 1
+# environment, and the user's processes are the ones it must find. A zombie in
+# one of those sessions is already dead (only its parent's wait is missing), so
+# it is not counted. Exit status 1
 # when something survived the KILL. Plain POSIX sh with sed/cut/tr/grep, read
 # from /proc, so it needs nothing beyond the base image.
 _END_SHELL_SCRIPT = r"""
 m="TRINITY_TERMINAL_SESSION=$1"
 self=$$
 sid_of() { sed -e 's/^.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f4; }
+state_sid_of() { sed -e 's/^.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f1,4; }
 marked() { tr '\0' '\n' 2>/dev/null < "/proc/$1/environ" | grep -qxF "$m"; }
 init_sid=$(sid_of 1)
 sids=" "
@@ -78,7 +81,9 @@ targets() {
     for d in /proc/[0-9]*; do
       p=${d#/proc/}
       [ "$p" = "$self" ] && continue
-      case "$sids" in *" $(sid_of "$p") "*) pids="$pids $p" ;; esac
+      f=$(state_sid_of "$p")
+      [ "${f%% *}" = Z ] && continue
+      case "$sids" in *" ${f#* } "*) pids="$pids $p" ;; esac
     done
   fi
 }
