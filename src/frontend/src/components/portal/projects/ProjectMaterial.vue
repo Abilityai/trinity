@@ -15,6 +15,8 @@
       <span class="flex-1"></span>
       <BaseButton v-if="canContribute && !archived" size="sm" variant="secondary" data-testid="project-add-item" @click="openPicker">Add from…</BaseButton>
     </div>
+    <!-- trinity-enterprise#1132: the withheld control, said where it would be. -->
+    <p v-if="withheld" class="text-xs text-gray-600 dark:text-gray-300" data-testid="project-material-withheld">{{ withheld }}</p>
     <InlineError v-if="error" :message="error" @dismiss="error = ''" />
 
     <p v-if="!files.length && !reports.length && !decisions.length" class="rounded-lg border border-dashed border-gray-300 dark:border-gray-700 p-6 text-center text-sm text-gray-600 dark:text-gray-300" data-testid="project-material-empty">
@@ -118,7 +120,7 @@ import ReportSummary from '@/components/reports/ReportSummary.vue'
 import { useProjectsStore } from '@/stores/projects'
 import { formatRelativeTime, formatLocalDateTime } from '@/utils/timestamps'
 import { humanSize } from '@/components/portal/portalFiles'
-import { projectErrorMessage } from './projectsUtils'
+import { projectErrorMessage, withheldLine } from './projectsUtils'
 
 const props = defineProps({
   project: { type: Object, required: true },
@@ -155,6 +157,7 @@ const files = computed(() => props.project.files || [])
 const reports = computed(() => props.project.reports || [])
 const decisions = computed(() => (props.guest ? [] : props.project.decisions || []))
 const canContribute = computed(() => props.project.can?.contribute === true)
+const withheld = computed(() => (props.guest ? '' : withheldLine({ project: props.project, myEmail: props.myEmail, canContribute: canContribute.value, archived: archived.value }, 'files and reports')))
 const archived = computed(() => Boolean(props.project.archived_at))
 const canShare = computed(() => props.project.can?.manage_members === true && !archived.value)
 const linked = computed(() => new Set([...files.value, ...reports.value, ...decisions.value].map((i) => i.id)))
