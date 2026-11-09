@@ -21,7 +21,7 @@ Three rules from the event contract (ent#165 plan §6.4) are load-bearing:
 * **Only the turn-tier hook counts** (`by_hook_code["turn_tier_guard:*"]`). A
   credential redaction, or another hook's deny, never makes a run unclean.
 * **"No events" is zero only when the agent is known to be able to send them**:
-  a Claude Code agent that is reporting. An agent that never reported, or one on
+  a Claude Code agent that is reporting, and has reported since the run ended. An agent that never reported, or one on
   Gemini/Codex (no hooks: its forwarder sends keepalives only, so it reads
   `reporting`; review X12), reads `None`, unknown -- never 0, which would be a
   false "clean".
@@ -101,6 +101,14 @@ def reading_for(entry: Optional[Dict[str, Any]], reporting: Dict[str, Any],
         return n, READING_STALE
     ended = _as_utc(completed_at)
     if ended is None or now - ended < timedelta(seconds=PENDING_SECONDS):
+        return n, READING_PENDING
+    # The delivery bound holds only while the forwarder can deliver; one that
+    # cannot still reads `reporting` until STALE_AFTER_SECONDS, with this run's
+    # refusals in its spool. Every successful post carries the spool's backlog,
+    # so the count is complete only once a report arrived after the run ended
+    # (at the latest the next keepalive, <= 5 min).
+    last_report = _as_utc(reporting.get("last_report_at"))
+    if last_report is None or last_report < ended:
         return n, READING_PENDING
     return n, None
 

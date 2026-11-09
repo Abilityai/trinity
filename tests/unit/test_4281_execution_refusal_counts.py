@@ -256,6 +256,37 @@ def test_the_real_terminal_write_reads_pending_at_once(world):
     assert _reading(_detail(world, run)) == (0, "pending")
 
 
+def test_a_run_the_reporter_has_not_reported_past_is_pending_not_a_complete_zero(world):
+    """The delivery bound holds only while the forwarder can deliver. One that
+    cannot (transport errors, 5xx back-off, a refused key) still reads
+    `reporting` for STALE_AFTER_SECONDS while the run's refusals sit in its
+    spool, so "no events" is evidence only once a report arrived after the run
+    ended: every successful post carries the spool's backlog."""
+    _keepalive()
+    run = _run(world, ended_seconds_ago=30)
+    # The last report the backend received came 2.5 min before the run ended.
+    assert svc.record_report(AGENT, "claude-code", 0, _iso_ago(180))
+    assert svc.reporting_state(AGENT)["state"] == "reporting"
+
+    assert _reading(_list(world)[run]) == (0, "pending")
+    assert _reading(_detail(world, run)) == (0, "pending")
+    assert _reading(_history(world)[run]) == (0, "pending")
+
+    # The backlog lands: the refusal is counted and the count is complete.
+    _ingest([_event(run)])
+    assert _reading(_list(world)[run]) == (1, None)
+
+
+def test_a_keepalive_after_the_run_ended_settles_a_clean_run_at_zero(world):
+    run = _run(world, ended_seconds_ago=30)
+    assert svc.record_report(AGENT, "claude-code", 0, _iso_ago(180))
+    assert _reading(_list(world)[run]) == (0, "pending")
+
+    _keepalive()
+
+    assert _reading(_list(world)[run]) == (0, None)
+
+
 def test_a_count_that_cannot_be_read_says_so_and_the_read_still_answers(world, monkeypatch):
     run = _run(world)
     _keepalive()
@@ -327,13 +358,20 @@ def test_the_markers_are_exactly_the_wire_literal():
     # Stale wins over pending: the more severe doubt is the one stated.
     ({"state": "stale", "runtime": "claude-code"}, 1, (0, "stale")),
     ({"state": "reporting", "runtime": "claude-code"}, 1, (0, "pending")),
-    ({"state": "reporting", "runtime": "claude-code"}, 60, (0, None)),
+    # Past the delivery bound, complete only once the reporter reported after the end.
+    ({"state": "reporting", "runtime": "claude-code", "last_report_at": "now"}, 60, (0, None)),
+    ({"state": "reporting", "runtime": "claude-code", "last_report_at": "before_end"}, 60, (0, "pending")),
+    ({"state": "reporting", "runtime": "claude-code"}, 60, (0, "pending")),
 ])
 def test_the_markers_go_most_severe_first(reporting, ended_ago, expected):
     from services import execution_refusals as er
 
     now = utc_now()
-    assert er.reading_for(None, reporting, now - timedelta(seconds=ended_ago), now) == expected
+    ended = now - timedelta(seconds=ended_ago)
+    stamps = {"now": to_utc_iso(now), "before_end": to_utc_iso(ended - timedelta(seconds=1))}
+    if "last_report_at" in reporting:
+        reporting = {**reporting, "last_report_at": stamps[reporting["last_report_at"]]}
+    assert er.reading_for(None, reporting, ended, now) == expected
 
 
 def test_a_naive_completed_at_is_read_as_utc():
@@ -343,4 +381,5 @@ def test_a_naive_completed_at_is_read_as_utc():
     now = utc_now()
     naive = (now - timedelta(seconds=60)).replace(tzinfo=None)
     entry = {"by_kind": {"deny": 3}, "by_hook_code": {"turn_tier_guard:shell_owner_only": 3}}
-    assert er.reading_for(entry, {"state": "reporting", "runtime": "claude-code"}, naive, now) == (3, None)
+    reporting = {"state": "reporting", "runtime": "claude-code", "last_report_at": to_utc_iso(now)}
+    assert er.reading_for(entry, reporting, naive, now) == (3, None)
