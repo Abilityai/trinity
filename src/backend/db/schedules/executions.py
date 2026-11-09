@@ -209,6 +209,31 @@ class ScheduleExecutionsMixin:
             ).scalar()
         return int(value or 0)
 
+    def get_deepest_running_chain_row(self, agent_name: str) -> Optional[Dict]:
+        """The RUNNING row of `agent_name` that `get_max_running_chain_depth` reads (#4357).
+
+        Read only when a hop is refused, so the refusal can name the execution
+        that exhausted the depth. Roots (NULL depth) are skipped — PostgreSQL
+        sorts NULLs first in DESC — and only the four columns the refusal
+        reports are read: never a person, a channel or message text. None when
+        no running row carries a depth.
+        """
+        c = schedule_executions.c
+        with get_engine().connect() as conn:
+            row = conn.execute(
+                select(c.id, c.chain_depth, c.triggered_by, c.source_agent_name)
+                .where(
+                    and_(
+                        c.agent_name == agent_name,
+                        c.status == TaskExecutionStatus.RUNNING,
+                        c.chain_depth.is_not(None),
+                    )
+                )
+                .order_by(c.chain_depth.desc().nulls_last())
+                .limit(1)
+            ).first()
+        return dict(row._mapping) if row is not None else None
+
     def get_running_turn_attribution(self, agent_name: str) -> List[Dict]:
         """Who each of `agent_name`'s RUNNING turns is for (trinity-enterprise#926).
 

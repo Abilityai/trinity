@@ -855,6 +855,11 @@ OPS_SETTINGS_DEFAULTS = {
     # source starve the rest). Chain depth bounds how deep a chain runs; this
     # bounds how often.
     "event_dispatch_max_fires_per_hour": "120",
+    # #4357: caller wakes one callee may send one delegator per one-hour Redis
+    # window (ent#1102 wakes). A wake stands at the delegator's own depth, so
+    # depth no longer bounds how many wakes follow one another; this does.
+    # "0" (or less) is unlimited — the `metrics_daily_point_cap` convention.
+    "caller_wake_max_per_hour": "120",
 }
 
 
@@ -902,6 +907,8 @@ OPS_SETTINGS_VALIDATION = {
     # #2806: the floor is 1, not 0 — no value may refuse every agent call.
     "inter_agent_max_chain_depth": ("int", 1, 32),
     "event_dispatch_max_fires_per_hour": ("int", 1, 10_000),
+    # #4357: `0` means UNLIMITED here, so the floor is 0.
+    "caller_wake_max_per_hour": ("int", 0, 10_000),
 }
 
 
@@ -924,6 +931,7 @@ ENV_BACKED_OPS_KEYS = {
     "metrics_retention_days": "METRICS_RETENTION_DAYS",
     "metrics_daily_point_cap": "METRICS_DAILY_POINT_CAP",
     "inter_agent_max_chain_depth": "INTER_AGENT_MAX_CHAIN_DEPTH",
+    "caller_wake_max_per_hour": "CALLER_WAKE_MAX_PER_HOUR",
 }
 
 _env_ops_warned: set = set()

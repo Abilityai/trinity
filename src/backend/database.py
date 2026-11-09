@@ -1974,6 +1974,10 @@ class DatabaseManager:
         """Deepest chain_depth among the agent's running rows, 0 if none (#2806)."""
         return self._schedule_ops.get_max_running_chain_depth(agent_name)
 
+    def get_deepest_running_chain_row(self, agent_name: str):
+        """The running row that set that depth, for a refusal to name (#4357)."""
+        return self._schedule_ops.get_deepest_running_chain_row(agent_name)
+
     def get_running_turn_attribution(self, agent_name: str):
         """Who each of the agent's running turns is for (trinity-enterprise#926)."""
         return self._schedule_ops.get_running_turn_attribution(agent_name)

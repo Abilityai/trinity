@@ -196,6 +196,47 @@ def add_portal_message(msg_id: str, agent_name: str, client_email: str,
         })
 
 
+def add_portal_message_once(msg_id: str, agent_name: str, client_email: str,
+                            role: str, content: str, now: str, session_id: str,
+                            source: Optional[str] = None) -> bool:
+    """Insert a platform-written row under a deterministic id, at most once
+    (trinity-enterprise#1170). True when THIS call wrote it.
+
+    The insert and the session touch are one transaction, and the touch runs
+    only when the insert landed — so a duplicate counts nothing, and there is
+    no committed row whose ``message_count`` was never advanced. Duplicates are
+    decided by ``ON CONFLICT (id) DO NOTHING`` (SQLite >= 3.24 and PostgreSQL),
+    never by catching an IntegrityError."""
+    insert_stmt = text(
+        "INSERT INTO enterprise_portal_messages "
+        "(id, agent_name, client_email, session_id, role, content, cost, created_at, source) "
+        "VALUES (:id, :agent, :email, :session, :role, :content, NULL, :now, :source) "
+        "ON CONFLICT (id) DO NOTHING"
+    )
+    touch_stmt = text(
+        "UPDATE enterprise_portal_sessions "
+        "SET last_message_at = :now, message_count = message_count + 1 "
+        "WHERE id = :id"
+    )
+    with get_engine().begin() as conn:
+        res = conn.execute(insert_stmt, {
+            "id": msg_id, "agent": agent_name, "email": (client_email or "").lower(),
+            "session": session_id, "role": role, "content": content, "now": now,
+            "source": source,
+        })
+        if res.rowcount != 1:
+            return False
+        conn.execute(touch_stmt, {"now": now, "id": session_id})
+    return True
+
+
+def portal_message_exists(msg_id: str) -> bool:
+    """Whether a row with this id exists (trinity-enterprise#1170)."""
+    stmt = text("SELECT 1 FROM enterprise_portal_messages WHERE id = :id")
+    with get_engine().connect() as conn:
+        return conn.execute(stmt, {"id": msg_id}).first() is not None
+
+
 def mark_portal_messages_held(message_ids: list, gate_hold: Optional[str]) -> None:
     """trinity#3402: mark the rows of a turn the skill gate stopped — the request
     id or `refused:<code>` — or, with None, clear a reused row's old verdict (a

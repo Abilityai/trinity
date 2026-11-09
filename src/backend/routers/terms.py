@@ -125,9 +125,13 @@ async def accept_terms(body: TermsAccept, request: Request, background: Backgrou
         # it at the redirect, which it does once, right after this call).
         # Bounded by `TERMS_INLINE_HOOK_BUDGET_S` and never a cancellation: a
         # consumer past the ceiling finishes in the background and this answers
-        # anyway. Never raises.
-        await terms_service.run_inline_acceptance_hooks(
+        # anyway. Never raises. A hook that put something in front of the
+        # person may name where it is (trinity-enterprise#1170); the door only
+        # checks it is a same-origin path.
+        landing = await terms_service.run_inline_acceptance_hooks(
             out["user_id"], out["email"], out["version"], out["accepted_at"])
+        if landing:
+            out = {**out, "landing": landing}
         # After the response, inside this request: the consumers (an invite
         # door, a member's agent) never hold the acceptance up, once per new row.
         background.add_task(terms_service.run_acceptance_hooks, out["user_id"], out["email"],

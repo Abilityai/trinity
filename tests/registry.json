@@ -61,6 +61,30 @@
       "description": "trinity-enterprise#1148 F2: GET /api/executions and GET /api/activities/timeline, read by an agent key in a shared person's turn, omit every agent that person cannot open (fail-closed on an unreadable lookup); a key in no person's turn keeps its reach with no lookup."
     },
     {
+      "file": "unit/test_4357_wake_chain_depth.py",
+      "feature": "#4357",
+      "added": "2026-11-08",
+      "categories": [
+        "unit",
+        "backend",
+        "agent-collaboration",
+        "reliability"
+      ],
+      "description": "#4357: a caller wake stands at the delegator's own depth (max(callee - 1, MAX(running caller), 0)), so twenty delegate->wake rounds and a reminder fired while the last wake runs are all admitted through the real /task depth guard; a synchronous chain is still refused past the max and answered/ended asks stay roots. The per-pair hourly wake budget caller_wake_max_per_hour (default 120, <=0 unlimited) skips and audits skipped_budget past the cap with one notification per window, fails open without Redis, and a collapsed window spends nothing."
+    },
+    {
+      "file": "unit/test_4357_depth_resets_parity.py",
+      "feature": "#4357",
+      "added": "2026-11-08",
+      "categories": [
+        "unit",
+        "backend",
+        "mcp",
+        "agent-collaboration"
+      ],
+      "description": "#4357: the MCP server's fallback depth-reset sentence (client.ts DEPTH_RESETS, used when a refusal body carries no resets) equals the backend's InterAgentDepthExceeded.RESETS, and the backend's refusal body sends that sentence, so the two copies cannot drift."
+    },
+    {
       "file": "unit/test_1168_agent_ssh_bind.py",
       "feature": "trinity-enterprise#1168",
       "added": "2026-11-07",
@@ -1809,7 +1833,7 @@
         "compose",
         "settings"
       ],
-      "description": "Every config.ENV_BACKED_OPS_KEYS variable (METRICS_RETENTION_DAYS, METRICS_DAILY_POINT_CAP, INTER_AGENT_MAX_CHAIN_DEPTH) is forwarded exactly once by docker-compose.yml / .prod.yml / .hosted.yml with an EMPTY default (${VAR:-}), no other docker-compose*.yml supplies a default, and .env.example leaves each commented but documented - so `source: env` on GET /api/settings/retention means an operator set it and the Settings rows are not locked on every install."
+      "description": "Every config.ENV_BACKED_OPS_KEYS variable (METRICS_RETENTION_DAYS, METRICS_DAILY_POINT_CAP, INTER_AGENT_MAX_CHAIN_DEPTH, CALLER_WAKE_MAX_PER_HOUR) is forwarded exactly once by docker-compose.yml / .prod.yml / .hosted.yml with an EMPTY default (${VAR:-}), no other docker-compose*.yml supplies a default, and .env.example leaves each commented but documented - so `source: env` on GET /api/settings/retention means an operator set it and the Settings rows are not locked on every install."
     },
     {
       "file": "unit/test_ent671_retention_metric_rows.py",
