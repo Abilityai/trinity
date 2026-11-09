@@ -262,6 +262,7 @@ class TestReporting:
         assert svc.reporting_state(AGENT) == {
             "state": "never",
             "last_report_at": None,
+            "first_report_at": None,
             "runtime": None,
             "dropped_total": 0,
         }
@@ -356,6 +357,84 @@ class TestFutureTimestamp:
         }
 
 
+# ---------------------------------------------------------------------------
+# Coverage start: when the agent first reported (fix round R4)
+# ---------------------------------------------------------------------------
+
+
+class TestCoverageStart:
+    """`reporting.first_report_at` lets a consumer tell "before this agent
+    reported at all" from "covered, and clean". First write wins; when the fast
+    store lost it, the earliest stored row stands in; a lost fast store with no
+    rows resets coverage to the next report (later, never earlier: the safe
+    direction)."""
+
+    def test_never_reported_has_no_coverage_start(self, db_backend, redis):
+        assert svc.reporting_state(AGENT)["first_report_at"] is None
+
+    def test_the_first_report_sets_it_and_a_later_one_does_not_move_it(
+        self, db_backend, redis, monkeypatch
+    ):
+        t0 = datetime(2026, 11, 1, 8, 0, tzinfo=timezone.utc)
+        t1 = datetime(2026, 11, 1, 9, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr(svc, "utc_now", lambda: t0)
+        _ingest([])
+        monkeypatch.setattr(svc, "utc_now", lambda: t1)
+        _ingest([_ev()])
+        state = svc.reporting_state(AGENT, now=t1)
+        assert state["first_report_at"] == _z(t0)
+        assert state["last_report_at"] == _z(t1)
+
+    def test_a_lost_fast_store_falls_back_to_the_earliest_stored_row(
+        self, db_backend, redis, monkeypatch
+    ):
+        t0 = datetime(2026, 11, 1, 8, 0, tzinfo=timezone.utc)
+        t1 = datetime(2026, 11, 1, 9, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr(svc, "utc_now", lambda: t0)
+        _ingest([_ev("a", ts=_z(t0))])
+        monkeypatch.setattr(svc, "utc_now", lambda: t1)
+        _ingest([_ev("b", ts=_z(t1))])
+        redis.flushall()
+        state = svc.reporting_state(AGENT, now=t1)
+        assert state["first_report_at"] == _z(t0)
+        assert state["last_report_at"] == _z(t1)
+
+    def test_after_a_lost_fast_store_the_next_report_resets_coverage_to_now(
+        self, db_backend, redis, monkeypatch
+    ):
+        """Rows from before the loss do not pull the start back: once the fast
+        store holds a start again, it wins (later is the safe direction)."""
+        t0 = datetime(2026, 11, 1, 8, 0, tzinfo=timezone.utc)
+        t1 = datetime(2026, 11, 1, 9, 0, tzinfo=timezone.utc)
+        monkeypatch.setattr(svc, "utc_now", lambda: t0)
+        _ingest([_ev("a", ts=_z(t0))])
+        redis.flushall()
+        monkeypatch.setattr(svc, "utc_now", lambda: t1)
+        _ingest([])
+        assert svc.reporting_state(AGENT, now=t1)["first_report_at"] == _z(t1)
+
+    def test_teardown_forgets_it(self, db_backend, redis):
+        _ingest([])
+        svc.clear_reporter(AGENT)
+        assert svc.reporting_state(AGENT)["first_report_at"] is None
+
+    def test_a_record_with_no_start_and_no_rows_starts_at_its_last_report(
+        self, db_backend, redis
+    ):
+        """A reporter hash written before the start was recorded: coverage is
+        the last report, never null while the agent reads as reporting."""
+        last = _z(datetime.now(timezone.utc))
+        redis.hset(f"{svc.REPORTER_KEY_PREFIX}{AGENT}", mapping={"last_report_at": last})
+        state = svc.reporting_state(AGENT)
+        assert (state["state"], state["first_report_at"]) == ("reporting", last)
+
+    def test_the_execution_count_seam_carries_it(self, db_backend, redis):
+        """trinity#4281 reads coverage through this seam, never the store."""
+        _ingest([_ev()])
+        out = svc.count_by_execution(AGENT, ["exec-1"])
+        assert out["reporting"]["first_report_at"] is not None
+        assert out["reporting"]["first_report_at"] <= out["reporting"]["last_report_at"]
+
 
 # ---------------------------------------------------------------------------
 # Per-agent read
@@ -415,6 +494,7 @@ class TestList:
             "reporting": {
                 "state": "never",
                 "last_report_at": None,
+                "first_report_at": None,
                 "runtime": None,
                 "dropped_total": 0,
             },

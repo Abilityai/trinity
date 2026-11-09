@@ -4763,6 +4763,10 @@ class DatabaseManager:
         """When the newest stored event for this agent arrived, or None."""
         return self._guardrail_event_ops.latest_received_at(agent_name)
 
+    def earliest_guardrail_event_received_at(self, agent_name: str):
+        """When the oldest stored event for this agent arrived, or None."""
+        return self._guardrail_event_ops.earliest_received_at(agent_name)
+
     def count_guardrail_events_by_execution(self, agent_name: str, execution_ids):
         """`(execution_id, kind, hook, code, n)` groups for this agent's rows."""
         return self._guardrail_event_ops.count_by_execution(agent_name, execution_ids)

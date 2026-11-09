@@ -128,6 +128,14 @@ class GuardrailEventOperations:
         with get_engine().connect() as conn:
             return conn.execute(stmt).scalar()
 
+    def earliest_received_at(self, agent_name: str) -> Optional[str]:
+        """When the oldest stored row for this agent arrived, or None (the
+        coverage-start fallback when Redis lost the reporter record)."""
+        stmt = select(func.min(guardrail_events.c.received_at)).where(
+            guardrail_events.c.agent_name == agent_name)
+        with get_engine().connect() as conn:
+            return conn.execute(stmt).scalar()
+
     def count_by_execution(
         self, agent_name: str, execution_ids: Iterable[str]
     ) -> List[Dict]:

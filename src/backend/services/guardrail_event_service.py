@@ -20,7 +20,9 @@ Contract rules that are load-bearing (plan §6):
 * **Only allowlisted fields are stored**, each bounded, and the free-text ones
   (`rule`, `path`) pass through the credential sanitizer as defence in depth.
 * **Reporting state** tells "no events" from "not reporting": `never`,
-  `reporting` (a report inside `STALE_AFTER_SECONDS`), `stale`.
+  `reporting` (a report inside `STALE_AFTER_SECONDS`), `stale`. Its
+  `first_report_at` is the coverage start: history before it was never
+  reported, so a consumer must not read it as clean.
 * **`occurred_at` is never later than `received_at`.** An agent's clock can run
   ahead; a future `ts` is clamped to the receive time at ingest (the reported
   value kept in `details.occurred_at_reported`), so a skewed event is neither
@@ -104,9 +106,11 @@ _MAX_TOOL_LEN = 128
 # encoded. One such event must never cost the batch or poison the read.
 _UNSTORABLE = re.compile("[\x00\ud800-\udfff]")
 
-# Liveness of the agent's forwarder. A HASH {last_report_at, runtime,
-# dropped_total} with no TTL: `stale` needs the last value to outlive the
-# silence. Cleared on the agent's teardown (`agent_runtime_state`).
+# Liveness of the agent's forwarder. A HASH {first_report_at, last_report_at,
+# runtime, dropped_total} with no TTL: `stale` needs the last value to outlive
+# the silence. `first_report_at` is written once (HSETNX), so a later report
+# never moves the coverage start. Cleared on the agent's teardown
+# (`agent_runtime_state`).
 REPORTER_KEY_PREFIX = "agent:guardrail_reporter:"
 
 
@@ -311,6 +315,8 @@ def record_report(agent_name: str, runtime: Optional[str], dropped: int, at: str
             mapping["runtime"] = runtime
         pipe = redis.pipeline()
         pipe.hset(key, mapping=mapping)
+        # First write wins: the coverage start never moves forward on a report.
+        pipe.hsetnx(key, "first_report_at", at)
         pipe.hincrby(key, "dropped_total", max(int(dropped), 0))
         pipe.execute()
         return True
@@ -336,11 +342,18 @@ def _state_for(last_report_at: str, now: datetime) -> str:
 
 
 def reporting_state(agent_name: str, now: Optional[datetime] = None) -> Dict[str, Any]:
-    """`{state, last_report_at, runtime, dropped_total}` for one agent.
+    """`{state, last_report_at, first_report_at, runtime, dropped_total}` for
+    one agent.
 
     Redis holds the forwarder's last report. When it has no record (Redis down,
     flushed or restored) the newest stored row stands in for it, because an
     agent with rows HAS reported and reading `never` would be a lie.
+
+    `first_report_at` is the coverage start: Redis's first-write-wins value,
+    else the EARLIEST stored row's receive time, else the last report. Every
+    fallback is at or after the true first report, so a lost Redis can only
+    move coverage later (more history reads "before coverage"), never earlier.
+    Null exactly when `state` is `never`.
     """
     now = now or utc_now()
     record: Dict[str, str] = {}
@@ -355,10 +368,15 @@ def reporting_state(agent_name: str, now: Optional[datetime] = None) -> Dict[str
     if not last:
         last = db.latest_guardrail_event_received_at(agent_name)
     if not last:
-        return {"state": "never", "last_report_at": None, "runtime": None, "dropped_total": 0}
+        return {"state": "never", "last_report_at": None, "first_report_at": None,
+                "runtime": None, "dropped_total": 0}
+    first = (record.get("first_report_at")
+             or db.earliest_guardrail_event_received_at(agent_name)
+             or last)
     return {
         "state": _state_for(last, now),
         "last_report_at": last,
+        "first_report_at": first,
         "runtime": record.get("runtime"),
         "dropped_total": int(record.get("dropped_total") or 0),
     }

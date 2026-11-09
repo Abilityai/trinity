@@ -91,7 +91,7 @@ CLEARED_KEYSPACES: Tuple[str, ...] = (
     # the next poll (<=15 s).
     "agent:pull_claim_denied:",
     # trinity-enterprise#165: the guardrail-event forwarder's last report
-    # (`last_report_at`, `runtime`, `dropped_total`), TTL-less so a silent
+    # (`first_report_at`, `last_report_at`, `runtime`, `dropped_total`), TTL-less so a silent
     # agent reads `stale`. Cleared ONLY on teardown (`clear_agent_runtime_state`)
     # — clearing it on every start would make a restarted agent read `never`
     # (the "older image" state) until its first keepalive.

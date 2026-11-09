@@ -3326,9 +3326,12 @@ class GuardrailEventIngestResponse(BaseModel):
 
 class GuardrailReportingState(BaseModel):
     """`never` | `reporting` | `stale` — so "no events" is never mistaken for
-    "not reporting"."""
+    "not reporting". `first_report_at` is the coverage start (ISO-8601 UTC,
+    `Z`): events before it were never reported, so history before it is not
+    "clean". Null exactly when `state` is `never`."""
     state: str
     last_report_at: Optional[str] = None
+    first_report_at: Optional[str] = None
     runtime: Optional[str] = None
     dropped_total: int = 0
 

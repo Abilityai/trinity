@@ -247,6 +247,10 @@ class TestGet:
         assert body["next_cursor"] is None
         assert body["reporting"]["state"] == "reporting"
         assert body["reporting"]["runtime"] == "claude-code"
+        # The coverage start reaches the wire (fix round R4): the response
+        # model must carry it, or the read drops it silently.
+        assert body["reporting"]["first_report_at"].endswith("Z")
+        assert body["reporting"]["first_report_at"] <= body["reporting"]["last_report_at"]
 
     def test_a_future_dated_event_reads_at_its_receive_time(self, world):
         """Fix round R3, through the real route: a skewed agent clock keeps the
@@ -268,6 +272,7 @@ class TestGet:
         assert r.status_code == 200
         assert r.json() == {"events": [], "next_cursor": None,
                             "reporting": {"state": "never", "last_report_at": None,
+                                          "first_report_at": None,
                                           "runtime": None, "dropped_total": 0}}
 
     def test_a_non_owner_and_a_missing_agent_get_the_same_404(self, world):
