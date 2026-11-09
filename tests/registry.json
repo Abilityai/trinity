@@ -9012,6 +9012,19 @@
         "docker"
       ],
       "description": "GUARD-004 S5: the output scanner covers Read, Grep, WebFetch and owner MCP tools. Each case runs the hook only when the managed file's matchers select it, judged by a port of CLI 2.1.281's matcher rule (letters, digits, `_` and `|` = exact list; anything else = unanchored regex), so an unregistered tool reads as unscanned. Pins: the registration reaches Read/Grep/WebFetch/`mcp__*` (and an MCP error result on `PostToolUseFailure`) but not NotebookRead, ReadMcpResourceTool, Glob or Write; a Read file's `file.content` is redacted with the line counts kept, including the agent's own `.env`, `.mcp.json` and credentials file and a background Bash `tasks/*.output` file; a source file with fixtures and prefixes is byte-identical; binary payloads (Read image/pdf/parts `base64`, a notebook output's `image_data`, an MCP image's `source.data`) are never rewritten nor counted against the scan cap, with the precondition that the base64 fixture matches two shapes; Grep content, WebFetch `result` and MCP text blocks are redacted with numbers and images kept; an MCP error string stays a string; the platform `trinity` MCP server is not scanned on either event, by the same predicate as turn-tier-guard (parity-tested) while `trinity_`/`trinity__x` servers are; a withhold has each tool's shape (Read as a text read, Grep as content, WebFetch keeping its numbers, MCP keeping list or string); the write-back refusals steer to Edit on only the needed lines instead of dropping the value; Write/Edit to the agent's own credential files stays refused by the path rule; and the build smoke checks Read/MCP redaction, the platform exemption and the registration coverage."
+    },
+    {
+      "file": "unit/test_4281_execution_refusal_counts.py",
+      "feature": "#4281",
+      "added": "2026-11-08",
+      "categories": [
+        "unit",
+        "security",
+        "guardrails",
+        "scheduling",
+        "executions"
+      ],
+      "description": "#4281 slice E: a schedule-backed run the turn-tier hook refused does not read as a clean success. The execution list, detail and a schedule's history carry guardrail_refusals + guardrail_reporting, counted at READ time from the agent's guardrail events (real ingest service, fakeredis reporter, real schedules router over a real DB): an event landing after the run ended is counted on the next read; only turn_tier_guard counts (a credential redaction or a bash deny never does); a sibling agent's event naming this run is ignored; never -> null, stale -> count + stale, Gemini/Codex keepalives or no runtime on record -> null + not_claude_code (review X12), inside 10 s of the end or still running -> pending (review R11), an unreadable count -> null + unavailable with the read still 200; a run with no schedule carries neither field and is never counted; one count query per page. Reverting the change turns 15 red; a 9-mutant pass on the service is all red."
     }
   ]
 }
