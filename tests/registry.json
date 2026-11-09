@@ -1,6 +1,66 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent1148_delegation_tier.py",
+      "feature": "trinity-enterprise#1148",
+      "added": "2026-11-07",
+      "categories": [
+        "backend",
+        "security",
+        "turn-tier",
+        "agent-collaboration"
+      ],
+      "description": "trinity-enterprise#1148: turn_actor rule A (a delegated row for a person who cannot open the callee runs at the callee's tier, clamped to the caller owner's tier there; fail-closed lookups), rule B (registered person-tier provider rates a person the owner of one agent; last wins, strict True), the member/delegated kinds get shell + standing work, turn_origin_user_id/_email carry the acting person from an owner-by-rule turn (C1, re-rated per hop), the ledger readers rate delegated rows the same way and memoize per distinct attribution."
+    },
+    {
+      "file": "unit/test_ent1148_ledger_columns_guard.py",
+      "feature": "trinity-enterprise#1148",
+      "added": "2026-11-07",
+      "categories": [
+        "backend",
+        "security",
+        "turn-tier",
+        "static-guard"
+      ],
+      "description": "trinity-enterprise#1148: turn_tier_service.LEDGER_COLUMNS covers every _field(execution, ...) the rule reads (AST), get_running_turn_attribution selects each (source), and the real SQLite read returns them with source_agent_name round-tripped."
+    },
+    {
+      "file": "unit/test_ent1148_caller_reads_stay_person.py",
+      "feature": "trinity-enterprise#1148",
+      "added": "2026-11-07",
+      "categories": [
+        "backend",
+        "security",
+        "turn-tier",
+        "auth"
+      ],
+      "description": "trinity-enterprise#1148 AC3: viewer_row_scope shows an agent key acting for a shared person NO rows of an agent that person cannot open (fail-closed on an unreadable or non-True access answer, or a person with no account row); the person's own agent and an openable agent keep today's rule; no lookup for NO_ROWS or the full view."
+    },
+    {
+      "file": "unit/test_ent1148_fan_out_source.py",
+      "feature": "trinity-enterprise#1148",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "security",
+        "turn-tier",
+        "fan-out"
+      ],
+      "description": "trinity-enterprise#1148 F1: a fan-out row names the initiator's key agent (or the vouched X-Source-Agent), never its own target; a delegated turn fanning out to another agent without the header rates share, a person's own fan-out does not rise to owner after the share is revoked, and a self fan-out rates the person's own tier (share), never the delegated owner tier."
+    },
+    {
+      "file": "unit/test_ent1148_fleet_reads_stay_person.py",
+      "feature": "trinity-enterprise#1148",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "security",
+        "turn-tier",
+        "auth"
+      ],
+      "description": "trinity-enterprise#1148 F2: GET /api/executions and GET /api/activities/timeline, read by an agent key in a shared person's turn, omit every agent that person cannot open (fail-closed on an unreadable lookup); a key in no person's turn keeps its reach with no lookup."
+    },
+    {
       "file": "unit/test_4357_wake_chain_depth.py",
       "feature": "#4357",
       "added": "2026-11-08",
