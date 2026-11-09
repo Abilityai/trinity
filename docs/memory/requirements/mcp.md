@@ -1518,6 +1518,12 @@ description also carries the delegation contract verbatim (abilityai/trinity-ent
   A 403 without that code (access denial, SELF-EXEC-001) still throws as before.
   Since #2973 `run_agent_loop`, `trigger_agent_schedule` and `emit_event` return the same
   refusal object (`client.ts::depthRefusalFromError`).
+  Since #4357 the refusal also carries `exhausted_by` (the caller's own execution that set the
+  depth, or `{"kind": "event_claim", "chain_depth"}`; `null` is passed through as `null` when the
+  backend could not read it, and a non-object is dropped) and `resets` (what lowers the depth;
+  `client.ts::DEPTH_RESETS` when the body has none). The fallback `message`, used only when the
+  body carries none, keeps "Do not retry this call or route it through another agent" verbatim
+  and ends with the reset sentence. No tool description mentions depth, so none changed.
 - **FR-5b — `execution_id` parity (#3232)**: dedicated `chat_with_<slug>` tools declare and
   forward `execution_id` with `chat_with_agent`'s semantics, including the async report-back
   default and the `manual` opt-out ([public-access.md §15.1h](public-access.md), MCP caller

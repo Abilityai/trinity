@@ -1375,6 +1375,18 @@ class DatabaseManager:
     def set_autonomy_enabled(self, agent_name: str, enabled: bool):
         return self._agent_ops.set_autonomy_enabled(agent_name, enabled)
 
+    def transfer_agent_ownership(self, agent_name: str, *, to_user_id: int, expect: dict,
+                                 clear_spawn_provenance: bool, clear_ephemeral: bool,
+                                 enable_autonomy: bool, restore_spawn_provenance=None):
+        """Re-own an agent and its owner-carrying rows under a CAS (ent#1147);
+        every side effect is a named, required option — see the mixin."""
+        return self._agent_ops.transfer_agent_ownership(
+            agent_name, to_user_id=to_user_id, expect=expect,
+            clear_spawn_provenance=clear_spawn_provenance,
+            clear_ephemeral=clear_ephemeral, enable_autonomy=enable_autonomy,
+            restore_spawn_provenance=restore_spawn_provenance,
+        )
+
     def get_all_agents_autonomy_status(self):
         return self._agent_ops.get_all_agents_autonomy_status()
 
@@ -1973,6 +1985,10 @@ class DatabaseManager:
     def get_max_running_chain_depth(self, agent_name: str) -> int:
         """Deepest chain_depth among the agent's running rows, 0 if none (#2806)."""
         return self._schedule_ops.get_max_running_chain_depth(agent_name)
+
+    def get_deepest_running_chain_row(self, agent_name: str):
+        """The running row that set that depth, for a refusal to name (#4357)."""
+        return self._schedule_ops.get_deepest_running_chain_row(agent_name)
 
     def get_running_turn_attribution(self, agent_name: str):
         """Who each of the agent's running turns is for (trinity-enterprise#926)."""

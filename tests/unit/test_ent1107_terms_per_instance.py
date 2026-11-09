@@ -738,7 +738,9 @@ class TestThePortalSessionIsGated:
         r = c.post("/api/terms/accept", json={"version": version}, headers=_bearer(token))
         assert r.status_code == 200, r.text
         assert r.json() == {"accepted": True, "created": True, "version": version,
-                            "accepted_at": r.json()["accepted_at"]}
+                            "accepted_at": r.json()["accepted_at"],
+                            # ent#1170: no inline hook named a landing.
+                            "landing": None}
 
         rows = db.list_terms_acceptances(10)
         assert len(rows) == 1
