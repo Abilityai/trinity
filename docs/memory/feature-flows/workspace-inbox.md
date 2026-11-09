@@ -589,6 +589,14 @@ fence instead: the platform chose the addressee; the roster was never its fence.
   (`is_addressee_reach`), so answer and context open it off-roster and anyone
   else gets the uniform 404. The wider addressee-only family keeps its roster
   fence.
+- **A project ask reaches its reader by address (trinity-enterprise#1134).** A
+  third arm of the same SQL: `to_role = 'project'`, `raised_by = 'agent'`, the
+  platform's `workspace_project_id` stamp in the context (a LIKE prefilter) and
+  the viewer as its addressee (`_list_conditions(project_reach_key=…)`, applied
+  to the page, its count and the agent names). `_owned_ask` applies the Python
+  twin (`is_project_reach`, the parsed top-level key deciding), so the steward
+  or creator answers it off the agent's roster; `discuss_ask` refuses them
+  `422 not_discussable` there, because a discussion is a chat with the agent.
 - **One person off a shared row.** `ask_service.drop_addressee(ask_id, email,
   reason=…)` removes one person from a row's `resolved_to` (and clears the
   single addressee when it named them), compare-and-set; the row stays for the
