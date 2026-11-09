@@ -240,8 +240,10 @@ SchedulesPanel.vue
        -> confirm: utils/scheduleRunTier.js::takeOverBody(copy, {viewerEmail, delivery})
        -> stores/schedules.js::takeOver -> POST .../take-over (shared api client)
           200 -> close, reload list
-          409 -> takeOverRefusalText(code) in the dialog; changed_since_review / not_restricted
-                 reload the list and show the current version (confirm disabled if nothing to adopt)
+          409/404 -> takeOverRefusalText(code) in the dialog; changed_since_review / not_restricted /
+                 delivers_to_another_person (decided before the version, so a delivery added after
+                 the open arrives as this code) / schedule_not_found reload the list and show the
+                 current version (confirm disabled if nothing to adopt, or if the reload fails)
   Run now -> requestRun: warnsOnRunNow(schedule, ownerTier) -> ConfirmDialog "this one run has your access" (D9)
   create dialog: !ownerTier -> the share-holder notice; a named refusal on save shows detail.message
   history row / execution modal: RestrictedRunMarker (badge / line) from exec.turn_integrity.restricted_turn
