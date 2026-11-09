@@ -789,7 +789,7 @@ TABLES = {
             seq INTEGER NOT NULL,                      -- monotonic per room
             sender_kind TEXT NOT NULL,                 -- agent | user | workspace_user | system
             sender_identity TEXT,
-            kind TEXT NOT NULL DEFAULT 'message',      -- message | system
+            kind TEXT NOT NULL DEFAULT 'message',      -- what the row is: message | system | chain_paused | chain_continued (#4302); sender_kind says who
             mentions TEXT,                             -- JSON array of agent names
             content TEXT NOT NULL,
             execution_id TEXT,                         -- schedule_executions.id (nullable)
