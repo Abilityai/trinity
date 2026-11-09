@@ -16,8 +16,9 @@ import contextvars
 import logging
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from config import ROOM_SOURCE_CHANNEL
 from services import person_mention_service
@@ -174,6 +175,35 @@ class RoomError(Exception):
         super().__init__(detail)
 
 
+@dataclass(frozen=True)
+class Waker:
+    """Who a room turn runs for when no person posted
+    (abilityai/trinity-enterprise#1135): the engine itself, continuing an
+    agent on an ask it raised in this room. It acts for nobody.
+
+    The room engine reads a waker for three things, and each is explicit here
+    rather than borrowed from a person who did nothing: ``email`` is the turn's
+    client (``source_user_email``, ``source_channel_client``, the inbox
+    manifest) — set only when the person who ended the ask is seated in this
+    room, else None (ent#886: a resume turn names no person);
+    ``reach_principal`` is whose access the reply's @mentions are held to (the
+    room's moderator, rebuilt from its row; None reaches nobody); and the
+    engine reply lands under the agent's own membership, never the waker's.
+    A seam ent#442's system poster can build on — not that design.
+    """
+    kind: str
+    identity: str
+    email: Optional[str] = None
+    reach_principal: Any = None
+
+
+# What `_wake_agent` returns besides a dispatch result (ent#1135 reads them;
+# every @mention caller ignores the return value).
+GATE_HELD = "gate_held"     # the skill gate stopped the turn (#3402)
+LOCK_BUSY = "lock_busy"     # a pilot's earlier turn here still holds the lock
+DISPATCH_RAISED = "dispatch_raised"  # the dispatch raised: a turn may have started
+
+
 # --- identity helpers --------------------------------------------------------
 
 def _user_identity(current_user) -> str:
@@ -325,7 +355,12 @@ def _assert_can_reach_agent(current_user, agent_name: str) -> None:
 
 
 def _can_still_reach(current_user, agent_name: str) -> bool:
-    """`_assert_can_reach_agent` as a predicate, for the wake-time re-check."""
+    """`_assert_can_reach_agent` as a predicate, for the wake-time re-check.
+    An engine `Waker` lends the reach of its `reach_principal`, or none."""
+    if isinstance(current_user, Waker):
+        if current_user.reach_principal is None:
+            return False
+        current_user = current_user.reach_principal
     try:
         _assert_can_reach_agent(current_user, agent_name)
     except RoomError:
@@ -1464,7 +1499,8 @@ def _people_line(participants: Optional[list[dict]]) -> str:
 
 def _build_turn_prompt(room: dict, agent_name: str, delta: list[dict], cold: bool,
                        user_facing: bool = False,
-                       participants: Optional[list[dict]] = None) -> str:
+                       participants: Optional[list[dict]] = None,
+                       ask_block: Optional[str] = None) -> str:
     # The old header claimed "Other agents and people are in this room"
     # UNCONDITIONALLY — false in an agent-only room, and far too weak in front of
     # a customer to count as a disclosure (trinity-enterprise#363). It now says
@@ -1480,14 +1516,19 @@ def _build_turn_prompt(room: dict, agent_name: str, delta: list[dict], cold: boo
         + ".\n\n"
         + who
         + _people_line(participants)
-        + " You were @mentioned, so it is "
-        "your turn to reply. Reply with your message only — it will be posted to "
+        + (" An ask you raised in this room ended; continue the work that was "
+           "waiting on it." if ask_block else
+           " You were @mentioned, so it is your turn to reply.")
+        + " Reply with your message only — it will be posted to "
         "the room as you. To bring in another participant, @mention them by name. "
         # #3210: a hint, not a limit — a long reply still lands whole. It is here
         # because every agent woken afterwards re-reads what was posted.
         "For a long deliverable, consider sharing it as a file and posting a "
         "summary here; post it in full when the room needs the full text.\n\n"
     )
+    if ask_block:
+        # ent#1135: the ending, framed as data, before the transcript it continues.
+        header += ask_block + "\n\n"
     if cold:
         header += ("[You are joining the conversation now — here is the recent "
                    "transcript for context]\n")
@@ -1575,7 +1616,14 @@ async def post_message(current_user, room_id: str, content: str,
 
     # An engine reply (`_sender_override`) was dispatched while its waker was a
     # member; it lands even if the waker has since been removed (ent#959 r2).
-    room = _require_membership(room_id, current_user, allow_departed=is_agent_reply)
+    if is_agent_reply and isinstance(current_user, Waker):
+        # ent#1135: an engine waker is nobody's membership — the agent's own
+        # was verified by the engine before the turn ran.
+        room = db.get_room(room_id)
+        if not room:
+            raise RoomError(404, "room_not_found", "Room not found")
+    else:
+        room = _require_membership(room_id, current_user, allow_departed=is_agent_reply)
 
     # A human/external post is INBOUND — reject it if the room is closed, expired
     # or already at budget. An agent reply (``_sender_override`` set) is an
@@ -1947,39 +1995,44 @@ _held_wake_locks: contextvars.ContextVar[frozenset] = contextvars.ContextVar(
 )
 
 
-async def _wake_agent(current_user, room_id: str, agent_name: str, chain_depth: int) -> None:
+async def _wake_agent(current_user, room_id: str, agent_name: str, chain_depth: int,
+                      ask_block: Optional[str] = None,
+                      ask_request_text: str = ""):
     """Serialise wakes of one pull-pilot agent in one room, then run the turn (#3114).
 
     Two posts that both mention an agent wake it twice. Unserialised, both
     read the same cursor, delta and cached session id and both answer the same
     messages. The lock spans the whole turn, so the second wake reads what the
     first left; it waits up to one turn's length, then gives up visibly.
+
+    Returns what `_wake_agent_locked` returns, or `LOCK_BUSY`.
     """
     from services.pull_pilot import pull_owns_dispatch
     from services.session_turn_service import ResumeLock, ResumeLockBusy
 
     # Pull pilots only. Push agents keep their wake behaviour unchanged.
+    turn = dict(ask_block=ask_block, ask_request_text=ask_request_text)
     if not pull_owns_dispatch(agent_name, "room"):
-        await _wake_agent_locked(current_user, room_id, agent_name, chain_depth)
-        return
+        return await _wake_agent_locked(current_user, room_id, agent_name, chain_depth, **turn)
     key = f"room_wake_lock:{room_id}:{agent_name}"
     held = _held_wake_locks.get()
     if key in held:
-        await _wake_agent_locked(current_user, room_id, agent_name, chain_depth)
-        return
+        return await _wake_agent_locked(current_user, room_id, agent_name, chain_depth, **turn)
     ttl = (ROOM_TURN_TIMEOUT_SECONDS + _room_queue_allowance(agent_name)
            + ROOM_WAKE_LOCK_BUFFER_SECONDS)
     try:
         async with ResumeLock(agent_name, None, "", ttl, key=key, wait_seconds=ttl):
             token = _held_wake_locks.set(held | {key})
             try:
-                await _wake_agent_locked(current_user, room_id, agent_name, chain_depth)
+                return await _wake_agent_locked(current_user, room_id, agent_name,
+                                                chain_depth, **turn)
             finally:
                 _held_wake_locks.reset(token)
     except ResumeLockBusy:
         logger.warning("room %s: %s still busy with an earlier turn after %ss",
                        room_id, agent_name, ttl)
         _post_system(room_id, f"{agent_name} is still busy with an earlier turn.")
+        return LOCK_BUSY
 
 
 def _without_gate_holds(room_id: str, agent_name: str, delta: list[dict]) -> list[dict]:
@@ -2029,11 +2082,19 @@ def _record_gate_hold(room_id: str, agent_name: str, shown: list[dict],
 
 
 async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
-                             chain_depth: int) -> None:
+                             chain_depth: int, ask_block: Optional[str] = None,
+                             ask_request_text: str = ""):
     """One agent turn: delta -> execute_task -> auto-post the reply.
 
     Every wake is an ORDINARY execution through the standard path, so slots, the
     circuit breaker, cost and observability all come for free.
+
+    ``ask_block`` (ent#1135): the ending of an ask the agent raised here,
+    framed as data. It IS the turn's content, so the turn runs even when the
+    unread delta is empty or holds only what the gate stopped. Returns the
+    dispatch result when a dispatch returned, `GATE_HELD` when the skill gate
+    stopped it, `DISPATCH_RAISED` when the dispatch raised, else None (nothing
+    dispatched).
     """
     participant = db.get_participant(room_id, "agent", agent_name)
     if not participant or participant.get("left_at"):
@@ -2049,16 +2110,17 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
     cold = not cached
     if cold:
         delta = db.get_recent_messages(room_id, ROOM_COLD_CONTEXT_MESSAGES)
-    if not delta:
+    if not delta and not ask_block:
         return
 
-    top_seq = max(m["seq"] for m in delta)
+    top_seq = max((m["seq"] for m in delta), default=cursor)
     # trinity#3402: never what this agent's gate already stopped — not shown,
     # so not scanned (one list feeds both). Left with nothing to answer, the
     # wake is over. The cursor stays (it moves on a reply): the next wake reads
     # these rows again and leaves them out again.
     visible = _without_gate_holds(room_id, agent_name, delta)
-    if visible is not delta and not any(m.get("sender_kind") != "system" for m in visible):
+    if (visible is not delta and not ask_block
+            and not any(m.get("sender_kind") != "system" for m in visible)):
         return
     # #3210: what the agent is SHOWN is bounded; what it is marked as having
     # read is not — the cursor still moves past every message in the delta,
@@ -2122,12 +2184,15 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
         # awaited here.
         result = await dispatch_and_await_terminal(
             agent_name=agent_name,
-            message=turn_prefix + manifest_prefix + _build_turn_prompt(room, agent_name, shown, cold, user_facing, roster),
+            message=turn_prefix + manifest_prefix + _build_turn_prompt(
+                room, agent_name, shown, cold, user_facing, roster, ask_block=ask_block),
             # trinity-enterprise#751: the skill gate reads what the participants
             # wrote that this agent is SHOWN (the #3210 budget-fitted delta),
             # never the transcript scaffolding.
-            request_text="\n".join(m.get("content") or "" for m in shown
-                                    if m.get("sender_kind") != "system"),
+            # ent#1135: plus the person's answer to the ask this turn continues.
+            request_text="\n".join([m.get("content") or "" for m in shown
+                                     if m.get("sender_kind") != "system"]
+                                    + ([ask_request_text] if ask_request_text else [])),
             triggered_by="room",
             conversation_key=f"room:{room_id}",
             system_prompt=room_prompt,
@@ -2168,11 +2233,13 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
         # cursor keeps its rule — it moves on a reply — so anything else in
         # this delta is delivered on the next wake.
         _record_gate_hold(room_id, agent_name, shown, notice_seq, e)
-        return
+        return GATE_HELD
     except Exception as e:  # noqa: BLE001 — a failed turn is VISIBLE, never silent
         logger.warning("room %s: turn for %s raised: %s", room_id, agent_name, e)
         _post_system(room_id, f"{agent_name} could not respond ({type(e).__name__}).")
-        return
+        # ent#1135: not None — a turn may have started before the raise, so the
+        # ask return must not fall through to a second, ordinary wake.
+        return DISPATCH_RAISED
     finally:
         _clear_agent_working(room_id, agent_name)
         _broadcast("room_participant_state",
@@ -2233,7 +2300,7 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
     # answered is re-delivered on the next wake.
     if status == "cancelled":
         _post_system(room_id, f"{agent_name}'s turn was stopped.")
-        return
+        return result
 
     if status == "failed" or not reply:
         # A dead resume handle is the common cause — drop it so the next wake is
@@ -2244,7 +2311,7 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
         _post_system(room_id,
                      f"{agent_name} could not respond"
                      + (f": {err[:200]}" if err else " (no response)."))
-        return
+        return result
 
     # POST FIRST, then advance the cursor (ent#220 item 1).
     #
@@ -2277,7 +2344,7 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
                        room_id, agent_name, execution_id, exc_info=True)
         _post_system_safe(room_id,
                           f"{agent_name}'s reply could not be posted ({type(e).__name__}).")
-        return
+        return result
 
     # Cursor advances only on SUCCESS — a failed turn re-delivers its delta.
     try:
@@ -2286,6 +2353,7 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
         logger.warning("room %s: could not advance the read cursor of %s — its "
                        "next wake re-reads this delta", room_id, agent_name,
                        exc_info=True)
+    return result
 
 
 def sweep_expired_rooms() -> int:
@@ -2296,3 +2364,323 @@ def sweep_expired_rooms() -> int:
             _post_system(room["id"], "Room closed (expired).")
             closed += 1
     return closed
+
+
+# --- asks raised in a room (abilityai/trinity-enterprise#1135) ----------------
+#
+# An agent that raises an ask (`ask_operator`) from inside a room turn asked in
+# front of everyone in that room — so the room hears that it is waiting, hears
+# how the ask ended, and gets the continuation as a room turn. The platform
+# knows the raising turn: every room turn's execution row is stamped with this
+# room (#2792), and the ask route passes the platform-set execution id.
+
+def room_for_execution(agent_name: str, execution_id: Optional[str]) -> Optional[str]:
+    """The room ``execution_id`` is a turn of, iff it is a still-RUNNING room
+    turn of THIS agent in an open room the agent is a current participant of —
+    else None. The room analogue of ``client_portal.service.chat_for_execution``
+    (ent#734), with its trust bound: the id is a platform-set header, but the
+    agent's own process can send any of its executions' ids, so what remains
+    forgeable is another RUNNING room turn of the same agent — never another
+    agent's room, a room it is not in, or a finished turn. Raises like any
+    other read; the caller owns the fail-soft."""
+    if not execution_id:
+        return None
+    from database import db as core_db
+    from models import TaskExecutionStatus
+
+    execution = core_db.get_execution(execution_id)
+    status = getattr(execution, "status", None)
+    if (execution is None or execution.agent_name != agent_name
+            or getattr(status, "value", status) != TaskExecutionStatus.RUNNING.value
+            or execution.triggered_by != "room"
+            or getattr(execution, "source_channel", None) != ROOM_SOURCE_CHANNEL):
+        return None
+    room_id = getattr(execution, "source_channel_chat_id", None)
+    if not room_id:
+        return None
+    key = getattr(execution, "conversation_key", None)
+    if key and key != f"room:{room_id}":
+        return None
+    participant = db.get_participant(room_id, "agent", agent_name)
+    if not participant or participant.get("left_at"):
+        return None
+    room = db.get_room(room_id)
+    if not room or room["status"] != "open":
+        return None
+    expires_at = room.get("expires_at")
+    if expires_at and expires_at <= utc_now_iso():
+        return None
+    return room_id
+
+
+# The ask title is agent text spoken in the platform's voice (a system line):
+# quoted, whitespace-collapsed and capped, whatever cap the raise applied.
+ASK_LINE_TITLE_MAX_CHARS = 120
+
+# Privacy rule (requirements/security.md §26.12): who an ask waits on, or who
+# ended it, is named by participant identity only when that person is SEATED in
+# this room; anyone else is a role word — never a non-member's email.
+_ASK_ROLE_WORDS = {
+    "primary": "its primary",
+    "approver": "its approver",
+    "viewer": "its viewer",
+    "operator": "an operator",
+}
+
+
+def _ask_title(title) -> str:
+    text = " ".join(str(title or "").split())
+    if len(text) > ASK_LINE_TITLE_MAX_CHARS:
+        text = text[:ASK_LINE_TITLE_MAX_CHARS - 1] + "…"
+    return f"“{text}”"
+
+
+def _ask_role_words(to_role) -> str:
+    from services import role_addressing
+
+    if role_addressing.parse_role_id(to_role) is not None:
+        return f"the {role_addressing.role_label(to_role)} role"
+    return _ASK_ROLE_WORDS.get(str(to_role or ""), "an operator")
+
+
+def _seated_identity(room_id: str, email: Optional[str]) -> Optional[str]:
+    """The participant identity of the person behind ``email`` when they are
+    seated in this room now, else None. A Workspace client is seated by its
+    email; a platform account by its username."""
+    email = (email or "").strip().lower()
+    if not email:
+        return None
+    seat = db.get_participant(room_id, WORKSPACE_KIND, email)
+    if seat and not seat.get("left_at"):
+        return seat["identity"]
+    from database import db as core_db
+
+    user = core_db.get_user_by_email(email)
+    username = (user or {}).get("username")
+    if username:
+        seat = db.get_participant(room_id, "user", username)
+        if seat and not seat.get("left_at"):
+            return seat["identity"]
+    return None
+
+
+def _ask_context(row: dict) -> dict:
+    context = row.get("context")
+    if isinstance(context, str):
+        try:
+            import json
+            context = json.loads(context)
+        except ValueError:
+            return {}
+    return context if isinstance(context, dict) else {}
+
+
+def ask_room_of(row: dict) -> Optional[str]:
+    """The room an ask was raised in (the platform key), or None."""
+    from services.operator_queue_service import _WORKSPACE_ROOM_KEY
+
+    room_id = _ask_context(row).get(_WORKSPACE_ROOM_KEY)
+    return room_id if isinstance(room_id, str) and room_id else None
+
+
+def post_ask_raised_line(room_id: str, agent_name: str, row: dict) -> None:
+    """One system line while the ask is open: who asked what, waiting on whom.
+    Never raises — the ask stands whether or not the room heard about it."""
+    try:
+        people = row.get("resolved_to") or []
+        if isinstance(people, str):
+            people = [people]
+        addressee = row.get("addressed_to_email") or (people[0] if len(people) == 1 else None)
+        who = (_seated_identity(room_id, addressee) if addressee else None) \
+            or _ask_role_words(row.get("to_role"))
+        _post_system(room_id, f"{agent_name} asked: {_ask_title(row.get('title'))} — "
+                              f"waiting on {who}.")
+    except Exception:  # noqa: BLE001
+        logger.warning("room %s: could not post the line for an ask %s raised",
+                       room_id, agent_name, exc_info=True)
+
+
+def _ending_who(room_id: str, row: dict, actor_email: Optional[str]) -> str:
+    seated = _seated_identity(room_id, actor_email)
+    if seated:
+        return seated
+    actor = (actor_email or "").strip().lower()
+    if actor and actor == (row.get("addressed_to_email") or "").strip().lower():
+        return _ask_role_words(row.get("to_role"))
+    return "an operator"
+
+
+def _ending_clause(event, row: dict, room_id: str) -> str:
+    """How one ask ended, in the room's words — the disposition and a coarse
+    who; never the answer, the notes or the cancel reason."""
+    from services import ask_service
+
+    kind = ask_service.agent_ending_kind(row)
+    if kind == ask_service.REPLACED:
+        return "was replaced by a newer ask"
+    if kind == ask_service.WITHDRAWN:
+        return f"was withdrawn by {row.get('agent_name')}"
+    if event.disposition == ask_service.EXPIRED:
+        return "expired — denied by timeout"
+    verb = {ask_service.ANSWERED: "answered", ask_service.DISMISSED: "dismissed"}.get(
+        event.disposition, "cancelled")
+    return f"was {verb} by {_ending_who(room_id, row, event.actor_email)}"
+
+
+def on_ask_ending(event) -> None:
+    """The ask sink's ending observer (abilityai/trinity-enterprise#1135): one
+    system line per (room, agent, ending event) for the asks raised in a room —
+    every disposition, whether or not a wake runs (a stopped agent, an owner who
+    switched the wake off, an expiry and an agent's own replace or withdraw all
+    still leave the room showing how the ask ended). The ONE writer of ending
+    lines; the return turn never posts one. Best-effort per room."""
+    groups: dict[tuple[str, str], list[dict]] = {}
+    for row in event.rows or ():
+        room_id = ask_room_of(row)
+        if room_id and row.get("agent_name"):
+            groups.setdefault((room_id, row["agent_name"]), []).append(row)
+    for (room_id, agent_name), rows in groups.items():
+        try:
+            if len(rows) == 1:
+                row = rows[0]
+                content = (f"{agent_name}'s ask {_ask_title(row.get('title'))} "
+                           f"{_ending_clause(event, row, room_id)}.")
+            else:
+                from services.operator_resume_service import ENDING_LIST_MAX
+
+                clause = _ending_clause(event, rows[0], room_id)
+                clause = clause.replace("was ", "were ", 1)
+                titles = "; ".join(_ask_title(r.get("title")) for r in rows[:ENDING_LIST_MAX])
+                more = (f"; …and {len(rows) - ENDING_LIST_MAX} more"
+                        if len(rows) > ENDING_LIST_MAX else "")
+                content = f"{len(rows)} asks by {agent_name} {clause}: {titles}{more}."
+            _post_system(room_id, content)
+        except Exception:  # noqa: BLE001 — the ending is committed; a line never undoes it
+            logger.warning("room %s: could not post how %s's ask ended", room_id,
+                           agent_name, exc_info=True)
+
+
+def register_ask_observers() -> None:
+    """Hook the ending observer into the ask sink. Called from `main.py`
+    beside the skill gate's (not at import: the unit island pops modules)."""
+    from services import ask_service
+
+    ask_service.register_ending_observer(on_ask_ending)
+
+
+# The return turn's outcome (`return_ask_to_room`).
+RETURN_DECLINED = "declined"   # nothing spent: the caller wakes the agent outside the room
+RETURN_RAN = "ran"             # a room turn was dispatched; `result` says how it went
+RETURN_HELD = "held"           # the skill gate stopped it — its own observer continues
+RETURN_RAISED = "raised"       # the room dispatch raised: no wake now; it stays re-offerable
+
+
+@dataclass(frozen=True)
+class RoomReturn:
+    kind: str
+    result: Any = None
+
+
+def _reach_principal(room_id: str):
+    """Whose access the return turn's @mentions are held to: the room's
+    moderator, rebuilt from its row the way a request would resolve it. A
+    missing or suspended account lends no reach (the `get_current_user`
+    rule). Never raises."""
+    try:
+        from database import db as core_db
+
+        moderator = next((p for p in db.list_participants(room_id)
+                          if p.get("role") == "moderator" and p.get("kind") in PEOPLE_KINDS
+                          and not p.get("left_at")), None)
+        if moderator is None:
+            return None
+        if moderator["kind"] == "user":
+            from models import User
+
+            row = core_db.get_user_by_username(moderator["identity"])
+            if not row or row.get("suspended_at"):
+                return None
+            return User(id=row["id"], username=row["username"], email=row.get("email"),
+                        role=row.get("role") or "user")
+        from shared_sessions.router import WorkspacePrincipal
+
+        email = moderator["identity"]
+        account = core_db.get_user_by_email(email)
+        if account and account.get("suspended_at"):
+            return None
+        # A Workspace creator with a platform account reaches the agents it
+        # owns through the platform path (`agent_on_roster(include_owned=...)`).
+        return WorkspacePrincipal(email=email, is_platform=bool(account))
+    except Exception:  # noqa: BLE001
+        logger.warning("room %s: could not rebuild the moderator's reach", room_id,
+                       exc_info=True)
+        return None
+
+
+def _ask_waker(room_id: str, agent_name: str, actor_email: Optional[str]) -> Waker:
+    seated = _seated_identity(room_id, actor_email)
+    return Waker(kind="ask", identity=agent_name,
+                 email=(actor_email or "").strip().lower() if seated else None,
+                 reach_principal=_reach_principal(room_id))
+
+
+def _decline(room_id: str, agent_name: str, reason: Optional[str]) -> RoomReturn:
+    if reason:
+        _post_system_safe(room_id, f"{agent_name} continues outside the room: {reason}.")
+    return RoomReturn(RETURN_DECLINED)
+
+
+async def return_ask_to_room(room_id: str, agent_name: str, *, ask_block: str,
+                             request_text: str = "",
+                             actor_email: Optional[str] = None) -> RoomReturn:
+    """Continue an agent IN the room where it raised an ask that just ended
+    (abilityai/trinity-enterprise#1135): a room turn through the engine, with
+    the room's unread delta, gate-hold filter, prompt, transcript budget, wake
+    cap, cursor and mention cascade, and ``ask_block`` (the ending, framed as
+    data) as its content. The ending LINE is not posted here — the ending
+    observer is its one writer.
+
+    `RETURN_DECLINED` when nothing was spent — the room is closed or expired,
+    the agent left, the room is over budget, the agent's own wake cap is spent,
+    or a pull pilot's earlier turn holds the room lock; the room then says, in
+    one clause, that the agent continues outside it (a cap adds that clause to
+    its own line) and the caller runs today's wake. `RETURN_RAISED` when the
+    room dispatch raised: a turn may have started, so the caller runs no
+    ordinary wake now — but the wake is left re-offerable, so the agent's next
+    start may wake it again. Never raises."""
+    try:
+        room = db.get_room(room_id)
+        if not room:
+            return RoomReturn(RETURN_DECLINED)
+        expires_at = room.get("expires_at")
+        if room["status"] != "open" or (expires_at and expires_at <= utc_now_iso()):
+            return _decline(room_id, agent_name, "the room is closed")
+        participant = db.get_participant(room_id, "agent", agent_name)
+        if not participant or participant.get("left_at"):
+            return _decline(room_id, agent_name, f"{agent_name} has left the room")
+        over = _budget_exceeded_reason(room)
+        if over:
+            return _decline(room_id, agent_name,
+                            "the room is over its message budget" if over == "max_messages"
+                            else "the room is over its cost budget")
+        # The cap is the agent's own sender budget in this room — never a
+        # bystander's. A cap decline writes its own line, then says where the
+        # agent continues.
+        if not _apply_wake_cap(room_id, "agent", agent_name, [agent_name]):
+            return _decline(room_id, agent_name, "its wake limit here is spent")
+        waker = _ask_waker(room_id, agent_name, actor_email)
+        out = await _wake_agent(waker, room_id, agent_name, 0, ask_block=ask_block,
+                                ask_request_text=request_text)
+    except Exception:  # noqa: BLE001 — the answer must never be lost to the room path
+        logger.warning("room %s: the ask return for %s failed before a turn ran",
+                       room_id, agent_name, exc_info=True)
+        return RoomReturn(RETURN_DECLINED)
+    if out == LOCK_BUSY:
+        return _decline(room_id, agent_name, "it is still busy with an earlier turn here")
+    if out == GATE_HELD:
+        return RoomReturn(RETURN_HELD)
+    if out == DISPATCH_RAISED:
+        return RoomReturn(RETURN_RAISED)
+    if out is None:
+        return RoomReturn(RETURN_DECLINED)
+    return RoomReturn(RETURN_RAN, out)

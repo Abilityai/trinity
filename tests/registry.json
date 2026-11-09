@@ -8714,6 +8714,42 @@
       "description": "trinity-enterprise#1117: the git_sync tool schema refuses a `paths` element starting with '-' through the same ~standard.validate seam FastMCP calls; the issue sits at paths.<i> and its message leads with the element (capped at 200 chars). Decides every row of tests/fixtures/git-sync-path-cases.json the same way as the backend model (shared table). node:test."
     },
     {
+      "file": "unit/test_ent1135_ask_room_attachment.py",
+      "feature": "trinity-enterprise#1135",
+      "added": "2026-11-07",
+      "categories": [
+        "backend",
+        "unit",
+        "rooms",
+        "operator-queue"
+      ],
+      "description": "trinity-enterprise#1135: an ask raised in a running room turn records the room (platform key, stripped from agent input) and posts one raised line; fail-soft; never a gate or credential ask."
+    },
+    {
+      "file": "unit/test_ent1135_ask_room_return.py",
+      "feature": "trinity-enterprise#1135",
+      "added": "2026-11-07",
+      "categories": [
+        "backend",
+        "unit",
+        "rooms",
+        "operator-queue"
+      ],
+      "description": "trinity-enterprise#1135: the ending line for every disposition (coarse who, never the answer) and the room-engine return turn under a Waker, with declines falling back to today's wake."
+    },
+    {
+      "file": "unit/test_ent1135_wake_restart_survival.py",
+      "feature": "trinity-enterprise#1135",
+      "added": "2026-11-07",
+      "categories": [
+        "backend",
+        "unit",
+        "rooms",
+        "operator-queue"
+      ],
+      "description": "trinity-enterprise#1135 (T4): wake_state owed before the spawn, the ending lifecycle, the widened re-offer and the once-per-process boot re-offer after startup recovery."
+    },
+    {
       "file": "../src/frontend/tests/unit/workspaceProjectsEnt1133.mount.spec.js",
       "feature": "trinity-enterprise#1133",
       "added": "2026-11-07",
