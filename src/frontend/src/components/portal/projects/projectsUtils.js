@@ -151,6 +151,10 @@ export function chatProjectActions({ projectsAvailable, isPlatform, isMain, sess
  */
 const ROOM_AGENT_BADGE = { active: 'success', pending: 'warning', declined: 'neutral', off: 'neutral' }
 const ROOM_AGENT_NOTE = { not_on_your_list: 'Not on your list' }
+const REQUEST_NOTE = {
+  pending: 'Asked — waiting on the creator',
+  blocked: 'You have a request waiting on the creator',
+}
 
 export function roomAgentRows(project) {
   if (!project || !('room_agents' in project)) return null
@@ -163,8 +167,14 @@ export function roomAgentRows(project) {
     state: a.state,
     label: agentStateLabel(a.state),
     badge: ROOM_AGENT_BADGE[a.state] || 'neutral',
-    action: canManage && a.can_add === true ? 'add' : null,
-    note: canManage ? ROOM_AGENT_NOTE[a.reason] || null : null,
+    action: canManage && a.can_add === true ? 'add'
+      // ent#1131 part 2: a member who can't add asks the creator instead —
+      // one request at a time, so none beside a pending one (`blocked`).
+      : (a.can_request === true && !['pending', 'blocked'].includes(a.my_request) ? 'request' : null),
+    // My request for it: `pending` reads as waiting; a decline offers Ask again.
+    requested: a.can_request === true ? (a.my_request || null) : null,
+    note: canManage ? ROOM_AGENT_NOTE[a.reason] || null
+      : (a.can_request === true ? REQUEST_NOTE[a.my_request] || null : null),
   }))
   const notOn = rows.filter((r) => r.state === 'off' || r.state === 'declined').length
   const waiting = rows.filter((r) => r.state === 'pending').length
@@ -472,7 +482,9 @@ export function roleLine(project, myEmail) {
     return `You're a member. You can add and change tasks, write in the log and add files. Only ${creator} changes the name, goal, steward, members and visibility.`
   }
   if (!role && project?.visibility === 'company') {
-    return `You can view this project because it's open to everyone at the company. You can chat with its agents about it, but only members add or change tasks, the log and files. Ask ${creator} to add you as a member.`
+    // ent#1132 part 2: with Ask to join offered, the line points at it.
+    const ask = project?.my_request?.can_ask_to_join ? `Ask to join, and ${creator} decides.` : `Ask ${creator} to add you as a member.`
+    return `You can view this project because it's open to everyone at the company. You can chat with its agents about it, but only members add or change tasks, the log and files. ${ask}`
   }
   return `You can view this project. ${creator === 'you' ? 'You decide' : `${creator} decides`} who else can change it.`
 }
@@ -487,6 +499,7 @@ export function roleLine(project, myEmail) {
 export function withheldLine({ project, myEmail, canContribute, archived }, what) {
   if (canContribute || archived || !project) return ''
   if (project.my_role === 'creator' || project.my_role === 'member') return ''
+  if (project.my_request?.can_ask_to_join) return `Only members add or change ${what}. Use Ask to join at the top of the page.`
   return `Only members add or change ${what}. Ask ${creatorName(project, myEmail)} to add you.`
 }
 
@@ -514,4 +527,21 @@ export function agentPreview(text) {
   let end = AGENT_READ_BYTES
   while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1     // never split a character
   return { text: new TextDecoder().decode(bytes.slice(0, end)), truncated: true, total: bytes.length, shown: end }
+}
+
+// --- trinity-enterprise#1132 part 2: Ask to join ------------------------------------
+/**
+ * What the page shows a company viewer about joining, from the read's
+ * `my_request`: `ask` (offer the button), `pending` (waiting on the creator),
+ * `declined` (the reason, and Ask again), or null (nothing to say — a member,
+ * a guest, an older backend, or a read that failed).
+ */
+export function joinRequestState(project) {
+  const mine = project?.my_request
+  if (!mine || mine.unknown) return null
+  const last = mine.last && mine.last.request === 'join' ? mine.last : null
+  if (last && last.state === 'pending') return { kind: 'pending', waitingOn: last.waiting_on || project.created_by }
+  if (!mine.can_ask_to_join) return null
+  if (last && last.state === 'declined') return { kind: 'declined', reason: last.reason || null }
+  return { kind: 'ask' }
 }

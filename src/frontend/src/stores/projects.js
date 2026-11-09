@@ -232,6 +232,12 @@ export const useProjectsStore = defineStore('projects', () => {
     _write(id, () => portalHttp.delete(
       url(id, `/metrics/${encodeURIComponent(agentName)}/${encodeURIComponent(metric)}`), { headers: headers() }))
 
+  // --- ent#1132 part 2 / ent#1131 part 2: a person asks the project's creator --------
+  const requestToJoin = (id, note) =>
+    _write(id, () => portalHttp.post(url(id, '/join-request'), note ? { note } : {}, { headers: headers() }))
+  const requestAgent = (id, agentName) =>
+    _write(id, () => portalHttp.post(url(id, '/agent-requests'), { agent_name: agentName }, { headers: headers() }))
+
   // --- ent#1161: the steward agent's seat, asked for and given on the project -------
   const requestStewardAccess = (id) =>
     _write(id, () => portalHttp.post(url(id, '/steward-access/request'), {}, { headers: headers() }))
@@ -296,7 +302,7 @@ export const useProjectsStore = defineStore('projects', () => {
     tasks, logs, fetchTasks, fetchTask, createTask, updateTask, addTaskNote, fetchLog, addLogEntry,
     addGuest, addItem, setItemAudience, removeItem, fetchReport, myItems, importCandidates, importProject,
     setHealth, linkMetric, unlinkMetric, metricOptions, stewarding, fetchStewarding,
-    requestStewardAccess, grantStewardAccess,
+    requestStewardAccess, grantStewardAccess, requestToJoin, requestAgent,
     writeContext, readContext, updateContext, deleteContext, markItemForAgents,
     fetchProjectPeople, fetchCompanyPeople, fetchStewardOptions,
   }
