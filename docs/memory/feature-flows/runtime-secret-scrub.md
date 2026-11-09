@@ -96,13 +96,20 @@ store is global):
   one **throttled** ERROR — the terminal MUST persist, and the pattern pass still
   runs. No NEW secret is delivered during the outage (the stage side is closed),
   so the open scrub side never widens exposure beyond turns already in flight.
-- `scrub_text(values, text)` — replaces every rendition of every staged value
-  with the sanitizer's `REDACTION_PLACEHOLDER` (`***REDACTED***`, so operators
-  and the manual verification grep one marker). **Longest-first** (a staged value
+- `scrub_text(values, text, marker=REDACTION_PLACEHOLDER)` — replaces every
+  rendition of every staged value with the sanitizer's `REDACTION_PLACEHOLDER`
+  (`***REDACTED***`, so operators and the manual verification grep one marker),
+  or with `SPOKEN_PLACEHOLDER` (`redacted`) for text that is read aloud, where the
+  stored marker would be spoken as punctuation. The spoken placeholder is no
+  longer than the 8-char staging floor, so a scrub never lengthens spoken text.
+  **Longest-first** (a staged value
   that is a substring of a longer one must not shred the longer match). **Literal**
   `str.replace`, never regex (no regex-injection surface). **Falsy passthrough** —
   a falsy input is returned unchanged (never `None` → `""`, which would corrupt a
   NULL error column).
+- `scrub_staged(text, *, marker=...)` — `scrub_text(get_staged_values(), text,
+  marker)` for a sink that scrubs one text; reads the store only when there is
+  text.
 - Per value, **three renditions** are scrubbed: raw, once-JSON-escaped
   (`json.dumps(v)[1:-1]` — catches values embedded in already-dumped JSON), and
   base64 (the most common trivial encoding).
@@ -145,6 +152,27 @@ scrub all fields.
 - `routers/sessions.py` needs **no** direct wiring: its assistant write persists
   the applier's already-scrubbed outputs (verified, transitively covered).
 
+### Speech sinks (text handed to a third-party TTS provider)
+
+These send agent text off-platform. What they speak carries `SPOKEN_PLACEHOLDER`;
+a text they also store (the addressed note's audit `message_preview`) keeps the
+stored marker. All fail open like `send_message`: a store outage speaks the text
+as given.
+
+- `tts_service.synthesize_mp3` — the floor for every caller, `synthesize_voice_note`
+  included: the text is scrubbed before the shared cost cap and the request.
+- `voice_reply_service.send_voice_reply` (in-session voice note) and
+  `send_proactive_voice` (addressed voice note, also before its audit
+  `message_preview`) — #4228.
+
+Each caller scrubs after its cheap refusals (channel, destination, voice gates),
+so a refused call never reads the store. A cost cap in front of a caller judges
+the text **as written**, not as scrubbed. The store is shared by every agent, so
+an answer that changed with what is staged (spoken or refused, or the length a
+`text_too_long` guidance quotes) would let an agent test a guessed
+value against it. Because the spoken placeholder never lengthens text, text that
+fits the cap as written still fits after the scrub.
+
 ## Drift guard
 
 `tests/unit/test_ent279_scrub_parity.py` — the chokepoint set is **discovered,
@@ -157,6 +185,12 @@ function that persists agent-authored text into the named tables
 must call the scrub seam or appear on an explicit allowlist with a one-line
 justification — so a future persistence writer that ships un-wired is a CI
 failure, not a silent leak.
+
+The negative scan cannot see sinks that write none of those tables (the speech
+sinks above, the agent HTTP-error log line), so `_REQUIRED_SCRUBBERS` pins them
+**positively** by name with no allowlist escape — along with the direct
+table-writing sinks, so a scrub removal plus an allowlist entry cannot exempt
+them. Deleting the scrub call in any of them fails `test_direct_sinks_still_scrub`.
 
 ## Error Handling
 
@@ -176,7 +210,9 @@ failure, not a silent leak.
   `resend_pending_results` terminal delivered after expiry, persists with the
   pattern pass only.
 - Encodings beyond the three scrubbed renditions (raw / JSON-escaped / base64) are
-  not chased.
+  not chased. On a speech sink that includes a value an agent reformats to be read
+  aloud (spelled out with spaces or dashes, NATO letters, a case change): it is
+  not matched and is spoken.
 - The live tool result is plaintext **by design** (locked).
 - Agent-authored side channels (report payloads, `emit_event` payloads, room
   messages) are documented residuals, not chokepoints.
@@ -198,6 +234,13 @@ failure, not a silent leak.
   the persisted `execution_log` / `tool_calls` / `response_snapshot`) and the
   `:6390` cross-worker two-client propagation test land **with** the chokepoint
   wiring, alongside the parity guard.
+- `tests/unit/test_4228_voice_reply_scrub.py` — the voice sends and
+  `synthesize_mp3`: a staged value with no credential-pattern shape never
+  reaches synthesis (asserted on the provider request body for `synthesize_mp3`),
+  what is spoken carries the spoken placeholder while the audit
+  preview keeps the stored marker, nothing staged is byte-identical, a store
+  outage fails open, a refused call never reads the store, and the cap's answer
+  (and quoted length) is the same whether or not the value is staged.
 
 ## Related Flows
 
