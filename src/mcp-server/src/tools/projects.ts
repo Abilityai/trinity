@@ -386,17 +386,21 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "and the agent on it, and only its members can see it — adding people or changing who can " +
         "see it stays your owner's. Needs the project-management permission an instance admin grants; " +
         "without it the call is refused with `project_management_not_permitted` and nothing is created. " +
-        "Returns the project; work on it with the task and log tools.",
+        "Pass `steward` to name another agent your owner can use as its steward instead of you " +
+        "(trinity-enterprise#1169); it is added to the project beside you, its owner asked first if it is " +
+        "someone else's. Returns the project; work on it with the task and log tools.",
       parameters: z.object({
         agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         name: z.string().min(1).max(200).describe("Short project name, e.g. 'Q4 launch'."),
         goal: z.string().min(1).max(2000).describe("What done looks like, in a sentence or two."),
         tracker_url: z.string().max(2000).optional().describe("An external tracker for its tasks, if it has one."),
+        steward: z.string().min(1).max(128).optional().describe("Another agent to steward it (its name). Default: you."),
       }),
-      execute: async (p: { name: string; goal: string; tracker_url?: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
+      execute: async (p: { name: string; goal: string; tracker_url?: string; steward?: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
           const body: Record<string, unknown> = { name: p.name, goal: p.goal };
           if (p.tracker_url) body.tracker_url = p.tracker_url;
+          if (p.steward) body.steward = p.steward;
           return ok({ project: await clientFor(context, p.agent_name).createProjectAsAgent(body, turnOf(context)) });
         } catch (e) {
           return fail(e);
@@ -412,14 +416,16 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "Trinity): `project_files/<slug>` or `<canon>/projects/<slug>` with its project.md, task " +
         "files, log and decisions. Afterwards the platform is its home and nothing syncs back; a " +
         "second import of the same folder is refused. Needs the project-management permission; " +
-        "your owner becomes the project's creator, you its steward.",
+        "your owner becomes the project's creator. The steward is the agent its project.md names as " +
+        "`owner` when your owner can use it, else your owner; pass `steward` to name an agent instead.",
       parameters: z.object({
         agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         path: z.string().min(1).max(300).describe("The project folder in your files, e.g. 'project_files/q4-launch'."),
+        steward: z.string().min(1).max(128).optional().describe("An agent to steward it (its name), instead of the folder's owner."),
       }),
-      execute: async (p: { path: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
+      execute: async (p: { path: string; steward?: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          return ok({ project: await clientFor(context, p.agent_name).importProjectAsAgent(p.path, turnOf(context)) });
+          return ok({ project: await clientFor(context, p.agent_name).importProjectAsAgent(p.path, turnOf(context), p.steward) });
         } catch (e) {
           return fail(e);
         }

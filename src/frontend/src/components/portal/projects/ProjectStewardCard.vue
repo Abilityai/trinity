@@ -14,6 +14,11 @@
   answers it once in the Inbox. The card says who it waits on, so nobody
   reads the unchanged member list as the proposal having been lost.
 
+  An agent steward's line says whether it carries the library's
+  project-management skills (trinity-enterprise#1169); a person steward's card
+  says what having no steward agent means (nothing reads the digest between
+  visits).
+
   A person steward sees what waits on them (tasks to verify, stuck tasks —
   from the roll-up the page already has) and, when it is me, the way to the
   "I steward" tab.
@@ -57,6 +62,8 @@
           <template v-else>No sweep recorded yet</template>
         </li>
         <li v-if="steward.schedule" data-testid="project-steward-schedule">{{ scheduleLine }}<span v-if="scheduleAt" :title="absolute(scheduleAt)"> {{ relative(scheduleAt) }}</span></li>
+        <!-- ent#1169: does the agent carry the project-management skills? -->
+        <li v-if="skillLine" :class="skillSet.held ? '' : 'font-medium text-status-warning-700 dark:text-status-warning-300'" data-testid="project-steward-skills">{{ skillLine }}</li>
         <li v-if="!health">No health update yet</li>
         <li v-if="rollup.health_due" class="font-medium text-status-warning-700 dark:text-status-warning-300" data-testid="project-steward-health-due">Health update due</li>
       </ul>
@@ -75,6 +82,10 @@
       </p>
       <p class="mt-3 text-xs text-gray-500 dark:text-gray-400">
         The steward verifies finished tasks, unblocks stuck ones and says how it's going.
+      </p>
+      <!-- ent#1169 (R5 on ent#1137): what having no steward AGENT means. -->
+      <p class="mt-2 text-xs text-gray-500 dark:text-gray-400" data-testid="project-steward-no-agent">
+        No steward agent: nothing reads this project's digest or checks done claims between visits. Pick an agent as steward in Edit project to have that done on a schedule.
       </p>
       <BaseButton v-if="isMe" class="mt-3" size="sm" variant="secondary" data-testid="project-steward-open-stewarding" @click="$emit('open-stewarding')">Open I steward</BaseButton>
     </template>
@@ -126,6 +137,15 @@ const inboxRoute = computed(() => {
   return p ? askInboxRoute({ id: p.ask_id, agent_name: p.proposed_by }) : null
 })
 const scheduleLine = computed(() => stewardScheduleLine(steward.value?.schedule))
+// ent#1169: the read's `skill_set` ({held, available}); absent on an older backend → no line.
+const skillSet = computed(() => steward.value?.skill_set || null)
+const skillLine = computed(() => {
+  const s = skillSet.value
+  if (!s || s.held === null || s.held === undefined) return ''
+  if (s.held) return 'Has the project-management skills'
+  if (s.available === false) return "The project-management skills aren't available on this Trinity yet"
+  return "Doesn't have the project-management skills yet, so it can't keep the record. Its owner or an admin can give them on the agent's Skills tab."
+})
 const scheduleAt = computed(() => (steward.value?.schedule?.state === 'scheduled' ? steward.value.schedule.next_run_at : null))
 // What waits on a person steward: the task lines only — health has its own
 // line here, asks have their own card.
