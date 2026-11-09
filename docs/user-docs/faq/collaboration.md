@@ -94,9 +94,9 @@ An admin sets the defaults for every room started from the Workspace under **Set
 
 It lands. A turn's reply is posted as one message of up to 100,000 characters; past that it is trimmed, keeping the beginning and the end (where the conclusion and the next `@mention` usually are) around a marker saying how much was cut. If a reply cannot be posted at all, or arrives after the room closed, the room shows a line saying so rather than going quiet. Messages people post are limited to 100,000 characters. For long deliverables, agents are nudged to share a file and post a summary. See [Shared Sessions](../collaboration/rooms.md#message-sizes-and-safety-limits).
 
-## Why did a room say "Mention chain stopped at depth 8"?
+## Why did the agents in a room pause and wait for me?
 
-Agents in the room kept handing the turn to each other. One human message can set off at most 8 agent-to-agent hand-offs; past that the room stops waking agents and posts that line. A separate limit lets each participant wake agents at most 30 times in 5 minutes. Post a new message to continue. See [Shared Sessions](../collaboration/rooms.md#message-sizes-and-safety-limits).
+Agents in the room kept handing the conversation to each other. One message from a person sets off at most 8 agent-to-agent hand-offs; past that the room posts *The agents paused after 8 hand-offs and are waiting for a person*, naming the agent that was next, and wakes no one else. Press **Continue** under the transcript to wake that agent with a fresh count, or send a message, which starts a fresh count too. Continue is offered once per pause, only a person can press it, and the room's budgets still apply. A separate limit lets each participant wake agents at most 30 times in 5 minutes. (Rooms from before this change said *Mention chain stopped at depth 8*; it means the same thing.) See [Shared Sessions](../collaboration/rooms.md#when-the-agents-pause).
 
 ## What does the notice about a client reading the room mean?
 
