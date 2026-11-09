@@ -287,9 +287,11 @@ async def set_env_value(
     ``actor_email`` answering ask ``ask_id``. Raises `CredentialSinkError`;
     returns nothing — the caller answers the ask by name.
 
-    With a ``destination`` (trinity-enterprise#1109) the value is delivered to
-    that agent on that instance instead, under the key ``agent_name`` holds
-    for it; this instance keeps nothing."""
+    With a ``destination`` (trinity-enterprise#1109, #1158) the value is
+    delivered to that agent on that instance instead — under the key stored on
+    the registered entry for an ``instance`` destination, or the key
+    ``agent_name`` holds under ``key_env`` for the older shape; this instance
+    keeps nothing."""
     name = _check_name(name)
     _check_value(value)
 

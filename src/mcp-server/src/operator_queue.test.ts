@@ -965,6 +965,7 @@ describe("trinity-enterprise#1066 ask_for_credential", () => {
       "destination_invalid", "destination_instance_invalid", "destination_agent_invalid",
       "destination_outbound_disabled", "destination_not_approved", "destination_instance_no_credential",
       "destination_url_invalid", "destination_key_env_invalid", "destination_key_env_missing",
+      "instance_moved", "destination_unreadable", "destination_key_refused",
     ]) assert.match(d, new RegExp(code), code);
     assert.ok(d.length <= 2048, `destination description is ${d.length} characters`);
   });

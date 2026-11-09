@@ -761,12 +761,21 @@ _KEY_GUARDED = {
     "_deliver_remote": {"key", "headers"},
     "_deliver_remote_once": {"key", "headers"},
     "merge_env_values": {"item"},
+    "classify_key": {"key", "found"},
+    "key_env_state": {"env_text"},
 }
+# `credential_destination.py` reduces a resolved entry to metadata; there only
+# `.credential` is watched (it may be measured by `bool`, never carried).
+_DEST_KEY_GUARDED = {
+    "entry_metadata": set(),
+}
+# `classify_key` is itself guarded above, so handing the file's text to it is
+# not a leak.
 _ALLOWED_KEY_CALLEES = {"len", "isinstance", "strip", "match", "bool", "_read_capped",
-                        "_check_value"}
+                        "_check_value", "classify_key"}
 
 
-def _key_offences(src: str):
+def _key_offences(src: str, guarded=_KEY_GUARDED):
     tree = ast.parse(src)
     parents = {}
     for node in ast.walk(tree):
@@ -774,10 +783,10 @@ def _key_offences(src: str):
             parents[child] = node
     found_fns, offences = set(), []
     for fn in ast.walk(tree):
-        if not (isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name in _KEY_GUARDED):
+        if not (isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name in guarded):
             continue
         found_fns.add(fn.name)
-        tainted = _KEY_GUARDED[fn.name]
+        tainted = guarded[fn.name]
         for node in ast.walk(fn):
             hit = ((isinstance(node, ast.Name) and node.id in tainted and isinstance(node.ctx, ast.Load))
                    or (isinstance(node, ast.Attribute) and node.attr == "credential"
@@ -820,6 +829,13 @@ def test_the_sink_module_never_interpolates_a_delivery_key():
     found_fns, offences = _key_offences(src)
     # every guarded function still exists, so the guard cannot go blind on a rename
     assert found_fns == set(_KEY_GUARDED), set(_KEY_GUARDED) - found_fns
+    assert not offences, offences
+
+
+def test_the_destination_module_never_carries_an_entry_credential():
+    src = (Path(_BACKEND) / "services" / "credential_destination.py").read_text(encoding="utf-8")
+    found_fns, offences = _key_offences(src, _DEST_KEY_GUARDED)
+    assert found_fns == set(_DEST_KEY_GUARDED), set(_DEST_KEY_GUARDED) - found_fns
     assert not offences, offences
 
 

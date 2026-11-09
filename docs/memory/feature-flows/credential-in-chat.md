@@ -69,7 +69,7 @@ person's field: "Sent to the agent X on the Trinity at host …"
              └─ credential_sink.set_env_value(..., destination)
                   stage_secret (fail closed)
                   · _deliver_remote, inside ONE audit `finally`:
-                      check_deliverable (switch + origin still registered)
+                      check_switch (outbound on) — not check_deliverable: the resolve-by-id + origin equality below is the registry check
                       _resolve_instance_key ◀── THE resolve point (the per-agent grant seam)
                          a2a_outbound.resolve_endpoint(agent, endpoint_id) — by the stored id
                          none → destination_not_approved / instance_unknown
