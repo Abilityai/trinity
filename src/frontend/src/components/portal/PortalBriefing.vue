@@ -1,7 +1,7 @@
 <template>
   <div id="portal-briefing" class="py-8 sm:py-12 text-center">
-    <PortalAvatar :name="agent.name" :avatar-url="agent.avatar_url" :size="64" class="mx-auto" />
-    <h1 class="mt-4 text-xl font-semibold tracking-tight">{{ isMemberViewer ? agentDisplayName(agent) : agent.name }}</h1>
+    <PortalAvatar :name="agentDisplayName(agent)" :avatar-url="agent.avatar_url" :size="64" class="mx-auto" />
+    <h1 class="mt-4 text-xl font-semibold tracking-tight">{{ agentDisplayName(agent) }}</h1>
     <!-- #2163: the briefing is hydrated AFTER the roster (it used to ship with
          it, which is what made the Workspace's first paint wait for the slowest
          agent in the fleet). So this zone shows a placeholder keyed on the
