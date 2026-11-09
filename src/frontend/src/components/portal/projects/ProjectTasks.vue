@@ -139,6 +139,18 @@
         </div>
         <div v-if="task.done_definition && showRead"><h3 class="text-xs font-semibold text-gray-500 dark:text-gray-400">Definition of done</h3><p class="mt-1 whitespace-pre-line font-mono text-xs text-gray-800 dark:text-gray-200">{{ task.done_definition }}</p></div>
 
+        <!-- trinity-enterprise#1193: this task's briefs, for the agent working it. -->
+        <ProjectContext
+          :project-id="projectId"
+          :task-id="task.id"
+          :items="(task.context || []).filter((c) => c.kind === 'project-file')"
+          :can-contribute="canContribute"
+          :archived="archived"
+          :my-email="myEmail"
+          :is-creator="isCreator"
+          @changed="refreshTask"
+        />
+
         <form v-if="canContribute && !archived" class="space-y-2 rounded-lg border border-gray-200 dark:border-gray-750 p-3" @submit.prevent="saveTask">
           <BaseInput
             id="task-title-edit"
@@ -234,6 +246,7 @@ import LoadFailed from '@/components/LoadFailed.vue'
 import InlineError from '@/components/InlineError.vue'
 import PortalMarkdown from '@/components/portal/PortalMarkdown.vue'
 import { useProjectsStore } from '@/stores/projects'
+import ProjectContext from './ProjectContext.vue'
 import { viewState } from '@/utils/loadingState'
 import { formatRelativeTime, formatLocalDateTime } from '@/utils/timestamps'
 import {
@@ -248,6 +261,8 @@ const props = defineProps({
   myEmail: { type: String, default: '' },
   // The project's members `{email, label}` — names an owner on a row.
   members: { type: Array, default: () => [] },
+  // trinity-enterprise#1193: the viewer holds the creator role (may change anyone's brief).
+  isCreator: { type: Boolean, default: false },
 })
 
 const store = useProjectsStore()
@@ -355,6 +370,15 @@ async function confirmDone(t) {
     confirmError.value = projectErrorMessage(err)
   } finally {
     confirming.value = ''
+  }
+}
+
+async function refreshTask() {
+  if (!task.value) return
+  try {
+    task.value = await store.fetchTask(props.projectId, task.value.id)
+  } catch (err) {
+    actionError.value = projectErrorMessage(err)
   }
 }
 

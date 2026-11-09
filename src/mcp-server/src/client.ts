@@ -4418,6 +4418,12 @@ export class TrinityClient {
     return res.entries;
   }
 
+  /** trinity-enterprise#1193: one budget-sized part of a brief marked for agents. */
+  async readProjectContext(projectId: string, itemId: string, offset = 0, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("GET",
+      this.projectPath(projectId, `/context/${encodeURIComponent(itemId)}?offset=${offset}`), turn);
+  }
+
   async addProjectLogEntry(projectId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
     return this.projectRequest("POST", this.projectPath(projectId, "/log"), turn, body);
   }

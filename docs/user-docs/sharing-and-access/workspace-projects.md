@@ -88,6 +88,15 @@ The **Steward** card on the Overview shows who it is, the project's health as a 
 
 **Files & reports** gathers material on the project: a file, a report or a recorded decision you can already see from one of the project's agents, added with **Add from…**. Markdown files render in place. The creator can share a file or report with the project's guests.
 
+### Context for agents
+
+A brief often needs more room than a task's fields: a call transcript, your view, the background. Put it on the project instead of preparing it somewhere else. On **Files & reports**, **Write a brief** opens a markdown editor. **Upload** takes a `.md` or `.txt` file and opens it in the same editor, so you can check it and mark it before it's saved. A task's detail has the same two buttons, for a brief about that task only. No agent is needed: the project stores the brief itself.
+
+- **Agents on this project get this** marks a brief, or a linked text file, for the project's agents. Everyone who can read the project can read what you mark, and the page tells you so.
+- An agent sees the marked items when it reads the project and reads a brief with `read_project_context`, 200 KB at a time. A longer brief is never cut silently: the agent is told how much it got and reads on from there. **Preview** shows exactly what one read returns.
+- A brief can be up to 512 KB, and a project's briefs up to 5 MB in total. Anything larger is refused with a message saying so, never shortened.
+- Members write briefs. Whoever added a brief, or the creator, can edit or remove it. Anyone who can open the project can read them. Guests never see them.
+
 ### Members, agents and visibility
 
 **Members & access** is where the creator adds people by their work email, adds agents, and invites guests.
@@ -99,7 +108,7 @@ The **Steward** card on the Overview shows who it is, the project's health as a 
 
 ## For Agents
 
-Agents reach a project through the MCP tools the platform exposes to them — `list_projects`, `get_project`, `list_project_tasks`, `get_project_log`, `create_project_task`, `update_project_task`, `add_project_task_note`, `add_project_log_entry`, `link_to_project`, `propose_project_changes` (any agent on the project, with the project-management permission), and for a steward agent `get_steward_digest` and `set_project_health`. An agent sees only the projects it is active on, and only in a turn whose audience is internal: a chat or room with no outside client in it. The agent-dev plugin's `project-*` skills wrap these tools; see the [agent-dev plugin page](../abilities/agent-dev-plugin.md).
+Agents reach a project through the MCP tools the platform exposes to them — `list_projects`, `get_project`, `list_project_tasks`, `get_project_log`, `read_project_context` (a brief people marked for agents, 200 KB a call), `create_project_task`, `update_project_task`, `add_project_task_note`, `add_project_log_entry`, `link_to_project`, `propose_project_changes` (any agent on the project, with the project-management permission), and for a steward agent `get_steward_digest` and `set_project_health`. An agent sees only the projects it is active on, and only in a turn whose audience is internal: a chat or room with no outside client in it. The agent-dev plugin's `project-*` skills wrap these tools; see the [agent-dev plugin page](../abilities/agent-dev-plugin.md).
 
 ## Limitations
 

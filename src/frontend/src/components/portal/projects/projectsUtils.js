@@ -181,6 +181,11 @@ const CODE_MESSAGE = {
   archived: 'This project is archived. Restore it to add to it.',
   not_permitted: 'Only the person who created this project can change that.',
   unknown_person: 'Only people at your company can be added. Check the email, e.g. name@your-company.com.',
+  context_too_large: 'A brief can be at most 512 KB. Split it into several files.',
+  project_context_full: "This project's briefs can total at most 5 MB. Remove one you no longer need first.",
+  unsupported_type: 'A brief is markdown (.md) or plain text (.txt). Link other files from Add from… instead.',
+  not_text: "This file isn't text. Save it as .md or .txt and try again.",
+  empty_brief: 'The brief is empty.',
   agent_not_found: "That agent isn't on your list, so you can't add it.",
   too_many_members: 'This project has reached its member limit.',
   too_many_links: 'This project has reached its link limit.',
@@ -412,4 +417,18 @@ export function projectNeedsYouRows(asks, mineIds, { expanded = {}, dismissals =
       open: Boolean(expanded[a.id]) || Boolean(dismissals[a.id]),
       ask: a,
     }))
+}
+
+// --- trinity-enterprise#1193: context for agents ------------------------------------
+/** One agent read returns at most this many bytes; past it the agent reads on by offset. */
+export const AGENT_READ_BYTES = 200 * 1024
+export const CONTEXT_SHARED_NOTICE = 'Everyone who can read this project can read it.'
+
+/** What an agent receives from one read of `text`: the first part, and whether it is cut. */
+export function agentPreview(text) {
+  const bytes = new TextEncoder().encode(text || '')
+  if (bytes.length <= AGENT_READ_BYTES) return { text: text || '', truncated: false, total: bytes.length, shown: bytes.length }
+  let end = AGENT_READ_BYTES
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1     // never split a character
+  return { text: new TextDecoder().decode(bytes.slice(0, end)), truncated: true, total: bytes.length, shown: end }
 }

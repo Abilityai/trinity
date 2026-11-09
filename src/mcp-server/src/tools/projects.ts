@@ -161,7 +161,9 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       name: "get_project",
       description:
         "Read one Workspace project you are working on, by id: its goal, status, steward, tracker " +
-        "link, members, the other agents on it, and how many chats and rooms are linked. Other " +
+        "link, members, the other agents on it, and how many chats and rooms are linked. `context` " +
+        "lists the briefs people prepared for agents (id, filename, size_bytes, task_id — a task's " +
+        "own brief carries its id); read one with read_project_context before working that task. Other " +
         "people's chats are private, so they appear only as a count. Use the id from the " +
         "'[Project]' line at the top of the conversation, or from list_projects.",
       parameters: z.object({
@@ -284,6 +286,30 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       execute: async (p: { project_id: string; task_id: string; body: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
           return ok(await clientFor(context, p.agent_name).addProjectTaskNote(p.project_id, p.task_id, p.body, turnOf(context)));
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    },
+
+    // ========================================================================
+    read_project_context: {
+      name: "read_project_context",
+      description:
+        "Read a brief people prepared for this project's agents (a transcript, background, their " +
+        "view) — an item from the `context` list of get_project. Returns its text, at most 200 KB " +
+        "per call. When `truncated` is true the brief is longer: call again with offset = " +
+        "`next_offset` until `truncated` is false. Read a task's brief before working the task.",
+      parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
+        project_id: projectId,
+        item_id: z.string().min(1).max(64).describe("The context item's id, from get_project's `context`."),
+        offset: z.number().int().min(0).optional().describe("Byte offset to read from: 0, then `next_offset`."),
+      }),
+      execute: async (p: { project_id: string; item_id: string; offset?: number } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
+        try {
+          const part = await clientFor(context, p.agent_name).readProjectContext(p.project_id, p.item_id, p.offset ?? 0, turnOf(context));
+          return ok(part);
         } catch (e) {
           return fail(e);
         }
