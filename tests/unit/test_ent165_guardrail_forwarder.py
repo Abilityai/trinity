@@ -444,6 +444,26 @@ def test_a_backend_without_the_route_keeps_the_spool_and_retries_hourly(spool, c
     assert backend.bodies[-1]["events"] and len(set(backend.event_ids())) == 2
 
 
+@pytest.mark.parametrize("status", [401, 403])
+def test_a_refused_key_keeps_the_spool_and_retries_hourly(spool, caplog, status):
+    """The platform answers 403 to a key that is not the agent's own, and also
+    when the key is revoked while the body uploads. A key will not fix itself
+    in seconds: keep the records, ask again in an hour, log once."""
+    append(spool, record(), record())
+    backend = Backend((status, None))
+    fwd = make(backend)
+    caplog.set_level("DEBUG", logger=ge.logger.name)
+    run(drive(fwd, 0.0, 3599.0))
+    assert len(backend.bodies) == 1, "one attempt, then quiet for an hour"
+    assert (
+        sum("guardrail" in r.getMessage() for r in caplog.records if r.levelno >= 20)
+        == 1
+    )
+    backend.answers = [(200, None)]
+    run(drive(fwd, 3601.0, 3610.0))
+    assert len(set(backend.event_ids())) == 2 and backend.bodies[-1]["dropped"] == 0
+
+
 def test_a_resend_carries_the_same_event_ids(spool):
     append(spool, record(), record())
     backend = Backend((503, None), ConnectionError("down"), (200, None))

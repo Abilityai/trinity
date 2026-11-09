@@ -622,6 +622,37 @@ def test_the_image_smoke_passes_a_real_deny_record(lib, tmp_path, monkeypatch):
     assert failures == []
 
 
+@pytest.mark.parametrize("missing", ["v", "event_id", "kind", "hook", "code"])
+def test_the_image_smoke_requires_each_contract_field(lib, tmp_path, monkeypatch, missing):
+    monkeypatch.setattr(sys, "argv", [str(HOOKS / "bash-guardrail.py")])
+    with pytest.raises(SystemExit):
+        lib.deny("x", tool="Bash", code="bash_deny_pattern")
+    [rec] = _records(lib.LOG_PATH)
+    del rec[missing]
+    smoke = _load_smoke()
+    smoke.LOG_PATH = str(tmp_path / "one-record.jsonl")
+    Path(smoke.LOG_PATH).write_text(json.dumps(rec) + "\n")
+    failures = []
+    smoke._check_deny_record(failures)
+    assert len(failures) == 1
+
+
+def test_the_image_smoke_checks_the_record_after_the_bash_rows():
+    """The check is only proof at image build if the smoke's main() calls it."""
+    tree = ast.parse((HOOKS / "guard002-smoke.py").read_text())
+    main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+    branches = [
+        n for n in ast.walk(main)
+        if isinstance(n, ast.If) and "'bash-guardrail.py'" in ast.unparse(n.test)
+    ]
+    assert len(branches) == 1
+    calls = [ast.unparse(s) for s in branches[0].body]
+    assert "_check_deny_record(failures)" in calls
+    assert calls.index("_check_gated_rows(argv, failures)") < calls.index(
+        "_check_deny_record(failures)"
+    )
+
+
 def test_the_fake_key_in_a_command_stays_only_in_the_local_spool(tmp_path):
     """The local record keeps `command_prefix` for debugging (unchanged); the
     forwarder's projection is what keeps it in the container
