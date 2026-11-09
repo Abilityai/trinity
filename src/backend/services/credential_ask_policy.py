@@ -55,8 +55,14 @@ _AGENT_PROTECTED_KEYS = frozenset({
     "GIT_EDITOR", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_COUNT",
     "GIT_CONFIG_NOSYSTEM", "GIT_ASKPASS", "GIT_PROXY_COMMAND",
     "GEMINI_CLI_HOME", "GEMINI_CLI_SYSTEM_SETTINGS_PATH", "GEMINI_CLI_SYSTEM_DEFAULTS_PATH",
-    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "DISABLE_TELEMETRY", "DISABLE_ERROR_REPORTING",
     "CLAUDE_CODE_MANAGED_SETTINGS_PATH", "CLAUDE_CODE_DISABLE_ADMIN_ENV_UNION",
+})
+
+#: Mirror of the union of the agent image's `execution_env.RUNTIME_OPT_OUT_KEYS`
+#: values — reserved on every runtime here, as the endpoint names are below: a
+#: credential ask does not know the runtime, and an opt-out is never a secret.
+_AGENT_RUNTIME_OPT_OUT_KEYS = frozenset({
+    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "DISABLE_TELEMETRY", "DISABLE_ERROR_REPORTING",
 })
 
 #: Mirror of the agent image's `execution_env.ROUTING_KEYS`.
@@ -87,7 +93,7 @@ _AGENT_RUNTIME_ENDPOINT_KEYS = frozenset({
 #: Every name a credential ask may not carry.
 RESERVED_ENV_NAMES = frozenset(
     PLATFORM_WRITTEN_ENV_NAMES | _AGENT_PROTECTED_KEYS | _AGENT_ROUTING_KEYS
-    | _AGENT_RUNTIME_ENDPOINT_KEYS
+    | _AGENT_RUNTIME_ENDPOINT_KEYS | _AGENT_RUNTIME_OPT_OUT_KEYS
 )
 
 #: Mirror of the agent image's `execution_env.PROTECTED_KEY_PREFIXES` — an

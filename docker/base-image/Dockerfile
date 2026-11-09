@@ -325,25 +325,27 @@ RUN chown -R root:root /etc/claude-code/managed-settings.d && \
 # that carries a SHA-256 of each small file the agent reads), error reports and
 # the update/feedback/release-notes checks are off. Nothing leaves the server
 # without an admin opt-in, and these had none. Still on: the model API, Claude
-# Code's own settings and policy-limits reads, and the WebFetch domain check.
+# Code's own settings and policy-limits reads, the WebFetch domain check, and
+# the customer OTLP export the platform configures (CLAUDE_CODE_ENABLE_TELEMETRY,
+# /api/ops/costs), which the CLI gates on its own name only.
 #
-# Two layers, same three names, kept equal by
-# tests/unit/test_ent1093_claude_vendor_telemetry.py:
-# - the `70-vendor-telemetry.json` drop-in above, because Claude Code applies
-#   `env` from the agent-writable `~/.claude/settings.json` and
-#   `.claude/settings.local.json` over the process env, and only policy `env`
-#   beats those. Its own file: a schema-invalid entry voids only the file it is
-#   in (a file that is not JSON fails the build at guard002-smoke below);
-# - this ENV, as defence in depth: the CLI's gates read `process.env`, and this
-#   puts the values there before any settings are read, in `docker inspect`, and
-#   in every process the platform starts (an SSH login gets the drop-in only).
+# The `70-vendor-telemetry.json` drop-in above is the only layer, on purpose:
+# - Claude Code applies `env` from the agent-writable `~/.claude/settings.json`
+#   and `.claude/settings.local.json` over the process env, and only policy
+#   `env` beats those. Its own file: a schema-invalid entry voids only the file
+#   it is in (a file that is not JSON fails the build at guard002-smoke below).
+#   The two names that could detach it (CLAUDE_CODE_MANAGED_SETTINGS_PATH,
+#   CLAUDE_CODE_DISABLE_ADMIN_ENV_UNION) are process-env-only: the CLI drops
+#   them from every settings file's `env`, and `.env` cannot set them.
+# - No image ENV: a recreate replays the old container's Config.Env, so an
+#   image ENV would be frozen into every agent and a later admin opt-in could
+#   not reach it. The drop-in alone holds (proven by a proxied capture).
 # The broad name alone is what gates the error sink on the pinned CLI; the two
 # narrow ones keep telemetry and error reports off if a later CLI narrows it.
-# `.env` cannot set any of them (execution_env.PROTECTED_KEYS). Both layers sit
-# before the plugin pre-install, so that install runs with them on.
-ENV CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 \
-    DISABLE_ERROR_REPORTING=1 \
-    DISABLE_TELEMETRY=1
+# `.env` cannot set any of them on Claude (execution_env.RUNTIME_OPT_OUT_KEYS).
+# The only `claude` run before this COPY is the install's `claude --version`,
+# which makes no request; everything after it, the plugin pre-install included,
+# runs with the opt-out on. tests/unit/test_ent1093_claude_vendor_telemetry.py.
 
 # trinity-enterprise#1001 — the routing env names (`ANTHROPIC_BASE_URL`, the
 # proxy and TLS-trust names) are pinned by their own policy drop-in, because

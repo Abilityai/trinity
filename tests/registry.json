@@ -8806,7 +8806,7 @@
         "security",
         "unit"
       ],
-      "description": "trinity-enterprise#1093: Claude Code vendor traffic off by default (CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC + DISABLE_TELEMETRY + DISABLE_ERROR_REPORTING) in a root-owned managed-settings.d drop-in and the image ENV, both before the build's own claude runs; no other managed source declares the names; every managed env name is one .env cannot set; .env cannot blank the opt-out or detach managed env (real build_execution_env); CLI-pin gate."
+      "description": "trinity-enterprise#1093: Claude Code vendor traffic off by default (CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC + DISABLE_TELEMETRY + DISABLE_ERROR_REPORTING) in a root-owned managed-settings.d drop-in, installed before every build-time claude run but the install's --version; no image ENV for the names (a recreate would freeze it); no other managed source declares them; every managed env name is one .env cannot set; a Claude agent's .env cannot blank the opt-out while a Gemini/Codex agent's may set the generic names, and no runtime's .env can detach managed env (real build_execution_env); /health vendor_telemetry_opt_out (ok/missing/not_root_owned/writable/altered/unsupported_runtime); CLI-pin gate incl. the OTLP cost-metric check."
     },
     {
       "file": "unit/test_ent1135_ask_room_attachment.py",
