@@ -187,10 +187,12 @@ def _events(tmp_path, name):
 
 
 def test_the_base64_fixture_is_one_the_shapes_would_damage():
-    """Precondition for every binary-skip test: the payload is not vacuous."""
+    """Precondition for every binary-skip test: the payload is not vacuous.
+    Each shape is compiled behind the shared left boundary, as the hook does."""
+    baseline = json.loads(H.BASELINE.read_text())
     shapes = [
-        re.compile(e["pattern"])
-        for e in json.loads(H.BASELINE.read_text())["credential_patterns"]
+        re.compile(baseline["credential_boundary"] + "(?:" + e["pattern"] + ")")
+        for e in baseline["credential_patterns"]
     ]
     assert sum(1 for p in shapes if p.search(_B64)) >= 2
 
