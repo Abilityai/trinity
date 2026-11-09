@@ -569,6 +569,51 @@ def test_rotation_loses_nothing_a_hook_appended_during_the_rename(spool, monkeyp
     assert len(ids) == len(set(ids)) == 12
 
 
+def test_a_cut_short_line_at_the_end_of_the_rotated_spool_never_stalls_delivery(
+    spool, monkeypatch
+):
+    """A hook write cut short (a full disk, a kill mid-write) leaves a line with
+    no newline. In the live spool the next append completes it into one line;
+    in `.1` nothing ever will, so the forwarder waited there for good while its
+    keepalives went on saying all was well. Past the grace it is counted and
+    the forwarder moves on to the live spool."""
+    first = [record() for _ in range(15)]
+    append(spool, *first, raw=json.dumps(record())[:50])
+    backend = Backend()
+    fwd = make(backend)
+    run(drive(fwd, 0.0, 5.0))
+    monkeypatch.setattr(ge, "ROTATE_BYTES", 2048)
+    run(fwd.tick(5.0))  # the spool, cut-short tail and all, becomes `.1`
+    assert Path(str(spool) + ".1").exists() and not spool.exists()
+    later = [record() for _ in range(3)]
+    append(spool, *later)
+    run(drive(fwd, 5.1, 30.0))
+    ids = backend.event_ids()
+    assert all(r["event_id"] in ids for r in first + later)
+    assert sum(b["dropped"] for b in backend.bodies) == 1
+
+
+def test_a_second_rotation_waits_out_the_first_ones_grace(spool, monkeypatch):
+    """A flood that fills the fresh spool inside the grace window must not
+    replace `.1` while a hook may still be appending to it: that write would land
+    in an unlinked file, neither delivered nor counted."""
+    append(spool, *[record() for _ in range(25)])
+    backend = Backend()
+    fwd = make(backend)
+    run(drive(fwd, 0.0, 5.0))
+    monkeypatch.setattr(ge, "ROTATE_BYTES", 2048)
+    with open(spool, "a") as held:  # a hook that opened the path just before the rename
+        run(fwd.tick(5.0))  # rotation 1
+        append(spool, *[record() for _ in range(25)])  # the new spool is full at once
+        run(fwd.tick(5.6))  # still inside rotation 1's grace
+        held.write(json.dumps(record()) + "\n")
+    run(drive(fwd, 6.0, 60.0))
+    delivered = backend.event_ids()
+    dropped = sum(b["dropped"] for b in backend.bodies)
+    assert len(delivered) == len(set(delivered))
+    assert len(delivered) + dropped == 51, "every record is delivered or counted"
+
+
 def test_a_spool_the_platform_never_drains_is_bounded_and_the_loss_counted(
     spool, monkeypatch
 ):

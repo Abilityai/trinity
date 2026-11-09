@@ -259,14 +259,29 @@ class Forwarder:
     def _grace_over(self, now: float) -> bool:
         return self._rotated_at is None or now - self._rotated_at >= ROTATE_GRACE_SECONDS
 
+    def _only_a_cut_line_left(self, path: str, size: int) -> bool:
+        """What is left of `path` is one line with no newline. A longer one is
+        skipped whole by `_read_batch`, so only a short one can stall."""
+        if size - self._offset >= MAX_LINE_BYTES:
+            return False
+        with open(path, "rb") as f:
+            f.seek(self._offset)
+            return b"\n" not in f.read()
+
     def _advance_past_rotated(self, now: float) -> Tuple[Optional[str], Optional[os.stat_result]]:
         path, st = self._locate()
-        if path == self._rotated_path() and st is not None and self._offset >= st.st_size and self._grace_over(now):
-            live = _stat(SPOOL_PATH)
-            self._ino = live.st_ino if live is not None else None
-            self._offset = 0
-            self._save_state()
-            return (SPOOL_PATH, live) if live is not None else (None, None)
+        if path == self._rotated_path() and st is not None and self._grace_over(now):
+            if self._offset < st.st_size and self._only_a_cut_line_left(path, st.st_size):
+                # A write cut short (a full disk, a kill mid-write). Nothing appends
+                # to `.1` past the grace, so no newline will ever finish it.
+                self._dropped += 1
+                self._offset = st.st_size
+            if self._offset >= st.st_size:
+                live = _stat(SPOOL_PATH)
+                self._ino = live.st_ino if live is not None else None
+                self._offset = 0
+                self._save_state()
+                return (SPOOL_PATH, live) if live is not None else (None, None)
         return path, st
 
     def _has_unread(self) -> bool:
@@ -279,6 +294,10 @@ class Forwarder:
         return False
 
     def _maybe_rotate(self, now: float) -> None:
+        if not self._grace_over(now):
+            # A hook may still be appending to `.1`; replacing it now would put
+            # that write in an unlinked file, neither delivered nor counted.
+            return
         live = _stat(SPOOL_PATH)
         if live is None or live.st_size < ROTATE_BYTES:
             return
