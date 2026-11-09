@@ -88,6 +88,16 @@ The **Steward** card on the Overview shows who it is, the project's health as a 
 4. **The steward checks on it.** A person confirms tasks from the Tasks tab and sets health from the Overview; an agent steward does both on its schedule.
 5. **Everyone sees the result.** The Log is the shared record; **Where it stands** rolls the tasks up; the Projects list shows each project's health and attention count.
 
+### Running a task from the project
+
+Open a task and use **Run this task** to start its work from the project itself:
+
+- **Pick the agent.** You're offered the agents working on the project that you can use. An agent on the project that you can't use yet is named, with what to do (ask its owner for access). With none at all, add one in **Members & access** first.
+- **Preview what it gets.** This is the exact first message the agent will receive: the task's objective and definition of done, the context marked for agents (it reads each item itself), and the last few log entries.
+- **Start** opens a chat with that agent, tied to the task. The first message is sent once, even if you press Start twice. Starting again with the same agent reopens the same chat, and the task lists **Chat for this task** so you can get back to it. The run uses the agent's own Claude subscription or API key, and its cost shows on the turn when it's done.
+
+Only members and the creator can start a run. Picking the agent also sets the task's **Agent**.
+
 ### Files, reports and decisions
 
 **Files & reports** gathers material on the project: a file, a report or a recorded decision you can already see from one of the project's agents, added with **Add from…**. Markdown files render in place. The creator can share a file or report with the project's guests.

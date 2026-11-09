@@ -260,6 +260,18 @@ export const useProjectsStore = defineStore('projects', () => {
     _write(id, () => portalHttp.put(url(id, `/items/${kind}/${encodeURIComponent(targetId)}/for-agents`),
       { for_agents: forAgents }, { headers: headers() }))
 
+  // --- ent#1195: start a task's run from the project ------------------------------
+  async function startPreview(id, taskId, agent = null) {
+    const { data } = await portalHttp.get(url(id, `/tasks/${encodeURIComponent(taskId)}/start-preview`),
+      { headers: headers(), params: agent ? { agent } : {} })
+    return data
+  }
+  async function startTask(id, taskId, agentName, previewSha = null) {
+    const { data } = await portalHttp.post(url(id, `/tasks/${encodeURIComponent(taskId)}/start`),
+      { agent_name: agentName, ...(previewSha ? { preview_sha: previewSha } : {}) }, { headers: headers() })
+    return data
+  }
+
   async function metricOptions(id) {
     const { data } = await portalHttp.get(url(id, '/metric-options'), { headers: headers() })
     return data.agents || []
@@ -303,6 +315,7 @@ export const useProjectsStore = defineStore('projects', () => {
     addGuest, addItem, setItemAudience, removeItem, fetchReport, myItems, importCandidates, importProject,
     setHealth, linkMetric, unlinkMetric, metricOptions, stewarding, fetchStewarding,
     requestStewardAccess, grantStewardAccess, requestToJoin, requestAgent,
+    startPreview, startTask,
     writeContext, readContext, updateContext, deleteContext, markItemForAgents,
     fetchProjectPeople, fetchCompanyPeople, fetchStewardOptions,
   }

@@ -154,6 +154,16 @@
           @changed="refreshTask"
         />
 
+        <!-- trinity-enterprise#1195: pick the agent, see what it gets, start the task's chat. -->
+        <ProjectTaskStart
+          v-if="canContribute"
+          :project-id="projectId"
+          :task-id="task.id"
+          :can-contribute="canContribute"
+          :archived="archived"
+          @open-thread="openThread"
+        />
+
         <form v-if="canContribute && !archived" class="space-y-2 rounded-lg border border-gray-200 dark:border-gray-750 p-3" @submit.prevent="saveTask">
           <BaseInput
             id="task-title-edit"
@@ -250,6 +260,7 @@ import InlineError from '@/components/InlineError.vue'
 import PortalMarkdown from '@/components/portal/PortalMarkdown.vue'
 import { useProjectsStore } from '@/stores/projects'
 import ProjectContext from './ProjectContext.vue'
+import ProjectTaskStart from './ProjectTaskStart.vue'
 import { viewState } from '@/utils/loadingState'
 import { formatRelativeTime, formatLocalDateTime } from '@/utils/timestamps'
 import {
@@ -269,6 +280,7 @@ const props = defineProps({
   isCreator: { type: Boolean, default: false },
 })
 
+const emit = defineEmits(['open-thread'])
 const store = useProjectsStore()
 const createOpen = ref(false)
 const taskOpen = ref(false)
@@ -386,6 +398,12 @@ async function refreshTask() {
   } catch (err) {
     actionError.value = projectErrorMessage(err)
   }
+}
+
+// ent#1195: the task's chat opens in the Workspace; the task dialog closes first.
+function openThread(t) {
+  taskOpen.value = false
+  emit('open-thread', t)
 }
 
 async function openTask(id) {
