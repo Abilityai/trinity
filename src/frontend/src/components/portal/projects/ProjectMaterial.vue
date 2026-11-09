@@ -28,6 +28,7 @@
       :archived="archived"
       :my-email="myEmail"
       :is-creator="project.my_role === 'creator'"
+      :limits="project.context_limits || null"
     />
 
     <p v-if="!files.length && !reports.length && !decisions.length" class="rounded-lg border border-dashed border-gray-300 dark:border-gray-700 p-6 text-center text-sm text-gray-600 dark:text-gray-300" data-testid="project-material-empty">
@@ -46,8 +47,8 @@
           </div>
           <BaseBadge v-if="!guest && f.audience === 'guests'" variant="info">Shared with guests</BaseBadge>
           <!-- trinity-enterprise#1193: the context mark on a linked file. -->
-          <label v-if="!guest && canContribute && !archived" class="inline-flex items-center gap-1.5 text-xs text-gray-700 dark:text-gray-300">
-            <input type="checkbox" :checked="f.for_agents" :data-testid="`file-mark-${f.id}`" @change="markFile(f, $event.target.checked)" />
+          <label v-if="!guest && canMarkFile(f)" class="inline-flex items-center gap-1.5 text-xs text-gray-700 dark:text-gray-300">
+            <input type="checkbox" :checked="f.for_agents" :data-testid="`file-mark-${f.id}`" @change="markFile(f, $event)" />
             For agents
           </label>
           <BaseBadge v-else-if="!guest && f.for_agents" variant="info">For agents</BaseBadge>
@@ -138,7 +139,7 @@ import { useProjectsStore } from '@/stores/projects'
 import { formatRelativeTime, formatLocalDateTime } from '@/utils/timestamps'
 import { humanSize } from '@/components/portal/portalFiles'
 import ProjectContext from './ProjectContext.vue'
-import { projectErrorMessage, withheldLine } from './projectsUtils'
+import { isTextMime, projectErrorMessage, sameEmail, withheldLine } from './projectsUtils'
 
 const props = defineProps({
   project: { type: Object, required: true },
@@ -178,11 +179,17 @@ const canContribute = computed(() => props.project.can?.contribute === true)
 const withheld = computed(() => (props.guest ? '' : withheldLine({ project: props.project, myEmail: props.myEmail, canContribute: canContribute.value, archived: archived.value }, 'files and reports')))
 // trinity-enterprise#1193: the project-level briefs (task briefs live on their task).
 const projectBriefs = computed(() => (props.project.context || []).filter((c) => c.kind === 'project-file' && !c.task_id))
-async function markFile(f, on) {
+// The server's rule (ent#1193 review): a TEXT file, marked by whoever linked it
+// or the creator. Offering it elsewhere would only show a refusal.
+const canMarkFile = (f) => canContribute.value && !archived.value && isTextMime(f.mime_type)
+  && (props.project.my_role === 'creator' || sameEmail(f.linked_by, props.myEmail))
+async function markFile(f, event) {
+  const on = event.target.checked
   error.value = ''
   try {
     await store.markItemForAgents(props.project.id, 'file', f.id, on)
   } catch (err) {
+    event.target.checked = !on               // refused: the box shows the server's state again
     error.value = projectErrorMessage(err)
   }
 }

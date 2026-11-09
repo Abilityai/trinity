@@ -458,7 +458,9 @@ export function projectNeedsYouRows(asks, mineIds, { expanded = {}, dismissals =
 // task rule never disagree. Roles come from the read (`my_role`: creator /
 // member / null for a company viewer); a guest has its own narrow page.
 
-const same = (a, b) => Boolean(a) && Boolean(b) && String(a).toLowerCase() === String(b).toLowerCase()
+/** The one email comparison (case-insensitive), shared by every project control. */
+export const sameEmail = (a, b) => Boolean(a) && Boolean(b) && String(a).toLowerCase() === String(b).toLowerCase()
+const same = sameEmail
 
 /** The creator, as the reader should see them. */
 export function creatorName(project, myEmail) {
@@ -518,13 +520,23 @@ export function verificationRule(project) {
 // --- trinity-enterprise#1193: context for agents ------------------------------------
 /** One agent read returns at most this many bytes; past it the agent reads on by offset. */
 export const AGENT_READ_BYTES = 200 * 1024
+/** A file an agent can read as text (the server's `context._is_text`). */
+export const isTextMime = (mime) => {
+  const m = String(mime || '')
+  return m.startsWith('text/') || m === 'application/json' || m === 'application/x-yaml'
+}
 export const CONTEXT_SHARED_NOTICE = 'Everyone who can read this project can read it.'
 
-/** What an agent receives from one read of `text`: the first part, and whether it is cut. */
-export function agentPreview(text) {
+/**
+ * What an agent receives from one read of `text`: the first part, and whether it
+ * is cut. `budget` is the server's `context_limits.agent_read_bytes` (the page
+ * read carries it); the constant is only the fallback for an older read. The cut
+ * mirrors `context._part` on the server (a character is never split).
+ */
+export function agentPreview(text, budget = AGENT_READ_BYTES) {
   const bytes = new TextEncoder().encode(text || '')
-  if (bytes.length <= AGENT_READ_BYTES) return { text: text || '', truncated: false, total: bytes.length, shown: bytes.length }
-  let end = AGENT_READ_BYTES
+  if (bytes.length <= budget) return { text: text || '', truncated: false, total: bytes.length, shown: bytes.length }
+  let end = budget
   while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1     // never split a character
   return { text: new TextDecoder().decode(bytes.slice(0, end)), truncated: true, total: bytes.length, shown: end }
 }

@@ -41,7 +41,7 @@
         <BaseBadge v-if="c.for_agents" variant="info">For agents</BaseBadge>
         <template v-if="canEdit(c)">
           <label class="inline-flex items-center gap-1.5 text-xs text-gray-700 dark:text-gray-300">
-            <input type="checkbox" :checked="c.for_agents" :disabled="busy === c.id" :data-testid="`context-mark-${c.id}`" @change="mark(c, $event.target.checked)" />
+            <input type="checkbox" :checked="c.for_agents" :disabled="busy === c.id" :data-testid="`context-mark-${c.id}`" @change="mark(c, $event)" />
             Agents on this project get this
           </label>
           <BaseButton size="sm" variant="ghost" @click="openWrite(c)">Edit</BaseButton>
@@ -59,7 +59,7 @@
         <BaseTextarea id="context-content" v-model="form.content" :rows="14" label="Brief (markdown)"
                       placeholder="The transcript, your view, the background an agent needs." />
         <p class="text-xs text-gray-500 dark:text-gray-400" data-testid="context-size">
-          {{ humanSize(bytes) }} of 512 KB<template v-if="bytes > AGENT_READ_BYTES"> · an agent reads it in parts of 200 KB</template>
+          {{ humanSize(bytes) }} of {{ humanSize(fileBytes) }}<template v-if="bytes > readBytes"> · an agent reads it in parts of {{ humanSize(readBytes) }}</template>
         </p>
         <label class="flex items-start gap-2 text-sm text-gray-800 dark:text-gray-200">
           <input v-model="form.for_agents" type="checkbox" class="mt-0.5" data-testid="context-form-mark" />
@@ -77,10 +77,11 @@
     <BaseModal v-model="previewOpen" labelledby="context-preview-title" panel-class="relative w-full max-w-3xl rounded-lg bg-white p-6 shadow-xl dark:bg-gray-800 max-h-[90vh] overflow-y-auto">
       <div class="space-y-3">
         <h2 id="context-preview-title" class="text-lg font-semibold text-gray-900 dark:text-gray-100">{{ shown?.filename }}</h2>
-        <p v-if="shown?.cut?.truncated" class="rounded-lg border border-status-warning-200 dark:border-status-warning-900/50 bg-status-warning-50 dark:bg-status-warning-900/20 px-3 py-2 text-sm text-gray-800 dark:text-gray-200" data-testid="context-preview-truncated">
-          An agent's first read gets the first {{ humanSize(shown.cut.shown) }} of {{ humanSize(shown.cut.total) }}, and is told the rest is there. It reads on in parts of 200 KB.
+        <!-- An unmarked brief is never described as something an agent reads. -->
+        <p v-if="shown && !shown.for_agents" class="text-sm text-gray-600 dark:text-gray-300" data-testid="context-preview-unmarked">Not marked for agents: no agent reads this.</p>
+        <p v-else-if="shown?.cut?.truncated" class="rounded-lg border border-status-warning-200 dark:border-status-warning-900/50 bg-status-warning-50 dark:bg-status-warning-900/20 px-3 py-2 text-sm text-gray-800 dark:text-gray-200" data-testid="context-preview-truncated">
+          An agent's first read gets the first {{ humanSize(shown.cut.shown) }} of {{ humanSize(shown.cut.total) }}, and is told the rest is there. It reads on in parts of {{ humanSize(readBytes) }}.
         </p>
-        <p v-else-if="shown && !shown.for_agents" class="text-sm text-gray-600 dark:text-gray-300">Not marked for agents: no agent reads this.</p>
         <SkeletonLoader v-if="!shown?.cut" :count="4" height="1.5rem" gap="0.5rem" />
         <pre v-else class="max-h-[60vh] overflow-auto whitespace-pre-wrap rounded bg-gray-50 p-3 text-xs text-gray-800 dark:bg-gray-900 dark:text-gray-200" data-testid="context-preview-text">{{ shown.cut.text }}</pre>
         <div class="flex justify-end"><BaseButton variant="secondary" @click="previewOpen = false">Close</BaseButton></div>
@@ -100,7 +101,7 @@ import InlineError from '@/components/InlineError.vue'
 import SkeletonLoader from '@/components/SkeletonLoader.vue'
 import { useProjectsStore } from '@/stores/projects'
 import { humanSize } from '@/components/portal/portalFiles'
-import { AGENT_READ_BYTES, CONTEXT_SHARED_NOTICE, agentPreview, projectErrorMessage } from './projectsUtils'
+import { AGENT_READ_BYTES, CONTEXT_SHARED_NOTICE, agentPreview, projectErrorMessage, sameEmail } from './projectsUtils'
 
 const props = defineProps({
   projectId: { type: String, required: true },
@@ -112,6 +113,8 @@ const props = defineProps({
   // The viewer holds the project's creator role (the page read's `my_role`) — the
   // server's rule for changing someone else's brief, not an email comparison.
   isCreator: { type: Boolean, default: false },
+  // The server's limits (the page read's `context_limits`); constants only as a fallback.
+  limits: { type: Object, default: null },
 })
 const emit = defineEmits(['changed'])
 
@@ -128,10 +131,11 @@ const form = reactive({ filename: '', content: '', for_agents: false })
 const previewOpen = ref(false)
 const shown = ref(null)
 
-const same = (a, b) => Boolean(a) && Boolean(b) && String(a).toLowerCase() === String(b).toLowerCase()
+const fileBytes = computed(() => props.limits?.file_bytes || 512 * 1024)
+const readBytes = computed(() => props.limits?.agent_read_bytes || AGENT_READ_BYTES)
 const canWrite = computed(() => props.canContribute && !props.archived)
 // Whoever added a brief, or the project's creator, changes it (the server's rule).
-const canEdit = (c) => canWrite.value && (props.isCreator || same(c.created_by, props.myEmail))
+const canEdit = (c) => canWrite.value && (props.isCreator || sameEmail(c.created_by, props.myEmail))
 const bytes = computed(() => new TextEncoder().encode(form.content || '').length)
 
 async function run(id, fn) {
@@ -150,16 +154,36 @@ async function run(id, fn) {
   }
 }
 
+// Each open of the editor or the preview takes a ticket; a read that comes back
+// for an older one (the person moved on, or already typed) is dropped, so one
+// brief's text never lands under another's name.
+let writeTicket = 0
+let previewTicket = 0
+const loadingContent = ref(false)
+
 function openWrite(c = null) {
+  const ticket = ++writeTicket
   editing.value = c
   formError.value = ''
   Object.assign(form, { filename: c?.filename || '', content: '', for_agents: c ? c.for_agents : false })
   writeOpen.value = true
-  if (c) store.readContext(props.projectId, c.id).then((full) => { form.content = full.content }).catch((err) => { formError.value = projectErrorMessage(err) })
+  loadingContent.value = !!c
+  if (!c) return
+  store.readContext(props.projectId, c.id)
+    .then((full) => {
+      if (ticket !== writeTicket || form.content) return       // stale, or the person already typed
+      form.content = full.content
+    })
+    .catch((err) => { if (ticket === writeTicket) formError.value = projectErrorMessage(err) })
+    .finally(() => { if (ticket === writeTicket) loadingContent.value = false })
 }
 
 async function save() {
   formError.value = ''
+  if (loadingContent.value) {
+    formError.value = 'The brief is still loading.'
+    return
+  }
   if (!form.filename.trim() || !form.content.trim()) {
     formError.value = 'A brief needs a name and some text.'
     return
@@ -191,7 +215,7 @@ async function upload(event) {
     error.value = projectErrorMessage({ response: { data: { detail: { code: 'unsupported_type' } } } })
     return
   }
-  if (file.size > 512 * 1024) {
+  if (file.size > fileBytes.value) {
     error.value = projectErrorMessage({ response: { data: { detail: { code: 'context_too_large' } } } })
     return
   }
@@ -208,16 +232,23 @@ async function upload(event) {
   writeOpen.value = true
 }
 
-const mark = (c, on) => run(c.id, () => store.updateContext(props.projectId, c.id, { for_agents: on }))
+async function mark(c, event) {
+  const on = event.target.checked
+  const out = await run(c.id, () => store.updateContext(props.projectId, c.id, { for_agents: on }))
+  if (!out) event.target.checked = !on       // refused: the box shows the server's state again
+}
 const remove = (c) => run(c.id, () => store.deleteContext(props.projectId, c.id))
 
 async function preview(c) {
+  const ticket = ++previewTicket
   shown.value = { ...c, cut: null }
   previewOpen.value = true
   try {
     const full = await store.readContext(props.projectId, c.id)
-    shown.value = { ...c, cut: agentPreview(full.content) }
+    if (ticket !== previewTicket) return
+    shown.value = { ...c, cut: agentPreview(full.content, readBytes.value) }
   } catch (err) {
+    if (ticket !== previewTicket) return
     previewOpen.value = false
     error.value = projectErrorMessage(err)
   }

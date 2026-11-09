@@ -151,6 +151,7 @@ const stewardPicked = ref(null)
 let initial = {}
 // ent#1169: the steward-options read, once per opening; null = loading, false = failed.
 const stewardOptions = ref(null)
+let optionsTicket = 0
 // In Edit, only a CHANGED steward is sent (and only then given the skills), so
 // an unchanged one gets no promise; the Steward card says what it holds.
 const stewardHint = computed(() => (props.project && form.steward === initial.steward
@@ -176,8 +177,11 @@ watch(() => props.modelValue, (open) => {
   errors.value = {}
   submitError.value = ''
   stewardOptions.value = null
+  const ticket = ++optionsTicket          // a reply for an earlier opening is dropped
   if (props.agents.length) {
-    store.fetchStewardOptions().then((o) => { stewardOptions.value = o }).catch(() => { stewardOptions.value = false })
+    store.fetchStewardOptions()
+      .then((o) => { if (ticket === optionsTicket) stewardOptions.value = o })
+      .catch(() => { if (ticket === optionsTicket) stewardOptions.value = false })
   }
 }, { immediate: true })
 

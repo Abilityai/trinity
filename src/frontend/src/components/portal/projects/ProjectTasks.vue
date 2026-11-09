@@ -150,6 +150,7 @@
           :archived="archived"
           :my-email="myEmail"
           :is-creator="isCreator"
+          :limits="project?.context_limits || null"
           @changed="refreshTask"
         />
 
