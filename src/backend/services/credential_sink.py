@@ -93,9 +93,10 @@ delivery lands as one line set in place, not a whole-file rewrite.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import httpx
 
@@ -120,6 +121,10 @@ LOCK_TTL_SECONDS = 90
 AGENT_HTTP_TIMEOUT_SECONDS = 30.0
 #: One pinned request to another Trinity (trinity-enterprise#1109).
 DESTINATION_HTTP_TIMEOUT_SECONDS = 30.0
+#: The raise-time `key_env` check (trinity-enterprise#1158 §2): the whole
+#: read — the Docker lookup and the agent's read endpoint — inside one budget.
+#: Past it the check cannot tell, and the raise proceeds (delivery re-checks).
+KEY_ENV_STATE_TIMEOUT_SECONDS = 5
 AUDIT_ACTION = "chat_provide"
 AUDIT_ACTION_DELIVERED = "credential_delivered"
 #: Written BEFORE the request to another Trinity leaves (trinity-enterprise#1109).
@@ -146,9 +151,9 @@ class CredentialSinkError(Exception):
         self.may_have_written = may_have_written
 
 
-def _agent_client(agent_name: str) -> httpx.AsyncClient:
+def _agent_client(agent_name: str, timeout: float = AGENT_HTTP_TIMEOUT_SECONDS) -> httpx.AsyncClient:
     """Pre-authenticated client for `agent-{name}:8000`; a seam tests replace."""
-    return agent_httpx_client(agent_name, timeout=AGENT_HTTP_TIMEOUT_SECONDS)
+    return agent_httpx_client(agent_name, timeout=timeout)
 
 
 def _destination_client() -> httpx.AsyncClient:
@@ -438,6 +443,49 @@ def _destination_failure(code: str, message: str, data: Optional[Dict[str, Any]]
     return CredentialSinkError(status_code, code, message, data, may_have_written=may_have_written)
 
 
+def classify_key(env_text: str, key_env: str) -> Tuple[str, Optional[str]]:
+    """What ``env_text`` holds under ``key_env`` as a key to another Trinity —
+    the ONE decision delivery (`_read_key_by_name`) and the raise-time check
+    (`key_env_state`) share, so the two cannot drift (trinity-enterprise#1158
+    §2). The last occurrence wins, as the agent's own reader sees it. Nothing
+    (absent or empty) → ``("missing", None)``; a value that cannot travel as a
+    header — whitespace-only, whitespace, control or non-ASCII characters —
+    → ``("invalid", None)``; else ``("ok", key)``."""
+    found = agent_env_patch.values_of(env_text, key_env)
+    key = found[-1] if found else ""
+    if not key:
+        return "missing", None
+    if not key.strip() or not a2a_outbound._HEADER_SAFE_CREDENTIAL.match(key):
+        return "invalid", None
+    return "ok", key
+
+
+async def key_env_state(agent_name: str, key_env: str) -> Optional[str]:
+    """``"ok"`` / ``"missing"`` / ``"invalid"`` for the key ``agent_name``
+    holds under ``key_env`` (`classify_key`), or None when this cannot tell —
+    the agent is not running, its file is unreadable, its server failed, or
+    the read ran past `KEY_ENV_STATE_TIMEOUT_SECONDS`. The raise-time check
+    (trinity-enterprise#1158 §2): None lets the ask through and delivery stays
+    the authoritative check (T2). Only the label leaves this function, never
+    the key or the file's text. The Docker lookup is a blocking SDK call, so
+    it runs off the event loop."""
+    async def _read() -> Optional[str]:
+        if await asyncio.to_thread(_running_state, agent_name) is not None:
+            return None
+        async with _agent_client(agent_name, timeout=KEY_ENV_STATE_TIMEOUT_SECONDS) as client:
+            env_text = await _read_env(client, agent_name)
+        return classify_key(env_text, key_env)[0]
+
+    try:
+        return await asyncio.wait_for(_read(), KEY_ENV_STATE_TIMEOUT_SECONDS)
+    except (asyncio.TimeoutError, CredentialSinkError, httpx.HTTPError):
+        return None
+    except Exception:
+        logger.warning("credential key check: could not read agent=%s; delivery will check",
+                       agent_name)
+        return None
+
+
 async def _read_key_by_name(agent_name: str, key_env: str) -> str:
     """The key ``agent_name`` holds under ``key_env`` in its own `.env`, read
     through its own read endpoint. Absent → `destination_key_missing`; one
@@ -455,14 +503,13 @@ async def _read_key_by_name(agent_name: str, key_env: str) -> str:
             {"status": state})
     async with _agent_client(agent_name) as client:
         env_text = await _read_env(client, agent_name)
-    found = agent_env_patch.values_of(env_text, key_env)
-    key = found[-1] if found else ""
-    if not key.strip():
+    label, key = classify_key(env_text, key_env)
+    if label == "missing":
         raise _destination_failure(
             "destination_key_missing",
             "The agent that asked does not hold a key to that Trinity yet, so nothing was "
             "stored. Once it has one, send the credential again.")
-    if not a2a_outbound._HEADER_SAFE_CREDENTIAL.match(key):
+    if label == "invalid":
         raise _destination_failure(
             "destination_key_invalid",
             "The key the agent that asked holds for that Trinity cannot be sent as it is "
