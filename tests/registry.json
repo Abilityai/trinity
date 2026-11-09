@@ -6204,6 +6204,48 @@
         "unit"
       ],
       "description": "Through the real shared_sessions._after_landing: every principal is re-checked at wake time with the room-creation rule (_assert_can_reach_agent). A platform member still shared wakes the agent; one whose access is gone does not, and the room gets the 'could not be reached' line; a Workspace principal is held to its roster, never the platform ACL; an agent reply is held to the access of the person whose turn started the chain; a deleted agent is not woken. Mutation: reverting the service turns the 3 platform/agent-chain tests red."
+    },
+    {
+      "file": "unit/test_ent1117_s6a_git_add_option_injection.py",
+      "feature": "trinity-enterprise#1117",
+      "added": "2026-11-05",
+      "updated": "2026-11-06",
+      "categories": [
+        "agent-server",
+        "git",
+        "git-sync",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1117 (CodeQL py/command-line-injection): the agent server's Push stages `paths` with `git add -- <paths>`, so `-f`/`--force` in `paths` is a pathspec and a gitignored .env is never force-staged or pushed. Drives the real sync_to_github body against a scratch repo with a local bare origin and asserts on origin's tree. Also pins that ONLY the named paths are staged and pushed (an unrelated modified tracked file stays out of the push and dirty locally), that `./-name` stages a file whose name starts with '-', and that the no-paths branch still runs exactly `git add -A`. No Docker."
+    },
+    {
+      "file": "unit/test_ent1117_s6a_sync_paths_option_reject.py",
+      "feature": "trinity-enterprise#1117",
+      "added": "2026-11-05",
+      "updated": "2026-11-06",
+      "categories": [
+        "backend",
+        "git",
+        "git-sync",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1117: GitSyncRequest refuses a `paths` element starting with '-' with a 422 whose message leads with `paths[i] '<elem>'` (element capped at 200 chars), through the real routers.git router and the platform 422 handler, before the agent is called; a dash elsewhere is forwarded unchanged and an empty body still syncs everything. Decides every row of tests/fixtures/git-sync-path-cases.json the same way as the MCP git_sync schema (shared table)."
+    },
+    {
+      "file": "../src/mcp-server/src/tools/git.ent1117-s6a.test.ts",
+      "feature": "trinity-enterprise#1117",
+      "added": "2026-11-05",
+      "updated": "2026-11-06",
+      "categories": [
+        "mcp",
+        "mcp-server",
+        "typescript",
+        "git-sync",
+        "security"
+      ],
+      "description": "trinity-enterprise#1117: the git_sync tool schema refuses a `paths` element starting with '-' through the same ~standard.validate seam FastMCP calls; the issue sits at paths.<i> and its message leads with the element (capped at 200 chars). Decides every row of tests/fixtures/git-sync-path-cases.json the same way as the backend model (shared table). node:test."
     }
   ]
 }
