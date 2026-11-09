@@ -339,6 +339,26 @@
             </template>
           </p>
         </div>
+        <!-- trinity-enterprise#1134 (AC4): an ask this chat's turn raised that
+             fell to the operators — nobody is this agent's primary and the
+             owner cannot stand in. Content-free: the person here is not its
+             addressee, so the line says where it went and who fixes it, never
+             what it asks. -->
+        <p
+          v-else-if="item.kind === 'ask-notice'"
+          class="flex items-baseline justify-center gap-1 min-w-0 text-xs flex-wrap text-center"
+          :class="META_INK_CLASS"
+          :data-ask-id="item.notice.id"
+          data-testid="portal-chat-ask-notice"
+        >
+          <span class="shrink-0">{{ item.line.kind }}</span>
+          <span aria-hidden="true">·</span>
+          <span>went to the operators: {{ item.line.reason }}. {{ item.line.fix }}</span>
+          <template v-if="item.line.when">
+            <span aria-hidden="true">·</span>
+            <time class="shrink-0" :datetime="item.line.at" :title="formatLocalDateTime(item.line.at)">{{ item.line.when }}</time>
+          </template>
+        </p>
         <details
           v-else-if="item.kind === 'voice-call'"
           class="rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-950"
@@ -958,7 +978,7 @@ import { cycleIndex } from './portalKeymap'
 // ent#738: the chip's one-line excerpt — the same one the Inbox's arrow hands over.
 // Aliased: `submitUserText` already takes a `replyExcerpt` (the excerpt itself).
 import { replyExcerpt as excerptForReply } from './portalInbox'
-import { chatTurnAsks, placeAsksInThread, askTileMode, askHistoryLine, isDiscussedIn } from './portalChatAsks'
+import { chatTurnAsks, chatTurnNotices, placeAsksInThread, askTileMode, askHistoryLine, askNoticeLine, isDiscussedIn } from './portalChatAsks'
 import AskMarkdown from '@/components/operator/AskMarkdown.vue'
 import { formatLocalDateTime } from '@/utils/timestamps'
 import { usePortalFileDrop } from '@/composables/usePortalFileDrop'
@@ -3347,8 +3367,13 @@ const voiceHeaderText = computed(() => voiceHeaderLine({
 const threadItems = computed(() => groupVoiceBlocks(messages.value, { liveCallId: directCallActive.value ? direct.voiceSessionId.value : null }))
 // trinity-enterprise#610: the thread's rows with this chat's chat-turn asks
 // placed among them by time, each as a card or a history row.
-const threadRows = computed(() => placeAsksInThread(threadItems.value, chatTurnAskList.value, { truncated: historyTruncated.value, sessionId: currentSessionId.value }).map((row) => (
-  row.kind !== 'ask' ? row
+// trinity-enterprise#1134 (AC4): this chat's notices come from its own read only.
+const chatTurnNoticeList = computed(() => (
+  chatRead.value.sid === currentSessionId.value ? chatTurnNotices(chatRead.value.rows, currentSessionId.value) : []
+))
+const threadRows = computed(() => placeAsksInThread(threadItems.value, [...chatTurnAskList.value, ...chatTurnNoticeList.value], { truncated: historyTruncated.value, sessionId: currentSessionId.value }).map((row) => (
+  row.kind === 'ask-notice' ? { ...row, line: askNoticeLine(row.notice) }
+  : row.kind !== 'ask' ? row
     // trinity-enterprise#748: a dismissal inside its Undo window keeps the card,
     // which is where its Undo is.
     : askTileMode(row.ask) === 'card' || store.askDismissals[row.ask.id] ? { ...row, mode: 'card' }
@@ -3378,7 +3403,7 @@ function refreshAsksAfterTurn() {
   store.fetchAsks().catch(() => {})
 }
 const rowKey = (item) => (
-  item.kind === 'ask' ? `ask-${item.ask.id}` : item.kind === 'voice-call' ? `call-${item.callId}` : `m-${item.index}`
+  item.kind === 'ask' ? `ask-${item.ask.id}` : item.kind === 'ask-notice' ? `ask-notice-${item.notice.id}` : item.kind === 'voice-call' ? `call-${item.callId}` : `m-${item.index}`
 )
 
 // The shell reads these to swap the rail for the canvas column and to refuse

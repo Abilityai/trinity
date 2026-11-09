@@ -8712,6 +8712,79 @@
         "security"
       ],
       "description": "trinity-enterprise#1117: the git_sync tool schema refuses a `paths` element starting with '-' through the same ~standard.validate seam FastMCP calls; the issue sits at paths.<i> and its message leads with the element (capped at 200 chars). Decides every row of tests/fixtures/git-sync-path-cases.json the same way as the backend model (shared table). node:test."
+    },
+    {
+      "file": "unit/test_ent1135_ask_room_attachment.py",
+      "feature": "trinity-enterprise#1135",
+      "added": "2026-11-07",
+      "categories": [
+        "backend",
+        "unit",
+        "rooms",
+        "operator-queue"
+      ],
+      "description": "trinity-enterprise#1135: an ask raised in a running room turn records the room (platform key, stripped from agent input) and posts one raised line; fail-soft; never a gate or credential ask."
+    },
+    {
+      "file": "unit/test_ent1135_ask_room_return.py",
+      "feature": "trinity-enterprise#1135",
+      "added": "2026-11-07",
+      "categories": [
+        "backend",
+        "unit",
+        "rooms",
+        "operator-queue"
+      ],
+      "description": "trinity-enterprise#1135: the ending line for every disposition (coarse who, never the answer) and the room-engine return turn under a Waker, with declines falling back to today's wake."
+    },
+    {
+      "file": "unit/test_ent1135_wake_restart_survival.py",
+      "feature": "trinity-enterprise#1135",
+      "added": "2026-11-07",
+      "categories": [
+        "backend",
+        "unit",
+        "rooms",
+        "operator-queue"
+      ],
+      "description": "trinity-enterprise#1135 (T4): wake_state owed before the spawn, the ending lifecycle, the widened re-offer and the once-per-process boot re-offer after startup recovery."
+    },
+    {
+      "file": "../src/frontend/tests/unit/workspaceProjectsEnt1133.mount.spec.js",
+      "feature": "trinity-enterprise#1133",
+      "added": "2026-11-07",
+      "categories": [
+        "frontend",
+        "unit",
+        "ui",
+        "workspace"
+      ],
+      "description": "A task's title, objective and definition of done edited from the detail form, mounted: the three fields prefill from the task and only the changed ones are sent (a cleared long field as null); a blank or over-limit value is refused inline with nothing sent, counting code points so 150 emoji pass; a legacy over-limit stored value does not block a status change; the read-only objective / DoD blocks show only when the fields are not offered; a done task shows them disabled with the reopen reason and Reopen sends the status alone; a server 422 lands under the field it names, keeping what was typed; and the create dialog refuses the same lengths."
+    },
+    {
+      "file": "../src/frontend/tests/unit/workspaceProjectsTaskLimits.spec.js",
+      "feature": "trinity-enterprise#1133",
+      "added": "2026-11-07",
+      "categories": [
+        "frontend",
+        "unit",
+        "workspace"
+      ],
+      "description": "The task-field limits the client checks (title 200, objective / definition of done 4000 code points) are pinned to the server pair from the public side, so a drift goes red in public CI: validateTaskFields executed at and one past each boundary, emoji counted as one; the backend constants are compared too when that module is checked out."
+    },
+    {
+      "file": "unit/test_4302_room_chain_continue.py",
+      "feature": "trinity#4302",
+      "added": "2026-11-07",
+      "categories": [
+        "backend",
+        "rooms",
+        "idempotency",
+        "auth",
+        "api",
+        "unit"
+      ],
+      "description": "trinity#4302: a mention chain stopped at ROOM_MAX_CHAIN_DEPTH writes a typed `chain_paused` system row (mentions = who was next; plain words, no UI verb) and the room payload carries `paused_chain` {seq, next} while the offer stands (survives bookkeeping lines; ends on a conversational row, a later pause/continue row, a closed room, or every named agent having left; a collaborator seated above the row still gets it). POST /api/rooms/{id}/continue through the real router, service, db and idempotency layers over a temp SQLite DB: wakes `next` at depth 1 (a fresh count that may pause again), posts a `chain_continued` receipt that spends no message budget, hands the woken agent what it was owed; a seated collaborator, a person's user key and a Workspace client may continue, an agent key and the system key get 403 not_a_person, a non-member the uniform 404 with no key claimed, an unreachable `next` a 403 with nothing consumed, a departed `next` 409 no_one_to_wake; a closed room / a room at its message budget 410 with stop_reason and the budget named. Once per stop: a double click with an Idempotency-Key is 409 in-flight then a replay under scope room-continue:{room_id}; two workers without a key wake once (the second gets 409 room_moved_on); a stale offer_stands read is not the guard (the receipt insert is); two simultaneous receipt inserts land exactly one; a repeat after a restart (key rows gone) is 409 room_moved_on."
     }
   ]
 }

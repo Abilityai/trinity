@@ -637,6 +637,14 @@ async def _start_maintenance_services() -> None:
     except Exception as e:
         logger.error(f"Error registering the skill gate ending observer: {e}")
 
+    # abilityai/trinity-enterprise#1135: an ask raised in a room shows in that
+    # room how it ended — every worker, for the same reason as the gate's.
+    try:
+        from shared_sessions import service as rooms_service
+        rooms_service.register_ask_observers()
+    except Exception as e:
+        logger.error(f"Error registering the rooms ask ending observer: {e}")
+
 
 async def _schedule_staggered_services() -> None:
     """PERF-269 staggered starts. Each spawns a delayed task; none blocks boot.

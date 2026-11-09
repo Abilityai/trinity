@@ -18,6 +18,47 @@ const AGENT_STATE_LABEL = {
 export const NAME_MAX = 120
 export const GOAL_MAX = 1000
 
+// A task's text limits, mirroring `TITLE_MAX` / `TEXT_MAX` in
+// `enterprise/backend/projects/work.py` — the server is still the authority;
+// these stop the user before a paste reaches the outer Pydantic cap, whose
+// refusal has no field to show it under. A test pins the two in step.
+export const TASK_TITLE_MAX = 200
+export const TASK_TEXT_MAX = 4000
+
+// How a task field is named to a person, and which inline error a server
+// refusal belongs under.
+const TASK_FIELD_LABEL = { title: 'title', objective: 'objective', done_definition: 'definition of done' }
+export const TASK_FIELD_ERROR_CODES = Object.freeze({
+  invalid_title: 'title', invalid_objective: 'objective', invalid_done_definition: 'done_definition',
+})
+
+/** Length in CODE POINTS, which is what Python's `len` counts — `.length`
+ *  would read 150 emoji as 300 and refuse a title the server accepts. */
+const codePoints = (text) => [...String(text ?? '')].length
+
+/**
+ * The create dialog's and the detail form's shared check, so "the same limits
+ * as at creation" holds in both directions. `only` narrows it to the fields a
+ * save actually sends: a legacy stored value over the limit must not block an
+ * unrelated change.
+ */
+export function validateTaskFields(values, only = null) {
+  const fields = only || Object.keys(TASK_FIELD_LABEL)
+  const errors = {}
+  for (const f of fields) {
+    if (!(f in TASK_FIELD_LABEL)) continue
+    const text = String(values?.[f] ?? '').trim()
+    const n = codePoints(text)
+    if (f === 'title' && !n) {
+      errors.title = 'Give the task a title, e.g. "Draft the launch brief".'
+      continue
+    }
+    const max = f === 'title' ? TASK_TITLE_MAX : TASK_TEXT_MAX
+    if (n > max) errors[f] = `Keep the ${TASK_FIELD_LABEL[f]} to ${max} characters (it's ${n} now).`
+  }
+  return errors
+}
+
 export function statusLabel(status) {
   return STATUS_LABEL[status] || 'Unknown'
 }
@@ -277,7 +318,7 @@ export function wrapUpPrompt(projectName) {
 
 const TASK_LOG_KIND_LABEL = {
   created: 'Created', status: 'Status', reopened: 'Reopened', done_claim: 'Done claim',
-  note: 'Note', imported: 'Imported',
+  note: 'Note', imported: 'Imported', edited: 'Edited', owner: 'Owner',
 }
 
 /** A task-log entry's kind in words ("Done claim", "Reopened"). */

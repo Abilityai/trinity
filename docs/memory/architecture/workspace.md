@@ -744,6 +744,17 @@ next — turn-taking is mechanical: **you are woken iff you were @mentioned**.
   `/budget-defaults` path there would sit beside `/{room_id}`, one ordering slip from
   being read as a room id (Invariant #4) on the one surface whose reader must never be
   a client.
+- **Ask return** (abilityai/trinity-enterprise#1135): an ask raised from a room turn
+  carries the platform key `context.workspace_room_id` (`room_for_execution`, a RUNNING
+  room turn of this agent in an open room it sits in; never a credential ask). The room
+  gets one system line when it is raised (`post_ask_raised_line`) and one when it ends
+  (`on_ask_ending`, the sink's ending observer registered from `main.py` — every
+  disposition, one line per room/agent/event; coarse *who*, never the answer). The answer
+  or a cancel/dismiss wake runs **through the turn engine** (`return_ask_to_room` →
+  `_wake_agent(…, ask_block=…)`) under an engine `Waker` that acts for nobody (client
+  stamp only for a seated answerer; mention reach = the moderator rebuilt from its row);
+  closed / departed / over budget / capped / lock-busy declines with one clause and the
+  resume service runs today's wake. Normative text: `requirements/security.md` §26.9, §26.12.
 - **Turn engine** (`service.py::post_message` → `_wake_agent`): mentions resolve against
   participants; each woken agent runs an **ordinary** `execute_task(triggered_by="room")`,
   so slots, the circuit breaker, cost and observability come for free, and its reply is
@@ -787,6 +798,23 @@ next — turn-taking is mechanical: **you are woken iff you were @mentioned**.
   With two or more people present the turn prompt names them and what each may decide, and an
   `@username` of a seated person becomes a tag through the #631 path, never a wake.
   `POST /api/rooms/{id}/leave` is people-only (no MCP tool: an agent is removed, never leaves).
+- **A paused chain says so, and a person continues it (trinity#4302).** At
+  `ROOM_MAX_CHAIN_DEPTH` `_after_landing` writes a typed system row
+  (`_post_pause_line`: `kind = "chain_paused"`, `mentions` = who was next, facts-only
+  content) instead of waking. `get_room` derives `paused_chain` `{seq, next}` at read time
+  (`_paused_chain`: newest pause → `db.offer_stands` → still-seated agents), for every
+  reader. `POST /api/rooms/{id}/continue` → `service.continue_chain` (membership → person →
+  budgets → offer → seated → reachable) consumes the offer with a `chain_continued` receipt
+  that `db.append_continue_receipt` inserts `INSERT … SELECT … WHERE NOT EXISTS` under the
+  same moved-on predicate (`_MOVED_ON_SQL`, one fragment, two readers) inside the
+  seq-allocation transaction, then wakes through `_wake_targets` — the per-target loop
+  extracted from `_after_landing`, so a Continue and a landed message wake one way, here at
+  depth 1. The idempotency claim has its own scope `room-continue:{room_id}` and is never
+  the once-per-stop guard. **Readers key a system row on `sender_kind`, not `kind`**: `kind`
+  now types some system rows, so a `kind === 'system'` test misreads them as messages
+  (`PortalRoom.vue`'s transcript and `isMine`, as `portalInbox.js` already did). The
+  Workspace control is `portal/PortalRoomContinue.vue`, rendered once after the transcript
+  from the payload. No MCP tool: Continue is a person's action.
 - **A gated wake is recorded, not re-run (trinity#3402).** A wake the skill gate held — or
   refused for a reason the same request would get again (`STANDING_REFUSALS`) — records in
   `room_gate_holds` each shown post whose own text invokes a skill gated on that agent, plus
@@ -1721,7 +1749,16 @@ is the edition-agnostic surface it plugs into:
   (`ProjectMaterial.vue`, reusing `ReportRenderer`). An invited guest gets one
   narrow view (the server omits the log, tasks, decisions and members); the
   controls it cannot use are absent, not disabled. `ProjectImportModal.vue`
-  imports a folder project once.
+  imports a folder project once. A contributor edits a task's title, objective
+  and definition of done as fields in the detail form's one Save / one dirty
+  path, so the rendered objective and definition-of-done blocks render only
+  when those fields are NOT offered (a reader, an archived project, or a task
+  whose status is done and therefore locked) — a mount spec that reads the
+  rendered objective must pick that audience, or it finds nothing. Lengths are
+  checked client-side by the shared `projectsUtils.validateTaskFields` in
+  CODE POINTS, which is what the server's `len` counts; a refusal that names a
+  field (`invalid_title` / `invalid_objective` / `invalid_done_definition`)
+  is shown under it rather than as the form's error.
 - **Project page Overview (v3 hub + #3694 + ent#896)** — ONE layout owned by
   `ProjectPage.vue`: a `lg:grid-cols-3 lg:items-start` wrapper holding a
   main stack (`lg:col-span-2`) and a side stack, cards stacking within their
