@@ -322,6 +322,39 @@ def test_a_lost_fast_store_moves_coverage_later_never_earlier(world):
     assert _reading(_list(world)[run]) == (None, "never")
 
 
+def _redeliver(run, *, requeued_seconds_ago):
+    """The lease reaper re-queues the run under the SAME id (#1081, pull mode):
+    `started_at` is reset, so the first attempt's start is no longer on record."""
+    with get_engine().begin() as conn:
+        conn.execute(text("UPDATE schedule_executions SET status = 'running', lease_expires_at = :l "
+                          "WHERE id = :i"), {"l": _iso_ago(requeued_seconds_ago + 60), "i": run})
+    assert db.requeue_expired_lease(run, _iso_ago(requeued_seconds_ago))
+
+
+@pytest.mark.parametrize("first_report_ago", [900, COVERED_SINCE_SECONDS])
+def test_a_redelivered_run_reads_unknown_its_first_attempt_start_is_lost(world, first_report_ago):
+    """Second voice: attempt 1 ran 20 min ago, the reaper re-queued it 5 min
+    ago and reset `started_at`, so a start check alone would read the earlier
+    attempt's calls as covered. No column keeps the first attempt's start, so a
+    redelivered run reads `never` even when coverage began long before (the
+    second case is that cost, pinned)."""
+    run = _run(world, ended_seconds_ago=None, started_seconds_ago=1200)
+    _reported_since(first_report_ago)
+    _redeliver(run, requeued_seconds_ago=300)
+    with get_engine().begin() as conn:
+        conn.execute(text("UPDATE schedule_executions SET status = 'success', completed_at = :c "
+                          "WHERE id = :i"), {"c": _iso_ago(60), "i": run})
+    _keepalive()
+    started = parse_iso_timestamp(_list(world)[run]["started_at"])
+    assert started > parse_iso_timestamp(svc.reporting_state(AGENT)["first_report_at"])
+
+    assert _reading(_list(world)[run]) == (None, "never")
+    assert _reading(_detail(world, run)) == (None, "never")
+    assert _reading(_history(world)[run]) == (None, "never")
+    # The list's response model still filters the extra column it now reads.
+    assert "redelivery_count" not in _list(world)[run]
+
+
 def test_a_read_inside_the_delivery_bound_is_pending_not_a_bare_zero(world):
     """Review R11: events land up to ~2 s (p99 <= 5 s) after the hook fired."""
     _reported_since()
@@ -494,6 +527,11 @@ def test_a_refusal_on_a_run_from_before_coverage_still_shows():
                  "first_report_at": to_utc_iso(now - timedelta(seconds=300))}
     assert er.reading_for(entry, reporting, started, now - timedelta(seconds=60), now) == (2, "never")
     assert er.reading_for(None, reporting, None, now - timedelta(seconds=60), now) == (None, "never")
+    # A redelivered run's start is its last attempt's: the first one's is lost.
+    covered = {**reporting, "first_report_at": to_utc_iso(now - timedelta(days=30))}
+    assert er.reading_for(entry, covered, started, now - timedelta(seconds=60), now, 0) == (2, None)
+    assert er.reading_for(entry, covered, started, now - timedelta(seconds=60), now, 1) == (2, "never")
+    assert er.reading_for(None, covered, started, now - timedelta(seconds=60), now, None) == (0, None)
 
 
 def test_a_naive_completed_at_is_read_as_utc():

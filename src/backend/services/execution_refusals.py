@@ -35,6 +35,9 @@ Three rules from the event contract (ent#165 plan §6.4) are load-bearing:
   The coverage start is a lower bound (a lost fast store only moves it later),
   so this errs towards `never`, not towards a clean 0. The cost is a run that
   started in the seconds between the agent's boot and its first keepalive.
+  A REDELIVERED run (the lease reaper re-queued it under the same id, pull
+  mode) reads `never` too: the re-queue resets `started_at`, no column keeps
+  the first attempt's start, and that attempt's calls count under this id.
 
 A `None` count always carries a non-None marker, except on a run with no
 schedule, where both are `None`: the fields describe schedule-backed runs only.
@@ -94,7 +97,8 @@ def _as_utc(value: Any) -> Optional[datetime]:
 
 
 def reading_for(entry: Optional[Dict[str, Any]], reporting: Dict[str, Any],
-                started_at: Any, completed_at: Any, now: datetime) -> Reading:
+                started_at: Any, completed_at: Any, now: datetime,
+                redelivery_count: Optional[int] = 0) -> Reading:
     """`(guardrail_refusals, guardrail_reporting)` for one schedule-backed run.
 
     `entry` is the run's `count_by_execution` entry (None when the run has no
@@ -109,10 +113,12 @@ def reading_for(entry: Optional[Dict[str, Any]], reporting: Dict[str, Any],
         return (n or None), READING_NOT_CLAUDE_CODE
     # A run that started before the agent's first report is not covered, and
     # never will be: no data, whatever arrives later. A coverage start or a run
-    # start that is missing proves nothing, so it reads the same way.
+    # start that is missing proves nothing, so it reads the same way, and so
+    # does a redelivered run's start, which is its LAST attempt's.
     coverage_from = _as_utc(reporting.get("first_report_at"))
     started = _as_utc(started_at)
-    if coverage_from is None or started is None or started < coverage_from:
+    if (coverage_from is None or started is None or started < coverage_from
+            or (redelivery_count or 0) > 0):
         return (n or None), READING_NEVER
     if reporting.get("state") != "reporting":
         return n, READING_STALE
@@ -130,31 +136,34 @@ def reading_for(entry: Optional[Dict[str, Any]], reporting: Dict[str, Any],
     return n, None
 
 
-def readings(agent_name: str, rows: Iterable[Tuple[str, Any, Any, Any]],
+def readings(agent_name: str, rows: Iterable[Tuple[str, Any, Any, Any, Any]],
              now: Optional[datetime] = None) -> Dict[str, Reading]:
     """Readings for one page of `agent_name`'s executions, in ONE count query.
 
-    `rows` are `(execution_id, schedule_id, started_at, completed_at)`. Every id is in the
+    `rows` are `(execution_id, schedule_id, started_at, completed_at,
+    redelivery_count)`. Every id is in the
     answer; a run with no schedule maps to `NOT_SCHEDULE_BACKED` and is never
     sent to the count. When the counts cannot be read, every schedule-backed
     run reads `(None, "unavailable")` and the cause is logged: the execution
     read itself still answers.
     """
     rows = list(rows)
-    out: Dict[str, Reading] = {eid: NOT_SCHEDULE_BACKED for eid, _, _, _ in rows}
-    backed = [(eid, started_at, completed_at)
-              for eid, sid, started_at, completed_at in rows if is_schedule_backed(sid)]
+    out: Dict[str, Reading] = {eid: NOT_SCHEDULE_BACKED for eid, *_ in rows}
+    backed = [(eid, started_at, completed_at, redeliveries)
+              for eid, sid, started_at, completed_at, redeliveries in rows
+              if is_schedule_backed(sid)]
     if not backed:
         return out
     try:
-        counts = guardrail_event_service.count_by_execution(agent_name, [eid for eid, _, _ in backed])
+        counts = guardrail_event_service.count_by_execution(agent_name, [eid for eid, *_ in backed])
     except Exception:  # noqa: BLE001 -- surfaced as `unavailable` on every row, and logged
         logger.warning("execution refusals: counts unreadable for %s", agent_name, exc_info=True)
-        for eid, _, _ in backed:
+        for eid, *_ in backed:
             out[eid] = (None, READING_UNAVAILABLE)
         return out
     now = now or utc_now()
     executions = counts["executions"]
-    for eid, started_at, completed_at in backed:
-        out[eid] = reading_for(executions.get(eid), counts["reporting"], started_at, completed_at, now)
+    for eid, started_at, completed_at, redeliveries in backed:
+        out[eid] = reading_for(executions.get(eid), counts["reporting"], started_at, completed_at,
+                               now, redeliveries)
     return out

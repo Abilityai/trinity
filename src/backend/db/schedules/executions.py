@@ -756,6 +756,8 @@ class ScheduleExecutionsMixin:
                 schedule_executions.c.business_status,
                 schedule_executions.c.validation_execution_id,
                 schedule_executions.c.turn_integrity,
+                # #4281: a redelivered run's first-attempt start is not on record.
+                schedule_executions.c.redelivery_count,
             )
             .where(schedule_executions.c.agent_name == agent_name)
             .order_by(schedule_executions.c.started_at.desc())

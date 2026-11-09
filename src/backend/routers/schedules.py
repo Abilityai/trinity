@@ -1020,7 +1020,8 @@ async def get_schedule_executions(
             include_unattributed=getattr(schedule, "owner_id", None) == scope)
     # #4281: turn-tier refusals, counted now (events can land after the run ended).
     refusals = execution_refusals.readings(
-        name, [(e.id, e.schedule_id, e.started_at, e.completed_at) for e in executions])
+        name, [(e.id, e.schedule_id, e.started_at, e.completed_at, e.redelivery_count)
+               for e in executions])
     return [ExecutionResponse(**e.model_dump(), guardrail_refusals=refusals[e.id][0],
                               guardrail_reporting=refusals[e.id][1]) for e in executions]
 
@@ -1058,8 +1059,8 @@ async def get_agent_executions(
         name, [e.get("id") for e in executions], current_user)
     # #4281: turn-tier refusals on the page's schedule runs, one count query.
     refusals = execution_refusals.readings(
-        name, [(e.get("id"), e.get("schedule_id"), e.get("started_at"), e.get("completed_at"))
-               for e in executions])
+        name, [(e.get("id"), e.get("schedule_id"), e.get("started_at"), e.get("completed_at"),
+                e.get("redelivery_count")) for e in executions])
     for e in executions:
         e["gate_self_approved"], e["gate_self_approved_by_viewer"] = flags.get(e.get("id"), (False, False))
         e["guardrail_refusals"], e["guardrail_reporting"] = refusals[e.get("id")]
@@ -1092,7 +1093,7 @@ async def get_execution(
     # #4281: turn-tier refusals, as on the list.
     refusals, reporting = execution_refusals.readings(
         name, [(execution.id, execution.schedule_id, execution.started_at,
-                execution.completed_at)])[execution.id]
+                execution.completed_at, execution.redelivery_count)])[execution.id]
     return ExecutionResponse(**execution.model_dump(), gate_self_approved=self_approved,
                              gate_self_approved_by_viewer=by_viewer,
                              guardrail_refusals=refusals, guardrail_reporting=reporting)
