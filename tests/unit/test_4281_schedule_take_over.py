@@ -492,7 +492,11 @@ def test_taking_over_twice_is_a_quiet_no_op(client, world, audit):
     again = take_over(client, world, sid)
     assert again.status_code == 200, again.text
     assert stored(sid)["updated_at"] == updated_at
-    assert [a["event_action"] for a in audit] == ["schedule_taken_over"]
+    # Only this route's own action: the take-over also ends the former creator's
+    # restricted-schedule alert, which audits `platform_cleared`.
+    assert [a["event_action"] for a in audit if a["event_action"] == "schedule_taken_over"] == [
+        "schedule_taken_over"
+    ]
 
 
 # ---- the webhook and the former creator -------------------------------------------------

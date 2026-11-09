@@ -970,6 +970,12 @@ async def take_over_schedule(
         raise HTTPException(status_code=refused.status_code, detail=refused.detail)
 
     if done.changed:
+        # #4281: the creator changed without the other schedule routes, so the
+        # restricted-schedule alert is decided again for both: the former
+        # creator's row ends once no shared-person schedule of theirs is left,
+        # and the taker (owner tier) files nothing. Never raises.
+        schedule_tier_alerts.sync(name, done.previous_creator_id)
+        schedule_tier_alerts.sync(name, current_user.id)
         logger.info("[#4281] schedule %s on %s taken over by user %s from user %s",
                     schedule_id, name, current_user.id, done.previous_creator_id)
         await platform_audit_service.log(

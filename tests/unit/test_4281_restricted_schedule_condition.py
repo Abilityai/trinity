@@ -451,3 +451,53 @@ def test_the_alert_module_loads_once_take_over_replaces_recreate(monkeypatch):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)      # never registered in sys.modules
     assert module._REMEDY_TEXT["take_over"] == schedule_tier_alerts._REMEDY_TEXT["take_over"]
+
+
+# ---- take-over (slice D) ends the former creator's row ------------------------------------
+
+def take_over(client, world, sid, who="owner"):
+    """The owner takes the schedule over, echoing the read they reviewed."""
+    row = call(client, world, who, "GET", f"/{sid}").json()
+    body = {"expected_updated_at": row["updated_at"],
+            "reviewed": {k: row[k] for k in ("message", "allowed_tools", "model",
+                                             "validation_enabled", "validation_prompt")}}
+    return call(client, world, who, "POST", f"/{sid}/take-over", json=body)
+
+
+def test_taking_over_the_last_schedule_ends_the_former_creators_row(client, world):
+    sid = create(client, world, "mate")
+    row = the_alert(world)
+    assert take_over(client, world, sid).status_code == 200
+    assert alerts(world) == []
+    ended = db.get_operator_queue_item(row["id"])
+    assert (ended["status"], ended["disposed_by"]) == ("cancelled", "platform")
+
+
+def test_taking_over_one_of_two_keeps_the_row_for_the_other(client, world):
+    first = create(client, world, "mate")
+    second = create(client, world, "mate")
+    assert take_over(client, world, first).status_code == 200
+    row = the_alert(world)
+    assert row["subject"] == f"{KIND}:{world.mate.id}"
+    assert (row["context"]["schedule_ids"], row["context"]["schedule_count"]) == ([second], 1)
+
+
+def test_a_refused_take_over_leaves_the_row(client, world):
+    sid = create(client, world, "mate")
+    resp = call(client, world, "owner", "POST", f"/{sid}/take-over",
+                json={"expected_updated_at": "2000-01-01T00:00:00Z",
+                      "reviewed": {"message": BODY["message"], "allowed_tools": None, "model": None,
+                                   "validation_enabled": False, "validation_prompt": None}})
+    assert resp.status_code == 409, resp.text
+    assert the_alert(world)["context"]["schedule_ids"] == [sid]
+
+
+def test_a_take_over_also_ends_the_takers_own_stale_row(client, world):
+    """A promotion decides no alert (the next run does). A share holder promoted
+    to admin who takes over a schedule has their own row decided again too."""
+    create(client, world, "other")
+    mate_sid = create(client, world, "mate")
+    _set_role(world.other, "admin")
+    assert {r["subject"] for r in alerts(world)} == {f"{KIND}:{world.other.id}", f"{KIND}:{world.mate.id}"}
+    assert take_over(client, world, mate_sid, who="other").status_code == 200
+    assert alerts(world) == []
