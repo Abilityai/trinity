@@ -832,11 +832,26 @@ async def _agent_runtime(agent_name: str) -> str:
         return _DEFAULT_RUNTIME
 
 
+def _member_agent_names() -> frozenset:
+    """Names of non-deleted member agents, fail-open (ent#1172).
+
+    OSS installs without the enterprise submodule get an empty frozenset — the
+    roster must never 500 over a missing capability (the same contract as
+    `_projects_available` and `_default_voice_id`).
+    """
+    try:
+        from enterprise.backend.member_agents.db import live_member_agent_names
+        return live_member_agent_names()
+    except Exception:  # noqa: BLE001 — fail open: OSS installs have no enterprise
+        return frozenset()
+
+
 def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
                  availability: str = "unknown", *,
                  is_platform: bool, runtime: str,
                  model_context: ModelContext,
                  stt_ready: bool | None,
+                 member_agent_names: frozenset = frozenset(),
                  can_manage_canvases: bool = False) -> PortalAgentCard:
     """One roster row → one card. Shared by the roster and the single-agent
     lookup (#2160) so the two cannot disagree about how a card is built.
@@ -865,6 +880,10 @@ def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
     from services import tts_service
     from services.pull_pilot import pull_owns_dispatch
     name = r["agent_name"]
+    # ent#1172: suppress the model picker for share-tier viewers of member agents.
+    # An owner viewing their own member agent keeps the control (AC 5 boundary).
+    is_member_agent = name in member_agent_names
+    _is_share_tier_member = is_member_agent and not bool(r.get("owned"))
     updated = r.get("avatar_updated_at")
     # Only agents with a generated (non-default) avatar get an image URL;
     # the UI renders an initials tile otherwise.
@@ -918,13 +937,16 @@ def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
         # #3114: an env-var read, so cheap per card.
         pulls_turns=pull_owns_dispatch(name, "public"),
         # ent#403: `None` — no control at all — for every non-platform principal.
-        # The roster payload is the ONLY capability channel an external client
-        # has (#2128): a UI gate written against `GET /api/settings/feature-flags`
-        # is `get_current_user`-gated and returns empty for exactly that
-        # audience, so the gate has to be here.
+        # ent#1172: also `None` for share-tier viewers of member agents (taste
+        # decision 7: model_default=None server-side for that audience).
         model_default=(
-            _card_model_default(r, model_context, runtime) if is_platform else None
+            _card_model_default(r, model_context, runtime)
+            if is_platform and not _is_share_tier_member
+            else None
         ),
+        # ent#1172: carried to the frontend so it can suppress the briefing body
+        # (description, skill hints, suggestions, error line) for share-tier viewers.
+        is_member_agent=is_member_agent,
     )
 
 
@@ -1021,6 +1043,9 @@ async def get_agent_card(email: str | None, agent_name: str,
                         is_platform=include_owned,
                         runtime=runtime,
                         model_context=_model_context(),
+                        # ent#1172: same set the roster resolves once — the page
+                        # and sidebar cannot disagree about is_member_agent either.
+                        member_agent_names=_member_agent_names(),
                         # ent#553 (review): the roster resolves this per row and
                         # this path did not, so the SAME owner saw
                         # `can_manage_canvases: true` in the sidebar and `false`
@@ -1124,6 +1149,8 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
     # its label), resolved HERE beside `tts_ready` and `default_voice` and
     # threaded into every card — never re-read per card.
     model_context = _model_context()
+    # ent#1172: once per roster load, like `tts_ready` and `model_context`.
+    member_names = _member_agent_names()
     cards = [
         _row_to_card(r, tts_ready, default_voice,
                      availability=availability.get(r["agent_name"], "unknown"),
@@ -1131,6 +1158,7 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
                      runtime=runtimes.get(r["agent_name"], _DEFAULT_RUNTIME),
                      model_context=model_context,
                      stt_ready=stt_ready,
+                     member_agent_names=member_names,
                      # ent#553 — resolved through `may_manage_canvases`, the SAME
                      # predicate the write routes enforce with, rather than a
                      # faster per-row comparison against `r["owner"]`. That
