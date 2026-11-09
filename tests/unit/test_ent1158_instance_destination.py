@@ -11,7 +11,8 @@ names an entry an admin registered under Settings → Integrations → Outbound
 A2A endpoints; the platform delivers under the key stored for that entry, so
 the asking agent never holds a copy.
 
-Pinned here (checkpoint 1 of the plan — the raise half and the answer path):
+Pinned here (checkpoints 1 and 2 of the plan — the raise half, the answer path,
+then delivery: the resolve point, raise/delivery parity, one audit row):
 
 * the answer path fails CLOSED: a stored destination this Trinity cannot read
   is a 409 `destination_unreadable` and nothing is written anywhere — before
@@ -486,3 +487,428 @@ class TestReadersRenderAnInstanceRow:
         assert TARGET in text and HOST in text
         assert "not in your environment" in text
         assert SECRET not in text
+
+
+# ===========================================================================
+# Checkpoint 2 — delivery: the key is resolved at the resolve point, by the
+# entry's id, every time; one audit row per delivery.
+# ===========================================================================
+
+import functools  # noqa: E402
+import logging  # noqa: E402
+import socket  # noqa: E402
+from unittest.mock import MagicMock  # noqa: E402
+
+import fakeredis  # noqa: E402
+import httpx  # noqa: E402
+
+ADDRESS = "93.184.216.34"
+ROTATED = "trinity_mcp_ROTATED_KEY_cm90YXRlZC1lbnRyeS1rZXk"
+ACTION = "credential_instance_delivery"
+
+
+def _resolver(host, port, *a, **k):
+    if host in (HOST, "other.example.com"):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ADDRESS, port))]
+    raise socket.gaierror(socket.EAI_NONAME, "Name or service not known")
+
+
+def _streaming(resp):
+    if not resp.is_stream_consumed:
+        return resp
+    return httpx.Response(resp.status_code, headers=resp.headers, stream=httpx.ByteStream(resp.content))
+
+
+class _Instance:
+    """The remote instance's backend over the pinned transport: a real
+    `httpx.AsyncClient` over a `MockTransport`. Records what it was sent."""
+
+    def __init__(self):
+        self.calls = []
+        self.status = 200
+        self.error = None
+
+    def client(self, *a, **k):
+        inst = self
+
+        async def _handler(request):
+            inst.calls.append({"url": str(request.url),
+                               "json": json.loads(request.content or b"null"),
+                               "headers": request.headers})
+            if inst.error:
+                raise inst.error
+            if inst.status != 200:
+                return _streaming(httpx.Response(inst.status, json={"detail": "nope"}))
+            return _streaming(httpx.Response(200, json={"status": "success"}))
+
+        return httpx.AsyncClient(transport=httpx.MockTransport(_handler), follow_redirects=False)
+
+
+class _FakeEnc:
+    def encrypt(self, d):
+        return "ENV:" + json.dumps(d)
+
+    def decrypt(self, s):
+        return json.loads(s[len("ENV:"):])
+
+
+@pytest.fixture
+def world(real_db, monkeypatch):
+    """The real credential sink over the real SQLite. The asking agent's own
+    server is a trap: an `instance` delivery must never read or write it."""
+    import services.ask_service as svc
+    import services.credential_sink as sink
+    import services.runtime_secret_scrub as scrub
+    from services import a2a_client
+    from utils.url_validation import validate_a2a_endpoint_url
+
+    fake = fakeredis.FakeStrictRedis(decode_responses=True)
+    monkeypatch.setattr(scrub, "get_breaker_redis", lambda: fake)
+    monkeypatch.setattr(scrub, "_enc_svc", lambda: _FakeEnc())
+    monkeypatch.setattr(scrub, "_redis_down_until", 0.0, raising=False)
+    monkeypatch.setattr(sink, "get_breaker_redis", lambda: fake)
+    monkeypatch.setattr(a2a_client, "validate_a2a_endpoint_url",
+                        functools.partial(validate_a2a_endpoint_url, resolver=_resolver))
+
+    asker_calls = []
+
+    def _asker_client(agent_name):
+        asker_calls.append(agent_name)
+        raise AssertionError("an instance delivery must not reach the asking agent's server")
+
+    monkeypatch.setattr(sink, "_agent_client", _asker_client)
+
+    async def _no_env_read(*a, **k):
+        asker_calls.append("read_env")
+        raise AssertionError("an instance delivery must not read the asking agent's .env")
+
+    monkeypatch.setattr(sink, "_read_env", _no_env_read)
+    instance = _Instance()
+    monkeypatch.setattr(sink, "_destination_client", instance.client)
+    monkeypatch.setattr(sink, "get_agent_container", lambda name: MagicMock())
+    monkeypatch.setattr(sink, "get_agent_status_from_container",
+                        lambda c: SimpleNamespace(status="running"))
+
+    audit = []
+    audit_fails = {"on": False}
+
+    class _Audit:
+        async def log(self, **kw):
+            if audit_fails["on"]:
+                raise RuntimeError("audit store down")
+            audit.append(kw)
+            return "evt"
+
+    monkeypatch.setattr(sink, "platform_audit_service", _Audit())
+    monkeypatch.setattr(sink.credential_requirements_service, "invalidate_report_cache",
+                        lambda name: None)
+    monkeypatch.setattr(svc, "platform_audit_service", _Audit())
+    monkeypatch.setattr(svc, "_websocket_manager", None)
+    monkeypatch.setattr(svc, "_observers", [])
+    monkeypatch.setattr(real_db, "get_operator_resume_enabled", lambda a: False, raising=False)
+    return SimpleNamespace(db=real_db, sink=sink, fake=fake, instance=instance, audit=audit,
+                           audit_fails=audit_fails, asker_calls=asker_calls)
+
+
+def _refused(uid, status, code):
+    from client_portal.asks import service
+    with pytest.raises(service.AskError) as info:
+        _provide(uid)
+    assert (info.value.status_code, info.value.code) == (status, code), (
+        info.value.status_code, info.value.code, info.value.detail)
+    return info.value
+
+
+def _staged(world):
+    return world.fake.hlen("secret_scrub:staged") or 0
+
+
+def _rows(world, action=ACTION):
+    return [a for a in world.audit if a.get("event_action") == action]
+
+
+# -- 3. raise / delivery parity ---------------------------------------------
+
+
+_ENTRY_STATES = {
+    "absent": None,
+    "no_credential": {"credential": None},
+    "empty_credential": {"credential": ""},
+    "aauth": {"credential": None, "auth_scheme": "aauth"},
+    "payment_token": {"credential_kind": "payment_token"},
+    "ok": {},
+}
+
+
+class TestRaiseDeliveryParity:
+    """One table, both readers: the raise-time twin (`instance_entry` +
+    `entry_problem`) and the delivery resolve point (`_resolve_instance_key`)
+    must answer every entry state with the same code and reason."""
+
+    @pytest.mark.parametrize("state", sorted(_ENTRY_STATES))
+    def test_raise_and_delivery_agree(self, registry, state):
+        from services import credential_destination as cd
+        from services import credential_sink as sink
+        over = _ENTRY_STATES[state]
+        registry.records.clear()
+        if over is not None:
+            registry.records.append(_entry(**over))
+
+        raised = cd.entry_problem(cd.instance_entry(ASKER, ENTRY_ID))
+        try:
+            key, ep_id, ep_name = sink._resolve_instance_key(ASKER, dict(STORED))
+            delivered = None
+        except sink.CredentialSinkError as exc:
+            delivered = exc
+
+        if raised is None:
+            assert delivered is None, (delivered.code, delivered.data)
+            assert (key, ep_id, ep_name) == (SECRET, ENTRY_ID, ENTRY)
+        else:
+            assert delivered is not None, f"raise refused {raised.code}, delivery did not"
+            assert (delivered.status_code, delivered.code, delivered.data.get("reason")) \
+                == (422, raised.code, raised.reason)
+            assert SECRET not in delivered.message
+
+    def test_delivery_resolves_by_the_stored_id_not_the_name(self, registry):
+        """A remove-and-re-add under the same name gets a new id: never followed."""
+        from services import credential_sink as sink
+        registry.records[0] = _entry(id="ep-readded")
+        with pytest.raises(sink.CredentialSinkError) as info:
+            sink._resolve_instance_key(ASKER, dict(STORED))
+        assert (info.value.code, info.value.data.get("reason")) == ("destination_not_approved",
+                                                                    "instance_unknown")
+
+    def test_the_resolve_point_asks_for_the_asking_agent(self, registry):
+        from services import a2a_outbound
+        from services import credential_sink as sink
+        seen = []
+
+        class _Scoped:
+            def resolve_endpoint(self, agent_name, ref):
+                seen.append((agent_name, ref))
+                return None
+
+            def list_endpoints(self, agent_name):
+                return []
+
+        a2a_outbound.register_provider(_Scoped())
+        with pytest.raises(sink.CredentialSinkError) as info:
+            sink._resolve_instance_key(ASKER, dict(STORED))
+        assert seen == [(ASKER, ENTRY_ID)]
+        assert info.value.data.get("reason") == "instance_unknown"
+
+    def test_a_provider_error_is_the_unknown_refusal_without_its_text(self, registry):
+        from services import a2a_outbound
+        from services import credential_sink as sink
+
+        class _Broken:
+            def resolve_endpoint(self, agent_name, ref):
+                raise RuntimeError(f"backend down {SECRET}")
+
+            def list_endpoints(self, agent_name):
+                return []
+
+        a2a_outbound.register_provider(_Broken())
+        with pytest.raises(sink.CredentialSinkError) as info:
+            sink._resolve_instance_key(ASKER, dict(STORED))
+        assert info.value.data.get("reason") == "instance_unknown"
+        assert SECRET not in info.value.message and "backend down" not in info.value.message
+
+    def test_a_moved_entry_is_refused_before_its_credential_is_looked_at(self, registry):
+        from services import credential_sink as sink
+        registry.records[0] = _entry(url="https://other.example.com/a2a", credential=None)
+        with pytest.raises(sink.CredentialSinkError) as info:
+            sink._resolve_instance_key(ASKER, dict(STORED))
+        assert (info.value.code, info.value.data.get("reason")) == ("destination_not_approved",
+                                                                    "instance_moved")
+
+    def test_a_header_unsafe_entry_credential_is_refused_at_delivery_only(self, registry):
+        from services import credential_sink as sink
+        bad = "trinity_mcp_bad kéy"
+        registry.records[0] = _entry(credential=bad)
+        with pytest.raises(sink.CredentialSinkError) as info:
+            sink._resolve_instance_key(ASKER, dict(STORED))
+        assert (info.value.status_code, info.value.code) == (422, "destination_key_invalid")
+        assert bad not in info.value.message
+
+
+# -- 4. delivery --------------------------------------------------------------
+
+
+class TestInstanceDelivery:
+    def test_the_value_lands_under_the_entry_key_and_the_asking_agent_is_never_touched(
+            self, world, monkeypatch, caplog):
+        from services import a2a_client
+        caplog.set_level(logging.DEBUG)
+        seen = {}
+        real = a2a_client._read_capped
+
+        def _spy(*a, **kw):
+            seen.update(kw)
+            return real(*a, **kw)
+
+        monkeypatch.setattr(a2a_client, "_read_capped", _spy)
+        uid = _pending(world.db, "d-ok", destination=dict(STORED))
+        out = _provide(uid)
+
+        assert len(world.instance.calls) == 1
+        call = world.instance.calls[0]
+        assert call["url"] == f"https://{ADDRESS}/api/agents/{TARGET}/credentials/inject"
+        assert call["headers"]["Host"] == HOST
+        assert call["headers"]["Authorization"] == f"Bearer {SECRET}"
+        assert call["json"] == {"mode": "merge", "env": {NAME: VALUE}}
+        assert seen.get("secret") == SECRET
+        # the asking agent's .env was never read nor written
+        assert world.asker_calls == []
+        assert _staged(world) == 0
+        row = world.db.get_operator_queue_item(uid)
+        assert row["response"] == "provided" and out.answer == "provided"
+        everything = caplog.text + json.dumps(world.audit, default=str) \
+            + json.dumps(row, default=str) + json.dumps(out.model_dump(), default=str)
+        assert SECRET not in everything and VALUE not in everything
+
+    def test_a_key_rotated_on_the_entry_after_the_ask_is_the_one_used(self, world, registry):
+        uid = _pending(world.db, "d-rot", destination=dict(STORED))
+        registry.records[0] = _entry(credential=ROTATED)
+        _provide(uid)
+        assert world.instance.calls[0]["headers"]["Authorization"] == f"Bearer {ROTATED}"
+
+    def test_an_entry_repointed_at_another_host_is_refused_and_nothing_is_sent(
+            self, world, registry):
+        uid = _pending(world.db, "d-moved", destination=dict(STORED))
+        registry.records[0] = _entry(url="https://other.example.com/a2a")
+        e = _refused(uid, 422, "destination_not_approved")
+        assert e.data.get("reason") == "instance_moved"
+        assert "again" in e.detail and "nothing was stored" in e.detail
+        assert world.instance.calls == [] and _staged(world) == 0
+        assert world.db.get_operator_queue_item(uid)["status"] == "pending"
+
+    @pytest.mark.parametrize("change,code,reason", [
+        (lambda r: r.clear(), "destination_not_approved", "instance_unknown"),
+        (lambda r: r.__setitem__(0, _entry(credential=None)),
+         "destination_instance_no_credential", "no_credential"),
+        (lambda r: r.__setitem__(0, _entry(credential_kind="payment_token")),
+         "destination_instance_no_credential", "payment_token"),
+    ])
+    def test_an_entry_changed_after_the_ask_is_a_named_refusal_with_nothing_sent(
+            self, world, registry, change, code, reason):
+        uid = _pending(world.db, f"d-chg-{reason}", destination=dict(STORED))
+        change(registry.records)
+        e = _refused(uid, 422, code)
+        assert e.data.get("reason") == reason
+        assert "nothing was stored" in e.detail and "admin" in e.detail
+        assert world.instance.calls == [] and _staged(world) == 0
+
+    def test_a_refused_key_names_the_registered_key_not_the_asking_agent(self, world):
+        world.instance.status = 401
+        uid = _pending(world.db, "d-401", destination=dict(STORED))
+        e = _refused(uid, 409, "destination_key_refused")
+        assert "registered for that Trinity" in e.detail
+        assert "agent that asked holds" not in e.detail
+
+    def test_the_sentinel_key_reaches_no_body_log_or_audit_row_on_any_refusal(
+            self, world, registry, caplog):
+        caplog.set_level(logging.DEBUG)
+        texts = []
+        for i, (over, status, code) in enumerate([
+            ({"credential_kind": "payment_token"}, 422, "destination_instance_no_credential"),
+            ({"url": "https://other.example.com/a2a"}, 422, "destination_not_approved"),
+            ({"credential": SECRET + " x"}, 422, "destination_key_invalid"),
+        ]):
+            registry.records[0] = _entry(**over)
+            e = _refused(_pending(world.db, f"d-sent-{i}", destination=dict(STORED)), status, code)
+            texts.append(f"{e.detail} {json.dumps(e.data, default=str)}")
+        registry.records[0] = _entry()
+        world.instance.status = 403
+        e = _refused(_pending(world.db, "d-sent-403", destination=dict(STORED)), 409,
+                     "destination_key_refused")
+        texts.append(f"{e.detail} {json.dumps(e.data, default=str)}")
+        everything = " ".join(texts) + caplog.text + json.dumps(world.audit, default=str)
+        assert SECRET not in everything and VALUE not in everything
+
+
+# -- 5. one audit row per delivery --------------------------------------------
+
+
+class TestOneAuditRowPerDelivery:
+    def test_a_delivery_writes_exactly_one_row_with_names_only(self, world):
+        uid = _pending(world.db, "a-ok", destination=dict(STORED))
+        _provide(uid)
+        rows = _rows(world)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["actor_email"] == OWNER
+        assert (row["target_type"], row["target_id"]) == ("agent", ASKER)
+        assert row["details"] == {
+            "name": NAME, "ask_id": uid, "instance": ENTRY, "endpoint_id": ENTRY_ID,
+            "destination": {"host": HOST, "agent_name": TARGET},
+            "outcome": "delivered", "may_have_written": True}
+        # the ent#1109 pair is for key_env destinations only
+        assert _rows(world, "credential_delivery_attempt") == []
+        assert _rows(world, "credential_delivered") == []
+
+    @pytest.mark.parametrize("arm,status,code,may_have_written", [
+        ("switch_off", 422, "destination_outbound_disabled", False),
+        ("removed", 422, "destination_not_approved", False),
+        ("moved", 422, "destination_not_approved", False),
+        ("no_credential", 422, "destination_instance_no_credential", False),
+        ("key_invalid", 422, "destination_key_invalid", False),
+        ("dns", 422, "destination_url_invalid", False),
+        ("refused", 409, "destination_key_refused", False),
+        ("timeout", 503, "destination_unreachable", True),
+        ("5xx", 503, "destination_unconfirmed", True),
+    ])
+    def test_each_refusal_writes_exactly_one_row_naming_its_outcome(
+            self, world, registry, monkeypatch, arm, status, code, may_have_written):
+        uid = _pending(world.db, f"a-{arm}", destination=dict(STORED))
+        if arm == "switch_off":
+            registry.switch["on"] = False
+        elif arm == "removed":
+            registry.records.clear()
+        elif arm == "moved":
+            registry.records[0] = _entry(url="https://other.example.com/a2a")
+        elif arm == "no_credential":
+            registry.records[0] = _entry(credential=None)
+        elif arm == "key_invalid":
+            registry.records[0] = _entry(credential="bad key")
+        elif arm == "dns":
+            from services import a2a_client
+            from utils.url_validation import validate_a2a_endpoint_url
+            monkeypatch.setattr(a2a_client, "validate_a2a_endpoint_url", functools.partial(
+                validate_a2a_endpoint_url,
+                resolver=lambda h, p, *a, **k: [(socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                                                 ("10.0.0.9", p))]))
+        elif arm == "refused":
+            world.instance.status = 403
+        elif arm == "timeout":
+            world.instance.error = httpx.ReadTimeout("slow")
+        elif arm == "5xx":
+            world.instance.status = 503
+        _refused(uid, status, code)
+        rows = _rows(world)
+        assert len(rows) == 1, [a.get("event_action") for a in world.audit]
+        details = rows[0]["details"]
+        assert details["outcome"] == code
+        assert details["may_have_written"] is may_have_written
+        # the stored name and id when the entry did not resolve
+        assert (details["instance"], details["endpoint_id"]) == (ENTRY, ENTRY_ID)
+        assert details["destination"] == {"host": HOST, "agent_name": TARGET}
+        assert set(details) == {"name", "ask_id", "instance", "endpoint_id", "destination",
+                                "outcome", "may_have_written"}
+        assert _rows(world, "credential_delivery_attempt") == []
+        assert SECRET not in json.dumps(world.audit, default=str)
+
+    def test_a_failed_audit_write_does_not_undo_the_delivery(self, world):
+        world.audit_fails["on"] = True
+        uid = _pending(world.db, "a-fail", destination=dict(STORED))
+        out = _provide(uid)
+        assert out.answer == "provided" and len(world.instance.calls) == 1
+
+    def test_a_trace_is_logged_before_the_request_leaves(self, world, caplog):
+        caplog.set_level(logging.INFO)
+        world.instance.error = httpx.ReadTimeout("slow")
+        uid = _pending(world.db, "a-trace", destination=dict(STORED))
+        _refused(uid, 503, "destination_unreachable")
+        lines = [r.getMessage() for r in caplog.records if r.name == "services.credential_sink"]
+        assert any(uid in line and NAME in line and HOST in line for line in lines), lines

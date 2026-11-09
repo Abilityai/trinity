@@ -235,10 +235,11 @@ def instance_entry(agent_name: str, ref: str) -> Optional[Dict[str, Any]]:
     disagree about an entry; the resolved credential is reduced to a bool in
     the same expression and is never bound here."""
     from services import a2a_outbound
-    return _metadata(a2a_outbound.resolve_endpoint(agent_name, ref))
+    return entry_metadata(a2a_outbound.resolve_endpoint(agent_name, ref))
 
 
-def _metadata(ep: Any) -> Optional[Dict[str, Any]]:
+def entry_metadata(ep: Any) -> Optional[Dict[str, Any]]:
+    """A resolved entry reduced to what `entry_problem` reads; never its credential."""
     if ep is None:
         return None
     return {"id": ep.id, "name": ep.name, "url": ep.url, "auth_scheme": ep.auth_scheme,

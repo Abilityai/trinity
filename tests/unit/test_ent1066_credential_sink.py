@@ -702,7 +702,7 @@ class TestTheAskSide:
 # delivery step are the only moves the module may make with it.
 _ALLOWED_VALUE_CALLEES = {"len", "isinstance", "strip", "encode", "splitlines",
                           "stage_secret", "unstage_secret", "set_keys", "_check_value",
-                          "_deliver", "_deliver_remote", "set_env_value"}
+                          "_deliver", "_deliver_remote", "_deliver_remote_once", "set_env_value"}
 
 
 def test_the_sink_module_never_interpolates_the_value():
@@ -746,3 +746,102 @@ def test_the_sink_module_never_interpolates_the_value():
         if verdict:
             offences.append((node.lineno, verdict))
     assert not offences, offences
+
+
+# The KEY a remote delivery is sent under (trinity-enterprise#1109, #1158) is a
+# second secret in this module: the asking agent's own key (`_read_key_by_name`)
+# or the one stored on a registry entry (`_resolve_instance_key`). In the
+# functions that hold it, these names — and any `.credential` attribute — may
+# be measured, matched, returned or handed to the pinned request; never
+# formatted, logged, concatenated or raised. The one f-string allowed is the
+# `Authorization` header's own value.
+_KEY_GUARDED = {
+    "_read_key_by_name": {"key", "found"},
+    "_resolve_instance_key": {"key", "credential", "found"},
+    "_deliver_remote": {"key", "headers"},
+    "_deliver_remote_once": {"key", "headers"},
+    "merge_env_values": {"item"},
+}
+_ALLOWED_KEY_CALLEES = {"len", "isinstance", "strip", "match", "bool", "_read_capped",
+                        "_check_value"}
+
+
+def _key_offences(src: str):
+    tree = ast.parse(src)
+    parents = {}
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+    found_fns, offences = set(), []
+    for fn in ast.walk(tree):
+        if not (isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) and fn.name in _KEY_GUARDED):
+            continue
+        found_fns.add(fn.name)
+        tainted = _KEY_GUARDED[fn.name]
+        for node in ast.walk(fn):
+            hit = ((isinstance(node, ast.Name) and node.id in tainted and isinstance(node.ctx, ast.Load))
+                   or (isinstance(node, ast.Attribute) and node.attr == "credential"
+                       and isinstance(node.ctx, ast.Load)))
+            if not hit:
+                continue
+            cur, verdict = node, None
+            while cur in parents and cur is not fn:
+                child, cur = cur, parents[cur]
+                if isinstance(cur, ast.JoinedStr):
+                    owner = parents.get(cur)
+                    if (isinstance(owner, ast.Dict) and cur in owner.values
+                            and isinstance(owner.keys[owner.values.index(cur)], ast.Constant)
+                            and owner.keys[owner.values.index(cur)].value == "Authorization"):
+                        break
+                    verdict = "f-string"
+                    break
+                if isinstance(cur, ast.BinOp) and isinstance(cur.op, (ast.Add, ast.Mod)):
+                    verdict = "concatenation"
+                    break
+                if isinstance(cur, ast.Call):
+                    if child is cur.func:
+                        continue  # `key.strip()` — the receiver, not an argument
+                    f = cur.func
+                    name = f.id if isinstance(f, ast.Name) else (f.attr if isinstance(f, ast.Attribute) else None)
+                    if (isinstance(f, ast.Attribute) and isinstance(f.value, ast.Name)
+                            and f.value.id == "logger") or name not in _ALLOWED_KEY_CALLEES:
+                        verdict = f"call {name}"
+                    break
+                if isinstance(cur, ast.Raise):
+                    verdict = "raise"
+                    break
+            if verdict:
+                offences.append((fn.name, node.lineno, verdict))
+    return found_fns, offences
+
+
+def test_the_sink_module_never_interpolates_a_delivery_key():
+    src = (Path(_BACKEND) / "services" / "credential_sink.py").read_text(encoding="utf-8")
+    found_fns, offences = _key_offences(src)
+    # every guarded function still exists, so the guard cannot go blind on a rename
+    assert found_fns == set(_KEY_GUARDED), set(_KEY_GUARDED) - found_fns
+    assert not offences, offences
+
+
+@pytest.mark.parametrize("leak", [
+    'logger.info("key %s", ep.credential)',
+    'raise CredentialSinkError(422, "x", f"bad {ep.credential}")',
+    'return "Bearer " + ep.credential',
+    'print(key)',
+])
+def test_the_key_guard_catches_a_planted_leak(leak):
+    """The guard is not vacuous: each of these, planted in the resolve point, is caught."""
+    src = f"def _resolve_instance_key(agent_name, destination):\n    key = ep.credential\n    {leak}\n"
+    _, offences = _key_offences(src)
+    assert offences, leak
+
+
+@pytest.mark.parametrize("module", ["credential_sink.py", "credential_destination.py"])
+def test_a_resolved_endpoint_is_never_flattened(module):
+    """`ResolvedEndpoint.__repr__` hides the credential; `dataclasses.asdict`
+    and `vars` do not. Neither may appear where an entry is resolved."""
+    src = (Path(_BACKEND) / "services" / module).read_text(encoding="utf-8")
+    calls = [n for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Call)]
+    names = {(c.func.id if isinstance(c.func, ast.Name) else
+              c.func.attr if isinstance(c.func, ast.Attribute) else None) for c in calls}
+    assert not names & {"asdict", "vars", "astuple"}, names & {"asdict", "vars", "astuple"}
