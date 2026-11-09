@@ -14,6 +14,12 @@
   answers it once in the Inbox. The card says who it waits on, so nobody
   reads the unchanged member list as the proposal having been lost.
 
+  An agent steward is usable only by people who hold it (trinity-enterprise#1161
+  — project membership never carries agent access). A member without it reads
+  that, by name, and can ask the agent's owner; the owner reads which members
+  lack it and gives access here. Both are the platform's existing access request
+  and share row, behind the project routes.
+
   A person steward sees what waits on them (tasks to verify, stuck tasks —
   from the roll-up the page already has) and, when it is me, the way to the
   "I steward" tab.
@@ -51,6 +57,49 @@
     <p v-if="!steward" class="mt-2 text-sm text-gray-600 dark:text-gray-300">The creator stewards it until someone is named.</p>
 
     <template v-else-if="steward.kind === 'agent'">
+      <!-- trinity-enterprise#1161: I am on the project but can't use its steward. -->
+      <div
+        v-if="access && !access.has_access"
+        class="mt-3 rounded-lg border border-status-warning-200 dark:border-status-warning-900/50 bg-status-warning-50 dark:bg-status-warning-900/20 px-3 py-2.5"
+        data-testid="project-steward-no-access"
+      >
+        <p class="text-sm font-semibold text-status-warning-700 dark:text-status-warning-400">You can't use {{ access.agent }} yet</p>
+        <p class="mt-1 text-sm text-gray-700 dark:text-gray-300">
+          Being on the project doesn't give you the steward agent. Until its owner gives you access, you can't chat with it and its questions don't reach you.
+        </p>
+        <p v-if="access.request === 'pending'" class="mt-2 text-sm font-medium text-gray-700 dark:text-gray-300" data-testid="project-steward-access-pending">Access requested. Waiting on the agent's owner.</p>
+        <p v-else-if="access.request === 'denied'" class="mt-2 text-sm text-gray-700 dark:text-gray-300" data-testid="project-steward-access-denied">The agent's owner declined your request. Ask them directly.</p>
+        <BaseButton
+          v-else
+          class="mt-2" size="sm" variant="secondary" :disabled="asking"
+          data-testid="project-steward-access-request"
+          @click="askForAccess"
+        >{{ asking ? 'Asking…' : 'Ask for access' }}</BaseButton>
+        <p v-if="askError" class="mt-1 text-xs text-status-danger-700 dark:text-status-danger-400" role="alert">{{ askError }}</p>
+      </div>
+
+      <!-- trinity-enterprise#1161: I own the steward agent; members who can't use it. -->
+      <div
+        v-if="access?.can_grant && missing.length"
+        class="mt-3 rounded-lg border border-status-warning-200 dark:border-status-warning-900/50 bg-status-warning-50 dark:bg-status-warning-900/20 px-3 py-2.5"
+        data-testid="project-steward-missing-access"
+      >
+        <p class="text-sm font-semibold text-status-warning-700 dark:text-status-warning-400">
+          {{ missing.length === 1 ? '1 member can\'t' : `${missing.length} members can't` }} use {{ access.agent }}
+        </p>
+        <ul class="mt-2 space-y-2">
+          <li v-for="m in missing" :key="m.email" class="flex items-center gap-2" :data-testid="`project-steward-missing-${m.email}`">
+            <span class="min-w-0 flex-1 truncate text-sm text-gray-800 dark:text-gray-200" :title="m.email">{{ m.label }}</span>
+            <BaseBadge v-if="m.request_id" variant="warning">Asked</BaseBadge>
+            <BaseButton size="sm" variant="secondary" :disabled="granting === m.email" @click="giveAccess(m.email)">
+              {{ granting === m.email ? 'Giving…' : 'Give access' }}
+            </BaseButton>
+          </li>
+        </ul>
+        <p v-if="grantError" class="mt-1 text-xs text-status-danger-700 dark:text-status-danger-400" role="alert">{{ grantError }}</p>
+      </div>
+      <p v-if="access?.unknown" class="mt-2 text-xs text-gray-500 dark:text-gray-400" data-testid="project-steward-access-unknown">Couldn't check who can use this agent.</p>
+
       <ul class="mt-2 space-y-1 text-sm text-gray-700 dark:text-gray-300">
         <li v-if="'last_sweep_at' in steward" data-testid="project-steward-sweep">
           <template v-if="steward.last_sweep_at">Last sweep <span :title="absolute(steward.last_sweep_at)">{{ relative(steward.last_sweep_at) }}</span></template>
@@ -82,7 +131,7 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseCard from '@/components/base/BaseCard.vue'
@@ -90,7 +139,8 @@ import PortalAvatar from '@/components/portal/PortalAvatar.vue'
 import { formatRelativeTime, formatLocalDateTime } from '@/utils/timestamps'
 import { askInboxRoute } from '../portalRailAsks'
 import { INBOX_LINK_CLASS } from '../portalUtils'
-import { HEALTH_BADGE, healthLabel, attentionLines, stewardScheduleLine } from './projectsUtils'
+import { HEALTH_BADGE, healthLabel, attentionLines, stewardScheduleLine, projectErrorMessage } from './projectsUtils'
+import { useProjectsStore } from '@/stores/projects'
 
 const props = defineProps({
   project: { type: Object, required: true },
@@ -131,6 +181,39 @@ const scheduleAt = computed(() => (steward.value?.schedule?.state === 'scheduled
 // line here, asks have their own card.
 const waiting = computed(() => attentionLines({ ...rollup.value, open_asks: 0, health_due: false, quiet: false })
   .filter((l) => l.key === 'verify' || l.key === 'stuck'))
+
+// trinity-enterprise#1161 — the steward agent's seat. The store is reached on
+// click only, so a read-only mount needs no Pinia.
+const access = computed(() => props.project.steward_access || null)
+const missing = computed(() => access.value?.members_without_access || [])
+const asking = ref(false)
+const askError = ref('')
+const granting = ref('')
+const grantError = ref('')
+
+async function askForAccess() {
+  asking.value = true
+  askError.value = ''
+  try {
+    await useProjectsStore().requestStewardAccess(props.project.id)
+  } catch (err) {
+    askError.value = projectErrorMessage(err)
+  } finally {
+    asking.value = false
+  }
+}
+
+async function giveAccess(email) {
+  granting.value = email
+  grantError.value = ''
+  try {
+    await useProjectsStore().grantStewardAccess(props.project.id, email)
+  } catch (err) {
+    grantError.value = projectErrorMessage(err)
+  } finally {
+    granting.value = ''
+  }
+}
 
 const relative = (t) => (t ? formatRelativeTime(t) : '')
 const absolute = (t) => (t ? formatLocalDateTime(t) : '')

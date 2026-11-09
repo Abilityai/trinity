@@ -232,6 +232,12 @@ export const useProjectsStore = defineStore('projects', () => {
     _write(id, () => portalHttp.delete(
       url(id, `/metrics/${encodeURIComponent(agentName)}/${encodeURIComponent(metric)}`), { headers: headers() }))
 
+  // --- ent#1161: the steward agent's seat, asked for and given on the project -------
+  const requestStewardAccess = (id) =>
+    _write(id, () => portalHttp.post(url(id, '/steward-access/request'), {}, { headers: headers() }))
+  const grantStewardAccess = (id, email) =>
+    _write(id, () => portalHttp.post(url(id, '/steward-access/grant'), { email }, { headers: headers() }))
+
   async function metricOptions(id) {
     const { data } = await portalHttp.get(url(id, '/metric-options'), { headers: headers() })
     return data.agents || []
@@ -266,6 +272,7 @@ export const useProjectsStore = defineStore('projects', () => {
     tasks, logs, fetchTasks, fetchTask, createTask, updateTask, addTaskNote, fetchLog, addLogEntry,
     addGuest, addItem, setItemAudience, removeItem, fetchReport, myItems, importCandidates, importProject,
     setHealth, linkMetric, unlinkMetric, metricOptions, stewarding, fetchStewarding,
+    requestStewardAccess, grantStewardAccess,
     fetchProjectPeople, fetchCompanyPeople,
   }
 })
