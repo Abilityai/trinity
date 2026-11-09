@@ -1846,7 +1846,9 @@ channel_client_blocks = Table(
 # trinity-enterprise#165 (GUARD-005) — guardrail events an agent's hooks
 # reported, pushed by the agent's own key. `execution_id` is attribution, not a
 # FK. `details` is a JSON object of the allowlisted fields (patterns, verb,
-# tier, turn_kind, rule, path, session_id, tool_use_id, kind_raw, hook_raw).
+# tier, turn_kind, rule, path, session_id, tool_use_id, kind_raw, hook_raw,
+# occurred_at_reported — the agent's own `ts` when it was later than the
+# receive time and `occurred_at` was clamped to it).
 guardrail_events = Table(
     "guardrail_events",
     metadata,

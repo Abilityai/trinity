@@ -248,6 +248,15 @@ class TestGet:
         assert body["reporting"]["state"] == "reporting"
         assert body["reporting"]["runtime"] == "claude-code"
 
+    def test_a_future_dated_event_reads_at_its_receive_time(self, world):
+        """Fix round R3, through the real route: a skewed agent clock keeps the
+        event, dated when the backend received it."""
+        assert _post(_app(), _batch([_ev("ahead", ts="2999-01-01T00:00:00Z")])).status_code == 200
+        r = _app(_user(OWNER)).get(f"/api/agents/{AGENT}/guardrail-events")
+        [event] = r.json()["events"]
+        assert event["occurred_at"] == event["received_at"]
+        assert event["details"]["occurred_at_reported"] == "2999-01-01T00:00:00.000000Z"
+
     def test_an_admin_reads_any_agent(self, world):
         self._seed()
         r = _app(_user(ADMIN, role="admin")).get(f"/api/agents/{AGENT}/guardrail-events")

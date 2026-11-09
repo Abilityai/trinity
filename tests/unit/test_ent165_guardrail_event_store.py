@@ -304,6 +304,60 @@ class TestReporting:
 
 
 # ---------------------------------------------------------------------------
+# A future `ts` is clamped to the receive time (fix round R3)
+# ---------------------------------------------------------------------------
+
+
+def _z(dt):
+    return dt.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+class TestFutureTimestamp:
+    """An agent's clock can run ahead. Its event must still be stored (a skewed
+    clock never costs the agent its record) but dated no later than the moment
+    the backend received it, or it would sit inside every rolling window until
+    it is pruned."""
+
+    def test_a_future_ts_is_stored_at_the_receive_time_with_the_reported_value_kept(
+        self, db_backend, redis
+    ):
+        res = _ingest([_ev(ts="2999-01-01T00:00:00Z")])
+        assert res == {"accepted": 1, "duplicates": 0, "rejected": 0}
+        [row] = _rows()
+        assert row["occurred_at"] == row["received_at"]
+        details = svc.load_details(row["details"])
+        assert details["occurred_at_reported"] == "2999-01-01T00:00:00.000000Z"
+
+    def test_a_past_ts_is_kept_as_reported(self, db_backend, redis):
+        past = _z(datetime.now(timezone.utc) - timedelta(hours=2))
+        _ingest([_ev(ts=past)])
+        [row] = _rows()
+        assert row["occurred_at"] == past
+        assert "occurred_at_reported" not in svc.load_details(row["details"])
+
+    def test_a_future_event_leaves_the_window_once_its_receive_time_has(
+        self, db_backend, redis, monkeypatch
+    ):
+        """The behaviour the clamp exists for: an event received two days ago
+        with a `ts` still in the future is NOT in today's 24 h counts or a
+        `since` read of the last day."""
+        now = datetime.now(timezone.utc)
+        two_days_ago = now - timedelta(hours=48)
+        # A scoped patch: `monkeypatch.undo()` would also revert the fixtures'
+        # own patches (the DB and Redis seams) and make every count vacuous.
+        with monkeypatch.context() as m:
+            m.setattr(svc, "utc_now", lambda: two_days_ago)
+            _ingest([_ev("skewed", ts=_z(now + timedelta(days=1)))])
+        assert svc.count_by_agent(24, agent_names=[AGENT]) == {"agents": {}}
+        page = svc.list_events(AGENT, since=_z(now - timedelta(hours=24)))
+        assert page["events"] == []
+        assert svc.count_by_agent(72, agent_names=[AGENT]) == {
+            "agents": {AGENT: {"by_kind": {"deny": 1}}}
+        }
+
+
+
+# ---------------------------------------------------------------------------
 # Per-agent read
 # ---------------------------------------------------------------------------
 

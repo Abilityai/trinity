@@ -21,6 +21,10 @@ Contract rules that are load-bearing (plan §6):
   (`rule`, `path`) pass through the credential sanitizer as defence in depth.
 * **Reporting state** tells "no events" from "not reporting": `never`,
   `reporting` (a report inside `STALE_AFTER_SECONDS`), `stale`.
+* **`occurred_at` is never later than `received_at`.** An agent's clock can run
+  ahead; a future `ts` is clamped to the receive time at ingest (the reported
+  value kept in `details.occurred_at_reported`), so a skewed event is neither
+  lost nor counted in every rolling window until it is pruned.
 
 Events are agent-reported: an agent acting deliberately can suppress or forge
 its own. This is observability, not a tamper-proof audit trail.
@@ -136,17 +140,18 @@ def _iso(dt: datetime) -> str:
 # Normalization (one event at a time)
 # ---------------------------------------------------------------------------
 
-def _parse_ts(value: Any) -> Optional[str]:
+def _parse_ts(value: Any) -> Optional[datetime]:
+    """The wire `ts` (epoch number or ISO string) as an aware datetime, or None."""
     if isinstance(value, bool):
         return None
     if isinstance(value, (int, float)):
         try:
-            return _iso(datetime.fromtimestamp(value, tz=timezone.utc))
+            return datetime.fromtimestamp(value, tz=timezone.utc)
         except (OverflowError, OSError, ValueError):
             return None
     if isinstance(value, str) and 0 < len(value) <= 64:
         try:
-            return _iso(parse_iso_timestamp(value))
+            return parse_iso_timestamp(value)
         except ValueError:
             return None
     return None
@@ -173,8 +178,8 @@ def normalize_event(raw: Any, received_at: str) -> Optional[Dict]:
     event_id = raw.get("event_id")
     if not isinstance(event_id, str) or not _EVENT_ID.match(event_id):
         return None
-    occurred_at = _parse_ts(raw.get("ts"))
-    if occurred_at is None:
+    occurred = _parse_ts(raw.get("ts"))
+    if occurred is None:
         return None
     kind, hook = raw.get("kind"), raw.get("hook")
     if not (isinstance(kind, str) and _TOKEN.match(kind)):
@@ -186,6 +191,13 @@ def normalize_event(raw: Any, received_at: str) -> Optional[Dict]:
         return None
 
     details: Dict[str, Any] = {}
+    # A future `ts` (the agent's clock runs ahead) is dated at the receive time:
+    # kept, never rejected, but out of every window it does not belong to.
+    if occurred > parse_iso_timestamp(received_at):
+        details["occurred_at_reported"] = _iso(occurred)
+        occurred_at = received_at
+    else:
+        occurred_at = _iso(occurred)
     if kind not in KINDS:
         details["kind_raw"] = kind
         kind = OTHER
