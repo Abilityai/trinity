@@ -8917,6 +8917,18 @@
         "unit"
       ],
       "description": "trinity#4302: a mention chain stopped at ROOM_MAX_CHAIN_DEPTH writes a typed `chain_paused` system row (mentions = who was next; plain words, no UI verb) and the room payload carries `paused_chain` {seq, next} while the offer stands (survives bookkeeping lines; ends on a conversational row, a later pause/continue row, a closed room, or every named agent having left; a collaborator seated above the row still gets it). POST /api/rooms/{id}/continue through the real router, service, db and idempotency layers over a temp SQLite DB: wakes `next` at depth 1 (a fresh count that may pause again), posts a `chain_continued` receipt that spends no message budget, hands the woken agent what it was owed; a seated collaborator, a person's user key and a Workspace client may continue, an agent key and the system key get 403 not_a_person, a non-member the uniform 404 with no key claimed, an unreachable `next` a 403 with nothing consumed, a departed `next` 409 no_one_to_wake; a closed room / a room at its message budget 410 with stop_reason and the budget named. Once per stop: a double click with an Idempotency-Key is 409 in-flight then a replay under scope room-continue:{room_id}; two workers without a key wake once (the second gets 409 room_moved_on); a stale offer_stands read is not the guard (the receipt insert is); two simultaneous receipt inserts land exactly one; a repeat after a restart (key rows gone) is 409 room_moved_on."
+    },
+    {
+      "file": "unit/test_ent863_terminal_close.py",
+      "feature": "trinity-enterprise#863",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "websocket",
+        "unit",
+        "security"
+      ],
+      "description": "Terminals follow the account: the real agent-terminal and system-agent-terminal handlers register with the worker's live-connection registry and close when the account's access changes (immediate re-check and periodic re-check): error frame plus 4003, the handler returns normally within 1 s without being cancelled and logs no error, the container socket is closed, the one-terminal slot and the registry entry are freed. The close cancels the session's own forwarder tasks (blocked in the browser read and the container read); input arriving during the close is not forwarded; a change while the shell starts refuses the session after the start returns. A session closed for an access change ends its shell with an exec as the terminal's user carrying the session's marker; an unchanged account and an ordinary close end nothing; a failed end is logged. The snapshot holds the role the door authorized on. Shape: each door registers in the step that authorizes it and goes live after the start, before auth_success. The end-of-shell script (Linux, /proc) ends the marked processes and their session and spares another session and a bystander."
     }
   ]
 }
