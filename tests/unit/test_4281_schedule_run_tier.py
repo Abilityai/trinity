@@ -72,6 +72,21 @@ def test_turn_actor_is_the_projection_of_the_run_tier(sid, agent, expected):
     assert t.turn_actor(World(), agent, execution=run) == (tier, kind, creator if tier == "share" else None)
 
 
+def test_a_member_creator_rates_as_the_members_turn_does():
+    """A creator whom the registered person-tier provider rates the owner of
+    this agent (trinity-enterprise#1148): the schedule read and the turn agree,
+    owner tier with kind `member`, and the turn keeps the creator on record."""
+    t = _t()
+    t.register_person_tier_provider(lambda db, uid, agent: uid == MATE_ID and agent == AGENT)
+    try:
+        rated = t.schedule_run_tier(World(), AGENT, schedule("s-mate"))
+        assert (rated.tier, rated.kind, rated.creator_id) == ("owner", "member", MATE_ID)
+        run = SimpleNamespace(agent_name=AGENT, source_user_id=None, schedule_id="s-mate", triggered_by="schedule")
+        assert t.turn_actor(World(), AGENT, execution=run) == ("owner", "member", MATE_ID)
+    finally:
+        t.clear_person_tier_providers()
+
+
 def test_a_cause_lookup_that_fails_is_unknown_and_the_tier_stands():
     """The tier half reads the owner once; the cause's own read then fails."""
     db = World(fail_after={"get_agent_owner": 1})
