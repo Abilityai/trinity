@@ -81,7 +81,7 @@ What it does not cover:
 
 - **A command that fails** (exits non-zero), or an MCP tool that returns an error: Claude Code does not promise that hooks can change this output. With the Claude Code version Trinity ships, the key is still hidden, but the model sees the result without its error flag; the text still starts with `Error: Exit code N`. The model is also told the output held a credential it must not repeat, store or send, and the event is recorded. A later Claude Code version may stop hiding it.
 - **Tools it is not registered for:** `Glob`, `WebSearch`, MCP resource reads and subagent results are not scanned.
-- **Trinity's own MCP tools:** their output comes from the platform and is not scanned here.
+- **Trinity's own MCP tools:** not scanned here, because some of them hand the agent a credential on purpose. That also leaves output such as an agent's container logs (`get_agent_logs`) unscanned.
 - **Another hook that also rewrites the output:** a hook the agent or a template adds in its own settings can bring the original back. The scanner's change is not final in that case.
 - **A scanner that cannot run in time** (30 seconds) or whose change Claude Code rejects: the original output goes through.
 - **Codex and Gemini agents:** these hooks run on Claude Code only.

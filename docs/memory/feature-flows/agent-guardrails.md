@@ -300,7 +300,7 @@ Loads config → takes `bash_deny`, plus `gated_bash_deny` while the root-owned 
 
 `_normalise(path)` → absolute (expands `~`, prefixes `/home/developer` for relative, collapses any run of leading slashes to one — `normpath` keeps exactly two, which made `//home/developer/.ssh/x` match no absolute pattern, trinity-enterprise#792; `read-only-guard.py` normalises the same way). `_matches_glob` runs `fnmatch` against **both** the full path and the basename, so `.env` patterns catch nested copies. Checks `path_deny` (baseline globs) then `extra_path_deny` (literals). A basename on `path_allow` (`.env.example`, #3868 — names only, required by compat check K-001) skips the slash-free `path_deny` patterns (`.env.*` and the other basename rules); absolute patterns, `extra_path_deny` and a symlinked `.env.example` still deny. `deny` with `tool`, `path`, `pattern`.
 
-### Credential scanner — `hooks/output-scanner.py` (495 lines, PostToolUse + PostToolUseFailure, trinity-enterprise#165)
+### Credential scanner — `hooks/output-scanner.py` (497 lines, PostToolUse + PostToolUseFailure, trinity-enterprise#165)
 
 Requirement: GUARD-004, `requirements/security.md` §28.4. Exits 0 on every path; exit 2 on `PostToolUse` only adds stderr and the model still sees the original output.
 
@@ -444,7 +444,7 @@ See [read-only-mode.md](read-only-mode.md).
 | Hook lib | `docker/base-image/hooks/lib.py` | 1-103 |
 | Bash hook | `docker/base-image/hooks/bash-guardrail.py` | 1-66 |
 | File hook | `docker/base-image/hooks/file-guardrail.py` | 1-89 |
-| Output scanner | `docker/base-image/hooks/output-scanner.py` | 1-495 |
+| Output scanner | `docker/base-image/hooks/output-scanner.py` | 1-497 |
 | Runtime merge | `docker/base-image/hooks/write-runtime-config.py` | 1-83 |
 | CLI loader | `docker/base-image/agent_server/services/_runtime_config.py` | 1-33 |
 | CLI consumer (chat) | `docker/base-image/agent_server/services/claude_code.py` | 209-222 |

@@ -4,7 +4,9 @@
 Registered for `Bash` (both events below), for `Read|Grep|WebFetch` and for
 every `mcp__*` tool on `PostToolUse`, and for `mcp__*` on `PostToolUseFailure`.
 The platform's own `trinity` MCP server is skipped (`is_platform_mcp_tool`):
-its output is platform-authored and carries share links. Background Bash
+some of its tools hand the agent a credential on purpose (`fetch_credential`).
+The skip is server-wide, so `get_agent_logs`' raw container logs go unscanned
+too (open). Background Bash
 output is read later through `Read`, so the `Read` registration covers it.
 Strings that are binary payloads (`base64`, `image_data`, a base64 `source`'s
 `data`) are never scanned or counted: a rewritten span would only break them.
