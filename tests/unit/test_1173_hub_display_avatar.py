@@ -1,247 +1,371 @@
-"""Tests for hub display name + default avatar at hand-over (ent#1173).
+"""Tests for GitHub template bundled avatar + portal display label (ent#1173).
 
-These are pure-logic tests that do NOT import enterprise modules (which would
-require the full enterprise stack), and do NOT pollute sys.modules with stubs.
+AC-2: GitHub templates may ship avatar.webp/avatar.png, fetched via
+_fetch_github_file_bytes and installed via _install_bundled_avatar_bytes.
+Tests here call the real functions from services.agent_service.crud.
 
-Tests are grouped into:
-1. Constants — HUB_AVATAR_NAME, HUB_AVATAR_PROMPT, AVATAR_SETTING_UPDATED_AT
-2. _apply_hub_avatar logic — copies hub default, calls set_avatar_identity (not set_default_avatar)
-3. resolve_settings display_name — includes display_name key with default "Regent"
-4. _remove_hub_avatar_if_set — only removes when prompt matches HUB_AVATAR_PROMPT
-5. avatar_updated_at flows through from the hub upload timestamp
+AC-4 (display_label on portal surfaces) is covered by the companion
+frontend specs in src/frontend/tests/unit/:
+  - portalBriefingDisplayLabel.spec.js
+  - portalWorkCardDisplayLabel.spec.js
 """
 from __future__ import annotations
 
+import base64
+import os
+import sys
+import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+pytestmark = pytest.mark.unit
+
+# ---------------------------------------------------------------------------
+# Backend harness: load crud with heavy deps mocked.
+# Shape follows test_1484_create_agent_characterization.py::_load_crud —
+# deliberately NOT shared (learnings 2026-07-26: sys.modules leaks).
+# ---------------------------------------------------------------------------
+
+os.environ.setdefault("REDIS_URL", "redis://test:test@redis:6379")
+os.environ.setdefault("REDIS_PASSWORD", "test")
+os.environ.setdefault("REDIS_BACKEND_PASSWORD", "test")
+os.environ.setdefault("AGENT_AUTH_SECRET", "0" * 64)
+_TMP_DB = Path(tempfile.gettempdir()) / "trinity_test_1173.db"
+os.environ.setdefault("TRINITY_DB_PATH", str(_TMP_DB))
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_BACKEND = str(_PROJECT_ROOT / "src" / "backend")
+if _BACKEND not in sys.path:
+    sys.path.insert(0, _BACKEND)
+
+
+class _NotFound(Exception):
+    pass
+
+
+def _purge_services(monkeypatch, keep):
+    for key in list(sys.modules.keys()):
+        if (key == "services" or key.startswith("services.")) and key not in keep:
+            monkeypatch.delitem(sys.modules, key, raising=False)
+
+
+def _load_crud(monkeypatch):
+    docker_mod = MagicMock()
+    docker_mod.errors.NotFound = _NotFound
+
+    lifecycle_mod = MagicMock()
+    lifecycle_mod.RESTRICTED_CAPABILITIES = []
+    lifecycle_mod.FULL_CAPABILITIES = []
+
+    capabilities_mod = MagicMock()
+    capabilities_mod.AGENT_TMPFS_MOUNT = {}
+    capabilities_mod.AGENT_DEFAULT_TMPDIR = "/home/developer/.tmp"
+    capabilities_mod.AGENT_RESTART_POLICY = {"Name": "unless-stopped"}
+    capabilities_mod.AGENT_LOG_CONFIG = {}
+    capabilities_mod.normalize_cpu = MagicMock(side_effect=lambda v, d: v or d)
+    capabilities_mod.normalize_memory = MagicMock(side_effect=lambda v, d: v or d)
+
+    helpers_mod = MagicMock()
+    helpers_mod.validate_base_image = MagicMock()
+    helpers_mod.is_claude_runtime = MagicMock(return_value=False)
+    helpers_mod.validate_runtime = MagicMock()
+
+    settings_service = MagicMock()
+    settings_service.resolve_github_pat = MagicMock(return_value=("pat", "global"))
+    settings_service.resolve_github_pat_candidates = MagicMock(return_value=[])
+    settings_service.get_anthropic_api_key = MagicMock(return_value="sk-ant")
+    settings_service.get_agent_full_capabilities = MagicMock(return_value=False)
+    settings_service.get_agent_quota_for_role = MagicMock(return_value=0)
+    settings_service.get_agent_default_resources = MagicMock(
+        return_value={"cpu": "2", "memory": "4g"})
+    settings_service.get_agent_default_require_email = MagicMock(return_value=False)
+    settings_service.get_ephemeral_agent_quota = MagicMock(return_value=5)
+    settings_service.get_ephemeral_ttl_ceiling_seconds = MagicMock(return_value=86400)
+
+    pkg = "services.agent_service"
+    sibling_mocks = {}
+    for sib in [
+        "api_key", "autonomy", "dashboard", "deploy", "file_sharing",
+        "files", "folders", "helpers", "lifecycle", "mcp_tool_names",
+        "metrics", "permissions", "queue", "read_only", "stats",
+        "terminal", "capabilities", "ephemeral", "pull_mode",
+    ]:
+        mod = {
+            "helpers": helpers_mod,
+            "lifecycle": lifecycle_mod,
+            "capabilities": capabilities_mod,
+        }.get(sib, MagicMock())
+        sibling_mocks[f"{pkg}.{sib}"] = mod
+
+    agent_ssh_binding = MagicMock()
+    agent_ssh_binding.AgentSshBindAddressError = type(
+        "AgentSshBindAddressError", (Exception,), {})
+    agent_ssh_binding.agent_ssh_port_binding = MagicMock(return_value=(2222, "127.0.0.1"))
+    agent_ssh_binding.raise_for_ssh_bind_failure = MagicMock()
+
+    mocks = {
+        "docker": docker_mod,
+        "docker.errors": docker_mod.errors,
+        "redis": MagicMock(),
+        "redis.asyncio": MagicMock(),
+        "database": MagicMock(),
+        "services.docker_service": MagicMock(),
+        "services.docker_utils": MagicMock(),
+        "services.template_service": MagicMock(),
+        "services.git_service": MagicMock(),
+        "services.settings_service": settings_service,
+        "services.github_service": MagicMock(),
+        "services.entitlement_service": MagicMock(),
+        "services.rate_limiter": MagicMock(),
+        "services.agent_runtime_state": MagicMock(),
+        "services.agent_auth": MagicMock(),
+        "services.template_source_policy": MagicMock(),
+        "services.agent_ssh_binding": agent_ssh_binding,
+        **sibling_mocks,
+    }
+
+    patcher = patch.dict("sys.modules", mocks)
+    patcher.start()
+    _purge_services(monkeypatch, mocks)
+    import services.agent_service.crud as crud_mod
+    return crud_mod, patcher
 
 
 # ---------------------------------------------------------------------------
-# Tests: hub avatar constants (names the implementation must use)
+# Tests: _TemplateResolution.bundled_avatar_bytes field (AC-2 data carrier)
 # ---------------------------------------------------------------------------
 
-class TestHubAvatarConstants:
+class TestTemplateResolutionBundledAvatarField:
+    """The dataclass field that carries fetched bytes into create_agent_internal."""
 
-    def test_hub_avatar_name_is_reserved_name(self):
-        """HUB_AVATAR_NAME must start with _ so it's a platform-reserved name."""
-        HUB_AVATAR_NAME = "_hub-default"
-        assert HUB_AVATAR_NAME.startswith("_"), (
-            "HUB_AVATAR_NAME must start with _ (platform-reserved namespace)")
-
-    def test_hub_avatar_prompt_is_stable_sentinel(self):
-        """HUB_AVATAR_PROMPT is the sentinel _remove_hub_avatar_if_set checks.
-        Stable across versions — changing it would orphan images applied by older versions."""
-        HUB_AVATAR_PROMPT = "hub-default-avatar"
-        assert HUB_AVATAR_PROMPT == "hub-default-avatar"
-
-    def test_avatar_setting_updated_at_key(self):
-        """AVATAR_SETTING_UPDATED_AT is the system_settings key for the hub upload timestamp."""
-        AVATAR_SETTING_UPDATED_AT = "member_agent_avatar_updated_at"
-        assert AVATAR_SETTING_UPDATED_AT == "member_agent_avatar_updated_at"
-
-
-# ---------------------------------------------------------------------------
-# Tests: _apply_hub_avatar logic (pure-path tests, no enterprise import)
-# ---------------------------------------------------------------------------
-
-class TestApplyHubAvatarLogic:
-
-    def test_copies_hub_bytes_to_agent_slot(self, tmp_path):
-        """Hub bytes are written verbatim to the agent's avatar path (v2)."""
-        hub_file = tmp_path / "_hub-default.webp"
-        hub_file.write_bytes(b"hub_avatar_bytes")
-        agent_dest = tmp_path / "some-agent.webp"
-
-        agent_dest.write_bytes(hub_file.read_bytes())
-        assert agent_dest.read_bytes() == b"hub_avatar_bytes"
-
-    def test_no_op_when_hub_file_absent(self, tmp_path):
-        """When hub_path does not exist, the function must return without writing."""
-        hub_file = tmp_path / "_hub-default.webp"
-        # NOT created on disk
-        result = hub_file.exists()
-        assert result is False
-        # The guard: `if hub_path is None or not hub_path.exists(): return`
-
-    def test_calls_set_avatar_identity_not_set_default_avatar(self):
-        """The contract: set_avatar_identity is called (never set_default_avatar).
-
-        set_default_avatar sets is_default_avatar=1 → portal filter SKIPS it.
-        set_avatar_identity sets is_default_avatar=0 → portal filter INCLUDES it.
-        This is the load-bearing distinction for AC-3."""
-        db = MagicMock()
-
-        HUB_AVATAR_PROMPT = "hub-default-avatar"
-        updated_at = "2026-11-01T10:00:00Z"
-
-        db.set_avatar_identity("some-agent", HUB_AVATAR_PROMPT, updated_at)
-
-        db.set_avatar_identity.assert_called_once_with(
-            "some-agent", HUB_AVATAR_PROMPT, updated_at)
-        db.set_default_avatar.assert_not_called()
-
-    def test_avatar_updated_at_uses_hub_upload_timestamp(self):
-        """When AVATAR_SETTING_UPDATED_AT is in settings, that timestamp flows through,
-        so the agent's avatar_updated_at matches the hub upload time, not now."""
-        expected_ts = "2026-11-01T12:34:56.789Z"
-
-        db = MagicMock()
-        db.get_setting_value = MagicMock(return_value=expected_ts)
-        db.set_avatar_identity = MagicMock()
-
-        # Simulate the apply logic with the expected timestamp
-        AVATAR_SETTING_UPDATED_AT = "member_agent_avatar_updated_at"
-        updated_at = db.get_setting_value(AVATAR_SETTING_UPDATED_AT, None) or "fallback"
-        db.set_avatar_identity("some-agent", "hub-default-avatar", updated_at)
-
-        assert updated_at == expected_ts, (
-            "set_avatar_identity must receive the hub upload timestamp, not now()")
-        db.set_avatar_identity.assert_called_once_with("some-agent", "hub-default-avatar", expected_ts)
-
-    def test_avatar_updated_at_falls_back_to_now_when_unset(self):
-        """When no hub upload timestamp setting exists, falls back to current time."""
-        db = MagicMock()
-        db.get_setting_value = MagicMock(return_value=None)
-
-        AVATAR_SETTING_UPDATED_AT = "member_agent_avatar_updated_at"
-        updated_at = db.get_setting_value(AVATAR_SETTING_UPDATED_AT, None) or "NOW_FALLBACK"
-        # With None from db, the `or` clause provides a non-None timestamp
-        assert updated_at == "NOW_FALLBACK"
-
-
-# ---------------------------------------------------------------------------
-# Tests: resolve_settings display_name
-# ---------------------------------------------------------------------------
-
-class TestResolveSettingsDisplayName:
-
-    def test_resolve_settings_key_name(self):
-        """The setting key for display_name is exactly 'member_agent_display_name'."""
-        SETTING_DISPLAY_NAME = "member_agent_display_name"
-        assert SETTING_DISPLAY_NAME == "member_agent_display_name"
-
-    def test_display_name_default_is_regent(self):
-        """The default display name is 'Regent', not empty."""
-        DEFAULT_DISPLAY_NAME = "Regent"
-        assert DEFAULT_DISPLAY_NAME == "Regent"
-
-    def test_display_name_or_guard_on_none(self):
-        """An unset (None) setting value falls back to the default 'Regent'."""
-        DEFAULT_DISPLAY_NAME = "Regent"
-        setting_value = None
-        result = setting_value or DEFAULT_DISPLAY_NAME
-        assert result == "Regent"
-
-    def test_display_name_or_guard_on_empty(self):
-        """An explicitly empty setting value falls back to the default 'Regent'."""
-        DEFAULT_DISPLAY_NAME = "Regent"
-        setting_value = ""
-        result = setting_value or DEFAULT_DISPLAY_NAME
-        assert result == "Regent"
-
-    def test_display_name_uses_configured_value(self):
-        """A non-empty configured value is used as-is."""
-        DEFAULT_DISPLAY_NAME = "Regent"
-        setting_value = "Aria"
-        result = setting_value or DEFAULT_DISPLAY_NAME
-        assert result == "Aria"
-
-    def test_display_name_in_resolve_settings_shape(self):
-        """resolve_settings() must include 'display_name' in its returned dict."""
-        # We can't import enterprise code, so verify the contract shape:
-        # the dict returned by resolve_settings() must carry display_name.
-        # This is verified by the SETTING_DISPLAY_NAME/DEFAULT_DISPLAY_NAME pair
-        # being added to service.py and included in the return dict with the
-        # `or DEFAULT_DISPLAY_NAME` guard.
-        expected_key = "display_name"
-        # The implementation: "display_name": _setting(SETTING_DISPLAY_NAME, DEFAULT_DISPLAY_NAME) or DEFAULT_DISPLAY_NAME
-        # Verify the OR pattern is correct
-        for raw_value, expected in [
-            (None, "Regent"),
-            ("", "Regent"),
-            ("Custom Name", "Custom Name"),
-        ]:
-            result = (raw_value or "Regent")
-            assert result == expected
-
-
-# ---------------------------------------------------------------------------
-# Tests: _remove_hub_avatar_if_set logic
-# ---------------------------------------------------------------------------
-
-class TestRemoveHubAvatarIfSet:
-
-    def test_does_nothing_when_no_identity_row(self):
-        """No identity row → no file removed, no DB call."""
-        db = MagicMock()
-        db.get_avatar_identity = MagicMock(return_value=None)
-        db.clear_avatar_identity = MagicMock()
-
-        # Simulate the guard:
-        identity = db.get_avatar_identity("some-agent")
-        HUB_AVATAR_PROMPT = "hub-default-avatar"
-        if not identity or identity.get("identity_prompt") != HUB_AVATAR_PROMPT:
-            pass  # early return
-        else:
-            db.clear_avatar_identity("some-agent")
-
-        db.clear_avatar_identity.assert_not_called()
-
-    def test_does_nothing_when_prompt_does_not_match(self):
-        """Identity row with a different prompt → not a hub-applied avatar, skip."""
-        db = MagicMock()
-        db.get_avatar_identity = MagicMock(return_value={"identity_prompt": "my-custom-avatar"})
-        db.clear_avatar_identity = MagicMock()
-
-        identity = db.get_avatar_identity("some-agent")
-        HUB_AVATAR_PROMPT = "hub-default-avatar"
-        if not identity or identity.get("identity_prompt") != HUB_AVATAR_PROMPT:
-            pass  # early return
-        else:
-            db.clear_avatar_identity("some-agent")
-
-        db.clear_avatar_identity.assert_not_called()
-
-    def test_removes_file_and_clears_identity_when_prompt_matches(self, tmp_path):
-        """When identity_prompt == HUB_AVATAR_PROMPT, the file is unlinked and identity cleared."""
-        agent_avatar = tmp_path / "some-agent.webp"
-        agent_avatar.write_bytes(b"hub_avatar")
-
-        db = MagicMock()
-        db.get_avatar_identity = MagicMock(
-            return_value={"identity_prompt": "hub-default-avatar"})
-        db.clear_avatar_identity = MagicMock()
-
-        identity = db.get_avatar_identity("some-agent")
-        HUB_AVATAR_PROMPT = "hub-default-avatar"
-        if identity and identity.get("identity_prompt") == HUB_AVATAR_PROMPT:
-            if agent_avatar.exists():
-                agent_avatar.unlink(missing_ok=True)
-            db.clear_avatar_identity("some-agent")
-
-        assert not agent_avatar.exists()
-        db.clear_avatar_identity.assert_called_once_with("some-agent")
-
-    def test_clear_is_best_effort(self):
-        """An exception during clear must be caught and not propagated.
-
-        The production _remove_hub_avatar_if_set wraps everything in
-        ``except Exception`` — it must never surface a DB error to the caller."""
-        import pytest
-
-        db = MagicMock()
-        db.get_avatar_identity = MagicMock(
-            return_value={"identity_prompt": "hub-default-avatar"})
-        db.clear_avatar_identity = MagicMock(side_effect=RuntimeError("db error"))
-
-        # Simulate the best-effort pattern:
+    def test_field_exists_and_defaults_to_none(self, monkeypatch):
+        """_TemplateResolution.bundled_avatar_bytes defaults to None (not fetched)."""
+        crud, patcher = _load_crud(monkeypatch)
         try:
-            identity = db.get_avatar_identity("some-agent")
-            HUB_AVATAR_PROMPT = "hub-default-avatar"
-            if identity and identity.get("identity_prompt") == HUB_AVATAR_PROMPT:
-                db.clear_avatar_identity("some-agent")
-        except Exception:  # noqa: BLE001 — best-effort
-            pass
+            tr = crud._TemplateResolution()
+            assert tr.bundled_avatar_bytes is None
+        finally:
+            patcher.stop()
 
-        # Verify clear WAS attempted (not silently skipped)
-        db.clear_avatar_identity.assert_called_once_with("some-agent")
+    def test_field_accepts_bytes(self, monkeypatch):
+        """_TemplateResolution.bundled_avatar_bytes can hold bytes payload."""
+        crud, patcher = _load_crud(monkeypatch)
+        try:
+            tr = crud._TemplateResolution()
+            tr.bundled_avatar_bytes = b"\x89PNG\r\n"
+            assert tr.bundled_avatar_bytes == b"\x89PNG\r\n"
+        finally:
+            patcher.stop()
+
+
+# ---------------------------------------------------------------------------
+# Tests: _fetch_github_file_bytes (AC-2 network fetch)
+# ---------------------------------------------------------------------------
+
+class TestFetchGithubFileBytes:
+    """_fetch_github_file_bytes: best-effort GitHub contents API fetch."""
+
+    def _load(self, monkeypatch):
+        crud, patcher = _load_crud(monkeypatch)
+        return crud._fetch_github_file_bytes, patcher
+
+    def test_returns_bytes_on_200_with_valid_content(self, monkeypatch):
+        """On HTTP 200 with base64-encoded content, returns the decoded bytes."""
+        raw = b"png_data_here"
+        encoded = base64.b64encode(raw).decode() + "\n"
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.json.return_value = {"content": encoded}
+
+        fn, patcher = self._load(monkeypatch)
+        try:
+            with patch("httpx.Client") as mock_client_cls:
+                mock_client = MagicMock()
+                mock_client.__enter__ = MagicMock(return_value=mock_client)
+                mock_client.__exit__ = MagicMock(return_value=False)
+                mock_client.get.return_value = fake_resp
+                mock_client_cls.return_value = mock_client
+
+                result = fn("owner/repo", None, "main", "avatar.png", 2 * 1024 * 1024)
+
+            assert result == raw
+        finally:
+            patcher.stop()
+
+    def test_returns_none_on_404(self, monkeypatch):
+        """Non-200 response (like 404) → returns None, never raises."""
+        fake_resp = MagicMock()
+        fake_resp.status_code = 404
+
+        fn, patcher = self._load(monkeypatch)
+        try:
+            with patch("httpx.Client") as mock_client_cls:
+                mock_client = MagicMock()
+                mock_client.__enter__ = MagicMock(return_value=mock_client)
+                mock_client.__exit__ = MagicMock(return_value=False)
+                mock_client.get.return_value = fake_resp
+                mock_client_cls.return_value = mock_client
+
+                result = fn("owner/repo", "pat-token", "main", "avatar.webp", 2 * 1024 * 1024)
+
+            assert result is None
+        finally:
+            patcher.stop()
+
+    def test_returns_none_when_content_exceeds_max_bytes(self, monkeypatch):
+        """Content that decodes to more than max_bytes → returns None."""
+        big_raw = b"x" * 100
+        encoded = base64.b64encode(big_raw).decode()
+        fake_resp = MagicMock()
+        fake_resp.status_code = 200
+        fake_resp.json.return_value = {"content": encoded}
+
+        fn, patcher = self._load(monkeypatch)
+        try:
+            with patch("httpx.Client") as mock_client_cls:
+                mock_client = MagicMock()
+                mock_client.__enter__ = MagicMock(return_value=mock_client)
+                mock_client.__exit__ = MagicMock(return_value=False)
+                mock_client.get.return_value = fake_resp
+                mock_client_cls.return_value = mock_client
+
+                result = fn("owner/repo", None, None, "avatar.png", 50)  # max=50, content=100
+
+            assert result is None
+        finally:
+            patcher.stop()
+
+    def test_returns_none_on_network_exception(self, monkeypatch):
+        """Any exception during the request → returns None, never propagates."""
+        fn, patcher = self._load(monkeypatch)
+        try:
+            with patch("httpx.Client") as mock_client_cls:
+                mock_client = MagicMock()
+                mock_client.__enter__ = MagicMock(return_value=mock_client)
+                mock_client.__exit__ = MagicMock(return_value=False)
+                mock_client.get.side_effect = ConnectionError("network unreachable")
+                mock_client_cls.return_value = mock_client
+
+                result = fn("owner/repo", None, "main", "avatar.png", 2 * 1024 * 1024)
+
+            assert result is None
+        finally:
+            patcher.stop()
+
+    def test_includes_pat_in_authorization_header(self, monkeypatch):
+        """When pat is provided, Authorization header is set."""
+        fake_resp = MagicMock()
+        fake_resp.status_code = 404
+
+        fn, patcher = self._load(monkeypatch)
+        try:
+            with patch("httpx.Client") as mock_client_cls:
+                mock_client = MagicMock()
+                mock_client.__enter__ = MagicMock(return_value=mock_client)
+                mock_client.__exit__ = MagicMock(return_value=False)
+                mock_client.get.return_value = fake_resp
+                mock_client_cls.return_value = mock_client
+
+                fn("owner/repo", "ghp_secret", "main", "avatar.webp", 2 * 1024 * 1024)
+
+                call_kwargs = mock_client.get.call_args
+                headers = call_kwargs[1]["headers"]
+                assert "Authorization" in headers
+                assert "ghp_secret" in headers["Authorization"]
+        finally:
+            patcher.stop()
+
+    def test_omits_authorization_header_when_no_pat(self, monkeypatch):
+        """When pat is None/empty, Authorization header is not set."""
+        fake_resp = MagicMock()
+        fake_resp.status_code = 404
+
+        fn, patcher = self._load(monkeypatch)
+        try:
+            with patch("httpx.Client") as mock_client_cls:
+                mock_client = MagicMock()
+                mock_client.__enter__ = MagicMock(return_value=mock_client)
+                mock_client.__exit__ = MagicMock(return_value=False)
+                mock_client.get.return_value = fake_resp
+                mock_client_cls.return_value = mock_client
+
+                fn("owner/repo", None, "main", "avatar.png", 2 * 1024 * 1024)
+
+                call_kwargs = mock_client.get.call_args
+                headers = call_kwargs[1]["headers"]
+                assert "Authorization" not in headers
+        finally:
+            patcher.stop()
+
+
+# ---------------------------------------------------------------------------
+# Tests: _install_bundled_avatar_bytes (AC-2 installation)
+# ---------------------------------------------------------------------------
+
+class TestInstallBundledAvatarBytes:
+    """_install_bundled_avatar_bytes: write optimized avatar to the avatar store."""
+
+    def _load(self, monkeypatch):
+        crud, patcher = _load_crud(monkeypatch)
+        return crud._install_bundled_avatar_bytes, patcher
+
+    def test_writes_optimized_bytes_to_avatar_path(self, monkeypatch, tmp_path):
+        """When avatar_path_or_none returns a path, optimized bytes are written there."""
+        dest = tmp_path / "agent.webp"
+        optimized = b"optimized_webp_data"
+
+        fake_img = MagicMock()
+        fake_img.__enter__ = MagicMock(return_value=fake_img)
+        fake_img.__exit__ = MagicMock(return_value=False)
+        fake_img.width = 100
+        fake_img.height = 100
+
+        crud, patcher = _load_crud(monkeypatch)
+        fn = crud._install_bundled_avatar_bytes
+        avatar_paths_mod = crud.avatar_paths  # the exact module object the function closes over
+        try:
+            with patch.object(avatar_paths_mod, "avatar_path_or_none", return_value=dest), \
+                 patch.object(avatar_paths_mod, "ensure_avatar_store"), \
+                 patch("PIL.Image.open", return_value=fake_img), \
+                 patch("utils.image_optimize.optimize_avatar", return_value=optimized):
+                fn("test-agent", b"raw_png_bytes")
+
+            assert dest.read_bytes() == optimized
+        finally:
+            patcher.stop()
+
+    def test_returns_early_when_no_valid_avatar_path(self, monkeypatch, tmp_path):
+        """When avatar_path_or_none returns None (bad agent name), nothing is written."""
+        crud, patcher = _load_crud(monkeypatch)
+        fn = crud._install_bundled_avatar_bytes
+        avatar_paths_mod = crud.avatar_paths
+        try:
+            with patch.object(avatar_paths_mod, "avatar_path_or_none", return_value=None), \
+                 patch.object(avatar_paths_mod, "ensure_avatar_store") as mock_ensure:
+                fn("../traversal-agent", b"some_bytes")
+
+            mock_ensure.assert_not_called()
+        finally:
+            patcher.stop()
+
+    def test_raises_for_oversized_image_dimensions(self, monkeypatch):
+        """Image wider/taller than 4096×4096 total pixels raises ValueError."""
+        fake_img = MagicMock()
+        fake_img.__enter__ = MagicMock(return_value=fake_img)
+        fake_img.__exit__ = MagicMock(return_value=False)
+        fake_img.width = 5000
+        fake_img.height = 5000  # 5000 * 5000 = 25M > 4096 * 4096 = ~16.7M
+
+        crud, patcher = _load_crud(monkeypatch)
+        fn = crud._install_bundled_avatar_bytes
+        avatar_paths_mod = crud.avatar_paths
+        try:
+            dest = Path(tempfile.gettempdir()) / "agent.webp"
+            with patch.object(avatar_paths_mod, "avatar_path_or_none", return_value=dest), \
+                 patch("PIL.Image.open", return_value=fake_img):
+                with pytest.raises(ValueError, match="4096x4096"):
+                    fn("test-agent", b"big_image_bytes")
+        finally:
+            patcher.stop()

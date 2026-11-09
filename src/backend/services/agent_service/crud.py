@@ -2795,11 +2795,12 @@ def _fetch_github_file_bytes(
     base64 content returns bytes; everything else is None (best-effort caller).
     """
     import base64 as _base64
+    import httpx as _httpx
     try:
         headers = {"Accept": "application/vnd.github+json"}
         if pat:
             headers["Authorization"] = f"Bearer {pat}"
-        with httpx.Client(timeout=10.0) as client:
+        with _httpx.Client(timeout=10.0) as client:
             resp = client.get(
                 f"https://api.github.com/repos/{repo}/contents/{filename}",
                 headers=headers,
