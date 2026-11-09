@@ -96,13 +96,20 @@ store is global):
   one **throttled** ERROR — the terminal MUST persist, and the pattern pass still
   runs. No NEW secret is delivered during the outage (the stage side is closed),
   so the open scrub side never widens exposure beyond turns already in flight.
-- `scrub_text(values, text)` — replaces every rendition of every staged value
-  with the sanitizer's `REDACTION_PLACEHOLDER` (`***REDACTED***`, so operators
-  and the manual verification grep one marker). **Longest-first** (a staged value
+- `scrub_text(values, text, marker=REDACTION_PLACEHOLDER)` — replaces every
+  rendition of every staged value with the sanitizer's `REDACTION_PLACEHOLDER`
+  (`***REDACTED***`, so operators and the manual verification grep one marker),
+  or with `SPOKEN_PLACEHOLDER` (`redacted`) for text that is read aloud, where the
+  stored marker would be spoken as punctuation. The spoken placeholder is no
+  longer than the 8-char staging floor, so a scrub never lengthens spoken text.
+  **Longest-first** (a staged value
   that is a substring of a longer one must not shred the longer match). **Literal**
   `str.replace`, never regex (no regex-injection surface). **Falsy passthrough** —
   a falsy input is returned unchanged (never `None` → `""`, which would corrupt a
   NULL error column).
+- `scrub_staged(text, *, marker=...)` — `scrub_text(get_staged_values(), text,
+  marker)` for a sink that scrubs one text; reads the store only when there is
+  text.
 - Per value, **three renditions** are scrubbed: raw, once-JSON-escaped
   (`json.dumps(v)[1:-1]` — catches values embedded in already-dumped JSON), and
   base64 (the most common trivial encoding).
@@ -147,21 +154,34 @@ scrub all fields.
 
 ### Speech sinks (text handed to a third-party TTS provider)
 
-These send agent text off-platform, so each scrubs **before** anything reads
-the text — the shared cost cap (`TTS_MAX_CHARS`, inside `tts_service`) therefore
-judges the scrubbed text. All fail open like `send_message`: a store outage
-speaks the text as given.
+These send agent text off-platform. What they speak carries `SPOKEN_PLACEHOLDER`;
+a text they also store (the addressed note's audit `message_preview`) keeps the
+stored marker. All fail open like `send_message`: a store outage speaks the text
+as given.
 
+- `tts_service.synthesize_mp3` — the floor for every caller, `synthesize_voice_note`
+  included: the text is scrubbed before the shared cost cap and the request.
 - `voice_reply_service.send_voice_reply` (in-session voice note) and
-  `send_proactive_voice` (addressed voice note — also before its audit
+  `send_proactive_voice` (addressed voice note, also before its audit
   `message_preview`) — #4228.
-- `direct_voice_service._speak_sentence` — each sentence of a direct voice call,
-  before streaming TTS and the `spoken` frame sent to the browser.
+- `direct_voice_service.DirectBridge.speak_execution` — each stream text block and
+  the persisted reply of a direct voice call, scrubbed **before** `sentences()`
+  runs `speakable()`, which drops `**`, `__` and `~~` anywhere and so would stop an
+  exact match. A stored marker already in the saved reply is said as the spoken
+  placeholder. `_speak_sentence` scrubs each line again before streaming TTS and
+  the `spoken` frame sent to the browser.
 - `client_portal.service.synthesize_portal_tts` — Workspace read-aloud. The reply
   was scrubbed when saved, but the client sends the text back, so a value staged
-  after the save would otherwise reach the provider (#4359). Scrubbed
-  before the request text is stripped, so a value staged with edge whitespace
-  still matches.
+  after the save would otherwise reach the provider (#4359). Scrubbed before the
+  request text is stripped, so a value staged with edge whitespace still matches.
+
+Each caller scrubs after its cheap refusals (channel, destination, voice gates),
+so a refused call never reads the store. A cost cap in front of a caller judges
+the text **as written**, not as scrubbed. The store is shared by every agent, so
+an answer that changed with what is staged (spoken or refused, or the length a
+`text_too_long` guidance quotes) would let an agent or a client test a guessed
+value against it. Because the spoken placeholder never lengthens text, text that
+fits the cap as written still fits after the scrub.
 
 **Not covered (residual):** `services/gemini_voice.py` returns an agent task's
 `response_text` to Gemini Live as a tool result on the non-Workspace voice paths,
@@ -205,7 +225,14 @@ them. Deleting the scrub call in any of them fails `test_direct_sinks_still_scru
   `resend_pending_results` terminal delivered after expiry, persists with the
   pattern pass only.
 - Encodings beyond the three scrubbed renditions (raw / JSON-escaped / base64) are
-  not chased.
+  not chased. On a speech sink that includes a value an agent reformats to be read
+  aloud (spelled out with spaces or dashes, NATO letters, a case change): it is
+  not matched and is spoken.
+- Read-aloud speaks text the Workspace client sends, so a client who already
+  holds a guessed value hears whether it is staged (the placeholder is spoken
+  instead). The same client can already learn that from a voice call: its spoken
+  turns are scrubbed against the same store when the call saves them to the
+  thread (`client_portal/voice.py::persist_voice_turn`).
 - The live tool result is plaintext **by design** (locked).
 - Agent-authored side channels (report payloads, `emit_event` payloads, room
   messages) are documented residuals, not chokepoints.
@@ -229,9 +256,13 @@ them. Deleting the scrub call in any of them fails `test_direct_sinks_still_scru
   wiring, alongside the parity guard.
 - `tests/unit/test_4228_voice_reply_scrub.py` / `tests/unit/test_4359_portal_tts_scrub.py`
   — the speech sinks: a staged value with no credential-pattern shape never
-  reaches synthesis (#4359 asserts on the provider request body itself), nothing
-  staged is byte-identical, a store outage fails open, and the real cost cap
-  judges the scrubbed length in both directions.
+  reaches synthesis (asserted on the provider request body for `synthesize_mp3`
+  and read-aloud), what is spoken carries the spoken placeholder while the audit
+  preview keeps the stored marker, nothing staged is byte-identical, a store
+  outage fails open, a refused call never reads the store, and the cap's answer
+  (and quoted length) is the same whether or not the value is staged. The direct
+  call is driven through `DirectBridge.speak_execution` with a value `speakable()`
+  would rewrite.
 
 ## Related Flows
 
