@@ -55,10 +55,10 @@ describe('ent#1161 — the member who lacks the steward agent', () => {
     expect(w.find('[data-testid="project-steward-access-request"]').exists()).toBe(false)
   })
 
-  it('a declined request is said, and not offered again', () => {
+  it('a declined request is said, and the member may ask again', () => {
     const w = card(project({ ...BASE, request: 'denied' }))
-    expect(w.find('[data-testid="project-steward-access-denied"]').exists()).toBe(true)
-    expect(w.find('[data-testid="project-steward-access-request"]').exists()).toBe(false)
+    expect(w.find('[data-testid="project-steward-access-denied"]').text()).toBe("The agent's owner declined your last request.")
+    expect(w.find('[data-testid="project-steward-access-request"]').text()).toBe('Ask again')
   })
 
   it("the server's refusal renders next to the button", async () => {

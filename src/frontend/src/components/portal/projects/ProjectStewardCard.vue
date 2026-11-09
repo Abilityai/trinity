@@ -68,13 +68,14 @@
           Being on the project doesn't give you the steward agent. Until its owner gives you access, you can't chat with it and its questions don't reach you.
         </p>
         <p v-if="access.request === 'pending'" class="mt-2 text-sm font-medium text-gray-700 dark:text-gray-300" data-testid="project-steward-access-pending">Access requested. Waiting on the agent's owner.</p>
-        <p v-else-if="access.request === 'denied'" class="mt-2 text-sm text-gray-700 dark:text-gray-300" data-testid="project-steward-access-denied">The agent's owner declined your request. Ask them directly.</p>
-        <BaseButton
-          v-else
-          class="mt-2" size="sm" variant="secondary" :disabled="asking"
-          data-testid="project-steward-access-request"
-          @click="askForAccess"
-        >{{ asking ? 'Asking…' : 'Ask for access' }}</BaseButton>
+        <template v-else>
+          <p v-if="access.request === 'denied'" class="mt-2 text-sm text-gray-700 dark:text-gray-300" data-testid="project-steward-access-denied">The agent's owner declined your last request.</p>
+          <BaseButton
+            class="mt-2" size="sm" variant="secondary" :disabled="asking"
+            data-testid="project-steward-access-request"
+            @click="askForAccess"
+          >{{ asking ? 'Asking…' : (access.request === 'denied' ? 'Ask again' : 'Ask for access') }}</BaseButton>
+        </template>
         <p v-if="askError" class="mt-1 text-xs text-status-danger-700 dark:text-status-danger-400" role="alert">{{ askError }}</p>
       </div>
 
