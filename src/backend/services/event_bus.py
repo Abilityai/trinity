@@ -653,13 +653,16 @@ class StreamDispatcher:
         block the single reader loop for every connected client. A failure
         leaves the previous roster in place until the next read replaces it.
         A slot marked to read again while this read was in flight is read once
-        more, unless it has disconnected or the dispatcher is stopping."""
+        more, unless it has disconnected or the dispatcher is stopping, and this
+        read's result is not applied to it: the read may predate the change
+        that asked for the next one, or the list a ``refresh`` command set."""
         try:
             names = await asyncio.to_thread(read)
             if isinstance(names, (list, tuple, set)):
                 resolved = set(names)
                 for slot in slots:
-                    slot.accessible_agents = resolved
+                    if not slot.refresh_again:
+                        slot.accessible_agents = resolved
         except asyncio.CancelledError:
             raise
         except Exception as e:  # noqa: BLE001 — a refresh must never kill delivery

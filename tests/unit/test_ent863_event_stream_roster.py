@@ -402,6 +402,84 @@ async def test_a_refresh_command_during_an_in_flight_read_has_the_last_word():
     assert slot.accessible_agents == {"kept"}
 
 
+class _BlockedReads:
+    """Every call blocks until its own release; returns the next value."""
+
+    def __init__(self, *values):
+        self.values = [list(v) for v in values]
+        self.releases = [threading.Event() for _ in values]
+        self.started = [threading.Event() for _ in values]
+        self.calls = 0
+        self._lock = threading.Lock()
+
+    def __call__(self, *_args):
+        with self._lock:
+            n = self.calls
+            self.calls += 1
+        self.started[n].set()
+        assert self.releases[n].wait(5), f"read {n} was never released"
+        return self.values[n]
+
+
+async def _until_set(event: threading.Event) -> None:
+    for _ in range(500):
+        if event.is_set():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("the read never started")
+
+
+@pytest.mark.asyncio
+async def test_a_read_that_a_refresh_command_superseded_is_not_applied():
+    """The in-flight read started before the access change. Its result is
+    older than the list the refresh command set, so it never replaces it,
+    not even until the follow-up read lands."""
+    read = _BlockedReads(["kept", "revoked"], ["kept"])
+    d = StreamDispatcher()
+    slot = _ClientSlot(
+        ws=None, scope=SCOPE_SCOPED, send_func=None,
+        accessible_agents={"kept", "revoked"}, roster_resolver=read,
+    )
+    d._clients["c"] = slot
+
+    d._maybe_invalidate_rosters({"event": "agent_created", "data": {"name": "x"}})
+    await _until_set(read.started[0])
+    d.update_accessible_agents("c", ["kept"])  # the refresh command's fresh read
+    read.releases[0].set()
+    await _until_set(read.started[1])  # the follow-up read is in flight
+    try:
+        assert slot.accessible_agents == {"kept"}
+    finally:
+        read.releases[1].set()
+        await _drain(d)
+    assert slot.accessible_agents == {"kept"}
+
+
+@pytest.mark.asyncio
+async def test_a_read_that_an_access_change_superseded_is_not_applied():
+    """An access change while a read is in flight: that read may predate the
+    change, so its result is dropped and only the follow-up read is applied."""
+    read = _BlockedReads(["kept", "new-but-stale"], ["kept"])
+    d = StreamDispatcher()
+    slot = _ClientSlot(
+        ws=None, scope=SCOPE_SCOPED, send_func=None,
+        accessible_agents={"kept"}, roster_resolver=read,
+    )
+    d._clients["c"] = slot
+
+    d._maybe_invalidate_rosters({"event": "agent_shared", "data": {"name": "x"}})
+    await _until_set(read.started[0])
+    d._maybe_invalidate_rosters({"event": "agent_unshared", "data": {"name": "x"}})
+    read.releases[0].set()
+    await _until_set(read.started[1])
+    try:
+        assert slot.accessible_agents == {"kept"}
+    finally:
+        read.releases[1].set()
+        await _drain(d)
+    assert slot.accessible_agents == {"kept"}
+
+
 @pytest.mark.asyncio
 async def test_a_slot_that_disconnects_mid_read_is_not_read_again():
     read = _SlowFirstRead(first=["a"], then=["b"])
