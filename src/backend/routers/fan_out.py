@@ -153,8 +153,11 @@ async def fan_out(
         for t in request.tasks
     ]
 
-    # Determine source agent for origin tracking
-    source_agent = x_source_agent or (name if request.agent == "self" else None)
+    # Origin tracking: the initiator's key agent, else the vouched header — the
+    # reminders/loops resolution. Never the target: rule A reads this as the
+    # calling agent, and a row naming its own agent always passes the clamp
+    # (trinity-enterprise#1148).
+    source_agent = getattr(current_user, "agent_name", None) or x_source_agent
 
     try:
         result = await service.execute(

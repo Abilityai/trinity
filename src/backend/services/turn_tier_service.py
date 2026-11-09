@@ -39,8 +39,28 @@ the owner or an admin is `owner`, anyone else a shared `person`, never a
 visitor. Only that channel's email counts: a public-link turn shares
 `triggered_by="public"`, but its email is what the visitor typed, and reading
 it as an account would let a visitor claim the owner's tier.
+
+Two more answers are `owner` with a kind, so the person stays on record
+(trinity-enterprise#1148):
+
+  member     a private module may rate a person the owner of ONE agent, the one
+             created for them, through `register_person_tier_provider`. Without
+             a registered provider nothing changes. The person's reach on every
+             other agent is what it was.
+  delegated  a turn another agent dispatched (`source_agent_name` set) for a
+             person P who cannot open this agent at all runs at this agent's
+             own tier: the callee does the hub's work, and P only ever drove the
+             caller's prompt. Bounded by a clamp: only when the calling agent's
+             owner is owner or admin of this agent, so a share holder on A never
+             gets more on B than A's owner has there. P who CAN open this agent
+             keeps P's own tier here. A self-call (caller == this agent) is
+             never delegation: it rates P's own tier here. Every lookup fails
+             closed to `share`.
+
+A turn such an answer dispatches carries that person forward
+(`turn_origin_user_id`), and the delegation rule decides again at every hop.
 """
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 from config import PORTAL_SOURCE_CHANNEL
 
@@ -50,6 +70,20 @@ UNKNOWN = "unknown"
 
 PERSON = "person"
 VISITOR = "visitor"
+# Kinds of an OWNER answer that is a person's by rule (trinity-enterprise#1148):
+# the consumers (the guard hook, the runtime gate) read `tier` and `shell` and
+# map any kind but `person`/`visitor` to None, so these change nothing there.
+MEMBER = "member"
+DELEGATED = "delegated"
+
+# Every execution-row column `turn_actor` reads. `db.get_running_turn_attribution`
+# (the ledger path) must select each of them, or a turn rates differently from
+# the ledger than from its own row; `test_ent1148_ledger_columns_guard.py` holds
+# the SELECT to this tuple.
+LEDGER_COLUMNS = (
+    "id", "agent_name", "source_user_id", "schedule_id", "triggered_by",
+    "source_channel", "source_user_email", "source_agent_name",
+)
 
 # Turns with no platform user that only something set up at owner tier starts.
 # A schedule-backed row (schedule, webhook, retry, validation, manual) is rated
@@ -79,6 +113,82 @@ def _user_tier(db, user_id, agent_name: str) -> str:
     if db.can_user_share_agent(user.get("username") or "", agent_name):
         return OWNER
     return SHARE
+
+
+# --- the person-tier provider (an optional private module's answer) ---------
+
+PersonTierProvider = Callable[[object, int, str], bool]
+
+_person_tier_provider: Optional[PersonTierProvider] = None
+
+
+def register_person_tier_provider(provider: PersonTierProvider) -> None:
+    """Register the one provider that may rate a person the owner of an agent
+    created for them: `provider(db, user_id, agent_name) -> bool`. Last
+    registration wins (a reload re-registers). Only a strict `True` elevates;
+    a provider that raises rates nobody."""
+    global _person_tier_provider
+    _person_tier_provider = provider
+
+
+def clear_person_tier_providers() -> None:
+    global _person_tier_provider
+    _person_tier_provider = None
+
+
+def _provider_rates_owner(db, user_id: int, agent_name: str) -> bool:
+    provider = _person_tier_provider
+    if provider is None:
+        return False
+    try:
+        return provider(db, user_id, agent_name) is True
+    except Exception:  # noqa: BLE001 - fail closed: an unreadable answer elevates nobody
+        return False
+
+
+def _person_tier(db, user_id, agent_name: str) -> Tuple[str, Optional[str], Optional[int]]:
+    """(tier, kind, person) for a person's turn: the owner or an admin first
+    (`(owner, None, None)`, as before), then the registered provider's member,
+    else a shared person."""
+    if _user_tier(db, user_id, agent_name) == OWNER:
+        return OWNER, None, None
+    person = _int_or_none(user_id)
+    if person is not None and _provider_rates_owner(db, person, agent_name):
+        return OWNER, MEMBER, person
+    return SHARE, PERSON, person
+
+
+def _delegation_runs_as_owner(db, agent_name: str, execution, person: Optional[int]) -> bool:
+    """Rule A with its clamp: a row another agent dispatched for `person`, who
+    cannot open `agent_name` at all, runs at this agent's own tier — when the
+    calling agent's owner is owner or admin here. Every lookup fails closed.
+    A self-call (the caller IS this agent) is never delegation: the person
+    keeps their own tier here, so a self fan-out never rates above share."""
+    caller = _field(execution, "source_agent_name")
+    if not isinstance(caller, str) or not caller.strip() or person is None:
+        return False
+    if caller == agent_name:
+        return False
+    try:
+        user = db.get_user_by_id(person)
+    except Exception:  # noqa: BLE001
+        user = None
+    username = (user or {}).get("username") if isinstance(user, dict) else getattr(user, "username", None)
+    if not username:
+        return False
+    try:
+        opens = db.can_user_access_agent(username, agent_name)
+    except Exception:  # noqa: BLE001 - fail closed: an unreadable answer keeps the person's tier
+        return False
+    if opens is not False:
+        return False
+    try:
+        caller_owner = _field(db.get_agent_owner(caller), "owner_id")
+    except Exception:  # noqa: BLE001
+        return False
+    if caller_owner is None:
+        return False
+    return _user_tier(db, caller_owner, agent_name) == OWNER
 
 
 def _int_or_none(value) -> Optional[int]:
@@ -130,10 +240,10 @@ def _workspace_person(db, execution) -> Tuple[bool, Optional[int]]:
 def turn_actor(db, agent_name: str, execution_id: Optional[str] = None, *,
                execution=None) -> Tuple[str, Optional[str], Optional[int]]:
     """(tier, kind, person id) for a turn, by `execution_id` or by the row itself
-    (`execution`: any object or dict carrying `agent_name`, `source_user_id`,
-    `schedule_id` and `triggered_by`). `kind` is `person` or `visitor` for a
-    share turn and None otherwise; the person id is the user a share turn is
-    for, if any."""
+    (`execution`: any object or dict carrying the `LEDGER_COLUMNS`). `kind` is
+    `person` or `visitor` for a share turn, `member` or `delegated` for an
+    owner turn that is a person's by rule, and None for the owner's own; the
+    person id is the user the turn is for, if any."""
     if execution is None:
         execution = db.get_execution(execution_id) if execution_id else None
     if execution is None or _field(execution, "agent_name") != agent_name:
@@ -150,21 +260,20 @@ def turn_actor(db, agent_name: str, execution_id: Optional[str] = None, *,
             if creator is None:
                 # No recorded creator: the owner's alone (the webhook rule, ent#875).
                 return OWNER, None, None
-            if _user_tier(db, creator, agent_name) == OWNER:
-                return OWNER, None, None
-            return SHARE, PERSON, _int_or_none(creator)
+            return _person_tier(db, creator, agent_name)
         is_workspace, person = _workspace_person(db, execution)
         if is_workspace:
-            if person is not None and _user_tier(db, person, agent_name) == OWNER:
-                return OWNER, None, None
-            return SHARE, PERSON, person
+            if person is None:
+                return SHARE, PERSON, None
+            return _person_tier(db, person, agent_name)
         trigger = (_field(execution, "triggered_by") or "").lower()
         if trigger in OWNER_CONFIGURED_TRIGGERS:
             return OWNER, None, None
         return SHARE, VISITOR, None
-    if _user_tier(db, user_id, agent_name) == OWNER:
-        return OWNER, None, None
-    return SHARE, PERSON, _int_or_none(user_id)
+    tier, kind, person = _person_tier(db, user_id, agent_name)
+    if tier == SHARE and _delegation_runs_as_owner(db, agent_name, execution, person):
+        return OWNER, DELEGATED, person
+    return tier, kind, person
 
 
 def turn_tier(db, agent_name: str, execution_id: Optional[str] = None, *, execution=None) -> str:
@@ -184,13 +293,30 @@ def turn_person(db, agent_name: str, execution) -> Optional[int]:
     return _int_or_none(uid)
 
 
+def _rated_rows(db, agent_name: str, rows):
+    """`(row, turn_actor(row))` for ledger rows, each distinct attribution rated
+    once: the ledger readers run on every agent-key request over every RUNNING
+    row, and a busy callee's rows mostly share one person and caller."""
+    memo = {}
+    for row in rows:
+        key = tuple(_field(row, c) for c in LEDGER_COLUMNS if c != "id")
+        try:
+            hit = memo.get(key)
+        except TypeError:  # an unhashable stand-in value: rate it alone
+            yield row, turn_actor(db, agent_name, execution=row)
+            continue
+        if hit is None:
+            hit = memo[key] = turn_actor(db, agent_name, execution=row)
+        yield row, hit
+
+
 def running_share_people(db, agent_name: str) -> set:
     """The people (user ids; None for a turn with no person) of every RUNNING
     share-tier turn on `agent_name`. Read from the ledger, never from a request,
     so no header the agent sends can change it."""
     people = set()
-    for row in db.get_running_turn_attribution(agent_name):
-        if turn_tier(db, agent_name, execution=row) == SHARE:
+    for row, (tier, _, _) in _rated_rows(db, agent_name, db.get_running_turn_attribution(agent_name)):
+        if tier == SHARE:
             people.add(turn_person(db, agent_name, row))
     return people
 
@@ -231,8 +357,7 @@ def running_turn_restricts(db, agent_name: str) -> bool:
         rows = db.get_running_turn_attribution(agent_name)
     except Exception:  # noqa: BLE001 - fail closed
         return True
-    for row in rows:
-        tier, kind, _ = turn_actor(db, agent_name, execution=row)
+    for _, (tier, kind, _) in _rated_rows(db, agent_name, rows):
         if restricts_standing_work(db, agent_name, tier, kind):
             return True
     return False
@@ -272,15 +397,24 @@ def turn_origin_user_id(db, principal) -> Optional[int]:
     would run as the owner. It carries that person instead, or no user for a
     visitor, so the child turn is no higher than its parent (ruling 2026-10-19)."""
     acting = acting_turn(db, principal)
-    if acting is None or acting[0] == OWNER:
+    if acting is None or _is_the_owners_own(acting):
         return getattr(principal, "id", None)
     return acting[2]
+
+
+def _is_the_owners_own(acting: Tuple[str, Optional[str], Optional[int]]) -> bool:
+    """An OWNER answer with no person behind it. An owner turn that is a
+    person's by rule (`member`, `delegated`) still dispatches as that person,
+    so the next row records who the work is for and the delegation rule
+    decides again there (trinity-enterprise#1148)."""
+    tier, kind, person = acting[0], acting[1], acting[2]
+    return tier == OWNER and not (kind in (MEMBER, DELEGATED) and person)
 
 
 def turn_origin_email(db, principal, default: Optional[str]) -> Optional[str]:
     """The `source_user_email` matching `turn_origin_user_id`."""
     acting = acting_turn(db, principal)
-    if acting is None or acting[0] == OWNER:
+    if acting is None or _is_the_owners_own(acting):
         return default
     person = acting[2]
     if not person:

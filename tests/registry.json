@@ -1,6 +1,90 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent1148_delegation_tier.py",
+      "feature": "trinity-enterprise#1148",
+      "added": "2026-11-07",
+      "categories": [
+        "backend",
+        "security",
+        "turn-tier",
+        "agent-collaboration"
+      ],
+      "description": "trinity-enterprise#1148: turn_actor rule A (a delegated row for a person who cannot open the callee runs at the callee's tier, clamped to the caller owner's tier there; fail-closed lookups), rule B (registered person-tier provider rates a person the owner of one agent; last wins, strict True), the member/delegated kinds get shell + standing work, turn_origin_user_id/_email carry the acting person from an owner-by-rule turn (C1, re-rated per hop), the ledger readers rate delegated rows the same way and memoize per distinct attribution."
+    },
+    {
+      "file": "unit/test_ent1148_ledger_columns_guard.py",
+      "feature": "trinity-enterprise#1148",
+      "added": "2026-11-07",
+      "categories": [
+        "backend",
+        "security",
+        "turn-tier",
+        "static-guard"
+      ],
+      "description": "trinity-enterprise#1148: turn_tier_service.LEDGER_COLUMNS covers every _field(execution, ...) the rule reads (AST), get_running_turn_attribution selects each (source), and the real SQLite read returns them with source_agent_name round-tripped."
+    },
+    {
+      "file": "unit/test_ent1148_caller_reads_stay_person.py",
+      "feature": "trinity-enterprise#1148",
+      "added": "2026-11-07",
+      "categories": [
+        "backend",
+        "security",
+        "turn-tier",
+        "auth"
+      ],
+      "description": "trinity-enterprise#1148 AC3: viewer_row_scope shows an agent key acting for a shared person NO rows of an agent that person cannot open (fail-closed on an unreadable or non-True access answer, or a person with no account row); the person's own agent and an openable agent keep today's rule; no lookup for NO_ROWS or the full view."
+    },
+    {
+      "file": "unit/test_ent1148_fan_out_source.py",
+      "feature": "trinity-enterprise#1148",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "security",
+        "turn-tier",
+        "fan-out"
+      ],
+      "description": "trinity-enterprise#1148 F1: a fan-out row names the initiator's key agent (or the vouched X-Source-Agent), never its own target; a delegated turn fanning out to another agent without the header rates share, a person's own fan-out does not rise to owner after the share is revoked, and a self fan-out rates the person's own tier (share), never the delegated owner tier."
+    },
+    {
+      "file": "unit/test_ent1148_fleet_reads_stay_person.py",
+      "feature": "trinity-enterprise#1148",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "security",
+        "turn-tier",
+        "auth"
+      ],
+      "description": "trinity-enterprise#1148 F2: GET /api/executions and GET /api/activities/timeline, read by an agent key in a shared person's turn, omit every agent that person cannot open (fail-closed on an unreadable lookup); a key in no person's turn keeps its reach with no lookup."
+    },
+    {
+      "file": "unit/test_4357_wake_chain_depth.py",
+      "feature": "#4357",
+      "added": "2026-11-08",
+      "categories": [
+        "unit",
+        "backend",
+        "agent-collaboration",
+        "reliability"
+      ],
+      "description": "#4357: a caller wake stands at the delegator's own depth (max(callee - 1, MAX(running caller), 0)), so twenty delegate->wake rounds and a reminder fired while the last wake runs are all admitted through the real /task depth guard; a synchronous chain is still refused past the max and answered/ended asks stay roots. The per-pair hourly wake budget caller_wake_max_per_hour (default 120, <=0 unlimited) skips and audits skipped_budget past the cap with one notification per window, fails open without Redis, and a collapsed window spends nothing."
+    },
+    {
+      "file": "unit/test_4357_depth_resets_parity.py",
+      "feature": "#4357",
+      "added": "2026-11-08",
+      "categories": [
+        "unit",
+        "backend",
+        "mcp",
+        "agent-collaboration"
+      ],
+      "description": "#4357: the MCP server's fallback depth-reset sentence (client.ts DEPTH_RESETS, used when a refusal body carries no resets) equals the backend's InterAgentDepthExceeded.RESETS, and the backend's refusal body sends that sentence, so the two copies cannot drift."
+    },
+    {
       "file": "unit/test_1168_agent_ssh_bind.py",
       "feature": "trinity-enterprise#1168",
       "added": "2026-11-07",
@@ -1749,7 +1833,7 @@
         "compose",
         "settings"
       ],
-      "description": "Every config.ENV_BACKED_OPS_KEYS variable (METRICS_RETENTION_DAYS, METRICS_DAILY_POINT_CAP, INTER_AGENT_MAX_CHAIN_DEPTH) is forwarded exactly once by docker-compose.yml / .prod.yml / .hosted.yml with an EMPTY default (${VAR:-}), no other docker-compose*.yml supplies a default, and .env.example leaves each commented but documented - so `source: env` on GET /api/settings/retention means an operator set it and the Settings rows are not locked on every install."
+      "description": "Every config.ENV_BACKED_OPS_KEYS variable (METRICS_RETENTION_DAYS, METRICS_DAILY_POINT_CAP, INTER_AGENT_MAX_CHAIN_DEPTH, CALLER_WAKE_MAX_PER_HOUR) is forwarded exactly once by docker-compose.yml / .prod.yml / .hosted.yml with an EMPTY default (${VAR:-}), no other docker-compose*.yml supplies a default, and .env.example leaves each commented but documented - so `source: env` on GET /api/settings/retention means an operator set it and the Settings rows are not locked on every install."
     },
     {
       "file": "unit/test_ent671_retention_metric_rows.py",
@@ -8712,6 +8796,79 @@
         "security"
       ],
       "description": "trinity-enterprise#1117: the git_sync tool schema refuses a `paths` element starting with '-' through the same ~standard.validate seam FastMCP calls; the issue sits at paths.<i> and its message leads with the element (capped at 200 chars). Decides every row of tests/fixtures/git-sync-path-cases.json the same way as the backend model (shared table). node:test."
+    },
+    {
+      "file": "unit/test_ent1135_ask_room_attachment.py",
+      "feature": "trinity-enterprise#1135",
+      "added": "2026-11-07",
+      "categories": [
+        "backend",
+        "unit",
+        "rooms",
+        "operator-queue"
+      ],
+      "description": "trinity-enterprise#1135: an ask raised in a running room turn records the room (platform key, stripped from agent input) and posts one raised line; fail-soft; never a gate or credential ask."
+    },
+    {
+      "file": "unit/test_ent1135_ask_room_return.py",
+      "feature": "trinity-enterprise#1135",
+      "added": "2026-11-07",
+      "categories": [
+        "backend",
+        "unit",
+        "rooms",
+        "operator-queue"
+      ],
+      "description": "trinity-enterprise#1135: the ending line for every disposition (coarse who, never the answer) and the room-engine return turn under a Waker, with declines falling back to today's wake."
+    },
+    {
+      "file": "unit/test_ent1135_wake_restart_survival.py",
+      "feature": "trinity-enterprise#1135",
+      "added": "2026-11-07",
+      "categories": [
+        "backend",
+        "unit",
+        "rooms",
+        "operator-queue"
+      ],
+      "description": "trinity-enterprise#1135 (T4): wake_state owed before the spawn, the ending lifecycle, the widened re-offer and the once-per-process boot re-offer after startup recovery."
+    },
+    {
+      "file": "../src/frontend/tests/unit/workspaceProjectsEnt1133.mount.spec.js",
+      "feature": "trinity-enterprise#1133",
+      "added": "2026-11-07",
+      "categories": [
+        "frontend",
+        "unit",
+        "ui",
+        "workspace"
+      ],
+      "description": "A task's title, objective and definition of done edited from the detail form, mounted: the three fields prefill from the task and only the changed ones are sent (a cleared long field as null); a blank or over-limit value is refused inline with nothing sent, counting code points so 150 emoji pass; a legacy over-limit stored value does not block a status change; the read-only objective / DoD blocks show only when the fields are not offered; a done task shows them disabled with the reopen reason and Reopen sends the status alone; a server 422 lands under the field it names, keeping what was typed; and the create dialog refuses the same lengths."
+    },
+    {
+      "file": "../src/frontend/tests/unit/workspaceProjectsTaskLimits.spec.js",
+      "feature": "trinity-enterprise#1133",
+      "added": "2026-11-07",
+      "categories": [
+        "frontend",
+        "unit",
+        "workspace"
+      ],
+      "description": "The task-field limits the client checks (title 200, objective / definition of done 4000 code points) are pinned to the server pair from the public side, so a drift goes red in public CI: validateTaskFields executed at and one past each boundary, emoji counted as one; the backend constants are compared too when that module is checked out."
+    },
+    {
+      "file": "unit/test_4302_room_chain_continue.py",
+      "feature": "trinity#4302",
+      "added": "2026-11-07",
+      "categories": [
+        "backend",
+        "rooms",
+        "idempotency",
+        "auth",
+        "api",
+        "unit"
+      ],
+      "description": "trinity#4302: a mention chain stopped at ROOM_MAX_CHAIN_DEPTH writes a typed `chain_paused` system row (mentions = who was next; plain words, no UI verb) and the room payload carries `paused_chain` {seq, next} while the offer stands (survives bookkeeping lines; ends on a conversational row, a later pause/continue row, a closed room, or every named agent having left; a collaborator seated above the row still gets it). POST /api/rooms/{id}/continue through the real router, service, db and idempotency layers over a temp SQLite DB: wakes `next` at depth 1 (a fresh count that may pause again), posts a `chain_continued` receipt that spends no message budget, hands the woken agent what it was owed; a seated collaborator, a person's user key and a Workspace client may continue, an agent key and the system key get 403 not_a_person, a non-member the uniform 404 with no key claimed, an unreachable `next` a 403 with nothing consumed, a departed `next` 409 no_one_to_wake; a closed room / a room at its message budget 410 with stop_reason and the budget named. Once per stop: a double click with an Idempotency-Key is 409 in-flight then a replay under scope room-continue:{room_id}; two workers without a key wake once (the second gets 409 room_moved_on); a stale offer_stands read is not the guard (the receipt insert is); two simultaneous receipt inserts land exactly one; a repeat after a restart (key rows gone) is 409 room_moved_on."
     }
   ]
 }

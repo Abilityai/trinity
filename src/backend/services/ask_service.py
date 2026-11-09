@@ -130,7 +130,8 @@ class AskNotAddressee(Exception):
     """trinity-enterprise#751: a gated-skill approval may be decided only by a
     person it was addressed to (an admin may cancel it, never approve it).
     trinity-enterprise#1042: so may an ask addressed to a canon role id —
-    `role` is that `role:<id>` (or `approver`, #1053), None for any other ask."""
+    `role` is that `role:<id>` (or `approver`, #1053; or `project`,
+    trinity-enterprise#1134), None for any other ask."""
 
     def __init__(self, item_id: str, *, role: Optional[str] = None):
         super().__init__("not_addressee")
@@ -145,6 +146,16 @@ class AskNotAddressee(Exception):
         if self.role is None:
             return None
         from services import role_addressing
+        if self.role == "project":
+            # ent#1134: addressed to the project's steward, else its creator —
+            # a seat the project holds, not a role on the agent.
+            if cancelling:
+                return ("This ask was addressed to the project it was raised on; only the "
+                        "person it waits on or an admin can cancel it.")
+            return ("This ask was addressed to the project it was raised on; only the person "
+                    "it waits on — the project's steward, else its creator — can decide it. "
+                    "Ask them to answer it from their Inbox, or have it cancelled so the agent "
+                    "can ask again.")
         label = role_addressing.role_label(self.role)
         if cancelling:
             return (f"This ask was addressed to the {label} role; only a person seated "
@@ -230,9 +241,19 @@ def _approver_seated(row: Mapping[str, Any]) -> bool:
 
 
 def _fenced_role_of(row: Mapping[str, Any]) -> Optional[str]:
-    """The role a refusal names (`AskNotAddressee.role`): the canon role id, or
-    `approver` for a seated approver ask; None keeps the door's own wording."""
+    """The role a refusal names (`AskNotAddressee.role`): the canon role id,
+    `approver` for a seated approver ask, or `project` for a project-addressed
+    ask (ent#1134); None keeps the door's own wording."""
+    if _project_addressed(row):
+        return "project"
     return _role_id_of(row) or ("approver" if _approver_seated(row) else None)
+
+
+def _project_addressed(row: Mapping[str, Any]) -> bool:
+    """An agent's ask addressed `to: project` (trinity-enterprise#1134): the
+    first agent-raised row that reaches a person off the agent's roster, so
+    its answer is fenced to `resolved_to` like a canon-role ask's."""
+    return row.get("to_role") == "project"
 
 
 def _seat_fenced(row: Mapping[str, Any], *, cancelling: bool = False) -> bool:
@@ -241,16 +262,18 @@ def _seat_fenced(row: Mapping[str, Any], *, cancelling: bool = False) -> bool:
     so a card never offers a control the sink would refuse.
 
     - A gated-skill approval (trinity-enterprise#751): its answer AND its cancel.
-    - An ask addressed to a canon role id (trinity-enterprise#1042), or to the
-      `approver` kind with a seat snapshot (trinity-enterprise#1053): its answer
-      only — a cancel keeps the rule every ask has.
+    - An ask addressed to a canon role id (trinity-enterprise#1042), to the
+      `approver` kind with a seat snapshot (trinity-enterprise#1053), or to
+      the turn's project (trinity-enterprise#1134 — the steward, else the
+      creator, who may be off the agent's roster): its answer only — a cancel
+      keeps the rule every ask has.
     The other kinds, and a legacy `approver` row with no snapshot, are not
     fenced here."""
     if row.get("raised_by") == "gate" and row.get("type") == "approval":
         return True
     if cancelling:
         return False
-    return _role_id_of(row) is not None or _approver_seated(row)
+    return _role_id_of(row) is not None or _approver_seated(row) or _project_addressed(row)
 
 
 def _resolved_people(row: Mapping[str, Any]) -> List[str]:
@@ -636,7 +659,11 @@ def drop_addressee(ask_id: str, email: str, *, reason: str) -> bool:
 # `PLATFORM_ENDING_REASONS`, carried on the audit row. The assignments router's
 # write is the one trigger today; ent#961's unshare adds its own reason here.
 ASSIGNMENT_CHANGED = "assignment_changed"
-PLATFORM_READDRESS_REASONS = (ASSIGNMENT_CHANGED,)
+# trinity-enterprise#1134: a project's steward was set, changed, cleared or
+# removed from the project — its pending `to: project` rows move (per row, by
+# the stamped project id; the enterprise projects module is the one caller).
+PROJECT_STEWARD_CHANGED = "project_steward_changed"
+PLATFORM_READDRESS_REASONS = (ASSIGNMENT_CHANGED, PROJECT_STEWARD_CHANGED)
 
 
 def _people_list(values: Optional[Iterable[Any]]) -> List[str]:
@@ -650,7 +677,8 @@ def _people_list(values: Optional[Iterable[Any]]) -> List[str]:
 
 
 def readdress_item(ask_id: str, people: Iterable[str], single: Optional[str], *,
-                   reason: str, trigger: bool = True) -> bool:
+                   reason: str, trigger: bool = True, attach_chat: bool = True,
+                   platform_context: Optional[Mapping[str, Any]] = None) -> bool:
     """The PLATFORM rewrites ONE pending row's audience
     (trinity-enterprise#1095): `resolved_to` becomes `people`, the single
     Workspace addressee becomes `single`. The row is not ended and its
@@ -668,6 +696,16 @@ def readdress_item(ask_id: str, people: Iterable[str], single: Optional[str], *,
     under a compare-and-set on the three address columns as read plus
     `status = 'pending'`, so a row answered, cancelled or dropped meanwhile is
     never overwritten.
+
+    `attach_chat=False` (trinity-enterprise#1134) drops the stale keys but
+    attaches no Main for the new addressee — a project-addressed row moves to
+    a steward or creator who may be off the agent's roster, and a Main is a
+    roster relationship (the ent#981 reason the gate skips it).
+
+    `platform_context` (trinity-enterprise#1134) re-stamps platform keys
+    (`_PLATFORM_CONTEXT_KEYS` only; anything else is ignored) in the same
+    compare-and-set — a project row moved from its steward to its creator
+    carries the seat that picked the new reader, never the old one's.
 
     `reason` is one of `PLATFORM_READDRESS_REASONS`. An unchanged audience
     writes, audits and announces nothing. Per changed row: one audit row (ids
@@ -694,18 +732,22 @@ def readdress_item(ask_id: str, people: Iterable[str], single: Optional[str], *,
 
     raw_context = row.get("context")
     context: Optional[Dict[str, Any]] = None
-    if old_single != new_single:
+    stamps = {k: v for k, v in (platform_context or {}).items() if k in oqs._PLATFORM_CONTEXT_KEYS}
+    if old_single != new_single or stamps:
         try:
             parsed = json.loads(raw_context) if raw_context else {}
         except ValueError:
             parsed = {}
         context = dict(parsed) if isinstance(parsed, dict) else {}
+    if old_single != new_single:
         for key in (oqs._WORKSPACE_THREAD_KEY, oqs._WORKSPACE_TURN_KEY, oqs._WORKSPACE_DISCUSSION_KEY):
             context.pop(key, None)
-        if new_single:
+        if new_single and attach_chat:
             thread, _ = oqs._workspace_attachment(row["agent_name"], new_single)
             if thread:
                 context[oqs._WORKSPACE_THREAD_KEY] = thread
+    if context is not None:
+        context.update(stamps)
 
     changed = bool(db.readdress_operator_queue_item(
         ask_id, new_people, new_single,
@@ -816,6 +858,26 @@ def _fresh_audience(agent_name: str, role: str, *, gate: bool) -> Optional[Tuple
             return None
     people = _people_list(people)
     return people, (people[0] if len(people) == 1 else None)
+
+
+def _raising_room(agent_name: str, turn: Optional[str], ask_type: str) -> Optional[str]:
+    """The room whose RUNNING turn raised this ask, or None
+    (abilityai/trinity-enterprise#1135). An agent's raise only — a gate's ask is
+    a background ask (the ent#610 amendment) — and never a credential ask: a
+    secret has exactly one reader (ent#1066), and a room has many. Fail-soft,
+    the #1632 clamp contract: a lookup that fails leaves the ask where ent#734
+    puts it (its chat, or Main) and never refuses it."""
+    if not turn or ask_type == "credential":
+        return None
+    try:
+        from shared_sessions import service as rooms
+
+        return rooms.room_for_execution(agent_name, turn)
+    except Exception:  # noqa: BLE001
+        logger.warning("[AskService] could not resolve the room of the turn that raised an "
+                       "ask from %s; it is not attached to a room (ent#1135)",
+                       agent_name, exc_info=True)
+        return None
 
 
 def raise_ask(
@@ -929,6 +991,7 @@ def raise_ask(
     (`ValueError`), never a refusal an agent earned.
     """
     from services import operator_queue_service as oqs
+    from services import role_addressing
 
     if raised_by not in ASK_RAISERS:
         raise ValueError(f"raise_ask: unknown raised_by {raised_by!r}")
@@ -956,10 +1019,18 @@ def raise_ask(
         _refuse_unlinked_reask(agent_name, norm["proposal"], raised_by)
     target = _replace_target(agent_name, norm["replaces"])
     to_role = to_role_override or norm["to"]
+    turn = _platform_turn(agent_name, platform_execution_id)
+    project_id: Optional[str] = None
+    seat: Optional[str] = None
     if named:
         people, addressee, resolved = [named], named, True
     elif pre is not None:
         people, addressee, resolved = pre, (pre[0] if len(pre) == 1 else None), True
+    elif norm["to"] in role_addressing.ASK_TARGETS:
+        # trinity-enterprise#1134: the platform resolves the target from the
+        # turn it knows — the agent supplied the word, nothing else.
+        people, addressee, resolved, project_id, seat = _address_target(
+            agent_name, norm["to"], turn)
     else:
         people, addressee, resolved = _address(agent_name, norm["to"])
     if norm["type"] == "credential" and not addressee:
@@ -974,10 +1045,18 @@ def raise_ask(
             "with the person who holds the credential, addressed to primary.")
 
     context = dict(norm["context"])
-    turn = _platform_turn(agent_name, platform_execution_id)
     if turn:
         context["execution_id"] = turn
-    if addressee and attach_chat:
+    if addressee and attach_chat and project_id is not None:
+        # trinity-enterprise#1134: a project-addressed ask reaches a person who
+        # may be off the agent's roster, so it attaches ONLY to the chat the
+        # addressee's own running turn serves — never their Main (a roster
+        # relationship, which the ent#981 reach rows skip for the same reason).
+        thread = _in_turn_chat(agent_name, addressee, turn)
+        if thread:
+            context[oqs._WORKSPACE_THREAD_KEY] = thread
+            context[oqs._WORKSPACE_TURN_KEY] = True
+    elif addressee and attach_chat:
         # The chat the raising turn serves (ent#734), else the addressee's Main
         # (ent#429/#523), resolved at raise time. Only after the caps passed:
         # attaching may create Main. Only an AGENT's raise reads the turn: a
@@ -991,6 +1070,30 @@ def raise_ask(
             context[oqs._WORKSPACE_THREAD_KEY] = thread
         if thread and in_turn:
             context[oqs._WORKSPACE_TURN_KEY] = True
+    elif not people and raised_by == "agent" and to_role == "primary" and turn:
+        # trinity-enterprise#1134 (AC4): a chat turn's `primary` ask that fell
+        # to the operators (nobody assigned, no owner who can stand in). The
+        # person in the chat is not its addressee and reads none of its
+        # content — but the chat the turn serves is stamped, with why it fell,
+        # so that chat's own read shows one content-free line. An explicit
+        # `to: operator` is never stamped: it may be ABOUT the person.
+        hit = _turn_chat(agent_name, turn)
+        if hit:
+            context[oqs._WORKSPACE_THREAD_KEY] = hit
+            context[oqs._WORKSPACE_TURN_KEY] = True
+            reason = role_addressing.operators_reason(agent_name)
+            if reason:
+                context[oqs._WORKSPACE_OPERATORS_REASON_KEY] = reason
+    if project_id is not None:
+        # The platform's own stamp (ent#981's key, reused): written after the
+        # strip in `_validated_ask`, so an agent-authored value never survives
+        # and the Workspace card shows the project exactly as a gate row does.
+        context[oqs._WORKSPACE_PROJECT_ID_KEY] = project_id
+        if seat in ("steward", "creator"):
+            context[oqs._WORKSPACE_PROJECT_SEAT_KEY] = seat
+    room_id = _raising_room(agent_name, turn, norm["type"]) if raised_by == "agent" else None
+    if room_id:
+        context[oqs._WORKSPACE_ROOM_KEY] = room_id
     for key, value in (platform_context or {}).items():
         # trinity-enterprise#981: the platform's own attachment, platform keys
         # only — after the strip in `_validated_ask`, so it is the one writer.
@@ -1059,6 +1162,12 @@ def raise_ask(
     row = out["row"]
     if out["outcome"] == "replayed":   # a concurrent call with the same id won
         return _replay(row, norm, oqs, raised_by)
+    if room_id:
+        # ent#1135: the room where the agent asked hears that it is waiting —
+        # only now, so a refused ask leaves no trace there. Never raises.
+        from shared_sessions import service as rooms
+
+        rooms.post_ask_raised_line(room_id, agent_name, row)
     replaced = out.get("predecessor") if target else None
 
     audit = [{
@@ -1300,9 +1409,9 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent",
         # so a retry spelt `role:Head` replays against `role:head` with no
         # false `differs`. Resolved — and refused by name — in `_address`.
         to = f"{role_addressing.ROLE_ID_PREFIX}{role_id}"
-    elif to not in ASK_ROLES:
+    elif to not in ASK_ROLES and to not in role_addressing.ASK_TARGETS:
         raise AskRejected(422, "invalid_to", "Unknown role.",
-                          allowed=[*ASK_ROLES, ASK_ROLE_ID_FORM])
+                          allowed=[*ASK_ROLES, *role_addressing.ASK_TARGETS, ASK_ROLE_ID_FORM])
     if kind == "credential" and to != "primary":
         # trinity-enterprise#1066: the secret field writes into the agent's
         # environment, so it opens for the agent's primary person only — never
@@ -1607,9 +1716,12 @@ def _named_addressees(addressees: Optional[List[str]], to_role_override: Optiona
 def _address(agent_name: str, role: str) -> Tuple[List[str], Optional[str], bool]:
     """`(resolved_to, addressed_to_email, resolved)` for a role.
 
-    The one resolution rule, `services/role_addressing.resolve` (ent#606) —
-    shared with reports and messages so an ask and a report addressed to the
-    same role reach the same people. Several people are recorded in
+    The one resolution rule of the addressing surfaces,
+    `services/role_addressing.resolve_addressee` (ent#606, ent#1134) — shared
+    with messages and the enterprise proposals so an ask and a message
+    addressed to the same role reach the same people: a provider answering
+    "nobody fills primary" stands the agent's OWNER in (the 2026-11-07
+    ruling), an owner with no email is still the operators. Several people are recorded in
     `resolved_to` and none becomes the single Workspace addressee: the ONE ask
     is delivered to each of them on read (trinity-enterprise#816, the
     2026-10-07 ruling — the Workspace list and its doors match `resolved_to`
@@ -1633,12 +1745,67 @@ def _address(agent_name: str, role: str) -> Tuple[List[str], Optional[str], bool
             raise AskRejected(422, e.code, e.message, role=e.role)
         return r.people, r.single, r.resolved
     try:
-        r = role_addressing.resolve(agent_name, role, owner_lookup=_owner_email)
+        r = role_addressing.resolve_addressee(agent_name, role, owner_lookup=_owner_email)
     except role_addressing.RoleRefused:
         raise AskRejected(422, "role_unassigned",
                           f"Nobody fills the {role} role for this agent yet; address the ask to "
                           "primary or operator.", role=role)
     return r.people, r.single, r.resolved
+
+
+def _address_target(agent_name: str, target: str,
+                    turn: Optional[str]) -> Tuple[List[str], Optional[str], bool, Optional[str],
+                                                  Optional[str]]:
+    """`(resolved_to, addressed_to_email, resolved, project_id, seat)` for an
+    addressing target (trinity-enterprise#1134) — `project`, resolved by the
+    PLATFORM from `turn` (the validated raising execution, or None) through
+    the resolver the enterprise projects module registers
+    (`role_addressing.resolve_target`). Every arm is a 422 by name:
+    `project_unavailable` (no resolver, or it failed — an OSS-only install),
+    and the resolver's own `not_in_project_turn` / `project_unreachable`, each
+    with its remedy. Never a fallback to the owner or the operators: a project
+    ask reaches the project's person or is not filed."""
+    from services import role_addressing
+
+    try:
+        r = role_addressing.resolve_target(target, agent_name, turn)
+    except role_addressing.RoleRefused as e:
+        raise AskRejected(422, e.code, e.message, role=e.role)
+    people = _people_list(r.people)
+    single = (r.single or "").strip().lower() or None
+    return people, single, bool(people), r.project_id, r.seat
+
+
+def _in_turn_chat(agent_name: str, email: str, turn: Optional[str]) -> Optional[str]:
+    """The Workspace chat `turn` serves iff it is (agent, email)'s own RUNNING
+    chat turn (`client_portal.service.chat_for_execution`, ent#734) — else
+    None, and no Main is resolved or created. Fail-soft like
+    `_workspace_attachment`: a lookup that fails costs the reader a click,
+    never the ask."""
+    if not turn:
+        return None
+    try:
+        from client_portal.service import chat_for_execution
+        return chat_for_execution(agent_name, email, turn) or None
+    except Exception:  # noqa: BLE001
+        logger.warning("[AskService] could not resolve the chat of the turn that raised a "
+                       "project ask from %s; stored without a chat", agent_name, exc_info=True)
+        return None
+
+
+def _turn_chat(agent_name: str, turn: str) -> Optional[str]:
+    """The chat a RUNNING Workspace chat turn serves, whoever its person is
+    (`client_portal.service.chat_of_turn`, trinity-enterprise#1134) — else
+    None. Fail-soft: a lookup that fails costs the person the notice, never
+    the ask."""
+    try:
+        from client_portal.service import chat_of_turn
+        hit = chat_of_turn(agent_name, turn)
+    except Exception:  # noqa: BLE001
+        logger.warning("[AskService] could not resolve the chat of the turn that raised an "
+                       "unaddressed ask from %s; stored without a chat", agent_name, exc_info=True)
+        return None
+    return hit[0] if hit else None
 
 
 def _owner_email(agent_name: str) -> Optional[str]:
@@ -1906,6 +2073,9 @@ def _wake_filer(event: EndingEvent) -> None:
         for row in event.rows:
             if is_platform_minted(row) or not _wakes(row):
                 continue
+            # ent#1135 (T4): `owed` BEFORE the spawn, so a restart between this
+            # ending and the turn still finds the wake owed and re-offers it.
+            _mark_wake_owed(lambda row=row: [row])
             operator_resume_service.spawn_resume_dispatch(
                 row,
                 response=row.get("response"),
@@ -1927,6 +2097,8 @@ def _wake_filer(event: EndingEvent) -> None:
     rows = [row for row in event.rows if row.get("disposed_by") != "agent" and _wakes(row)]
     if not rows:
         return
+    _mark_wake_owed(lambda: [row for row in rows
+                             if operator_resume_service._wakes_on_ending(row)])
     operator_resume_service.spawn_ending_dispatch(
         rows,
         disposition=event.disposition,
@@ -1934,6 +2106,17 @@ def _wake_filer(event: EndingEvent) -> None:
         reason=event.reason,
         batch_id=event.batch_id,
     )
+
+
+def _mark_wake_owed(rows_of) -> None:
+    """ent#1135 (T4): stamp `owed` before a spawn. A failed stamp is logged and
+    never costs the wake: the spawn still runs and the dispatch writes its own
+    `woken` / `pending` — only a restart in between would lose it."""
+    try:
+        operator_resume_service.mark_wake_owed(rows_of())
+    except Exception:  # noqa: BLE001
+        logger.warning("ask sink: wake_state=owed not recorded — the wake is still spawned, "
+                       "but a restart before its turn would drop it", exc_info=True)
 
 
 register_ending_observer(_wake_filer)
