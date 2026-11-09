@@ -199,10 +199,13 @@ async def test_a_key_change_rechecks_here_and_publishes_one_key_scoped_control_e
 @pytest.mark.asyncio
 async def test_a_control_event_rechecks_locally_and_is_never_published_again(people, monkeypatch):
     """The receiving side runs the local re-check only. Were it to call
-    ``notify_*``, every worker would republish every event it read, forever."""
+    ``notify_*``, every worker would republish every event it read, forever.
+    Driven through ``lc.handle_control``, the function main.py hands the
+    dispatcher, so the wired path is the one pinned."""
     reg = LiveConnectionRegistry()
     published = Published()
     monkeypatch.setattr(lc, "_control_publisher", published)
+    monkeypatch.setattr(lc, "registry", reg)
     key = _key(people, ALICE)
     closes = Closes()
     _open(reg, DOOR_WS, ALICE, closes.closer("alice"))
@@ -210,12 +213,12 @@ async def test_a_control_event_rechecks_locally_and_is_never_published_again(peo
     _open(reg, DOOR_EVENT_STREAM, ALICE, closes.closer("alice-stream"), key_id=key.id)
     people.update_user_role(ALICE, "operator")
 
-    reg.handle_control({"recheck": "account", "username": ALICE})
+    lc.handle_control({"recheck": "account", "username": ALICE})
     await _settle(reg)
     assert closes.by_name() == {"alice": CloseReason.CHANGED, "alice-stream": CloseReason.CHANGED}
 
     # A key nobody here opened a stream with: nothing to compare, nothing closes.
-    reg.handle_control({"recheck": "key", "key_id": "ce-no-such-key"})
+    lc.handle_control({"recheck": "key", "key_id": "ce-no-such-key"})
     await _settle(reg)
     assert set(closes.by_name()) == {"alice", "alice-stream"}
     assert published.events == [], "a received control event was published again"
