@@ -92,6 +92,13 @@ _SHORT_FIELDS = ("verb", "tier", "turn_kind")      # <= 64 chars each
 _ID_FIELDS = ("session_id", "tool_use_id")         # <= MAX_EXECUTION_ID_LEN
 _BOUNDED_TEXT = {"rule": 200, "path": 512}
 _MAX_TOOL_LEN = 128
+# A NUL or a lone surrogate (a non-UTF-8 byte the hook decoded with
+# surrogateescape, or a model-written "\\udcff" escape in a tool input) is a
+# character no store can hold: psycopg2 refuses a NUL before PostgreSQL sees
+# it, SQLite cannot encode a surrogate, and a surrogate that does reach a row
+# (inside `details`, JSON-escaped) 500s every later GET when the response is
+# encoded. One such event must never cost the batch or poison the read.
+_UNSTORABLE = re.compile("[\x00\ud800-\udfff]")
 
 # Liveness of the agent's forwarder. A HASH {last_report_at, runtime,
 # dropped_total} with no TTL: `stale` needs the last value to outlive the
@@ -145,10 +152,15 @@ def _parse_ts(value: Any) -> Optional[str]:
     return None
 
 
+def _text(value: str) -> str:
+    """Display text with every unstorable character replaced by U+FFFD."""
+    return _UNSTORABLE.sub("\ufffd", value)
+
+
 def _bounded_str(value: Any, limit: int) -> Optional[str]:
     if not isinstance(value, str) or not value:
         return None
-    return value[:limit]
+    return _text(value)[:limit]
 
 
 def normalize_event(raw: Any, received_at: str) -> Optional[Dict]:
@@ -192,17 +204,21 @@ def normalize_event(raw: Any, received_at: str) -> Optional[Dict]:
             details[field] = sanitize_text(value)
     for field in _ID_FIELDS:
         value = raw.get(field)
-        if isinstance(value, str) and 0 < len(value) <= MAX_EXECUTION_ID_LEN:
+        if (isinstance(value, str) and 0 < len(value) <= MAX_EXECUTION_ID_LEN
+                and not _UNSTORABLE.search(value)):
             details[field] = value
     for field, limit in _BOUNDED_TEXT.items():
         value = raw.get(field)
         if isinstance(value, str) and value:
             # Sanitize the whole value first, so a secret straddling the cut is
             # still recognised, then bound it.
-            details[field] = sanitize_text(value)[:limit]
+            details[field] = sanitize_text(_text(value))[:limit]
 
     execution_id = raw.get("execution_id")
-    if not (isinstance(execution_id, str) and 0 < len(execution_id) <= MAX_EXECUTION_ID_LEN):
+    # An id is matched, never displayed: one that holds an unstorable character
+    # is nulled like an over-long one, not rewritten into a different id.
+    if not (isinstance(execution_id, str) and 0 < len(execution_id) <= MAX_EXECUTION_ID_LEN
+            and not _UNSTORABLE.search(execution_id)):
         execution_id = None
 
     return {

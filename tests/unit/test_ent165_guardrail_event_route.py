@@ -287,3 +287,48 @@ class TestGet:
         self._seed()
         r = _app(_user(OWNER)).get(f"/api/agents/{AGENT}/guardrail-events?kind=deny&limit=1")
         assert [e["event_id"] for e in r.json()["events"]] == ["e-1"]
+
+
+# ---------------------------------------------------------------------------
+# POST — strings a store cannot hold
+# ---------------------------------------------------------------------------
+
+class TestPostUnstorableStrings:
+    """A character no store can hold must never cost the batch or the read.
+
+    SQLite cannot encode a lone surrogate (a non-UTF-8 byte the hook decoded
+    with surrogateescape, e.g. a forged TRINITY_EXECUTION_ID in a nested CLI's
+    environ, or a model-written escape in a tool input's path); psycopg2
+    refuses a NUL before PostgreSQL sees it. Stored raw, either one 500s the
+    whole batch on every retry and wedges the forwarder behind it; inside
+    `details` a surrogate is stored JSON-escaped and then 500s every GET.
+    """
+
+    @pytest.mark.parametrize("field,value,stored_as", [
+        ("tool", "\ud800x", "\ufffdx"),
+        ("tool", "a\x00b", "a\ufffdb"),
+        ("execution_id", "exec-\udcff", None),
+        ("execution_id", "exec-\x00", None),
+    ])
+    def test_the_event_lands_and_the_batch_with_it(self, world, field, value, stored_as):
+        db, svc = world
+        raw = json.dumps(_batch([_ev("e-1"), _ev("e-2", **{field: value})]))
+        r = _post(_app(), None, raw=raw)
+        assert r.status_code == 200, r.text
+        assert r.json() == {"accepted": 2, "duplicates": 0, "rejected": 0}
+        stored = {e["event_id"]: e for e in svc.list_events(AGENT)["events"]}
+        assert stored["e-2"][field] == stored_as
+        assert stored["e-1"]["tool"] == "Bash"
+
+    def test_a_surrogate_in_details_never_breaks_the_owners_read(self, world):
+        raw = json.dumps(_batch([_ev("e-1", path="/tmp/\udcff", rule="r\udcfe",
+                                     verb="v\ud800", session_id="s-\udcff")]))
+        assert _post(_app(), None, raw=raw).status_code == 200
+        r = _app(_user(OWNER)).get(f"/api/agents/{AGENT}/guardrail-events")
+        assert r.status_code == 200, r.text
+        details = r.json()["events"][0]["details"]
+        assert details["path"] == "/tmp/\ufffd"
+        assert details["rule"] == "r\ufffd"
+        assert details["verb"] == "v\ufffd"
+        assert "session_id" not in details
+
