@@ -8712,6 +8712,18 @@
         "security"
       ],
       "description": "trinity-enterprise#1117: the git_sync tool schema refuses a `paths` element starting with '-' through the same ~standard.validate seam FastMCP calls; the issue sits at paths.<i> and its message leads with the element (capped at 200 chars). Decides every row of tests/fixtures/git-sync-path-cases.json the same way as the backend model (shared table). node:test."
+    },
+    {
+      "file": "unit/test_1175_member_progress.py",
+      "feature": "trinity-enterprise#1175",
+      "added": "2026-11-08",
+      "categories": [
+        "enterprise",
+        "unit",
+        "backend",
+        "websocket"
+      ],
+      "description": "trinity-enterprise#1175: member onboarding progress card. STEPS constant (5 steps, plain-English labels, correct keys); init_progress_sync (creates record, idempotent); set_step_sync (set done/failed/with-note, unknown key noop, missing user noop, other steps unchanged); get_progress (None when absent, returns steps, all_done flag, failed step not all_done); build_progress_event (correct type/agent_name/steps)."
     }
   ]
 }

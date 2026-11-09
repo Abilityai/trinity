@@ -293,6 +293,13 @@
         <!-- #2694: the window is counted in typed turns under a row ceiling.
              When the ceiling cut the OLD end, say so — a thread that silently
              starts mid-call is the very symptom the window fix removes. -->
+        <!-- ent#1175: member onboarding progress card — visible in Main until all done -->
+        <PortalProgressCard
+          v-if="isMainChat"
+          :steps="progressData.steps"
+          :all-done="progressData.all_done"
+          :active="progressData.active"
+        />
         <p
           v-if="historyTruncated"
           :class="PLATFORM_LINE_CLASS"
@@ -981,6 +988,8 @@ import PortalAsks from './PortalAsks.vue'
 import PortalReplyChip from './PortalReplyChip.vue'
 import PortalDeliverables from './PortalDeliverables.vue'
 import PortalSkeleton from './PortalSkeleton.vue'
+import PortalProgressCard from './PortalProgressCard.vue'
+import { usePortalProgressStore } from '@/stores/portalProgress'
 import { workSignalFrom } from './portalRail'
 import PortalRating from './PortalRating.vue'
 import ExecutionGateMarker from '../skills/ExecutionGateMarker.vue'  // trinity-enterprise#754
@@ -1384,6 +1393,12 @@ const activeTurnSpoken = ref(false)
 // A stop said on the call before the server has named the run: cancel it the moment it
 // starts, and never ask for it to be spoken.
 let stopWhenStarted = false
+
+// ---- ent#1175: member onboarding progress card ------------------------------
+const progressStore = usePortalProgressStore()
+const progressData = computed(() => progressStore.progressFor(props.agent.name))
+// Fetch on mount (idempotent — cache-hits skip the network round-trip)
+onMounted(() => { if (isMainChat.value) progressStore.fetchProgress(props.agent.name) })
 
 // ---- ent#525: the live card and the terminal card ---------------------------
 const workStore = usePortalWorkStore()

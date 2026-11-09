@@ -646,7 +646,7 @@
     },
     "src/frontend/src/components/portal/PortalConversation.vue": {
       "raw_nongray": 0,
-      "raw_gray": 85,
+      "raw_gray": 86,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/portal/PortalDeliverables.vue": {
@@ -677,6 +677,11 @@
     "src/frontend/src/components/portal/PortalMarkdown.vue": {
       "raw_nongray": 0,
       "raw_gray": 34,
+      "hardcoded_colors": 0
+    },
+    "src/frontend/src/components/portal/PortalProgressCard.vue": {
+      "raw_nongray": 0,
+      "raw_gray": 19,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/portal/PortalRail.vue": {
@@ -997,7 +1002,7 @@
   },
   "totals": {
     "raw_nongray": 812,
-    "raw_gray": 8729,
+    "raw_gray": 8749,
     "hardcoded_colors": 447,
     "semantic_tokens": 4030,
     "files_with_violations": 198
