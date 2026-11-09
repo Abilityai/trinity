@@ -51,7 +51,13 @@ _SCANNER = "output-scanner.py"
 _SECRET = "sk-ant-api03-" + "A" * 93
 _GITHUB = "ghp_" + "b" * 36
 _GOOGLE = "AIza" + "C" * 35
-_BOUNDARY = "(?<![A-Za-z0-9_-])"
+# The left boundary every model-facing shape gets: not after a letter, digit
+# or `-`, or after an escape that ends in one (a literal `\n`/`\r`/`\t`, a
+# `%XX` URL escape, an ANSI CSI sequence, raw or written as an escape); `_`
+# counts as a separator (fix round R2). The CSI is consumed as `lead` and
+# written back unchanged.
+_BOUNDARY = (r"(?:(?<![A-Za-z0-9-])|(?<=\\[nrt])|(?<=%[0-9A-Fa-f]{2})"
+             r"|(?P<lead>(?:\x1b|\\(?:u001[bB]|x1[bB]|033|e))\[[0-?]*[ -/]*[@-~]))")
 
 
 def _load(rel: str, name: str):
@@ -186,6 +192,11 @@ BENIGN = [
     "?sig=Xq3vNw8pLr2TzYb6KdHj0MfA5sUeCo1gWi7RnQ4lVyE",
     "The redaction placeholder looks like [REDACTED:sk]; logs use ***REDACTED***.",
     "AWS_REGION=eu-west-1 AKIA_ROTATION_DAYS=90",
+    # Fix round R2: the new left contexts in front of the same prefix-only words.
+    "\x1b[32mpod/task-runner-deployment-7d9f8c6b5-x2z9q\x1b[0m   1/1   Running",
+    "\x1b[01;31m\x1b[Kxoxb-test\x1b[m\x1b[K and KEY_xoxb-your-token-here",
+    '{"env": "A=1\\nOPENAI_API_KEY=sk-your-openai-key\\tKEY_sk-your-openai-key"}',
+    "https://x.example/cb?next%3Dtask-runner-deployment-7d9f8c6b5-x2z9q&k%3Dsk-your-openai-key",
     # Fix round R1: identifiers that start with the Trinity key prefix are code.
     "def test_trinity_mcp_injection_writes_the_opt_out(tmp_path):",
     "def test_trinity_mcp_key_is_injected_into_the_agent_environment_at_start(tmp_path):",
@@ -255,10 +266,12 @@ def test_a_scanner_exception_withholds_stdout_stderr_and_structured_content(tmp_
 
 @pytest.mark.parametrize("baseline", [
     {},
-    {"credential_patterns": []},
-    {"credential_patterns": [{"name": "sk", "pattern": "sk-[A-Z"}]},
-    {"credential_patterns": [{"name": "Not A Name", "pattern": "x"}]},
-], ids=["no-key", "empty", "bad-regex", "bad-name"])
+    {"credential_boundary": _BOUNDARY, "credential_patterns": []},
+    {"credential_boundary": _BOUNDARY, "credential_patterns": [{"name": "sk", "pattern": "sk-[A-Z"}]},
+    {"credential_boundary": _BOUNDARY, "credential_patterns": [{"name": "Not A Name", "pattern": "x"}]},
+    {"credential_patterns": [{"name": "sk", "pattern": "sk-[A-Za-z0-9]{20,}"}]},
+    {"credential_boundary": "(?<!", "credential_patterns": [{"name": "sk", "pattern": "sk-[A-Za-z0-9]{20,}"}]},
+], ids=["no-key", "empty", "bad-regex", "bad-name", "no-boundary", "bad-boundary"])
 def test_shapes_that_cannot_be_loaded_withhold(tmp_path, baseline):
     payload = _bash(stdout=f"k={_SECRET}")
     result = _scan(tmp_path, payload, baseline=baseline)
@@ -413,6 +426,11 @@ def _scanner_shapes():
     return json.loads(H.BASELINE.read_text())["credential_patterns"]
 
 
+def test_every_shape_shares_the_one_left_boundary():
+    """The hook compiles `credential_boundary` once in front of all the shapes."""
+    assert json.loads(H.BASELINE.read_text())["credential_boundary"] == _BOUNDARY
+
+
 def test_every_sanitizer_shape_is_named_tightened_or_excluded():
     cs = _load(_BACKEND_CS, "_cs165_partition")
     shapes = _scanner_shapes()
@@ -423,9 +441,9 @@ def test_every_sanitizer_shape_is_named_tightened_or_excluded():
     for shape in shapes:
         if shape["source"] in TIGHTENED:
             body, how = TIGHTENED[shape["source"]]
-            assert shape["pattern"] == _BOUNDARY + body and shape["tightening"] == how, shape
+            assert shape["pattern"] == body and shape["tightening"] == how, shape
         else:
-            assert shape["pattern"] == _BOUNDARY + shape["source"] and "tightening" not in shape, shape
+            assert shape["pattern"] == shape["source"] and "tightening" not in shape, shape
         # One vocabulary with the Workspace composer guard (ent#1066).
         assert shape["name"] == cs._GUARD_SHAPES[shape["source"]], shape
         re.compile(shape["pattern"])
@@ -670,3 +688,63 @@ def test_identifiers_that_start_with_the_mcp_prefix_stay_in_logs(rel):
     for line in BENIGN[-2:]:
         assert cs.sanitize_text(line) == line, line
 
+
+# --- fix round R2: a key after an escape or an underscore is still a key -------
+# These six reached the model unchanged (review F3/FU-1): the character before
+# the key was the last letter of an escape, or `_`.
+
+_CSI_GREP = "\x1b[01;31m\x1b[K"
+_CSI_END = "\x1b[m\x1b[K"
+
+
+@pytest.mark.parametrize("before, after", [
+    (_CSI_GREP + _SECRET + _CSI_END, _CSI_GREP + "[REDACTED:sk]" + _CSI_END),
+    ("config.py:3:KEY = \x1b[0m\x1b[1m\x1b[31m" + _SECRET + "\x1b[0m",
+     "config.py:3:KEY = \x1b[0m\x1b[1m\x1b[31m[REDACTED:sk]\x1b[0m"),
+    ('{"keys": "first\\n' + _SECRET + '"}', '{"keys": "first\\n[REDACTED:sk]"}'),
+    ("a\\t" + _GITHUB, "a\\t[REDACTED:github]"),
+    ("https://x.example/cb?token%3D" + _SECRET, "https://x.example/cb?token%3D[REDACTED:sk]"),
+    ("Authorization%3A%20Bearer%20" + _GITHUB, "Authorization%3A%20Bearer%20[REDACTED:github]"),
+    ("KEY_" + _SECRET, "KEY_[REDACTED:sk]"),
+    ("prefix_" + _GITHUB, "prefix_[REDACTED:github]"),
+    ('"line": "\\u001b[31m' + _GOOGLE + '\\u001b[0m"', '"line": "\\u001b[31m[REDACTED:google]\\u001b[0m"'),
+    ("\x1b[1;32m" + "trinity_mcp_Df81fwt_" + "Q" * 35, "\x1b[1;32m[REDACTED:trinity_mcp]"),
+], ids=["grep-color", "rg-color", "json-newline", "json-tab", "url-eq", "url-space",
+        "underscore-key", "underscore-ghp", "json-escaped-csi", "csi-mcp"])
+def test_a_key_after_an_escape_or_an_underscore_is_redacted_and_the_escape_kept(tmp_path, before, after):
+    rewritten = _rewrite(_scan(tmp_path, _bash(stdout=before, stderr=before)))
+    assert rewritten["stdout"] == after and rewritten["stderr"] == after
+
+
+@pytest.mark.parametrize("key, name", [
+    ("trinity_mcp_ab_" + "sk-" + "Q" * 37, "trinity_mcp"),
+    ("AIza" + "Q" * 10 + "_sk-" + "R" * 21, "google"),
+], ids=["sk-in-mcp", "sk-in-google"])
+def test_a_key_whose_body_holds_another_shape_after_an_underscore_is_redacted_whole(tmp_path, key, name):
+    """With `_` a boundary, a shape can start inside another key's random body.
+    Each shape matches on the original text and overlapping matches become one
+    placeholder, so the outer key is not cut short whichever shape runs first."""
+    rewritten = _rewrite(_scan(tmp_path, _bash(stdout=f"key {key} end")))
+    assert rewritten["stdout"] == f"key [REDACTED:{name}] end"
+
+
+def test_a_key_failing_with_an_escape_in_front_still_warns(tmp_path):
+    result = _scan(tmp_path, _failure("Error: Exit code 1\n" + _CSI_GREP + _SECRET + _CSI_END))
+    assert "credential" in json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+
+
+@pytest.mark.parametrize("unit", [
+    "\x1b[01;31m\x1b[Ktask-runner\x1b[m\x1b[K a%3Dflask-x \\nmask-y KEY_disk-z ",
+    "\\", "\x1b[",
+], ids=["mixed", "backslashes", "csi-starts"])
+def test_eight_mib_of_escapes_is_scanned_well_inside_the_hook_timeout(tmp_path, unit):
+    """The boundary's escape branches stay cheap: output dense with colour codes,
+    URL escapes and `\\n` escapes, and the slowest input found (every position
+    a backslash or an unfinished CSI), scan well inside the 30 s timeout."""
+    filler = unit * (8 * 1024 * 1024 // len(unit) + 1)
+    stdout = filler[: 8 * 1024 * 1024 - 200] + " " + _CSI_GREP + _SECRET
+    started = time.monotonic()
+    result = _scan(tmp_path, _bash(stdout=stdout))
+    elapsed = time.monotonic() - started
+    assert _rewrite(result)["stdout"].endswith(_CSI_GREP + "[REDACTED:sk]")
+    assert elapsed < 10, f"8 MiB took {elapsed:.1f}s"

@@ -27,8 +27,10 @@ passes the original through.
 
 The shapes are `credential_patterns` in the baseline: the known-prefix
 partition of `utils/credential_sanitizer.SECRET_VALUE_PATTERNS` (D4), copied
-because a `-I -S` hook cannot import it. Events go to the guardrails log with
-shape names only, never a value.
+because a `-I -S` hook cannot import it, behind the one `credential_boundary`
+(not after a letter, digit or `-`, except where that character ends an escape:
+`\\n`/`\\t`, `%XX`, an ANSI CSI sequence; `_` is a separator). Events go to
+the guardrails log with shape names only, never a value.
 """
 import json
 import os
@@ -86,17 +88,29 @@ class _Unverifiable(Exception):
 
 
 def _shapes(config):
+    """One matcher for every shape: `credential_boundary`, then each entry's
+    `pattern` as the named group `s<index>`, and the list of shape names.
+
+    One pass finds the leftmost key, so a shape that starts inside another key's
+    random body (with `_` a left boundary, `trinity_mcp_ab_sk-...`) is part of
+    that key instead of cutting it short, and the boundary is tested once per
+    position instead of once per shape."""
+    boundary = config.get("credential_boundary")
     entries = config.get("credential_patterns")
+    if not isinstance(boundary, str) or not boundary:
+        raise ValueError("no credential_boundary")
     if not isinstance(entries, list) or not entries:
         raise ValueError("no credential_patterns")
-    shapes = []
+    names, groups = [], []
     for entry in entries:
         name = entry.get("name") if isinstance(entry, dict) else None
         pattern = entry.get("pattern") if isinstance(entry, dict) else None
         if not isinstance(name, str) or not _NAME.fullmatch(name) or not isinstance(pattern, str):
             raise ValueError("malformed credential_patterns entry")
-        shapes.append((re.compile(pattern), name))
-    return shapes
+        re.compile(pattern)
+        groups.append(f"(?P<s{len(names)}>{pattern})")
+        names.append(name)
+    return re.compile(boundary + "(?:" + "|".join(groups) + ")"), names
 
 
 def _text_size(value):
@@ -112,12 +126,22 @@ def _text_size(value):
     return total
 
 
+def _shape_name(match, names):
+    return names[int(match.lastgroup[1:])]
+
+
 def _redact_text(text, shapes, hits):
-    for pattern, name in shapes:
-        text, count = pattern.subn(PLACEHOLDER.format(name=name), text)
-        if count:
-            hits.add(name)
-    return text
+    """Each key replaced by `[REDACTED:<shape>]`. A `lead` the boundary consumed
+    (an ANSI CSI sequence in front of the key) is written back unchanged."""
+    matcher, names = shapes
+
+    def replace(match):
+        name = _shape_name(match, names)
+        hits.add(name)
+        lead = match.group("lead") if "lead" in matcher.groupindex else None
+        return (lead or "") + PLACEHOLDER.format(name=name)
+
+    return matcher.sub(replace, text)
 
 
 def _redact(value, shapes, hits, skip=()):
@@ -264,7 +288,7 @@ def _on_failure(data, shapes):
     text = error if isinstance(error, str) else ""
     if len(text) > SCAN_CAP_CHARS:
         raise _Oversize()
-    hits = {name for pattern, name in shapes if pattern.search(text)}
+    hits = {_shape_name(match, shapes[1]) for match in shapes[0].finditer(text)}
     if hits:
         log_event("credential_unredacted", tool=data.get("tool_name", ""), code="bash_failure_output",
                   patterns=sorted(hits), **_ids(data))
