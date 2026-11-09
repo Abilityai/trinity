@@ -85,6 +85,31 @@
       "description": "#4357: the MCP server's fallback depth-reset sentence (client.ts DEPTH_RESETS, used when a refusal body carries no resets) equals the backend's InterAgentDepthExceeded.RESETS, and the backend's refusal body sends that sentence, so the two copies cannot drift."
     },
     {
+      "file": "unit/test_ent165_guardrail_spool.py",
+      "feature": "trinity-enterprise#165",
+      "added": "2026-11-08",
+      "categories": [
+        "agent",
+        "unit",
+        "security",
+        "guardrails"
+      ],
+      "description": "trinity-enterprise#165 S2: the guardrail spool record. lib.log_event adds v, event_id (uuid4), kind and hook derived through the frozen legacy-event table and the script name (closed sets EVENT_KINDS / EVENT_HOOKS), code (the event name when absent), execution_id from /proc/<ppid>/environ (null outside a turn or past 128 chars, never the hook's own env), and session_id/tool_use_id from read_stdin_json; existing fields unchanged; derived fields beat a caller's; a derivation fault still writes the legacy record. Every shipped hook denies with its code when run as its own script (bash, file, read-only, turn-tier incl. turn_kind, skill gate); an AST guard fails any deny without code= or any call passing a reserved field; the image smoke's deny-record check fails a record without the contract. Reverting the change turns 63 red."
+    },
+    {
+      "file": "unit/test_ent165_guardrail_forwarder.py",
+      "feature": "trinity-enterprise#165",
+      "added": "2026-11-08",
+      "categories": [
+        "agent",
+        "unit",
+        "security",
+        "guardrails",
+        "reliability"
+      ],
+      "description": "trinity-enterprise#165 S2: the agent server's guardrail event forwarder (agent_server/guardrail_events.py) on a fake clock and a fake backend. Allowlist projection (command_prefix/traceback/error/reason never leave; a fake key a command carried never reaches a POST body; bounds; overlong ids nulled); records without v, with kind/hook null, and unparseable lines (counted as dropped); delivery within 2 s of an append; one POST per burst; count and byte batch caps; envelope; 5-min keepalive; 413 split and single-event drop; 422 drop counted in the next accepted post; 404 keeps the spool and retries hourly, logging once; resend carries the same event_ids; 5xx backoff 2/4/8/16/32 s capped; 429 Retry-After; a failing step never kills the loop; offset resume across a restart; partial last line; rotation race inside the 2 s grace with no busy loop; a never-drained spool stays bounded with delivered + dropped == written; gated on URL + key; main.py wires it; posts under the agent's own key to its own route. 15/15 mutants killed."
+    },
+    {
       "file": "unit/test_1168_agent_ssh_bind.py",
       "feature": "trinity-enterprise#1168",
       "added": "2026-11-07",
