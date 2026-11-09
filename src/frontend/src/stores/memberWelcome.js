@@ -5,6 +5,11 @@
  * { text, is_default, replaces_hello, max_length }`; `PUT .../settings/welcome`
  * writes it — `text: null` restores the shipped default, `""` turns it off.
  * Admin only, behind the member-agents entitlement.
+ *
+ * trinity-enterprise#1202: the same response also carries the member-turn
+ * `model` block and the `wake_model` block (each member agent's own model).
+ * `settings` keeps the whole view so the read-only model panel reads it here
+ * rather than issuing a second GET; `save()` replaces only `welcome`.
  */
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
@@ -14,6 +19,7 @@ const BASE = '/api/enterprise/member-agents/settings'
 
 export const useMemberWelcomeStore = defineStore('memberWelcome', () => {
   const welcome = ref(null)
+  const settings = ref(null)
   const hasLoaded = ref(false)
   const loading = ref(false)
   const error = ref(null)
@@ -23,6 +29,7 @@ export const useMemberWelcomeStore = defineStore('memberWelcome', () => {
     try {
       const { data } = await api.get(BASE)
       welcome.value = data?.welcome || null
+      settings.value = data || null
       hasLoaded.value = true
       error.value = null
     } catch (e) {
@@ -39,5 +46,5 @@ export const useMemberWelcomeStore = defineStore('memberWelcome', () => {
     return data
   }
 
-  return { welcome, hasLoaded, loading, error, load, save }
+  return { welcome, settings, hasLoaded, loading, error, load, save }
 })
