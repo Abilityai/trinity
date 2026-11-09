@@ -2524,7 +2524,7 @@ def chat_for_execution(agent_name: str, email: str, execution_id: str) -> str | 
     person's conversation. Raises like any other portal call; the caller owns
     the fail-soft.
 
-    ent#1171 is a named exception: a reminder (`triggered_by="reminder"`) the
+    ent#1171 is a named exception: a reminder (a turn whose `triggered_by` is `reminder`) the
     person's own agent set for that person's work tiles in their conversation —
     handled upstream in `_workspace_attachment` via `wake_for_execution`.
 
