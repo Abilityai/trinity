@@ -50,9 +50,11 @@ standing below a deep turn of the caller that is still running (a collapsed
 window can read the shallower ending). It was ``callee + 1``, and the wake turn's
 next delegation is ``1 + MAX(running)`` over a set that includes the wake row, so
 every delegate→wake round added two and an orchestrator working through wakes
-was refused after about four rounds. A wake is therefore at most ``max − 1`` and
-can always make one hop; a genuine chain — hops from turns still running — is
-still counted and refused by the guard exactly as before.
+was refused after about four rounds. A wake is therefore at most ``max − 1``
+unless a turn of the delegator that is still running stands deeper, and it can
+make one hop whenever the delegator's own turns allow one; a genuine chain —
+hops from turns still running — is still counted and refused by the guard
+exactly as before.
 
 **The wake budget.** Depth therefore no longer bounds how many wakes follow one
 another, so a per-pair hourly budget does: ``caller_wake_max_per_hour`` (default

@@ -2195,7 +2195,7 @@ bounding the table. OSS-core (Workspace rule above). Flow:
   | Turn kind | Its own row is stamped | Why |
   |---|---|---|
   | Delegated call (`/chat`, `/task`, `/fan-out`, session turn by an agent key) | `1 + MAX(running caller)` | a genuine hop |
-  | **Wake when a delegated run ends** (`caller_wake`) | `max(callee − 1, MAX(running caller), 0)`, NULL counted as 0 | it continues the delegator's own work, so it stands where the delegator stood when it delegated — never one hop more. The callee row was stamped `1 + MAX(running caller)`, so `callee − 1` is that standing; the live MAX keeps a wake from standing below a deeper turn still running. A wake is at most `max − 1` and can always make one hop |
+  | **Wake when a delegated run ends** (`caller_wake`) | `max(callee − 1, MAX(running caller), 0)`, NULL counted as 0 | it continues the delegator's own work, so it stands where the delegator stood when it delegated — never one hop more. The callee row was stamped `1 + MAX(running caller)`, so `callee − 1` is that standing; the live MAX keeps a wake from standing below a deeper turn still running. A wake is at most `max − 1` unless a turn of the delegator that is still running stands deeper; it can make one hop whenever the delegator's own turns allow one |
   | Wake on an answered or ended ask (`operator_response`, `operator_ending`) | root (NULL) | a person acted |
   | Reminder | root (NULL) | the setter's standing is not persisted yet (#3116) |
   | Turn a person starts (chat, Workspace, channel) | root (NULL) | non-agent principal |
