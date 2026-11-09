@@ -346,6 +346,40 @@ def test_a_new_cause_files_again_after_a_persons_ending(client, world):
     assert the_alert(world)["context"]["cause"] == "agent_has_no_owner"
 
 
+def test_a_cause_that_could_not_be_looked_up_does_not_re_file_a_persons_ending(
+        client, world, monkeypatch):
+    """`cause` is the material key, so a transient `unknown` (a lookup that
+    failed, or changed between two reads) would read as a new cause and re-file
+    the row a person ended. Such a reading decides nothing."""
+    from services import schedule_tier_alerts, turn_tier_service
+    create(client, world, "mate")
+    row = the_alert(world)
+    end_as_person(row)
+    _ended_long_ago(row)
+    monkeypatch.setattr(turn_tier_service, "schedule_run_cause",
+                        lambda *_a, **_k: turn_tier_service.CAUSE_UNKNOWN)
+    assert schedule_tier_alerts.sync(world.agent, world.mate.id) is None
+    assert alerts(world) == []
+
+
+def test_a_failing_alert_never_fails_a_committed_schedule_write(client, world, monkeypatch):
+    """Every route calls `sync` after its write has committed: an alert that
+    cannot be decided is logged, and the route still answers its write."""
+    from services import platform_alerts
+
+    def broken(*_a, **_k):
+        raise RuntimeError("operator queue unavailable")
+
+    monkeypatch.setattr(platform_alerts, "observe", broken)
+    monkeypatch.setattr(platform_alerts, "clear", broken)
+    sid = create(client, world, "mate")
+    assert call(client, world, "owner", "POST", f"/{sid}/disable").status_code == 200
+    assert call(client, world, "owner", "POST", f"/{sid}/enable").status_code == 200
+    assert call(client, world, "mate", "PUT", f"/{sid}", json={"message": "Edited"}).status_code == 200
+    assert call(client, world, "mate", "DELETE", f"/{sid}").status_code == 204
+    assert db.get_schedule(sid) is None
+
+
 # ---- one writer per reading ---------------------------------------------------------------------
 
 def test_concurrent_readings_of_one_creator_are_one_row(client, world):
