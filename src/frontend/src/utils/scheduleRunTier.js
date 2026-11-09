@@ -82,6 +82,8 @@ const REFUSALS = {
     "This schedule's runs already have the owner's access, so there is nothing to take over.",
   schedule_delivers_to_another_person:
     "This schedule delivers to another person's Workspace. Choose whether to stop or keep that delivery, then take it over again.",
+  schedule_not_found:
+    'This schedule no longer exists, so there is nothing to take over.',
 }
 
 /** A take-over refusal in user words; an unknown code reads `fallback`. */

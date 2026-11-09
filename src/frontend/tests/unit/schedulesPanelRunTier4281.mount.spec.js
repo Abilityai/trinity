@@ -409,6 +409,59 @@ describe('Take over', () => {
     w.unmount()
   })
 
+  it('409 delivers_to_another_person after a delivery was added: shows it, and the next confirm decides it', async () => {
+    // The creator adds a delivery to someone else after the open. The server
+    // checks the delivery before the version, so this is the refusal that
+    // arrives; the review must show the delivery so it can be decided.
+    const later = restricted('a', { updated_at: '2026-12-01T00:00:00Z', deliver_to_workspace_email: 'q@example.com' })
+    lists = [[restricted('a')], [later]]
+    takeOver = vi.fn(async () => { throw conflict('schedule_delivers_to_another_person') })
+    const w = mountPanel()
+    await flush()
+    const d = await open(w)
+    await d.find('[data-testid="take-over-confirm"]').trigger('click')
+    await flush()
+    expect(page().find('[data-testid="take-over-delivery-clear"]').exists()).toBe(true)
+    expect(page().find('[data-testid="take-over-delivery"]').text()).toContain('q@example.com')
+    takeOver = vi.fn(async () => ({ data: {} }))
+    await page().find('[data-testid="take-over-confirm"]').trigger('click')
+    await flush()
+    expect(takeOverPosts().at(-1)[1]).toMatchObject({ expected_updated_at: later.updated_at, delivery: 'clear' })
+    w.unmount()
+  })
+
+  it('a refusal whose refresh fails does not claim the current version is shown', async () => {
+    lists = [[restricted('a')], new Error('list down')]
+    takeOver = vi.fn(async () => { throw conflict('schedule_changed_since_review') })
+    const w = mountPanel()
+    await flush()
+    const d = await open(w)
+    await d.find('[data-testid="take-over-confirm"]').trigger('click')
+    await flush()
+    const err = page().find('[data-testid="take-over-error"]').text()
+    expect(err).not.toMatch(/current version is shown now/)
+    expect(err).toMatch(/couldn't load the current version/i)
+    expect(page().find('[data-testid="take-over-confirm"]').attributes('disabled')).toBeDefined()
+    w.unmount()
+  })
+
+  it('a schedule deleted mid-take-over reads in words, and offers nothing to adopt', async () => {
+    lists = [[restricted('a')], []]
+    takeOver = vi.fn(async () => {
+      throw Object.assign(new Error('404'), { response: { status: 404, data: { detail: { code: 'schedule_not_found', message: 'schedule_not_found' } } } })
+    })
+    const w = mountPanel()
+    await flush()
+    const d = await open(w)
+    await d.find('[data-testid="take-over-confirm"]').trigger('click')
+    await flush()
+    const err = page().find('[data-testid="take-over-error"]').text()
+    expect(err).not.toContain('schedule_not_found')
+    expect(err).toMatch(/no longer exists/)
+    expect(page().find('[data-testid="take-over-confirm"]').attributes('disabled')).toBeDefined()
+    w.unmount()
+  })
+
   it('Esc does not close the review while the take-over is in flight', async () => {
     lists = [[restricted('a')]]
     let release

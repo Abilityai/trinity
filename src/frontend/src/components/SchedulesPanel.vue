@@ -1602,6 +1602,17 @@ let takeOverSeq = 0
 
 const snapshotOf = (schedule) => JSON.parse(JSON.stringify(schedule))
 
+// The refusals after which the version on screen is no longer the one that
+// exists: the review is reloaded. The delivery refusal is one of them, since
+// the server decides the delivery before it compares the version (a delivery
+// added after the open arrives as this code, not as `changed_since_review`).
+const TAKE_OVER_REVIEW_AGAIN = new Set([
+  'schedule_changed_since_review',
+  'schedule_not_restricted',
+  'schedule_delivers_to_another_person',
+  'schedule_not_found',
+])
+
 async function loadTakeOverWebhook(schedule) {
   const seq = ++takeOverSeq
   takeOverWebhook.value = { state: 'loading' }
@@ -1633,10 +1644,16 @@ async function submitTakeOver(body) {
   } catch (error) {
     const code = apiErrorCode(error)
     takeOverError.value = takeOverRefusalText(code, apiErrorMessage(error, "Couldn't take the schedule over. Nothing was changed — try again."))
-    if (code === 'schedule_changed_since_review' || code === 'schedule_not_restricted') {
+    if (TAKE_OVER_REVIEW_AGAIN.has(code) || error?.response?.status === 404) {
       // Show the version that now exists, so the next confirm adopts what
       // the person can see (or offers nothing when there is nothing to adopt).
       await loadSchedules()
+      if (loadError.value) {
+        // The list read failed: what is on screen is the refused version.
+        takeOverError.value = "Nothing was changed, and Trinity couldn't load the current version of this schedule. Close this review and open it again once the list has loaded."
+        takeOverTarget.value = { ...target, can_take_over: false }
+        return
+      }
       const fresh = schedules.value.find((s) => s.id === target.id)
       if (fresh) {
         takeOverTarget.value = snapshotOf(fresh)
