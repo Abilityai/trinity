@@ -55,7 +55,10 @@
         </div>
 
         <template v-else>
-          <p class="mt-1 text-sm text-gray-600 dark:text-gray-300 tabular-nums" data-testid="terms-version">
+          <!-- ent#1172 AC 4: version label is a platform detail; share-tier
+               members (role=user) see the terms text without it. The version
+               still records in the acceptance row on submit. -->
+          <p v-if="!isUserRole" class="mt-1 text-sm text-gray-600 dark:text-gray-300 tabular-nums" data-testid="terms-version">
             Version {{ terms.version }}
           </p>
           <p
@@ -129,6 +132,9 @@ const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
 const store = useTermsStore()
+
+// ent#1172 AC 4: suppress the version label for share-tier (role=user) viewers.
+const isUserRole = computed(() => authStore.user?.role === 'user')
 
 const agreed = ref(false)
 const accepting = ref(false)
