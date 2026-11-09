@@ -400,6 +400,34 @@ def test_the_snapshot_holds_what_the_door_authorized(people, lc, monkeypatch):
     asyncio.run(scenario())
 
 
+def test_a_change_after_the_start_but_before_forwarding_still_ends_the_session(people, lc, monkeypatch):
+    """A close that lands while the door reports the start (after go_live,
+    before the forwarders run) finds no forwarder to cancel: the door must
+    then not start them, and the session ends as any access close does."""
+    docker = _Docker()
+    decode = _wire_agent_door(monkeypatch, docker)
+
+    class _ClosedWhileStarting(_Browser):
+        async def send_text(self, text):
+            await super().send_text(text)
+            if json.loads(text).get("type") == "auth_success":
+                _run_sql("UPDATE users SET role = 'operator' WHERE username = :u", u=ALICE)
+                lc.notify_account_changed(ALICE)
+                await _settle(lc.registry)
+
+    async def scenario():
+        browser = _ClosedWhileStarting()
+        manager, task = _start_agent_terminal(browser, decode)
+        await _finish(task)
+        assert browser.closed == (4003, "Access changed")
+        assert docker.peer_closed()
+        assert manager._active_sessions == {}
+        assert lc.registry.count() == 0
+
+    asyncio.run(scenario())
+    assert len(docker.ended) == 1
+
+
 def test_a_failed_end_of_shell_is_logged_and_the_session_still_ends(people, lc, monkeypatch, caplog):
     docker = _Docker(end_result={"exit_code": 1, "output": "still running: 42", "timed_out": False})
     decode = _wire_agent_door(monkeypatch, docker)
@@ -449,6 +477,35 @@ def test_the_system_agent_terminal_closes_when_the_account_changes(people, lc, m
     assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
     assert len(docker.ended) == 1
     assert docker.ended[0]["command"][-1] == docker.marker()
+
+
+def test_an_account_with_no_email_keeps_its_terminal_across_a_recheck(people, lc, monkeypatch):
+    """The token read returns ``email: None`` for an account with no email
+    (as the built-in admin is provisioned). Its snapshot must equal the
+    re-check's view of the same unchanged row, or the terminal would close at
+    every re-check."""
+    docker = _Docker()
+    _wire_system_door(monkeypatch, docker)
+    _run_sql("UPDATE users SET email = NULL WHERE username = :u", u=ADMIN)
+    monkeypatch.setitem(system_agent.system_agent_terminal.__globals__, "decode_token",
+                        lambda _t: {"sub": ADMIN, "email": None, "role": "admin"})
+
+    async def scenario():
+        browser = _Browser()
+        task = asyncio.ensure_future(system_agent.system_agent_terminal(browser, mode="bash"))
+        await _until(browser.started, "the session to start")
+        await lc.registry.revalidate()
+        lc.notify_account_changed(ADMIN)
+        await _settle(lc.registry)
+        await asyncio.sleep(0.05)
+        assert not task.done()
+        assert browser.closed is None
+        await browser.inbox.put({"type": "websocket.disconnect"})
+        docker.peer.close()
+        await _finish(task)
+
+    asyncio.run(scenario())
+    assert docker.ended == []
 
 
 def test_a_change_while_the_system_agent_shell_starts_refuses_the_session(people, lc, monkeypatch):
