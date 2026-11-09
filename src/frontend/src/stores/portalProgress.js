@@ -7,7 +7,7 @@
  * whether the member opens or refreshes — no skeleton flash on a cache hit.
  */
 import { defineStore } from 'pinia'
-import api from '@/utils/api'
+import api from '../api'
 
 export const usePortalProgressStore = defineStore('portalProgress', {
   state: () => ({

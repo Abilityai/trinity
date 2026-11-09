@@ -41,6 +41,29 @@ def _init_schema(conn):
 # import the module under test
 # ---------------------------------------------------------------------------
 
+# Modules this test registers in sys.modules — restored after each test so the
+# path-loaded copy never leaks into other test files.
+_STUBBED_MODULE_NAMES = [
+    "enterprise.backend.member_agents.progress",
+]
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    """Snapshot sys.modules before each test and restore after."""
+    import sys
+
+    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
+
+
 def _import_progress():
     """Import the enterprise progress module via its path.
     Returns the module, or skips the test when the module does not exist yet.
