@@ -427,6 +427,19 @@ describe('Take over', () => {
     w.unmount()
   })
 
+  it('a schedule whose creator account is gone is not described as a live share holder', async () => {
+    lists = [[restricted('a', {
+      runs_as_reason: { code: 'creator_missing', message: REASON }, created_by: null,
+    })]]
+    const w = mountPanel()
+    await flush()
+    const d = await open(w)
+    expect(d.text()).toMatch(/account that created this schedule no longer exists/)
+    expect(d.text()).not.toMatch(/a person the agent is shared with/)
+    expect(d.text()).not.toMatch(/can no longer edit or delete it/)
+    w.unmount()
+  })
+
   it('initial focus is not on the Take over button', async () => {
     lists = [[restricted('a')]]
     const w = mountPanel()

@@ -21,7 +21,7 @@
           Take over “{{ schedule.name }}”
         </h3>
         <p class="mt-2 text-[14px] text-gray-600 dark:text-gray-300">
-          {{ creatorPhrase }} created this schedule. Its runs have their access as a person the agent is shared with: no shell commands and no tools the owner added. After you take it over, every run has your access. Review what it runs first.
+          {{ introText }} After you take it over, every run has your access. Review what it runs first.
         </p>
       </div>
 
@@ -84,7 +84,7 @@
           <p v-else class="text-[14px] text-gray-900 dark:text-gray-100">{{ webhookText }}</p>
         </section>
 
-        <p class="text-[12.5px] text-gray-600 dark:text-gray-300">
+        <p v-if="!creatorGone" class="text-[12.5px] text-gray-600 dark:text-gray-300">
           {{ creatorPhrase }} can no longer edit or delete it, or see its scheduled runs.
         </p>
       </div>
@@ -137,6 +137,11 @@ const delivery = ref('clear')
 watch(() => [props.schedule?.id, props.schedule?.updated_at, props.modelValue], () => { delivery.value = 'clear' })
 
 const creatorPhrase = computed(() => props.schedule?.created_by || 'Its creator')
+// `creator_missing`: no account is left to describe, or to lose anything.
+const creatorGone = computed(() => props.schedule?.runs_as_reason?.code === 'creator_missing')
+const introText = computed(() => (creatorGone.value
+  ? "The account that created this schedule no longer exists, so its runs have a shared person's access: no shell commands and no tools the owner added."
+  : `${creatorPhrase.value} created this schedule. Its runs have their access as a person the agent is shared with: no shell commands and no tools the owner added.`))
 const deliveryKind = computed(() => deliveryDecision(props.schedule, props.viewerEmail))
 const toolsText = computed(() => {
   const tools = props.schedule?.allowed_tools
