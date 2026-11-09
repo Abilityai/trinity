@@ -26,6 +26,7 @@ import types
 import uuid
 from pathlib import Path
 
+import httpx
 import pytest
 
 pytestmark = pytest.mark.unit
@@ -92,8 +93,10 @@ class Backend:
         self.bodies = []
 
     async def post(self, body):
-        # What would go on the wire: the encoder's own output, not our dict.
-        self.bodies.append(json.loads(json.dumps(body)))
+        # What would go on the wire: httpx's own encoder (strict UTF-8), not our dict.
+        self.bodies.append(
+            json.loads(httpx.Request("POST", "http://backend:8000", json=body).content)
+        )
         answer = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
         if isinstance(answer, Exception):
             raise answer
@@ -252,6 +255,44 @@ def test_a_line_that_does_not_parse_is_counted_as_dropped(spool):
 
 
 # ---- delivery latency -------------------------------------------------------------------------
+
+
+def test_a_lone_surrogate_in_a_field_never_stalls_the_spool(spool):
+    """A hook input can carry an escaped lone surrogate (a model-written
+    `file_path`). It survives the spool's json round trip, but httpx encodes the
+    body as strict UTF-8, so the POST raised before it was sent, on every
+    attempt: that record and every one after it were never delivered, and the
+    keepalives stopped with them. Text gets U+FFFD and an id holding one is
+    dropped, the platform's own rule."""
+    poison = record(
+        hook="file_guardrail",
+        code="protected_path",
+        tool="Write",
+        path="/home/developer/\udcff.env",
+        session_id="sess-\udcff",
+    )
+    good = record()
+    append(spool, poison, good)
+    sent = []
+
+    def handler(request):
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"accepted": 1, "duplicates": 0, "rejected": 0})
+
+    async def go():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+
+            async def post(body):
+                response = await client.post("http://backend:8000/ingest", json=body)
+                return response.status_code, response.headers.get("Retry-After")
+
+            await drive(ge.Forwarder(post, runtime="claude-code", rand=lambda: 1.0), 0.0, 5.0)
+
+    run(go())
+    events = [e for b in sent for e in b["events"]]
+    assert [e["event_id"] for e in events] == [poison["event_id"], good["event_id"]]
+    assert events[0]["path"] == "/home/developer/\ufffd.env"
+    assert events[0]["session_id"] is None
 
 
 def test_an_append_is_delivered_within_two_seconds(spool):

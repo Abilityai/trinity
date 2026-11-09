@@ -30,6 +30,7 @@ import logging
 import math
 import os
 import random
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
@@ -78,6 +79,11 @@ _ENUM_FIELDS = {"kind": 64, "hook": 64, "code": 64, "verb": 32, "tier": 32, "tur
 _TEXT_FIELDS = {"tool": 128, "rule": 200, "path": 512}
 _PATTERNS_MAX = 16
 _PATTERN_NAME_MAX = 64
+# A lone surrogate survives the spool's json round trip (a hook input can carry
+# one escaped) but not httpx's strict UTF-8 encoding of the body, so one would
+# fail every POST of its batch. Same rule as the platform: U+FFFD in text, and
+# an id holding one is dropped (the id check below sees the change).
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
 
 Post = Callable[[Dict[str, Any]], Awaitable[Tuple[int, Optional[str]]]]
 
@@ -98,7 +104,7 @@ def _iso_z(ts: Any) -> Optional[str]:
 def _clean(value: Any) -> Optional[str]:
     if not isinstance(value, str):
         return None
-    return sanitize_text(value)
+    return sanitize_text(_LONE_SURROGATE.sub("\ufffd", value))
 
 
 def project(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -132,7 +138,7 @@ def project(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     patterns = record.get("patterns")
     if isinstance(patterns, list):
         out["patterns"] = [
-            sanitize_text(p)[:_PATTERN_NAME_MAX] for p in patterns[:_PATTERNS_MAX] if isinstance(p, str)
+            _clean(p)[:_PATTERN_NAME_MAX] for p in patterns[:_PATTERNS_MAX] if isinstance(p, str)
         ]
     return out
 
