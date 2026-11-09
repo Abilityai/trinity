@@ -242,8 +242,12 @@ def test_chain_depth_is_bounded_and_says_so(rooms_db, allow_all, fake_execute, m
     _run(service.post_message(_user(), room["id"], "@agent-a begin"))
 
     assert len(calls) <= 3
-    assert any("Mention chain stopped" in m["content"]
-               for m in rdb.get_messages(room["id"]) if m["kind"] == "system")
+    # trinity#4302: the stop is a typed system row naming who was next, in
+    # plain words — the Workspace turns it into a Continue offer.
+    paused = [m for m in rdb.get_messages(room["id"]) if m["kind"] == "chain_paused"]
+    assert paused and paused[-1]["sender_kind"] == "system"
+    assert "waiting for a person" in paused[-1]["content"]
+    assert paused[-1]["mentions"] in (["agent-a"], ["agent-b"])
 
 
 # --- delta injection ---------------------------------------------------------

@@ -787,6 +787,23 @@ next — turn-taking is mechanical: **you are woken iff you were @mentioned**.
   With two or more people present the turn prompt names them and what each may decide, and an
   `@username` of a seated person becomes a tag through the #631 path, never a wake.
   `POST /api/rooms/{id}/leave` is people-only (no MCP tool: an agent is removed, never leaves).
+- **A paused chain says so, and a person continues it (trinity#4302).** At
+  `ROOM_MAX_CHAIN_DEPTH` `_after_landing` writes a typed system row
+  (`_post_pause_line`: `kind = "chain_paused"`, `mentions` = who was next, facts-only
+  content) instead of waking. `get_room` derives `paused_chain` `{seq, next}` at read time
+  (`_paused_chain`: newest pause → `db.offer_stands` → still-seated agents), for every
+  reader. `POST /api/rooms/{id}/continue` → `service.continue_chain` (membership → person →
+  budgets → offer → seated → reachable) consumes the offer with a `chain_continued` receipt
+  that `db.append_continue_receipt` inserts `INSERT … SELECT … WHERE NOT EXISTS` under the
+  same moved-on predicate (`_MOVED_ON_SQL`, one fragment, two readers) inside the
+  seq-allocation transaction, then wakes through `_wake_targets` — the per-target loop
+  extracted from `_after_landing`, so a Continue and a landed message wake one way, here at
+  depth 1. The idempotency claim has its own scope `room-continue:{room_id}` and is never
+  the once-per-stop guard. **Readers key a system row on `sender_kind`, not `kind`**: `kind`
+  now types some system rows, so a `kind === 'system'` test misreads them as messages
+  (`PortalRoom.vue`'s transcript and `isMine`, as `portalInbox.js` already did). The
+  Workspace control is `portal/PortalRoomContinue.vue`, rendered once after the transcript
+  from the payload. No MCP tool: Continue is a person's action.
 - **A gated wake is recorded, not re-run (trinity#3402).** A wake the skill gate held — or
   refused for a reason the same request would get again (`STANDING_REFUSALS`) — records in
   `room_gate_holds` each shown post whose own text invokes a skill gated on that agent, plus

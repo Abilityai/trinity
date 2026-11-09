@@ -8735,6 +8735,20 @@
         "workspace"
       ],
       "description": "The task-field limits the client checks (title 200, objective / definition of done 4000 code points) are pinned to the server pair from the public side, so a drift goes red in public CI: validateTaskFields executed at and one past each boundary, emoji counted as one; the backend constants are compared too when that module is checked out."
+    },
+    {
+      "file": "unit/test_4302_room_chain_continue.py",
+      "feature": "trinity#4302",
+      "added": "2026-11-07",
+      "categories": [
+        "backend",
+        "rooms",
+        "idempotency",
+        "auth",
+        "api",
+        "unit"
+      ],
+      "description": "trinity#4302: a mention chain stopped at ROOM_MAX_CHAIN_DEPTH writes a typed `chain_paused` system row (mentions = who was next; plain words, no UI verb) and the room payload carries `paused_chain` {seq, next} while the offer stands (survives bookkeeping lines; ends on a conversational row, a later pause/continue row, a closed room, or every named agent having left; a collaborator seated above the row still gets it). POST /api/rooms/{id}/continue through the real router, service, db and idempotency layers over a temp SQLite DB: wakes `next` at depth 1 (a fresh count that may pause again), posts a `chain_continued` receipt that spends no message budget, hands the woken agent what it was owed; a seated collaborator, a person's user key and a Workspace client may continue, an agent key and the system key get 403 not_a_person, a non-member the uniform 404 with no key claimed, an unreachable `next` a 403 with nothing consumed, a departed `next` 409 no_one_to_wake; a closed room / a room at its message budget 410 with stop_reason and the budget named. Once per stop: a double click with an Idempotency-Key is 409 in-flight then a replay under scope room-continue:{room_id}; two workers without a key wake once (the second gets 409 room_moved_on); a stale offer_stands read is not the guard (the receipt insert is); two simultaneous receipt inserts land exactly one; a repeat after a restart (key rows gone) is 409 room_moved_on."
     }
   ]
 }
