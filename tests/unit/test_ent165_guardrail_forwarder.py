@@ -295,6 +295,18 @@ def test_a_lone_surrogate_in_a_field_never_stalls_the_spool(spool):
     assert events[0]["session_id"] is None
 
 
+def test_a_timestamp_out_of_float_range_is_counted_not_retried_forever(spool):
+    """A JSON integer too large for a float raised OverflowError in the
+    projection, outside every guard, so the step failed on the same line forever."""
+    bad = record(ts=10**400)
+    good = record()
+    append(spool, bad, good)
+    backend = Backend()
+    run(drive(make(backend), 0.0, 5.0))
+    assert backend.event_ids() == [good["event_id"]]
+    assert sum(b["dropped"] for b in backend.bodies) == 1
+
+
 def test_an_append_is_delivered_within_two_seconds(spool):
     backend = Backend()
     fwd = make(backend)

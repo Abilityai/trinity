@@ -92,9 +92,12 @@ Post = Callable[[Dict[str, Any]], Awaitable[Tuple[int, Optional[str]]]]
 # Projection
 # ---------------------------------------------------------------------------
 def _iso_z(ts: Any) -> Optional[str]:
-    if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not math.isfinite(ts):
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
         return None
     try:
+        # isfinite itself raises OverflowError on an int too large for a float.
+        if not math.isfinite(ts):
+            return None
         moment = datetime.fromtimestamp(ts, tz=timezone.utc)
     except (OverflowError, OSError, ValueError):
         return None
