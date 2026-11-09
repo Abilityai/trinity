@@ -83,6 +83,8 @@ _MEMBER_HELD_BACK_NOTE = (
 _MEMBER_FILLED_NOTE = "the hub member holds the primary seat and sees this agent"
 _MEMBER_DIFFERS_NOTE = ("another person holds the primary seat; apply never moves it. Move "
                         "the primary in the agent's Assignments panel from a signed-in session")
+_MEMBER_UNENTITLED_NOTE = ("the module that seats the hub member is not entitled on this "
+                           "instance; enable the {} entitlement, then re-run apply")
 _MEMBER_NOT_RECORDED_NOTE = ("no hub member is recorded on this instance; an admin in a "
                              "signed-in session records one (PUT /api/enterprise/hub/member), "
                              "then re-run apply")
@@ -304,8 +306,12 @@ def _plan_member_seat(mp, entry, status, writer, apply_change, make_op) -> None:
     reports = {"filled": ("seat_filled", _MEMBER_FILLED_NOTE),
                "differs": ("member_seat_differs", _MEMBER_DIFFERS_NOTE),
                "no_member": ("member_not_recorded", _MEMBER_NOT_RECORDED_NOTE)}
+    missing, _, entitlement = (status or "").partition(":")
     if status in reports:
         code, note = reports[status]
+    elif missing == assignment_provider.ENTITLEMENT_MISSING:
+        code = assignment_provider.ENTITLEMENT_MISSING
+        note = _MEMBER_UNENTITLED_NOTE.format(f"`{entitlement}`" if entitlement else "module's")
     elif status not in ("vacant", "partial"):
         code, note = UNOBSERVED_CODE, _NO_ANSWER_NOTE
     elif not writer:
@@ -378,6 +384,26 @@ async def run_member(op, actor, out, attempt, *, request=None) -> None:
     if await attempt(name, short, PERSON_STEP, write, key=role) and (
             result.get("changed") or result.get("shared")):
         await _audit_member_seat(name, role, result, actor, request)
+        if result.get("shared"):
+            await _broadcast_shared(name)
+
+
+async def _broadcast_shared(name) -> None:
+    """The share route's `agent_shared` event, through its manager, so open
+    sharing panels and every worker's cached roster refresh (ent#467).
+    Identifiers only (#918): the module resolved who, and no address crosses
+    back to the core."""
+    import json
+
+    from routers import sharing
+    if sharing.manager is None:
+        return
+    try:
+        await sharing.manager.broadcast(json.dumps({"event": "agent_shared",
+                                                    "data": {"name": name}}))
+    except Exception:  # noqa: BLE001 — the write landed; a lost event is logged
+        logging.getLogger(__name__).warning(
+            "member seat on %s landed but agent_shared was not broadcast", name, exc_info=True)
 
 
 async def _audit_member_seat(name, role, result, actor, request) -> None:

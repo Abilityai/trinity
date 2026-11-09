@@ -230,9 +230,10 @@ class TestReservedSettings:
 class _Member:
     """A provider with the agent-seat hooks AND the two member-seat hooks."""
 
-    def __init__(self, state="vacant", refuse=None):
+    def __init__(self, state="vacant", refuse=None, extra=None):
         self.state = state
         self.refuse = refuse
+        self.extra = extra or {}
         self.calls = []
         self.held = {}
 
@@ -254,7 +255,7 @@ class _Member:
 
     def member_seat_status(self, agent_name, role_id, kind):
         self.calls.append(("member_seat_status", agent_name, role_id, kind))
-        return None if self.state is None else {"state": self.state}
+        return None if self.state is None else {"state": self.state, **self.extra}
 
     def seat_member(self, agent_name, role_id, kind, created_by):
         self.calls.append(("seat_member", agent_name, role_id, kind, created_by))
@@ -424,6 +425,95 @@ class TestPlan:
         assert shares[0]["actor_user"].username == W.ADMIN
         assert shares[0]["details"]["via"] == "apply_member_seat"
         assert "@" not in repr(shares[0]["details"])
+
+    @pytest.mark.parametrize("extra,named", [
+        ({"entitlement": "seat-module"}, "`seat-module` entitlement"),
+        ({}, "module's entitlement"),
+        ({"entitlement": "not an id!"}, "module's entitlement"),
+    ], ids=["named", "unnamed", "malformed_name"])
+    def test_an_unentitled_module_is_named_not_unobserved(self, world, extra, named):
+        """Plan T7 / gap 5: the dry run says which entitlement is missing —
+        the provider's own name for it; OSS names none."""
+        p = _Member(state="entitlement_missing", extra=extra)
+        assignment_provider.register_provider(p)
+        world.seed_agent(LEAD, owner=W.ADMIN)
+        res = _apply(world, _manifest([MEMBER]), dry_run=True, user=_key(world))
+        m = _m(res)
+        assert _person_changes(m) == [("report", "entitlement_missing")]
+        note = next(c.note for c in m.changes if c.field == "person_seats")
+        assert named in note
+        assert res.blockers == []
+        real = _apply(world, _manifest([MEMBER]), dry_run=False, user=_key(world))
+        assert _writes(p) == [] and real.failed == []
+
+    def test_a_landed_share_broadcasts_agent_shared_with_identifiers_only(
+            self, world, monkeypatch):
+        """Plan E5 / gap 2: the share route's own event, so open panels and
+        every worker's roster refresh; no address on the unfiltered /ws."""
+        import json
+
+        from routers import sharing
+        sent = []
+
+        class _Mgr:
+            async def broadcast(self, msg):
+                sent.append(json.loads(msg))
+        monkeypatch.setattr(sharing, "manager", _Mgr())
+        assignment_provider.register_provider(_Member())
+        world.seed_agent(LEAD, owner=W.ADMIN)
+        res = _apply(world, _manifest([MEMBER]), dry_run=False, user=_key(world))
+        assert res.status == "applied", res.failed
+        assert [e for e in sent if e.get("event") == "agent_shared"] == [
+            {"event": "agent_shared", "data": {"name": LEAD}}]
+
+    def test_a_seat_without_a_new_share_broadcasts_nothing(self, world, monkeypatch):
+        import json
+
+        from routers import sharing
+        sent = []
+
+        class _Mgr:
+            async def broadcast(self, msg):
+                sent.append(json.loads(msg))
+
+        class _SeatOnly(_Member):
+            def seat_member(self, agent_name, role_id, kind, created_by):
+                self.calls.append(("seat_member", agent_name, role_id, kind, created_by))
+                return {"changed": True, "shared": False}
+        monkeypatch.setattr(sharing, "manager", _Mgr())
+        assignment_provider.register_provider(_SeatOnly(state="partial"))
+        world.seed_agent(LEAD, owner=W.ADMIN)
+        _apply(world, _manifest([MEMBER]), dry_run=False, user=_key(world))
+        assert [e for e in sent if e.get("event") == "agent_shared"] == []
+
+
+class TestDeployIgnoresHolderMember:
+    """Plan E6 / gap 4 (review I3): create mode (`deploy_system`, which an
+    agent key reaches through `agents.manage`) never reads or writes the
+    `holder: member` seat — only apply does. The manifest declares a `seat:`
+    too, so create mode's seat phase runs and is the code under test."""
+
+    @pytest.fixture(autouse=True)
+    def _started(self, monkeypatch):
+        async def started(names):
+            return {n: "started" for n in names}
+        monkeypatch.setattr(system_service, "start_all_agents", started)
+
+    @pytest.mark.parametrize("who", ["admin_session", "admin_user_key", "agent_key"])
+    def test_deploy_never_seats_the_member(self, world, who):
+        user = {"admin_session": lambda: world.user(W.ADMIN),
+                "admin_user_key": lambda: _key(world),
+                "agent_key": lambda: _key(world, scope="agent",
+                                          agent_name="orchestrator")}[who]()
+        p = _Member()
+        assignment_provider.register_provider(p)
+        for dry_run in (True, False):
+            res = asyncio.run(system_service.deploy_manifest(
+                _manifest([MEMBER], seat="lead-role"), user, None, dry_run=dry_run,
+                create_agent_fn=world.create))
+            assert res.status == ("valid" if dry_run else "deployed"), (res.failed, res.warnings)
+        assert [c.name for c in world.create_calls] == [LEAD]
+        assert [c for c in p.calls if c[0] in ("seat_member", "member_seat_status")] == []
 
 
 class TestRegressions:

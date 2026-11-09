@@ -160,8 +160,10 @@ class AssignmentProvider(Protocol):
     # apply will create it). ``{"state": s}``, ``s`` one of
     # :data:`MEMBER_SEAT_STATES`: ``filled`` (seated AND shared), ``partial``
     # (one of the two), ``vacant``, ``differs`` (another person holds the
-    # primary) or ``no_member`` (none recorded). Takes no person and returns
-    # none. Read through ``getattr`` by :func:`resolve_member_seat`.
+    # primary), ``no_member`` (none recorded) or ``entitlement_missing`` (the
+    # module is not entitled; the answer's ``entitlement`` names which). Takes
+    # no person and returns none. Read through ``getattr`` by
+    # :func:`resolve_member_seat`.
     # def member_seat_status(self, agent_name: str, role_id: str, kind: str) -> Optional[dict]: ...
 
     # OPTIONAL (trinity-enterprise#1174): seat the RECORDED member on
@@ -589,7 +591,11 @@ def resolve_person_seat(agent_name: str, role_id: str, kind: str) -> str:
 # --- trinity-enterprise#1174: the hub member's seat -------------------------
 
 #: What :func:`resolve_member_seat` may answer from a provider.
-MEMBER_SEAT_STATES = ("filled", "partial", "vacant", "differs", "no_member")
+MEMBER_SEAT_STATES = ("filled", "partial", "vacant", "differs", "no_member",
+                      "entitlement_missing")
+#: The provider's own name for what is missing rides on this state as
+#: ``entitlement_missing:<name>`` — OSS names no module's entitlement.
+ENTITLEMENT_MISSING = "entitlement_missing"
 
 
 def member_seat_writer_installed() -> bool:
@@ -603,7 +609,9 @@ def member_seat_writer_installed() -> bool:
 def resolve_member_seat(agent_name: str, role_id: str, kind: str) -> str:
     """One of :data:`MEMBER_SEAT_STATES`, ``unobserved`` (no hook, or the hook
     answers ``None``) or ``error`` (a raise or a malformed answer — a READ
-    failure, never unobserved). Never a person."""
+    failure, never unobserved). ``entitlement_missing`` carries the provider's
+    ``entitlement`` as ``entitlement_missing:<name>`` when it is id-shaped.
+    Never a person."""
     provider = _provider
     fn = getattr(provider, "member_seat_status", None) if provider is not None else None
     if fn is None:
@@ -620,6 +628,10 @@ def resolve_member_seat(agent_name: str, role_id: str, kind: str) -> str:
         logger.warning("[assignment_provider] provider.member_seat_status returned a "
                        "malformed answer for %s", agent_name)
         return "error"
+    entitlement = answer.get("entitlement")
+    if (answer["state"] == ENTITLEMENT_MISSING and isinstance(entitlement, str)
+            and ROLE_ID_RE.fullmatch(entitlement)):
+        return f"{ENTITLEMENT_MISSING}:{entitlement}"
     return answer["state"]
 
 
