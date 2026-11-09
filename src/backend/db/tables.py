@@ -636,6 +636,8 @@ enterprise_room_messages = Table(
     Column("seq", Integer),
     Column("sender_kind", Text),
     Column("sender_identity", Text),
+    # What the row is: message | system | chain_paused | chain_continued (#4302).
+    # `sender_kind` says who wrote it; readers key on that, not on `kind`.
     Column("kind", Text),
     Column("mentions", Text),
     Column("content", Text),
