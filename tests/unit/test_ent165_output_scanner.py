@@ -53,11 +53,11 @@ _GITHUB = "ghp_" + "b" * 36
 _GOOGLE = "AIza" + "C" * 35
 # The left boundary every model-facing shape gets: not after a letter, digit
 # or `-`, or after an escape that ends in one (a literal `\n`/`\r`/`\t`, a
-# `%XX` URL escape, an ANSI CSI sequence, raw or written as an escape); `_`
-# counts as a separator (fix round R2). The CSI is consumed as `lead` and
+# `%XX` URL escape, an ANSI escape sequence, raw or written as an escape); `_`
+# counts as a separator. The escape is consumed as `lead` and
 # written back unchanged.
 _BOUNDARY = (r"(?:(?<![A-Za-z0-9-])|(?<=\\[nrt])|(?<=%[0-9A-Fa-f]{2})"
-             r"|(?P<lead>(?:\x1b|\\(?:u001[bB]|x1[bB]|033|e))\[[0-?]*[ -/]*[@-~]))")
+             r"|(?P<lead>(?:\x1b|\\(?:u001[bB]|x1[bB]|033|e))(?:\[[0-?]*[ -/]*[@-~]|[ -/]*[0-~])))")
 
 
 def _load(rel: str, name: str):
@@ -192,15 +192,17 @@ BENIGN = [
     "?sig=Xq3vNw8pLr2TzYb6KdHj0MfA5sUeCo1gWi7RnQ4lVyE",
     "The redaction placeholder looks like [REDACTED:sk]; logs use ***REDACTED***.",
     "AWS_REGION=eu-west-1 AKIA_ROTATION_DAYS=90",
-    # Fix round R2: the new left contexts in front of the same prefix-only words.
+    # The escape and `_` left contexts in front of the same prefix-only words.
     "\x1b[32mpod/task-runner-deployment-7d9f8c6b5-x2z9q\x1b[0m   1/1   Running",
     "\x1b[01;31m\x1b[Kxoxb-test\x1b[m\x1b[K and KEY_xoxb-your-token-here",
     '{"env": "A=1\\nOPENAI_API_KEY=sk-your-openai-key\\tKEY_sk-your-openai-key"}',
     "https://x.example/cb?next%3Dtask-runner-deployment-7d9f8c6b5-x2z9q&k%3Dsk-your-openai-key",
-    # Fix round R1: identifiers that start with the Trinity key prefix are code.
+    # Identifiers that start with the Trinity key prefix are code.
     "def test_trinity_mcp_injection_writes_the_opt_out(tmp_path):",
     "def test_trinity_mcp_key_is_injected_into_the_agent_environment_at_start(tmp_path):",
+    "def test_trinity_mcp_API_key_is_injected_into_the_agent_environment_at_start(tmp_path):",
 ]
+_MCP_IDENTIFIERS = BENIGN[-3:]
 
 
 @pytest.mark.parametrize("text", BENIGN)
@@ -614,14 +616,15 @@ def test_the_build_smoke_fails_a_log_only_scanner(tmp_path):
     assert failures, "a scanner that hides nothing passed the smoke"
 
 
-# --- fix round R1: a Trinity MCP key is recognised whole ---------------------
+# --- a Trinity MCP key is recognised whole ------------------------------------
 # Keys are `trinity_mcp_` + `secrets.token_urlsafe(32)`: 43 base64url
 # characters, so about 40% hold a `-` or `_`. The old body `[a-zA-Z0-9]{16,}`
 # missed a key with one in its first 16 characters and stopped at the first one
-# after that, leaving the key's tail in clear (batch verify F-1).
+# after that, leaving the key's tail in clear (an agent's own key reached the
+# model on a read of its MCP config).
 
 _MCP_MINT = "src/backend/db/mcp_keys.py"
-_MCP_SOURCE = r'trinity_mcp_(?:(?=[a-z0-9_-]{0,42}[A-Z])[A-Za-z0-9_-]{43}|[a-zA-Z0-9]{16,})'
+_MCP_SOURCE = r'trinity_mcp_(?:[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])|[a-zA-Z0-9]{16,})'
 
 
 def _minted_mcp_keys(count=2000, seed=165):
@@ -644,6 +647,33 @@ def test_the_keys_under_test_are_minted_like_the_backend_mints_them():
     assert len(missed) > 300 and len(cut) > 300
 
 
+# Valid mint outputs (each body is the base64url of exactly 32 bytes) with no
+# uppercase letter, and an older alnum form longer than 43 characters: a rule
+# that keys on character classes or stops at 43 leaves these in clear.
+_MCP_EDGE_KEYS = [
+    "trinity_mcp_" + "a_" * 21 + "g",
+    "trinity_mcp_" + "a" * 20 + "_" + "b" * 21 + "g",
+    "trinity_mcp_" + "-" * 42 + "w",
+    "trinity_mcp_" + "A" * 64,
+]
+
+
+def test_the_edge_keys_are_what_they_claim():
+    for key in _MCP_EDGE_KEYS[:3]:
+        body = key[len("trinity_mcp_"):]
+        assert base64.urlsafe_b64encode(base64.urlsafe_b64decode(body + "=")).rstrip(b"=").decode() == body
+        assert len(base64.urlsafe_b64decode(body + "=")) == 32
+
+
+@pytest.mark.parametrize("key", _MCP_EDGE_KEYS, ids=["no-upper", "no-upper-underscore", "dashes", "alnum-64"])
+def test_an_mcp_key_of_any_characters_or_the_older_length_is_redacted_whole(tmp_path, key):
+    rewritten = _rewrite(_scan(tmp_path, _bash(stdout=f'"Bearer {key}"')))
+    assert rewritten["stdout"] == '"Bearer [REDACTED:trinity_mcp]"'
+    for rel in (_BACKEND_CS, _AGENT_CS):
+        cs = _load(rel, "_cs165_r1_edge_" + rel.replace("/", "_").replace(".", "_"))
+        assert cs.sanitize_text(f"key {key} end") == f"key {cs.REDACTION_PLACEHOLDER} end", rel
+
+
 def test_every_minted_mcp_key_is_redacted_whole_by_the_scanner(tmp_path):
     keys = _minted_mcp_keys()
     rewritten = _rewrite(_scan(tmp_path, _bash(stdout="\n".join(f"key {k} end" for k in keys))))
@@ -651,7 +681,7 @@ def test_every_minted_mcp_key_is_redacted_whole_by_the_scanner(tmp_path):
 
 
 def test_the_agent_mcp_config_read_back_hides_its_own_key(tmp_path):
-    """F-1 as it was found: `cat ~/.mcp.json` printed the agent's own key."""
+    """The case as it was found: `cat ~/.mcp.json` printed the agent's own key."""
     key = "trinity_mcp_Df81fwt_" + "Q" * 35
     config = json.dumps({"mcpServers": {"trinity": {"type": "http", "url": "http://mcp-server:8080/mcp",
                                                      "headers": {"Authorization": f"Bearer {key}"}}}})
@@ -685,12 +715,12 @@ def test_a_key_that_holds_another_shape_is_redacted_whole_from_logs(rel):
 @pytest.mark.parametrize("rel", [_BACKEND_CS, _AGENT_CS])
 def test_identifiers_that_start_with_the_mcp_prefix_stay_in_logs(rel):
     cs = _load(rel, "_cs165_r1_ident_" + rel.replace("/", "_").replace(".", "_"))
-    for line in BENIGN[-2:]:
+    for line in _MCP_IDENTIFIERS:
         assert cs.sanitize_text(line) == line, line
 
 
-# --- fix round R2: a key after an escape or an underscore is still a key -------
-# These six reached the model unchanged (review F3/FU-1): the character before
+# --- a key after an escape or an underscore is still a key --------------------
+# These reached the model unchanged: the character before
 # the key was the last letter of an escape, or `_`.
 
 _CSI_GREP = "\x1b[01;31m\x1b[K"
@@ -709,8 +739,10 @@ _CSI_END = "\x1b[m\x1b[K"
     ("prefix_" + _GITHUB, "prefix_[REDACTED:github]"),
     ('"line": "\\u001b[31m' + _GOOGLE + '\\u001b[0m"', '"line": "\\u001b[31m[REDACTED:google]\\u001b[0m"'),
     ("\x1b[1;32m" + "trinity_mcp_Df81fwt_" + "Q" * 35, "\x1b[1;32m[REDACTED:trinity_mcp]"),
+    ("\x1b(B" + _GITHUB + "\x1b(B\x1b[m", "\x1b(B[REDACTED:github]\x1b(B\x1b[m"),
+    ("\x1b7" + _SECRET + "\x1b8", "\x1b7[REDACTED:sk]\x1b8"),
 ], ids=["grep-color", "rg-color", "json-newline", "json-tab", "url-eq", "url-space",
-        "underscore-key", "underscore-ghp", "json-escaped-csi", "csi-mcp"])
+        "underscore-key", "underscore-ghp", "json-escaped-csi", "csi-mcp", "charset-escape", "cursor-save"])
 def test_a_key_after_an_escape_or_an_underscore_is_redacted_and_the_escape_kept(tmp_path, before, after):
     rewritten = _rewrite(_scan(tmp_path, _bash(stdout=before, stderr=before)))
     assert rewritten["stdout"] == after and rewritten["stderr"] == after

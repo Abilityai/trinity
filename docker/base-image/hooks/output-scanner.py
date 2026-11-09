@@ -29,7 +29,7 @@ The shapes are `credential_patterns` in the baseline: the known-prefix
 partition of `utils/credential_sanitizer.SECRET_VALUE_PATTERNS` (D4), copied
 because a `-I -S` hook cannot import it, behind the one `credential_boundary`
 (not after a letter, digit or `-`, except where that character ends an escape:
-`\\n`/`\\t`, `%XX`, an ANSI CSI sequence; `_` is a separator). Events go to
+`\\n`/`\\t`, `%XX`, an ANSI escape; `_` is a separator). Events go to
 the guardrails log with shape names only, never a value.
 """
 import json
@@ -132,7 +132,7 @@ def _shape_name(match, names):
 
 def _redact_text(text, shapes, hits):
     """Each key replaced by `[REDACTED:<shape>]`. A `lead` the boundary consumed
-    (an ANSI CSI sequence in front of the key) is written back unchanged."""
+    (an ANSI escape sequence in front of the key) is written back unchanged."""
     matcher, names = shapes
 
     def replace(match):

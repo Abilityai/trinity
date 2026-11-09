@@ -96,11 +96,11 @@ SECRET_VALUE_PATTERNS = [
     # Trinity MCP keys (trinity-enterprise#165): `trinity_mcp_` + `token_urlsafe(32)`
     # (db/mcp_keys.py), 43 base64url characters, so `-` and `_` are part of the
     # key; the alnum-only body missed ~40% of keys or left their tail in clear.
-    # The 43-character form must hold an uppercase letter (a random key does,
-    # all but ~1 in 5e9), which keeps `trinity_mcp_<snake_case_name>` code out;
-    # the second branch is the older form. FIRST in the list, so an `sk-` that
-    # happens to sit in a key's random body cannot cut the key short.
-    r'trinity_mcp_(?:(?=[a-z0-9_-]{0,42}[A-Z])[A-Za-z0-9_-]{43}|[a-zA-Z0-9]{16,})',
+    # The 43-character form must end there (no URL-safe character follows), so a
+    # longer `trinity_mcp_<snake_case_name>` identifier is code, not a key; the
+    # second branch is the older alnum form, any length. FIRST in the list, so an
+    # `sk-` that happens to sit in a key's random body cannot cut the key short.
+    r'trinity_mcp_(?:[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])|[a-zA-Z0-9]{16,})',
     # One rule for the whole `sk-` family (#2208). Three prefix-specific patterns
     # meant every NEW variant shipped unredacted until someone noticed: the
     # generic `sk-[a-zA-Z0-9]{20,}` stops at the first hyphen, so an OpenAI
