@@ -524,10 +524,10 @@ The decisions above are right. For the ones below, the code has drifted from the
 
 | Decision | Gap today | Tracking |
 |----------|-----------|----------|
-| Three-layer backend architecture | About 680 direct `db.*()` calls under `routers/`; 15 service modules import from `routers`. | none |
-| Single Axios instance (`api.js`) | 50 frontend files import `axios` directly — about 395 bare calls against about 240 through `api.js`. | #2720 (one file) |
-| Pydantic models centralized in `models.py` | One 6,600-line file, the most-edited source file in the repository over the last three months. Centralization stands; the single-file form is the cost. | none |
-| WebSocket client with reconnect replay | Two independent app sockets (`utils/websocket.js`, `stores/network.js`), each with its own reconnect and event handling. | none |
+| Three-layer backend architecture | About 680 direct `db.*()` calls under `routers/`; 15 service modules import from `routers`. | #4418 |
+| Single Axios instance (`api.js`) | 50 frontend files import `axios` directly — about 395 bare calls against about 240 through `api.js`. | #1309 |
+| Pydantic models centralized in `models.py` | One 6,600-line file, the most-edited source file in the repository over the last three months. Centralization stands; the single-file form is the cost. | #4417 |
+| WebSocket client with reconnect replay | Two independent app sockets (`utils/websocket.js`, `stores/network.js`), each with its own reconnect and event handling. | #4421 |
 
 ---
 
@@ -600,27 +600,27 @@ See `docs/archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md` for the sprint seq
 1. **A non-blocking request path** (follows from Principle 3).
    - **Target:** no request handler holds the event loop on database, Docker or Redis I/O. Until the async driver lands, blocking calls run in a threadpool, and a lint ratchet keeps new ones out.
    - **Today:** `routers/` has about 740 `async def` functions and 42 thread offloads. The database is synchronous. `slot_service` and `capacity_manager` use the synchronous Redis client. `list_agents_endpoint` is `async def` over a synchronous Docker `containers.list`. Production and hosted run `--workers 2`, so one stalled call holds half the API.
-   - **Tracking:** none.
+   - **Tracking:** #4413.
 
 2. **One owner for an execution's terminal transition** (follows from Principle 2).
    - **Target:** a single function wins the status compare-and-set and records every obligation the winner owes — close the dispatch activity, release capacity, emit `agent.task.*`, complete the idempotency claim, wake the sync waiter. Every writer calls it, recovery sweeps and the scheduler included. A graceful backend shutdown leaves a turn the agent is still running for the result path to settle, and does not write it terminal.
    - **Today:** terminal writers are open-coded, and a writer that skips one obligation is a recurring bug class (#45, #767, #1804, #3651). Shutdown handlers write `FAILED "Execution cancelled (backend shutdown)"`.
-   - **Tracking:** #3405 (the CAS-win / dispatch-close pairing only), #3651, #429. Pull Phase 5 removes most writers; it does not by itself give the rest one owner.
+   - **Tracking:** #3405 (the CAS-win / dispatch-close pairing only), #3651, #429, #4408 (shutdown), #4409 (cleanup lease), #4410 and #4411 (scheduler). Pull Phase 5 removes most writers; it does not by itself give the rest one owner.
 
 3. **Failure is distinguishable from "nothing there"**.
    - **Target:** readers of external state return a tri-state, as `agent_container_states()` does (#2196). The backend exposes readiness per dependency — database, Redis, Docker, and each background loop's last tick. An agent server that exits takes its container down with it.
    - **Today:** `/health` returns healthy unconditionally on PostgreSQL, because its migration gate is SQLite-only. `docker_service` binds its client once at import and leaves it `None` on failure, with no reconnect. `startup.sh` backgrounds the agent server and ends in `tail -f /dev/null`, and the base image declares no `HEALTHCHECK`.
-   - **Tracking:** #4238 covers the scheduler's healthcheck only.
+   - **Tracking:** #4406 (Docker client), #4407 (backend health), #4412 (agent-server supervision); #4238 covers the scheduler's healthcheck.
 
 4. **Versioned contracts between separately shipped parts**.
    - **Target:** the agent server reports a contract version and feature set, and the backend gates on it instead of inferring an old image from response shapes. MCP-server and frontend types are generated from the backend's OpenAPI schema, with a parity check in CI.
    - **Today:** the agent server declares a static `version="2.0.0"`, and a running agent keeps its base image across a platform upgrade. The MCP client is a hand-written 4,475-line `client.ts`; neither the MCP server nor the frontend generates types from the schema.
-   - **Tracking:** #3765 (recreate the fleet on a new image) and #1029 (split `client.ts`) are adjacent; neither covers the handshake or generation.
+   - **Tracking:** #4414 (generated types); the handshake is `abilityai/trinity-enterprise#1205`. #3765 (recreate the fleet on a new image) and #1029 (split `client.ts`) are adjacent.
 
 5. **A frontend data layer** (follows from Invariants #6, #7 and #10).
    - **Target:** every request goes through `api.js` behind one resource primitive that owns caching, de-duplication, cancellation and error state. One app WebSocket with a subscriber registry, backoff, and a resync that reaches every mounted store.
    - **Today:** see the bare-`axios` and two-socket rows under "Decisions That Stand but Are Not Yet Honoured".
-   - **Tracking:** #1030 (decompose oversized views) is adjacent.
+   - **Tracking:** #1309 (calls onto `api.js`), #4421 (one socket), #4422 (polling), #4423 (AgentDetail loading); #1030 (decompose oversized views) is adjacent.
 
 ---
 
