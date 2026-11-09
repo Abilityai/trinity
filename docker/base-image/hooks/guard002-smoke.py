@@ -119,6 +119,11 @@ def _check_output_scanner(argv: list, failures: list) -> None:
     if out.get("updatedToolOutput") != {"stdout": "Error: Exit code 1\ntoken=[REDACTED:sk]",
                                         "stderr": "", "interrupted": False} or SECRET in r.stdout:
         fail("a failed call's string output was not rewritten as a Bash object", r)
+    # `grep --color=always sk-ant` puts the colour codes INSIDE the key.
+    split = {**shape, "stdout": "cfg \x1b[m\x1b[1;31msk-ant\x1b[m" + SECRET[6:] + " end"}
+    r, out = _scanner_run(argv, {**base, "tool_response": split})
+    if out.get("updatedToolOutput") != {**split, "stdout": "cfg \x1b[m\x1b[1;31m[REDACTED:sk]\x1b[m end"}:
+        fail("a key that colour codes split was not redacted whole", r)
     clean = {**shape, "stdout": "pod/task-runner-deployment-7d9f8c6b5-x2z9q Running"}
     r, _ = _scanner_run(argv, {**base, "tool_response": clean})
     if r.returncode != 0 or r.stdout.strip():

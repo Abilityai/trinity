@@ -78,6 +78,7 @@
     ".env.example"
   ],
   "credential_boundary": "(?:(?<![A-Za-z0-9-])|(?<=\\\\[nrt])|(?<=%[0-9A-Fa-f]{2})|(?P<lead>(?:\\x1b|\\\\(?:u001[bB]|x1[bB]|033|e))(?:\\[[0-?]*[ -/]*[@-~]|[ -/]*[0-~])))",
+  "credential_escape": "(?:\\x1b|\\\\(?:u001[bB]|x1[bB]|033|e))(?:\\[[0-?]*[ -/]*[@-~]|[ -/]*[0-~])",
   "credential_patterns": [
     {"name": "sk", "source": "sk-[A-Za-z0-9][A-Za-z0-9_-]{19,}", "pattern": "sk-[A-Za-z0-9][A-Za-z0-9_-]{19,}"},
     {"name": "github", "source": "ghp_[a-zA-Z0-9]{36,}", "pattern": "ghp_[a-zA-Z0-9]{36,}"},

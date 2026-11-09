@@ -780,3 +780,210 @@ def test_eight_mib_of_escapes_is_scanned_well_inside_the_hook_timeout(tmp_path, 
     elapsed = time.monotonic() - started
     assert _rewrite(result)["stdout"].endswith(_CSI_GREP + "[REDACTED:sk]")
     assert elapsed < 10, f"8 MiB took {elapsed:.1f}s"
+
+
+# --- a key that output colouring splits is still one key ----------------------
+# `grep --color=always <prefix>` wraps the matched part of a key in colour
+# codes, so the escape sits INSIDE the key (`trinity_mcp\x1b[m_PPP...`) and no
+# shape matched the contiguous text: the rest of the key reached the model, the
+# stored execution log and the transcript in clear. Every escape run is removed
+# for a second look, and a key found there that had an escape run inside it is
+# redacted whole; the escapes it held are kept after the placeholder, so the
+# colour state of the output is unchanged.
+
+_GREP_ON, _GREP_OFF = "\x1b[01;31m\x1b[K", "\x1b[m\x1b[K"       # GNU grep's defaults
+_IMAGE_ON, _IMAGE_OFF = "\x1b[m\x1b[1;31m", "\x1b[m"           # as the agent image's grep wrote it
+_RG_ON, _RG_OFF = "\x1b[0m\x1b[1m\x1b[31m", "\x1b[0m"           # ripgrep
+_TPUT_ON, _TPUT_OFF = "\x1b[1m\x1b[31m", "\x1b(B\x1b[m"           # `tput bold; tput setaf 1` ... `tput sgr0`
+_SPLIT_MCP = "trinity_mcp_PPP-PPPP_" + "P" * 34
+_MCP_HOLDING_SK = "trinity_mcp_ab_sk-" + "Q" * 37
+_AKIA = "AKIA" + "Z" * 16
+_SLACK = "xoxb-" + "1234567890-" * 3
+_ESCAPE = (r"(?:\x1b|\\(?:u001[bB]|x1[bB]|033|e))(?:\[[0-?]*[ -/]*[@-~]|[ -/]*[0-~])")
+
+
+def _coloured(key, needle, on, off, placeholder):
+    """`key` as grep colours every `needle` in it, and what the redaction of
+    that must be: the placeholder, with the colour codes the key held kept in
+    order after it (the leading one stays in front when the key starts with
+    the needle)."""
+    count = key.count(needle)
+    assert count, (key, needle)
+    if key.startswith(needle):
+        want = on + placeholder + off + (on + off) * (count - 1)
+    else:
+        want = placeholder + (on + off) * count
+    return key.replace(needle, on + needle + off), want
+
+
+def test_the_key_as_the_live_turn_printed_it_is_redacted_whole(tmp_path):
+    """The bytes the model received from `grep --color=always trinity_mcp`."""
+    before = "cfg \x1b[m\x1b[1;31mtrinity_mcp\x1b[m_PPP-PPPP_" + "P" * 34 + " end\x1b[m"
+    rewritten = _rewrite(_scan(tmp_path, _bash(stdout=before, stderr=before)))
+    after = "cfg \x1b[m\x1b[1;31m[REDACTED:trinity_mcp]\x1b[m end\x1b[m"
+    assert rewritten["stdout"] == after and rewritten["stderr"] == after
+    assert [e["patterns"] for e in _events(tmp_path, "credential_redacted")] == [["trinity_mcp"]]
+
+
+_SPLITS = [
+    (_SECRET, "sk-ant", "sk"), (_SECRET, "sk", "sk"), (_SECRET, "api03", "sk"), (_SECRET, "AAAA", "sk"),
+    (_GITHUB, "ghp", "github"), (_GITHUB, "bbbbbbbbbbbb", "github"),
+    (_GOOGLE, "AIza", "google"), (_GOOGLE, "CC", "google"),
+    (_AKIA, "AKIA", "aws"), (_SLACK, "xoxb", "slack"), (_SLACK, "-", "slack"),
+    (_SPLIT_MCP, "trinity_mcp", "trinity_mcp"), (_SPLIT_MCP, "trinity", "trinity_mcp"),
+    (_SPLIT_MCP, "mcp_PPP", "trinity_mcp"), (_SPLIT_MCP, "_", "trinity_mcp"),
+    (_MCP_HOLDING_SK, "QQQQ", "trinity_mcp"),
+]
+_SPLIT_IDS = ["sk-prefix", "sk", "sk-mid", "sk-every-4", "ghp-prefix", "ghp-mid", "google-prefix",
+              "google-every-2", "aws-prefix", "slack-prefix", "slack-every-dash", "mcp-prefix",
+              "mcp-part-prefix", "mcp-across-prefix", "mcp-every-underscore", "mcp-holding-sk"]
+_COLOURS = [(_GREP_ON, _GREP_OFF), (_IMAGE_ON, _IMAGE_OFF), (_RG_ON, _RG_OFF), (_TPUT_ON, _TPUT_OFF)]
+
+
+@pytest.mark.parametrize("colour", _COLOURS, ids=["grep", "image-grep", "rg", "tput"])
+@pytest.mark.parametrize("key, needle, name", _SPLITS, ids=_SPLIT_IDS)
+def test_a_key_split_by_colour_codes_is_redacted_whole_and_the_codes_kept(tmp_path, key, needle, name, colour):
+    split, want = _coloured(key, needle, *colour, f"[REDACTED:{name}]")
+    rewritten = _rewrite(_scan(tmp_path, _bash(stdout=f"cfg: {split} end", stderr=split)))
+    assert rewritten["stdout"] == f"cfg: {want} end"
+    assert rewritten["stderr"] == want
+
+
+@pytest.mark.parametrize("key, needle, name", _SPLITS[::3], ids=_SPLIT_IDS[::3])
+def test_a_split_key_in_json_text_is_redacted_whole(tmp_path, key, needle, name):
+    """A log or transcript read back as JSON writes the escape as `\\u001b`."""
+    split, want = _coloured(key, needle, _GREP_ON, _GREP_OFF, f"[REDACTED:{name}]")
+    before = json.dumps({"line": f"x {split} y"})
+    assert "\\u001b" in before
+    rewritten = _rewrite(_scan(tmp_path, _bash(stdout=before)))
+    assert rewritten["stdout"] == json.dumps({"line": f"x {want} y"})
+
+
+def test_every_minted_mcp_key_split_at_its_prefix_is_redacted_whole(tmp_path):
+    keys = _minted_mcp_keys(500)
+    lines = [f"cfg {_IMAGE_ON}trinity_mcp{_IMAGE_OFF}{k[len('trinity_mcp'):]} end" for k in keys]
+    rewritten = _rewrite(_scan(tmp_path, _bash(stdout="\n".join(lines))))
+    want = f"cfg {_IMAGE_ON}[REDACTED:trinity_mcp]{_IMAGE_OFF} end"
+    assert rewritten["stdout"] == "\n".join([want] * len(keys))
+
+
+def test_a_key_coloured_only_at_its_end_is_one_placeholder(tmp_path):
+    """The head before the colour codes is a key on its own (the first look
+    finds it) and the whole key is one too (the second look): one placeholder,
+    not a hidden head followed by the tail in clear."""
+    split = _SECRET[:-4] + _GREP_ON + _SECRET[-4:] + _GREP_OFF
+    rewritten = _rewrite(_scan(tmp_path, _bash(stdout=f"k {split} e")))
+    assert rewritten["stdout"] == f"k [REDACTED:sk]{_GREP_ON}{_GREP_OFF} e"
+    for rel in (_BACKEND_CS, _AGENT_CS):
+        cs = _load(rel, "_cs165_g1_tail_" + rel.replace("/", "_").replace(".", "_"))
+        if hasattr(cs, "_credential_values"):
+            cs._credential_values = set()
+        assert cs.sanitize_text(f"k {split} e") == f"k {cs.REDACTION_PLACEHOLDER}{_GREP_ON}{_GREP_OFF} e", rel
+
+
+def test_a_failing_command_with_a_split_key_still_warns(tmp_path):
+    split, _ = _coloured(_GITHUB, "ghp", _GREP_ON, _GREP_OFF, "")
+    result = _scan(tmp_path, _failure("Error: Exit code 1\n" + split))
+    context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
+    assert "credential (github)" in context
+
+
+_COLOURED_BENIGN_NEEDLES = ("task", "flask", "disk", "mask", "sk", "xoxb", "ghp", "AKIA", "ROTATION",
+                            "trinity_mcp", "mcp", "key", "your", "-")
+
+
+def _coloured_benign():
+    lines = []
+    for text in BENIGN:
+        for needle in _COLOURED_BENIGN_NEEDLES:
+            if needle in text:
+                lines.append(text.replace(needle, _GREP_ON + needle + _GREP_OFF))
+    return lines
+
+
+def test_the_coloured_benign_corpus_splits_words():
+    """Precondition: these lines do put colour codes inside words."""
+    inside = re.compile(f"[A-Za-z0-9_-](?:{_ESCAPE})+[A-Za-z0-9_-]")
+    assert len(_coloured_benign()) > 40
+    assert sum(1 for line in _coloured_benign() if inside.search(line)) > 30
+
+
+@pytest.mark.parametrize("text", _coloured_benign())
+def test_coloured_benign_output_is_byte_identical(tmp_path, text):
+    result = _scan(tmp_path, _bash(stdout=text, stderr=json.dumps(text)))
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "", f"rewrote benign output: {result.stdout[:300]}"
+
+
+@pytest.mark.parametrize("rel", [_BACKEND_CS, _AGENT_CS])
+@pytest.mark.parametrize("key, needle, name", _SPLITS, ids=_SPLIT_IDS)
+def test_a_split_key_is_redacted_whole_from_logs(rel, key, needle, name):
+    cs = _load(rel, "_cs165_g1_" + rel.replace("/", "_").replace(".", "_"))
+    if hasattr(cs, "_credential_values"):
+        cs._credential_values = set()
+    for on, off in _COLOURS:
+        split, want = _coloured(key, needle, on, off, cs.REDACTION_PLACEHOLDER)
+        assert cs.sanitize_text(f"cfg: {split} end") == f"cfg: {want} end", (on, off)
+        written = json.dumps(f"cfg: {split} end")[1:-1]
+        assert cs.sanitize_text(written) == json.dumps(f"cfg: {want} end")[1:-1], (on, off)
+
+
+def test_the_stored_execution_log_holds_no_part_of_a_split_key():
+    """The backend's last pass before the execution log is stored, and the agent
+    side's per-line pass over the stream it sends."""
+    line = "cfg \x1b[m\x1b[1;31mtrinity_mcp\x1b[m_PPP-PPPP_" + "P" * 34 + " end\x1b[m"
+    entry = {"type": "user", "message": {"content": [
+        {"type": "tool_result", "tool_use_id": "toolu_1", "content": line}]}}
+    backend = _load(_BACKEND_CS, "_cs165_g1_log_backend")
+    stored = backend.sanitize_execution_log(json.dumps([entry]))
+    agent = _load(_AGENT_CS, "_cs165_g1_log_agent")
+    agent._credential_values = set()
+    streamed = agent.sanitize_subprocess_line(json.dumps(entry))
+    for out in (stored, streamed):
+        assert "PPPP" not in out and "***REDACTED***" in out
+        assert json.loads(out)[0 if out.startswith("[") else "type"] is not None
+    assert agent.sanitize_text(line) == "cfg \x1b[m\x1b[1;31m***REDACTED***\x1b[m end\x1b[m"
+
+
+@pytest.mark.parametrize("rel", [_BACKEND_CS, _AGENT_CS])
+def test_a_bearer_token_whose_scheme_grep_coloured_is_redacted_from_logs(rel):
+    cs = _load(rel, "_cs165_g1_bearer_" + rel.replace("/", "_").replace(".", "_"))
+    if hasattr(cs, "_credential_values"):
+        cs._credential_values = set()
+    line = f"Authorization: {_GREP_ON}Bearer{_GREP_OFF} abcDEF123.ghiJKL456.mnoPQR789"
+    assert cs.sanitize_text(line) == f"Authorization: {_GREP_ON}***REDACTED***{_GREP_OFF}"
+
+
+def test_the_escape_grammar_is_one_definition_in_the_scanner_and_both_sanitizers():
+    baseline = json.loads(H.BASELINE.read_text())
+    assert baseline["credential_escape"] == _ESCAPE
+    assert f"(?P<lead>{_ESCAPE})" in baseline["credential_boundary"]
+    for rel in (_BACKEND_CS, _AGENT_CS):
+        cs = _load(rel, "_cs165_g1_parity_" + rel.replace("/", "_").replace(".", "_"))
+        assert cs.ESCAPE_SEQUENCE == _ESCAPE, rel
+
+
+def test_eight_mib_of_split_words_is_scanned_well_inside_the_hook_timeout(tmp_path):
+    """The most second looks one output can need: an escape run inside every word."""
+    unit = "ab" + _GREP_ON + "cd" + _GREP_OFF + "ef "
+    filler = unit * (8 * 1024 * 1024 // len(unit))
+    split, want = _coloured(_SECRET, "sk-ant", _GREP_ON, _GREP_OFF, "[REDACTED:sk]")
+    stdout = filler[: 8 * 1024 * 1024 - 300] + " " + split
+    started = time.monotonic()
+    result = _scan(tmp_path, _bash(stdout=stdout))
+    elapsed = time.monotonic() - started
+    assert _rewrite(result)["stdout"].endswith(" " + want)
+    assert elapsed < 10, f"8 MiB took {elapsed:.1f}s"
+
+
+def test_the_split_key_search_is_one_function_in_the_scanner_and_both_sanitizers():
+    """D4: the scanner cannot import the sanitizer, so `_split_keys` is copied;
+    the copies must not drift (docstrings aside)."""
+    def body(rel):
+        for node in ast.parse((H.REPO / rel).read_text()).body:
+            if isinstance(node, ast.FunctionDef) and node.name == "_split_keys":
+                stmts = node.body[1:] if isinstance(node.body[0], ast.Expr) else node.body
+                return [ast.dump(s) for s in stmts], ast.dump(node.args)
+        raise AssertionError(f"no _split_keys in {rel}")
+    scanner = body("docker/base-image/hooks/" + _SCANNER)
+    assert body(_BACKEND_CS) == scanner and body(_AGENT_CS) == scanner

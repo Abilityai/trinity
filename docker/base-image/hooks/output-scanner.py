@@ -29,9 +29,12 @@ The shapes are `credential_patterns` in the baseline: the known-prefix
 partition of `utils/credential_sanitizer.SECRET_VALUE_PATTERNS` (D4), copied
 because a `-I -S` hook cannot import it, behind the one `credential_boundary`
 (not after a letter, digit or `-`, except where that character ends an escape:
-`\\n`/`\\t`, `%XX`, an ANSI escape; `_` is a separator). Events go to
-the guardrails log with shape names only, never a value.
+`\\n`/`\\t`, `%XX`, an ANSI escape; `_` is a separator). A key that colour
+codes split (`credential_escape` runs inside it) is found in the text with the
+escape runs removed and redacted whole. Events go to the guardrails log with
+shape names only, never a value.
 """
+import bisect
 import json
 import os
 import re
@@ -89,16 +92,20 @@ class _Unverifiable(Exception):
 
 def _shapes(config):
     """One matcher for every shape: `credential_boundary`, then each entry's
-    `pattern` as the named group `s<index>`, and the list of shape names.
+    `pattern` as the named group `s<index>`; the list of shape names; and a
+    matcher for a run of `credential_escape` sequences.
 
     One pass finds the leftmost key, so a shape that starts inside another key's
     random body (with `_` a left boundary, `trinity_mcp_ab_sk-...`) is part of
     that key instead of cutting it short, and the boundary is tested once per
     position instead of once per shape."""
     boundary = config.get("credential_boundary")
+    escape = config.get("credential_escape")
     entries = config.get("credential_patterns")
     if not isinstance(boundary, str) or not boundary:
         raise ValueError("no credential_boundary")
+    if not isinstance(escape, str) or not escape:
+        raise ValueError("no credential_escape")
     if not isinstance(entries, list) or not entries:
         raise ValueError("no credential_patterns")
     names, groups = [], []
@@ -110,7 +117,7 @@ def _shapes(config):
         re.compile(pattern)
         groups.append(f"(?P<s{len(names)}>{pattern})")
         names.append(name)
-    return re.compile(boundary + "(?:" + "|".join(groups) + ")"), names
+    return re.compile(boundary + "(?:" + "|".join(groups) + ")"), names, re.compile(f"(?:{escape})+")
 
 
 def _text_size(value):
@@ -130,18 +137,72 @@ def _shape_name(match, names):
     return names[int(match.lastgroup[1:])]
 
 
+def _split_keys(text, runs, find):
+    """Keys that escape runs split, as (start, end, tag) spans of `text`.
+
+    `find` is run on `text` with every escape run removed (what a terminal
+    shows) and yields (start, end, tag) there; a match is kept only when an
+    escape run sat strictly inside it, and is mapped back onto `text`. The
+    same function is in both copies of `utils/credential_sanitizer.py` (D4)."""
+    if "\x1b" not in text and "\\" not in text:
+        return []
+    at, shift, parts, kept, removed = [], [], [], 0, 0
+    for run in runs.finditer(text):
+        parts.append(text[kept:run.start()])
+        at.append(run.start() - removed)
+        removed += run.end() - run.start()
+        shift.append(removed)
+        kept = run.end()
+    if not at:
+        return []
+    parts.append(text[kept:])
+    spans = []
+    for start, end, tag in find("".join(parts)):
+        first, last = bisect.bisect_right(at, start), bisect.bisect_left(at, end)
+        if first < last:
+            spans.append((start + (shift[first - 1] if first else 0), end + shift[last - 1], tag))
+    return spans
+
+
+def _spans(text, shapes):
+    """Every key in `text` as (start, end, name), in order, not overlapping.
+
+    Two looks: the text as it is (a key after an escape, the boundary's `lead`,
+    is found here), and the text with its escape runs removed, where a key that
+    colour codes split (`grep --color=always trinity_mcp` prints
+    `trinity_mcp\\x1b[m_...`) is whole again. Spans that overlap become one,
+    named by the leftmost."""
+    matcher, names, runs = shapes
+
+    def find(source):
+        return [(m.start(m.lastgroup), m.end(), _shape_name(m, names)) for m in matcher.finditer(source)]
+
+    merged = []
+    for start, end, name in sorted(find(text) + _split_keys(text, runs, find), key=lambda s: (s[0], -s[1])):
+        if merged and start < merged[-1][1]:
+            if end > merged[-1][1]:
+                merged[-1] = (merged[-1][0], end, merged[-1][2])
+        else:
+            merged.append((start, end, name))
+    return merged
+
+
 def _redact_text(text, shapes, hits):
-    """Each key replaced by `[REDACTED:<shape>]`. A `lead` the boundary consumed
-    (an ANSI escape sequence in front of the key) is written back unchanged."""
-    matcher, names = shapes
-
-    def replace(match):
-        name = _shape_name(match, names)
+    """Each key replaced by `[REDACTED:<shape>]`. Only the key's own characters
+    go: an escape in front of it (the boundary's `lead`) stays, and the escape
+    runs a split key held are written back after the placeholder, in order, so
+    the colour state of the output is unchanged."""
+    spans = _spans(text, shapes)
+    if not spans:
+        return text
+    out, kept = [], 0
+    for start, end, name in spans:
         hits.add(name)
-        lead = match.group("lead") if "lead" in matcher.groupindex else None
-        return (lead or "") + PLACEHOLDER.format(name=name)
-
-    return matcher.sub(replace, text)
+        out += [text[kept:start], PLACEHOLDER.format(name=name)]
+        out += [run.group() for run in shapes[2].finditer(text, start, end)]
+        kept = end
+    out.append(text[kept:])
+    return "".join(out)
 
 
 def _redact(value, shapes, hits, skip=()):
@@ -288,7 +349,7 @@ def _on_failure(data, shapes):
     text = error if isinstance(error, str) else ""
     if len(text) > SCAN_CAP_CHARS:
         raise _Oversize()
-    hits = {_shape_name(match, shapes[1]) for match in shapes[0].finditer(text)}
+    hits = {name for _, _, name in _spans(text, shapes)}
     if hits:
         log_event("credential_unredacted", tool=data.get("tool_name", ""), code="bash_failure_output",
                   patterns=sorted(hits), **_ids(data))

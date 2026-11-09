@@ -9,6 +9,7 @@ layer is a safety net for cases where the agent may not have sanitized properly.
 """
 
 import base64
+import bisect
 import re
 import json
 import logging
@@ -74,6 +75,71 @@ SENSITIVE_KEY_PATTERNS = [
 
 # Compiled patterns
 _secret_value_re = [re.compile(p) for p in SECRET_VALUE_PATTERNS]
+
+# trinity-enterprise#165: a key that output colouring split. `grep
+# --color=always trinity_mcp` prints `trinity_mcp\x1b[m_<rest of the key>`: the
+# escape sits INSIDE the key, so no pattern above matches the contiguous text
+# and the rest of the key was stored in clear. `_redact_split_keys` runs the
+# patterns once more on the text with every escape run removed (what a terminal
+# shows), keeps a match only when an escape run sat strictly inside it, and
+# replaces the key whole; the escapes it held are kept after the placeholder.
+# ONE escape grammar with the Bash output scanner (`credential_escape` in
+# docker/base-image/hooks/guardrails-baseline.json), raw ESC or written as
+# `\u001b`, `\x1b`, `\033` or `\e`; `_split_keys` is the scanner's function.
+ESCAPE_SEQUENCE = r'(?:\x1b|\\(?:u001[bB]|x1[bB]|033|e))(?:\[[0-?]*[ -/]*[@-~]|[ -/]*[0-~])'
+_escape_run_re = re.compile(f'(?:{ESCAPE_SEQUENCE})+')
+
+
+def _split_keys(text, runs, find):
+    """Keys that escape runs split, as (start, end, tag) spans of `text`.
+
+    `find` is run on `text` with every escape run removed (what a terminal
+    shows) and yields (start, end, tag) there; a match is kept only when an
+    escape run sat strictly inside it, and is mapped back onto `text`. The
+    same function is in the Bash output scanner (D4)."""
+    if "\x1b" not in text and "\\" not in text:
+        return []
+    at, shift, parts, kept, removed = [], [], [], 0, 0
+    for run in runs.finditer(text):
+        parts.append(text[kept:run.start()])
+        at.append(run.start() - removed)
+        removed += run.end() - run.start()
+        shift.append(removed)
+        kept = run.end()
+    if not at:
+        return []
+    parts.append(text[kept:])
+    spans = []
+    for start, end, tag in find("".join(parts)):
+        first, last = bisect.bisect_right(at, start), bisect.bisect_left(at, end)
+        if first < last:
+            spans.append((start + (shift[first - 1] if first else 0), end + shift[last - 1], tag))
+    return spans
+
+
+def _redact_split_keys(text: str) -> str:
+    """Each key that escape runs split replaced by the placeholder, with the
+    escapes it held written back after it, in order. Overlapping spans (an
+    `sk-` inside a key's random body) become one."""
+    def find(source):
+        return [(m.start(), m.end(), None) for pattern in _secret_value_re
+                for m in pattern.finditer(source)]
+
+    spans = []
+    for start, end, _ in sorted(_split_keys(text, _escape_run_re, find), key=lambda s: (s[0], -s[1])):
+        if spans and start < spans[-1][1]:
+            spans[-1] = (spans[-1][0], max(end, spans[-1][1]))
+        else:
+            spans.append((start, end))
+    if not spans:
+        return text
+    out, kept = [], 0
+    for start, end in spans:
+        out += [text[kept:start], REDACTION_PLACEHOLDER]
+        out += [run.group() for run in _escape_run_re.finditer(text, start, end)]
+        kept = end
+    out.append(text[kept:])
+    return "".join(out)
 # (#2398) The compiled `_sensitive_key_re` list lived here and is gone with
 # the quadratic test it fed — nothing referenced it any more. Leaving it
 # would have kept the removed regexes compiled and reachable by name, which
@@ -451,6 +517,9 @@ def sanitize_text(text: str) -> str:
         return text
 
     result = text
+
+    # A key that colour codes split, before the pass below cuts it short
+    result = _redact_split_keys(result)
 
     # Replace values matching secret patterns
     for pattern in _secret_value_re:
