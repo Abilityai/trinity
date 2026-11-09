@@ -2,8 +2,11 @@
  * The fixed first message a new member sees from their agent (trinity-enterprise#1170).
  *
  * `GET /api/enterprise/member-agents/settings` carries `welcome:
- * { text, is_default, replaces_hello, max_length }`; `PUT .../settings/welcome`
- * writes it — `text: null` restores the shipped default, `""` turns it off.
+ * { text, is_default, replaces_hello, max_length, source, template, preview }`;
+ * `PUT .../settings/welcome` writes it — `text: null` removes the text set
+ * here (the agent template's message, else the shipped default comes back),
+ * `""` turns it off. `source` is `template` | `setting` | `default` | `off`;
+ * `template` is what the agent template declares (trinity-enterprise#1198).
  * Admin only, behind the member-agents entitlement.
  */
 import { defineStore } from 'pinia'
