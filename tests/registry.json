@@ -9025,6 +9025,111 @@
         "executions"
       ],
       "description": "#4281 slice E: a schedule-backed run the turn-tier hook refused does not read as a clean success. The execution list, detail and a schedule's history carry guardrail_refusals + guardrail_reporting, counted at READ time from the agent's guardrail events (real ingest service, fakeredis reporter, real schedules router over a real DB): an event landing after the run ended is counted on the next read; only turn_tier_guard counts (a credential redaction or a bash deny never does); a sibling agent's event naming this run is ignored; never -> null, stale -> count + stale, Gemini/Codex keepalives or no runtime on record -> null + not_claude_code (review X12), inside 10 s of the end or still running -> pending (review R11), an unreadable count -> null + unavailable with the read still 200; a run with no schedule carries neither field and is never counted; one count query per page. Reverting the change turns 15 red; a 9-mutant pass on the service is all red."
+    },
+    {
+      "file": "unit/test_4281_turn_actor_frozen_matrix.py",
+      "feature": "#4281",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "#4281: the frozen rating matrix of turn_actor over a spec'd fake built from one table of users and one ownership map (_turn_tier_world.World): a user id, the Workspace branch, every owner-configured trigger plus __manual__ and '', schedule-backed runs (live, soft-deleted, read raises, another agent's, no recorded creator), creator admin/owner/share/dangling, and an agent whose owner user row is gone. Each row x visitor_shell on/off asserts the full triple (no person id on an owner row), shell_allowed, restricts_standing_work and turn_person. Characterization: green at the base (A0, 35041e532) and after; mutants leaking the creator on an owner row (14 cases), swapping PERSON->VISITOR (8 and 18 cases) and reading the tier through get_agent_owner (4 cases) each turn it red."
+    },
+    {
+      "file": "unit/test_4281_schedule_run_tier.py",
+      "feature": "#4281",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "#4281: schedule_run_tier's cause per row (creator_owner_tier, no_recorded_creator, creator_not_owner_tier, creator_missing, agent_has_no_owner, schedule_unreadable), turn_actor as its projection, a failing cause lookup -> unknown with the tier unchanged, the cause never on the fence path, remedies, the RunTierLookups memo (one read per creator/owner; a preloaded memo makes no query), and the turn-tier answer's cause/schedule/creator/remedy fields (null on other turns, no full email, worst case <=2048 bytes)."
+    },
+    {
+      "file": "unit/test_4281_schedule_read_fields.py",
+      "feature": "#4281",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "#4281: through the real schedules and ops routers, real get_current_user and real JWTs/agent key on SQLite: list/get/create/PUT/enable/disable and GET /api/ops/schedules carry runs_as, runs_as_reason, created_by_you and created_by; a share holder and an agent key acting for one see no creator names; a demoted creator flips the flag on the next read; a dangling creator reads creator_missing; a failed rating reads null, never owner; D2: switching on a shared-person schedule on gemini-cli/codex is 409 schedule_cannot_run_for_creator_on_runtime, warn on Claude Code and on a Docker fault; a 20-schedule list costs what a 2-schedule one does, and the fleet read costs the same on 3 and 30 agents; the memo and the bulk reads agree with the database."
+    },
+    {
+      "file": "unit/test_4281_restricted_run_stamp.py",
+      "feature": "#4281",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "unit"
+      ],
+      "description": "#4281 slice C: through the real terminal appliers (apply_result success and failure branches, the pull-mode apply_task_result) on SQLite with real users, share and schedule: a share holder's schedule run ends success with turn_integrity.restricted_turn {tier, kind, cause, schedule_id, creator_id, shell:false}; owner/admin creators and a manual Run now are byte-identical; the #2467 keys and the record share one object; a Gemini turn_refused failure is stamped; dangling creator -> creator_missing, missing owner user row -> agent_has_no_owner, schedule deleted mid-run -> schedule_unreadable with no creator; a rating that raises writes nothing and the run still succeeds; the record survives a late FAILED->SUCCESS correction; the record's charset belt; the stamped rating equals turn_actor's for every shape."
+    },
+    {
+      "file": "unit/test_4281_restricted_schedule_condition.py",
+      "feature": "#4281",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "unit"
+      ],
+      "description": "#4281 slice C: through the real schedules, ops and operator-queue routers, the internal execute-task handler and the real platform-alert seam on SQLite: one schedule_runs_restricted row per agent x creator (two schedules, fifty schedules, three runs -> one bounded row; two creators -> two rows); delete, disable, a disabling PUT, the admin pause and the emergency stop end it, enable and resume file it again; a promoted creator is cleared and a demoted one filed by the next run; a run ending after a disable does not re-file (X7); dispatch files it with no terminal through apply_result; a person's ending is final per cause and a new cause files; four concurrent readings are one row; the owner tier sees it, a share holder and the agent's key do not; the kind's registration."
+    },
+    {
+      "file": "unit/test_4281_schedule_take_over.py",
+      "feature": "#4281",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "security",
+        "unit"
+      ],
+      "description": "#4281 slice D: POST /api/agents/{name}/schedules/{id}/take-over through the real router, get_current_user, JWTs and keys on SQLite. Owner, admin and the owner's user key take over; the agent key is 403 person_required; a share holder 404; a Workspace-only person refused; an agent with no owner user row 404s for an admin. The owner adopts exactly what they reviewed: a prompt edited after the read, a prompt changed without touching updated_at, any differing echoed field, and a write landing between the check and the UPDATE are 409 schedule_changed_since_review; updated_at is compared as an instant (naive/Z/+00:00, 1us off refused). 409 while queued/running/pending_retry and on an owner-tier schedule; idempotent re-take; the webhook token and secret revoked. A creator's PUT, delete or webhook mint authorized before the take-over cannot land after it (admin writes unaffected). D8 delivery clear/keep-with-echo; audit row; can_take_over; remedy take_over; D9 agent key Run-now 409 schedule_runs_as_shared_person."
+    },
+    {
+      "file": "mcp-server/src/tools/schedules.trigger-conflict.test.ts",
+      "feature": "#4281",
+      "added": "2026-11-09",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "unit"
+      ],
+      "description": "#4281 (D9): trigger_agent_schedule answers already_running only for the scheduler's running-lock 409 (#1968, the exact lock body); every other 409 (schedule_runs_as_shared_person, a coded 409 the tool has never heard of, a plain-string 409, the lock text outside the backend's envelope, a body that is not JSON) is a refusal carrying the backend's code and message. Real tool execute() over a fake TrinityClient, node:test."
+    },
+    {
+      "file": "../src/frontend/tests/unit/scheduleRunTier4281.spec.js",
+      "feature": "#4281",
+      "added": "2026-11-08",
+      "categories": [
+        "frontend",
+        "unit"
+      ],
+      "description": "#4281 slice F: the pure rules behind the Schedules tab - the run-tier badge only on runs_as shared_person (owner and null show nothing), the creator line from created_by else created_by_you, the D9 Run-now warning only for the owner tier, the D8 delivery decision (own address compared trimmed and case-insensitive, unknown viewer never own), the take-over body echoing the reviewed copy verbatim (nulls included; clear/keep with the address; an undecided delivery throws), the 409 copy per code, and slice C's restricted_turn record read from turn_integrity (string or object, unparseable -> null) worded by cause."
+    },
+    {
+      "file": "../src/frontend/tests/unit/schedulesPanelRunTier4281.mount.spec.js",
+      "feature": "#4281",
+      "added": "2026-11-08",
+      "categories": [
+        "frontend",
+        "unit"
+      ],
+      "description": "#4281 slice F, MOUNTED SchedulesPanel: badge, server reason and creator name on a shared_person row; none on null; a share holder sees 'you created this' and no Take over; a failed refresh keeps the badge; the create dialog notice below owner tier and a named save refusal shown as its message; Take over only on can_take_over; the review shows full prompt, tools, model, validation, delivery and webhook state; the POST echoes exactly the reviewed version (not a refetch), clears another person's delivery by default, keeps with the address, leaves the owner's own delivery alone; 409 changed_since_review shows the current version and the next confirm sends it; 409 run_in_progress in the dialog; webhook read failure said; initial focus not on Take over; D9 Run-now confirm; restricted-run badge in the history and the sentence in the detail modal."
+    },
+    {
+      "file": "../src/frontend/tests/unit/restrictedRunMarker4281.mount.spec.js",
+      "feature": "#4281",
+      "added": "2026-11-08",
+      "categories": [
+        "frontend",
+        "unit"
+      ],
+      "description": "#4281 slice F, MOUNTED: RestrictedRunMarker renders nothing without a restricted_turn record, a 'ran without shell' badge with the cause sentence on hover, and a line for detail views; wired into the TasksPanel row (task-run-restricted) and the ExecutionDetail page (execution-restricted-line)."
     }
   ]
 }

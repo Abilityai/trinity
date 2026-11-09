@@ -538,6 +538,7 @@ location /api/ {
 | Date | Changes |
 |------|---------|
 | 2026-11-08 | **#4281 (slice E)**: the detail read carries `guardrail_refusals` / `guardrail_reporting` on a schedule-backed run (API only; not rendered yet) — [tasks-tab.md](tasks-tab.md). |
+| 2026-11-08 | **#4281 slice F**: a schedule run that did not have owner tier says so above the metadata cards, one sentence by cause (`RestrictedRunMarker.vue` line, from `turn_integrity.restricted_turn`). A `success` stays a `success`. |
 | 2026-10-08 | **trinity-enterprise#754**: the origin card says when the run went through without approval because its requester is the approver (`ExecutionGateMarker`, from `gate_self_approved` / `gate_self_approved_by_viewer` on the detail read) — [skills-tab.md](skills-tab.md). |
 | 2026-03-04 | **Paid/Public trigger types**: Added `paid` (yellow bg/icon) and `public` (teal bg/icon) to Trigger Icon Colors table. |
 | 2026-02-21 | **PERF-001**: Added note distinguishing `ExecutionResponse` (full, used here) from `ExecutionSummary` (lightweight, used by list endpoint). Execution Detail page continues to fetch full data via `GET /api/agents/{name}/executions/{id}`. |

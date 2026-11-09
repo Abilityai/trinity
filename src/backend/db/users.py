@@ -124,6 +124,17 @@ class UserOperations:
         """Get user by ID."""
         return self._get_user_by_field("id", user_id)
 
+    def get_users_by_ids(self, user_ids: List[int]) -> Dict[int, Dict]:
+        """`{id: user}` for many ids in ONE query (#4281: a fleet read rates
+        every schedule's creator without a lookup per creator). Ids with no
+        user row are absent."""
+        ids = list(dict.fromkeys(i for i in user_ids if isinstance(i, int)))
+        if not ids:
+            return {}
+        stmt = select(*self._USER_COLUMNS).where(users.c.id.in_(ids))
+        with get_engine().connect() as conn:
+            return {row["id"]: self._row_to_user_dict(row) for row in conn.execute(stmt).mappings()}
+
     def get_user_by_email(self, email: str) -> Optional[Dict]:
         """Get user by email address — case-insensitively, the way it is unique
         (ent#720)."""

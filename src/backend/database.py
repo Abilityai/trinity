@@ -1121,6 +1121,9 @@ class DatabaseManager:
     def get_user_by_id(self, user_id: int):
         return self._user_ops.get_user_by_id(user_id)
 
+    def get_users_by_ids(self, user_ids):
+        return self._user_ops.get_users_by_ids(user_ids)
+
     def get_user_by_email(self, email: str):
         return self._user_ops.get_user_by_email(email)
 
@@ -1207,6 +1210,9 @@ class DatabaseManager:
 
     def get_agent_owner(self, agent_name: str):
         return self._agent_ops.get_agent_owner(agent_name)
+
+    def get_agent_owners(self, agent_names):
+        return self._agent_ops.get_agent_owners(agent_names)
 
     def get_agents_by_owner(self, owner_username: str):
         return self._agent_ops.get_agents_by_owner(owner_username)
@@ -1926,6 +1932,13 @@ class DatabaseManager:
     def purge_schedule(self, schedule_id: str):
         return self._schedule_ops.purge_schedule(schedule_id)
 
+    def reassign_schedule_creator(self, schedule_id: str, *, new_owner_id: int, expected_owner_id: int,
+                                  expected_updated_at, expected: dict, clear_delivery: bool):
+        """#4281: the take-over write (`db/schedules/crud.py`)."""
+        return self._schedule_ops.reassign_schedule_creator(
+            schedule_id, new_owner_id=new_owner_id, expected_owner_id=expected_owner_id,
+            expected_updated_at=expected_updated_at, expected=expected, clear_delivery=clear_delivery)
+
     def find_soft_deleted_schedules_past_retention(self, retention_days: int, limit: int = 5000):
         return self._schedule_ops.find_soft_deleted_schedules_past_retention(retention_days, limit)
 
@@ -1936,8 +1949,8 @@ class DatabaseManager:
         return self._schedule_ops.list_soft_deleted_schedules(agent_name, limit)
 
     # Webhook token management (WEBHOOK-001, #291)
-    def generate_webhook_token(self, schedule_id: str):
-        return self._schedule_ops.generate_webhook_token(schedule_id)
+    def generate_webhook_token(self, schedule_id: str, creator_id=None):
+        return self._schedule_ops.generate_webhook_token(schedule_id, creator_id)
 
     def get_schedule_by_webhook_token(self, token: str):
         return self._schedule_ops.get_schedule_by_webhook_token(token)

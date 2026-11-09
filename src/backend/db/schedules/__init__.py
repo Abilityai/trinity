@@ -13,6 +13,7 @@ via this composed class's MRO — never a module import. The complete cross-slic
 `self.` edge map:
   - crud.create_schedule            -> self._generate_id (common), self._calculate_next_run_at (crud)
   - webhooks.get_schedule_by_webhook_token -> self._row_to_schedule (crud)
+  - crud.reassign_schedule_creator  -> self._webhook_revoked_values (webhooks), self._row_to_schedule (crud)
   - analytics.get_schedule_analytics -> self.get_schedule (crud)
   - cleanup.get_executions_pending_validation / get_validation_execution -> self._row_to_schedule_execution (executions)
   - cleanup.create_validation_execution / git_config.create_git_config /

@@ -210,6 +210,12 @@ _BUILTIN_KINDS = (
     # after the queue recovered carries a different marker and files.
     Kind("dispatch_queue_stalled", "queue-stall-", _D, CLEARS_HOOK,
          material_keys=("episode_started_at",)),
+    # #4281: one row per agent x creator whose enabled schedules run as a shared
+    # person. Bounded by the agent's share list (not budgeted: the cap would hide
+    # a sixth person). A person's ending is final per cause, because the
+    # condition keeps reading true for a brief the owner decided to accept.
+    Kind("schedule_runs_restricted", "schedule-restricted-", _N, CLEARS_HOOK,
+         material_keys=("cause",), person_ending_is_final=True),
     Kind("alert_budget", "alert-budget-", _D, CLEARS_HOOK, material_keys=("filled_by",)),
     Kind("skill_not_found", "skill-not-found-", _D, CLEARS_HOOK, budgeted_type="skill_not_found"),
     Kind("effect_unguarded", "effect-unguarded-", _D, CLEARS_LIFETIME_ONLY,
