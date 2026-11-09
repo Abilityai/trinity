@@ -34,6 +34,7 @@ import random
 import re
 import subprocess
 import sys
+import resource
 import time
 from pathlib import Path
 
@@ -775,11 +776,15 @@ def test_eight_mib_of_escapes_is_scanned_well_inside_the_hook_timeout(tmp_path, 
     a backslash or an unfinished CSI), scan well inside the 30 s timeout."""
     filler = unit * (8 * 1024 * 1024 // len(unit) + 1)
     stdout = filler[: 8 * 1024 * 1024 - 200] + " " + _CSI_GREP + _SECRET
-    started = time.monotonic()
+    # CPU time of the hook process, not wall time: a shared CI runner can stall
+    # a process several times over (11.3 s wall for a 2.6 s scan was seen), and
+    # that is the runner, not the scanner.
+    before = resource.getrusage(resource.RUSAGE_CHILDREN)
     result = _scan(tmp_path, _bash(stdout=stdout))
-    elapsed = time.monotonic() - started
+    after = resource.getrusage(resource.RUSAGE_CHILDREN)
+    cpu = (after.ru_utime - before.ru_utime) + (after.ru_stime - before.ru_stime)
     assert _rewrite(result)["stdout"].endswith(_CSI_GREP + "[REDACTED:sk]")
-    assert elapsed < 10, f"8 MiB took {elapsed:.1f}s"
+    assert cpu < 10, f"8 MiB took {cpu:.1f}s of CPU"
 
 
 # --- a key that output colouring splits is still one key ----------------------
