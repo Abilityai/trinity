@@ -27,6 +27,10 @@ nothing in this repo writes a seat.
 * `summarize` — `summary.roles.held_back` and its one warning line.
 * `run` — op `seat_set` through `assignment_provider.write_seat`; a refusal is
   recorded in `failed[]` with the module's code.
+* `holder: member` (trinity-enterprise#1174) — the ONE person seat apply
+  writes: the instance's recorded hub member, as `primary`, never named in the
+  manifest (an interactive admin records who on the instance). Read and
+  written through the optional `member_seat_status` / `seat_member` hooks.
 * `export_member` — `seat:` when the provider says the agent holds one;
   without a provider that can say — or one that answers nothing (#4132) —
   the export names the gap instead.
@@ -51,7 +55,11 @@ GROUP_FIELDS = (SEAT_STEP, PERSON_STEP)
 OP_KIND = "seat_set"
 #: The kinds a person may hold a seat as — the seam's `kinds_for` shape.
 PERSON_SEAT_KINDS = ("primary", "approver", "collaborator", "viewer")
-PERSON_SEAT_KEYS = ("role", "kind")
+PERSON_SEAT_KEYS = ("role", "kind", "holder")
+#: `holder:`'s only value — the instance's recorded hub member (ent#1174 T1).
+HOLDER_MEMBER = "member"
+#: The only kind `holder: member` may take (ent#1174 T6).
+MEMBER_KIND = "primary"
 UNOBSERVED_CODE = "seat_unobserved"
 HELD_BACK_CODE = "seat_requires_interactive_admin"
 DEPLOY_HELD_BACK_CODE = "seats_require_interactive_admin"
@@ -107,7 +115,9 @@ def parse_person_seats(agent_name, value) -> Optional[List[Dict[str, str]]]:
                 where = "a key" if _looks_like_email(key) else f"'{key}'"
                 raise ValueError(
                     f"Agent '{agent_name}' person_seats[{i}]: {where} looks like an email "
-                    f"address; a person seat names the role and the kind, never a person")
+                    f"address; a person seat names the role and the kind, never a person. "
+                    f"To seat this instance's member, write `holder: {HOLDER_MEMBER}` with "
+                    f"`kind: {MEMBER_KIND}`")
         extra = sorted(str(k) for k in entry if k not in PERSON_SEAT_KEYS)
         if extra:
             raise ValueError(
@@ -123,8 +133,19 @@ def parse_person_seats(agent_name, value) -> Optional[List[Dict[str, str]]]:
             raise ValueError(f"Agent '{agent_name}' person_seats[{i}]: kind must be one of "
                              f"{', '.join(PERSON_SEAT_KINDS)}")
         seat = {"role": role, "kind": kind}
+        if "holder" in entry:  # trinity-enterprise#1174
+            if entry["holder"] != HOLDER_MEMBER:
+                raise ValueError(f"Agent '{agent_name}' person_seats[{i}]: holder's only legal "
+                                 f"value is '{HOLDER_MEMBER}' (the instance's recorded member)")
+            if kind != MEMBER_KIND:
+                raise ValueError(f"Agent '{agent_name}' person_seats[{i}]: holder: "
+                                 f"{HOLDER_MEMBER} is allowed only with kind: {MEMBER_KIND}")
+            seat["holder"] = HOLDER_MEMBER
         if seat not in out:
             out.append(seat)
+    if sum(1 for seat in out if seat.get("holder")) > 1:
+        raise ValueError(f"Agent '{agent_name}' person_seats: at most one entry may name "
+                         f"holder: {HOLDER_MEMBER} (an agent has one primary)")
     return out
 
 
