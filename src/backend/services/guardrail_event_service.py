@@ -353,7 +353,7 @@ def reporting_state(agent_name: str, now: Optional[datetime] = None) -> Dict[str
     else the EARLIEST stored row's receive time, else the last report. Every
     fallback is at or after the true first report, so a lost Redis can only
     move coverage later (more history reads "before coverage"), never earlier.
-    Null exactly when `state` is `never`.
+    Never later than `last_report_at`; null exactly when `state` is `never`.
     """
     now = now or utc_now()
     record: Dict[str, str] = {}
@@ -373,6 +373,9 @@ def reporting_state(agent_name: str, now: Optional[datetime] = None) -> Dict[str
     first = (record.get("first_report_at")
              or db.earliest_guardrail_event_received_at(agent_name)
              or last)
+    # Two reports racing can write the start after a later-dated last report;
+    # the agent really did report at `last`, so the earlier one is still safe.
+    first = min(first, last)
     return {
         "state": _state_for(last, now),
         "last_report_at": last,
@@ -474,6 +477,9 @@ def count_by_execution(agent_name: str, execution_ids: Iterable[str]) -> Dict[st
     authenticated agent, so a forged id on another agent's event never counts.
     Evaluate at read time: events can land seconds after the hook fired.
     """
+    # Coverage BEFORE counts: a batch committing between the two reads is then
+    # counted rather than establishing coverage over counts that missed it.
+    reporting = reporting_state(agent_name)
     executions: Dict[str, Dict[str, Dict[str, int]]] = {}
     for g in db.count_guardrail_events_by_execution(agent_name, list(execution_ids)):
         entry = executions.setdefault(g["execution_id"], {"by_kind": {}, "by_hook_code": {}})
@@ -481,7 +487,7 @@ def count_by_execution(agent_name: str, execution_ids: Iterable[str]) -> Dict[st
         if g["code"]:
             hc = f"{g['hook']}:{g['code']}"
             entry["by_hook_code"][hc] = entry["by_hook_code"].get(hc, 0) + g["n"]
-    return {"reporting": reporting_state(agent_name), "executions": executions}
+    return {"reporting": reporting, "executions": executions}
 
 
 def count_by_agent(hours: int, agent_names: Optional[Iterable[str]] = None) -> Dict[str, Any]:

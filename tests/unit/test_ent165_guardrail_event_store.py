@@ -428,12 +428,48 @@ class TestCoverageStart:
         state = svc.reporting_state(AGENT)
         assert (state["state"], state["first_report_at"]) == ("reporting", last)
 
-    def test_the_execution_count_seam_carries_it(self, db_backend, redis):
-        """trinity#4281 reads coverage through this seam, never the store."""
+    def test_the_execution_count_seam_carries_it(self, db_backend, redis, monkeypatch):
+        """trinity#4281 reads coverage through this seam, never the store. Two
+        reports, so a seam that passed `last_report_at` off as the start fails."""
+        t0 = datetime.now(timezone.utc) - timedelta(minutes=10)
+        with monkeypatch.context() as m:
+            m.setattr(svc, "utc_now", lambda: t0)
+            _ingest([])
         _ingest([_ev()])
         out = svc.count_by_execution(AGENT, ["exec-1"])
-        assert out["reporting"]["first_report_at"] is not None
-        assert out["reporting"]["first_report_at"] <= out["reporting"]["last_report_at"]
+        assert out["reporting"]["first_report_at"] == _z(t0)
+        assert out["reporting"]["last_report_at"] > _z(t0)
+        assert out["executions"]["exec-1"]["by_kind"] == {"deny": 1}
+
+    def test_racing_reports_never_put_the_start_after_the_last_report(
+        self, db_backend, redis
+    ):
+        """A report received at 08:00 that stalls and lands after one received
+        at 09:00 leaves first=09:00, last=08:00 in the hash. The agent did
+        report at 08:00, so the start reads 08:00: never after the last report."""
+        svc.record_report(AGENT, "claude-code", 0, "2026-11-01T09:00:00.000000Z")
+        svc.record_report(AGENT, "claude-code", 0, "2026-11-01T08:00:00.000000Z")
+        state = svc.reporting_state(AGENT)
+        assert state["first_report_at"] == "2026-11-01T08:00:00.000000Z"
+        assert state["first_report_at"] <= state["last_report_at"]
+
+    def test_coverage_is_read_before_the_counts(self, db_backend, redis, monkeypatch):
+        """The agent's FIRST batch commits while the counts are being read. The
+        answer must not pair counts that missed it with the coverage it set up
+        (a clean 0 for a run it covered): read coverage first, so the pair is
+        `never` with no counts, or coverage with the event counted."""
+        real = db.count_guardrail_events_by_execution
+
+        def count_then_first_batch_lands(agent_name, ids):
+            groups = real(agent_name, ids)
+            _ingest([_ev()])
+            return groups
+
+        monkeypatch.setattr(db, "count_guardrail_events_by_execution",
+                            count_then_first_batch_lands)
+        out = svc.count_by_execution(AGENT, ["exec-1"])
+        assert not (out["executions"] == {} and out["reporting"]["first_report_at"])
+        assert out["reporting"]["state"] == "never"
 
 
 # ---------------------------------------------------------------------------
