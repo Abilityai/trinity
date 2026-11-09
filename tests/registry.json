@@ -8933,6 +8933,17 @@
         "unit"
       ],
       "description": "#4281 slice D: POST /api/agents/{name}/schedules/{id}/take-over through the real router, get_current_user, JWTs and keys on SQLite. Owner, admin and the owner's user key take over; the agent key is 403 person_required; a share holder 404; a Workspace-only person refused; an agent with no owner user row 404s for an admin. The owner adopts exactly what they reviewed: a prompt edited after the read, a prompt changed without touching updated_at, any differing echoed field, and a write landing between the check and the UPDATE are 409 schedule_changed_since_review; updated_at is compared as an instant (naive/Z/+00:00, 1us off refused). 409 while queued/running/pending_retry and on an owner-tier schedule; idempotent re-take; the webhook token and secret revoked. A creator's PUT, delete or webhook mint authorized before the take-over cannot land after it (admin writes unaffected). D8 delivery clear/keep-with-echo; audit row; can_take_over; remedy take_over; D9 agent key Run-now 409 schedule_runs_as_shared_person."
+    },
+    {
+      "file": "mcp-server/src/tools/schedules.trigger-conflict.test.ts",
+      "feature": "#4281",
+      "added": "2026-11-09",
+      "categories": [
+        "mcp-server",
+        "typescript",
+        "unit"
+      ],
+      "description": "#4281 (D9): trigger_agent_schedule answers already_running only for the scheduler's running-lock 409 (#1968, the exact lock body); every other 409 (schedule_runs_as_shared_person, a coded 409 the tool has never heard of, a plain-string 409, the lock text outside the backend's envelope, a body that is not JSON) is a refusal carrying the backend's code and message. Real tool execute() over a fake TrinityClient, node:test."
     }
   ]
 }
