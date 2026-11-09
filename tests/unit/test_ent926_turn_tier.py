@@ -175,7 +175,7 @@ def test_the_route_gives_an_owner_by_rule_turn_the_shell(kind):
     is full owner tier; the kind is echoed, the person is not."""
     from services import turn_tier_service
     with patch.object(turn_tier_service, "turn_actor", return_value=("owner", kind, 9)):
-        assert _call() == {"tier": "owner", "kind": kind, "shell": True}
+        assert _call() == {"tier": "owner", "kind": kind, "shell": True, **NO_SCHEDULE}
 
 
 # ---- ent#926 2026-10-19: a schedule rates as its creator; visitors vs persons ----------
