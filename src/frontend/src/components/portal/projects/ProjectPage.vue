@@ -71,7 +71,9 @@
           <p v-if="guest" class="text-xs text-gray-500 dark:text-gray-400" data-testid="project-guest-note">
             You've been invited to this project. You see your own chats and what's been shared with you.
           </p>
-          <p v-else class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
+          <!-- trinity-enterprise#1132: my role on this project, and what it lets me do. -->
+          <p v-if="!guest" class="max-w-3xl text-sm text-gray-600 dark:text-gray-300" data-testid="project-my-role">{{ roleLine(p, myEmail) }}</p>
+          <p v-if="!guest" class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
             <span>Created by {{ p.created_by === myEmail ? 'you' : p.created_by }}</span>
             <a v-if="p.tracker_url" :href="p.tracker_url" target="_blank" rel="noopener noreferrer" class="text-action-primary-600 dark:text-action-primary-400 hover:underline">Tracker</a>
             <span :title="absolute(p.updated_at)">Updated {{ relative(p.updated_at) }}</span>
@@ -108,8 +110,8 @@
         <OverflowTabs :tabs="TABS" :model-value="tab" data-testid="project-tabs" @update:model-value="tab = $event" />
       </div>
 
-      <ProjectTasks v-if="!guest && tab === 'tasks'" :project-id="p.id" :can-contribute="p.can?.contribute === true" :archived="Boolean(p.archived_at)" :my-email="myEmail" :members="p.members || []" />
-      <ProjectLog v-if="!guest && tab === 'log'" :project-id="p.id" :can-contribute="p.can?.contribute === true" :archived="Boolean(p.archived_at)" :my-email="myEmail" />
+      <ProjectTasks v-if="!guest && tab === 'tasks'" :project="p" :project-id="p.id" :can-contribute="p.can?.contribute === true" :archived="Boolean(p.archived_at)" :my-email="myEmail" :members="p.members || []" />
+      <ProjectLog v-if="!guest && tab === 'log'" :project="p" :project-id="p.id" :can-contribute="p.can?.contribute === true" :archived="Boolean(p.archived_at)" :my-email="myEmail" />
       <ProjectMaterial v-if="!guest && tab === 'material'" :project="p" :my-email="myEmail" :agents="usableAgents" />
 
       <div v-show="guest || tab === 'overview'" class="grid grid-cols-1 gap-4 lg:grid-cols-3 lg:items-start" data-testid="project-overview">
@@ -308,7 +310,7 @@ import { viewState } from '@/utils/loadingState'
 import { formatRelativeTime, formatLocalDateTime } from '@/utils/timestamps'
 import {
   STATUS_BADGE, statusLabel, visibilityLabel, agentStateLabel, workOnItOptions, continueChoice,
-  projectErrorMessage, HOW_IT_MOVES_KEY,
+  projectErrorMessage, HOW_IT_MOVES_KEY, roleLine,
 } from './projectsUtils'
 
 const AGENT_BADGE = { active: 'success', pending: 'warning', declined: 'neutral' }

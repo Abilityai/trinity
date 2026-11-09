@@ -413,3 +413,62 @@ export function projectNeedsYouRows(asks, mineIds, { expanded = {}, dismissals =
       ask: a,
     }))
 }
+
+// --- trinity-enterprise#1132: where a person stands on a project, in plain words ---
+// One place for the wording, so the header, the withheld-control lines and the
+// task rule never disagree. Roles come from the read (`my_role`: creator /
+// member / null for a company viewer); a guest has its own narrow page.
+
+const same = (a, b) => Boolean(a) && Boolean(b) && String(a).toLowerCase() === String(b).toLowerCase()
+
+/** The creator, as the reader should see them. */
+export function creatorName(project, myEmail) {
+  const c = project?.created_by || ''
+  return same(c, myEmail) ? 'you' : (c || 'the creator')
+}
+
+/** The header's one line: my role on this project and what it lets me do. */
+export function roleLine(project, myEmail) {
+  const role = project?.my_role || null
+  const creator = creatorName(project, myEmail)
+  if (project?.archived_at) {
+    return role === 'creator' || creator === 'you'
+      ? 'This project is archived. Nothing on it changes until you restore it.'
+      : `This project is archived. Nothing on it changes until ${creator} restores it.`
+  }
+  if (role === 'creator') {
+    return 'You created this project. You can change everything on it: name, goal, steward, members, visibility, tasks and the log.'
+  }
+  if (role === 'member') {
+    return `You're a member. You can add and change tasks, write in the log and add files. Only ${creator} changes the name, goal, steward, members and visibility.`
+  }
+  if (!role && project?.visibility === 'company') {
+    return `You can view this project because it's open to everyone at the company. You can chat with its agents about it, but only members add or change tasks, the log and files. Ask ${creator} to add you as a member.`
+  }
+  return `You can view this project. ${creator === 'you' ? 'You decide' : `${creator} decides`} who else can change it.`
+}
+
+/**
+ * The line shown IN PLACE of a withheld control (no lost layout). `what` names
+ * the thing: "tasks", "log entries", "files and reports". Decided from the
+ * SAME inputs the control's own v-if uses (`canContribute`, `archived`), and
+ * only for someone who is not a member (a member has nobody to ask to be
+ * added; an archived project already says why nothing changes).
+ */
+export function withheldLine({ project, myEmail, canContribute, archived }, what) {
+  if (canContribute || archived || !project) return ''
+  if (project.my_role === 'creator' || project.my_role === 'member') return ''
+  return `Only members add or change ${what}. Ask ${creatorName(project, myEmail)} to add you.`
+}
+
+/**
+ * Who confirms a finished task: a member, or the steward agent when it is an
+ * ACTIVE agent on the project (only then can it verify — projects/work.py).
+ */
+export function verificationRule(project) {
+  const s = project?.steward
+  const active = s?.kind === 'agent'
+    && (project?.agents || []).some((a) => a.agent_name === s.ref && a.state === 'active')
+  const who = active ? `a member, or the steward agent ${s.ref},` : 'a member'
+  return `An agent's completion claim waits here until ${who} confirms it.`
+}

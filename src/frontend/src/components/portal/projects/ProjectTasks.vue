@@ -31,6 +31,8 @@
       <span class="flex-1"></span>
       <BaseButton v-if="canContribute && !archived" size="sm" data-testid="project-task-new" @click="openCreate">New task</BaseButton>
     </div>
+    <!-- trinity-enterprise#1132: the withheld control, said where it would be. -->
+    <p v-if="withheld" class="text-xs text-gray-600 dark:text-gray-300" data-testid="project-tasks-withheld">{{ withheld }}</p>
 
     <SkeletonLoader v-if="view.state === 'loading'" :count="4" height="3rem" gap="0.5rem" />
     <LoadFailed
@@ -50,7 +52,7 @@
           {{ g.label }} <span class="tabular-nums">· {{ g.rows.length }}</span>
         </h3>
         <p v-if="g.key === 'verifying' && g.rows.length" class="text-xs text-gray-600 dark:text-gray-300" data-testid="project-tasks-verification-rule">
-          An agent's completion claim waits here until a person — or the steward agent — confirms it. Open a task to see its evidence{{ canConfirm ? ', then Confirm' : '' }}.
+          {{ rule }} Open a task to see its evidence{{ canConfirm ? ', then Confirm' : '' }}.
         </p>
         <ul class="divide-y divide-gray-100 dark:divide-gray-750 rounded-lg border border-gray-200 dark:border-gray-750 bg-white dark:bg-gray-800">
           <li v-for="t in g.rows" :key="t.id" class="flex items-center gap-2 pr-2">
@@ -238,10 +240,11 @@ import { viewState } from '@/utils/loadingState'
 import { formatRelativeTime, formatLocalDateTime } from '@/utils/timestamps'
 import {
   TASK_FIELD_ERROR_CODES, TASK_STATUS_BADGE, authorLabel, groupTasks, projectErrorMessage, taskLogKindLabel,
-  taskStatusLabel, taskStatusOptions, validateTaskFields,
-} from './projectsUtils'
+  taskStatusLabel, taskStatusOptions, validateTaskFields, verificationRule, withheldLine } from './projectsUtils'
 
 const props = defineProps({
+  // trinity-enterprise#1132: the page read, for the withheld line and the rule.
+  project: { type: Object, default: null },
   projectId: { type: String, required: true },
   canContribute: { type: Boolean, default: false },
   archived: { type: Boolean, default: false },
@@ -290,6 +293,8 @@ const groups = computed(() => {
   ]
 })
 const canConfirm = computed(() => props.canContribute && !props.archived)
+const withheld = computed(() => withheldLine({ project: props.project, myEmail: props.myEmail, canContribute: props.canContribute, archived: props.archived }, 'tasks'))
+const rule = computed(() => verificationRule(props.project))
 const confirming = ref('')
 const confirmError = ref('')
 // A done task is frozen until it is reopened — the server refuses every other
