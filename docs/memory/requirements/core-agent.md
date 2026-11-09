@@ -4025,7 +4025,7 @@ to localStorage in the clear.
   in the row, announced, focus on the row (team ruling on #3101, 2026-10-01) — it is one muted row
   (kind · title · ending with who · when) that stays in that chat's history for the queue's own retention — the chat reads
   its own chat-turn asks (`GET …/asks?chat_id=`, no 7-day window). A background ask (schedule,
-  loop, gate) is in no chat, only the Inbox; its `chat_id` (Main) is the reply target. Nothing
+  loop, gate) is in no chat, only the Inbox; its `chat_id` (Main) is the reply target. Exception (ent#1171): a reminder-wake ask addressed to the same person the reminder was set for renders as a tile in that person's Main conversation. Nothing
   sits between the thread and the composer (principle 30). Every door — Work for platform
   users, Info for everyone — carries one "N ask(s) waiting on you · Open in Inbox" line to
   Action `?from=<agent>`, and each agent row's "needs you" mark counts from the same feed as the
