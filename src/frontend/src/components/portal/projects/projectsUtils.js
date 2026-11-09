@@ -11,7 +11,9 @@ import { askUrgencyCompare } from '../portalInbox'
 export const STATUS_BADGE = Object.freeze({ active: 'success', paused: 'warning', done: 'neutral' })
 const STATUS_LABEL = { active: 'Active', paused: 'Paused', done: 'Done' }
 const VISIBILITY_LABEL = { members: 'Members only', company: 'Company' }
-const AGENT_STATE_LABEL = { active: 'Can work on it', pending: 'Waiting for owner', declined: 'Owner declined' }
+const AGENT_STATE_LABEL = {
+  active: 'Can work on it', pending: 'Waiting for owner', declined: 'Owner declined', off: 'Not on the project',
+}
 
 export const NAME_MAX = 120
 export const GOAL_MAX = 1000
@@ -136,6 +138,39 @@ export function chatProjectActions({ projectsAvailable, isPlatform, isMain, sess
   const linked = base && Boolean(project)
   const show = base && (platform || linked)
   return { show, linked, canAdd: show && platform, canWrapUp: linked && platform }
+}
+
+/**
+ * A linked room's agents and where each stands on the project
+ * (trinity-enterprise#1131), from the server's `room_agents` block — null
+ * when the read has none (a thread, a guest, a participant who can't open the
+ * project). The chip counts the agents not on it (`off` / `declined`) before
+ * the ones waiting on their owner, and is null when every agent is active.
+ * Add is offered only to a MANAGE_AGENTS holder on a row the server marked
+ * `can_add`; a row it can't add says why.
+ */
+const ROOM_AGENT_BADGE = { active: 'success', pending: 'warning', declined: 'neutral', off: 'neutral' }
+const ROOM_AGENT_NOTE = { not_on_your_list: 'Not on your list' }
+
+export function roomAgentRows(project) {
+  if (!project || !('room_agents' in project)) return null
+  const canManage = project.can?.manage_agents === true
+  if (project.room_agents === null) {
+    return { rows: [], canManage, degraded: true, chip: { label: "Couldn't read agents", variant: 'neutral' } }
+  }
+  const rows = (project.room_agents || []).map((a) => ({
+    name: a.agent_name,
+    state: a.state,
+    label: agentStateLabel(a.state),
+    badge: ROOM_AGENT_BADGE[a.state] || 'neutral',
+    action: canManage && a.can_add === true ? 'add' : null,
+    note: canManage ? ROOM_AGENT_NOTE[a.reason] || null : null,
+  }))
+  const notOn = rows.filter((r) => r.state === 'off' || r.state === 'declined').length
+  const waiting = rows.filter((r) => r.state === 'pending').length
+  const chip = notOn ? { label: `${notOn} not on it`, variant: 'warning' }
+    : waiting ? { label: `${waiting} waiting on owner`, variant: 'neutral' } : null
+  return { rows, canManage, degraded: false, chip }
 }
 
 const CODE_MESSAGE = {
