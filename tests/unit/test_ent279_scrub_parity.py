@@ -331,6 +331,10 @@ _REQUIRED_SCRUBBERS = {
         "services/direct_voice_service.py",
         "_speak_sentence",
     ): "direct voice call sentence -> streaming TTS provider + `spoken` frame (#4359)",
+    (
+        "services/direct_voice_service.py",
+        "speak_execution",
+    ): "direct voice call reply text, scrubbed before speakable() rewrites it (#4359)",
 }
 
 
