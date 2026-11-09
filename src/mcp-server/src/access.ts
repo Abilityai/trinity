@@ -490,6 +490,8 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   // --- permissions.ts ---
   get_agent_permissions: { kind: "enforce", param: "agent_name" },
   get_agent_capability_grants: { kind: "baselined", owner: GRANTS_OWNER_TIER },
+  // --- member_progress.ts ---
+  set_member_progress: { kind: "enforce", param: "agent_name" },
   // --- connector.ts (connector / anonymous tiers) ---
   list_playbooks: { kind: "baselined", owner: CONNECTOR_SCOPE },
   run_playbook: { kind: "baselined", owner: CONNECTOR_SCOPE },

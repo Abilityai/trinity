@@ -1,7 +1,7 @@
 /**
- * Member setup progress card — Regent self-reporting tool (ent#1175)
+ * Member setup progress card — self-reporting tool for the member's assistant agent (ent#1175)
  *
- * The Regent (the member's assistant agent) calls ``set_member_progress`` to
+ * The member's assistant agent calls ``set_member_progress`` to
  * advance a step in the member's onboarding card. The backend writes the step
  * and broadcasts a ``member_progress_update`` WS event so the member's browser
  * tab updates without reloading.
@@ -62,7 +62,7 @@ export function createMemberProgressTools(
         agent_name: z
           .string()
           .min(1)
-          .describe("Your own agent name (the Regent)."),
+          .describe("Your own agent name (the member's assistant agent)."),
         step: z
           .enum(VALID_STEPS)
           .describe(

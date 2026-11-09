@@ -1,6 +1,6 @@
 # MCP Server
 
-Trinity's MCP server exposes 177 tools across 39 modules for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication. 172 of them are the operator tool set; three consumption-only tools are visible only to connector keys, and two sign-in tools are registered only when inline email auth is enabled. A few operator tools are enterprise-gated and return `"disabled"` (or a `not available` result) where not entitled.
+Trinity's MCP server exposes 178 tools across 40 modules for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication. 173 of them are the operator tool set; three consumption-only tools are visible only to connector keys, and two sign-in tools are registered only when inline email auth is enabled. A few operator tools are enterprise-gated and return `"disabled"` (or a `not available` result) where not entitled.
 
 > 📺 **Watch:** [From Zero to Deployed AI Agent — MCP setup](https://youtu.be/-TSZyekDS6o) *(Apr 2026)* · [all videos](../videos.md)
 
@@ -125,6 +125,7 @@ The JSON-RPC error code is `-32003` for both. Only `GET` or `HEAD /health` (the 
 | `projects.ts` | 14 | Tools for agents working on Workspace projects (enterprise-gated; where unavailable they return a result that says so) |
 | `assignments.ts` | 1 | `get_agent_assignments` — read who an agent works for (read-only; degrades to a not-available result where unsupported) |
 | `permissions.ts` | 2 | `get_agent_permissions`, `get_agent_capability_grants` — read an agent's permission edges (the agents it may call) and its self-change permissions; read-only, granting stays in the UI. An agent key reads edges for itself, an agent it has an edge to, or one it spawned, and grants only for itself or an agent it spawned |
+| `member_progress.ts` | 1 | `set_member_progress` — the member's assistant agent reports a step of the member's setup progress card; agent-scoped key, for itself only |
 | `connector.ts` | 3 | `list_playbooks`, `run_playbook`, `ask` — the consumption-only set a **connector key** sees; operator tools stay hidden from connector keys |
 | `auth.ts` | 2 | `request_login`, `verify_login` — registered only when inline email auth is on, advertised only to keyless sessions |
 

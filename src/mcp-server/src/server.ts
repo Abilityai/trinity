@@ -693,7 +693,7 @@ export async function createServer(config: ServerConfig = {}) {
     createProjectTools(client, requireApiKey),       // Workspace Projects — list/get read tools (license-blind proxy, ent#661)
     createAssignmentTools(client, requireApiKey),     // Role assignments — read who an agent serves (license-blind proxy, ent#500)
     createPermissionTools(client, requireApiKey),     // Permission edges + self-change grants, read-only (ent#991)
-    createMemberProgressTools(client, requireApiKey), // Member onboarding progress card — Regent self-reporting (ent#1175)
+    createMemberProgressTools(client, requireApiKey), // Member onboarding progress card — the member's assistant agent self-reports (ent#1175)
   ];
   // Operator tools: visible ONLY to fully-credentialed operator scopes.
   for (const group of toolGroups) {
