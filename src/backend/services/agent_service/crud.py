@@ -422,6 +422,10 @@ class _TemplateResolution:
     # "copy" import intent. When set, `github_repo_for_agent` stays None by
     # design — the container gets NO GitHub env, no git-config row, no PAT.
     copy_snapshot: Optional["snapshot_import.SnapshotStaging"] = None
+    # ent#1173 (AC-2): bytes of a GitHub template's bundled avatar file (avatar.webp
+    # or avatar.png). None when no such file exists or fetch failed. Installed
+    # after `_register_agent` via `_install_bundled_avatar_bytes`.
+    bundled_avatar_bytes: Optional[bytes] = None
 
 
 @dataclass
@@ -2022,6 +2026,24 @@ async def _resolve_template(
             tr.git_instance_id, tr.git_working_branch = await _reserve_git_instance(
                 config, current_user, tr.github_repo_for_agent
             )
+            # ent#1173 (AC-2): try to fetch a bundled avatar from the template
+            # repo. Best-effort — a missing file or fetch failure does not
+            # block creation; the agent gets an AI-generated avatar later.
+            if not config.ephemeral:
+                for _avatar_fname in _BUNDLED_AVATAR_NAMES:
+                    try:
+                        _avatar_bytes = await asyncio.to_thread(
+                            _fetch_github_file_bytes, tr.github_repo_for_agent,
+                            tr.github_pat_for_agent, url_branch, _avatar_fname,
+                            _BUNDLED_AVATAR_MAX_BYTES,
+                        )
+                    except Exception as _e:
+                        logger.debug("[AVATAR-003] could not fetch %s from %s: %s",
+                                     _avatar_fname, tr.github_repo_for_agent, _e)
+                        _avatar_bytes = None
+                    if _avatar_bytes:
+                        tr.bundled_avatar_bytes = _avatar_bytes
+                        break
         elif config.template.startswith("local:"):
             tr.template_data, tr.template_shared_folders = _resolve_local_template(config)
             # Same normalizer as the `github:` branch above — symmetric by
@@ -2763,6 +2785,62 @@ def _install_bundled_avatar(config: AgentConfig) -> None:
             f.write(optimize_avatar(data))
         logger.info(f"[AVATAR-003] Installed bundled avatar from {config.template} for {config.name}")
         return
+
+
+def _fetch_github_file_bytes(
+    repo: str, pat: Optional[str], ref: Optional[str], filename: str, max_bytes: int
+) -> Optional[bytes]:
+    """ent#1173 (AC-2): Fetch raw bytes of a file from a GitHub repo via the
+    contents API.  Returns None on 404 or any error. Only a 200 with valid
+    base64 content returns bytes; everything else is None (best-effort caller).
+    """
+    import base64 as _base64
+    try:
+        headers = {"Accept": "application/vnd.github+json"}
+        if pat:
+            headers["Authorization"] = f"Bearer {pat}"
+        with httpx.Client(timeout=10.0) as client:
+            resp = client.get(
+                f"https://api.github.com/repos/{repo}/contents/{filename}",
+                headers=headers,
+                params={"ref": ref} if ref else None,
+            )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        raw = _base64.b64decode(data["content"])
+        if len(raw) > max_bytes:
+            logger.debug("[AVATAR-003] bundled avatar %s/%s is %d bytes (max %d); skipping",
+                         repo, filename, len(raw), max_bytes)
+            return None
+        return raw
+    except Exception as e:
+        logger.debug("[AVATAR-003] could not fetch %s from %s: %s", filename, repo, e)
+        return None
+
+
+def _install_bundled_avatar_bytes(agent_name: str, data: bytes) -> None:
+    """ent#1173 (AC-2): install a GitHub template's bundled avatar from raw bytes.
+
+    Unlike the `local:` path (which reads from a filesystem path), the GitHub
+    path delivers raw bytes fetched from the API. Same size/pixel caps as the
+    local version. Stored as a default avatar (is_default_avatar=1) so
+    Settings → Generate Default Avatars can still overwrite it.
+    """
+    import io as _io
+    from PIL import Image
+    from utils.image_optimize import optimize_avatar
+
+    dest = avatar_paths.avatar_path_or_none(agent_name, ".webp")
+    if dest is None:
+        return
+    with Image.open(_io.BytesIO(data)) as img:
+        if img.width * img.height > 4096 * 4096:
+            raise ValueError(f"bundled avatar is {img.width}x{img.height}, max 4096x4096")
+    avatar_paths.ensure_avatar_store()
+    with open(dest, "wb") as f:
+        f.write(optimize_avatar(data))
+    logger.info(f"[AVATAR-003] Installed GitHub bundled avatar for {agent_name}")
 
 
 def _register_agent(
@@ -3961,6 +4039,14 @@ async def create_agent_internal(
                 ephemeral_expires_at,
                 auto_assigned_subscription_id,
             )
+            # ent#1173 (AC-2): install a GitHub template's bundled avatar bytes
+            # (fetched during _resolve_template). Best-effort — the agent is
+            # already registered and fully functional without an avatar.
+            if tr.bundled_avatar_bytes and not config.ephemeral:
+                try:
+                    _install_bundled_avatar_bytes(config.name, tr.bundled_avatar_bytes)
+                except Exception as _e:
+                    logger.warning(f"[AVATAR-003] Failed to install GitHub avatar for {config.name}: {_e}")
             await _materialize_agent_files(
                 config,
                 tr.template_data,
