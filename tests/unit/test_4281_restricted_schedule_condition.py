@@ -402,3 +402,17 @@ def test_the_kind_is_registered_reserved_and_about_a_person():
     assert oqs.is_platform_minted({"request_id": "schedule-restricted-7-x"})
     assert "schedule-restricted-" in oqs.OWNER_ONLY_ID_PREFIXES
     assert "schedule-restricted-" in oqs.ABOUT_A_PERSON_ID_PREFIXES
+
+
+def test_the_alert_module_loads_once_take_over_replaces_recreate(monkeypatch):
+    """Slice D removes `turn_tier_service.REMEDY_RECREATE` when the remedy
+    becomes take-over. The two slices merge without a conflict on those lines,
+    so this module must not need that name at import, or every backend import
+    of it (the applier, the internal router) fails once both are in."""
+    import importlib.util
+    from services import schedule_tier_alerts, turn_tier_service
+    monkeypatch.delattr(turn_tier_service, "REMEDY_RECREATE")
+    spec = importlib.util.spec_from_file_location("_sta_without_recreate", schedule_tier_alerts.__file__)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)      # never registered in sys.modules
+    assert module._REMEDY_TEXT["take_over"] == schedule_tier_alerts._REMEDY_TEXT["take_over"]

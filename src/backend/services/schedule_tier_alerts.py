@@ -44,8 +44,11 @@ MAX_NAMED = 5          # schedules the row's text names
 
 CLEARED = "cleared"
 
+# Keyed by the remedy codes as they go over the wire, not by turn_tier_service's
+# constants: `recreate` is the code until take-over exists, and the slice that
+# adds take-over removes that constant (a clean merge must still import).
 _REMEDY_TEXT = {
-    tts.REMEDY_RECREATE: ("To give them the owner's access, the agent's owner can create them again "
+    "recreate": ("To give them the owner's access, the agent's owner can create them again "
                           "as their own and disable these."),
     "take_over": "To give them the owner's access, the agent's owner can take them over.",
     tts.REMEDY_REPAIR_AGENT_OWNER: "An admin needs to restore the agent's owner.",
