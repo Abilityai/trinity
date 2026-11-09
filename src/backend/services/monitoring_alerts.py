@@ -451,6 +451,43 @@ class MonitoringAlertService:
         await self._broadcast_alert(notification)
         return notification.id
 
+    async def alert_caller_wake_budget_exhausted(
+        self,
+        agent_name: str,
+        callee: str,
+        limit: int,
+    ) -> Optional[str]:
+        """Wakes from ``callee``'s ended runs into ``agent_name`` hit the hourly cap.
+
+        #4357: fired once per window by ``caller_wake_service`` (on the first
+        wake past the cap), so no cooldown is needed. A wake stands at the
+        delegator's own depth, so a delegate-and-wake loop never runs deep
+        enough for the chain-depth guard to see it; this is the stop.
+        """
+        notification = db.create_notification(
+            agent_name=agent_name,
+            data=NotificationCreate(
+                notification_type="alert",
+                title=f"Agent {agent_name} wakes capped",
+                message=(
+                    f"Wakes into {agent_name} for runs it delegated to {callee} "
+                    f"reached {limit} this hour; further wakes from {callee} are "
+                    "skipped until the window resets, and those endings stay "
+                    "readable with get_execution_result. A delegation may be looping."
+                ),
+                priority="high",
+                category="health",
+                metadata={
+                    "agent_name": agent_name,
+                    "callee": callee,
+                    "limit": limit,
+                    "timestamp": utc_now_iso(),
+                },
+            ),
+        )
+        await self._broadcast_alert(notification)
+        return notification.id
+
     async def alert_heartbeat_recovered(
         self,
         agent_name: str
