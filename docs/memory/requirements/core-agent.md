@@ -4522,3 +4522,32 @@ to localStorage in the clear.
 - **Out of scope**: an MCP `continue_room` tool (Workspace first; a person's user-scoped key
   can call the REST route); consolidating the unused `components/rooms/*` (#2136); the
   router's `# mcp:` header (#3367).
+### 5.46 Rooms — the answer to an ask raised in a room comes back to that room (trinity-enterprise#1135)
+- **Status**: ✅ Implemented (2026-11-07)
+- **Requirement ID**: WORKSPACE_ROOM_ASK_RETURN
+- **GitHub Issue**: abilityai/trinity-enterprise#1135
+- **Description**: An agent that raises an ask (`ask_operator`) from inside a room turn
+  gets the answer back IN that room, as a room turn, with the room's context — not as an
+  owner-only continuation nobody in the room sees. The ask records the room it came from
+  (`context.workspace_room_id`, platform-written only, beside the Main attachment, which is
+  kept), the room shows one line while the ask is open and one line when it ends (every
+  disposition, whether or not a wake runs), and the continuation runs through the room
+  engine with the room's unread delta, gate-hold filter, user-facing prompt, transcript
+  budget, wake cap, cursor advance and mention cascade. Over budget, closed, departed or
+  busy, the room says so in one clause and the agent is answered outside the room (today's
+  wake) — the answer is never lost. The room's lines carry the agent, the title, the
+  disposition and a coarse *who*; never the answer, the free text, the cancel reason or a
+  non-member's email. Credential asks never attach to a room. The security requirement
+  (§26.12 "Raised in a room → the room" and §26.9 "A room-raised ask returns to its room";
+  restart survival under §26.9) is the normative text; this section is the Workspace pointer.
+- **Out of scope**: ent#1134 (`to: project`, owner fallback), ent#442 (schedule / system
+  poster into rooms — this is a bounded engine-side `Waker` for ONE participant-scoped case,
+  the seam ent#442 can build on), a room-side ask card, any new MCP tool, a `room_id` on the
+  Workspace ask projection (an existence bit), frontend changes (system lines already render).
+- **Files**: `src/backend/shared_sessions/service.py` (`room_for_execution`,
+  `post_ask_raised_line`, `on_ask_ending`, `return_ask_to_room`, `Waker`),
+  `src/backend/services/ask_service.py`, `src/backend/services/operator_resume_service.py`,
+  `src/backend/services/operator_queue_service/{__init__,poller}.py`,
+  `src/backend/db/operator_queue.py`, `src/backend/main.py`
+- **Tests**: `tests/unit/test_ent1135_ask_room_attachment.py`,
+  `tests/unit/test_ent1135_ask_room_return.py`, `tests/unit/test_ent1135_wake_restart_survival.py`

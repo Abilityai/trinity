@@ -643,9 +643,10 @@ export interface OperatorAskReceipt {
   disposed_by?: string | null;
   agent_ending?: "replaced" | "withdrawn" | null;  // trinity-enterprise#901
   // abilityai/trinity-enterprise#1108 AC #4: the answer wake's status — `pending`
-  // (answered, the agent was not running; its next start delivers it) | `woken` |
-  // null (no wake owed). On a `created` receipt it is null; a replay carries it.
-  wake_state?: "pending" | "woken" | null;
+  // (answered, the agent was not running; its next start delivers it) | `owed`
+  // (ent#1135: the wake is being delivered) | `woken` | null (no wake owed). On a
+  // `created` receipt it is null; a replay carries it.
+  wake_state?: "pending" | "owed" | "woken" | null;
   // trinity-enterprise#1109: where a credential lands when that is not the
   // asking agent — the agent and the host, never the key's variable name.
   credential_destination?: { agent_name: string; host: string } | null;

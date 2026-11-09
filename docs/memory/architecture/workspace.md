@@ -744,6 +744,17 @@ next — turn-taking is mechanical: **you are woken iff you were @mentioned**.
   `/budget-defaults` path there would sit beside `/{room_id}`, one ordering slip from
   being read as a room id (Invariant #4) on the one surface whose reader must never be
   a client.
+- **Ask return** (abilityai/trinity-enterprise#1135): an ask raised from a room turn
+  carries the platform key `context.workspace_room_id` (`room_for_execution`, a RUNNING
+  room turn of this agent in an open room it sits in; never a credential ask). The room
+  gets one system line when it is raised (`post_ask_raised_line`) and one when it ends
+  (`on_ask_ending`, the sink's ending observer registered from `main.py` — every
+  disposition, one line per room/agent/event; coarse *who*, never the answer). The answer
+  or a cancel/dismiss wake runs **through the turn engine** (`return_ask_to_room` →
+  `_wake_agent(…, ask_block=…)`) under an engine `Waker` that acts for nobody (client
+  stamp only for a seated answerer; mention reach = the moderator rebuilt from its row);
+  closed / departed / over budget / capped / lock-busy declines with one clause and the
+  resume service runs today's wake. Normative text: `requirements/security.md` §26.9, §26.12.
 - **Turn engine** (`service.py::post_message` → `_wake_agent`): mentions resolve against
   participants; each woken agent runs an **ordinary** `execute_task(triggered_by="room")`,
   so slots, the circuit breaker, cost and observability come for free, and its reply is

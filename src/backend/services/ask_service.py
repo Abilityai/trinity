@@ -860,6 +860,26 @@ def _fresh_audience(agent_name: str, role: str, *, gate: bool) -> Optional[Tuple
     return people, (people[0] if len(people) == 1 else None)
 
 
+def _raising_room(agent_name: str, turn: Optional[str], ask_type: str) -> Optional[str]:
+    """The room whose RUNNING turn raised this ask, or None
+    (abilityai/trinity-enterprise#1135). An agent's raise only — a gate's ask is
+    a background ask (the ent#610 amendment) — and never a credential ask: a
+    secret has exactly one reader (ent#1066), and a room has many. Fail-soft,
+    the #1632 clamp contract: a lookup that fails leaves the ask where ent#734
+    puts it (its chat, or Main) and never refuses it."""
+    if not turn or ask_type == "credential":
+        return None
+    try:
+        from shared_sessions import service as rooms
+
+        return rooms.room_for_execution(agent_name, turn)
+    except Exception:  # noqa: BLE001
+        logger.warning("[AskService] could not resolve the room of the turn that raised an "
+                       "ask from %s; it is not attached to a room (ent#1135)",
+                       agent_name, exc_info=True)
+        return None
+
+
 def raise_ask(
     agent_name: str,
     ask: Mapping[str, Any],
@@ -1071,6 +1091,9 @@ def raise_ask(
         context[oqs._WORKSPACE_PROJECT_ID_KEY] = project_id
         if seat in ("steward", "creator"):
             context[oqs._WORKSPACE_PROJECT_SEAT_KEY] = seat
+    room_id = _raising_room(agent_name, turn, norm["type"]) if raised_by == "agent" else None
+    if room_id:
+        context[oqs._WORKSPACE_ROOM_KEY] = room_id
     for key, value in (platform_context or {}).items():
         # trinity-enterprise#981: the platform's own attachment, platform keys
         # only — after the strip in `_validated_ask`, so it is the one writer.
@@ -1139,6 +1162,12 @@ def raise_ask(
     row = out["row"]
     if out["outcome"] == "replayed":   # a concurrent call with the same id won
         return _replay(row, norm, oqs, raised_by)
+    if room_id:
+        # ent#1135: the room where the agent asked hears that it is waiting —
+        # only now, so a refused ask leaves no trace there. Never raises.
+        from shared_sessions import service as rooms
+
+        rooms.post_ask_raised_line(room_id, agent_name, row)
     replaced = out.get("predecessor") if target else None
 
     audit = [{
@@ -2044,6 +2073,9 @@ def _wake_filer(event: EndingEvent) -> None:
         for row in event.rows:
             if is_platform_minted(row) or not _wakes(row):
                 continue
+            # ent#1135 (T4): `owed` BEFORE the spawn, so a restart between this
+            # ending and the turn still finds the wake owed and re-offers it.
+            _mark_wake_owed(lambda row=row: [row])
             operator_resume_service.spawn_resume_dispatch(
                 row,
                 response=row.get("response"),
@@ -2065,6 +2097,8 @@ def _wake_filer(event: EndingEvent) -> None:
     rows = [row for row in event.rows if row.get("disposed_by") != "agent" and _wakes(row)]
     if not rows:
         return
+    _mark_wake_owed(lambda: [row for row in rows
+                             if operator_resume_service._wakes_on_ending(row)])
     operator_resume_service.spawn_ending_dispatch(
         rows,
         disposition=event.disposition,
@@ -2072,6 +2106,17 @@ def _wake_filer(event: EndingEvent) -> None:
         reason=event.reason,
         batch_id=event.batch_id,
     )
+
+
+def _mark_wake_owed(rows_of) -> None:
+    """ent#1135 (T4): stamp `owed` before a spawn. A failed stamp is logged and
+    never costs the wake: the spawn still runs and the dispatch writes its own
+    `woken` / `pending` — only a restart in between would lose it."""
+    try:
+        operator_resume_service.mark_wake_owed(rows_of())
+    except Exception:  # noqa: BLE001
+        logger.warning("ask sink: wake_state=owed not recorded — the wake is still spawned, "
+                       "but a restart before its turn would drop it", exc_info=True)
 
 
 register_ending_observer(_wake_filer)

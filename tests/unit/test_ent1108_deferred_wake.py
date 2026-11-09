@@ -100,7 +100,13 @@ class TestTheColumn:
         _answered(queue_db, "n1", wake_state=None)
         _answered(queue_db, "o1", wake_state="pending", agent="other")
         _answered(queue_db, "c1", wake_state="pending", status="cancelled", disposition="cancelled")
-        assert sorted(r["id"] for r in ops.list_pending_wakes_for_agent("agent-w")) == ["p1", "p2"]
+        # abilityai/trinity-enterprise#1135 (T4): an ending wake is owed like an
+        # answer's (`pending` or `owed`), so a cancelled ask is re-offered too;
+        # an expiry never wakes, so it never is.
+        _answered(queue_db, "d1", wake_state="owed", status="cancelled", disposition="dismissed")
+        _answered(queue_db, "x1", wake_state="pending", status="expired", disposition="expired")
+        assert sorted(r["id"] for r in ops.list_pending_wakes_for_agent("agent-w")) == [
+            "c1", "d1", "p1", "p2"]
         row = ops.list_pending_wakes_for_agent("agent-w")[0]
         assert row["response"] == "Build it" and row["responded_by_email"] == "person@example.com"
 
