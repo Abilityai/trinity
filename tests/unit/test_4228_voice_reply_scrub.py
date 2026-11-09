@@ -12,6 +12,13 @@ Redis: the value is staged through ``stage_secret`` the way a producer stages it
 Faked: the Redis store (fakeredis), the seam's encryption (``_FakeEnc``), the db
 reads, the channel providers and synthesis. Assertions read what synthesis
 actually received.
+
+What is spoken carries the seam's spoken placeholder, a plain word, not the stored
+marker, which a speech provider would read out as punctuation. The audit preview is
+stored text and keeps the stored marker. The placeholder is never longer than a
+staged value, so the cost cap judges the text as the agent wrote it: its answer and
+the length it quotes do not depend on what is staged. ``tts_service.synthesize_mp3``
+scrubs as well, for any caller.
 """
 
 from __future__ import annotations
@@ -28,7 +35,8 @@ pytestmark = pytest.mark.unit
 
 AGENT = "brief-bot"
 EMAIL = "person@example.com"
-MARK = "***REDACTED***"
+MARK = "***REDACTED***"  # stored text: the audit preview
+SPOKEN = "redacted"  # spoken text: what synthesis receives
 # A value the text really contains, long enough to be staged (floor is 8) and
 # shaped like no known credential, so only the staged-value store can catch it:
 # the pattern sanitizer (utils.credential_sanitizer) leaves it alone, which
@@ -60,7 +68,14 @@ def seam(monkeypatch):
         assert bound.__globals__ is rss.__dict__
 
     fake = fakeredis.FakeStrictRedis(decode_responses=True)
-    state = types.SimpleNamespace(m=rss, fake=fake, client=fake)
+    state = types.SimpleNamespace(m=rss, fake=fake, client=fake, reads=0)
+    real_hgetall = fake.hgetall
+
+    def _counted_hgetall(*a, **k):
+        state.reads += 1
+        return real_hgetall(*a, **k)
+
+    monkeypatch.setattr(fake, "hgetall", _counted_hgetall)
     monkeypatch.setattr(rss, "get_breaker_redis", lambda: state.client)
     monkeypatch.setattr(rss, "_enc_svc", lambda: _FakeEnc())
     monkeypatch.setattr(rss, "_redis_down_until", 0.0)
@@ -159,6 +174,25 @@ def test_the_secret_is_invisible_to_the_pattern_sanitizer():
 def _stage(seam, value):
     seam.m.stage_secret(AGENT, value)
     assert seam.m.get_staged_values() == [value]  # the store really holds it
+    seam.reads = 0
+
+
+def test_the_spoken_placeholder_never_lengthens_a_text():
+    """What lets the cap judge the text as written: replacing any rendition of a
+    value at the staging floor with the placeholder cannot make a text longer."""
+    import base64
+
+    from services import runtime_secret_scrub as rss
+
+    assert rss.SPOKEN_PLACEHOLDER == SPOKEN
+    assert len(SPOKEN) <= rss._MIN_VALUE_LEN
+    floor_value = "Zq7x\"R2p"  # 8 chars; its JSON-escaped rendition is 9
+    assert len(floor_value) == rss._MIN_VALUE_LEN
+    for rendition in (floor_value, json.dumps(floor_value)[1:-1],
+                      base64.b64encode(floor_value.encode()).decode()):
+        text = f"a {rendition} b {rendition}"
+        out = rss.scrub_text([floor_value], text, SPOKEN)
+        assert floor_value not in out and len(out) <= len(text), rendition
 
 
 # ---------------------------------------------------------------------------
@@ -182,7 +216,7 @@ async def test_synthesis_never_receives_a_staged_value(seam, send, channel):
     with _world() as m:
         res = await send(channel, text)
     assert res.delivered is True, res
-    assert m.spoken == [f"Your new key is {MARK}, keep it safe."]
+    assert m.spoken == [f"Your new key is {SPOKEN}, keep it safe."]
 
 
 @pytest.mark.asyncio
@@ -209,7 +243,7 @@ async def test_addressed_audit_preview_is_scrubbed_on_a_refusal(seam):
 
 
 # ---------------------------------------------------------------------------
-# AC 2 — text_too_long judges the text synthesis would receive
+# AC 2 — text_too_long holds when scrubbing changes the text's length
 # ---------------------------------------------------------------------------
 
 _BOTH = [
@@ -220,41 +254,135 @@ _BOTH = [
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("send, channel", _BOTH)
-async def test_scrub_that_grows_the_text_past_the_cap_is_text_too_long(seam, send, channel):
-    """An 8-char value becomes the 14-char marker: a raw text exactly at the cap
-    is 6 over it once scrubbed. Judging the raw text would let it through to
-    synthesis, where Trinity's own tts_service._within_cost_cap refuses it before
-    any provider call, and it surfaces as synthesis_failed."""
+async def test_a_text_at_the_cap_still_fits_after_the_scrub(seam, send, channel):
+    """An 8-char value at the end of a text exactly at the cap: the scrub swaps it
+    for the placeholder, and what synthesis receives is still within the cap, so
+    it never surfaces as synthesis_failed."""
     import config
 
     cap = config.TTS_MAX_CHARS
     short = "Zq7xR2pW"
-    assert len(short) == 8 and len(MARK) == 14
     _stage(seam, short)
     text = "x" * (cap - len(short)) + short
     assert len(text) == cap
     with _world() as m:
         res = await send(channel, text)
-    assert res.reason == "text_too_long", res
-    assert res.max_chars == cap
-    assert f"this text is {cap + 6}." in res.guidance
+    assert res.delivered is True, res
+    assert m.spoken == ["x" * (cap - len(short)) + SPOKEN]
+    assert len(m.spoken[0]) <= cap
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("send, channel", _BOTH)
+async def test_the_cap_answer_does_not_depend_on_what_is_staged(seam, send, channel):
+    """The staged store is shared by every agent. If the cap judged the scrubbed
+    text, an agent could put a guessed value in an over-cap text and learn from
+    the answer, or from the length it quotes, whether that value is staged. The
+    cap judges the text as written, so staged and unstaged give one answer."""
+    import config
+
+    cap = config.TTS_MAX_CHARS
+    text = "x" * (cap - 20) + SECRET
+    assert len(text) > cap
+
+    with _world() as m:
+        unstaged = await send(channel, text)
+    _stage(seam, SECRET)
+    with _world() as m:
+        staged = await send(channel, text)
+
+    assert staged.reason == unstaged.reason == "text_too_long"
+    assert staged.guidance == unstaged.guidance
+    assert f"this text is {len(text)}." in staged.guidance
+    assert staged.max_chars == cap
+    assert m.spoken == []
+
+
+# ---------------------------------------------------------------------------
+# A refused call never reads the store
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("send, channel, expected", [
+    pytest.param(_in_session, "discord", "unsupported_channel", id="in-session-channel"),
+    pytest.param(_addressed, "discord", "unsupported_channel", id="addressed-channel"),
+    pytest.param(_addressed, "slack", "proactive_channel_unsupported", id="addressed-slack"),
+])
+async def test_a_structural_refusal_never_reads_the_store(seam, send, channel, expected):
+    _stage(seam, SECRET)
+    with _world() as m:
+        res = await send(channel, f"key {SECRET}")
+    assert res.reason == expected
+    assert seam.reads == 0
     assert m.spoken == []
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("send, channel", _BOTH)
-async def test_scrub_that_shrinks_the_text_under_the_cap_delivers(seam, send, channel):
-    import config
-
-    cap = config.TTS_MAX_CHARS
+async def test_a_gate_refusal_never_reads_the_store(seam, send, channel):
     _stage(seam, SECRET)
-    text = "x" * (cap - 20) + SECRET
-    assert len(text) > cap
-    with _world() as m:
-        res = await send(channel, text)
-    assert res.delivered is True, res
-    assert m.spoken == ["x" * (cap - 20) + MARK]
-    assert len(m.spoken[0]) <= cap
+    with _world() as m, patch("services.tts_service.is_available", return_value=False):
+        res = await send(channel, f"key {SECRET}")
+    assert res.reason == "tts_unavailable"
+    assert seam.reads == 0
+    assert m.spoken == []
+
+
+# ---------------------------------------------------------------------------
+# The synthesis chokepoint scrubs for any caller
+# ---------------------------------------------------------------------------
+
+
+class _Provider:
+    """Stands in for httpx.AsyncClient inside tts_service: records the text in
+    every request body and answers 200 with MP3 bytes."""
+
+    def __init__(self):
+        self.sent: list[str] = []
+
+    def client(self, *a, **k):
+        provider = self
+
+        class _Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def post(self, url, headers=None, json=None):
+                provider.sent.append(json["text"])
+                return types.SimpleNamespace(status_code=200, content=b"MP3", text="")
+
+        return _Client()
+
+
+@pytest.mark.asyncio
+async def test_synthesize_mp3_scrubs_for_a_caller_that_did_not(seam):
+    """A caller that hands raw agent text straight to synthesis: the provider
+    still never receives the staged value."""
+    from services import tts_service
+
+    _stage(seam, SECRET)
+    provider = _Provider()
+    with patch.object(tts_service, "_resolve_api_key", return_value="test-key"), \
+         patch.object(tts_service.httpx, "AsyncClient", new=provider.client):
+        audio = await tts_service.synthesize_mp3(f"Your key is {SECRET}.", "v1")
+    assert audio == b"MP3"
+    assert provider.sent == [f"Your key is {SPOKEN}."]
+
+
+@pytest.mark.asyncio
+async def test_synthesize_mp3_sends_unchanged_text_when_nothing_is_staged(seam):
+    from services import tts_service
+
+    provider = _Provider()
+    with patch.object(tts_service, "_resolve_api_key", return_value="test-key"), \
+         patch.object(tts_service.httpx, "AsyncClient", new=provider.client):
+        audio = await tts_service.synthesize_mp3(f"Plain {SECRET[:6]} text.", "v1")
+    assert audio == b"MP3"
+    assert provider.sent == [f"Plain {SECRET[:6]} text."]
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +435,3 @@ async def test_store_outage_behaves_like_send_message(seam, send, channel):
 
     assert res.delivered is True, res
     assert m.spoken == [captured["text"]]
-    # Today both pass the text through unchanged (the seam's stage side fails
-    # closed, so no NEW value is staged while the store is down).
-    assert captured["text"] == text

@@ -16,6 +16,10 @@ Design:
   never break a reply.
 - **Cost guardrail** is a shared char cap (``TTS_MAX_CHARS``): a reply longer than
   the cap is refused up front (``None``) so we never pay to synthesize an essay.
+- **Staged credential values never reach the provider.** ``synthesize_mp3`` (and so
+  ``synthesize_voice_note``) removes them before the request, whoever the caller is
+  (ent#279 seam, #4228). A caller that also shows or audits the text scrubs it
+  itself first; this one is the floor for any caller that does not.
 """
 import asyncio
 import logging
@@ -24,6 +28,7 @@ from typing import Optional
 import httpx
 
 import config
+from services.runtime_secret_scrub import SPOKEN_PLACEHOLDER, scrub_staged
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +112,10 @@ async def synthesize_mp3(text: str, voice_id: str) -> Optional[bytes]:
         return None
     if not voice_id:
         return None
+    # ent#279 / #4228: the provider is a third party. Scrubbing here covers every
+    # caller, and the cap below judges the text that would be sent. The spoken
+    # placeholder is never longer than a value, so this never pushes a text over it.
+    text = scrub_staged(text, marker=SPOKEN_PLACEHOLDER)
     if not _within_cost_cap(text):
         logger.info(
             "TTS skipped: reply length %d outside cost cap (0, %d] — falling back to text",

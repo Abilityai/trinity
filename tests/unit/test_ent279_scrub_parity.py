@@ -89,7 +89,7 @@ _MESSAGE_WRITERS = {
 }
 
 # Any of these discharges the obligation (all imported bare from the seam).
-_SCRUBBERS = {"get_staged_values", "scrub_text", "scrub_obj"}
+_SCRUBBERS = {"get_staged_values", "scrub_text", "scrub_obj", "scrub_staged"}
 
 _SCAN_DIRS = ("services", "routers", "client_portal")
 
@@ -319,6 +319,10 @@ _REQUIRED_SCRUBBERS = {
         "services/voice_reply_service.py",
         "send_proactive_voice",
     ): "addressed voice note text -> TTS provider + spoken audio + audit message_preview (#4228)",
+    (
+        "services/tts_service.py",
+        "synthesize_mp3",
+    ): "any caller's text -> ElevenLabs (also under synthesize_voice_note) (#4228)",
     (
         "client_portal/service.py",
         "synthesize_portal_tts",
