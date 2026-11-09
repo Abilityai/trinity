@@ -1287,6 +1287,16 @@ DELEGATED: Dict[str, Tuple[str, str, str]] = {
         "POST /api/rooms/{room_id}/leave",
         "shared_sessions.service.leave_room -> PEOPLE_KINDS check",
         "tests/unit/test_ent701_room_people.py::test_an_agent_cannot_leave"),
+    # trinity#4302: a person continues a paused mention chain. Same principal
+    # (a platform user OR a Workspace client), so no dependency gate fits; the
+    # service refuses any non-person (`not_a_person`, 403 — an agent-callable
+    # Continue would let the bounded thing lift its own cap) after the uniform
+    # membership 404, which the router checks before the idempotency claim.
+    "shared_sessions/router.py::continue_chain": (
+        "POST /api/rooms/{room_id}/continue",
+        "shared_sessions.service.continue_chain -> _is_room_person",
+        "tests/unit/test_4302_room_chain_continue.py::"
+        "test_an_agent_or_system_key_reads_the_offer_but_may_not_continue"),
     # trinity-enterprise#719: three room uses. Agents read and post in a room as
     # themselves (ent#169); `get_room_principal` fits no census gate, and the
     # service keeps each room to its members. Creating a room stays in the

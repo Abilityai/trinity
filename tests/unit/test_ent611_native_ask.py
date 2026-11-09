@@ -433,10 +433,13 @@ class TestRaiseAsk:
         assert row["resolved_to"] == ["approver@example.com"]
         assert row["addressed_to_email"] == "approver@example.com" and r["resolved"] is True
 
-    def test_a_provider_that_says_nobody_fills_primary_sends_the_ask_to_the_operators(self, ask):
-        """ent#606: an ask to `primary` falls back to `operator` when no primary is
-        assigned; the owner stands in only when no provider answers at all. An
-        empty list IS an answer ("nobody fills it", resolve_role_people)."""
+    def test_a_provider_that_says_nobody_fills_primary_stands_the_owner_in(self, ask):
+        """abilityai/trinity-enterprise#1134 (ruling 1 of 2026-11-07): an ask to
+        `primary` reaches the agent's OWNER when no primary is assigned — never
+        silently the operator queue, where the person in the chat would not see
+        it. An empty list IS an answer ("nobody fills it", resolve_role_people);
+        under ent#606 it meant the operators, which left the field case with an
+        ask nobody in the chat could see."""
         from services import assignment_provider
 
         class _P:
@@ -448,6 +451,25 @@ class TestRaiseAsk:
 
         assignment_provider.register_provider(_P())
         r = _raise(ask, self.AGENT, _body("ra-nobody"))
+        row = ask.db.get_operator_queue_item(r["id"])
+        assert (r["to_role"], r["resolved"]) == ("primary", True)
+        assert row["addressed_to_email"] == OWNER and row["resolved_to"] == [OWNER]
+        assert (row["context"] or {}).get("workspace_session_id") == f"thread-{OWNER}"   # the owner's Main
+
+    def test_nobody_fills_primary_and_the_owner_has_no_email_is_the_operators(self, ask):
+        """The one remaining operator fallback after ent#1134: no owner address."""
+        from services import assignment_provider
+
+        class _P:
+            def assignment_for(self, agent, trig):
+                return None
+
+            def people_for(self, agent, role):
+                return {"emails": []}
+
+        assignment_provider.register_provider(_P())
+        ask.state["owner"] = None
+        r = _raise(ask, self.AGENT, _body("ra-nobody-noemail"))
         row = ask.db.get_operator_queue_item(r["id"])
         assert (r["to_role"], r["resolved"]) == ("primary", False)
         assert row["addressed_to_email"] is None and row["resolved_to"] is None

@@ -4151,6 +4151,22 @@ to localStorage in the clear.
   else sees it, and the rest of the addressee-only family keeps its roster fence. Such an ask
   opens no chat, and carries a `project` field (`{id, task_id, event}`) read only from
   platform-written context keys an agent cannot set.
+- **Who an ask reaches when nobody is primary, and `to: project` (trinity-enterprise#1134)**:
+  with nobody assigned as primary, a `primary` ask goes to the agent's owner (the one owner
+  stand-in asks, proposals, messages and voice share; the skill gate still refuses
+  `role_unassigned`). Only with no owner or an owner with no email does it fall to the
+  operators; then, if it was raised during a Workspace chat turn, that chat shows one muted,
+  content-free line where it was asked — kind, *went to the operators*, why, and that an admin
+  can assign a primary contact in the agent's Access tab — never its title, question or
+  options, and never for an ask addressed to `operator` on purpose (the room's line is
+  trinity-enterprise#1135). An ask addressed `to: project` reaches ONE person resolved from the
+  turn's own chat or room project — the steward when a reachable person, else the creator —
+  even off the agent's roster (listed, counted and answered by address; Discuss is refused
+  `not_discussable` off the roster); only they answer it (an admin may cancel), its card says
+  *To you as this project's steward* (or *creator*), and a steward change moves it and
+  re-stamps the seat. It never
+  falls through: `project_unavailable`, `not_in_project_turn` or `project_unreachable` refuse
+  it with nothing filed.
 - **Known properties (stated, not bugs)**:
   - A viewer who has never read anything has no baseline, so nothing counts for them — a first
     deliverable included (the inherited #557 rule).
@@ -4457,3 +4473,81 @@ to localStorage in the clear.
   and always creates a room, even with one agent.
 - **What a collaborator reads**: the room payload and list drop `cost`, `max_cost_usd`, each message's `execution_id`, and other participants' session and cursor fields. A moderator, an admin and an agent keep them. A collaborator keeps their own cursor.
 - **A reply outlives its waker**: an engine reply lands even if the person who woke it has since left or been removed. That person still cannot read the room.
+
+### 5.45 A paused mention chain says so, and a person can continue it (abilityai/trinity#4302)
+- **Status**: ✅ Implemented (2026-11-07)
+- **Requirement ID**: ROOM_CHAIN_CONTINUE
+- **GitHub Issue**: abilityai/trinity#4302
+- **Description**: The room's chain cap (`ROOM_MAX_CHAIN_DEPTH = 8` hand-offs from one
+  human message) stays, and still protects spend. What changes is the dead end: the stop
+  says, in plain words, that the agents are waiting for a person and who was next, and a
+  person can carry on with one control instead of discovering that a new message restarts
+  the count. The cap is not raised and not made configurable.
+- **FR-1 — The pause is a typed row.** At the cap the engine writes a system row with
+  `kind = "chain_paused"`, `mentions` = the agents that were next, and content that states
+  facts only: *"The agents paused after 8 hand-offs and are waiting for a person. {a} was
+  next."* (*"{a} and {b} were next."*). Agents read every system row as `System:` text on
+  their next wake, so no UI verb is stored; the how-to-carry-on wording is the Workspace's
+  to render beside the control. `kind` is free text on both tracks — no migration.
+- **FR-2 — The payload names the live offer.** `GET /api/rooms/{id}` carries
+  `paused_chain: {seq, next}` while the room is open, the newest pause's offer stands and at
+  least one agent it named is still seated; otherwise `null`. Derived from the transcript at
+  read time, never stored, and present for every reader (collaborators included, above the
+  read floor too). It is a UI capability; the route decides who may act.
+- **FR-3 — The offer stands until the conversation moves on.** A conversational row (any
+  non-system sender) or a later `chain_paused` / `chain_continued` row after the pause ends
+  it; bookkeeping lines (joined, left, still busy) keep it. One SQL predicate
+  (`_MOVED_ON_SQL`) is shared by the read (`offer_stands`) and the write.
+- **FR-4 — `POST /api/rooms/{id}/continue` `{seq}`, people only.** Order: membership
+  (uniform 404) → a person (403 `not_a_person` — agent and system keys are refused; an
+  agent-callable Continue would let the bounded thing lift its own bound) → budgets (410
+  `room_closed` with `stop_reason` and a sentence saying why) → the offer at `seq` stands
+  (409 `room_moved_on`) → someone named is still seated (409 `no_one_to_wake`) → the person
+  still reaches at least one of them (403 `agent_not_accessible`, nothing consumed) → the
+  receipt → the wake cap → the wakes at a fresh depth (depth 1, as a human post's).
+- **FR-5 — Once per stop, durably.** The receipt is a `chain_continued` system row
+  (*"{person} asked {a} to carry on."*) inserted by `append_continue_receipt` under the
+  FR-3 predicate inside the seq-allocation transaction, so a double click, two tabs, two
+  workers or a retry after a restart wake the agents once. The optional `Idempotency-Key`
+  header (Invariant #18) lives under the route's own scope `room-continue:{room_id}`; it is
+  never the once-per-stop guard, and the Workspace sends none.
+- **FR-6 — Budgets still apply.** The receipt is a system row and spends no message budget;
+  the turns it wakes are costed and counted as any other.
+- **FR-7 — The Workspace control.** One Continue block after the transcript, from
+  `paused_chain`, only while the room is open: *"Continue lets {a} carry on, or send a
+  message."* and a secondary **Continue** button. Its state follows the payload, not the
+  held request: a network failure and `room_moved_on` / `request_in_progress` are silent
+  (the reload shows what happened); any other coded refusal shows the server's sentence in
+  an `InlineError` while the offer stands. Readable in light and dark, stacks on a phone.
+- **Out of scope**: an MCP `continue_room` tool (Workspace first; a person's user-scoped key
+  can call the REST route); consolidating the unused `components/rooms/*` (#2136); the
+  router's `# mcp:` header (#3367).
+### 5.46 Rooms — the answer to an ask raised in a room comes back to that room (trinity-enterprise#1135)
+- **Status**: ✅ Implemented (2026-11-07)
+- **Requirement ID**: WORKSPACE_ROOM_ASK_RETURN
+- **GitHub Issue**: abilityai/trinity-enterprise#1135
+- **Description**: An agent that raises an ask (`ask_operator`) from inside a room turn
+  gets the answer back IN that room, as a room turn, with the room's context — not as an
+  owner-only continuation nobody in the room sees. The ask records the room it came from
+  (`context.workspace_room_id`, platform-written only, beside the Main attachment, which is
+  kept), the room shows one line while the ask is open and one line when it ends (every
+  disposition, whether or not a wake runs), and the continuation runs through the room
+  engine with the room's unread delta, gate-hold filter, user-facing prompt, transcript
+  budget, wake cap, cursor advance and mention cascade. Over budget, closed, departed or
+  busy, the room says so in one clause and the agent is answered outside the room (today's
+  wake) — the answer is never lost. The room's lines carry the agent, the title, the
+  disposition and a coarse *who*; never the answer, the free text, the cancel reason or a
+  non-member's email. Credential asks never attach to a room. The security requirement
+  (§26.12 "Raised in a room → the room" and §26.9 "A room-raised ask returns to its room";
+  restart survival under §26.9) is the normative text; this section is the Workspace pointer.
+- **Out of scope**: ent#1134 (`to: project`, owner fallback), ent#442 (schedule / system
+  poster into rooms — this is a bounded engine-side `Waker` for ONE participant-scoped case,
+  the seam ent#442 can build on), a room-side ask card, any new MCP tool, a `room_id` on the
+  Workspace ask projection (an existence bit), frontend changes (system lines already render).
+- **Files**: `src/backend/shared_sessions/service.py` (`room_for_execution`,
+  `post_ask_raised_line`, `on_ask_ending`, `return_ask_to_room`, `Waker`),
+  `src/backend/services/ask_service.py`, `src/backend/services/operator_resume_service.py`,
+  `src/backend/services/operator_queue_service/{__init__,poller}.py`,
+  `src/backend/db/operator_queue.py`, `src/backend/main.py`
+- **Tests**: `tests/unit/test_ent1135_ask_room_attachment.py`,
+  `tests/unit/test_ent1135_ask_room_return.py`, `tests/unit/test_ent1135_wake_restart_survival.py`

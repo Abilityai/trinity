@@ -736,6 +736,61 @@ describe("trinity-enterprise#1007 ask_operator to a canon role", () => {
 });
 
 // ---------------------------------------------------------------------------
+// trinity-enterprise#1134 — ask_operator may address the turn's project:
+// `to: "project"`. The backend resolves who that reaches (the project's
+// steward, else its creator) from the platform's turn; the schema admits the
+// word, the parameter teaches the three named refusals, the tool description
+// keeps its headroom.
+// ---------------------------------------------------------------------------
+
+describe("trinity-enterprise#1134 ask_operator to the project", () => {
+  const tool = makeAskOperator(raisingClient().fake);
+  const schema = tool.parameters as any;
+
+  it('accepts to="project"', () => {
+    assert.equal(schema.safeParse({ ...ASK, to: "project" }).success, true);
+  });
+
+  for (const to of ["Project", "projects", "project:x", "role:project "]) {
+    it(`rejects to=${JSON.stringify(to)}`, () => {
+      assert.equal(schema.safeParse({ ...ASK, to }).success, false);
+    });
+  }
+
+  it("forwards the word to the backend unchanged — the backend resolves the person", async () => {
+    const { fake, calls } = raisingClient({ status: "created", request_id: "deploy-1", to_role: "project" });
+    const body: OperatorAskCreate = { ...(ASK as any), to: "project" };
+    const out = JSON.parse(await makeAskOperator(fake).execute(body, agentCtx("self")));
+    assert.deepEqual(calls, [["self", body]]);
+    assert.equal(out.to_role, "project");
+  });
+
+  for (const code of ["project_unavailable", "not_in_project_turn", "project_unreachable"]) {
+    it(`a ${code} refusal reaches the agent by name, never a person`, async () => {
+      const detail = { code, message: "Address primary or operator instead.", role: "project" };
+      const fake = {
+        raiseAsk: async () => { throw new ApiError(422, JSON.stringify({ detail })); },
+      } as Partial<TrinityClient>;
+      const out = JSON.parse(await makeAskOperator(fake).execute({ ...ASK, to: "project" } as any, agentCtx("self")));
+      assert.deepEqual(out, { success: false, status: 422, ...detail });
+    });
+  }
+
+  it("the `to` parameter teaches the project target and its three refusals", () => {
+    const d = schema.shape.to.description as string;
+    assert.match(d, /Or project\b/);
+    assert.match(d, /steward, else its creator/);
+    for (const code of ["project_unavailable", "not_in_project_turn", "project_unreachable"]) {
+      assert.ok(d.includes(code), code);
+    }
+  });
+
+  it("the tool description keeps its headroom", () => {
+    assert.ok(tool.description.length <= 1800, `ask_operator description is ${tool.description.length} characters`);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // trinity-enterprise#1066 — ask_for_credential: an agent asks the person of the
 // conversation for a secret BY NAME. The ask is a `credential` ask addressed to
 // primary; the value is typed into the masked field in the person's Workspace

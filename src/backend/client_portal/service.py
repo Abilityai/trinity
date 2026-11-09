@@ -2533,6 +2533,22 @@ def chat_for_execution(agent_name: str, email: str, execution_id: str) -> str | 
     readable and resumable (`reset_main_session`), Reset is refused mid-turn,
     so a running turn there is a person talking in a chat they can see.
     """
+    hit = chat_of_turn(agent_name, execution_id)
+    if hit is None or hit[1] != (email or "").lower():
+        return None
+    return hit[0]
+
+
+def chat_of_turn(agent_name: str, execution_id: str) -> tuple[str, str] | None:
+    """`(chat_id, client)` for a RUNNING Workspace chat turn of `agent_name`,
+    whoever its client is — else None (trinity-enterprise#1134).
+
+    The rule `chat_for_execution` documents, without the addressee match: an
+    ask that fell to the operators has no addressee to match, and its chat
+    notice is read only by that chat's owner (`get_portal_session` again at
+    read time). The session must belong to the turn's own client, so a row can
+    never name another person's conversation.
+    """
     from database import db as core_db
     from models import TaskExecutionStatus
     execution = core_db.get_execution(execution_id)
@@ -2544,9 +2560,9 @@ def chat_for_execution(agent_name: str, email: str, execution_id: str) -> str | 
         return None
     chat_id = getattr(execution, "source_channel_chat_id", None)
     client = (getattr(execution, "source_channel_client", None) or "").lower()
-    if not chat_id or not client or client != (email or "").lower():
+    if not chat_id or not client:
         return None
-    return chat_id if db.get_portal_session(chat_id, agent_name, client) else None
+    return (chat_id, client) if db.get_portal_session(chat_id, agent_name, client) else None
 
 
 def _one_line(content) -> str:

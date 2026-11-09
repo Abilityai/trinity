@@ -11,10 +11,53 @@ import { askUrgencyCompare } from '../portalInbox'
 export const STATUS_BADGE = Object.freeze({ active: 'success', paused: 'warning', done: 'neutral' })
 const STATUS_LABEL = { active: 'Active', paused: 'Paused', done: 'Done' }
 const VISIBILITY_LABEL = { members: 'Members only', company: 'Company' }
-const AGENT_STATE_LABEL = { active: 'Can work on it', pending: 'Waiting for owner', declined: 'Owner declined' }
+const AGENT_STATE_LABEL = {
+  active: 'Can work on it', pending: 'Waiting for owner', declined: 'Owner declined', off: 'Not on the project',
+}
 
 export const NAME_MAX = 120
 export const GOAL_MAX = 1000
+
+// A task's text limits, mirroring `TITLE_MAX` / `TEXT_MAX` in
+// `enterprise/backend/projects/work.py` — the server is still the authority;
+// these stop the user before a paste reaches the outer Pydantic cap, whose
+// refusal has no field to show it under. A test pins the two in step.
+export const TASK_TITLE_MAX = 200
+export const TASK_TEXT_MAX = 4000
+
+// How a task field is named to a person, and which inline error a server
+// refusal belongs under.
+const TASK_FIELD_LABEL = { title: 'title', objective: 'objective', done_definition: 'definition of done' }
+export const TASK_FIELD_ERROR_CODES = Object.freeze({
+  invalid_title: 'title', invalid_objective: 'objective', invalid_done_definition: 'done_definition',
+})
+
+/** Length in CODE POINTS, which is what Python's `len` counts — `.length`
+ *  would read 150 emoji as 300 and refuse a title the server accepts. */
+const codePoints = (text) => [...String(text ?? '')].length
+
+/**
+ * The create dialog's and the detail form's shared check, so "the same limits
+ * as at creation" holds in both directions. `only` narrows it to the fields a
+ * save actually sends: a legacy stored value over the limit must not block an
+ * unrelated change.
+ */
+export function validateTaskFields(values, only = null) {
+  const fields = only || Object.keys(TASK_FIELD_LABEL)
+  const errors = {}
+  for (const f of fields) {
+    if (!(f in TASK_FIELD_LABEL)) continue
+    const text = String(values?.[f] ?? '').trim()
+    const n = codePoints(text)
+    if (f === 'title' && !n) {
+      errors.title = 'Give the task a title, e.g. "Draft the launch brief".'
+      continue
+    }
+    const max = f === 'title' ? TASK_TITLE_MAX : TASK_TEXT_MAX
+    if (n > max) errors[f] = `Keep the ${TASK_FIELD_LABEL[f]} to ${max} characters (it's ${n} now).`
+  }
+  return errors
+}
 
 export function statusLabel(status) {
   return STATUS_LABEL[status] || 'Unknown'
@@ -95,6 +138,39 @@ export function chatProjectActions({ projectsAvailable, isPlatform, isMain, sess
   const linked = base && Boolean(project)
   const show = base && (platform || linked)
   return { show, linked, canAdd: show && platform, canWrapUp: linked && platform }
+}
+
+/**
+ * A linked room's agents and where each stands on the project
+ * (trinity-enterprise#1131), from the server's `room_agents` block — null
+ * when the read has none (a thread, a guest, a participant who can't open the
+ * project). The chip counts the agents not on it (`off` / `declined`) before
+ * the ones waiting on their owner, and is null when every agent is active.
+ * Add is offered only to a MANAGE_AGENTS holder on a row the server marked
+ * `can_add`; a row it can't add says why.
+ */
+const ROOM_AGENT_BADGE = { active: 'success', pending: 'warning', declined: 'neutral', off: 'neutral' }
+const ROOM_AGENT_NOTE = { not_on_your_list: 'Not on your list' }
+
+export function roomAgentRows(project) {
+  if (!project || !('room_agents' in project)) return null
+  const canManage = project.can?.manage_agents === true
+  if (project.room_agents === null) {
+    return { rows: [], canManage, degraded: true, chip: { label: "Couldn't read agents", variant: 'neutral' } }
+  }
+  const rows = (project.room_agents || []).map((a) => ({
+    name: a.agent_name,
+    state: a.state,
+    label: agentStateLabel(a.state),
+    badge: ROOM_AGENT_BADGE[a.state] || 'neutral',
+    action: canManage && a.can_add === true ? 'add' : null,
+    note: canManage ? ROOM_AGENT_NOTE[a.reason] || null : null,
+  }))
+  const notOn = rows.filter((r) => r.state === 'off' || r.state === 'declined').length
+  const waiting = rows.filter((r) => r.state === 'pending').length
+  const chip = notOn ? { label: `${notOn} not on it`, variant: 'warning' }
+    : waiting ? { label: `${waiting} waiting on owner`, variant: 'neutral' } : null
+  return { rows, canManage, degraded: false, chip }
 }
 
 const CODE_MESSAGE = {
@@ -242,7 +318,7 @@ export function wrapUpPrompt(projectName) {
 
 const TASK_LOG_KIND_LABEL = {
   created: 'Created', status: 'Status', reopened: 'Reopened', done_claim: 'Done claim',
-  note: 'Note', imported: 'Imported',
+  note: 'Note', imported: 'Imported', edited: 'Edited', owner: 'Owner',
 }
 
 /** A task-log entry's kind in words ("Done claim", "Reopened"). */

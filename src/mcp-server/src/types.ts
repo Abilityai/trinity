@@ -613,7 +613,7 @@ export interface OperatorAskCreate {
   options?: string[];
   context?: Record<string, unknown> | null;
   proposal?: Record<string, unknown> | null;
-  to?: "primary" | "approver" | "viewer" | "operator" | `role:${string}`;   // trinity-enterprise#1007: or a canon role id
+  to?: "primary" | "approver" | "viewer" | "operator" | "project" | `role:${string}`;   // trinity-enterprise#1007: or a canon role id; ent#1134: or the turn's project
   expires_at?: string;
   supersedes_expired?: string;
   replaces?: string;   // #3247: request_id of one of the agent's own PENDING asks
@@ -643,9 +643,10 @@ export interface OperatorAskReceipt {
   disposed_by?: string | null;
   agent_ending?: "replaced" | "withdrawn" | null;  // trinity-enterprise#901
   // abilityai/trinity-enterprise#1108 AC #4: the answer wake's status — `pending`
-  // (answered, the agent was not running; its next start delivers it) | `woken` |
-  // null (no wake owed). On a `created` receipt it is null; a replay carries it.
-  wake_state?: "pending" | "woken" | null;
+  // (answered, the agent was not running; its next start delivers it) | `owed`
+  // (ent#1135: the wake is being delivered) | `woken` | null (no wake owed). On a
+  // `created` receipt it is null; a replay carries it.
+  wake_state?: "pending" | "owed" | "woken" | null;
   // trinity-enterprise#1109: where a credential lands when that is not the
   // asking agent — the agent and the host, never the key's variable name.
   credential_destination?: { agent_name: string; host: string } | null;
