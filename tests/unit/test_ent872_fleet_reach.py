@@ -823,6 +823,9 @@ _ALLOW = {
     ("services/turn_tier_service.py", "can_user_share_agent"):
         "RunTierLookups' restatement of db.can_user_share_agent for _user_tier (#4281): the role compared is "
         "a schedule creator's user row, never the caller's; selects no roster",
+    ("services/turn_tier_service.py", "schedule_run_cause"):
+        "#4281: the role compared is a schedule creator's user row, never the caller's, and only to "
+        "keep the cause from contradicting the tier; selects no roster",
     ("services/ws_identity_service.py", "event_stream_identity"):
         "an agent key returns agent_reach_names as a non-admin slot before the role compare",
     ("services/ws_identity_service.py", "accessible_agents_for"):

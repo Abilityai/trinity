@@ -219,6 +219,30 @@ def test_a_failing_cause_lookup_still_answers():
                                                                                    None)
 
 
+@pytest.mark.parametrize("sid, agent", [("s-owner", AGENT), ("s-admin", AGENT), ("c-admin", ORPHAN_AGENT)])
+def test_a_cause_never_contradicts_the_tier_it_is_given(sid, agent):
+    """A share tier for a creator the lookups now find owner-tier (a lookup that
+    changed between the tier and the cause) is not explained as "someone else
+    created it": the cause is unknown."""
+    assert _t().schedule_run_cause(World(), agent, schedule(sid), "share") == "unknown"
+
+
+def test_a_schedule_read_that_fails_once_does_not_misname_the_owner():
+    """The answer reads the schedule twice: for the tier, then for the detail.
+    A first read that fails rates the turn a shared person (fail closed); a
+    second read that succeeds must not then call the agent's owner someone who
+    is not the owner."""
+    class _FailsOnce(World):
+        def get_schedule(self, schedule_id):
+            if not self.calls["get_schedule"]:
+                self.calls["get_schedule"] += 1
+                raise RuntimeError("blip")
+            return World.get_schedule(self, schedule_id)
+    answer = _answer(_FailsOnce(executions={"e1": _schedule_run("s-owner")}))
+    assert (answer["tier"], answer["shell"]) == ("share", False)
+    assert (answer["cause"], answer["creator"], answer["remedy"]) == ("unknown", None, None)
+
+
 # Characters JSON escapes as \\uXXXX under ensure_ascii, the widest form: an
 # astral character becomes a 12-byte surrogate pair.
 _WIDE = "\U0001F600"

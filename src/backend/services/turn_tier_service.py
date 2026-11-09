@@ -307,10 +307,16 @@ def schedule_run_cause(db, agent_name: str, schedule, tier: str) -> str:
         if tier == OWNER:
             return CREATOR_OWNER_TIER
         uid = _int_or_none(creator)
-        if uid is None or not db.get_user_by_id(uid):
+        user = db.get_user_by_id(uid) if uid is not None else None
+        if not user:
             return CREATOR_MISSING
-        if db.get_agent_owner(agent_name) is None:
+        if user.get("role") == "admin":
+            return CAUSE_UNKNOWN  # owner-tier now: a lookup changed since the tier was read
+        owner = db.get_agent_owner(agent_name)
+        if owner is None:
             return AGENT_HAS_NO_OWNER
+        if owner.get("owner_username") == user.get("username"):
+            return CAUSE_UNKNOWN  # the same: never name the owner as "someone else"
         return CREATOR_NOT_OWNER_TIER
     except Exception as exc:  # noqa: BLE001 - total by contract; the tier stands
         logger.warning("[#4281] schedule run cause lookup failed for agent %s: %s", agent_name, exc)
