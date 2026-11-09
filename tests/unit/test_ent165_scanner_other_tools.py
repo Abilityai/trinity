@@ -597,6 +597,18 @@ _BAD_BASELINE = {"credential_patterns": []}
 _NOTICE = "[Output withheld: Trinity's credential check failed."
 
 
+def _assert_a_text_read(rewritten):
+    """A withheld Read must still parse as Read's text variant, number types
+    included: the CLI drops a rewrite that fails the output schema and shows the
+    original output instead."""
+    file = rewritten["file"]
+    assert rewritten["type"] == "text"
+    assert isinstance(file["filePath"], str) and isinstance(file["content"], str)
+    assert all(
+        type(file[k]) is int for k in ("numLines", "startLine", "totalLines")
+    ), file
+
+
 def test_a_withheld_read_is_a_text_read_with_the_notice_as_its_content(tmp_path):
     payload = _read_text(f"k={_SECRET}\n", "/home/developer/app/c.yaml")
     rewritten = _rewrite(_scan(tmp_path, payload, baseline=_BAD_BASELINE))
@@ -610,6 +622,7 @@ def test_a_withheld_read_is_a_text_read_with_the_notice_as_its_content(tmp_path)
     }
     assert rewritten["file"]["filePath"] == "/home/developer/app/c.yaml"
     assert rewritten["file"]["content"].startswith(_NOTICE)
+    _assert_a_text_read(rewritten)
     assert "another way" in rewritten["file"]["content"]
     assert _SECRET not in json.dumps(rewritten)
 
@@ -626,6 +639,7 @@ def test_a_withheld_image_read_is_a_text_read_too(tmp_path):
     assert rewritten["type"] == "text" and rewritten["file"]["content"].startswith(
         _NOTICE
     )
+    _assert_a_text_read(rewritten)
 
 
 def test_a_withheld_grep_shows_the_notice_as_content(tmp_path):
@@ -659,6 +673,24 @@ def test_a_withheld_webfetch_keeps_its_numbers_and_shows_the_notice_as_result(tm
         "durationMs": 9,
     }
     assert rewritten["codeText"] == "" and rewritten["url"] == ""
+    assert rewritten["result"].startswith(_NOTICE)
+
+
+def test_a_withheld_webfetch_missing_its_numbers_gets_integer_ones(tmp_path):
+    """WebFetch's schema requires bytes, code and durationMs as numbers; a
+    withhold that filled them with anything else would be dropped by the CLI."""
+    response = {
+        "result": f"key {_SECRET}",
+        "url": "https://example.com/x",
+        "code": True,
+    }
+    rewritten = _rewrite(
+        _scan(tmp_path, _call("WebFetch", response), baseline=_BAD_BASELINE)
+    )
+    assert all(
+        type(rewritten[k]) is int for k in ("bytes", "code", "durationMs")
+    ), rewritten
+    assert isinstance(rewritten["codeText"], str) and isinstance(rewritten["url"], str)
     assert rewritten["result"].startswith(_NOTICE)
 
 
