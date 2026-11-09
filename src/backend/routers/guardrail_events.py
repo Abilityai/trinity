@@ -54,15 +54,20 @@ async def _read_capped_body(request: Request) -> bytes:
     return bytes(body)
 
 
-@router.post("/{agent_name}/guardrail-events", response_model=GuardrailEventIngestResponse)
-async def post_guardrail_events(agent_name: str, request: Request):
-    """Ingest one batch of the agent's own guardrail events."""
+def _require_own_key(request: Request, agent_name: str) -> None:
+    """403 unless the bearer is the agent's own key (the heartbeat predicate)."""
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_OWN_KEY_ONLY)
     res = db.validate_mcp_api_key(auth_header[7:], track_usage=False)
     if not heartbeat_service.authorize_heartbeat(res, agent_name):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_OWN_KEY_ONLY)
+
+
+@router.post("/{agent_name}/guardrail-events", response_model=GuardrailEventIngestResponse)
+async def post_guardrail_events(agent_name: str, request: Request):
+    """Ingest one batch of the agent's own guardrail events."""
+    _require_own_key(request, agent_name)
 
     limit = guardrail_event_service.check_rate(agent_name)
     if not limit.allowed:
@@ -73,6 +78,11 @@ async def post_guardrail_events(agent_name: str, request: Request):
         )
 
     raw = await _read_capped_body(request)
+    # Again, now the body is in: a body streamed slowly can outlive an agent
+    # delete or rename (keys deactivated or re-bound, rows cascaded, reporter
+    # cleared). Writing then would leave rows under the retired name and mark a
+    # later agent of that name as reporting.
+    _require_own_key(request, agent_name)
     try:
         batch = GuardrailEventBatch.model_validate(json.loads(raw))
     except (ValueError, ValidationError) as exc:

@@ -332,3 +332,31 @@ class TestPostUnstorableStrings:
         assert details["verb"] == "v\ufffd"
         assert "session_id" not in details
 
+
+# ---------------------------------------------------------------------------
+# POST — a key revoked while the body streams
+# ---------------------------------------------------------------------------
+
+class TestPostKeyRevokedMidBody:
+    def test_a_key_revoked_while_the_body_streams_writes_nothing(self, world):
+        """Auth is decided before the body is read, so a slow body outlives an
+        agent delete (keys deactivated, rows cascaded, reporter cleared): its
+        rows would land under the retired name and its report would mark a
+        later agent of that name as reporting."""
+        db, svc = world
+        body = json.dumps(_batch([_ev()])).encode()
+
+        def chunks():
+            yield body[:10]
+            _KEYS.pop("own")  # the agent is deleted mid-upload
+            yield body[10:]
+
+        try:
+            r = _app().post(f"/api/agents/{AGENT}/guardrail-events", content=chunks(),
+                            headers={"Authorization": "Bearer own",
+                                     "Content-Type": "application/json"})
+        finally:
+            _KEYS["own"] = {"agent_name": AGENT, "scope": "agent"}
+        assert r.status_code == 403
+        assert svc.list_events(AGENT)["events"] == []
+        assert svc.reporting_state(AGENT)["state"] == "never"
