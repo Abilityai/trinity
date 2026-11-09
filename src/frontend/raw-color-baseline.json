@@ -646,7 +646,7 @@
     },
     "src/frontend/src/components/portal/PortalConversation.vue": {
       "raw_nongray": 0,
-      "raw_gray": 86,
+      "raw_gray": 85,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/portal/PortalDeliverables.vue": {

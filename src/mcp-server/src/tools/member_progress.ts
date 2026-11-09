@@ -100,7 +100,7 @@ export function createMemberProgressTools(
             `/api/enterprise/client-portal/agents/${encodeURIComponent(agent_name)}/progress/step`,
             { step, state, note }
           );
-          return ok({ success: true, ...result });
+          return ok({ success: true, ...(result as Record<string, unknown>) });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           console.error(`[set_member_progress] error: ${msg}`);

@@ -50,9 +50,9 @@
             :class="labelClass(step.state)"
           >{{ step.label }}</p>
           <p
-            v-if="step.note"
+            v-if="step.note || step.state === 'failed'"
             class="text-xs mt-0.5 text-gray-500 dark:text-gray-400"
-          >{{ step.note }}</p>
+          >{{ step.note || 'Something went wrong here. Your assistant is looking into it and will tell you in the chat.' }}</p>
         </div>
       </li>
     </ul>
