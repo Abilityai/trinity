@@ -70,7 +70,7 @@
         mode="pick"
         label="Steward"
         placeholder="Type a name or email"
-        :fetch="(q) => store.fetchCompanyPeople(q)"
+        :fetch="stewardLookup"
         :no-match="(t) => `No one at your company matches “${t}”.`"
         :accept-text="isInitialSteward"
         :error="errors.steward"
@@ -141,6 +141,12 @@ const errors = ref({})
 const submitError = ref('')
 const saving = ref(false)
 const stewardField = ref(null)
+// trinity-enterprise#1165: on an existing project the steward is looked up
+// through the project-scoped read, behind the steward write's own gate; the
+// company-wide read is for a project that doesn't exist yet.
+const stewardLookup = (q) => (props.project?.id
+  ? store.fetchProjectPeople(props.project.id, q, 'steward')
+  : store.fetchCompanyPeople(q))
 const stewardPicked = ref(null)
 let initial = {}
 // ent#1169: the steward-options read, once per opening; null = loading, false = failed.
