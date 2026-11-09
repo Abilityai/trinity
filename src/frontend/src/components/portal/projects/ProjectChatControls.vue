@@ -10,6 +10,14 @@
   One button rather than two keeps the header's single primary action and
   fits a phone (principle 11).
 
+  A linked room (trinity-enterprise#1131): linking never adds the room's
+  agents, so a chip beside the badge counts the ones not on the project
+  ("2 not on it" / "1 waiting on owner") and opens "Agents in this room" —
+  each agent's state, and for the creator Add (the existing add-agent route;
+  another owner's agent still asks its owner). No chip when all are on it.
+  While the room's read is in flight the chip's space is held by an invisible
+  stand-in, so the header does not shift when the read lands (plan §2.6).
+
   Never rendered in Main, for an outside client, before a chat exists, or on a
   build without projects (`chatProjectActions`). Which project a chat is in
   comes from the server's link row for THIS chat, never from anything the
@@ -17,6 +25,12 @@
 -->
 <template>
   <div v-if="actions.show" class="flex items-center gap-1" data-testid="project-chat-controls">
+    <span
+      v-if="chipPending"
+      class="invisible inline-flex items-center rounded-md border border-transparent px-2.5 py-1 text-[12.5px] leading-[1.35]"
+      aria-hidden="true"
+      data-testid="project-room-agents-chip-slot"
+    ><BaseBadge variant="neutral" size="sm">0 not on it</BaseBadge></span>
     <template v-if="actions.linked">
       <button
         type="button"
@@ -27,6 +41,14 @@
         <svg class="h-3.5 w-3.5 flex-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" :d="FOLDER" /></svg>
         <span class="truncate">{{ project.name }}</span>
       </button>
+      <BaseButton
+        v-if="roomAgents && roomAgents.chip"
+        size="sm"
+        variant="ghost"
+        data-testid="project-room-agents-chip"
+        :aria-label="`Agents in this room: ${roomAgents.chip.label}`"
+        @click="agentsOpen = true"
+      ><BaseBadge :variant="roomAgents.chip.variant" size="sm">{{ roomAgents.chip.label }}</BaseBadge></BaseButton>
       <BaseButton
         v-if="actions.canWrapUp && kind === 'thread' && !project.archived_at"
         size="sm"
@@ -66,6 +88,48 @@
       </div>
     </BaseModal>
 
+    <BaseModal v-if="roomAgents" v-model="agentsOpen" labelledby="project-room-agents-title">
+      <div class="space-y-4" data-testid="project-room-agents-modal">
+        <h2 id="project-room-agents-title" class="text-lg font-semibold text-gray-900 dark:text-gray-100">
+          Agents in this room<span v-if="!roomAgents.degraded" class="font-normal tabular-nums text-gray-500 dark:text-gray-400"> · {{ roomAgents.rows.length }}</span>
+        </h2>
+        <p class="text-sm text-gray-600 dark:text-gray-300">
+          Linking a room doesn't add its agents. An agent that isn't on “{{ project.name }}” can't use the project until it is added and its owner agrees.
+        </p>
+        <p v-if="roomAgents.degraded" class="text-sm text-gray-600 dark:text-gray-300">Couldn't read this room's agents right now. Try again in a moment.</p>
+        <p v-else-if="!roomAgents.rows.length" class="text-sm text-gray-600 dark:text-gray-300">There are no agents in this room.</p>
+        <ul v-else class="max-h-80 divide-y divide-gray-200 overflow-y-auto dark:divide-gray-750">
+          <li
+            v-for="r in roomAgents.rows"
+            :key="r.name"
+            class="flex items-center gap-2 py-2"
+            data-testid="project-room-agent-row"
+            :data-agent="r.name"
+          >
+            <span class="min-w-0 flex-1 truncate text-sm text-gray-900 dark:text-gray-100">{{ r.name }}</span>
+            <BaseBadge :variant="r.badge" size="sm">{{ r.label }}</BaseBadge>
+            <BaseButton
+              v-if="r.action === 'add'"
+              size="sm"
+              variant="secondary"
+              :loading="adding === r.name"
+              :disabled="Boolean(adding) && adding !== r.name"
+              data-testid="project-room-agent-add"
+              @click="addRoomAgent(r.name)"
+            >Add</BaseButton>
+            <span v-else-if="r.note" class="text-xs text-gray-600 dark:text-gray-300">{{ r.note }}</span>
+          </li>
+        </ul>
+        <p v-if="!roomAgents.canManage && !roomAgents.degraded" class="text-sm text-gray-600 dark:text-gray-300">
+          Only the project's creator can add agents. Ask them to add the ones this room needs.
+        </p>
+        <InlineError v-if="agentsError" :message="agentsError" @dismiss="agentsError = ''" />
+        <div class="flex justify-end">
+          <BaseButton variant="ghost" @click="agentsOpen = false">Close</BaseButton>
+        </div>
+      </div>
+    </BaseModal>
+
     <ProjectCreateModal
       v-if="kind === 'thread'"
       v-model="createOpen"
@@ -79,6 +143,7 @@
 
 <script setup>
 import { computed, ref, watch } from 'vue'
+import BaseBadge from '@/components/base/BaseBadge.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseModal from '@/components/base/BaseModal.vue'
 import BaseSelect from '@/components/base/BaseSelect.vue'
@@ -86,7 +151,7 @@ import InlineError from '@/components/InlineError.vue'
 import ProjectCreateModal from './ProjectCreateModal.vue'
 import { useProjectsStore } from '@/stores/projects'
 import { useClientPortalStore } from '@/stores/clientPortal'
-import { chatProjectActions, projectErrorMessage } from './projectsUtils'
+import { chatProjectActions, projectErrorMessage, roomAgentRows } from './projectsUtils'
 
 const FOLDER = 'M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z'
 
@@ -106,6 +171,9 @@ const createOpen = ref(false)
 const picked = ref('')
 const busy = ref(false)
 const error = ref('')
+const agentsOpen = ref(false)
+const adding = ref('')
+const agentsError = ref('')
 
 const project = computed(() => (props.targetId ? store.forLink(props.kind, props.targetId) : null) || null)
 const actions = computed(() => chatProjectActions({
@@ -115,6 +183,10 @@ const actions = computed(() => chatProjectActions({
   sessionId: props.targetId,
   project: project.value,
 }))
+const roomAgents = computed(() => (props.kind === 'room' ? roomAgentRows(project.value) : null))
+// ent#1131: the room's read hasn't landed yet (undefined, not null = unlinked).
+const chipPending = computed(() => props.kind === 'room' && Boolean(props.targetId)
+  && store.forLink(props.kind, props.targetId) === undefined)
 const rosterAgents = computed(() => portal.agents.map((a) => a.name))
 const candidates = computed(() => store.list.filter((p) => !p.archived_at && (props.kind === 'room'
   || (p.agents || []).some((a) => a.agent_name === props.agentName && ['active', 'pending'].includes(a.state)))))
@@ -123,6 +195,8 @@ watch(() => [props.targetId, portal.projectsAvailable], () => {
   if (!props.targetId || !portal.projectsAvailable || props.isMain) return
   if (store.forLink(props.kind, props.targetId) === undefined) void store.fetchForLink(props.kind, props.targetId)
 }, { immediate: true })
+
+watch(agentsOpen, (open) => { if (open) agentsError.value = '' })
 
 watch(dialogOpen, (open) => {
   if (!open) return
@@ -143,7 +217,22 @@ const addToProject = () => run(async () => {
   await store.link(picked.value, props.kind, props.targetId)
   await store.fetchForLink(props.kind, props.targetId)
   dialogOpen.value = false
+  // ent#1131: the creator lands on the room's agents, with Add, when some aren't on it.
+  if (roomAgents.value?.chip && roomAgents.value.canManage) agentsOpen.value = true
 })
+
+async function addRoomAgent(name) {
+  adding.value = name
+  agentsError.value = ''
+  try {
+    await store.addAgent(project.value.id, name)
+    await store.fetchForLink('room', props.targetId)
+  } catch (err) {
+    agentsError.value = projectErrorMessage(err)
+  } finally {
+    adding.value = ''
+  }
+}
 
 function makeProject() {
   dialogOpen.value = false
