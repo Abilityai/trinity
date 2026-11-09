@@ -222,6 +222,15 @@ class PollerCoreMixin:
                 await self._broadcast_sync()
             return
 
+        # abilityai/trinity-enterprise#1135 (T4): once per process, after
+        # startup recovery, re-offer the ask wakes a restart dropped — leader
+        # only (this cycle is past the lease), never with unreadable states.
+        try:
+            from services import operator_resume_service
+            operator_resume_service.redispatch_pending_wakes_after_boot(states)
+        except Exception as e:
+            logger.error(f"Boot re-offer of pending ask wakes failed: {e}")
+
         running_agents = sorted(name for name, state in states.items() if state == "running")
         now = utc_now_iso()
 

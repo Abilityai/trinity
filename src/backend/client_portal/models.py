@@ -208,6 +208,12 @@ class PortalAgentCard(BaseModel):
     # older client, a partial payload or a failed read renders no control.
     model_default: Optional[PortalModelDefault] = None
 
+    # ent#1172 — True when this agent was created for an invited hub member (the
+    # `enterprise_member_agents` table, via `_member_agent_names()`). Used by the
+    # frontend to suppress description / skill hints / suggestions / error line
+    # for a share-tier viewer (the owner still sees the full briefing).
+    is_member_agent: bool = False
+
 
 class PortalBriefing(BaseModel):
     """ONE agent's briefing, hydrated off the roster's critical path (#2163).

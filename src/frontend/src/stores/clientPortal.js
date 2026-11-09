@@ -1815,6 +1815,22 @@ export const useClientPortalStore = defineStore('clientPortal', {
       }
     },
 
+    // trinity#4302 — a person wakes the agents a paused mention chain left
+    // waiting. `seq` is `room.paused_chain.seq`; the server's receipt is the
+    // once-per-stop guard, so no Idempotency-Key is sent from here.
+    async continueRoomChain(roomId, seq) {
+      this._requireRooms()
+      try {
+        const { data } = await portalHttp.post(
+          `/api/rooms/${encodeURIComponent(roomId)}/continue`, { seq },
+          { headers: this.authHeader }
+        )
+        return data   // {room_id, seq, woke}
+      } catch (err) {
+        throw this._noteRoomsRefusal(err)
+      }
+    },
+
     async addRoomParticipant(roomId, agentName) {
       this._requireRooms()
       try {

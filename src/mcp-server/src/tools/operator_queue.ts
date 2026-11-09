@@ -144,15 +144,18 @@ const askOperatorParameters = z.object({
   // lower-cases the id, so a retry spelt differently still replays). A union
   // publishes as `anyOf`, which strictJsonSchema leaves alone. trinity-enterprise#1053:
   // the answer to an `approver` ask is fenced to the seat (`ask_service.may_end`).
+  // trinity-enterprise#1134: `project` — the platform resolves the person from
+  // the turn's project; the answer is fenced to them like a role id's.
   to: z
     .union([
-      z.enum(["primary", "approver", "viewer", "operator"]),
+      z.enum(["primary", "approver", "viewer", "operator", "project"]),
       z.string().regex(/^role:[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/),
     ])
     .optional()
     .describe(
       "Who should answer: primary (your owner — it also shows in their Workspace; the default for approval and question) or operator (the platform's operators; the default for alert). approver and viewer are refused with role_unassigned until someone fills them. approver: only a person seated as approver can answer (anyone else is refused with not_addressee). A role several people fill reaches every one of them: the first answer wins. " +
-        "Or role:<id> — a canon role on your own roster, reaching every person seated in it who can open you; refused by name with role_unavailable (the assignments module is absent, has no answer for the role or could not answer: address primary or operator), role_unassigned (nobody is seated) or role_cannot_open_agent (nobody seated can open you: ask your owner to share you with them).",
+        "Or role:<id> — a canon role on your own roster, reaching every person seated in it who can open you; refused by name with role_unavailable (the assignments module is absent, has no answer for the role or could not answer: address primary or operator), role_unassigned (nobody is seated) or role_cannot_open_agent (nobody seated can open you: ask your owner to share you with them). " +
+        "Or project — from a chat or room turn on a project you work on, reaching that project's steward, else its creator, even if they cannot open you; only they can answer; refused by name with project_unavailable (not on this install), not_in_project_turn (this turn is not on such a project) or project_unreachable (nobody on it can be reached): address primary or operator instead.",
     ),
   expires_at: z
     .string()

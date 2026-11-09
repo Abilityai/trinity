@@ -3465,11 +3465,33 @@ def assert_not_share_viewer(current_user: User, agent_name: str) -> None:
 NO_ROWS_USER_ID = -1
 
 
+def _acting_person_may_open(user_id: int, agent_name: str) -> bool:
+    """May the person an agent key is acting for open `agent_name` at all
+    (`db.can_user_access_agent`: admin, owner, shared)? Fails closed."""
+    try:
+        user = db.get_user_by_id(user_id)
+        username = (user or {}).get("username")
+        if not username:
+            return False
+        return db.can_user_access_agent(username, agent_name) is True
+    except Exception:  # noqa: BLE001 — fail closed: an unreadable answer shows no rows
+        logger.warning("[ent#1148] acting-person access lookup failed", exc_info=True)
+        return False
+
+
 def viewer_row_scope(current_user: User, agent_name: str) -> Optional[int]:
     """The user id whose executions the caller may see on `agent_name`, or None
-    when they may see every row (owner, admin, key tier)."""
+    when they may see every row (owner, admin, key tier).
+
+    An agent key acting for a shared person reads as that person on EVERY
+    agent the route names, and that person's rows exist on an agent they cannot
+    open: a callee the key's agent delegated to records the person
+    (trinity-enterprise#1148). So the person must be able to open the route's
+    agent, or the key sees no rows there — what the person's own key would see."""
     acting = acting_turn_user_id(current_user)
     if acting is not None:
+        if acting != NO_ROWS_USER_ID and not _acting_person_may_open(acting, agent_name):
+            return NO_ROWS_USER_ID
         return acting
     if agent_viewer_tier(current_user, agent_name) != VIEWER_SHARE:
         return None

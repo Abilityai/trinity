@@ -432,11 +432,26 @@ _WORKSPACE_DISCUSSION_KEY = "workspace_discussion_id"
 _WORKSPACE_PROJECT_ID_KEY = "workspace_project_id"
 _WORKSPACE_PROJECT_TASK_KEY = "workspace_project_task"
 _WORKSPACE_PROJECT_EVENT_KEY = "workspace_project_event"
+# trinity-enterprise#1134: which rule picked a project ask's addressee
+# (`steward` | `creator`), read as the client-facing `destination` seat.
+_WORKSPACE_PROJECT_SEAT_KEY = "workspace_project_seat"
+# trinity-enterprise#1134 (AC4): why an in-turn `primary` ask fell to the
+# operators (`owner_no_email` | `no_owner`), read as the chat notice's
+# `destination.reason`. Written only beside the two chat keys above.
+_WORKSPACE_OPERATORS_REASON_KEY = "workspace_operators_reason"
+# abilityai/trinity-enterprise#1135: the ROOM whose turn raised the ask. Beside
+# the chat attachment, never instead of it — the ask still lives in the pair's
+# Main and the Inbox. Written by `ask_service.raise_ask` from the platform-known
+# raising execution (`shared_sessions.service.room_for_execution`); read by the
+# room's ending observer and the answer wake, which return the ask to the room.
+_WORKSPACE_ROOM_KEY = "workspace_room_id"
 # Every context key the platform writes and no agent may author: stripped at both
 # ingestion boundaries and ignored when comparing an agent's content.
 _PLATFORM_CONTEXT_KEYS = frozenset({
     _WORKSPACE_THREAD_KEY, _WORKSPACE_TURN_KEY, _WORKSPACE_DISCUSSION_KEY,
     _WORKSPACE_PROJECT_ID_KEY, _WORKSPACE_PROJECT_TASK_KEY, _WORKSPACE_PROJECT_EVENT_KEY,
+    _WORKSPACE_PROJECT_SEAT_KEY, _WORKSPACE_OPERATORS_REASON_KEY,
+    _WORKSPACE_ROOM_KEY,
 })
 
 
@@ -489,6 +504,22 @@ def _workspace_attachment(agent_name: str, email: str,
             logger.warning(
                 "[OperatorQueue] could not resolve the chat of the turn that raised "
                 "an ask from %s; attaching it to Main (ent#734)",
+                agent_name,
+                exc_info=True,
+            )
+        # ent#1171: a reminder the person's own agent set for that person's work
+        # tiles in conversation (raised_in_turn=True). Cross-member delegation
+        # (source_user_email != email) stays Inbox-only — handled in wake_for_execution.
+        try:
+            from client_portal.service import wake_for_execution
+
+            chat = wake_for_execution(agent_name, email, execution_id)
+            if chat:
+                return chat, True
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "[OperatorQueue] could not resolve the wake chat for an ask from %s; "
+                "attaching it to Main as background (ent#1171)",
                 agent_name,
                 exc_info=True,
             )
@@ -739,6 +770,7 @@ from .rows import (  # noqa: E402,F401
     is_owner_only,
     is_person_tag,
     is_platform_minted,
+    is_project_reach,
 )
 # alerts: the bounded-alert delegates and their outcomes, which callers outside
 # the package (and the #3254 suite) read through the package.

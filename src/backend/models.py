@@ -6567,6 +6567,9 @@ class TermsAccepted(BaseModel):
     created: bool           # False when this person had already accepted this version
     version: str
     accepted_at: str
+    # trinity-enterprise#1170: a same-origin path an inline acceptance hook
+    # named for the person to land on, or None (the SPA's own landing rule).
+    landing: Optional[str] = None
 
 
 class TermsUpdate(BaseModel):

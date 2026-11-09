@@ -13,7 +13,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Union
 
 from sqlalchemy.exc import OperationalError
 
@@ -27,7 +27,7 @@ from services.operator_queue_choices import (
 )
 from utils.helpers import iso_cutoff, utc_now_iso
 
-from .models import WorkspaceAsk
+from .models import WorkspaceAsk, WorkspaceAskNotice
 
 logger = logging.getLogger(__name__)
 
@@ -266,6 +266,20 @@ def _project_attachment(context: dict) -> Optional[dict]:
             "event": event if isinstance(event, str) and event else None}
 
 
+_PROJECT_SEATS = ("steward", "creator")
+_OPERATOR_REASONS = ("owner_no_email", "no_owner")
+
+
+def _project_destination(item: dict, context: dict) -> Optional[dict]:
+    """`{"kind": "project", "seat": …}` for an ask addressed `to: project`
+    whose seat the platform stamped (trinity-enterprise#1134), else None."""
+    from services.operator_queue_service import _WORKSPACE_PROJECT_SEAT_KEY
+    seat = context.get(_WORKSPACE_PROJECT_SEAT_KEY)
+    if item.get("to_role") != "project" or seat not in _PROJECT_SEATS:
+        return None
+    return {"kind": "project", "seat": seat}
+
+
 def _project(item: dict, *, viewer_email: Optional[str] = None,
              resume_requested: Optional[bool] = None,
              is_platform: bool = False) -> WorkspaceAsk:
@@ -334,6 +348,7 @@ def _project(item: dict, *, viewer_email: Optional[str] = None,
         credential_destination=(credential_destination.public_view(
             credential_destination.destination_of(context))
             if item.get("type") == "credential" else None),
+        destination=_project_destination(item, context),
     )
 
 
@@ -394,7 +409,8 @@ _CURSOR_RE = re.compile(r"^v1:(\d{1,9})$")
 class AsksPage:
     """One page of the viewer's visible asks, the size of the whole visible set,
     and — while more remain — the cursor for the next page."""
-    items: List[WorkspaceAsk] = field(default_factory=list)
+    # trinity-enterprise#1134: a `chat_id` read appends that chat's notices.
+    items: List[Union[WorkspaceAsk, WorkspaceAskNotice]] = field(default_factory=list)
     total: int = 0
     next_cursor: Optional[str] = None
 
@@ -465,9 +481,18 @@ def list_asks_page(email: str, is_platform: bool, agent_name: Optional[str] = No
         # agents the viewer's asks span, and the answer goes into the SQL as the
         # access set. Re-implementing membership here is how the two drift.
         # ent#747: a chat also holds the ask it was opened to DISCUSS — read
-        # here, inside the same 503 boundary, on the first page only.
-        discussed = (_discussed_in(chat_id, email, is_platform, agent_name)
-                     if chat_id is not None and offset == 0 else [])
+        # here, inside the same 503 boundary.
+        # trinity-enterprise#1134 (AC4): and the content-free notices of its
+        # own turns' asks that fell to the operators. Both are SHOWN on the
+        # first page only, but read on every page of a chat: they are part of
+        # the chat's total, which must not change from page to page.
+        extra = []
+        if chat_id is not None:
+            # A discussed ask raised in this very chat is already one of the
+            # paged rows (`_in_chat`) — counted and shown there, never twice.
+            extra = [a for a in _discussed_in(chat_id, email, is_platform, agent_name)
+                     if not _in_chat(a, chat_id)]
+            extra += _notices_in(chat_id, email, is_platform, agent_name)
         allowed = {a for a in db.list_operator_queue_agent_names(**filters)
                    if _on_roster(a, email, is_platform, strict=True)}
         # trinity-enterprise#981: a row the platform raised about the viewer
@@ -478,15 +503,23 @@ def list_asks_page(email: str, is_platform: bool, agent_name: Optional[str] = No
         # its count alike. So an empty access set is no longer "nothing": a
         # viewer on no roster at all may still have such a row.
         reach = _reach_prefixes()
-        if allowed or reach:
-            total = db.count_operator_queue_items(
-                accessible_agent_names=allowed, addressee_reach_request_id_prefixes=reach,
-                **filters)
-            items = db.list_operator_queue_items(
-                accessible_agent_names=allowed, addressee_reach_request_id_prefixes=reach,
-                limit=limit, offset=offset, **filters)
-        else:
-            total, items = 0, []
+        # trinity-enterprise#1134: an agent's ask `to: project` reaches its
+        # steward or creator by address the same way — the platform resolved
+        # that person from the project, and they may be off the agent's roster.
+        # A third arm beside the two, in the same SQL as the page and its count.
+        project_key = _project_reach_key()
+        # Page 1 of a chat carries its extras inside the page size, so it holds
+        # no more rows than a later page; the cursor counts paged rows only.
+        # At least one paged row, always: a page-1 cursor at offset 0 would
+        # read as page 1 again (only extras that alone fill a page exceed it).
+        shown = extra if offset == 0 else []
+        total = db.count_operator_queue_items(
+            accessible_agent_names=allowed, addressee_reach_request_id_prefixes=reach,
+            project_reach_key=project_key, **filters)
+        items = db.list_operator_queue_items(
+            accessible_agent_names=allowed, addressee_reach_request_id_prefixes=reach,
+            project_reach_key=project_key, limit=max(1, limit - len(shown)), offset=offset,
+            **filters)
     except AsksUnavailable:
         raise
     except Exception as e:  # noqa: BLE001 — surfaced as a 503, never as "nothing" (A0)
@@ -498,9 +531,49 @@ def list_asks_page(email: str, is_platform: bool, agent_name: Optional[str] = No
         out = [a for a in out if _in_chat(a, chat_id)]
     end = offset + len(items or [])
     next_cursor = _encode_cursor(end) if end < total else None
-    seen = {a.id for a in out}
-    extra = [a for a in discussed if a.id not in seen]
-    return AsksPage(items=out + extra, total=total + len(extra), next_cursor=next_cursor)
+    return AsksPage(items=out + shown, total=total + len(extra), next_cursor=next_cursor)
+
+
+def _notices_in(chat_id: str, email: str, is_platform: bool,
+                agent_name: Optional[str]) -> List[WorkspaceAskNotice]:
+    """The asks `chat_id`'s own turns raised that fell to the operators
+    (trinity-enterprise#1134, AC4), as content-free notices — for the chat's
+    OWNER only (`get_portal_session(chat, agent, viewer)`, plus the roster
+    re-check every ask read makes). Pending and ended alike, like the chat's
+    asks. Only an agent's `primary` ask with nobody resolved: an explicit
+    `to: operator` is never stamped and never shown, and an ask re-addressed
+    to a person since leaves the notice for that person's normal row. The SQL
+    match on the stored context is a prefilter; the parsed keys decide."""
+    from client_portal import db as portal_db
+    from services.operator_queue_service import (
+        _WORKSPACE_OPERATORS_REASON_KEY, _WORKSPACE_THREAD_KEY, _WORKSPACE_TURN_KEY)
+    rows = db.list_operator_queue_items(
+        agent_name=agent_name, types=_VISIBLE_KINDS, include_cleared=True,
+        context_contains=_chat_turn_fragments(chat_id), limit=PAGE_MAX,
+    ) or []
+    out, owns = [], {}
+    for row in rows:
+        context = row.get("context") if isinstance(row.get("context"), dict) else {}
+        agent = row.get("agent_name") or ""
+        if (row.get("raised_by") != "agent" or row.get("to_role") != "primary"
+                or row.get("resolved_to") or row.get("addressed_to_email")
+                or context.get(_WORKSPACE_THREAD_KEY) != chat_id
+                or context.get(_WORKSPACE_TURN_KEY) is not True):
+            continue
+        if agent not in owns:
+            owns[agent] = bool(portal_db.get_portal_session(chat_id, agent, email)
+                               and _on_roster(agent, email, is_platform, strict=True))
+        if not owns[agent]:
+            continue
+        reason = context.get(_WORKSPACE_OPERATORS_REASON_KEY)
+        destination = {"kind": "operators"}
+        if reason in _OPERATOR_REASONS:
+            destination["reason"] = reason
+        out.append(WorkspaceAskNotice(
+            notice=True, id=row["id"], agent_name=agent, kind=row.get("type") or "question",
+            status=_status_of(row), created_at=row.get("created_at") or "",
+            chat_id=chat_id, destination=destination))
+    return out
 
 
 def _discussed_in(chat_id: str, email: str, is_platform: bool,
@@ -552,6 +625,21 @@ def _reach_prefixes() -> tuple:
     return tuple(ADDRESSEE_REACH_ID_PREFIXES)
 
 
+def _project_reach_key() -> str:
+    """The platform's project context key — the stamp the list's project arm
+    (trinity-enterprise#1134) matches, read from the one constant."""
+    from services.operator_queue_service import _WORKSPACE_PROJECT_ID_KEY
+    return _WORKSPACE_PROJECT_ID_KEY
+
+
+def _reaches_by_project(item: dict, email: str) -> bool:
+    """Is this an agent's ask `to: project` addressed to `email` — the steward
+    or creator the platform resolved, who may be off the agent's roster
+    (trinity-enterprise#1134)? The Python twin of the list's project arm."""
+    from services.operator_queue_service import is_project_reach
+    return is_project_reach(item, email)
+
+
 def _reaches_by_address(item: dict) -> bool:
     """Is this a row the platform addressed to its reader — reserved
     sub-prefix AND `raised_by == 'gate'` — so the roster is not its fence
@@ -575,6 +663,8 @@ def _owned_ask(item_id: str, email: str, is_platform: bool, *, strict: bool = Fa
     (`_reaches_by_address`) is theirs by address — the platform chose this
     row's addressee; the roster was never its fence — so for that one family
     the roster is not asked. The addressee match comes first either way.
+    trinity-enterprise#1134: so for an agent's ask `to: project`, to the
+    steward or creator the platform resolved (`_reaches_by_project`).
 
     `strict` is the READ mode: an unreadable roster raises `AsksUnavailable`
     (503) instead of looking like "not yours" — asked only after the addressee
@@ -587,6 +677,7 @@ def _owned_ask(item_id: str, email: str, is_platform: bool, *, strict: bool = Fa
         or not _is_addressed_to(item, email)
         or item.get("type") not in _VISIBLE_KINDS
         or not (_reaches_by_address(item)
+                or _reaches_by_project(item, email)
                 or _on_roster(item.get("agent_name") or "", email, is_platform, strict=strict))
     ):
         raise AskError(404, "not_found", "Ask not found")
@@ -872,6 +963,14 @@ def discuss_ask(item_id: str, email: str, is_platform: bool):
     item = _owned_ask(item_id, email, is_platform)
     if (item.get("type") or "question") == "alert":
         raise AskError(422, "not_discussable", "An update has nothing to decide.")
+    # trinity-enterprise#1134: a project ask reaches its steward or creator by
+    # address, not through the agent's roster — and a discussion is a chat
+    # WITH the agent, which only its roster opens. Answer it on the card.
+    if (_reaches_by_project(item, email)
+            and not _on_roster(item.get("agent_name") or "", email, is_platform)):
+        raise AskError(422, "not_discussable",
+                       "This ask reached you through a project, and the agent isn't shared "
+                       "with you \u2014 answer it here instead.")
     # trinity-enterprise#816: a discussion chat belongs to one person, and a
     # shared ask's link holds one chat — refused by name for now (a follow-up
     # makes it per person).
