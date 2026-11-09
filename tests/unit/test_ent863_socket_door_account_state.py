@@ -172,6 +172,29 @@ class TestTheAgentTerminal:
         assert manager._active_sessions == {}
 
 
+def test_the_agent_terminal_route_authenticates_through_the_shared_decoder(monkeypatch):
+    """The route itself, not only the session manager: the WebSocket endpoint
+    hands the manager the shared decoder, so a deactivated account is refused
+    there too."""
+    import routers.agents as agents
+    import services.agent_service.terminal as terminal
+
+    rows, token = _wire(monkeypatch, agents.decode_token, _row("route-dec", "creator", _DEACTIVATED_AT))
+    monkeypatch.setattr(terminal, "db", rows)
+    reached: list[str] = []
+    monkeypatch.setattr(terminal, "get_agent_container", lambda name: reached.append(name))
+    manager = terminal.TerminalSessionManager()
+    monkeypatch.setattr(agents, "_terminal_manager", manager)
+    sock = _FakeSocket(token)
+
+    asyncio.run(agents.agent_terminal(sock, "atlas-ent863", mode="bash", model=None))
+
+    assert sock.closed is not None and sock.closed[0] == 4001
+    assert reached == [], "refused before the container lookup"
+    assert rows.lookups == ["route-dec"], "the refusal must come from the account row"
+    assert manager._active_sessions == {}
+
+
 # --------------------------------------------------------------------------- #
 # T1.3 — the system-agent terminal door
 # --------------------------------------------------------------------------- #
