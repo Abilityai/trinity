@@ -151,8 +151,8 @@ function errorDetail(e) {
   return String((d && (d.message || d.code)) || d || e.message || '')
 }
 
-function leave() {
-  return router.replace(afterTermsLocation(route.query.redirect, authStore.user?.role))
+function leave(landing) {
+  return router.replace(afterTermsLocation(route.query.redirect, authStore.user?.role, landing))
 }
 
 async function onAccept() {
@@ -162,8 +162,10 @@ async function onAccept() {
   acceptErrorDetail.value = ''
   const version = terms.value.version
   try {
-    await store.accept(version)
-    await leave()
+    const accepted = await store.accept(version)
+    // trinity-enterprise#1170: the accept may name where to land — the
+    // conversation with the agent just handed over, where its welcome is.
+    await leave(accepted?.landing)
   } catch (e) {
     const detail = e.response?.data?.detail
     const code = detail?.code
