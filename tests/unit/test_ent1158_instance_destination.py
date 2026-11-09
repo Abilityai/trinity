@@ -103,6 +103,17 @@ def registry(monkeypatch):
     a2a_outbound.clear_provider()
 
 
+def _end_pending_asks(store):
+    """The raise caps ASKER's pending asks at 25, counted in the session DB that
+    every test here fills and none ends — so under a shuffled order a raise
+    sees `queue_full`. End them in the store the raise counts in (`svc.db`)."""
+    ids = [r["id"] for r in store.list_operator_queue_items(
+        agent_name=ASKER, status="pending", limit=1000)]
+    if ids:
+        store.bulk_cancel_operator_queue_items(ids, disposed_by_email=OWNER,
+                                               reason="test isolation")
+
+
 @pytest.fixture
 def ask(real_db, monkeypatch):
     """The real ask sink; the world around it stubbed as the ent#1109 suite stubs it."""
@@ -129,6 +140,7 @@ def ask(real_db, monkeypatch):
     monkeypatch.setattr(oqs, "_workspace_attachment", lambda agent, email, **_: (f"thread-{email}", True))
     monkeypatch.setattr(real_db, "get_operator_resume_enabled", lambda agent: False, raising=False)
     monkeypatch.setattr(oqs.rate_limiter, "check", lambda *a, **k: RateLimitResult(True, 10, 0, 60))
+    _end_pending_asks(svc.db)
     assignment_provider.clear_provider()
     yield SimpleNamespace(svc=svc, audit=audit, db=real_db)
     assignment_provider.clear_provider()
