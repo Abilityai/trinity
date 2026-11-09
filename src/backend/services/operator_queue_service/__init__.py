@@ -507,6 +507,22 @@ def _workspace_attachment(agent_name: str, email: str,
                 agent_name,
                 exc_info=True,
             )
+        # ent#1171: a reminder the person's own agent set for that person's work
+        # tiles in conversation (raised_in_turn=True). Cross-member delegation
+        # (source_user_email != email) stays Inbox-only — handled in wake_for_execution.
+        try:
+            from client_portal.service import wake_for_execution
+
+            chat = wake_for_execution(agent_name, email, execution_id)
+            if chat:
+                return chat, True
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "[OperatorQueue] could not resolve the wake chat for an ask from %s; "
+                "attaching it to Main as background (ent#1171)",
+                agent_name,
+                exc_info=True,
+            )
     try:
         from client_portal.service import ensure_thread_for_ask
 

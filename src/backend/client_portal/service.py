@@ -2524,6 +2524,10 @@ def chat_for_execution(agent_name: str, email: str, execution_id: str) -> str | 
     person's conversation. Raises like any other portal call; the caller owns
     the fail-soft.
 
+    ent#1171 is a named exception: a reminder (a turn whose `triggered_by` is `reminder`) the
+    person's own agent set for that person's work tiles in their conversation —
+    handled upstream in `_workspace_attachment` via `wake_for_execution`.
+
     The turn must still be RUNNING (cso r1). The id arrives as a header the
     platform sets, but the agent process holds its own key and can send any of
     its executions' ids; only a live turn can be raising an ask. What remains
@@ -2563,6 +2567,32 @@ def chat_of_turn(agent_name: str, execution_id: str) -> tuple[str, str] | None:
     if not chat_id or not client:
         return None
     return (chat_id, client) if db.get_portal_session(chat_id, agent_name, client) else None
+
+
+def wake_for_execution(agent_name: str, email: str, execution_id: str) -> str | None:
+    """The Workspace Main chat for an ask raised during a reminder (wake) of
+    this agent for this person — the ent#1171 exception to ent#610's rule.
+
+    A reminder carries the original work's author as `source_user_email`; the
+    guard `source_user_email == email` ensures cross-member delegation (a wake
+    addressing a different person) stays Inbox-only. The ask attaches to Main
+    rather than a specific chat because a wake has no live portal session of its
+    own. Raises like any other portal call; the caller owns the fail-soft.
+    """
+    from database import db as core_db
+    from models import TaskExecutionStatus
+    execution = core_db.get_execution(execution_id)
+    status = getattr(execution, "status", None)
+    if (execution is None
+            or execution.agent_name != agent_name
+            or getattr(status, "value", status) != TaskExecutionStatus.RUNNING.value
+            or execution.triggered_by != "reminder"):
+        return None
+    # Cross-member delegation stays Inbox-only (ent#1171).
+    source = (getattr(execution, "source_user_email", None) or "").lower()
+    if not source or source != (email or "").lower():
+        return None
+    return ensure_thread_for_ask(agent_name, email)
 
 
 def _one_line(content) -> str:

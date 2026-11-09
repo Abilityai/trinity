@@ -1342,7 +1342,7 @@ chat when the execution row is a still-running Workspace chat turn (`triggered_b
 that pair (a reset, archived Main included — it stays resumable) — the link the portal creation sites already stamp (ent#457), so no column. Anything
 else, including a schedule that DELIVERS into Main (portal stamp, `schedule` trigger) and
 every file-ingested ask, falls through to Main; a lookup failure falls through with a warning.
-Because Main is then both a chat-turn ask's home and a background ask's reply target, the
+Because Main serves as a chat-turn ask's home, a reminder-wake ask's tile home (ent#1171), and a pure background ask's reply target — the
 row also carries `context.workspace_raised_in_turn` (platform-written, only on a turn match),
 projected as `WorkspaceAsk.raised_in_turn` — the fact a chat strip needs to draw a tile
 (trinity#3101 is the consumer; no frontend reads it yet).
