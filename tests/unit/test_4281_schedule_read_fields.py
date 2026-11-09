@@ -230,9 +230,15 @@ def test_an_owner_tier_creator_is_not_refused_on_any_runtime(client, world, monk
     assert call(client, world, who, "POST", json=BODY).status_code == 201
 
 
-def test_on_claude_code_it_is_created_and_flagged(client, world, monkeypatch):
-    on_runtime(monkeypatch, "claude-code")
+@pytest.mark.parametrize("runtime", ["claude-code", "claude"])
+def test_on_claude_code_it_is_created_and_flagged(client, world, monkeypatch, runtime):
+    """Both spellings select Claude Code, which runs the turn-tier hook
+    (`agent_service.helpers.CLAUDE_RUNTIME_NAMES`, the agent's runtime factory),
+    so neither is refused."""
+    on_runtime(monkeypatch, runtime)
     assert created(client, world, "mate")["runs_as"] == "shared_person"
+    sid = created(client, world, "mate", enabled=False)["id"]
+    assert call(client, world, "owner", "POST", f"/{sid}/enable").status_code == 200
 
 
 def test_when_docker_cannot_be_read_it_warns_and_does_not_refuse(client, world, monkeypatch):

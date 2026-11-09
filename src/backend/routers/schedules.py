@@ -242,8 +242,9 @@ async def _refuse_if_it_could_never_run(name: str, schedule, view: _ScheduleView
     if rated.tier == turn_tier_service.OWNER:
         return
     from services.docker_utils import agent_runtime_async
+    from services.agent_service.helpers import CLAUDE_RUNTIME_NAMES
     runtime = ((await agent_runtime_async(name)) or "claude-code").lower()
-    if runtime == "claude-code":
+    if runtime in CLAUDE_RUNTIME_NAMES:  # every spelling that selects Claude Code
         return
     way_out = ("An admin needs to restore the agent's owner first."
                if rated.cause == turn_tier_service.AGENT_HAS_NO_OWNER
