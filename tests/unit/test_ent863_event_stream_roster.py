@@ -562,6 +562,36 @@ async def test_the_periodic_re_read_runs_one_read_at_a_time(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_an_access_change_during_a_periodic_cycle_is_read_at_once(monkeypatch):
+    """The periodic cycle reads its rosters one after another. A slot it has
+    not reached yet is still free, so an access change is read for that slot
+    at once rather than after the earlier reads of the cycle."""
+    _fast_interval(monkeypatch, 0.01)
+    monkeypatch.setattr(StreamDispatcher, "_supervised_reader", _no_reader)
+    slow = _SlowFirstRead(first=["a"], then=["a"])
+    d = StreamDispatcher()
+    first = _ClientSlot(
+        ws=None, scope=SCOPE_SCOPED, send_func=None,
+        accessible_agents={"a"}, roster_resolver=slow,
+    )
+    second = _ClientSlot(
+        ws=None, scope=SCOPE_SCOPED, send_func=None,
+        accessible_agents={"kept", "unshared"}, roster_resolver=lambda: ["kept"],
+    )
+    d._clients = {"first": first, "second": second}
+    await d.start()
+    try:
+        await _wait_started(slow)  # the cycle is blocked on its first read
+        d._maybe_invalidate_rosters(
+            {"event": "agent_unshared", "data": {"name": "unshared"}}
+        )
+        await _until(lambda: second.accessible_agents == {"kept"}, timeout=1.0)
+    finally:
+        slow.release.set()
+        await d.stop()
+
+
+@pytest.mark.asyncio
 async def test_the_periodic_re_read_reads_nothing_when_no_roster_is_held(monkeypatch):
     _fast_interval(monkeypatch, 0.01)
     monkeypatch.setattr(StreamDispatcher, "_supervised_reader", _no_reader)

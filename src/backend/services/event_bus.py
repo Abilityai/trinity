@@ -588,7 +588,21 @@ class StreamDispatcher:
         for slots, read in self._claim_roster_reads():
             self._spawn_refresh(slots, read)
 
-    def _claim_roster_reads(self) -> List[Tuple[List[_ClientSlot], Callable[[], Iterable[str]]]]:
+    @staticmethod
+    def _claim_slot(slot: _ClientSlot) -> bool:
+        """Mark ``slot`` as being read. A slot whose read is already in flight is
+        not claimed: it is marked to read again when that read ends, because the
+        in-flight read may have started before the change that asked for this
+        one (trinity-enterprise#863)."""
+        if slot.refreshing:
+            slot.refresh_again = True
+            return False
+        slot.refreshing = True
+        return True
+
+    def _claim_roster_reads(
+        self, *, claim: bool = True
+    ) -> List[Tuple[List[_ClientSlot], Callable[[], Iterable[str]]]]:
         """Every non-admin roster this worker holds, as ``(slots, zero-arg read)``.
 
         A slot with its own ``roster_resolver`` (every non-admin ``/ws/events``
@@ -597,22 +611,17 @@ class StreamDispatcher:
         agent-create would otherwise fire one DB read per tab. Admins are never
         filtered, so their roster is never read.
 
-        Every returned slot is marked ``refreshing``. A slot whose read is
-        already in flight is not returned: it is marked to read again when that
-        read ends, because the in-flight read may have started before the
-        change that asked for this one (trinity-enterprise#863)."""
-        def claim(slot: _ClientSlot) -> bool:
-            if slot.refreshing:
-                slot.refresh_again = True
-                return False
-            slot.refreshing = True
-            return True
+        Every returned slot is claimed (``_claim_slot``), so a slot whose read
+        is already in flight is not returned. With ``claim=False`` nothing is
+        marked and every such slot is returned: the caller claims each group
+        just before it reads it."""
+        take = self._claim_slot if claim else (lambda _slot: True)
 
         reads: List[Tuple[List[_ClientSlot], Callable[[], Iterable[str]]]] = []
         for slot in list(self._clients.values()):
             if slot.roster_resolver is None or slot.is_admin:
                 continue
-            if claim(slot):
+            if take(slot):
                 reads.append(([slot], slot.roster_resolver))
         resolver = getattr(self, "_accessible_resolver", None)
         if resolver is None:
@@ -623,7 +632,7 @@ class StreamDispatcher:
                 continue
             if slot.roster_resolver is not None:
                 continue  # read above, through its own resolver
-            if claim(slot):
+            if take(slot):
                 by_email.setdefault(slot.email, []).append(slot)
         for email, slots in by_email.items():
             reads.append((slots, functools.partial(resolver, email)))
@@ -676,24 +685,21 @@ class StreamDispatcher:
         It runs in every worker with no leader lease, by design: the slots it
         reads are this process's own. Its reads run one after another, so the
         loop itself holds at most one thread of the default executor at a time,
-        and it reads nothing while no non-admin roster is held. A read that fails keeps
+        and it reads nothing while no non-admin roster is held. Each group is
+        claimed just before its own read, so a slot the cycle has not reached
+        yet is still free for an access change's read. A read that fails keeps
         the previous roster; any other error is logged and the loop carries on."""
         while not self._shutting_down:
             await asyncio.sleep(ROSTER_REREAD_INTERVAL_S)
-            reads = self._claim_roster_reads()
             try:
-                while reads:
-                    slots, read = reads.pop(0)
-                    await self._refresh_slots(slots, read)
+                for slots, read in self._claim_roster_reads(claim=False):
+                    claimed = [slot for slot in slots if self._claim_slot(slot)]
+                    if claimed:
+                        await self._refresh_slots(claimed, read)
             except asyncio.CancelledError:
                 raise
             except Exception:  # noqa: BLE001 — the loop must outlive one bad cycle
                 logger.exception("stream_dispatcher: periodic roster re-read failed")
-            finally:
-                for slots, _read in reads:  # claimed but never read
-                    for slot in slots:
-                        slot.refreshing = False
-                        slot.refresh_again = False
 
     def client_count(self) -> int:
         return len(self._clients)
