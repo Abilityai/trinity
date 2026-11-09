@@ -346,6 +346,7 @@ forwarder (agent's own TRINITY_MCP_API_KEY)
        ├─ authorize_heartbeat (own key only) ......... 403
        ├─ guardrail_event_service.check_rate ......... 429 + Retry-After (60 / 60 s / agent)
        ├─ body > 256 KiB / events > 500 .............. 413
+       ├─ authorize_heartbeat again, body in hand .... 403 (a body that outlived a delete / rename)
        ├─ GuardrailEventBatch (envelope only) ........ 422
        └─ guardrail_event_service.ingest
             ├─ normalize_event, one at a time ........ rejected++ on a shape failure
@@ -359,8 +360,8 @@ owner / admin (OwnedAgentByName, uniform 404)
 
 | Piece | Where | What it decides |
 |---|---|---|
-| Ingest + read routes | `src/backend/routers/guardrail_events.py` | Status order the forwarder branches on (403 → 429 → 413 → 422 → 200). The body is read under the byte cap, never buffered past it. |
-| Validation, reporting, counts | `src/backend/services/guardrail_event_service.py` | `KINDS` / `HOOKS` (the §6.1 closed sets; unknown → `other` + `kind_raw` / `hook_raw` in `details`), the open `code` (`^[a-z0-9_]{1,64}$`), `execution_id` > 128 chars → null, the field allowlist (`patterns`, `verb`, `tier`, `turn_kind`, `rule` ≤ 200, `path` ≤ 512, `session_id`, `tool_use_id`), free text through `sanitize_text`. Reporting state: `never` / `reporting` (≤ 15 min) / `stale`; a missing Redis record falls back to the newest row's `received_at`. |
+| Ingest + read routes | `src/backend/routers/guardrail_events.py` | Status order the forwarder branches on (403 → 429 → 413 → 422 → 200). The body is read under the byte cap, never buffered past it, and the own-key check runs again once it is in, so a slow body cannot write after its agent was deleted or renamed. |
+| Validation, reporting, counts | `src/backend/services/guardrail_event_service.py` | `KINDS` / `HOOKS` (the §6.1 closed sets; unknown → `other` + `kind_raw` / `hook_raw` in `details`), the open `code` (`^[a-z0-9_]{1,64}$`), `execution_id` > 128 chars → null, the field allowlist (`patterns`, `verb`, `tier`, `turn_kind`, `rule` ≤ 200, `path` ≤ 512, `session_id`, `tool_use_id`), free text through `sanitize_text`. A NUL or a lone surrogate (no store can hold either) becomes U+FFFD in display text and drops an id, so one such event never fails the batch or the read. Reporting state: `never` / `reporting` (≤ 15 min) / `stale`; a missing Redis record falls back to the newest row's `received_at`. |
 | Store | `src/backend/db/guardrail_events.py`, table `guardrail_events` | Keyset paging on `(occurred_at, id)`; `count_by_execution` (one `IN` query, filtered by agent); `count_by_agent`; the retention count and prune share one predicate on `received_at`. |
 | Migrations | `db/migrations.py::guardrail_events_table`, Alembic `0123_guardrail_events` | Additive table + three indexes on both tracks (Invariant #9). |
 | Lifecycle | `db/agent_cleanup.py` `AGENT_REFS` (CASCADE); `services/agent_runtime_state.py` `CLEARED_KEYSPACES` | Rows rename with the agent and go with its hard delete. The reporter key is cleared on teardown only — not on start, or a restarted agent would read `never`. |
