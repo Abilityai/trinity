@@ -1738,7 +1738,16 @@ is the edition-agnostic surface it plugs into:
   (`ProjectMaterial.vue`, reusing `ReportRenderer`). An invited guest gets one
   narrow view (the server omits the log, tasks, decisions and members); the
   controls it cannot use are absent, not disabled. `ProjectImportModal.vue`
-  imports a folder project once.
+  imports a folder project once. A contributor edits a task's title, objective
+  and definition of done as fields in the detail form's one Save / one dirty
+  path, so the rendered objective and definition-of-done blocks render only
+  when those fields are NOT offered (a reader, an archived project, or a task
+  whose status is done and therefore locked) — a mount spec that reads the
+  rendered objective must pick that audience, or it finds nothing. Lengths are
+  checked client-side by the shared `projectsUtils.validateTaskFields` in
+  CODE POINTS, which is what the server's `len` counts; a refusal that names a
+  field (`invalid_title` / `invalid_objective` / `invalid_done_definition`)
+  is shown under it rather than as the form's error.
 - **Project page Overview (v3 hub + #3694 + ent#896)** — ONE layout owned by
   `ProjectPage.vue`: a `lg:grid-cols-3 lg:items-start` wrapper holding a
   main stack (`lg:col-span-2`) and a side stack, cards stacking within their
