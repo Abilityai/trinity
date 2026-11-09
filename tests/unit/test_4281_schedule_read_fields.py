@@ -324,6 +324,31 @@ def test_the_fleet_read_costs_the_same_on_3_agents_and_on_30(client, world):
     assert _counted(lambda: read(large)) == on_three
 
 
+def test_a_failing_bulk_read_does_not_fail_the_fleet_read(client, world, monkeypatch):
+    """The preload is an optimisation. When a bulk read fails, the route still
+    answers, and each row is rated by the per-row lookups (or shows `runs_as:
+    null` when those fail too), as on the per-agent list."""
+    agents = set(_fleet(2))
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("bulk read failed")
+    headers = {"Authorization": f"Bearer {world.admin.jwt}"}
+    for method in ("get_agent_owners", "get_users_by_ids"):
+        with monkeypatch.context() as m:
+            m.setattr(db, method, boom)
+            resp = client.get("/api/ops/schedules", headers=headers)
+        assert resp.status_code == 200, (method, resp.text)
+        mine = [r for r in resp.json()["schedules"] if r["agent_name"] in agents]
+        assert sorted(r["runs_as"] for r in mine) == ["owner", "owner", "shared_person", "shared_person"]
+    with monkeypatch.context() as m:
+        m.setattr(db, "get_agent_owners", boom)
+        m.setattr(db, "get_agent_owner", boom)
+        resp = client.get("/api/ops/schedules", headers=headers)
+    assert resp.status_code == 200, resp.text
+    mine = [r for r in resp.json()["schedules"] if r["agent_name"] in agents]
+    assert "owner" not in {r["runs_as"] for r in mine if r["created_by"] == "Fleet Mate"}
+
+
 # ---- the memo and the bulk reads agree with the database -----------------------------------
 
 def test_the_memo_and_the_bulk_reads_answer_as_the_database_does(world):

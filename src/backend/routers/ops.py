@@ -208,8 +208,13 @@ async def list_all_schedules(
     latest_by_schedule = db.get_latest_execution_per_schedule([s.id for s in schedules])
     # #4281: rating every schedule reads its creator and its agent's owner. Two
     # bulk queries up front keep this route's cost flat in the fleet size.
+    # The preload is an optimisation: when it fails, each row is rated by the
+    # per-row lookups, and shows `runs_as: null` if those fail too.
     tier_lookups = turn_tier_service.RunTierLookups(db)
-    tier_lookups.preload([s.agent_name for s in schedules], [s.owner_id for s in schedules])
+    try:
+        tier_lookups.preload([s.agent_name for s in schedules], [s.owner_id for s in schedules])
+    except Exception as exc:  # noqa: BLE001 - degrade to per-row lookups, never fail the read
+        logger.warning("[#4281] run-tier preload failed on the fleet schedule read: %s", exc)
 
     # Build response with schedule details
     schedule_list = []
