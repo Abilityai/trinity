@@ -753,6 +753,16 @@ def _refuse_key_run_of_a_shared_persons_schedule(name: str, schedule, current_us
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=dict(_RUNS_AS_SHARED_PERSON))
 
 
+def _scheduler_conflict_body(response) -> dict:
+    """The scheduler's 409 body as a dict, or {} when it is not a JSON object.
+    Read on an error path, so a malformed body is a refusal, never a crash."""
+    try:
+        body = response.json()
+    except ValueError:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
 @router.post("/{name}/schedules/{schedule_id}/trigger")
 async def trigger_schedule(
     # CSO M1 (#2081) intent kept — owner-tier, matching update/delete. The
@@ -854,9 +864,25 @@ async def trigger_schedule(
                 # the 500 below, because it is not a failure — it is the answer
                 # to the caller's question, and the old handler's silent
                 # `"status": "triggered"` for this case is the bug.
+                # #4281: only the lock denial (`status: already_running`) is
+                # relayed as the lock. The MCP tool reads this exact detail as
+                # "a run is in flight, poll for it", so any other scheduler 409
+                # goes out as a coded refusal instead.
+                body = _scheduler_conflict_body(response)
+                if body.get("status") == "already_running":
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="Schedule is already executing"
+                    )
+                code = body.get("code")
+                message = body.get("message")
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail="Schedule is already executing"
+                    detail={
+                        "code": code if isinstance(code, str) and code else "scheduler_conflict",
+                        "message": (message if isinstance(message, str) and message
+                                    else "The scheduler refused to start this run."),
+                    },
                 )
             elif response.status_code != 200:
                 logger.error(f"Scheduler trigger failed: {response.status_code} - {response.text}")

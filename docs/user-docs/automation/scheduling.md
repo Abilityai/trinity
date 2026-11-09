@@ -119,7 +119,7 @@ curl -X POST http://localhost:8000/api/agents/my-agent/schedules/SCHEDULE_ID/tak
        "delivery": "clear"}'
 ```
 
-**Run now** on such a schedule stays available to the owner and admins, and that one run has your access. An agent key cannot do it: `trigger_agent_schedule` with an agent key returns `409 schedule_runs_as_shared_person`.
+**Run now** on such a schedule stays available to the owner and admins, and that one run has your access. An agent key cannot do it: the REST route answers `409 schedule_runs_as_shared_person`, and `trigger_agent_schedule` returns `status: "refused"` with that code and the backend's message. Only a run already in flight comes back as `status: "already_running"`; a refusal means nothing was started, so there is no run to wait for.
 
 ## Delivering a Run's Output to Someone's Workspace
 

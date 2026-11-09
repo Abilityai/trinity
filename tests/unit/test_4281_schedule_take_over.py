@@ -24,10 +24,12 @@ conftest's SQLite. Only the scheduler hop and the audit sink are replaced.
 
 from __future__ import annotations
 
+import re
 import secrets
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -834,3 +836,91 @@ def test_the_system_key_cannot_run_a_shared_persons_schedule_now(client, world):
                         json=review(read(client, world, sid)))
     assert taken.status_code == 403, taken.text
     assert stored(sid)["owner_id"] == world.mate.id
+
+
+# ---- the MCP surface reads the two 409s apart (Invariant #13) -------------------------
+#
+# `trigger_agent_schedule` (src/mcp-server/src/tools/schedules.ts) tells the
+# calling agent "already running, poll for the run in flight" only when the 409
+# is the scheduler's running lock, matched on its exact `detail`; any other 409
+# is a refusal carrying the backend's code and message. The TS side is tested in
+# its own runner; these pin the bodies it relies on, through the real route, so
+# a backend rewording cannot quietly turn the lock into a refusal (or a coded
+# refusal into a plain string).
+
+_SCHEDULES_TS = (
+    Path(__file__).resolve().parents[2] / "src" / "mcp-server" / "src" / "tools" / "schedules.ts"
+)
+
+
+def _mcp_running_lock_detail():
+    found = re.findall(
+        r'^const RUNNING_LOCK_DETAIL = "([^"]+)";$',
+        _SCHEDULES_TS.read_text(encoding="utf-8"),
+        flags=re.M,
+    )
+    assert len(found) == 1, "schedules.ts must declare RUNNING_LOCK_DETAIL once"
+    return found[0]
+
+
+def _scheduler_409(body):
+    class _Conflicted(_Scheduler):
+        async def post(self, url, **k):
+            _Scheduler.calls.append(url)
+            return SimpleNamespace(status_code=409, json=lambda: body, text=str(body))
+
+    return _Conflicted
+
+
+# The body `src/scheduler/main.py` sends when the schedule's lock is held (#1968).
+_SCHEDULER_LOCK_BODY = {
+    "status": "already_running",
+    "schedule_id": "s",
+    "schedule_name": "n",
+    "agent_name": "a",
+    "message": "Schedule is already executing",
+}
+
+
+def test_the_running_lock_409_is_the_detail_the_mcp_tool_matches(client, world, monkeypatch):
+    sid = created(client, world, who="owner")
+    monkeypatch.setattr(schedules_router.httpx, "AsyncClient", _scheduler_409(_SCHEDULER_LOCK_BODY))
+    resp = call(client, world, "key", "POST", f"/{sid}/trigger")
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"] == _mcp_running_lock_detail()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"status": "paused", "message": "Schedule is paused for review"},
+        {"code": "some_future_conflict", "message": "Not now."},
+        {},
+    ],
+)
+def test_a_scheduler_409_that_is_not_the_lock_is_not_relayed_as_the_lock(
+    client, world, monkeypatch, body
+):
+    """Only the scheduler's lock denial is "already executing". Relaying any
+    other scheduler 409 as the lock would make the MCP tool tell the agent to
+    poll for a run that was never started."""
+    sid = created(client, world, who="owner")
+    monkeypatch.setattr(schedules_router.httpx, "AsyncClient", _scheduler_409(body))
+    resp = call(client, world, "key", "POST", f"/{sid}/trigger")
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail != _mcp_running_lock_detail()
+    assert isinstance(detail, dict), detail
+    assert detail["code"] == body.get("code", "scheduler_conflict")
+    assert detail["message"] == body.get("message", "The scheduler refused to start this run.")
+
+
+def test_the_shared_person_409_is_coded_so_the_mcp_tool_reads_it_as_a_refusal(client, world):
+    sid = created(client, world)
+    resp = call(client, world, "key", "POST", f"/{sid}/trigger")
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert isinstance(detail, dict), detail
+    assert detail["code"] == "schedule_runs_as_shared_person"
+    assert isinstance(detail["message"], str) and detail["message"]
+    assert detail["message"] != _mcp_running_lock_detail()
