@@ -191,4 +191,18 @@ describe('restrictedRunSentence: worded by cause', () => {
     expect(s).toMatch(re)
     expect(s).toMatch(/no shell commands/)
   })
+
+  it('a cause that is not a known string reads the generic sentence and never throws', () => {
+    const generic = restrictedRunSentence({ cause: 'unknown' })
+    for (const cause of [{ toString: null }, 'constructor', 'toString', ['creator_missing'], 7, null]) {
+      expect(restrictedRunSentence({ cause })).toBe(generic)
+    }
+    expect(restrictedRunSentence(restrictedTurnOf('{"restricted_turn":{"cause":{"toString":null}}}'))).toBe(generic)
+  })
+})
+
+describe('takeOverRefusalText: inherited keys are not codes', () => {
+  it('a code like "constructor" reads the fallback', () => {
+    expect(takeOverRefusalText('constructor', 'fallback')).toBe('fallback')
+  })
 })

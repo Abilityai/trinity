@@ -86,9 +86,14 @@ const REFUSALS = {
     'This schedule no longer exists, so there is nothing to take over.',
 }
 
+// A lookup by a server-sent key: own keys only, so "constructor" or
+// "toString" never resolve to an inherited function, and a non-string never
+// reaches the property-key coercion (which can throw).
+const lookup = (table, key) => (typeof key === 'string' && Object.prototype.hasOwnProperty.call(table, key) ? table[key] : null)
+
 /** A take-over refusal in user words; an unknown code reads `fallback`. */
 export function takeOverRefusalText (code, fallback) {
-  return REFUSALS[code] || fallback
+  return lookup(REFUSALS, code) || fallback
 }
 
 /**
@@ -123,5 +128,5 @@ const RUN_SENTENCES = {
 
 /** The run's restriction as one sentence, by cause. */
 export function restrictedRunSentence (record) {
-  return RUN_SENTENCES[record?.cause] || `This run had a shared person's access: ${RESTRICTED}.`
+  return lookup(RUN_SENTENCES, record?.cause) || `This run had a shared person's access: ${RESTRICTED}.`
 }
