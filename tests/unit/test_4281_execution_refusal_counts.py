@@ -48,7 +48,7 @@ from db.engine import get_engine  # noqa: E402
 from dependencies import get_current_user  # noqa: E402
 from models import User  # noqa: E402
 from services import guardrail_event_service as svc  # noqa: E402
-from utils.helpers import to_utc_iso, utc_now  # noqa: E402
+from utils.helpers import parse_iso_timestamp, to_utc_iso, utc_now  # noqa: E402
 
 AGENT = "brief-agent"
 OTHER_AGENT = "brief-other"
@@ -82,19 +82,35 @@ def _iso_ago(seconds: float) -> str:
     return to_utc_iso(utc_now() - timedelta(seconds=seconds))
 
 
-def _run(world, *, ended_seconds_ago=60.0, status="success", schedule_id=None, agent=AGENT):
-    """A schedule run that ended `ended_seconds_ago` (None: still running)."""
+def _run(world, *, ended_seconds_ago=60.0, started_seconds_ago=None, status="success",
+         schedule_id=None, agent=AGENT):
+    """A schedule run that ended `ended_seconds_ago` (None: still running) and
+    started `started_seconds_ago` (default: 30 s before it ended)."""
     sid = world["schedule_id"] if schedule_id is None else schedule_id
     if sid == "__manual__":
         execution = db.create_task_execution(agent, "hello", triggered_by="manual")
     else:
         execution = db.create_schedule_execution(sid, agent, "brief", triggered_by="schedule")
-    if ended_seconds_ago is not None:
-        with get_engine().begin() as conn:
+    if started_seconds_ago is None:
+        started_seconds_ago = (ended_seconds_ago or 0) + 30
+    with get_engine().begin() as conn:
+        conn.execute(text("UPDATE schedule_executions SET started_at = :s WHERE id = :i"),
+                     {"s": _iso_ago(started_seconds_ago), "i": execution.id})
+        if ended_seconds_ago is not None:
             conn.execute(
                 text("UPDATE schedule_executions SET status = :s, completed_at = :c WHERE id = :i"),
                 {"s": status, "c": _iso_ago(ended_seconds_ago), "i": execution.id})
     return execution.id
+
+
+# The agent's forwarder has been reporting since well before any run a test
+# makes: a run that started before the agent's first report is not covered.
+COVERED_SINCE_SECONDS = 2 * 3600
+
+
+def _reported_since(seconds=COVERED_SINCE_SECONDS, agent=AGENT):
+    """The agent's first report reached the backend `seconds` ago."""
+    assert svc.record_report(agent, "claude-code", 0, _iso_ago(seconds))
 
 
 def _keepalive(runtime="claude-code", agent=AGENT):
@@ -141,6 +157,7 @@ def _reading(row):
 # ---------------------------------------------------------------------------
 
 def test_an_event_that_lands_after_the_run_ended_is_counted_on_the_next_read(world):
+    _reported_since()
     run = _run(world)
     _keepalive()
     assert _reading(_list(world)[run]) == (0, None)
@@ -153,6 +170,7 @@ def test_an_event_that_lands_after_the_run_ended_is_counted_on_the_next_read(wor
 
 
 def test_a_run_absent_from_the_counts_while_the_agent_reports_is_zero(world):
+    _reported_since()
     refused, clean = _run(world), _run(world)
     _ingest([_event(refused)])
 
@@ -166,6 +184,7 @@ def test_a_run_absent_from_the_counts_while_the_agent_reports_is_zero(world):
 # ---------------------------------------------------------------------------
 
 def test_a_credential_redaction_alone_never_makes_a_run_unclean(world):
+    _reported_since()
     run = _run(world)
     _ingest([_event(run, hook="output_scanner", code="credential_redacted", kind="credential_redacted")])
 
@@ -173,6 +192,7 @@ def test_a_credential_redaction_alone_never_makes_a_run_unclean(world):
 
 
 def test_another_hooks_deny_is_not_a_turn_tier_refusal(world):
+    _reported_since()
     run = _run(world)
     _ingest([_event(run, hook="bash_guardrail", code="bash_deny_pattern"),
              _event(run, hook="turn_tier_guard", code="schedule_creator_tier")])
@@ -183,6 +203,7 @@ def test_another_hooks_deny_is_not_a_turn_tier_refusal(world):
 def test_an_event_another_agent_files_against_this_run_is_ignored(world):
     """`execution_id` is attribution, not authority (ent#165 §6.1): a sibling
     agent naming this run's id never makes it unclean."""
+    _reported_since()
     run = _run(world)
     _keepalive()
     _ingest([_event(run)], agent=OTHER_AGENT)
@@ -202,6 +223,7 @@ def test_an_agent_that_never_reported_reads_unknown_not_zero(world):
 
 
 def test_a_stale_reporter_gives_the_count_marked_stale(world):
+    _reported_since()
     run = _run(world, ended_seconds_ago=3600)
     _ingest([_event(run)])
     stale_at = _iso_ago(svc.STALE_AFTER_SECONDS + 60)
@@ -236,8 +258,73 @@ def test_a_reporter_with_no_runtime_on_record_reads_unknown_not_zero(world):
     assert _reading(rows[old]) == (1, "not_claude_code")
 
 
+# ---------------------------------------------------------------------------
+# Coverage starts at the agent's first report (review E-F3, ruling R5)
+# ---------------------------------------------------------------------------
+
+def test_a_run_that_ended_before_the_agents_first_report_reads_unknown_not_zero(world):
+    """The upgrade case: a run refused on an image with no forwarder, then the
+    agent is recreated and reports. Its history must not turn into a clean 0."""
+    before = _run(world, ended_seconds_ago=3600)
+    assert _reading(_list(world)[before]) == (None, "never")
+
+    _keepalive()  # the agent's first report, an hour after the run ended
+
+    assert svc.reporting_state(AGENT)["state"] == "reporting"
+    assert _reading(_list(world)[before]) == (None, "never")
+    assert _reading(_detail(world, before)) == (None, "never")
+    assert _reading(_history(world)[before]) == (None, "never")
+
+
+def test_a_run_that_started_after_the_first_report_is_covered(world):
+    """Positive control for the rule above: the same agent, a run inside coverage."""
+    before = _run(world, ended_seconds_ago=3600)
+    _reported_since(600)  # the first report, ten minutes ago
+    after = _run(world, ended_seconds_ago=60, started_seconds_ago=300)
+    _keepalive()  # a report after the run ended
+
+    rows = _list(world)
+    assert _reading(rows[after]) == (0, None)
+    assert _reading(_detail(world, after)) == (0, None)
+    assert _reading(_history(world)[after]) == (0, None)
+    assert _reading(rows[before]) == (None, "never")
+
+
+def test_a_run_that_straddles_the_first_report_is_not_read_as_complete(world):
+    """It started before the agent first reported and ended after. Its tool
+    calls before that report are not provably covered, so even a later report
+    does not make its count complete; a refusal that did arrive still shows."""
+    clean = _run(world, ended_seconds_ago=60, started_seconds_ago=600)
+    refused = _run(world, ended_seconds_ago=60, started_seconds_ago=600)
+    _reported_since(300)  # the first report, mid-run
+    _ingest([_event(refused)])  # after both runs ended
+    assert (parse_iso_timestamp(svc.reporting_state(AGENT)["last_report_at"])
+            > parse_iso_timestamp(_list(world)[clean]["completed_at"]))
+
+    rows = _list(world)
+    assert _reading(rows[clean]) == (None, "never")
+    assert _reading(rows[refused]) == (1, "never")
+    assert _reading(_detail(world, refused)) == (1, "never")
+    assert _reading(_history(world)[clean]) == (None, "never")
+
+
+def test_a_lost_fast_store_moves_coverage_later_never_earlier(world):
+    """Redis flushed with no stored rows: the next report is the new coverage
+    start, so a clean run from before the flush reads unknown, never 0."""
+    _reported_since()
+    run = _run(world, ended_seconds_ago=600)
+    _keepalive()
+    assert _reading(_list(world)[run]) == (0, None)
+
+    world["redis"].flushall()
+    _keepalive()
+
+    assert _reading(_list(world)[run]) == (None, "never")
+
+
 def test_a_read_inside_the_delivery_bound_is_pending_not_a_bare_zero(world):
     """Review R11: events land up to ~2 s (p99 <= 5 s) after the hook fired."""
+    _reported_since()
     _keepalive()
     just_ended = _run(world, ended_seconds_ago=2)
     running = _run(world, ended_seconds_ago=None)
@@ -249,6 +336,7 @@ def test_a_read_inside_the_delivery_bound_is_pending_not_a_bare_zero(world):
 
 
 def test_the_real_terminal_write_reads_pending_at_once(world):
+    _reported_since()
     _keepalive()
     run = _run(world, ended_seconds_ago=None)
     assert db.update_execution_status(run, "success")
@@ -262,6 +350,7 @@ def test_a_run_the_reporter_has_not_reported_past_is_pending_not_a_complete_zero
     `reporting` for STALE_AFTER_SECONDS while the run's refusals sit in its
     spool, so "no events" is evidence only once a report arrived after the run
     ended: every successful post carries the spool's backlog."""
+    _reported_since()
     _keepalive()
     run = _run(world, ended_seconds_ago=30)
     # The last report the backend received came 2.5 min before the run ended.
@@ -318,6 +407,7 @@ def test_a_run_with_no_schedule_carries_neither_field(world, monkeypatch):
 
 
 def test_one_count_query_per_page_whatever_its_length(world, monkeypatch):
+    _reported_since()
     runs = [_run(world) for _ in range(7)]
     _ingest([_event(runs[0])])
     calls = []
@@ -350,28 +440,60 @@ def test_the_markers_are_exactly_the_wire_literal():
     assert markers == set(get_args(GuardrailReadingMarker))
 
 
+_COVERED = {"first_report_at": "long_ago"}
+
+
 @pytest.mark.parametrize("reporting, ended_ago, expected", [
     # `never` wins over everything, even a runtime that is not Claude Code.
     ({"state": "never", "runtime": "gemini"}, 60, (None, "never")),
     # A non-Claude-Code reporter that is also stale reads as the runtime case.
-    ({"state": "stale", "runtime": "codex"}, 60, (None, "not_claude_code")),
+    ({"state": "stale", "runtime": "codex", **_COVERED}, 60, (None, "not_claude_code")),
+    # ...and so does one whose coverage started after the run did.
+    ({"state": "reporting", "runtime": "gemini", "first_report_at": "after_start"}, 60,
+     (None, "not_claude_code")),
+    # Before coverage wins over stale and pending: the run will never be covered.
+    ({"state": "stale", "runtime": "claude-code", "first_report_at": "after_start"}, 1, (None, "never")),
+    ({"state": "reporting", "runtime": "claude-code", "first_report_at": "after_start",
+      "last_report_at": "now"}, 60, (None, "never")),
+    # A coverage start that is missing proves nothing: no data, not a clean 0.
+    ({"state": "reporting", "runtime": "claude-code", "last_report_at": "now"}, 60, (None, "never")),
+    # Coverage that began the instant the run started covers it.
+    ({"state": "reporting", "runtime": "claude-code", "first_report_at": "at_start",
+      "last_report_at": "now"}, 60, (0, None)),
     # Stale wins over pending: the more severe doubt is the one stated.
-    ({"state": "stale", "runtime": "claude-code"}, 1, (0, "stale")),
-    ({"state": "reporting", "runtime": "claude-code"}, 1, (0, "pending")),
+    ({"state": "stale", "runtime": "claude-code", **_COVERED}, 1, (0, "stale")),
+    ({"state": "reporting", "runtime": "claude-code", **_COVERED}, 1, (0, "pending")),
     # Past the delivery bound, complete only once the reporter reported after the end.
-    ({"state": "reporting", "runtime": "claude-code", "last_report_at": "now"}, 60, (0, None)),
-    ({"state": "reporting", "runtime": "claude-code", "last_report_at": "before_end"}, 60, (0, "pending")),
-    ({"state": "reporting", "runtime": "claude-code"}, 60, (0, "pending")),
+    ({"state": "reporting", "runtime": "claude-code", "last_report_at": "now", **_COVERED}, 60, (0, None)),
+    ({"state": "reporting", "runtime": "claude-code", "last_report_at": "before_end", **_COVERED}, 60,
+     (0, "pending")),
+    ({"state": "reporting", "runtime": "claude-code", **_COVERED}, 60, (0, "pending")),
 ])
 def test_the_markers_go_most_severe_first(reporting, ended_ago, expected):
     from services import execution_refusals as er
 
     now = utc_now()
     ended = now - timedelta(seconds=ended_ago)
-    stamps = {"now": to_utc_iso(now), "before_end": to_utc_iso(ended - timedelta(seconds=1))}
-    if "last_report_at" in reporting:
-        reporting = {**reporting, "last_report_at": stamps[reporting["last_report_at"]]}
-    assert er.reading_for(None, reporting, ended, now) == expected
+    started = ended - timedelta(seconds=30)
+    stamps = {"now": to_utc_iso(now), "before_end": to_utc_iso(ended - timedelta(seconds=1)),
+              "long_ago": to_utc_iso(now - timedelta(days=30)), "at_start": to_utc_iso(started),
+              "after_start": to_utc_iso(started + timedelta(microseconds=1))}
+    reporting = {k: stamps[v] if k.endswith("_at") else v for k, v in reporting.items()}
+    assert er.reading_for(None, reporting, started, ended, now) == expected
+
+
+def test_a_refusal_on_a_run_from_before_coverage_still_shows():
+    """No data is not the same as a known refusal: a count that did arrive is
+    a lower bound, so it is kept, with the marker that it may be short."""
+    from services import execution_refusals as er
+
+    now = utc_now()
+    started = now - timedelta(seconds=600)
+    entry = {"by_kind": {"deny": 2}, "by_hook_code": {"turn_tier_guard:shell_owner_only": 2}}
+    reporting = {"state": "reporting", "runtime": "claude-code", "last_report_at": to_utc_iso(now),
+                 "first_report_at": to_utc_iso(now - timedelta(seconds=300))}
+    assert er.reading_for(entry, reporting, started, now - timedelta(seconds=60), now) == (2, "never")
+    assert er.reading_for(None, reporting, None, now - timedelta(seconds=60), now) == (None, "never")
 
 
 def test_a_naive_completed_at_is_read_as_utc():
@@ -380,6 +502,11 @@ def test_a_naive_completed_at_is_read_as_utc():
 
     now = utc_now()
     naive = (now - timedelta(seconds=60)).replace(tzinfo=None)
+    naive_start = naive - timedelta(seconds=30)
     entry = {"by_kind": {"deny": 3}, "by_hook_code": {"turn_tier_guard:shell_owner_only": 3}}
-    reporting = {"state": "reporting", "runtime": "claude-code", "last_report_at": to_utc_iso(now)}
-    assert er.reading_for(entry, reporting, naive, now) == (3, None)
+    reporting = {"state": "reporting", "runtime": "claude-code", "last_report_at": to_utc_iso(now),
+                 "first_report_at": to_utc_iso(now - timedelta(seconds=120))}
+    assert er.reading_for(entry, reporting, naive_start, naive, now) == (3, None)
+    # Read as UTC, not as local time: a naive start just after coverage is covered.
+    just_after = (now - timedelta(seconds=119)).replace(tzinfo=None)
+    assert er.reading_for(entry, reporting, just_after, naive, now) == (3, None)
