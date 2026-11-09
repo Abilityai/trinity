@@ -61,6 +61,13 @@ _TTL_SECONDS = 24 * 60 * 60
 # A value shorter than this is NOT staged — scrubbing a 3-char value would shred
 # transcripts. Matches the agent-side sanitizer registry's own >=8 floor.
 _MIN_VALUE_LEN = 8
+# The placeholder for text that is SPOKEN rather than stored. The shared marker is
+# read aloud as punctuation; a plain word is not. At no more than the floor's length
+# it is never longer than a value it replaces, so a scrub can never lengthen spoken
+# text: a length cap judged on the text as written still holds after the scrub, and
+# the scrub changes no length an agent or a caller can observe.
+SPOKEN_PLACEHOLDER = "redacted"
+assert len(SPOKEN_PLACEHOLDER) <= _MIN_VALUE_LEN
 # Bounds on the distinct staged-value set (dedup keeps this small in practice).
 _SOFT_WARN_FIELDS = 200
 _HARD_CAP_FIELDS = 1000
@@ -249,12 +256,13 @@ def _renditions(value: str) -> list[str]:
     return out
 
 
-def scrub_text(values: list[str], text):
-    """Replace every rendition of every staged value in ``text`` with the
-    sanitizer's `***REDACTED***` marker. FALSY PASSTHROUGH — a falsy input is
-    returned UNCHANGED (never `None` → `""`, which would corrupt a NULL error
-    column). LONGEST-FIRST so a staged value that is a substring of a longer one
-    doesn't shred the longer match."""
+def scrub_text(values: list[str], text, marker: str = REDACTION_PLACEHOLDER):
+    """Replace every rendition of every staged value in ``text`` with ``marker``
+    (the sanitizer's `***REDACTED***` by default; ``SPOKEN_PLACEHOLDER`` for text
+    that is read aloud). FALSY PASSTHROUGH — a falsy input is returned UNCHANGED
+    (never `None` → `""`, which would corrupt a NULL error column). LONGEST-FIRST
+    so a staged value that is a substring of a longer one doesn't shred the
+    longer match."""
     if not text or not values:
         return text
     result = text
@@ -263,8 +271,17 @@ def scrub_text(values: list[str], text):
             continue
         for rendition in _renditions(value):
             if rendition:
-                result = result.replace(rendition, REDACTION_PLACEHOLDER)
+                result = result.replace(rendition, marker)
     return result
+
+
+def scrub_staged(text, *, marker: str = REDACTION_PLACEHOLDER):
+    """``scrub_text(get_staged_values(), text, marker)`` in one call, for a sink
+    that scrubs one text. The store is read only when there is text to scrub.
+    Same fail-open read and falsy passthrough as the two calls it wraps."""
+    if not text:
+        return text
+    return scrub_text(get_staged_values(), text, marker)
 
 
 def scrub_obj(values: list[str], obj: Any) -> Any:

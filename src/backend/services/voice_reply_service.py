@@ -36,7 +36,12 @@ from typing import Optional
 import config
 from database import db
 from services import idempotency_service
-from services.runtime_secret_scrub import get_staged_values, scrub_text
+from services.runtime_secret_scrub import (
+    SPOKEN_PLACEHOLDER,
+    get_staged_values,
+    scrub_staged,
+    scrub_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -203,11 +208,6 @@ async def send_voice_reply(
     Raises ``idempotency_service.EffectInProgressError`` when a voice note for this
     turn is already being sent; otherwise never raises (returns a not-delivered
     result the caller reports so the agent replies with text)."""
-    # ent#279 / #4228: scrub staged credential values at the TOP, like
-    # send_message — before the cost cap judges the text and before synthesis.
-    _staged = get_staged_values()
-    if _staged:
-        text = scrub_text(_staged, text)
     channel = (channel or "").lower()
     if channel not in _SUPPORTED_CHANNELS:
         return VoiceReplyResult(False, channel, "unsupported_channel")
@@ -218,6 +218,14 @@ async def send_voice_reply(
     voice_id, refused = _gate(agent_name, channel, text)
     if refused:
         return refused
+    # ent#279 / #4228: staged credential values come out before synthesis. After
+    # the gate, so a refused call never reads the store. The gate's cap judges the
+    # text as written: the spoken placeholder is never longer than a value it
+    # replaces, so the scrubbed text still fits, and the gate's answer and the
+    # length its guidance quotes do not depend on what is staged. Judging the
+    # scrubbed text instead would let an agent test a guessed value against the
+    # store, which every agent shares, from the length it is told.
+    text = scrub_staged(text, marker=SPOKEN_PLACEHOLDER)
 
     # --- Effect-scoped dedup (#1084) ------------------------------------------
     async with idempotency_service.effect_guard(
@@ -274,14 +282,8 @@ async def send_proactive_voice(
     from services.proactive_message_service import proactive_message_service as pms
     from services.settings_service import get_proactive_rate_limit
 
-    # ent#279 / #4228: scrub before anything reads the text — the audit preview,
-    # the cost cap and synthesis — the same order send_message uses.
-    _staged = get_staged_values()
-    if _staged:
-        text = scrub_text(_staged, text)
     recipient_email = (recipient_email or "").strip().lower()
     channel = (channel or "").lower()
-    preview = (text or "")[:100]
 
     if channel not in _PROACTIVE_CHANNELS:
         if channel in _SUPPORTED_CHANNELS:
@@ -300,6 +302,14 @@ async def send_proactive_voice(
     voice_id, refused = _gate(agent_name, channel, text)
     if refused:
         return refused
+    # ent#279 / #4228: staged values come out before anything below reads the text,
+    # after the gate for the reason given in send_voice_reply. The audit preview is
+    # stored text and keeps the shared marker; the note is spoken and gets the
+    # spoken placeholder. Scrub, then cut: cutting first could leave a value's
+    # prefix that no longer matches.
+    _staged = get_staged_values()
+    preview = (scrub_text(_staged, text) or "")[:100]
+    text = scrub_text(_staged, text, SPOKEN_PLACEHOLDER)
 
     async def _audit(success: bool, error: Optional[str] = None) -> None:
         await pms.audit_send(
