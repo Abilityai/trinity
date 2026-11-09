@@ -47,7 +47,9 @@ _ACCESS_CLOSE = {
 # Ends one terminal session's processes in the container: every process whose
 # environment carries the session's marker ($1), and every process in a session
 # led by one of them (which reaches what the shell started even after it dropped
-# the variable). HUP first, then KILL what is left. It runs as the terminal's
+# the variable). Those sessions are remembered across the passes, so a process
+# that outlives its leader's HUP is still found by its session. HUP first, then
+# KILL what is left. It runs as the terminal's
 # own user: a container root without CAP_SYS_PTRACE cannot read another user's
 # environment, and the user's processes are the ones it must find. Exit status 1
 # when something survived the KILL. Plain POSIX sh with sed/cut/tr/grep, read
@@ -57,17 +59,19 @@ m="TRINITY_TERMINAL_SESSION=$1"
 self=$$
 sid_of() { sed -e 's/^.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f4; }
 marked() { tr '\0' '\n' 2>/dev/null < "/proc/$1/environ" | grep -qxF "$m"; }
+init_sid=$(sid_of 1)
+sids=" "
 targets() {
-  init_sid=$(sid_of 1)
   pids=""
-  sids=" "
   for d in /proc/[0-9]*; do
     p=${d#/proc/}
     [ "$p" = "$self" ] && continue
     if marked "$p"; then
       pids="$pids $p"
       s=$(sid_of "$p")
-      if [ "$s" = "$p" ] && [ "$s" != "$init_sid" ]; then sids="$sids$s "; fi
+      if [ "$s" = "$p" ] && [ "$s" != "$init_sid" ]; then
+        case "$sids" in *" $s "*) ;; *) sids="$sids$s " ;; esac
+      fi
     fi
   done
   if [ "$sids" != " " ]; then
@@ -77,16 +81,15 @@ targets() {
       case "$sids" in *" $(sid_of "$p") "*) pids="$pids $p" ;; esac
     done
   fi
-  echo $pids
 }
-t=$(targets)
-if [ -z "$t" ]; then echo "nothing to end"; exit 0; fi
-kill -HUP $t 2>/dev/null
+targets
+if [ -z "$pids" ]; then echo "nothing to end"; exit 0; fi
+kill -HUP $pids 2>/dev/null
 sleep 1
-t=$(targets)
-if [ -n "$t" ]; then kill -KILL $t 2>/dev/null; sleep 0.2; fi
-t=$(targets)
-if [ -n "$t" ]; then echo "still running: $t"; exit 1; fi
+targets
+if [ -n "$pids" ]; then kill -KILL $pids 2>/dev/null; sleep 0.2; fi
+targets
+if [ -n "$pids" ]; then echo "still running:$pids"; exit 1; fi
 echo "ended"
 """
 

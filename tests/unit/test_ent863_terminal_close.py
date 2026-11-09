@@ -629,10 +629,13 @@ def test_the_end_of_shell_script_ends_the_marked_session_and_nothing_else():
         return subprocess.Popen(["sleep", "120"], env=env, start_new_session=session)
 
     # A marked session leader (the shell), and in its session a child whose
-    # environment no longer carries the marker; a marked process in a session
-    # of its own; a process of another terminal session; an unmarked bystander.
+    # environment no longer carries the marker and one that also ignores HUP
+    # (so it outlives the leader and is found only by the leader's session);
+    # a marked process in a session of its own; a process of another terminal
+    # session; an unmarked bystander.
+    unmark = "env -u " + terminal.TERMINAL_SESSION_ENV
     leader = subprocess.Popen(
-        ["sh", "-c", "env -u " + terminal.TERMINAL_SESSION_ENV + " sleep 120 & exec sleep 120"],
+        ["sh", "-c", unmark + " sleep 120 & " + unmark + " nohup sleep 120 >/dev/null 2>&1 & exec sleep 120"],
         env={**base, terminal.TERMINAL_SESSION_ENV: marker}, start_new_session=True,
     )
     detached = spawn({**base, terminal.TERMINAL_SESSION_ENV: marker}, session=True)
@@ -640,7 +643,7 @@ def test_the_end_of_shell_script_ends_the_marked_session_and_nothing_else():
     bystander = spawn(base, session=False)
     time.sleep(0.3)
     child_pids = [p for p in _session_members(leader.pid) if p != leader.pid]
-    assert child_pids, "the leader's unmarked child is in its session"
+    assert len(child_pids) == 2, "the leader's two unmarked children are in its session"
     try:
         out = subprocess.run(
             ["/bin/sh", "-c", terminal._END_SHELL_SCRIPT, "sh", marker],
