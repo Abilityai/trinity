@@ -1187,6 +1187,35 @@ export const AVAILABILITY_STOPPED = 'stopped'
 export const AVAILABILITY_UNAVAILABLE = 'unavailable'
 export const AVAILABILITY_UNKNOWN = 'unknown'
 
+// ent#1201 — the member tier. A person on an agent shared to them as a member
+// (`is_member_agent && !owned`, the same reading `PortalBriefing` uses) is
+// keyed on the CARD, not on the session kind, so a platform login and a portal
+// token get the same copy.
+export const MEMBER_RESTARTING_NOTICE = 'Your assistant is restarting.'
+
+export function viewerIsMemberTier(agent) {
+  return !!agent?.is_member_agent && !agent?.owned
+}
+
+// True while the member's assistant is being started: its progress record's
+// `assistant_ready` step is `in_progress`. `done`, `failed`, no step and no
+// record are all "not starting" — a missing card must never hide a real stop.
+export function assistantStarting(progress) {
+  const steps = Array.isArray(progress?.steps) ? progress.steps : []
+  return steps.some((s) => s?.key === 'assistant_ready' && s.state === 'in_progress')
+}
+
+// A turn refused because the agent is not running (the server's 502 whose copy
+// ends "…its owner needs to start it."), re-said for a member-tier viewer in
+// words that name no one. Null for any other viewer or any other refusal, so
+// the caller keeps the server's own words.
+export function memberTierRefusal(err, agent) {
+  if (!viewerIsMemberTier(agent)) return null
+  if (err?.response?.status !== 502) return null
+  const detail = err.response.data?.detail
+  return typeof detail === 'string' && /needs to start it/i.test(detail) ? MEMBER_RESTARTING_NOTICE : null
+}
+
 /**
  * The chip for one roster card, or `null` when nothing should be rendered.
  *
@@ -1206,9 +1235,19 @@ export const AVAILABILITY_UNKNOWN = 'unknown'
  * Nothing here is derived from a Docker string: `availability` is one of four
  * server-chosen constants, and an unrecognised value renders nothing.
  */
-export function availabilityChip(agent, { detailed = false } = {}) {
+export function availabilityChip(agent, { detailed = false, memberTier = viewerIsMemberTier(agent), starting = false } = {}) {
   const state = String(agent?.availability ?? '')
+  // ent#1201: while a member's assistant is being started the progress card
+  // speaks ("Your assistant is starting") and the row reads like a ready agent.
+  if (memberTier && starting) return null
   if (state !== AVAILABILITY_STOPPED && state !== AVAILABILITY_UNAVAILABLE) return null
+
+  // ent#1201: a member-tier viewer cannot start the agent and has nobody to
+  // ask — the card's owner is a platform account they have never heard of — so
+  // the copy names no one, and `detailed` does not apply.
+  if (memberTier) {
+    return { state, label: 'Restarting', variant: 'warning', title: MEMBER_RESTARTING_NOTICE }
+  }
 
   const owner = String(agent?.owner ?? '').trim()
   // The card already carries the owner, so naming them costs nothing and is far
@@ -2200,8 +2239,8 @@ export function agentPreview(threads, agentName) {
 // why it will not go yet. The server's 502 stays the real refusal — this only
 // sets the expectation before they hit Enter. Returns null while the agent can
 // run, including on `unknown`, which is not evidence of anything.
-export function composerAvailabilityNotice(agent) {
-  const chip = availabilityChip(agent, { detailed: true })
+export function composerAvailabilityNotice(agent, { memberTier = viewerIsMemberTier(agent), starting = false } = {}) {
+  const chip = availabilityChip(agent, { detailed: true, memberTier, starting })
   if (!chip) return null
   return { state: chip.state, message: chip.title }
 }
