@@ -138,7 +138,10 @@ with one shared agent could mint a ticket (`POST /api/ws/ticket` is plain
 - **A change during a read gets one more read.** A read asked for while one is
   already in flight for that slot (`refreshing`) marks it `refresh_again`, and
   the slot is read once more when the in-flight read ends — unless it has
-  disconnected or the dispatcher is stopping. `update_accessible_agents` (the
+  disconnected or the dispatcher is stopping — and the in-flight read's result
+  is not applied to it, since it may predate the change. The periodic cycle
+  claims each slot just before its own read, so a slot it has not reached yet
+  is read at once on an access change. `update_accessible_agents` (the
   `/ws/events` `refresh` command) marks it the same way. A failed read keeps the
   previous roster until the next read replaces it.
 - **An event-stream key's roster is its owner's, read now.** Every non-admin
@@ -147,7 +150,7 @@ with one shared agent could mint a ticket (`POST /api/ws/ticket` is plain
   key's owner on every call: an owner that is gone, deactivated or
   Workspace-only reads as an empty list, and the owner's current email is the
   one used. The `refresh` command reads through the same function. Admin keys
-  are never filtered and get no re-read.
+  are never filtered and get no automatic re-read.
 - **No Redis format change**: the envelope still carries a single
   `agent_name`; the set is derived from the payload at delivery, so entries
   written by a pre-ent#467 worker during a rolling deploy filter correctly.
