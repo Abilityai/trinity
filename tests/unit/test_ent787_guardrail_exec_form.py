@@ -86,8 +86,18 @@ EXPECTED = {
             {"matcher": "Edit|Write|NotebookEdit|MultiEdit",
              "hooks": [_entry("file-guardrail.py"), _entry("read-only-guard.py")]},
         ],
+        # trinity-enterprise#165: the scanner reads what the model reads. The
+        # built-in tools are an exact list (letters and `|` only); the MCP entry
+        # is a regex, anchored because a matcher regex is unanchored (S5).
         "PostToolUse": [
             {"matcher": "Bash", "hooks": [_entry("output-scanner.py")]},
+            {"matcher": "Read|Grep|WebFetch", "hooks": [_entry("output-scanner.py")]},
+            {"matcher": "^mcp__", "hooks": [_entry("output-scanner.py")]},
+        ],
+        # A failing command's (or an MCP error result's) output is warned about here.
+        "PostToolUseFailure": [
+            {"matcher": "Bash", "hooks": [_entry("output-scanner.py")]},
+            {"matcher": "^mcp__", "hooks": [_entry("output-scanner.py")]},
         ],
     },
 }
@@ -205,7 +215,9 @@ def test_read_only_guard_denies_under_the_registered_invocation(tmp_path):
 def test_output_scanner_still_records_a_leak_under_the_registered_invocation(tmp_path):
     result = _registered("output-scanner.py", tmp_path, payload=_SCAN)
     assert result.returncode == 0, result.stderr
-    events = [e for e in H.log_events(tmp_path) if e["event"] == "credential_pattern_in_output"]
+    # trinity-enterprise#165: it hides the key too (test_ent165_output_scanner.py).
+    assert _SECRET not in result.stdout and "[REDACTED:sk]" in result.stdout
+    events = [e for e in H.log_events(tmp_path) if e["event"] == "credential_redacted"]
     assert events and _SECRET not in json.dumps(events)
 
 

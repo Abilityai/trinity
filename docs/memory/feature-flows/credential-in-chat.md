@@ -90,7 +90,7 @@ receiving instance: POST /api/agents/{name}/credentials/inject mode "merge"
 | Agent | `agent_server/routers/credentials.py` → `GET /api/credentials/read` | Lists a path in `missing` only when the agent proved it absent; a path in none of `files` / `files_b64` / `missing` was not read |
 | Backend | `services/operator_resume_service.py` | Wake names the variable, never a value |
 | Backend | `client_portal/router.py::_refuse_secret_in_message` | Paste guard on both Workspace chat routes (422 `secret_in_message`) |
-| Backend | `utils/credential_sanitizer.py::secret_shape` | Detector over `SECRET_VALUE_PATTERNS` (+ `ops_eyJ…`, `dop_v1_`) |
+| Backend | `utils/credential_sanitizer.py::secret_shape` | Detector over `SECRET_VALUE_PATTERNS` (+ `ops_eyJ…`, `dop_v1_`; Google `AIza…` named `google` since trinity-enterprise#165 D9) |
 | Frontend | `components/portal/PortalCredentialField.vue` | Masked field, Show/Hide, one POST, emptied before the request |
 | Frontend | `components/portal/PortalAsks.vue` | Renders the field for the kind; always names the asking agent and quotes its reason as its words; no Discuss |
 | Frontend | `utils/operatorQueue.js` | `queueResponseKind` → `credential`; label; "You provided NAME" |

@@ -9,6 +9,7 @@ layer is a safety net for cases where the agent may not have sanitized properly.
 """
 
 import base64
+import bisect
 import re
 import json
 import logging
@@ -19,6 +20,14 @@ logger = logging.getLogger(__name__)
 
 # Secret value patterns - values that look like secrets regardless of context
 SECRET_VALUE_PATTERNS = [
+    # Trinity MCP keys (trinity-enterprise#165): `trinity_mcp_` + `token_urlsafe(32)`
+    # (db/mcp_keys.py), 43 base64url characters, so `-` and `_` are part of the
+    # key; the alnum-only body missed ~40% of keys or left their tail in clear.
+    # The 43-character form must end there (no URL-safe character follows), so a
+    # longer `trinity_mcp_<snake_case_name>` identifier is code, not a key; the
+    # second branch is the older alnum form, any length. FIRST in the list, so an
+    # `sk-` that happens to sit in a key's random body cannot cut the key short.
+    r'trinity_mcp_(?:[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])|[a-zA-Z0-9]{16,})',
     # One rule for the whole `sk-` family (#2208). Three prefix-specific patterns
     # meant every NEW variant shipped unredacted until someone noticed: the
     # generic `sk-[a-zA-Z0-9]{20,}` stops at the first hyphen, so an OpenAI
@@ -35,12 +44,14 @@ SECRET_VALUE_PATTERNS = [
     r'xoxp-[a-zA-Z0-9\-]+',           # Slack user token
     r'xoxa-[a-zA-Z0-9\-]+',           # Slack app token
     r'AKIA[A-Z0-9]{16}',              # AWS access key
-    r'trinity_mcp_[a-zA-Z0-9]{16,}',  # Trinity MCP keys
     # trinity-enterprise#1066: two service-token shapes a person is likely to
     # hand an agent — added to the list the redaction runs, not to a
     # guard-private one, so logs learn them in the same change.
     r'ops_eyJ[A-Za-z0-9_-]{40,}',     # 1Password service-account token (ops_ + base64url JSON)
     r'dop_v1_[a-f0-9]{20,}',          # DigitalOcean API token
+    # trinity-enterprise#165 (D9): the Google API key shape the Bash output
+    # scanner already matched; here too, so logs learn it in the same change.
+    r'AIza[0-9A-Za-z_-]{35}',         # Google API key
     r'Bearer\s+[a-zA-Z0-9\-_.]+',     # Bearer tokens
     r'Basic\s+[a-zA-Z0-9+/=]+',       # Basic auth
 ]
@@ -64,6 +75,71 @@ SENSITIVE_KEY_PATTERNS = [
 
 # Compiled patterns
 _secret_value_re = [re.compile(p) for p in SECRET_VALUE_PATTERNS]
+
+# trinity-enterprise#165: a key that output colouring split. `grep
+# --color=always trinity_mcp` prints `trinity_mcp\x1b[m_<rest of the key>`: the
+# escape sits INSIDE the key, so no pattern above matches the contiguous text
+# and the rest of the key was stored in clear. `_redact_split_keys` runs the
+# patterns once more on the text with every escape run removed (what a terminal
+# shows), keeps a match only when an escape run sat strictly inside it, and
+# replaces the key whole; the escapes it held are kept after the placeholder.
+# ONE escape grammar with the Bash output scanner (`credential_escape` in
+# docker/base-image/hooks/guardrails-baseline.json), raw ESC or written as
+# `\u001b`, `\x1b`, `\033` or `\e`; `_split_keys` is the scanner's function.
+ESCAPE_SEQUENCE = r'(?:\x1b|\\(?:u001[bB]|x1[bB]|033|e))(?:\[[0-?]*[ -/]*[@-~]|[ -/]*[0-~])'
+_escape_run_re = re.compile(f'(?:{ESCAPE_SEQUENCE})+')
+
+
+def _split_keys(text, runs, find):
+    """Keys that escape runs split, as (start, end, tag) spans of `text`.
+
+    `find` is run on `text` with every escape run removed (what a terminal
+    shows) and yields (start, end, tag) there; a match is kept only when an
+    escape run sat strictly inside it, and is mapped back onto `text`. The
+    same function is in the Bash output scanner (D4)."""
+    if "\x1b" not in text and "\\" not in text:
+        return []
+    at, shift, parts, kept, removed = [], [], [], 0, 0
+    for run in runs.finditer(text):
+        parts.append(text[kept:run.start()])
+        at.append(run.start() - removed)
+        removed += run.end() - run.start()
+        shift.append(removed)
+        kept = run.end()
+    if not at:
+        return []
+    parts.append(text[kept:])
+    spans = []
+    for start, end, tag in find("".join(parts)):
+        first, last = bisect.bisect_right(at, start), bisect.bisect_left(at, end)
+        if first < last:
+            spans.append((start + (shift[first - 1] if first else 0), end + shift[last - 1], tag))
+    return spans
+
+
+def _redact_split_keys(text: str) -> str:
+    """Each key that escape runs split replaced by the placeholder, with the
+    escapes it held written back after it, in order. Overlapping spans (an
+    `sk-` inside a key's random body) become one."""
+    def find(source):
+        return [(m.start(), m.end(), None) for pattern in _secret_value_re
+                for m in pattern.finditer(source)]
+
+    spans = []
+    for start, end, _ in sorted(_split_keys(text, _escape_run_re, find), key=lambda s: (s[0], -s[1])):
+        if spans and start < spans[-1][1]:
+            spans[-1] = (spans[-1][0], max(end, spans[-1][1]))
+        else:
+            spans.append((start, end))
+    if not spans:
+        return text
+    out, kept = [], 0
+    for start, end in spans:
+        out += [text[kept:start], REDACTION_PLACEHOLDER]
+        out += [run.group() for run in _escape_run_re.finditer(text, start, end)]
+        kept = end
+    out.append(text[kept:])
+    return "".join(out)
 # (#2398) The compiled `_sensitive_key_re` list lived here and is gone with
 # the quadratic test it fed — nothing referenced it any more. Leaving it
 # would have kept the removed regexes compiled and reachable by name, which
@@ -442,6 +518,9 @@ def sanitize_text(text: str) -> str:
 
     result = text
 
+    # A key that colour codes split, before the pass below cuts it short
+    result = _redact_split_keys(result)
+
     # Replace values matching secret patterns
     for pattern in _secret_value_re:
         result = pattern.sub(REDACTION_PLACEHOLDER, result)
@@ -484,9 +563,10 @@ _GUARD_SHAPES = {
     r'xoxp-[a-zA-Z0-9\-]+': "slack",
     r'xoxa-[a-zA-Z0-9\-]+': "slack",
     r'AKIA[A-Z0-9]{16}': "aws",
-    r'trinity_mcp_[a-zA-Z0-9]{16,}': "trinity_mcp",
+    r'trinity_mcp_(?:[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])|[a-zA-Z0-9]{16,})': "trinity_mcp",
     r'ops_eyJ[A-Za-z0-9_-]{40,}': "ops",
     r'dop_v1_[a-f0-9]{20,}': "dop",
+    r'AIza[0-9A-Za-z_-]{35}': "google",
 }
 _GUARD_EXCLUDED = frozenset({
     r'Bearer\s+[a-zA-Z0-9\-_.]+',
@@ -508,7 +588,7 @@ def secret_shape(text: Optional[str]) -> Optional[str]:
     """The name of the credential shape ``text`` carries, or None.
 
     The name is a short label for the client (`sk`, `github`, `slack`, `aws`,
-    `trinity_mcp`, `ops`, `dop`, `env_pair`) — never the matched text, which is
+    `trinity_mcp`, `ops`, `dop`, `google`, `env_pair`) — never the matched text, which is
     the thing the caller is refusing to repeat.
     """
     if not text:

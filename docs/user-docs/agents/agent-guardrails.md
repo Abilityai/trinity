@@ -7,7 +7,7 @@ Deterministic safety enforcement inside the agent's container. Catches destructi
 - **Baseline** -- Platform-wide safety rules baked into the agent base image. All agents inherit these rules.
 - **Hooks** -- Claude Code `PreToolUse` and `PostToolUse` hooks that intercept tool calls before and after execution.
 - **Per-Agent Overrides** -- Optional configuration that tightens (never loosens) the baseline for specific agents.
-- **Fail-Closed** -- If a hook encounters an error, the tool call is blocked by default.
+- **Fail-Closed** -- If a hook encounters an error, the tool call is blocked by default. The output scanner runs after the tool, so it cannot block; on an error it withholds the output instead.
 
 ## How It Works
 
@@ -52,20 +52,41 @@ The `PreToolUse` hook on `Edit`, `Write`, `MultiEdit`, and `NotebookEdit` blocks
 - `/opt/trinity/*` -- Platform guardrail hook scripts
 - `/etc/claude-code/*` -- The managed settings that register the hooks
 
-### 3. Credential Leak Detection
+### 3. Credential Hiding in Tool Output
 
-The `PostToolUse` hook on `Bash` scans command output for leaked credentials:
+When a `Bash` command prints something that looks like a credential, the agent's model sees a placeholder instead of the value. The same applies to a file it reads (`Read`), a search (`Grep`), a fetched web page (`WebFetch`), and a tool from an MCP server the owner added. A credential in that output could otherwise reach the people the agent talks to, a file it commits or a tool it calls next.
 
-| Pattern | Example |
-|---------|---------|
-| Anthropic API keys and OAuth tokens | `sk-ant-...`, `sk-ant-oat01-...` |
-| OpenAI API keys | `sk-proj-...` |
-| GitHub PATs | `ghp_...`, `github_pat_...` |
-| AWS access keys | `AKIA...` |
-| Slack tokens | `xoxb-...`, `xoxp-...` |
-| Google API keys | `AIza...` |
+| Shape | Example | The model sees |
+|-------|---------|----------------|
+| Anthropic, OpenAI and other `sk-` keys | `sk-ant-...`, `sk-proj-...`, `sk-svcacct-...` | `[REDACTED:sk]` |
+| GitHub tokens | `ghp_...`, `github_pat_...`, `gho_...`, `ghs_...`, `ghr_...` | `[REDACTED:github]` |
+| Slack tokens (20+ characters after the prefix) | `xoxb-...`, `xoxp-...`, `xoxa-...` | `[REDACTED:slack]` |
+| AWS access keys | `AKIA...` | `[REDACTED:aws]` |
+| Trinity MCP keys | `trinity_mcp_...` | `[REDACTED:trinity_mcp]` |
+| 1Password service-account tokens | `ops_eyJ...` | `[REDACTED:ops]` |
+| DigitalOcean tokens | `dop_v1_...` | `[REDACTED:dop]` |
+| Google API keys | `AIza...` | `[REDACTED:google]` |
 
-Matches are logged (pattern name only, not the actual value) for security review.
+Only the matched text is replaced; the rest of the output reaches the model unchanged. Only known key prefixes count: a `KEY=value` line is not hidden unless its value has one of these shapes. A prefix inside a longer word, such as `task-runner-...` or `flask-...`, is not read as a key, and a short placeholder such as `xoxb-your-token-here` passes. A key is still hidden when it follows `_` (`KEY_sk-...`), colour codes (`grep --color`, `rg`), a `\n` or `\t` escape in JSON text, or a URL escape such as `%3D`; the colour codes stay around the placeholder. The same holds when colour codes land inside a key, as `grep --color=always sk-ant` does to the part it matched: the whole key is hidden, and the colour codes stay. A Trinity MCP key is hidden whole, including keys that hold `-` or `_`. Output too large to show inline is saved to a file the agent can read; the scanner hides the key in that file too. Images and PDFs the agent reads are passed through untouched.
+
+What the agent can rely on:
+
+- **The command has already run.** The scanner changes only what the model sees, never what the command did.
+- **If the scanner fails, or the output is over 8 MiB, the model sees nothing of it:** a notice says the output was withheld and that the command should not be run again (or, for other tools, the output not fetched another way) to see it.
+- **The agent can still read its own config.** Reading `.env`, `.mcp.json` or another config file works; known-prefix keys in it show as placeholders, and values without a known prefix are shown as they are.
+- **The placeholder is not written back.** A file edit or a command that contains `[REDACTED:` is refused, because it would replace the real value with the placeholder. The refusal tells the agent to edit only the lines it needs (with `Edit`) and leave the hidden value's line alone, so changing another setting in the same file works and the real key stays. The agent cannot write `.env`, `.mcp.json` or its credentials file with its file tools at all. This also refuses a search for the placeholder itself, such as `grep -r '\[REDACTED:'`.
+- **Each hidden key is recorded** in the agent's guardrail log, with the shape's name only and never the value.
+
+What it does not cover:
+
+- **A command that fails** (exits non-zero), or an MCP tool that returns an error: Claude Code does not promise that hooks can change this output. With the Claude Code version Trinity ships, the key is still hidden, but the model sees the result without its error flag; the text still starts with `Error: Exit code N`. The model is also told the output held a credential it must not repeat, store or send, and the event is recorded. A later Claude Code version may stop hiding it.
+- **Tools it is not registered for:** `Glob`, `WebSearch`, MCP resource reads and subagent results are not scanned.
+- **Trinity's own MCP tools:** not scanned here, because some of them hand the agent a credential on purpose. That also leaves output such as an agent's container logs (`get_agent_logs`) unscanned.
+- **Another hook that also rewrites the output:** a hook the agent or a template adds in its own settings can bring the original back. The scanner's change is not final in that case.
+- **A scanner that cannot run in time** (30 seconds) or whose change Claude Code rejects: the original output goes through.
+- **Codex and Gemini agents:** these hooks run on Claude Code only.
+
+Trinity also redacts credentials again on the way out: in chat replies from Claude Code and Codex agents, and in stored execution logs on every runtime. That protects what leaves the agent, not what the model has already read.
 
 ### 4. Turn Limits
 

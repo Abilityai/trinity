@@ -77,16 +77,23 @@
   "path_allow": [
     ".env.example"
   ],
+  "credential_boundary": "(?:(?<![A-Za-z0-9-])|(?<=\\\\[nrt])|(?<=%[0-9A-Fa-f]{2})|(?P<lead>(?:\\x1b|\\\\(?:u001[bB]|x1[bB]|033|e))(?:\\[[0-?]*[ -/]*[@-~]|[ -/]*[0-~])))",
+  "credential_escape": "(?:\\x1b|\\\\(?:u001[bB]|x1[bB]|033|e))(?:\\[[0-?]*[ -/]*[@-~]|[ -/]*[0-~])",
   "credential_patterns": [
-    {"name": "anthropic_api_key", "pattern": "sk-ant-[a-zA-Z0-9_-]{20,}"},
-    {"name": "anthropic_oauth_token", "pattern": "sk-ant-oat01-[a-zA-Z0-9_-]{20,}"},
-    {"name": "openai_api_key", "pattern": "sk-(proj-)?[a-zA-Z0-9]{32,}"},
-    {"name": "github_pat_classic", "pattern": "ghp_[a-zA-Z0-9]{30,}"},
-    {"name": "github_pat_fine_grained", "pattern": "github_pat_[a-zA-Z0-9_]{40,}"},
-    {"name": "aws_access_key", "pattern": "AKIA[0-9A-Z]{16}"},
-    {"name": "slack_bot_token", "pattern": "xoxb-[0-9a-zA-Z-]{20,}"},
-    {"name": "slack_user_token", "pattern": "xoxp-[0-9a-zA-Z-]{20,}"},
-    {"name": "google_api_key", "pattern": "AIza[0-9A-Za-z_-]{35}"}
+    {"name": "sk", "source": "sk-[A-Za-z0-9][A-Za-z0-9_-]{19,}", "pattern": "sk-[A-Za-z0-9][A-Za-z0-9_-]{19,}"},
+    {"name": "github", "source": "ghp_[a-zA-Z0-9]{36,}", "pattern": "ghp_[a-zA-Z0-9]{36,}"},
+    {"name": "github", "source": "github_pat_[a-zA-Z0-9_]{22,}", "pattern": "github_pat_[a-zA-Z0-9_]{22,}"},
+    {"name": "github", "source": "gho_[a-zA-Z0-9]{36,}", "pattern": "gho_[a-zA-Z0-9]{36,}"},
+    {"name": "github", "source": "ghs_[a-zA-Z0-9]{36,}", "pattern": "ghs_[a-zA-Z0-9]{36,}"},
+    {"name": "github", "source": "ghr_[a-zA-Z0-9]{36,}", "pattern": "ghr_[a-zA-Z0-9]{36,}"},
+    {"name": "slack", "source": "xoxb-[a-zA-Z0-9\\-]+", "pattern": "xoxb-[a-zA-Z0-9\\-]{20,}", "tightening": "length floor 20"},
+    {"name": "slack", "source": "xoxp-[a-zA-Z0-9\\-]+", "pattern": "xoxp-[a-zA-Z0-9\\-]{20,}", "tightening": "length floor 20"},
+    {"name": "slack", "source": "xoxa-[a-zA-Z0-9\\-]+", "pattern": "xoxa-[a-zA-Z0-9\\-]{20,}", "tightening": "length floor 20"},
+    {"name": "aws", "source": "AKIA[A-Z0-9]{16}", "pattern": "AKIA[A-Z0-9]{16}"},
+    {"name": "trinity_mcp", "source": "trinity_mcp_(?:[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])|[a-zA-Z0-9]{16,})", "pattern": "trinity_mcp_(?:[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])|[a-zA-Z0-9]{16,})"},
+    {"name": "ops", "source": "ops_eyJ[A-Za-z0-9_-]{40,}", "pattern": "ops_eyJ[A-Za-z0-9_-]{40,}"},
+    {"name": "dop", "source": "dop_v1_[a-f0-9]{20,}", "pattern": "dop_v1_[a-f0-9]{20,}"},
+    {"name": "google", "source": "AIza[0-9A-Za-z_-]{35}", "pattern": "AIza[0-9A-Za-z_-]{35}"}
   ],
   "max_turns_chat": 200,
   "max_turns_task": 200,

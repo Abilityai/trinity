@@ -186,8 +186,9 @@ RESERVED_ENV_REFS = frozenset({
 })
 
 # Patterns that look like raw secrets accidentally pasted into a config —
-# reject with a clear message rather than silently accepting them. Mirrors
-# `credential_patterns` in docker/base-image/hooks/guardrails-baseline.json.
+# reject with a clear message rather than silently accepting them. Copied from
+# the output scanner's original `credential_patterns`; that list now follows
+# `utils/credential_sanitizer.SECRET_VALUE_PATTERNS` (trinity-enterprise#165).
 _LITERAL_SECRET_PATTERNS = (
     re.compile(r"sk-ant-[a-zA-Z0-9_-]{20,}"),
     re.compile(r"sk-ant-oat01-[a-zA-Z0-9_-]{20,}"),

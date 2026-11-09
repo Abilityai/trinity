@@ -96,8 +96,9 @@ def test_baseline_allows_normal_bash(command):
 def test_baseline_json_has_credential_patterns():
     baseline = _load_baseline()
     names = {entry["name"] for entry in baseline["credential_patterns"]}
-    # Representative set: we ship patterns for the big three at minimum.
-    for required in ("anthropic_api_key", "openai_api_key", "github_pat_classic", "aws_access_key"):
+    # Representative set: the shape names of the output scanner's placeholder
+    # (trinity-enterprise#165; the full partition is test_ent165_output_scanner.py).
+    for required in ("sk", "github", "aws", "slack", "google"):
         assert required in names, f"missing credential pattern {required}"
 
 
