@@ -807,3 +807,30 @@ def test_after_a_take_over_the_agent_key_may_run_it_now(client, world):
     sid = created(client, world)
     assert take_over(client, world, sid).status_code == 200
     assert call(client, world, "key", "POST", f"/{sid}/trigger").status_code == 200
+
+
+def _system_key(world):
+    """The platform's system key: an admin-owned agent key whose scope is
+    `system`. It carries the admin's role without being a person."""
+    system_agent = f"t4281-sys-{uuid.uuid4().hex[:6]}"
+    db.register_agent_owner(system_agent, world.admin.username)
+    key = db.create_agent_mcp_api_key(system_agent, world.admin.username)
+    sql("UPDATE mcp_api_keys SET scope = 'system' WHERE id = :i", i=key.id)
+    return key.api_key
+
+
+def test_the_system_key_cannot_run_a_shared_persons_schedule_now(client, world):
+    """D9 refuses every non-person principal, not only agent keys: the system
+    key reaches this owner-tier route as an admin, and its run would have the
+    admin's access."""
+    sid = created(client, world)
+    headers = {"Authorization": f"Bearer {_system_key(world)}"}
+    path = f"/api/agents/{world.agent}/schedules/{sid}"
+    resp = client.post(f"{path}/trigger", headers=headers)
+    assert resp.status_code == 409, resp.text
+    assert code_of(resp) == "schedule_runs_as_shared_person"
+    assert _Scheduler.calls == []
+    taken = client.post(f"{path}/take-over", headers=headers,
+                        json=review(read(client, world, sid)))
+    assert taken.status_code == 403, taken.text
+    assert stored(sid)["owner_id"] == world.mate.id
