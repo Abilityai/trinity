@@ -47,7 +47,9 @@ def main() -> None:
                 reason,
                 tool="Bash",
                 pattern=pattern.pattern,
+                rule=pattern.pattern,
                 command_prefix=command[:120],
+                code="bash_deny_pattern",
             )
 
     for literal in extras:
@@ -57,6 +59,7 @@ def main() -> None:
                 tool="Bash",
                 rule=literal[:80],
                 command_prefix=command[:120],
+                code="bash_agent_rule",
             )
 
     allow()

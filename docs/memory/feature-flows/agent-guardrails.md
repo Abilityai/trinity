@@ -269,16 +269,16 @@ Each hook registers in exec form (trinity-enterprise#787): `"command": "/usr/bin
 | `load_config()` (39-53) | runtime → baseline → `{}`; never raises |
 | `read_stdin_json()` (56-63) | parse hook stdin; **fail-closed** (exit 2) on bad JSON |
 | `compile_patterns()` (66-78) | compile regex list; skips + logs bad patterns |
-| `deny(msg, **fields)` (81-85) | log to `/logs/guardrails.jsonl`, stderr, `exit(2)` |
+| `deny(msg, **fields)` | log to `/logs/guardrails.jsonl`, stderr, `exit(2)`; every call site passes a stable `code=` (trinity-enterprise#165) |
 | `allow()` (88-90) | `exit(0)` |
 | `run_hook(main_fn)` (93-102) | wraps `main()`; any uncaught exception → log + `exit(2)` (**fail-closed**) |
-| `log_event()` (28-36) | append structured JSONL; never raises |
+| `log_event()` | append structured JSONL; never raises. Adds the spool contract (`v`, `event_id`, derived `kind`/`hook`, `code`, `execution_id`, `session_id`, `tool_use_id`) — see [Guardrail event spool and forwarder](#guardrail-event-spool-and-forwarder-trinity-enterprise165) |
 
 **Hook protocol**: exit 0 (silent) = allow; exit 2 + stderr = deny (message shown to model); exit 1 / uncaught = Claude treats as non-blocking, so hooks deliberately convert all errors to exit 2.
 
 ### Bash deny — `hooks/bash-guardrail.py` (66 lines)
 
-Loads config → takes `bash_deny`, plus `gated_bash_deny` while the root-owned skill-gate marker exists (trinity-enterprise#1002) → compiles them → first match wins → `deny`. Then checks `extra_bash_deny` (per-agent literal substrings). `allow()` if clean. Logs `tool`, `pattern`, `command_prefix[:120]` on deny.
+Loads config → takes `bash_deny`, plus `gated_bash_deny` while the root-owned skill-gate marker exists (trinity-enterprise#1002) → compiles them → first match wins → `deny`. Then checks `extra_bash_deny` (per-agent literal substrings). `allow()` if clean. Logs `tool`, `pattern`, `rule`, `command_prefix[:120]` and `code` (`bash_deny_pattern` / `bash_agent_rule`) on deny; `command_prefix` stays in the container.
 
 ### File deny — `hooks/file-guardrail.py` (89 lines)
 
@@ -309,6 +309,43 @@ Runs as **root** via `sudo` from `startup.sh`. Reads baseline + `$AGENT_GUARDRAI
 - **KEPT is data**: `PLATFORM_KEPT_TOOLS` (19 names, reasons in prose) + `AUDIT_CLI_VERSION` ("2.1.235"); DENIED ∪ KEPT exactly covers the measured init list (11+19=30). `scripts/dev/audit_headless_tools.py` is the living half — it probes a live agent WITH the container's own merged deny (exactly as the spawn sites pass it, comma-joined) and diffs offered built-ins against the audit; run it at every base-image CLI bump, because `--disallowedTools` treats an unknown name as a **silent no-op** (a CLI rename re-offers the false promise unseen) and no PR workflow builds the base image.
 - **Deny semantics (measured, 2.1.220 and 2.1.235)**: the tool is removed from the advertised set — a prompted call yields *"no tool named X exists"*, an **absence** in the transcript, never a visible error. The prompt-side counterweight lives in `platform_prompt_service` (see [system-wide-trinity-prompt.md](system-wide-trinity-prompt.md)): the family paragraph in "Repeating Work and Deferred Ticks" (capability-first phrasing, true on both sides of the image cut) + the always-tier "Nothing survives the end of your turn" section for the one promise that cannot be denied (Bash's own "You will be notified when it completes").
 - Guards: `tests/unit/test_2454_loop_routing.py` (spawn-site discovery + forward vocabulary) and `tests/unit/test_2468_headless_tool_audit.py` (reasons recorded, fragments verbatim, KEPT named, CORE never denied, exact-cover snapshot, reverse vocabulary, guardrails merge). **Release ordering**: the deny is agent-side — inert on the fleet until base-image rebuild + cold agent recreate; the prompt half reaches the fleet on backend deploy alone.
+
+### Guardrail event spool and forwarder (trinity-enterprise#165)
+
+Before this, no guardrail decision left the container: the hooks appended to `/logs/guardrails.jsonl`, nothing read it, and the file is lost on recreate. Requirement: `requirements/security.md` §28.2.2. The platform store and per-agent read are the ingest side (§28.5).
+
+**Spool record (`hooks/lib.py::log_event`).** Each record keeps its old fields and gains:
+
+| Field | Source |
+|---|---|
+| `v` | `SPOOL_SCHEMA_VERSION` (`1`) |
+| `event_id` | `uuid4`, the dedupe key on resend |
+| `kind` | derived from the legacy `event` by `_KIND_BY_EVENT` (closed set `EVENT_KINDS`); `deny` with `code="redaction_writeback_refused"` maps to that kind; `skill_gate_unknown` is `deny` only when the marker refused; anything else is `null` and stays local |
+| `hook` | derived from `sys.argv[0]` by `_HOOK_BY_SCRIPT` (closed set `EVENT_HOOKS`); `null` for any other script |
+| `code` | passed at every deny call site; defaults to the legacy event name |
+| `execution_id` | `TRINITY_EXECUTION_ID` from `/proc/<ppid>/environ`, read once per hook process; `null` past 128 chars. Attribution, not authority |
+| `session_id`, `tool_use_id` | the hook input, kept by `read_stdin_json` |
+
+Derived fields win over a caller's value of the same name, and a fault computing them still writes the legacy record (no `v`). Deny codes: `bash_deny_pattern`, `bash_agent_rule` (bash); `protected_path`, `path_agent_rule` (file); `read_only_path` (read-only); `shell_owner_only`, `shell_visitor_off`, `mcp_owner_only`, `mcp_visitor_off`, `owner_only_path`, `owner_only_search`, `tier_unreachable` (turn tier, which now records the turn's kind as `turn_kind`); `skill_refused`, `skill_check_unreachable` (skill gate). New codes need no backend change (`^[a-z0-9_]{1,64}$`).
+
+**Forwarder (`agent_server/guardrail_events.py`).** `schedule_guardrail_forwarder(app)` in `main.py`, gated like the heartbeat (`TRINITY_BACKEND_URL` + `TRINITY_MCP_API_KEY`).
+
+```
+hook ──append──► /logs/guardrails.jsonl ──tail (offset in /logs/.guardrails-forwarder.json)──►
+   project() allowlist + sanitize_text ──batch ≤500 / ≤256 KiB──►
+   POST {backend}/api/agents/{name}/guardrail-events  (Bearer: the agent's own key)
+   body {"schema":1, "runtime":"claude-code|codex|gemini|unknown", "events":[…], "dropped":n}
+```
+
+- Projected event keys: `event_id`, `ts` (ISO-8601 `Z`, ms), `kind`, `hook`, `tool`, `code`, `execution_id`, `session_id`, `tool_use_id`, `verb`, `tier`, `turn_kind`, `patterns`, `rule` (≤200), `path` (≤512). A lone surrogate becomes U+FFFD (httpx encodes the body as strict UTF-8, so one would fail every POST of its batch; the platform applies the same rule). An id the sanitizer or that replacement would change, or one past its bound, is sent as `null`. Never sent: `command_prefix`, `traceback`, `error`, `reason`, `pattern`.
+- `tick(now)` on a monotonic clock: poll 0.5 s, 1 s debounce after the first unsent append (delivery ≤2 s), keepalive (empty `events`) every 5 min, first one right after the 5 s start delay.
+- Responses: 2xx commits the offset and zeroes `dropped`; 413 halves the batch size (a single event still refused is dropped and counted); 422 drops the batch and counts it; 429 waits `Retry-After` (1 s–1 h, default 60 s); 404/401/403 waits an hour, logging once; 5xx/transport backs off 2 s → 5 min with jitter, logging once.
+- Rotation: past 5 MiB the live spool becomes `guardrails.jsonl.1`; the forwarder reads `.1` to its end and stays on it for a 2 s grace before moving to the new file. A line with no newline left at the end of `.1` past the grace (a write cut short) is counted in `dropped` and skipped. No second rotation happens inside the grace. Rotating again while `.1` is undelivered drops its rest and counts it, so the spool stays ≤ ~10 MiB.
+- Skipped: records without `v` (logged once), records with `kind`/`hook` null; unparseable lines and oversize lines (>64 KiB) count as `dropped`.
+- Loss window: no shutdown flush runs (PID 1 is bash with no SIGTERM handler; `docker stop` kills the server). What was unsent at a stop or recreate is lost.
+- Codex and Gemini agents run no guardrail hooks, so they send keepalives only.
+
+Tests: `tests/unit/test_ent165_guardrail_spool.py` (record contract, derivation table, every shipped hook's codes, the AST guard on reserved fields and missing codes, the smoke's new check) and `tests/unit/test_ent165_guardrail_forwarder.py` (projection, latency on a fake clock, each response, offset resume, rotation race, bounded spool, wiring).
 
 ---
 
@@ -431,6 +468,8 @@ See [read-only-mode.md](read-only-mode.md).
 | `tests/unit/test_guardrails.py` | Baseline bash deny-list (dangerous blocked / normal allowed), required credential patterns, router `_validate_guardrails_payload` bounds, `write-runtime-config.py` sanitization + clamping + malformed-env handling, migration idempotency |
 | `tests/test_files_guardrail_bypass.py` | AISEC-C2 RCE-by-config bypass repro, `PUT /files` deny-list coverage for protected paths, credential-inject allowlist rejection |
 | `tests/unit/test_ent787_guardrail_exec_form.py` | Exec-form registration shape of the four GUARD-002 hooks, no shell-prefix wrap, each hook's verdicts under the registered invocation and a hostile env, smoke-script coverage, `CLAUDE_CODE_SHELL_PREFIX` in `PROTECTED_KEYS` (trinity-enterprise#787) |
+| `tests/unit/test_ent165_guardrail_spool.py` | Spool record contract (`v`, `event_id`, derived `kind`/`hook`, `code`, `execution_id`), the frozen legacy-event table, each shipped hook's deny code, `turn_kind`, the AST guard (every deny has `code=`, no reserved field), the image smoke's deny-record check (trinity-enterprise#165) |
+| `tests/unit/test_ent165_guardrail_forwarder.py` | The forwarder: allowlist projection (a key a command carried never reaches a POST), ≤2 s delivery on a fake clock, count/byte batching, keepalive, 413/422/404/429/5xx, offset resume, partial lines, a lone surrogate and an out-of-range `ts` never stalling the spool, rotation race and a cut-short `.1` tail, bounded spool with `dropped`, wiring (trinity-enterprise#165) |
 | `tests/unit/test_ent1002_nested_cli_guardrail.py` | `gated_bash_deny`: the real hook under its registered flags with the marker on and off, refuse and pass tables run on the pinned CLIs, known-limit tables, adversarial commands to 512 KB, the image smoke's marker case |
 
 ---
@@ -466,7 +505,8 @@ See [read-only-mode.md](read-only-mode.md).
 | Hook registration | `docker/base-image/hooks/managed-settings.json` | — |
 | Routing env pins | `docker/base-image/hooks/write-routing-env.py` → `/etc/claude-code/managed-settings.d/60-routing-env.json` (trinity-enterprise#1001) | `tests/unit/test_ent1001_endpoint_env.py` |
 | Registration smoke (build) | `docker/base-image/hooks/guard002-smoke.py` | — |
-| Hook lib | `docker/base-image/hooks/lib.py` | 1-103 |
+| Hook lib | `docker/base-image/hooks/lib.py` | — |
+| Event forwarder | `docker/base-image/agent_server/guardrail_events.py` | — |
 | Bash hook | `docker/base-image/hooks/bash-guardrail.py` | 1-66 |
 | File hook | `docker/base-image/hooks/file-guardrail.py` | 1-89 |
 | Output scanner | `docker/base-image/hooks/output-scanner.py` | 1-58 |

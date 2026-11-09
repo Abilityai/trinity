@@ -76,6 +76,22 @@ def _check_gated_rows(argv: list, failures: list) -> None:
                             f"{r.stderr.strip()[:200]}")
 
 
+def _check_deny_record(failures: list) -> None:
+    """trinity-enterprise#165: a deny record carries the spool contract the
+    agent server's forwarder ships (`v`, `event_id`, a derived `kind` and
+    `hook`, a `code`). Read right after the bash-guardrail rows ran."""
+    try:
+        with open(LOG_PATH) as f:
+            records = [json.loads(line) for line in f if line.strip()]
+    except (OSError, ValueError) as e:
+        failures.append(f"spool: unreadable after a deny: {e}")
+        return
+    if not any(r.get("event") == "deny" and r.get("v") == 1 and isinstance(r.get("event_id"), str)
+               and r.get("kind") == "deny" and isinstance(r.get("hook"), str)
+               and isinstance(r.get("code"), str) for r in records):
+        failures.append("spool: no deny record with v/event_id/kind/hook/code")
+
+
 def main() -> int:
     with open(MANAGED) as f:
         managed = json.load(f)
@@ -103,6 +119,7 @@ def main() -> int:
                     failures.append(f"{hook}: exit {r.returncode}, want {want}: {r.stderr.strip()[:200]}")
             if hook == "bash-guardrail.py":
                 _check_gated_rows(argv, failures)
+                _check_deny_record(failures)
         if "output-scanner.py" in seen:
             with open(LOG_PATH) as f:
                 if '"credential_pattern_in_output"' not in f.read():

@@ -911,19 +911,21 @@
 - **Key Features**:
   - `PreToolUse` hooks on `Bash` tool: deny-list of destructive patterns (`rm -rf /`, `rm -rf ~`, `chmod 777`, `curl | sh`, `git push --force`, production domain access)
   - `PreToolUse` hooks on `Edit`/`Write` tools: block writes to credential files (`.env`, `.mcp.json`, `~/.ssh/`, `~/.aws/`) and to the runtime config files `~/.claude.json`, `~/.claude/.credentials.json`, `~/.gemini/settings.json` and `~/.tmp/codex/*` (trinity-enterprise#823)
-  - `PostToolUse` hooks on `Bash`: scan stdout/stderr for leaked credentials (API key patterns: `sk-`, `ghp_`, `AKIA`, bearer tokens)
+  - `PostToolUse` hooks on `Bash`: scan stdout/stderr for leaked credentials (the named vendor key shapes in `guardrails-baseline.json::credential_patterns`; there is no bearer-token pattern). What a hit does is GUARD-004 (§28.4)
   - Hook scripts installed at `/opt/trinity/hooks/` in base image
   - Configurable per-agent overrides via `agent-config.yaml` (operator can relax rules for specific agents that need broader access)
-  - All blocked actions logged to Vector pipeline with reason and tool input
+  - Every guardrail decision is appended to a spool in the container, `/logs/guardrails.jsonl`, and the agent server forwards the guardrail events from it to the platform under the agent's own key (28.2.2). Vector does not read that file; it collects container stdout only
 - **Architecture**:
   - Base image writes `/etc/claude-code/managed-settings.json` with default hooks during build (ent#345 — was `~/.claude/settings.json`)
   - `startup.sh` merges agent-specific hook overrides from `/config/agent-config.yaml`
   - Hook scripts receive JSON on stdin, return `permissionDecision: deny` to block
   - Exit code 2 = block action, exit code 0 = allow
 - **Implementation**:
-  - `/opt/trinity/hooks/bash-guardrail.sh` — Deny-list pattern matching on bash commands
-  - `/opt/trinity/hooks/file-guardrail.sh` — Block credential file modifications
-  - `/opt/trinity/hooks/output-scanner.sh` — Post-execution credential leak detection
+  - `/opt/trinity/hooks/lib.py` — shared helpers; owns the spool record (28.2.2)
+  - `/opt/trinity/hooks/bash-guardrail.py` — Deny-list pattern matching on bash commands
+  - `/opt/trinity/hooks/file-guardrail.py` — Block credential file modifications
+  - `/opt/trinity/hooks/output-scanner.py` — Post-execution credential leak detection
+  - `agent_server/guardrail_events.py` — the forwarder (28.2.2)
   - `/etc/claude-code/managed-settings.json` — Hook registration (baked into Dockerfile, root:root 0444 in a root-owned 0755 dir)
   - `/opt/trinity/hooks/skill-gate.py` + `_skill_gate.py` — the gated-skill check (§26.13, trinity-enterprise#752) on `Skill` and on `Agent`/`Task` skill preloads; registered by its own drop-in `/etc/claude-code/managed-settings.d/50-skill-gate.json` (root:root 0444, dir 0755, exec form). It fails closed only on an agent the platform marked as gated, the opposite direction from `read-only-guard.py`.
 
@@ -1002,6 +1004,30 @@
   what is pinned) and `tests/unit/test_ent787_guardrail_exec_form.py` (registration
   shape, each hook under the registered invocation, root-owned read-only config,
   legacy digest cleanup).
+
+#### 28.2.2 Guardrail event spool and forwarder (trinity-enterprise#165)
+- **Status**: ✅ Agent side (trinity-enterprise#165). The platform store and read are §28.5.
+- **Why**: before this, no guardrail decision left the container. The hooks appended to `/logs/guardrails.jsonl`, nothing read the file, and the file is on no volume, so it was lost on recreate. A class of hook denials could run for a day with every execution recorded as `success` (trinity#4281).
+- **Spool record** (`lib.log_event`, one JSON object per line). The existing fields (`ts`, `event`, the call site's own fields) are unchanged; each record gains:
+  - `v` (`1`) and `event_id` (a UUID4 string, the dedupe key on resend);
+  - `kind`, a closed set owned by `lib.py` (`EVENT_KINDS`): `deny`, `credential_redacted`, `credential_unredacted`, `redaction_writeback_refused`, `scanner_error`, `hook_error`, `config_error`. It is **derived** from the legacy `event` name by one frozen table, never passed by a caller: `deny` → `deny` (or `redaction_writeback_refused` when the deny's `code` is that); `credential_redacted`, `credential_unredacted` → themselves; `scanner_error`, `scanner_oversize` → `scanner_error`; `hook_error`, `hook_stdin_parse_error` → `hook_error`; `config_load_error`, `config_missing`, `bad_baseline_regex`, `read_only_config_load_error` → `config_error`; the skill gate's refusals (`skill_gate_deny`, and `skill_gate_unknown` when the marker made it refuse) → `deny`. Anything else (`skill_gate_allow`, `turn_tier_owner`, the legacy `credential_pattern_in_output`) has `kind: null` and stays in the spool for local debugging only;
+  - `hook`, a closed set owned by `lib.py` (`EVENT_HOOKS`): `bash_guardrail`, `file_guardrail`, `read_only_guard`, `turn_tier_guard`, `skill_gate`, `output_scanner`, derived from the script that runs. `null` for any other script, and such a record is not forwarded;
+  - `code`, an open string (`^[a-z0-9_]{1,64}$`): every deny call site passes a stable reason code (for example `shell_owner_only`, `mcp_visitor_off`, `protected_path`, `bash_deny_pattern`, `skill_refused`), so a new code needs no backend change. A record with no code carries its legacy event name;
+  - `execution_id` from `TRINITY_EXECUTION_ID` in the claude process's launch environment (`/proc/<parent>/environ`, the source the turn-tier guard trusts); `null` outside a platform turn or past 128 characters. It is **attribution, not authority**: a nested `claude` can carry a forged value, so every consumer filters by the authenticated agent;
+  - `session_id` and `tool_use_id` from the hook input, when the hook read it through `lib.read_stdin_json`.
+  - The turn-tier guard records the turn's kind as `turn_kind` (`person`/`visitor`). `kind` is reserved for the derived event kind, and a unit test fails any hook call that passes a reserved field (`v`, `event_id`, `kind`, `hook`, `execution_id`) or a deny without `code`.
+- **What leaves the container** is a projection through an allowlist: `event_id`, `ts` (as ISO-8601 UTC with `Z`), `kind`, `hook`, `tool`, `code`, `execution_id`, `session_id`, `tool_use_id`, `verb`, `tier`, `turn_kind`, `patterns` (names only), `rule` (≤200 chars) and `path` (≤512 chars). Every string passes the agent-side credential sanitizer before it is bounded. **Never forwarded**: `command_prefix` (it can hold a credential the command carried), `traceback`, `error` text and the `reason` prose. The forwarder never logs a record body.
+- **Forwarder** (`agent_server/guardrail_events.py`, started with the agent server when `TRINITY_BACKEND_URL` and `TRINITY_MCP_API_KEY` are both present, the heartbeat rule; with no key it does not start):
+  - tails the spool from an offset persisted beside it (`/logs/.guardrails-forwarder.json`), so an agent-server restart resumes where it stopped and a resend carries the same `event_id`s;
+  - **flushes within 2 s of the first unsent append** (polls every 0.5 s, then a 1 s debounce collects a burst into one batch), not on a periodic sweep;
+  - batches bounded by count (≤500 events) and by bytes (≤256 KiB) and posts them to the platform's ingest (§28.5) under the agent's own key, with `runtime` (`claude-code`, `codex`, `gemini`) and `dropped`, the count lost since the last accepted post;
+  - an empty batch every 5 minutes is a keepalive, so the platform can tell "no events" from "not reporting". Codex and Gemini agents have no guardrail hooks (§28.4) and send keepalives only;
+  - on `413` it halves the batch and resends (one event the platform still refuses is dropped and counted); on `422` the envelope was malformed, so the batch is dropped, counted and logged once; on `429` it waits for `Retry-After`; on a `5xx` or a transport error it backs off exponentially with jitter (2 s up to 5 min); on `404` (a backend without the ingest route) or `401`/`403` it keeps the spool and retries hourly, logging once rather than on every attempt;
+  - rotates the spool to `guardrails.jsonl.1` past 5 MiB and keeps reading the rotated file until it is drained, so a hook that appended during the rename is not lost. Rotating again while `.1` is still undelivered drops the rest of `.1` and counts it in `dropped`; the spool is therefore bounded at about 10 MiB however long the platform is unreachable;
+  - skips a record with no `v` (written by an older hook) and an unparseable line, counting the latter in `dropped`.
+- **Fails open everywhere**: a spool write failure is swallowed, as before; no forwarder error reaches a tool call, a turn or an execution.
+- **Loss window, stated**: records still in the spool at a stop or recreate are lost. There is no shutdown flush to rely on: PID 1 is `/bin/bash /app/startup.sh`, which has no SIGTERM handler, so `docker stop` waits out its timeout and kills the agent server without running its shutdown handlers. The window is the delivery bound above (about 2 s of appends), plus anything queued while the platform was unreachable.
+- **Authenticity, stated**: the spool (`/logs`) and the forwarder (`/app`) are both writable by the agent, so events are **agent-reported**. An agent acting deliberately can suppress or forge its own. This is observability for honest agents and misconfigurations, not a tamper-proof audit trail; Docker isolation and credential confinement stay the boundary (§28.4).
 
 ### 28.3 CLI Budget & Scope Controls (GUARD-003)
 - **Status**: 🚧 Partially Implemented — `--max-turns` + `--disallowedTools` shipped in #140; chat-mode wall-clock timeout tracked in #313

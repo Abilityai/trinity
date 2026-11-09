@@ -71,6 +71,8 @@ def main() -> None:
             tool=tool_name,
             path=path,
             pattern=match,
+            rule=match,
+            code="protected_path",
         )
 
     for literal in extras:
@@ -80,6 +82,7 @@ def main() -> None:
                 tool=tool_name,
                 path=path,
                 rule=literal[:80],
+                code="path_agent_rule",
             )
 
     allow()

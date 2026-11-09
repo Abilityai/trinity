@@ -790,14 +790,14 @@ def _verdict(status: int, payload: bytes, call: Call) -> Outcome:
     message = data.get("message")
     if not isinstance(message, str) or not message.strip():
         message = REFUSED_WITHOUT_WORDS
-    return Outcome(2, message[:MESSAGE_MAX_CHARS], "skill_gate_deny", _fields(call))
+    return Outcome(2, message[:MESSAGE_MAX_CHARS], "skill_gate_deny", dict(_fields(call), code="skill_refused"))
 
 
 def _no_verdict(reason: str, call) -> Outcome:
     """No answer from the platform: the marker decides. Present — this agent
     has gates — refuses; absent lets the call through."""
     marker = _marker_present()
-    fields = dict(_fields(call), reason=reason, marker=marker)
+    fields = dict(_fields(call), reason=reason, marker=marker, code="skill_check_unreachable")
     if marker:
         return Outcome(2, COULD_NOT_CHECK, "skill_gate_unknown", fields)
     return Outcome(0, None, "skill_gate_unknown", fields)
@@ -817,9 +817,10 @@ def _fields(call) -> dict:
 # ---------------------------------------------------------------------------
 
 def _log(outcome: Outcome) -> None:
-    """To /logs/guardrails.jsonl (Vector) through the guardrails' own helper,
-    in a thread with a short join: a failing or blocking write never changes
-    the exit code and never holds the tool."""
+    """To the /logs/guardrails.jsonl spool through the guardrails' own helper
+    (the agent server forwards it to the platform, trinity-enterprise#165), in
+    a thread with a short join: a failing or blocking write never changes the
+    exit code and never holds the tool."""
     if not outcome.event:
         return
 
