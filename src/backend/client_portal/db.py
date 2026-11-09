@@ -88,6 +88,7 @@ def get_shared_roster(email: str) -> list[dict]:
             # `agent_ownership`, so it is one column rather than a per-card read,
             # and the roster's model control needs it for every row.
             agent_ownership.c.public_channel_model,
+            agent_ownership.c.default_model,
             users.c.username.label("owner"),
         )
         .select_from(

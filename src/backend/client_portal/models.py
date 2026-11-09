@@ -78,7 +78,7 @@ class PortalModelDefault(BaseModel):
     """
     model: str
     label: str
-    source: Literal["agent", "platform"]
+    source: Literal["agent", "own", "platform"]  # own = the agent's default_model (ent#1202)
 
 
 class PortalAgentCard(BaseModel):
