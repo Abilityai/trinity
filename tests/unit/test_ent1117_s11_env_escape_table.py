@@ -10,8 +10,8 @@ of any credential in the file.
 The contract is the shared fixture ``tests/fixtures/ent1117-env-escape-cases.json``.
 Each row's ``line`` was generated from the agent's real ``format_env_line``,
 never hand-typed. THIS test proves every row against the agent's encoder and
-decoder, the agent's whole-file parser, and the backend's ``agent_env_patch``
-writer (the backend's second writer of the same file). Its twin,
+decoder, and the agent's whole-file parser. (On ``dev`` it also proves the
+backend's ``agent_env_patch`` writer; that module does not exist on ``main``.) Its twin,
 ``src/frontend/tests/unit/ent1117EnvEscape.spec.js``, proves the browser's
 ``utils/envFile.js`` against the same rows. A change to the encoding on either
 side turns one of the two red.
@@ -48,7 +48,6 @@ import pytest
 _REPO = Path(__file__).resolve().parents[2]
 _FIXTURE = _REPO / "tests" / "fixtures" / "ent1117-env-escape-cases.json"
 _AGENT = _REPO / "docker" / "base-image" / "agent_server" / "services" / "execution_env.py"
-_BACKEND = _REPO / "src" / "backend" / "services" / "agent_env_patch.py"
 _AGENT_SERVER = _REPO / "docker" / "base-image" / "agent_server"
 _MCP_TEMPLATE = _AGENT_SERVER / "mcp_template.py"
 _LEGACY_FIXTURE = _REPO / "tests" / "fixtures" / "ent1117-env-legacy-reads.json"
@@ -70,11 +69,6 @@ def _load(name: str, path: Path):
 @pytest.fixture(scope="module")
 def agent():
     return _load("_ent1117_execution_env", _AGENT)
-
-
-@pytest.fixture(scope="module")
-def backend():
-    return _load("_ent1117_agent_env_patch", _BACKEND)
 
 
 @pytest.fixture(scope="module")
@@ -119,11 +113,6 @@ def test_agent_encodes_each_value_to_the_table_line(agent, row):
 @pytest.mark.parametrize("row", ROWS, ids=[r["id"] for r in ROWS])
 def test_agent_decodes_each_table_line_back_exactly(agent, row):
     assert agent.unquote_env_value(_rhs(row["line"])) == row["value"]
-
-
-@pytest.mark.parametrize("row", ROWS, ids=[r["id"] for r in ROWS])
-def test_backend_writer_emits_the_same_line(backend, row):
-    assert backend.format_env_line("KEY", row["value"]) == row["line"]
 
 
 def test_agent_reads_a_whole_file_of_table_lines(agent, tmp_path):
@@ -197,8 +186,7 @@ def test_the_legacy_table_carries_the_shapes_an_existing_file_holds():
 
 @pytest.mark.parametrize("row", LEGACY, ids=[r["id"] for r in LEGACY])
 def test_every_agent_side_reader_keeps_reading_old_lines_as_before(
-    agent, backend, mcp_template, tmp_path, row
+    agent, mcp_template, tmp_path, row
 ):
     assert agent.unquote_env_value(row["rhs"]) == row["agent"]
-    assert backend._unquote(row["rhs"]) == row["agent"]
     assert _mcp_read(mcp_template, tmp_path, row["rhs"]) == row["agent"]
