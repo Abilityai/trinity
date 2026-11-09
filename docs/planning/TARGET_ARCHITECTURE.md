@@ -5,6 +5,7 @@
 > material.**
 
 **Created:** 2026-05-05
+**Updated 2026-11-09 (v3 — drift review):** no change of direction. Stale facts corrected against `dev` (PostgreSQL is the default and the images refuse SQLite — #4233; the database driver, scheduler job store, idempotency store and runtime list now say what the code does). "What Does Not Change" gains a table of decisions that stand but that the code does not yet honour. A new section, **Proposed Targets**, drafts five targets the document did not have; they are **not adopted** and bind nothing until accepted.
 **Updated 2026-07-01 (v2 — side-effect reframe):** v1 tried to make re-delivery *safe* by threading a platform-injected idempotency key through every outbound sink (effect-key **coverage**, "Direction A"). This version abandons *universal* sink coverage as structurally unachievable (the agent's own Resend key / `gh` / `curl` / any new MCP server emit effects the platform never routes) and replaces it with **retry-with-prior-trace recovery** + **deterministic tool-side gates on capability-confined irreversible rails** ("Direction B"). `#1084` is re-scoped from *"the gate that blocks pull"* to a **recovery discipline**; pull default-on now gates **per-effect, not per-agent**, so read/analysis-only + reversible + confined-irreversible agents can default on immediately. The reactive channel-reply and git-sink coverage work is **downgraded** (reversible / naturally-idempotent, not gate-blockers); the load-bearing problem **moves** to *trace fidelity* (the #548/#333 reader-race family) — it does not disappear. Tracked by new sub-issues of #1081: **#1401** (structured recovery trace + injection) and **#1402** (async operator-queue human-gate lever). The effect-key issue **#1084** (Direction A) is superseded in approach and **awaits re-scope**; the tool-side confined-rail gate is **not yet filed**. The prior v1 is archived at `docs/archive/plans/TARGET_ARCHITECTURE_v1_2026-06-06.md`. See §"Re-Delivery and Side-Effect Recovery" and Open Question 2a. All other sections carry forward from v1 unchanged.
 **Updated:** 2026-06-05 — Coordination model revised from a **push actor model** (backend dispatches into a per-agent Redis-stream mailbox) to **pull / work-stealing** (backend owns one durable per-agent queue; agents pull when they have free capacity). The change was driven by an adversarial design review across four coordination architectures: pull scored highest on simplicity, operational complexity, and reachability while delivering the same goals (async-first, the two operator levers, single-source-of-truth, replica groups) with ~80% reuse of existing primitives. See "Coordination Model" below. Tracked in GitHub under Epic #1045: umbrella #1081 (pull migration), #1082 (status-as-projection), #1083 (fire-and-forget dispatch), #1084 (effect-scoped idempotency), #1085 (correlated-failure controls). The governing principles, data layer, observability, and security sections are otherwise unchanged. **Stack trimmed the same day** to match the lean coordination model: Celery/Celery Beat rejected for APScheduler on a PostgreSQL job store (pull made a second competing-consumers system redundant — #949); PgBouncer and a read replica demoted to deferred scaling levers; Prometheus/Grafana framed as an opt-in observability profile. PostgreSQL is the one non-negotiable new service. **Updated 2026-06-06** — folded in three result-contract tightenings surfaced by the execution-bug meta-analysis: a typed terminal-reason on the reply envelope, an agent-owned out-of-band result record, and credential rotation via hot-reload. The coordination model is unchanged — these close the residual MISCLASSIFIED_FAILURE / READER_RACE / credential-recreate seams that pull alone does not address.
 **Status:** Living document — review quarterly, update on major architectural decisions
@@ -83,19 +84,21 @@ These rules take precedence over all other considerations. When in doubt, measur
 
 Replaces SQLite as the authoritative store for all durable relational state.
 
-> **SQLite end-of-support: September 1, 2026** (decision #1278). PostgreSQL is the
-> forward path; SQLite stays the zero-config default until then. Operators migrate
-> via `docs/migrations/SQLITE_TO_POSTGRES.md`. The dual-track migration system
-> (#1183) and single-source schema consolidation (#746) carry the transition.
+> **SQLite reached end-of-support on September 1, 2026** (decision #1278). PostgreSQL
+> is the default on every compose file and the images refuse to boot on SQLite (#4233);
+> operators migrate with `python -m db.sqlite_to_postgres`
+> (`docs/migrations/SQLITE_TO_POSTGRES.md`). Still to do: remove the SQLite runner,
+> code paths and test tier (#4175), then make `db/tables.py` + Alembic the single
+> schema source (#746). Until #4175 lands, a schema change still needs both tracks.
 
 **What lives here:**
 - All current SQLite tables (users, agents, schedules, executions, chat history, audit log, activities, subscriptions, skills, tags, operator queue, sync state)
 - **The per-agent work queue and execution state machine** — `schedule_executions` carrying the lifecycle `queued → claimed → running → terminal`. This single table is the sole owner of both "what is waiting" (lever 1: inbox depth) and "what is running" (the fact the old slot-ZSET/SQL split forced the cleanup+canary machinery to reconcile). The atomic claim (`UPDATE … WHERE id = (SELECT … WHERE status='queued' ORDER BY queued_at LIMIT 1 FOR UPDATE SKIP LOCKED) RETURNING`) is the competing-consumer primitive that lets N agent workers — and N replicas — pull without overbooking. The `FOR UPDATE SKIP LOCKED` is load-bearing, not an optimization: without it, two concurrent claimers can resolve the subselect to the same row, and READ COMMITTED re-checks only the outer `id =` predicate after the lock wait — both would "win" the claim and the task double-executes.
 - Partitioned tables for high-volume, time-series data: `audit_log`, `agent_activities`, `chat_messages`, `agent_session_messages` — partitioned by month, retained per configured window
-- Schema migrations via Alembic (versioned, reversible, automated on startup)
+- Schema migrations via Alembic (versioned, automated on startup; a revision is forward-only where the inverse would be unsafe, e.g. writing credentials back in cleartext)
 
 **Access pattern:**
-- Backend and scheduler connect through **asyncpg's built-in connection pool**. **PgBouncer (transaction pooling) is a deferred scaling lever** — added only when process count (multi-replica backend, prefork workers) outgrows PostgreSQL's connection ceiling, not before.
+- Backend and scheduler connect through **asyncpg's built-in connection pool**. *(Status 2026-11: not started. The backend uses a synchronous SQLAlchemy pool over `psycopg2`; the scheduler opens a `psycopg2` connection directly.)* **PgBouncer (transaction pooling) is a deferred scaling lever** — added only when process count (multi-replica backend, prefork workers) outgrows PostgreSQL's connection ceiling, not before.
 - Read-heavy endpoints (activity timeline, execution history, audit log queries) run against the primary today; a **read replica is a deferred scaling lever** for when the platform becomes genuinely read-bound.
 - No direct PostgreSQL connections from agent containers — agents communicate only through the backend API
 
@@ -138,8 +141,8 @@ Redis owns state that is either transient or derivable from the primary store.
 ### What Stays the Same
 
 - **FastAPI** as the framework — correct choice, keep
-- **Three-layer invariant**: Router → Service → DB — never violated
-- **Pydantic models centralized in `models.py`** — keep
+- **Three-layer invariant**: Router → Service → DB — keep (the code does not honour it everywhere; see "Decisions That Stand but Are Not Yet Honoured")
+- **Pydantic models centralized in `models.py`** — keep (one home for the API contract; the single-file form is listed in the same table)
 - **`Depends(get_current_user)` auth pattern** — keep
 - **Modular router structure** (`routers/`) — keep
 - **Channel Adapter ABC** (`adapters/base.py`) — keep
@@ -147,15 +150,15 @@ Redis owns state that is either transient or derivable from the primary store.
 
 ### What Changes
 
-**Database driver**: `asyncpg` + SQLAlchemy 2.0 async ORM replaces `aiosqlite` and direct SQLite calls. The DB layer interface (`db/` modules) remains the same from the router/service perspective — only the implementation changes.
+**Database driver**: `asyncpg` + SQLAlchemy 2.0 async replaces today's synchronous SQLAlchemy 2.0 Core over `psycopg2`. *(Status 2026-11: not started, no tracking issue. Until it lands, synchronous database calls run inside `async def` handlers — see Proposed Target 1.)* The DB layer interface (`db/` modules) remains the same from the router/service perspective — only the implementation changes.
 
-**Schema migrations**: Alembic replaces the custom `migrations.py`. Migrations run automatically on startup, are versioned, and are reversible.
+**Schema migrations**: Alembic replaces the custom `migrations.py`. Migrations run automatically on startup and are versioned. *(Status 2026-11: Alembic owns PostgreSQL; `migrations.py` still exists for the SQLite track and is removed under #4175.)*
 
 **Rate limiting**: Redis-backed sliding window replaces ad-hoc per-endpoint implementations. One middleware, one configuration, consistent behavior across all endpoints.
 
-**Idempotency keys**: All state-mutating endpoints accept an `Idempotency-Key` header. The backend deduplicates within a 24h window using Redis. This makes retries safe — critical for webhook triggers, scheduled executions, and agent-initiated calls. (See also Sprint D′ #525.)
+**Idempotency keys**: All state-mutating endpoints accept an `Idempotency-Key` header. The backend deduplicates within a 24h window using the `idempotency_keys` table (durable state belongs in PostgreSQL, per the Clean Separation Rule). *(Status 2026-11: shipped at the trigger boundaries — #525, Invariant #18.)* This makes retries safe — critical for webhook triggers, scheduled executions, and agent-initiated calls. (See also Sprint D′ #525.)
 
-**API versioning**: `/api/v1/` prefix introduced for all endpoints. `/api/` aliases preserved for backward compatibility. New capabilities go on `/api/v1/` only.
+**API versioning**: `/api/v1/` prefix introduced for all endpoints. `/api/` aliases preserved for backward compatibility. New capabilities go on `/api/v1/` only. *(Status 2026-11: not started — no backend route carries the prefix.)*
 
 ---
 
@@ -297,7 +300,7 @@ When a single container's `max_parallel_tasks` ceiling — bounded by container 
 
 - Docker container per agent — correct isolation model, keep
 - `agent-server.py` (FastAPI on port 8000 inside container) — keep
-- Claude Code as the execution runtime — keep
+- A pluggable execution runtime behind `runtime_adapter.py` — Claude Code, Gemini CLI and OpenAI Codex today — keep
 - `/api/chat`, `/health`, `/api/credentials/inject`, `/api/files` endpoints — keep (`/api/credentials/update` was listed here until #2008 removed it: it had no callers anywhere)
 - Pre-check hook (`~/.trinity/pre-check`) — keep
 - Credential injection via `.env` + `.credentials.enc` — keep
@@ -322,7 +325,7 @@ When a single container's `max_parallel_tasks` ceiling — bounded by container 
 
 ## Scheduling
 
-**APScheduler, backed by a PostgreSQL job store**, remains the scheduler — it moves its job store from SQLite to PostgreSQL and otherwise stays the standalone `scheduler` process it is today. Redundancy, when wanted, comes from running a second instance behind a **Redis-lock leader election** (`SET NX EX`), not from adopting a distributed task framework.
+**APScheduler, backed by a PostgreSQL job store**, remains the scheduler — its job store moves to PostgreSQL and it otherwise stays the standalone `scheduler` process it is today. *(Status 2026-11: not started — the job store is APScheduler's in-memory `MemoryJobStore`.)* Redundancy, when wanted, comes from running a second instance behind a **Redis-lock leader election** (`SET NX EX`), not from adopting a distributed task framework.
 
 The scheduling data model (agent_schedules, schedule_executions) is unchanged. The interface — cron expressions, manual triggers, webhook triggers — is unchanged. Under the pull model the scheduler is just another producer: on each tick it **enqueues a `queued` task row** (with its `Idempotency-Key: sched:{execution_id}`) and is done — the agent's worker pool drains it when it has capacity. The scheduler never dispatches to or blocks on an agent.
 
@@ -356,8 +359,8 @@ The scheduling data model (agent_schedules, schedule_executions) is unchanged. T
 - Vue.js 3 + Composition API — keep
 - Pinia stores — keep
 - Vue Flow for collaboration graph — keep
-- Single Axios instance (`api.js`) — keep
-- WebSocket client with reconnect replay — keep
+- Single Axios instance (`api.js`) — keep (not yet honoured; see "Decisions That Stand but Are Not Yet Honoured")
+- WebSocket client with reconnect replay — keep (two app sockets exist today; same table)
 
 ### What Improves
 
@@ -456,8 +459,8 @@ Docker Compose remains the primary deployment model — it matches Trinity's ICP
 | `backend` | unchanged |
 | `frontend` | unchanged |
 | `mcp-server` | unchanged |
-| `scheduler` | unchanged shape — still a standalone APScheduler process; only its job store moves from SQLite to PostgreSQL. Optional second instance behind a Redis-lock leader election for redundancy. |
-| `postgres` | **NEW** — replaces SQLite bind mount. The one non-negotiable new service. |
+| `scheduler` | unchanged shape — still a standalone APScheduler process; only its job store moves to PostgreSQL (in-memory today). Optional second instance behind a Redis-lock leader election for redundancy. |
+| `postgres` | Present, and the default database on every compose file since #4233. The one non-negotiable service this design added. |
 | `redis` | unchanged |
 | `vector` | unchanged |
 | `otel-collector` | already present |
@@ -466,7 +469,7 @@ Docker Compose remains the primary deployment model — it matches Trinity's ICP
 
 **Opt-in observability profile (not baseline):** `prometheus` (scrapes the already-present OTEL Collector) + `grafana` (fleet dashboards). Enabled by operators who want fleet-level dashboards; OTEL Collector and Vector cover the baseline.
 
-`~/trinity-data/` bind mount expands to cover the PostgreSQL data directory. SQLite is deprecated and removed once migration is complete.
+`~/trinity-data/` bind mount expands to cover the PostgreSQL data directory. SQLite is past end-of-support; its code removal is #4175.
 
 ### Redis ACL
 
@@ -515,6 +518,17 @@ These decisions are already correct and should not be revisited without strong e
 | Docker as source of truth for container state | No in-memory registry. `docker_service.py` is the single Docker interaction point. |
 | Single Axios instance (`api.js`) | One auth interceptor, one base URL, no duplicate clients. |
 
+### Decisions That Stand but Are Not Yet Honoured (v3)
+
+The decisions above are right. For the ones below, the code has drifted from them. A change that widens one of these gaps moves away from this document; a change that narrows one moves toward it. Counts were measured on `dev` at `13d32e22f` (2026-11-09) and are approximate.
+
+| Decision | Gap today | Tracking |
+|----------|-----------|----------|
+| Three-layer backend architecture | About 680 direct `db.*()` calls under `routers/`; 15 service modules import from `routers`. | none |
+| Single Axios instance (`api.js`) | 50 frontend files import `axios` directly — about 395 bare calls against about 240 through `api.js`. | #2720 (one file) |
+| Pydantic models centralized in `models.py` | One 6,600-line file, the most-edited source file in the repository over the last three months. Centralization stands; the single-file form is the cost. | none |
+| WebSocket client with reconnect replay | Two independent app sockets (`utils/websocket.js`, `stores/network.js`), each with its own reconnect and event handling. | none |
+
 ---
 
 ## Key Open Questions
@@ -523,7 +537,7 @@ These are architectural decisions not yet resolved. They should be answered befo
 
 1. **Message-envelope payload schema** (issue #945) — *Resolved (postcard written): see [`ACTOR_MODEL_POSTCARD.md`](ACTOR_MODEL_POSTCARD.md).* The envelope fields are defined; the `payload` schema for each `kind` is now pinned in the postcard. The pull model **retires the journal-as-source-of-truth question** — execution state is the backend row, not an agent-owned `journal.ndjson` — but the envelope is still the unit of enqueue/re-delivery/dedup and its payload contract is pinned before the pull pilot (#946). In particular the `reply` payload pins the **typed terminal-reason taxonomy** (`status` + `error_code`) that retires the substring failure classifier — see §Message Envelope and the postcard. See `ACTOR_MODEL_TASK_DEMOTION_MAP.md` for the *physical-enforcement* pre-work: `ParallelTaskRequest` has 14 fields today, and the envelope cannot replace that shape as a wire format until those are demoted to session/agent state or quarantined (the postcard is the documented contract; the pilot rides the existing reconstruction shape).
 
-2. **PostgreSQL migration strategy** (issue #300): What is the zero-downtime migration path from SQLite to PostgreSQL for operators running live instances? Likely: parallel-write period, verification query, cutover. **Sequencing constraint added by the pull model:** the queue, the atomic claim, the result-write, and the lease-reaper all converge on one DB; at 200 agents that is exactly where SQLite's single-writer lock becomes the ceiling — *before* agent count does. PostgreSQL must therefore land **before** the pull queue carries the full fleet at scale (or no later than the "capacity becomes physical" phase), not after. #300 covers the SQLAlchemy Core abstraction step (closed); a detailed cutover plan + a dedicated migration ticket are still required.
+2. **PostgreSQL migration strategy** (issue #300) — *Resolved 2026-11-06 (#4233).* PostgreSQL is the default, the images refuse SQLite, and existing installs move with an offline copy (`python -m db.sqlite_to_postgres`) rather than a parallel-write cutover. Removing the SQLite code is #4175; the single schema source (#746) follows it. The original question, kept for the sequencing constraint it records: What is the zero-downtime migration path from SQLite to PostgreSQL for operators running live instances? Likely: parallel-write period, verification query, cutover. **Sequencing constraint added by the pull model:** the queue, the atomic claim, the result-write, and the lease-reaper all converge on one DB; at 200 agents that is exactly where SQLite's single-writer lock becomes the ceiling — *before* agent count does. PostgreSQL must therefore land **before** the pull queue carries the full fleet at scale (or no later than the "capacity becomes physical" phase), not after. #300 covers the SQLAlchemy Core abstraction step (closed); a detailed cutover plan + a dedicated migration ticket are still required.
 
 2a. **Side-effect recovery** (issues #1401, #1402, #1084, **reframed in v2**): exactly-once external effects are impossible (two-generals), so the platform does not attempt them — it synthesizes recovery = **at-least-once delivery + retry-with-prior-trace + deterministic tool-side gates on capability-confined irreversible rails.** The remaining work, now with tracking:
    1. **Structured recovery trace + injection into re-delivered *and* next executions** — three-state (`done`/`not-done`/`unknown`), write-ahead for irreversible steps, structured (not stdout). The new center of gravity. **→ #1401** (filed, `status-incubating`, sub of #1081).
@@ -564,7 +578,7 @@ All pull-coordination work lives under **Epic #1045 (Agent Infrastructure)**.
 | ├─ Correlated-failure / herd controls (jitter + re-delivery caps + shared-cause pause) — **shipped**; default-OFF flag | #1085 |
 | ├─ Pilot: route MCP `chat_with_agent` through the agent queue | #946 |
 | ├─ Cleanup pyramid → single lease-reaper (bounded by #1402 `MAX_REDELIVERY`) | #429 |
-| └─ PostgreSQL migration (SQLAlchemy Core abstraction shipped; cutover ticket still to open) | #300 |
+| └─ PostgreSQL migration — SQLAlchemy Core abstraction and default-to-PostgreSQL **shipped** (#300, #4233); SQLite code removal, then single schema source | #4175, #746 |
 | Message-envelope payload schema (gates the pilot #946) — postcard written (`ACTOR_MODEL_POSTCARD.md`) | #945 |
 | Idempotency keys at trigger boundaries (shipped) | #525 |
 | Per-agent dispatch circuit breaker — repurposed gate→alert under pull (shipped) | #526 |
@@ -576,6 +590,37 @@ All pull-coordination work lives under **Epic #1045 (Agent Infrastructure)**.
 | Trace-fidelity dependency (blocks #1401) — stdout fd-inheritance reader-race family | #548, #333 |
 
 See `docs/archive/plans/ORCHESTRATION_RELIABILITY_2026-04.md` for the sprint sequencing and gating constraints between these, and `docs/archive/plans/TARGET_ARCHITECTURE_v1_2026-06-06.md` for the superseded v1 side-effect approach (Direction A).
+
+---
+
+## Proposed Targets (v3 draft — not adopted)
+
+> **Status: proposed 2026-11-09, from an architecture review. Not binding.** Each target is either accepted — and moved into the section it belongs to — or cut. Until then, do not reject a change for moving away from one. "Today" facts were checked on `dev` at `13d32e22f`.
+
+1. **A non-blocking request path** (follows from Principle 3).
+   - **Target:** no request handler holds the event loop on database, Docker or Redis I/O. Until the async driver lands, blocking calls run in a threadpool, and a lint ratchet keeps new ones out.
+   - **Today:** `routers/` has about 740 `async def` functions and 42 thread offloads. The database is synchronous. `slot_service` and `capacity_manager` use the synchronous Redis client. `list_agents_endpoint` is `async def` over a synchronous Docker `containers.list`. Production and hosted run `--workers 2`, so one stalled call holds half the API.
+   - **Tracking:** none.
+
+2. **One owner for an execution's terminal transition** (follows from Principle 2).
+   - **Target:** a single function wins the status compare-and-set and records every obligation the winner owes — close the dispatch activity, release capacity, emit `agent.task.*`, complete the idempotency claim, wake the sync waiter. Every writer calls it, recovery sweeps and the scheduler included. A graceful backend shutdown leaves a turn the agent is still running for the result path to settle, and does not write it terminal.
+   - **Today:** terminal writers are open-coded, and a writer that skips one obligation is a recurring bug class (#45, #767, #1804, #3651). Shutdown handlers write `FAILED "Execution cancelled (backend shutdown)"`.
+   - **Tracking:** #3405 (the CAS-win / dispatch-close pairing only), #3651, #429. Pull Phase 5 removes most writers; it does not by itself give the rest one owner.
+
+3. **Failure is distinguishable from "nothing there"**.
+   - **Target:** readers of external state return a tri-state, as `agent_container_states()` does (#2196). The backend exposes readiness per dependency — database, Redis, Docker, and each background loop's last tick. An agent server that exits takes its container down with it.
+   - **Today:** `/health` returns healthy unconditionally on PostgreSQL, because its migration gate is SQLite-only. `docker_service` binds its client once at import and leaves it `None` on failure, with no reconnect. `startup.sh` backgrounds the agent server and ends in `tail -f /dev/null`, and the base image declares no `HEALTHCHECK`.
+   - **Tracking:** #4238 covers the scheduler's healthcheck only.
+
+4. **Versioned contracts between separately shipped parts**.
+   - **Target:** the agent server reports a contract version and feature set, and the backend gates on it instead of inferring an old image from response shapes. MCP-server and frontend types are generated from the backend's OpenAPI schema, with a parity check in CI.
+   - **Today:** the agent server declares a static `version="2.0.0"`, and a running agent keeps its base image across a platform upgrade. The MCP client is a hand-written 4,475-line `client.ts`; neither the MCP server nor the frontend generates types from the schema.
+   - **Tracking:** #3765 (recreate the fleet on a new image) and #1029 (split `client.ts`) are adjacent; neither covers the handshake or generation.
+
+5. **A frontend data layer** (follows from Invariants #6, #7 and #10).
+   - **Target:** every request goes through `api.js` behind one resource primitive that owns caching, de-duplication, cancellation and error state. One app WebSocket with a subscriber registry, backoff, and a resync that reaches every mounted store.
+   - **Today:** see the bare-`axios` and two-socket rows under "Decisions That Stand but Are Not Yet Honoured".
+   - **Tracking:** #1030 (decompose oversized views) is adjacent.
 
 ---
 
@@ -618,6 +663,8 @@ Tracking: **#1401** (recovery trace + injection) and **#1402** (async human-gate
 ---
 
 ## Review Schedule
+
+**Last reviewed: 2026-11-09 (v3).**
 
 | Trigger | Action |
 |---------|--------|
