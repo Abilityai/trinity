@@ -918,10 +918,16 @@ _ROW_READERS = {
         "addressee", "the ask a chat discusses: addressed to the viewer in SQL, then the roster"),
     (_PORTAL_ASKS, "_linked_request_id"): (
         "addressee", "the linked row's request_id only, when this ask's addressee could already see it"),
+    (_PORTAL_ASKS, "_notices_in"): (
+        "internal", "trinity-enterprise#1134 AC4: a chat's own fallen-to-the-operators asks as notices "
+                    "with no content — id, agent, kind, status, created_at, chat id and the reason enum, "
+                    "never a title, question, options or context — shown only to the chat's owner "
+                    "(`get_portal_session`, then the roster)"),
     (_PORTAL_ASKS, "_owned_ask"): (
         "addressee", "the viewer's own ask (`_is_addressed_to`, visible kinds, then the roster — or, for "
-                     "the reserved reach family the gate raised about them, trinity-enterprise#981, the "
-                     "address alone), else the uniform 404"),
+                     "the reserved reach family the gate raised about them, trinity-enterprise#981, or an "
+                     "agent's ask `to: project`, trinity-enterprise#1134, the address alone), else the "
+                     "uniform 404"),
     (_PORTAL_ASKS, "_recent_answers"): (
         "addressee", "the viewer's own recent answers: addressed to the viewer in SQL"),
     (_PORTAL_ASKS, "discuss_ask"): (
@@ -932,8 +938,9 @@ _ROW_READERS = {
                  "names no person)"),
     (_PORTAL_ASKS, "list_asks_page"): (
         "addressee", "the Workspace inbox: addressed to the viewer in SQL, before the limit; the roster "
-                     "set OR the reserved reach family the gate raised about them (trinity-enterprise#981), "
-                     "both in the same SQL for the page and its count"),
+                     "set OR the reserved reach family the gate raised about them (trinity-enterprise#981) "
+                     "OR an agent's ask `to: project` (trinity-enterprise#1134), all in the same SQL for "
+                     "the page and its count"),
     (_ROUTER_FILE, "bulk_cancel_queue_items"): ("door", "§6: person only"),
     (_ROUTER_FILE, "cancel_queue_item"): ("door", "§6: person only"),
     (_ROUTER_FILE, "get_agent_queue_items"): ("door", "§6: `_for_principal`, the exclusion in SQL"),

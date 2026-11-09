@@ -1244,6 +1244,7 @@ class OperatorQueueOperations:
         addressee_only_request_id_prefixes: Optional[Tuple[str, ...]] = None,
         addressee_email: Optional[str] = None,
         addressee_reach_request_id_prefixes: Optional[Tuple[str, ...]] = None,
+        project_reach_key: Optional[str] = None,
     ) -> Optional[list]:
         """The WHERE conditions `list_items`, `count_items` and
         `list_item_agent_names` share (#3059) — ONE definition, so a page, its
@@ -1257,9 +1258,11 @@ class OperatorQueueOperations:
         # of a platform row about them.
         reach = tuple(addressee_reach_request_id_prefixes or ())
         viewer_for_reach = (addressed_to_email or "").strip().lower()
+        project_key = project_reach_key or None
         if not viewer_for_reach:
-            reach = ()
-        if accessible_agent_names is not None and len(accessible_agent_names) == 0 and not reach:
+            reach, project_key = (), None
+        if (accessible_agent_names is not None and len(accessible_agent_names) == 0
+                and not reach and not project_key):
             return None
 
         conds = []
@@ -1292,6 +1295,25 @@ class OperatorQueueOperations:
                 access = or_(access, and_(
                     self._request_id_prefixed_ci(reach),
                     operator_queue.c.raised_by == "gate",
+                    or_(
+                        func.lower(operator_queue.c.addressed_to_email) == viewer_for_reach,
+                        self._resolved_to_contains(viewer_for_reach),
+                    ),
+                ))
+            if project_key:
+                # trinity-enterprise#1134: an agent's ask addressed `to: project`
+                # reaches the steward or creator the platform resolved — who may
+                # be off the agent's roster — by address. Same shape as the
+                # ent#981 arm: the row's own `to_role` and `raised_by` columns,
+                # the platform's project stamp in the stored context (a LIKE
+                # prefilter; the Python twin `is_project_reach` re-checks the
+                # parsed key) and the viewer as its addressee.
+                stamp = json.dumps({project_key: ""})[1:-2]
+                stamp = stamp.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                access = or_(access, and_(
+                    operator_queue.c.to_role == "project",
+                    operator_queue.c.raised_by == "agent",
+                    operator_queue.c.context.like(f"%{stamp}%", escape="\\"),
                     or_(
                         func.lower(operator_queue.c.addressed_to_email) == viewer_for_reach,
                         self._resolved_to_contains(viewer_for_reach),
@@ -1413,12 +1435,18 @@ class OperatorQueueOperations:
         addressee_only_request_id_prefixes: Optional[Tuple[str, ...]] = None,
         addressee_email: Optional[str] = None,
         addressee_reach_request_id_prefixes: Optional[Tuple[str, ...]] = None,
+        project_reach_key: Optional[str] = None,
     ) -> List[Dict]:
         """List queue items with optional filters.
 
         addressee_reach_request_id_prefixes (trinity-enterprise#981): rows
         under one of these prefixes, raised by the gate and addressed to
         `addressed_to_email`, are listed even when their agent is outside
+        `accessible_agent_names` — see `_list_conditions`.
+
+        project_reach_key (trinity-enterprise#1134): the platform's project
+        context key; an agent's `to: project` row carrying it and addressed to
+        `addressed_to_email` is listed even when its agent is outside
         `accessible_agent_names` — see `_list_conditions`.
 
         exclude_request_id_prefixes (trinity-enterprise#815): leave out rows
@@ -1477,6 +1505,7 @@ class OperatorQueueOperations:
             addressee_only_request_id_prefixes=addressee_only_request_id_prefixes,
             addressee_email=addressee_email,
             addressee_reach_request_id_prefixes=addressee_reach_request_id_prefixes,
+            project_reach_key=project_reach_key,
         )
         if conds is None:
             return []

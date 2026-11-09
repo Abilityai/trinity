@@ -77,6 +77,13 @@
         </template>
       </div>
 
+      <!-- trinity-enterprise#1134: an ask the agent addressed `to: project`
+           says which seat brought it to this reader — never who else holds one. -->
+      <p
+        v-if="projectSeat(ask)"
+        class="mt-0.5 text-xs"
+        :data-testid="`${tid.prefix}-seat-${ask.id}`"
+      >To you as this project's {{ projectSeat(ask) }}</p>
       <p class="mt-1 text-sm font-medium text-gray-900 dark:text-gray-100">
         <AskMarkdown :text="ask.title" inline :data-testid="`${tid.prefix}-title-${ask.id}`" />
       </p>
@@ -669,6 +676,12 @@ onBeforeUnmount(() => {
 // Workspace — both come from utils/operatorQueue, the single home #2370
 // established. An ask's `kind` is the queue row's `type` verbatim.
 const kindLabel = (kind) => queueTypeLabel(kind) || 'Question'
+// trinity-enterprise#1134: the seat a `to: project` ask reached this reader
+// through. Only the two seats the platform resolves; anything else says nothing.
+const PROJECT_SEATS = new Set(['steward', 'creator'])
+const projectSeat = (ask) => (
+  ask?.destination?.kind === 'project' && PROJECT_SEATS.has(ask.destination.seat) ? ask.destination.seat : null
+)
 const controlsKind = (ask) => queueResponseKind({ type: ask.kind, options: ask.options })
 
 // trinity-enterprise#747: an alert has nothing to decide, so nothing to
