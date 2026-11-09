@@ -284,6 +284,30 @@ describe("ent#588 — an agent starts or imports a project (projects.manage)", (
     assert.equal(out.code, "project_management_not_permitted");
   });
 
+  it("create_project forwards an explicit steward (ent#1169)", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      createProjectAsAgent: async (body: Record<string, unknown>) => {
+        calls.push(["create", body]);
+        return { ...PROJECT, steward: { kind: "agent", ref: "pm" } };
+      },
+    } as Partial<TrinityClient>);
+    await tools.create_project.execute({ name: "x", goal: "y", steward: "pm" });
+    assert.deepEqual(calls, [["create", { name: "x", goal: "y", steward: "pm" }]]);
+  });
+
+  it("import_project forwards an explicit steward (ent#1169)", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      importProjectAsAgent: async (path: string, _turn?: string, steward?: string) => {
+        calls.push(["import", path, steward]);
+        return PROJECT;
+      },
+    } as Partial<TrinityClient>);
+    await tools.import_project.execute({ path: "project_files/q4", steward: "pm" });
+    assert.deepEqual(calls, [["import", "project_files/q4", "pm"]]);
+  });
+
   it("import_project forwards only the path; a second import's 409 is surfaced", async () => {
     const calls: unknown[][] = [];
     const tools = makeTools({

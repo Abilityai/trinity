@@ -240,6 +240,27 @@ export function stewardFormValue(steward, myEmail) {
   return { steward: 'me', steward_email: '' }
 }
 
+/**
+ * ent#1169 — the dialog's one line under Steward: what picking it does about
+ * the library's project-management skills. `options` is the steward-options
+ * read: null while it loads ("Checking…"), false when it failed (no line,
+ * nothing guessed).
+ */
+export function stewardSkillHint(steward, options) {
+  if (!String(steward || '').startsWith('agent:')) {
+    return 'A person steward checks finished tasks and health by hand. An agent steward with the project-management skills does it on its own schedule.'
+  }
+  if (options === false) return ''        // the read failed: say nothing rather than guess
+  if (!options) return 'Checking the project-management skills…'
+  const name = steward.slice(6)
+  const row = (options.agents || []).find((a) => a.agent_name === name)
+  if (row?.holds_set) return `${name} already has the project-management skills, so it can keep this project's record.`
+  if (row && row.holds_set === null) return `Trinity couldn't check ${name}'s skills. You can still make it the steward.`
+  if (options.set && !options.set.available) return options.set.message || "The project-management skills aren't available on this Trinity yet."
+  if (row?.can_assign) return `${name} gets the project-management skills, so it can verify finished tasks, record health and write the log.`
+  return `Only ${name}'s owner or an admin can give it the project-management skills. It can be the steward, but it can't keep the record until they do.`
+}
+
 /** The API's steward for the form's fields; null leaves the server default. */
 export function stewardPayload(form, myEmail) {
   if (String(form.steward || '').startsWith('agent:')) return { kind: 'agent', ref: form.steward.slice(6) }

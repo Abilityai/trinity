@@ -253,6 +253,14 @@ export const useProjectsStore = defineStore('projects', () => {
     return data.people || []
   }
 
+  // ent#1169: whether the library offers the project-management set, and per
+  // agent I can use whether it holds it and whether I may give it. A read for
+  // the dialog's hint; a failure leaves the hint out, never blocks creating.
+  async function fetchStewardOptions() {
+    const { data } = await portalHttp.get(`${BASE}/steward-options`, { headers: headers() })
+    return data
+  }
+
   const stewarding = ref({ rows: [], loaded: false, loading: false, error: null })
 
   async function fetchStewarding() {
@@ -273,6 +281,6 @@ export const useProjectsStore = defineStore('projects', () => {
     addGuest, addItem, setItemAudience, removeItem, fetchReport, myItems, importCandidates, importProject,
     setHealth, linkMetric, unlinkMetric, metricOptions, stewarding, fetchStewarding,
     requestStewardAccess, grantStewardAccess,
-    fetchProjectPeople, fetchCompanyPeople,
+    fetchProjectPeople, fetchCompanyPeople, fetchStewardOptions,
   }
 })
