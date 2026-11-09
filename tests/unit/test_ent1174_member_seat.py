@@ -221,3 +221,251 @@ class TestReservedSettings:
         db.set_setting("ent1174_plain", "x")
         got, err = self._call(get_setting("ent1174_plain", None, _key(world)))
         assert err is None and got.value == "x"
+
+
+# ===========================================================================
+# Plan + run (Phase 2): the seam hooks, the op, the gate per member
+# ===========================================================================
+
+class _Member:
+    """A provider with the agent-seat hooks AND the two member-seat hooks."""
+
+    def __init__(self, state="vacant", refuse=None):
+        self.state = state
+        self.refuse = refuse
+        self.calls = []
+        self.held = {}
+
+    def assignment_for(self, agent_name, triggered_by):
+        return None
+
+    def seat_for(self, agent_name):
+        role = self.held.get(agent_name)
+        return {"case": "holds" if role else "none", "role_id": role,
+                "seats": [role] if role else []}
+
+    def set_seat(self, agent_name, role_id, created_by):
+        self.calls.append(("set_seat", agent_name, role_id, created_by))
+        self.held[agent_name] = role_id
+        return {"changed": True}
+
+    def person_seat_status(self, agent_name, role_id, kind):
+        return {"filled": False}
+
+    def member_seat_status(self, agent_name, role_id, kind):
+        self.calls.append(("member_seat_status", agent_name, role_id, kind))
+        return None if self.state is None else {"state": self.state}
+
+    def seat_member(self, agent_name, role_id, kind, created_by):
+        self.calls.append(("seat_member", agent_name, role_id, kind, created_by))
+        if self.refuse:
+            return {"refused": self.refuse}
+        self.state = "filled"
+        return {"changed": True, "shared": True}
+
+
+class _NoMemberHooks(_Member):
+    member_seat_status = None
+    seat_member = None
+
+
+def _apply(world, text, *, dry_run, user):
+    return asyncio.run(system_service.apply_manifest(
+        text, user, None, dry_run=dry_run,
+        create_agent_fn=world.create, start_agent_fn=world.docker.start))
+
+
+def _m(res, name=LEAD):
+    return next(m for m in res.members if m.name == name)
+
+
+def _person_changes(member):
+    return [(c.action, c.code) for c in member.changes if c.field == "person_seats"]
+
+
+def _writes(p):
+    return [c for c in p.calls if c[0] == "seat_member"]
+
+
+class TestPlan:
+    def test_without_the_member_hooks_it_is_an_ordinary_report(self, world):
+        assignment_provider.register_provider(_NoMemberHooks())
+        world.seed_agent(LEAD, owner=W.ADMIN)
+        res = _apply(world, _manifest([MEMBER]), dry_run=True, user=_key(world))
+        assert _person_changes(_m(res)) == [("report", "seat_vacant")]
+
+    def test_an_admin_key_seats_the_member_on_a_member_it_owns(self, world):
+        p = _Member()
+        assignment_provider.register_provider(p)
+        world.seed_agent(LEAD, owner=W.ADMIN)
+        key = _key(world)
+        dry = _apply(world, _manifest([MEMBER]), dry_run=True, user=key)
+        assert _person_changes(_m(dry)) == [("write", "seat_missing")]
+        assert _m(dry).verdict == "update"
+        assert _writes(p) == []  # the dry run writes nothing
+        res = _apply(world, _manifest([MEMBER]), dry_run=False, user=key)
+        assert res.status == "applied", res.failed
+        assert _writes(p) == [("seat_member", LEAD, "digest-reader", "primary", W.ADMIN)]
+        again = _apply(world, _manifest([MEMBER]), dry_run=True, user=key)
+        assert _person_changes(_m(again)) == [("report", "seat_filled")]
+        assert _m(again).verdict == "unchanged"
+
+    def test_a_partial_seat_is_written_again(self, world):
+        assignment_provider.register_provider(_Member(state="partial"))
+        world.seed_agent(LEAD, owner=W.ADMIN)
+        dry = _apply(world, _manifest([MEMBER]), dry_run=True, user=_key(world))
+        assert _person_changes(_m(dry)) == [("write", "seat_missing")]
+
+    def test_a_member_this_run_creates_is_seated(self, world):
+        """E1: the issue's own case — apply creates the member's agent."""
+        p = _Member()
+        assignment_provider.register_provider(p)
+        key = _key(world)
+        dry = _apply(world, _manifest([MEMBER]), dry_run=True, user=key)
+        assert _m(dry).verdict == "create"
+        assert _person_changes(_m(dry)) == [("write", "seat_missing")]
+        assert _writes(p) == []
+        res = _apply(world, _manifest([MEMBER]), dry_run=False, user=key)
+        assert res.status == "applied", res.failed
+        assert [c.name for c in world.create_calls] == [LEAD]
+        assert _writes(p) == [("seat_member", LEAD, "digest-reader", "primary", W.ADMIN)]
+
+    def test_a_member_to_create_with_no_member_recorded_says_so_in_the_dry_run(self, world):
+        assignment_provider.register_provider(_Member(state="no_member"))
+        res = _apply(world, _manifest([MEMBER]), dry_run=True, user=_key(world))
+        assert _person_changes(_m(res)) == [("report", "member_not_recorded")]
+
+    def test_an_admin_key_is_held_back_on_a_member_someone_else_owns(self, world):
+        """E4: a personal admin key must not share an unrelated agent."""
+        p = _Member()
+        assignment_provider.register_provider(p)
+        world.seed_agent(LEAD, owner=W.ALICE)
+        res = _apply(world, _manifest([MEMBER]), dry_run=False, user=_key(world))
+        assert _person_changes(_m(res)) == [("report", "seat_requires_interactive_admin")]
+        assert res.summary["roles"]["held_back"] == [
+            {"name": LEAD, "seat": "digest-reader (member, primary)"}]
+        assert _writes(p) == []
+
+    def test_an_interactive_admin_seats_the_member_on_any_managed_member(self, world):
+        p = _Member()
+        assignment_provider.register_provider(p)
+        world.seed_agent(LEAD, owner=W.ALICE)
+        res = _apply(world, _manifest([MEMBER]), dry_run=False, user=world.user(W.ADMIN))
+        assert res.status == "applied", res.failed
+        assert len(_writes(p)) == 1
+
+    @pytest.mark.parametrize("who", ["creator_key", "creator_jwt"])
+    def test_a_non_admin_person_is_held_back(self, world, who):
+        p = _Member()
+        assignment_provider.register_provider(p)
+        world.seed_agent(LEAD, owner=W.ALICE)
+        user = _key(world, W.ALICE) if who == "creator_key" else world.user(W.ALICE)
+        res = _apply(world, _manifest([MEMBER]), dry_run=False, user=user)
+        assert _person_changes(_m(res)) == [("report", "seat_requires_interactive_admin")]
+        assert _writes(p) == []
+
+    def test_a_non_admin_creating_the_member_is_held_back(self, world):
+        p = _Member()
+        assignment_provider.register_provider(p)
+        res = _apply(world, _manifest([MEMBER]), dry_run=False, user=_key(world, W.ALICE))
+        assert _person_changes(_m(res)) == [("report", "seat_requires_interactive_admin")]
+        assert _writes(p) == []
+
+    def test_another_primary_is_reported_and_never_moved(self, world):
+        p = _Member(state="differs")
+        assignment_provider.register_provider(p)
+        world.seed_agent(LEAD, owner=W.ADMIN)
+        res = _apply(world, _manifest([MEMBER]), dry_run=False, user=_key(world))
+        m = _m(res)
+        assert _person_changes(m) == [("report", "member_seat_differs")]
+        note = next(c.note for c in m.changes if c.field == "person_seats")
+        assert "never moves" in note and "@" not in note
+        assert _writes(p) == []
+
+    def test_no_member_recorded_is_a_report_naming_the_fix(self, world):
+        assignment_provider.register_provider(_Member(state="no_member"))
+        world.seed_agent(LEAD, owner=W.ADMIN)
+        res = _apply(world, _manifest([MEMBER]), dry_run=True, user=_key(world))
+        m = _m(res)
+        assert _person_changes(m) == [("report", "member_not_recorded")]
+        assert res.blockers == []
+        note = next(c.note for c in m.changes if c.field == "person_seats")
+        assert "PUT /api/enterprise/hub/member" in note
+
+    def test_a_refusal_lands_in_failed_with_the_modules_code(self, world):
+        assignment_provider.register_provider(_Member(refuse="member_not_known"))
+        world.seed_agent(LEAD, owner=W.ADMIN)
+        res = _apply(world, _manifest([MEMBER]), dry_run=False, user=_key(world))
+        assert [(f.name, f.step, f.reason.split(":")[0]) for f in res.failed] == [
+            (LEAD, "person_seats", "member_not_known")]
+
+    def test_a_read_error_blocks_retryably(self, world):
+        class _Raises(_Member):
+            def member_seat_status(self, agent_name, role_id, kind):
+                raise RuntimeError("db down")
+        assignment_provider.register_provider(_Raises())
+        world.seed_agent(LEAD, owner=W.ADMIN)
+        res = _apply(world, _manifest([MEMBER]), dry_run=True, user=_key(world))
+        assert _m(res).verdict == "blocked"
+        assert [b.code for b in res.blockers] == ["member_reads_unavailable"]
+
+    def test_the_landed_write_is_audited_with_the_caller_and_no_address(self, world, monkeypatch):
+        from services.platform_audit_service import platform_audit_service
+        seen = []
+
+        async def _log(**kw):
+            seen.append(kw)
+        monkeypatch.setattr(platform_audit_service, "log", _log)
+        assignment_provider.register_provider(_Member())
+        world.seed_agent(LEAD, owner=W.ADMIN)
+        _apply(world, _manifest([MEMBER]), dry_run=False, user=_key(world))
+        shares = [e for e in seen if e.get("event_action") == "share"]
+        assert len(shares) == 1
+        assert shares[0]["actor_user"].username == W.ADMIN
+        assert shares[0]["details"]["via"] == "apply_member_seat"
+        assert "@" not in repr(shares[0]["details"])
+
+
+class TestRegressions:
+    def test_the_agent_seat_stays_interactive_admin_only_under_an_admin_key(self, world):
+        p = _Member()
+        assignment_provider.register_provider(p)
+        world.seed_agent(LEAD, owner=W.ADMIN)
+        res = _apply(world, _manifest([MEMBER], seat="lead-role"), dry_run=False,
+                     user=_key(world))
+        codes = [(c.field, c.code) for c in _m(res).changes]
+        assert ("seat", "seat_requires_interactive_admin") in codes
+        assert [c for c in p.calls if c[0] == "set_seat"] == []
+        assert len(_writes(p)) == 1
+
+    def test_other_person_seats_stay_report_only(self, world):
+        p = _Member()
+        assignment_provider.register_provider(p)
+        world.seed_agent(LEAD, owner=W.ADMIN)
+        res = _apply(world, _manifest([{"role": "reviewer", "kind": "viewer"}]),
+                     dry_run=False, user=world.user(W.ADMIN))
+        assert _person_changes(_m(res)) == [("report", "seat_vacant")]
+        assert _writes(p) == []
+
+    def test_an_agent_key_is_refused_before_planning(self, world):
+        """ent#695 unchanged: apply is person-credential only (the route's
+        `require_person`); `can_seat_member` refuses the agent key too."""
+        from dependencies import can_seat_member
+        assert can_seat_member(_key(world, scope="agent", agent_name="orchestrator")) is False
+
+
+class TestSeamCarriesNoEmail:
+    def test_the_member_seat_hooks_take_no_person(self):
+        """S1: the seam hook takes NO email; the provider resolves who."""
+        params = inspect.signature(assignment_provider.write_member_seat).parameters
+        assert list(params) == ["agent_name", "role_id", "kind", "created_by"]
+        params = inspect.signature(assignment_provider.resolve_member_seat).parameters
+        assert list(params) == ["agent_name", "role_id", "kind"]
+
+    def test_a_malformed_write_answer_is_an_error_not_a_success(self, world):
+        class _Bad(_Member):
+            def seat_member(self, *a):
+                return "yes"
+        assignment_provider.register_provider(_Bad())
+        with pytest.raises(ValueError):
+            assignment_provider.write_member_seat(LEAD, "digest-reader", "primary", "x")

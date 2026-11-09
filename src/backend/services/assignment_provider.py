@@ -155,6 +155,25 @@ class AssignmentProvider(Protocol):
     # person seats unobserved. Nothing ever fills a person seat through it.
     # def person_seat_status(self, agent_name: str, role_id: str, kind: str) -> Optional[dict]: ...
 
+    # OPTIONAL (trinity-enterprise#1174): the instance's recorded hub member's
+    # seat ``role_id`` of ``kind`` on ``agent_name`` (which may not exist yet —
+    # apply will create it). ``{"state": s}``, ``s`` one of
+    # :data:`MEMBER_SEAT_STATES`: ``filled`` (seated AND shared), ``partial``
+    # (one of the two), ``vacant``, ``differs`` (another person holds the
+    # primary) or ``no_member`` (none recorded). Takes no person and returns
+    # none. Read through ``getattr`` by :func:`resolve_member_seat`.
+    # def member_seat_status(self, agent_name: str, role_id: str, kind: str) -> Optional[dict]: ...
+
+    # OPTIONAL (trinity-enterprise#1174): seat the RECORDED member on
+    # ``agent_name`` and make the agent visible to them — the one person-seat
+    # write on this seam. It takes no person: the module resolves who from its
+    # own record, which only an interactive admin writes, so no caller can name
+    # someone to share with. The core has already judged the principal
+    # (`dependencies.can_seat_member`); ``created_by`` is attribution only.
+    # Answers ``{"changed": bool, "shared": bool}`` or ``{"refused": code}``.
+    # Read through ``getattr`` by :func:`write_member_seat`.
+    # def seat_member(self, agent_name: str, role_id: str, kind: str, created_by: str) -> Optional[dict]: ...
+
 
 _provider: Optional[AssignmentProvider] = None
 
@@ -565,3 +584,62 @@ def resolve_person_seat(agent_name: str, role_id: str, kind: str) -> str:
                        "malformed answer for %s/%s", agent_name, role_id)
         return "error"
     return "filled" if answer["filled"] else "vacant"
+
+
+# --- trinity-enterprise#1174: the hub member's seat -------------------------
+
+#: What :func:`resolve_member_seat` may answer from a provider.
+MEMBER_SEAT_STATES = ("filled", "partial", "vacant", "differs", "no_member")
+
+
+def member_seat_writer_installed() -> bool:
+    """Can a ``holder: member`` seat be both read and written on this install?"""
+    provider = _provider
+    return (provider is not None
+            and getattr(provider, "member_seat_status", None) is not None
+            and getattr(provider, "seat_member", None) is not None)
+
+
+def resolve_member_seat(agent_name: str, role_id: str, kind: str) -> str:
+    """One of :data:`MEMBER_SEAT_STATES`, ``unobserved`` (no hook, or the hook
+    answers ``None``) or ``error`` (a raise or a malformed answer — a READ
+    failure, never unobserved). Never a person."""
+    provider = _provider
+    fn = getattr(provider, "member_seat_status", None) if provider is not None else None
+    if fn is None:
+        return "unobserved"
+    try:
+        answer = fn(agent_name, role_id, kind)
+    except Exception:  # noqa: BLE001 — answered as a read failure, never a raise
+        logger.warning("[assignment_provider] provider.member_seat_status failed for %s",
+                       agent_name, exc_info=True)
+        return "error"
+    if answer is None:
+        return "unobserved"
+    if not isinstance(answer, Mapping) or answer.get("state") not in MEMBER_SEAT_STATES:
+        logger.warning("[assignment_provider] provider.member_seat_status returned a "
+                       "malformed answer for %s", agent_name)
+        return "error"
+    return answer["state"]
+
+
+def write_member_seat(agent_name: str, role_id: str, kind: str,
+                      created_by: Optional[str]) -> Dict[str, Any]:
+    """Seat the recorded member through ``seat_member``.
+
+    ``{"changed": bool, "shared": bool}`` or ``{"refused": code}`` — nothing
+    else crosses back, so no address reaches the apply report. Raises
+    :class:`SeatWriterUnavailable` without the hook and ``ValueError`` on a
+    malformed answer; a provider raise propagates (the caller records it)."""
+    provider = _provider
+    fn = getattr(provider, "seat_member", None) if provider is not None else None
+    if fn is None:
+        raise SeatWriterUnavailable("no member seat writer is installed")
+    answer = fn(agent_name, role_id, kind, created_by)
+    if not isinstance(answer, Mapping):
+        raise ValueError("the member seat writer returned a malformed answer")
+    refused = answer.get("refused")
+    if refused is not None:
+        code = refused if isinstance(refused, str) and ROLE_ID_RE.fullmatch(refused) else "refused"
+        return {"refused": code}
+    return {"changed": bool(answer.get("changed")), "shared": bool(answer.get("shared"))}
