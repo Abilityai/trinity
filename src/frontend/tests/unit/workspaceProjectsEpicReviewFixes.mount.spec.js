@@ -76,17 +76,49 @@ describe('briefs — stale reads are dropped', () => {
     expect(document.getElementById('context-filename').value).toBe('ctx_b.md')
   })
 
-  it('text typed before the read lands is kept', async () => {
+  it('the editor is read-only until the brief has loaded, then shows it', async () => {
     const read = deferred()
     store.readContext = vi.fn(() => read.promise)
     const w = ctx([brief('ctx_a')])
     await w.findAll('button').find((b) => b.text() === 'Edit').trigger('click')
-    const area = document.getElementById('context-content')
-    area.value = 'my own words'
-    area.dispatchEvent(new Event('input'))
+    expect(document.getElementById('context-content').disabled).toBe(true)
     read.resolve({ content: 'server text' })
     await flushPromises()
-    expect(document.getElementById('context-content').value).toBe('my own words')
+    const area = document.getElementById('context-content')
+    expect(area.disabled).toBe(false)
+    expect(area.value).toBe('server text')
+  })
+
+  it('a failed load keeps the editor read-only and Save refuses', async () => {
+    store.readContext = vi.fn().mockRejectedValue({ response: { status: 500, data: {} } })
+    store.updateContext = vi.fn()
+    const w = ctx([brief('ctx_a')])
+    await w.findAll('button').find((b) => b.text() === 'Edit').trigger('click')
+    await flushPromises()
+    expect(document.getElementById('context-content').disabled).toBe(true)
+    byTestId('context-save').click()
+    await flushPromises()
+    expect(store.updateContext).not.toHaveBeenCalled()
+  })
+
+  it('an upload after an unfinished Edit is not held by that read', async () => {
+    const read = deferred()
+    store.readContext = vi.fn(() => read.promise)
+    store.writeContext = vi.fn().mockResolvedValue({ data: {} })
+    const w = ctx([brief('ctx_a')])
+    await w.findAll('button').find((b) => b.text() === 'Edit').trigger('click')
+    const input = byTestId('context-upload-input')
+    const f = new File(['uploaded text'], 'notes.md', { type: 'text/markdown' })
+    f.arrayBuffer = async () => new TextEncoder().encode('uploaded text').buffer
+    Object.defineProperty(input, 'files', { value: [f] })
+    input.dispatchEvent(new Event('change'))
+    await flushPromises()
+    read.resolve({ content: 'A text' })                           // the Edit read lands after
+    await flushPromises()
+    expect(document.getElementById('context-content').value).toBe('uploaded text')
+    byTestId('context-save').click()
+    await flushPromises()
+    expect(store.writeContext).toHaveBeenCalledWith('prj_1', expect.objectContaining({ content: 'uploaded text', filename: 'notes.md' }))
   })
 
   it('previewing A then B: A’s late reply never shows under B', async () => {

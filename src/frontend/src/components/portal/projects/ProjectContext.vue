@@ -57,7 +57,8 @@
         <h2 id="context-write-title" class="text-lg font-semibold text-gray-900 dark:text-gray-100">{{ editing ? 'Edit the brief' : 'Write a brief' }}</h2>
         <BaseInput id="context-filename" v-model="form.filename" label="Name" placeholder="kickoff-brief.md" />
         <BaseTextarea id="context-content" v-model="form.content" :rows="14" label="Brief (markdown)"
-                      placeholder="The transcript, your view, the background an agent needs." />
+                      :disabled="loadingContent || loadFailed"
+                      :placeholder="loadingContent ? 'Loading the brief…' : 'The transcript, your view, the background an agent needs.'" />
         <p class="text-xs text-gray-500 dark:text-gray-400" data-testid="context-size">
           {{ humanSize(bytes) }} of {{ humanSize(fileBytes) }}<template v-if="bytes > readBytes"> · an agent reads it in parts of {{ humanSize(readBytes) }}</template>
         </p>
@@ -159,7 +160,11 @@ async function run(id, fn) {
 // brief's text never lands under another's name.
 let writeTicket = 0
 let previewTicket = 0
+// The editor is read-only until an existing brief's text has loaded, and stays
+// so if the load fails: Save would otherwise replace the stored brief with
+// whatever was typed over an empty box.
 const loadingContent = ref(false)
+const loadFailed = ref(false)
 
 function openWrite(c = null) {
   const ticket = ++writeTicket
@@ -168,13 +173,15 @@ function openWrite(c = null) {
   Object.assign(form, { filename: c?.filename || '', content: '', for_agents: c ? c.for_agents : false })
   writeOpen.value = true
   loadingContent.value = !!c
+  loadFailed.value = false
   if (!c) return
   store.readContext(props.projectId, c.id)
-    .then((full) => {
-      if (ticket !== writeTicket || form.content) return       // stale, or the person already typed
-      form.content = full.content
+    .then((full) => { if (ticket === writeTicket) form.content = full.content })   // a stale read is dropped
+    .catch((err) => {
+      if (ticket !== writeTicket) return
+      loadFailed.value = true
+      formError.value = projectErrorMessage(err)
     })
-    .catch((err) => { if (ticket === writeTicket) formError.value = projectErrorMessage(err) })
     .finally(() => { if (ticket === writeTicket) loadingContent.value = false })
 }
 
@@ -182,6 +189,10 @@ async function save() {
   formError.value = ''
   if (loadingContent.value) {
     formError.value = 'The brief is still loading.'
+    return
+  }
+  if (loadFailed.value) {
+    formError.value = "The brief couldn't be loaded, so it can't be saved from here. Close and try again."
     return
   }
   if (!form.filename.trim() || !form.content.trim()) {
@@ -226,6 +237,9 @@ async function upload(event) {
     error.value = projectErrorMessage({ response: { data: { detail: { code: 'not_text' } } } })
     return
   }
+  ++writeTicket                              // a pending Edit read no longer owns the editor
+  loadingContent.value = false
+  loadFailed.value = false
   editing.value = null
   formError.value = ''
   Object.assign(form, { filename: file.name, content, for_agents: false })
