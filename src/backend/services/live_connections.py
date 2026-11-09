@@ -394,15 +394,19 @@ class LiveConnectionRegistry:
                 "live connections: re-check read failed after a reported change; closing %d connections",
                 len(entries), exc_info=True,
             )
-            for entry in entries:
-                await self._close(entry, CloseReason.CHANGED)
+            await asyncio.gather(*(self._close(entry, CloseReason.CHANGED) for entry in entries))
             return
+        # Closes run side by side, each bounded by CLOSE_TIMEOUT_S, so a
+        # connection that is slow to close holds up no other one.
+        closing = []
         for entry in entries:
             if entry._released:
                 continue
             reason = _verdict(entry, rows.get(entry.username), entry.key_id in active)
             if reason is not None:
-                await self._close(entry, reason)
+                closing.append(self._close(entry, reason))
+        if closing:
+            await asyncio.gather(*closing)
 
     async def _close(self, entry: LiveConnection, reason: CloseReason) -> None:
         if entry._closing or entry._released:

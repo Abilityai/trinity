@@ -418,6 +418,33 @@ async def test_a_closer_that_raises_does_not_stop_the_others_or_the_loop(people)
 
 
 @pytest.mark.asyncio
+async def test_a_close_that_hangs_delays_neither_the_other_closes_nor_the_tick(people, monkeypatch):
+    """Closes run side by side, each bounded: one connection that does not
+    finish closing holds up no other connection's close, and the tick ends."""
+    monkeypatch.setattr(lc, "CLOSE_TIMEOUT_S", 0.5)
+    loop = asyncio.get_running_loop()
+    reg = LiveConnectionRegistry()
+    closed_after = {}
+    started = [loop.time()]
+
+    async def never_finishes(reason):
+        await asyncio.sleep(60)
+
+    async def closes(reason):
+        closed_after["bob"] = loop.time() - started[0]
+
+    _open(reg, DOOR_WS, ALICE, never_finishes)
+    _open(reg, DOOR_WS, BOB, closes)
+    people.update_user_role(ALICE, "operator")
+    people.update_user_role(BOB, "creator")
+
+    started[0] = loop.time()
+    await asyncio.wait_for(reg.revalidate(), timeout=5)
+    assert closed_after["bob"] < 0.25, f"a hanging close held up another for {closed_after['bob']:.2f}s"
+    assert loop.time() - started[0] < 2
+
+
+@pytest.mark.asyncio
 async def test_notify_from_a_plain_thread_closes_on_the_registrys_loop(registry, people):
     loop_thread = threading.get_ident()
     closes = Closes()
