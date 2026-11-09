@@ -206,6 +206,8 @@ export function useWebSocket() {
         try { agentsStore.fetchAgents && agentsStore.fetchAgents() } catch (_) {}
         try { notificationsStore.fetchPendingCount && notificationsStore.fetchPendingCount() } catch (_) {}
       }
+      // ent#1175: a Workspace store — the progress card re-reads too.
+      try { portalProgressStore.refetchAll() } catch (_) {}
       return
     }
     switch (data.event) {

@@ -52,9 +52,10 @@ WORKSPACE_KINDS = frozenset({
 
 # The fields those consumers read: the kind (`type`, or `event` for the lifecycle
 # kinds), the agent the event is about, and `activity_state` (the rail re-reads on
-# a terminal activity), plus `steps` (the progress card's state, ent#1175). `_eid`,
-# the replay cursor, is the dispatcher's own.
-WORKSPACE_FIELDS = frozenset({"type", "event", "agent_name", "activity_state", "steps"})
+# a terminal activity). `_eid`, the replay cursor, is the dispatcher's own.
+# `member_progress_update` (ent#1175) is a thin trigger — its listener refetches
+# the card — so it needs no field beyond these.
+WORKSPACE_FIELDS = frozenset({"type", "event", "agent_name", "activity_state"})
 
 
 def _slot(*, agents=("shared",), allowed_types=None, allowed_fields=None, is_admin=False):

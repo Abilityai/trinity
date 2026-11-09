@@ -40,8 +40,7 @@ WORKSPACE_WS_EVENT_TYPES = frozenset({
 # a terminal activity). Everything else — an activity's prompt and reply
 # previews, cost, session and execution ids — is cut from a Workspace-only
 # account's copy. The dispatcher keeps `_eid`, the replay cursor, on its own.
-WORKSPACE_WS_EVENT_FIELDS = frozenset({"type", "event", "agent_name", "activity_state",
-                                       "steps"})  # +steps for ent#1175 member_progress_update
+WORKSPACE_WS_EVENT_FIELDS = frozenset({"type", "event", "agent_name", "activity_state"})
 
 
 def accessible_agents_for(email: str) -> List[str]:

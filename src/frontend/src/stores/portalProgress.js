@@ -1,13 +1,20 @@
 /**
  * Member onboarding progress card store (ent#1175).
  *
- * Fetches the five-step setup card for a member's agent and handles live
- * ``member_progress_update`` WebSocket events so the card updates without
- * a reload.  The store is keyed by agent name so the same card is shown
- * whether the member opens or refreshes — no skeleton flash on a cache hit.
+ * Fetches the five-step setup card for a member's agent through the Workspace
+ * client (`portalHttp` + the portal auth header, like every client-portal
+ * read). A ``member_progress_update`` WebSocket event is a thin trigger — it
+ * carries the agent name only (#918) — so the store refetches through the
+ * access-controlled GET instead of trusting a broadcast payload.
+ *
+ * Keyed by agent name, so a remount reuses the last good card (no skeleton
+ * flash). A failed read is NOT cached: the next mount, WS trigger or
+ * ``resync_required`` reads again.
  */
 import { defineStore } from 'pinia'
-import api from '../api'
+import { portalHttp, useClientPortalStore } from './clientPortal'
+
+const EMPTY = Object.freeze({ loading: false, steps: [], all_done: false, active: false, error: null })
 
 export const usePortalProgressStore = defineStore('portalProgress', {
   state: () => ({
@@ -16,44 +23,45 @@ export const usePortalProgressStore = defineStore('portalProgress', {
   }),
 
   actions: {
-    async fetchProgress(agentName) {
+    async fetchProgress(agentName, { force = false } = {}) {
       if (!agentName) return
       const existing = this.byAgent[agentName]
-      // Skip if already loaded or in-flight
-      if (existing && (existing.loading || existing.active !== undefined)) return
+      if (existing?.loading) return
+      // A good read is reused on remount; a failed one (error set) is retried.
+      if (!force && existing?.loaded && !existing.error) return
 
-      this.byAgent[agentName] = { loading: true, steps: [], all_done: false, active: false, error: null }
+      // Keep showing the previous card while re-reading — no layout jump.
+      this.byAgent[agentName] = { ...(existing || EMPTY), loading: true }
       try {
-        const { data } = await api.get(
-          `/api/enterprise/client-portal/agents/${encodeURIComponent(agentName)}/progress`
+        const { data } = await portalHttp.get(
+          `/api/enterprise/client-portal/agents/${encodeURIComponent(agentName)}/progress`,
+          { headers: useClientPortalStore().authHeader },
         )
         this.byAgent[agentName] = {
           loading: false,
+          loaded: true,
           steps: data.steps || [],
           all_done: !!data.all_done,
           active: !!data.active,
           error: null,
         }
       } catch (err) {
-        // Soft fail — the enterprise module may not be present (OSS build) or
-        // the network may be temporarily unavailable.
-        this.byAgent[agentName] = { loading: false, steps: [], all_done: false, active: false, error: null }
+        // Soft fail — keep whatever card was shown, mark the error so the
+        // next trigger retries rather than serving a cached failure.
+        this.byAgent[agentName] = { ...(existing || EMPTY), loading: false, error: err?.message || 'failed' }
       }
     },
 
     handleWebSocketEvent(event) {
       if (!event || event.type !== 'member_progress_update') return
-      const agentName = event.agent_name
-      if (!agentName || !Array.isArray(event.steps)) return
-      const steps = event.steps
-      const all_done = steps.every((s) => s.state === 'done')
-      this.byAgent[agentName] = {
-        loading: false,
-        steps,
-        all_done,
-        active: true,
-        error: null,
-      }
+      if (!event.agent_name) return
+      return this.fetchProgress(event.agent_name, { force: true })
+    },
+
+    // The server trimmed our replay cursor: any update in the gap is lost, so
+    // re-read every card this tab is holding.
+    refetchAll() {
+      return Promise.all(Object.keys(this.byAgent).map((name) => this.fetchProgress(name, { force: true })))
     },
 
     clearProgress(agentName) {
@@ -64,8 +72,6 @@ export const usePortalProgressStore = defineStore('portalProgress', {
   },
 
   getters: {
-    progressFor: (state) => (agentName) => {
-      return state.byAgent[agentName] || { loading: false, steps: [], all_done: false, active: false, error: null }
-    },
+    progressFor: (state) => (agentName) => state.byAgent[agentName] || EMPTY,
   },
 })

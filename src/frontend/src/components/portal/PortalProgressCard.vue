@@ -1,9 +1,29 @@
 <template>
   <!-- Member onboarding progress card (ent#1175).
-       Visible in the Main conversation from acceptance until all five steps are done.
-       Card footprint is fixed by the five rows so the thread below never shifts. -->
+       Visible in the Main conversation from acceptance. While steps remain its
+       footprint is fixed by the five rows so the thread below never shifts; once
+       every step is done it collapses to one line (AC 3). -->
   <div
-    v-if="shouldShow"
+    v-if="shouldShow && allDone"
+    class="mb-6 flex items-center gap-2 rounded-lg border border-gray-200 dark:border-gray-750 bg-white dark:bg-gray-800 px-4 py-2"
+    data-testid="portal-progress-card-collapsed"
+    aria-label="Your setup progress"
+    role="region"
+  >
+    <span
+      class="w-4 h-4 shrink-0 flex items-center justify-center rounded-full bg-status-success-500 text-white"
+      aria-hidden="true"
+    >
+      <svg viewBox="0 0 12 12" fill="none" class="w-2.5 h-2.5">
+        <path d="M2 6l3 3 5-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </span>
+    <p class="text-sm text-gray-900 dark:text-gray-100 truncate">
+      You're all set up <span class="text-gray-500 dark:text-gray-400">· {{ steps.length }} of {{ steps.length }} steps complete</span>
+    </p>
+  </div>
+  <div
+    v-else-if="shouldShow"
     class="mb-6 rounded-lg border border-gray-200 dark:border-gray-750 bg-white dark:bg-gray-800 shadow-sm overflow-hidden"
     data-testid="portal-progress-card"
     aria-label="Your setup progress"
@@ -77,8 +97,9 @@ const props = defineProps({
   },
 })
 
-// Show the card while there is at least one step and not everything is done yet.
-const shouldShow = computed(() => props.active && props.steps.length > 0 && !props.allDone)
+// Show the card whenever the member has a progress record; `allDone` picks the
+// one-line collapsed form instead of the five rows.
+const shouldShow = computed(() => props.active && props.steps.length > 0)
 
 const doneCount = computed(() => props.steps.filter((s) => s.state === 'done').length)
 

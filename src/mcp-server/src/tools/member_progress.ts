@@ -57,7 +57,7 @@ export function createMemberProgressTools(
         "→ first_agent_built → first_run. The card updates in the member's browser " +
         "immediately via WebSocket. Set state to 'in_progress' when a step starts, " +
         "'done' when it completes, 'failed' with a plain-language note when it " +
-        "cannot complete. Unknown step keys are silently ignored.",
+        "cannot complete. Notes are capped at 280 characters; an unknown step key is refused.",
       parameters: z.object({
         agent_name: z
           .string()
@@ -74,6 +74,7 @@ export function createMemberProgressTools(
           .describe("New state: pending | in_progress | done | failed"),
         note: z
           .string()
+          .max(280)
           .optional()
           .describe(
             "Short plain-language note shown to the member (e.g. what failed and what happens next)."

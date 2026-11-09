@@ -290,16 +290,16 @@
              keyed on the call id (`groupVoiceBlocks`), placed where the call
              started. Visibly spoken — no rating control, a mic glyph, the
              label the call wrote ("Voice call · N min", and how it ended). -->
-        <!-- #2694: the window is counted in typed turns under a row ceiling.
-             When the ceiling cut the OLD end, say so — a thread that silently
-             starts mid-call is the very symptom the window fix removes. -->
-        <!-- ent#1175: member onboarding progress card — visible in Main until all done -->
+        <!-- ent#1175: member onboarding progress card — in Main from acceptance; one line once every step is done -->
         <PortalProgressCard
           v-if="isMainChat"
           :steps="progressData.steps"
           :all-done="progressData.all_done"
           :active="progressData.active"
         />
+        <!-- #2694: the window is counted in typed turns under a row ceiling.
+             When the ceiling cut the OLD end, say so — a thread that silently
+             starts mid-call is the very symptom the window fix removes. -->
         <p
           v-if="historyTruncated"
           :class="PLATFORM_LINE_CLASS"
