@@ -19,6 +19,17 @@
     <p v-if="withheld" class="text-xs text-gray-600 dark:text-gray-300" data-testid="project-material-withheld">{{ withheld }}</p>
     <InlineError v-if="error" :message="error" @dismiss="error = ''" />
 
+    <!-- trinity-enterprise#1193: briefs prepared on the project for its agents. -->
+    <ProjectContext
+      v-if="!guest"
+      :project-id="project.id"
+      :items="projectBriefs"
+      :can-contribute="canContribute"
+      :archived="archived"
+      :my-email="myEmail"
+      :is-creator="project.my_role === 'creator'"
+    />
+
     <p v-if="!files.length && !reports.length && !decisions.length" class="rounded-lg border border-dashed border-gray-300 dark:border-gray-700 p-6 text-center text-sm text-gray-600 dark:text-gray-300" data-testid="project-material-empty">
       {{ guest
         ? 'Nothing has been shared with you here yet.'
@@ -34,6 +45,12 @@
             <p class="text-xs text-gray-500 dark:text-gray-400">{{ f.agent_name }} · {{ humanSize(f.size_bytes) }} · link expires {{ formatRelativeTime(f.expires_at) }}</p>
           </div>
           <BaseBadge v-if="!guest && f.audience === 'guests'" variant="info">Shared with guests</BaseBadge>
+          <!-- trinity-enterprise#1193: the context mark on a linked file. -->
+          <label v-if="!guest && canContribute && !archived" class="inline-flex items-center gap-1.5 text-xs text-gray-700 dark:text-gray-300">
+            <input type="checkbox" :checked="f.for_agents" :data-testid="`file-mark-${f.id}`" @change="markFile(f, $event.target.checked)" />
+            For agents
+          </label>
+          <BaseBadge v-else-if="!guest && f.for_agents" variant="info">For agents</BaseBadge>
           <a :href="f.download_url" class="text-sm text-action-primary-600 dark:text-action-primary-400 hover:underline" :aria-label="`Download ${f.filename}`">Download</a>
           <ItemMenu v-if="!guest" :item="f" kind="file" :can-share="canShare" :can-remove="canRemove(f)" @share="toggleGuests('file', f)" @remove="remove('file', f)" />
         </li>
@@ -120,6 +137,7 @@ import ReportSummary from '@/components/reports/ReportSummary.vue'
 import { useProjectsStore } from '@/stores/projects'
 import { formatRelativeTime, formatLocalDateTime } from '@/utils/timestamps'
 import { humanSize } from '@/components/portal/portalFiles'
+import ProjectContext from './ProjectContext.vue'
 import { projectErrorMessage, withheldLine } from './projectsUtils'
 
 const props = defineProps({
@@ -158,6 +176,16 @@ const reports = computed(() => props.project.reports || [])
 const decisions = computed(() => (props.guest ? [] : props.project.decisions || []))
 const canContribute = computed(() => props.project.can?.contribute === true)
 const withheld = computed(() => (props.guest ? '' : withheldLine({ project: props.project, myEmail: props.myEmail, canContribute: canContribute.value, archived: archived.value }, 'files and reports')))
+// trinity-enterprise#1193: the project-level briefs (task briefs live on their task).
+const projectBriefs = computed(() => (props.project.context || []).filter((c) => c.kind === 'project-file' && !c.task_id))
+async function markFile(f, on) {
+  error.value = ''
+  try {
+    await store.markItemForAgents(props.project.id, 'file', f.id, on)
+  } catch (err) {
+    error.value = projectErrorMessage(err)
+  }
+}
 const archived = computed(() => Boolean(props.project.archived_at))
 const canShare = computed(() => props.project.can?.manage_members === true && !archived.value)
 const linked = computed(() => new Set([...files.value, ...reports.value, ...decisions.value].map((i) => i.id)))

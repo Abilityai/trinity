@@ -238,6 +238,22 @@ export const useProjectsStore = defineStore('projects', () => {
   const grantStewardAccess = (id, email) =>
     _write(id, () => portalHttp.post(url(id, '/steward-access/grant'), { email }, { headers: headers() }))
 
+  // --- ent#1193: context — briefs prepared for the project's agents ------------------
+  // Writes go through `_write`, so the page read (its `context` list) refreshes.
+  const writeContext = (id, body) =>
+    _write(id, () => portalHttp.post(url(id, '/context'), body, { headers: headers() }))
+  async function readContext(id, itemId) {
+    const { data } = await portalHttp.get(url(id, `/context/${encodeURIComponent(itemId)}`), { headers: headers() })
+    return data
+  }
+  const updateContext = (id, itemId, body) =>
+    _write(id, () => portalHttp.patch(url(id, `/context/${encodeURIComponent(itemId)}`), body, { headers: headers() }))
+  const deleteContext = (id, itemId) =>
+    _write(id, () => portalHttp.delete(url(id, `/context/${encodeURIComponent(itemId)}`), { headers: headers() }))
+  const markItemForAgents = (id, kind, targetId, forAgents) =>
+    _write(id, () => portalHttp.put(url(id, `/items/${kind}/${encodeURIComponent(targetId)}/for-agents`),
+      { for_agents: forAgents }, { headers: headers() }))
+
   async function metricOptions(id) {
     const { data } = await portalHttp.get(url(id, '/metric-options'), { headers: headers() })
     return data.agents || []
@@ -281,6 +297,7 @@ export const useProjectsStore = defineStore('projects', () => {
     addGuest, addItem, setItemAudience, removeItem, fetchReport, myItems, importCandidates, importProject,
     setHealth, linkMetric, unlinkMetric, metricOptions, stewarding, fetchStewarding,
     requestStewardAccess, grantStewardAccess,
+    writeContext, readContext, updateContext, deleteContext, markItemForAgents,
     fetchProjectPeople, fetchCompanyPeople, fetchStewardOptions,
   }
 })

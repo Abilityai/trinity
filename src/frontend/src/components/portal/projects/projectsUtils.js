@@ -184,6 +184,11 @@ const CODE_MESSAGE = {
   owner_not_on_project: "A task's owner must be the project's creator or one of its members. Add them to the project first.",
   invalid_owner: "Pick the owner from the project's people, or write a role as role:<id>. A name on its own reaches nobody.",
   session_required: 'Looking people up needs you signed in to Trinity. Reload the page and try again.',
+  context_too_large: 'A brief can be at most 512 KB. Split it into several files.',
+  project_context_full: "This project's briefs can total at most 5 MB. Remove one you no longer need first.",
+  unsupported_type: 'A brief is markdown (.md) or plain text (.txt). Link other files from Add from… instead.',
+  not_text: "This file isn't text. Save it as .md or .txt and try again.",
+  empty_brief: 'The brief is empty.',
   agent_not_found: "That agent isn't on your list, so you can't add it.",
   too_many_members: 'This project has reached its member limit.',
   too_many_links: 'This project has reached its link limit.',
@@ -495,4 +500,18 @@ export function verificationRule(project) {
     && (project?.agents || []).some((a) => a.agent_name === s.ref && a.state === 'active')
   const who = active ? `a member, or the steward agent ${s.ref},` : 'a member'
   return `An agent's completion claim waits here until ${who} confirms it.`
+}
+
+// --- trinity-enterprise#1193: context for agents ------------------------------------
+/** One agent read returns at most this many bytes; past it the agent reads on by offset. */
+export const AGENT_READ_BYTES = 200 * 1024
+export const CONTEXT_SHARED_NOTICE = 'Everyone who can read this project can read it.'
+
+/** What an agent receives from one read of `text`: the first part, and whether it is cut. */
+export function agentPreview(text) {
+  const bytes = new TextEncoder().encode(text || '')
+  if (bytes.length <= AGENT_READ_BYTES) return { text: text || '', truncated: false, total: bytes.length, shown: bytes.length }
+  let end = AGENT_READ_BYTES
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1     // never split a character
+  return { text: new TextDecoder().decode(bytes.slice(0, end)), truncated: true, total: bytes.length, shown: end }
 }
