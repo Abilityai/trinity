@@ -445,7 +445,8 @@ def test_the_alert_module_loads_once_take_over_replaces_recreate(monkeypatch):
     of it (the applier, the internal router) fails once both are in."""
     import importlib.util
     from services import schedule_tier_alerts, turn_tier_service
-    monkeypatch.delattr(turn_tier_service, "REMEDY_RECREATE")
+    # Already gone once both slices are in; the test must hold on either side.
+    monkeypatch.delattr(turn_tier_service, "REMEDY_RECREATE", raising=False)
     spec = importlib.util.spec_from_file_location("_sta_without_recreate", schedule_tier_alerts.__file__)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)      # never registered in sys.modules
