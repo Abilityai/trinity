@@ -26,9 +26,11 @@ Related flow: docs/memory/feature-flows/agent-guardrails.md
 from __future__ import annotations
 
 import ast
+import base64
 import importlib.util
 import json
 import os
+import random
 import re
 import subprocess
 import sys
@@ -184,6 +186,9 @@ BENIGN = [
     "?sig=Xq3vNw8pLr2TzYb6KdHj0MfA5sUeCo1gWi7RnQ4lVyE",
     "The redaction placeholder looks like [REDACTED:sk]; logs use ***REDACTED***.",
     "AWS_REGION=eu-west-1 AKIA_ROTATION_DAYS=90",
+    # Fix round R1: identifiers that start with the Trinity key prefix are code.
+    "def test_trinity_mcp_injection_writes_the_opt_out(tmp_path):",
+    "def test_trinity_mcp_key_is_injected_into_the_agent_environment_at_start(tmp_path):",
 ]
 
 
@@ -589,3 +594,79 @@ def test_the_build_smoke_fails_a_log_only_scanner(tmp_path):
     failures = []
     _smoke(tmp_path)._check_output_scanner(_hook_argv(tmp_path, log_only), failures)
     assert failures, "a scanner that hides nothing passed the smoke"
+
+
+# --- fix round R1: a Trinity MCP key is recognised whole ---------------------
+# Keys are `trinity_mcp_` + `secrets.token_urlsafe(32)`: 43 base64url
+# characters, so about 40% hold a `-` or `_`. The old body `[a-zA-Z0-9]{16,}`
+# missed a key with one in its first 16 characters and stopped at the first one
+# after that, leaving the key's tail in clear (batch verify F-1).
+
+_MCP_MINT = "src/backend/db/mcp_keys.py"
+_MCP_SOURCE = r'trinity_mcp_(?:(?=[a-z0-9_-]{0,42}[A-Z])[A-Za-z0-9_-]{43}|[a-zA-Z0-9]{16,})'
+
+
+def _minted_mcp_keys(count=2000, seed=165):
+    """Keys built the way the backend mints them (`token_urlsafe(32)` is the
+    unpadded base64url of 32 random bytes), from a seeded generator so a
+    failure names a reproducible key."""
+    rng = random.Random(seed)
+    return ["trinity_mcp_" + base64.urlsafe_b64encode(rng.randbytes(32)).rstrip(b"=").decode()
+            for _ in range(count)]
+
+
+def test_the_keys_under_test_are_minted_like_the_backend_mints_them():
+    assert 'f"trinity_mcp_{secrets.token_urlsafe(32)}"' in (H.REPO / _MCP_MINT).read_text()
+    keys = _minted_mcp_keys()
+    assert {len(k) for k in keys} == {12 + 43}
+    old = re.compile(r'trinity_mcp_[a-zA-Z0-9]{16,}')
+    missed = [k for k in keys if not old.search(k)]
+    cut = [k for k in keys if old.search(k) and old.search(k).group() != k]
+    # Not vacuous: the sample holds both failure kinds the old body had.
+    assert len(missed) > 300 and len(cut) > 300
+
+
+def test_every_minted_mcp_key_is_redacted_whole_by_the_scanner(tmp_path):
+    keys = _minted_mcp_keys()
+    rewritten = _rewrite(_scan(tmp_path, _bash(stdout="\n".join(f"key {k} end" for k in keys))))
+    assert rewritten["stdout"] == "\n".join("key [REDACTED:trinity_mcp] end" for _ in keys)
+
+
+def test_the_agent_mcp_config_read_back_hides_its_own_key(tmp_path):
+    """F-1 as it was found: `cat ~/.mcp.json` printed the agent's own key."""
+    key = "trinity_mcp_Df81fwt_" + "Q" * 35
+    config = json.dumps({"mcpServers": {"trinity": {"type": "http", "url": "http://mcp-server:8080/mcp",
+                                                     "headers": {"Authorization": f"Bearer {key}"}}}})
+    rewritten = _rewrite(_scan(tmp_path, _bash(stdout=config)))
+    assert rewritten["stdout"] == config.replace(key, "[REDACTED:trinity_mcp]")
+
+
+@pytest.mark.parametrize("rel", [_BACKEND_CS, _AGENT_CS])
+def test_every_minted_mcp_key_is_redacted_whole_from_logs(rel):
+    cs = _load(rel, "_cs165_r1_" + rel.replace("/", "_").replace(".", "_"))
+    keys = _minted_mcp_keys()
+    assert cs.sanitize_text(" | ".join(keys)) == " | ".join([cs.REDACTION_PLACEHOLDER] * len(keys))
+    assert _MCP_SOURCE in cs.SECRET_VALUE_PATTERNS, rel
+
+
+def test_the_composer_guard_knows_every_minted_mcp_key():
+    cs = _load(_BACKEND_CS, "_cs165_r1_guard")
+    assert [k for k in _minted_mcp_keys() if cs.secret_shape(f"here: {k}") is None] == []
+    assert cs._GUARD_SHAPES[_MCP_SOURCE] == "trinity_mcp"
+
+
+@pytest.mark.parametrize("rel", [_BACKEND_CS, _AGENT_CS])
+def test_a_key_that_holds_another_shape_is_redacted_whole_from_logs(rel):
+    """`sk-` inside a key's random body: the `sk` rule ran first and the MCP rule
+    then saw too short a head, which stayed in clear."""
+    cs = _load(rel, "_cs165_r1_nested_" + rel.replace("/", "_").replace(".", "_"))
+    key = "trinity_mcp_ab" + "sk-" + "Q" * 38
+    assert cs.sanitize_text(f"key {key} end") == f"key {cs.REDACTION_PLACEHOLDER} end"
+
+
+@pytest.mark.parametrize("rel", [_BACKEND_CS, _AGENT_CS])
+def test_identifiers_that_start_with_the_mcp_prefix_stay_in_logs(rel):
+    cs = _load(rel, "_cs165_r1_ident_" + rel.replace("/", "_").replace(".", "_"))
+    for line in BENIGN[-2:]:
+        assert cs.sanitize_text(line) == line, line
+

@@ -88,7 +88,7 @@
     {"name": "slack", "source": "xoxp-[a-zA-Z0-9\\-]+", "pattern": "(?<![A-Za-z0-9_-])xoxp-[a-zA-Z0-9\\-]{20,}", "tightening": "length floor 20"},
     {"name": "slack", "source": "xoxa-[a-zA-Z0-9\\-]+", "pattern": "(?<![A-Za-z0-9_-])xoxa-[a-zA-Z0-9\\-]{20,}", "tightening": "length floor 20"},
     {"name": "aws", "source": "AKIA[A-Z0-9]{16}", "pattern": "(?<![A-Za-z0-9_-])AKIA[A-Z0-9]{16}"},
-    {"name": "trinity_mcp", "source": "trinity_mcp_[a-zA-Z0-9]{16,}", "pattern": "(?<![A-Za-z0-9_-])trinity_mcp_[a-zA-Z0-9]{16,}"},
+    {"name": "trinity_mcp", "source": "trinity_mcp_(?:(?=[a-z0-9_-]{0,42}[A-Z])[A-Za-z0-9_-]{43}|[a-zA-Z0-9]{16,})", "pattern": "(?<![A-Za-z0-9_-])trinity_mcp_(?:(?=[a-z0-9_-]{0,42}[A-Z])[A-Za-z0-9_-]{43}|[a-zA-Z0-9]{16,})"},
     {"name": "ops", "source": "ops_eyJ[A-Za-z0-9_-]{40,}", "pattern": "(?<![A-Za-z0-9_-])ops_eyJ[A-Za-z0-9_-]{40,}"},
     {"name": "dop", "source": "dop_v1_[a-f0-9]{20,}", "pattern": "(?<![A-Za-z0-9_-])dop_v1_[a-f0-9]{20,}"},
     {"name": "google", "source": "AIza[0-9A-Za-z_-]{35}", "pattern": "(?<![A-Za-z0-9_-])AIza[0-9A-Za-z_-]{35}"}

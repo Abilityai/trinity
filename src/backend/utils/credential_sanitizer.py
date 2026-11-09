@@ -19,6 +19,14 @@ logger = logging.getLogger(__name__)
 
 # Secret value patterns - values that look like secrets regardless of context
 SECRET_VALUE_PATTERNS = [
+    # Trinity MCP keys (trinity-enterprise#165): `trinity_mcp_` + `token_urlsafe(32)`
+    # (db/mcp_keys.py), 43 base64url characters, so `-` and `_` are part of the
+    # key; the alnum-only body missed ~40% of keys or left their tail in clear.
+    # The 43-character form must hold an uppercase letter (a random key does,
+    # all but ~1 in 5e9), which keeps `trinity_mcp_<snake_case_name>` code out;
+    # the second branch is the older form. FIRST in the list, so an `sk-` that
+    # happens to sit in a key's random body cannot cut the key short.
+    r'trinity_mcp_(?:(?=[a-z0-9_-]{0,42}[A-Z])[A-Za-z0-9_-]{43}|[a-zA-Z0-9]{16,})',
     # One rule for the whole `sk-` family (#2208). Three prefix-specific patterns
     # meant every NEW variant shipped unredacted until someone noticed: the
     # generic `sk-[a-zA-Z0-9]{20,}` stops at the first hyphen, so an OpenAI
@@ -35,7 +43,6 @@ SECRET_VALUE_PATTERNS = [
     r'xoxp-[a-zA-Z0-9\-]+',           # Slack user token
     r'xoxa-[a-zA-Z0-9\-]+',           # Slack app token
     r'AKIA[A-Z0-9]{16}',              # AWS access key
-    r'trinity_mcp_[a-zA-Z0-9]{16,}',  # Trinity MCP keys
     # trinity-enterprise#1066: two service-token shapes a person is likely to
     # hand an agent — added to the list the redaction runs, not to a
     # guard-private one, so logs learn them in the same change.
@@ -487,7 +494,7 @@ _GUARD_SHAPES = {
     r'xoxp-[a-zA-Z0-9\-]+': "slack",
     r'xoxa-[a-zA-Z0-9\-]+': "slack",
     r'AKIA[A-Z0-9]{16}': "aws",
-    r'trinity_mcp_[a-zA-Z0-9]{16,}': "trinity_mcp",
+    r'trinity_mcp_(?:(?=[a-z0-9_-]{0,42}[A-Z])[A-Za-z0-9_-]{43}|[a-zA-Z0-9]{16,})': "trinity_mcp",
     r'ops_eyJ[A-Za-z0-9_-]{40,}': "ops",
     r'dop_v1_[a-f0-9]{20,}': "dop",
     r'AIza[0-9A-Za-z_-]{35}': "google",
