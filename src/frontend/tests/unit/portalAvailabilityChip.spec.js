@@ -23,7 +23,7 @@ import { fileURLToPath } from 'url'
 
 import {
   availabilityChip, composerAvailabilityNotice, viewerIsMemberTier, assistantStarting,
-  memberTierRefusal, MEMBER_RESTARTING_NOTICE,
+  memberTierRefusal, MEMBER_RESTARTING_NOTICE, setupPollVerdict, SETUP_POLL_CEILING_MS,
 } from '../../src/components/portal/portalUtils'
 
 const read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8')
@@ -285,5 +285,16 @@ describe('ent#1201 a member-tier viewer', () => {
     // A different 502 (usage limit, agent error) is not relabelled.
     expect(memberTierRefusal({ response: { status: 502, data: { detail: 'The agent has reached its usage limit.' } } }, MEMBER)).toBeNull()
     expect(memberTierRefusal({ response: { status: 422, data: { detail: 'x' } } }, MEMBER)).toBeNull()
+  })
+})
+
+describe('ent#1201 the set-up poll', () => {
+  it('polls while pending, stops when the flag clears, and goes overdue at the ceiling', () => {
+    expect(SETUP_POLL_CEILING_MS).toBe(3 * 60 * 1000)
+    expect(setupPollVerdict({ pending: true, elapsedMs: 0 })).toBe('poll')
+    expect(setupPollVerdict({ pending: true, elapsedMs: SETUP_POLL_CEILING_MS - 1 })).toBe('poll')
+    expect(setupPollVerdict({ pending: true, elapsedMs: SETUP_POLL_CEILING_MS })).toBe('overdue')
+    expect(setupPollVerdict({ pending: false, elapsedMs: 0 })).toBe('idle')
+    expect(setupPollVerdict({ pending: false, elapsedMs: SETUP_POLL_CEILING_MS * 2 })).toBe('idle')
   })
 })

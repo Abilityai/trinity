@@ -1205,6 +1205,17 @@ export function assistantStarting(progress) {
   return steps.some((s) => s?.key === 'assistant_ready' && s.state === 'in_progress')
 }
 
+// The set-up landing's poll (ent#1201). While the roster says the viewer's
+// agent is being set up, the shell re-reads it every few seconds, for at most
+// three minutes; past that it stops and says so rather than polling forever.
+// 'poll' | 'overdue' | 'idle' — idle once the flag clears, whatever the clock.
+export const SETUP_POLL_CEILING_MS = 3 * 60 * 1000
+
+export function setupPollVerdict({ pending, elapsedMs, ceilingMs = SETUP_POLL_CEILING_MS } = {}) {
+  if (!pending) return 'idle'
+  return elapsedMs >= ceilingMs ? 'overdue' : 'poll'
+}
+
 // A turn refused because the agent is not running (the server's 502 whose copy
 // ends "…its owner needs to start it."), re-said for a member-tier viewer in
 // words that name no one. Null for any other viewer or any other refusal, so

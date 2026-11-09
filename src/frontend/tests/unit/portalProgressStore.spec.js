@@ -65,3 +65,20 @@ describe('portalProgress store', () => {
     expect(get).toHaveBeenCalledTimes(4)
   })
 })
+
+// ent#1201: the sidebar row and the details panel read "is this member's
+// assistant still starting" off the one cached card.
+describe('portalProgress startingFor', () => {
+  beforeEach(() => { setActivePinia(createPinia()); get.mockReset() })
+
+  it('is true only while assistant_ready is in progress', async () => {
+    const s = usePortalProgressStore()
+    expect(s.startingFor('regent-bob')).toBe(false)
+    get.mockResolvedValue(ok([{ key: 'assistant_ready', state: 'in_progress' }]))
+    await s.fetchProgress('regent-bob')
+    expect(s.startingFor('regent-bob')).toBe(true)
+    get.mockResolvedValue(ok([{ key: 'assistant_ready', state: 'done' }]))
+    await s.fetchProgress('regent-bob', { force: true })
+    expect(s.startingFor('regent-bob')).toBe(false)
+  })
+})
