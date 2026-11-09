@@ -27,7 +27,7 @@ import httpx
 
 from config import CORS_ORIGINS, VOICE_ENABLED
 from models import User
-from dependencies import get_current_user, owner_is_suspended, owner_is_workspace_only, scope_may_open_event_stream, terms_route, workspace_route
+from dependencies import get_current_user, is_workspace_only_role, owner_is_suspended, owner_is_workspace_only, scope_may_open_event_stream, terms_route, workspace_route
 from services.docker_service import docker_client, list_all_agents_fast
 from utils.helpers import utc_now_iso
 
@@ -1610,6 +1610,16 @@ async def _close_live_socket(websocket: WebSocket, code: int, reason: str) -> No
     await websocket.close(code=code, reason=reason)
 
 
+def _scope_matches_snapshot(identity: dict, access: "live_connections.AccessSnapshot") -> bool:
+    """Is the `/ws` scope resolved from one account read the one the snapshot
+    recorded from the read before it describes (trinity-enterprise#863)?
+    Compared on what sets the scope: admin or not, Workspace-only or not, and
+    the email the roster is read by."""
+    return (identity["is_admin"] == (access.role == "admin")
+            and (identity["allowed_types"] is not None) == is_workspace_only_role(access.role)
+            and identity["email"] == access.email)
+
+
 # WebSocket endpoint
 @app.websocket("/ws")
 async def websocket_endpoint(
@@ -1685,6 +1695,10 @@ async def websocket_endpoint(
             identity = None
         if identity is None:
             await websocket.close(code=4001, reason="WebSocket ticket subject is not a known user")
+            return
+        if access.exists and not _scope_matches_snapshot(identity, access):
+            # The account read differently for the scope than for the snapshot.
+            await websocket.close(code=4000, reason="scope changed")
             return
         if not live.activate(access):
             # The account changed while this door was reading it.
@@ -1816,6 +1830,12 @@ async def websocket_events_endpoint(
         # open it. An owner that cannot be resolved is refused the same way.
         if owner_is_workspace_only(user_data):
             await websocket.close(code=4003, reason="This account works in the Workspace")
+            return
+        # trinity-enterprise#863 — the scope below is resolved with the email the
+        # key read returned, the snapshot with this owner read: both must
+        # describe the same account state.
+        if (user_data.get("email") or "") != (user_email or ""):
+            await websocket.close(code=4000, reason="scope changed")
             return
         if not live.activate(live_connections.access_snapshot(user_data)):
             # The owner's account changed while this door was reading it.

@@ -594,6 +594,38 @@ def test_a_change_while_the_browser_socket_reads_the_account_refuses_it(registry
     assert registry.count() == 0
 
 
+@pytest.mark.timeout(10)
+@pytest.mark.parametrize("middle, undo", [
+    (lambda db: db.update_user_role(ALICE, "admin"), lambda db: db.update_user_role(ALICE, "operator")),
+    (lambda db: _run("UPDATE users SET email = 'moved@example.test' WHERE username = :u", u=ALICE),
+     lambda db: _run("UPDATE users SET email = :e WHERE username = :u", e=ALICE_EMAIL, u=ALICE)),
+])
+def test_a_browser_socket_is_refused_when_its_scope_read_disagrees_with_its_snapshot(registry, people, monkeypatch,
+                                                                                    middle, undo):
+    """The door reads the account twice: the snapshot, then the scope. When
+    the scope read sees another role or email than the snapshot, the socket is
+    refused, even when the account reads as the snapshot again before any
+    re-check (so no re-check could ever tell the two apart)."""
+    from fastapi import WebSocketDisconnect
+
+    people.update_user_role(ALICE, "operator")
+    main, connect = _browser_socket(monkeypatch, ALICE)
+    real_resolve = main.resolve_ws_identity
+
+    def resolve_between_two_writes(username):
+        middle(people)
+        identity = real_resolve(username)
+        undo(people)
+        return identity
+
+    monkeypatch.setattr(main, "resolve_ws_identity", resolve_between_two_writes)
+    with pytest.raises(WebSocketDisconnect) as refused:
+        with connect:
+            pass
+    assert refused.value.code == 4000
+    assert registry.count() == 0
+
+
 def _event_stream(monkeypatch, token):
     import main
     from fastapi.testclient import TestClient
@@ -633,6 +665,33 @@ def test_the_event_stream_closes_with_its_code_and_unregisters_itself(registry, 
         assert main.stream_dispatcher.client_count() == held - 1
     assert registry.count() == 0
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+
+
+@pytest.mark.timeout(10)
+def test_an_event_stream_is_refused_when_its_owner_email_differs_from_its_key_read(registry, people, monkeypatch):
+    """The stream's scope is resolved with the email its key read returned,
+    and its snapshot with the owner read after it. When the two disagree the
+    stream is refused, so its scope and its snapshot describe one account."""
+    from database import db
+    from fastapi import WebSocketDisconnect
+
+    key = _key(people, ALICE)
+    main, connect = _event_stream(monkeypatch, key.api_key)
+    real_get = db.get_user_by_username
+    moved = []
+
+    def owner_read_after_an_email_change(username):
+        if username == ALICE and not moved:
+            moved.append(username)
+            _run("UPDATE users SET email = 'moved@example.test' WHERE username = :u", u=username)
+        return real_get(username)
+
+    monkeypatch.setattr(db, "get_user_by_username", owner_read_after_an_email_change)
+    with pytest.raises(WebSocketDisconnect) as refused:
+        with connect:
+            pass
+    assert refused.value.code == 4000
+    assert moved == [ALICE] and registry.count() == 0
 
 
 # ---------------------------------------------------------------------------

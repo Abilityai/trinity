@@ -776,6 +776,9 @@ _HELPER_ACCESSORS = {"get_accessible_agents", "accessible_agent_names", "visible
 #: (file, function) → why its principal is never an agent key, or why the admin
 #: branch selects no fleet. Shrink-only: `test_every_allowlist_entry_still_applies`.
 _ALLOW = {
+    ("main.py", "_scope_matches_snapshot"):
+        "compares the `/ws` scope a person's ticket resolved with that account's snapshot; selects no fleet "
+        "(trinity-enterprise#863)",
     ("routers/system_agent.py", "system_agent_terminal"):
         "the system-agent terminal authenticates a person (JWT) and checks the user row's role",
     ("services/settings_service.py", "get_agent_quota_for_role"):
