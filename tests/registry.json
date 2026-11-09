@@ -7585,6 +7585,42 @@
       "description": "/ws/events applies the #995 account-state check the other doors apply: dependencies.owner_is_suspended truth table (executed); the handler checks it on the owner row it resolves, closes and returns before accept() (shape check, main.py is not importable in the unit island); the close is identical to an inactive key's. Mutation: removing the guard turns both placement tests red."
     },
     {
+      "file": "unit/test_ent863_live_connections.py",
+      "feature": "trinity-enterprise#863",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "websocket",
+        "unit",
+        "security"
+      ],
+      "description": "Live connections follow the account: services/live_connections.py compares the account snapshot a door recorded at connect with the current row; a changed role (raised or lowered), email or password closes with the reconnect reason (4000), a deactivated or removed account or an inactive or deleted key with the ended reason (4001). The real role route re-checks the account at once on its worker, only when the role changed; a self-change is refused and closes nothing. A second worker's tick closes what the first worker's write left stale; a tick with nothing open reads nothing; a failed tick read keeps everything open and the next tick retries; a failed read after a reported change closes that account's connections; a raising closer does not stop the others or the loop. notify_account_changed from a plain thread closes on the registry's loop. A change while a door connects refuses it, a door that opens after the change stays open, and a re-check before the door's read marks it dirty. The real /ws and /ws/events handlers close with their codes, unregister their dispatcher slot before the handler returns, log no error, and refuse a socket whose account changed while it opened. Shape: each event door registers before it reads and goes live after it connects, releases in a finally; the 15 s loop starts outside the bus's try and stops with it. The batched reads return only existing rows and active keys and skip the database for an empty set."
+    },
+    {
+      "file": "unit/test_ent863_control_events.py",
+      "feature": "trinity-enterprise#863",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "websocket",
+        "unit",
+        "security"
+      ],
+      "description": "An account or key change reaches every worker: notify_account_changed / notify_key_changed re-check on the serving worker and publish one control event (scope control) through an injected publisher; each worker's dispatcher hands it to its registry's handle_control, which re-checks locally and never publishes again. A control entry reaches no client: _fanout routes it to the handler and returns (no roster read, no queue), with or without a handler, no slot of any kind is visible to it, and a last-event-id replay neither delivers nor re-runs it. Two dispatchers fed one entry each close their own registry's matching connections; two workers over one fake stream close from the event alone and publish once. The publisher's own echo closes nothing that already matches; an unrecognised control event is logged and closes nothing; a failing publish or handler is contained. The real MCP key revoke and delete routes close only the streams opened with that key, on both workers and when an admin revokes another person's key, never by account; a refused revoke closes nothing. A password change closes the account's connections (a revoked key's stream as ended). main.py wires the handler into the dispatcher and publishes through the bus at the control scope. Mutation: 18 hunk mutations, each turns a named test red."
+    },
+    {
+      "file": "unit/test_ent863_event_stream_roster.py",
+      "feature": "trinity-enterprise#863",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "websocket",
+        "unit",
+        "security"
+      ],
+      "description": "An event-stream key's agent list follows access changes: the real /ws/events handler gives every non-admin key (user keys too, not only agent keys) a roster read that re-reads the key's owner, and refresh reads the owner's current row (a lowered role reads the smaller list, a deactivated owner none); after an unshare fan-out the slot no longer receives the unshared agent's events. ws_identity_service.event_stream_roster_reader re-reads on every call, reads a gone, deactivated or Workspace-only owner as an empty list, and uses the owner's current email. A change that lands while a roster read is in flight is followed by one more read (/ws and /ws/events slots, and the refresh command); a slot that disconnects is not read again. StreamDispatcher re-reads every non-admin roster about once a minute (ROSTER_REREAD_INTERVAL_S = 60) in a per-worker loop it starts and stops itself: reads run one at a time, nothing is read while no non-admin roster is held, admin slots are never read, and a failing read keeps the previous roster and the loop."
+    },
+    {
       "file": "unit/test_ent860_room_wake_access.py",
       "feature": "trinity-enterprise#860",
       "added": "2026-10-20",
