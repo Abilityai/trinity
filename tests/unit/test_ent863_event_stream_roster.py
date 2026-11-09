@@ -670,6 +670,34 @@ async def test_an_access_change_during_a_periodic_cycle_is_read_at_once(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_a_slot_that_disconnects_before_its_periodic_read_is_not_read(monkeypatch):
+    _fast_interval(monkeypatch, 0.01)
+    monkeypatch.setattr(StreamDispatcher, "_supervised_reader", _no_reader)
+    slow = _SlowFirstRead(first=["a"], then=["a"])
+    gone_reads = []
+    d = StreamDispatcher()
+    d._clients = {
+        "first": _ClientSlot(
+            ws=None, scope=SCOPE_SCOPED, send_func=None, roster_resolver=slow
+        ),
+        "gone": _ClientSlot(
+            ws=None, scope=SCOPE_SCOPED, send_func=None,
+            roster_resolver=lambda: gone_reads.append(1) or ["x"],
+        ),
+    }
+    await d.start()
+    try:
+        await _wait_started(slow)  # the cycle is blocked on its first read
+        d.unregister("gone")
+        slow.release.set()
+        await _until(lambda: slow.calls >= 2)  # the next cycle has begun
+    finally:
+        slow.release.set()
+        await d.stop()
+    assert gone_reads == []
+
+
+@pytest.mark.asyncio
 async def test_the_periodic_re_read_reads_nothing_when_no_roster_is_held(monkeypatch):
     _fast_interval(monkeypatch, 0.01)
     monkeypatch.setattr(StreamDispatcher, "_supervised_reader", _no_reader)

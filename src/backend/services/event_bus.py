@@ -690,13 +690,18 @@ class StreamDispatcher:
         loop itself holds at most one thread of the default executor at a time,
         and it reads nothing while no non-admin roster is held. Each group is
         claimed just before its own read, so a slot the cycle has not reached
-        yet is still free for an access change's read. A read that fails keeps
+        yet is still free for an access change's read, and a slot that has
+        disconnected by then is skipped. A read that fails keeps
         the previous roster; any other error is logged and the loop carries on."""
         while not self._shutting_down:
             await asyncio.sleep(ROSTER_REREAD_INTERVAL_S)
             try:
                 for slots, read in self._claim_roster_reads(claim=False):
-                    claimed = [slot for slot in slots if self._claim_slot(slot)]
+                    live = {id(s) for s in self._clients.values()}
+                    claimed = [
+                        slot for slot in slots
+                        if id(slot) in live and self._claim_slot(slot)
+                    ]
                     if claimed:
                         await self._refresh_slots(claimed, read)
             except asyncio.CancelledError:
