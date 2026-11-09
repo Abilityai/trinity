@@ -3858,6 +3858,13 @@ async def create_agent_internal(
     # `clear_agent_breakers`: that also runs on every start.
     from services import agent_skills_listing
     agent_skills_listing.forget(config.name)
+    # trinity-enterprise#165: and the guardrail-event reporter record, for the
+    # same two reasons (a teardown whose fail-open Redis clear failed, or an
+    # ingest in flight during the delete writing it back). Its
+    # `first_report_at` would otherwise date the new agent's coverage before
+    # the agent existed: history it never reported would read as covered.
+    from services import guardrail_event_service
+    guardrail_event_service.clear_reporter(config.name)
 
     # QUOTA-001: per-role durable-agent quota (429; ephemeral agents bypass it).
     _enforce_role_quota(config, current_user)

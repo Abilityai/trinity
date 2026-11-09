@@ -336,6 +336,82 @@ Immutable, root-owned `0444`. Contents:
 
 ---
 
+## Guardrail event store and read (GUARD-005, trinity-enterprise#165 S1)
+
+The backend half of the guardrail event surface. The hooks' spool and the agent-server forwarder that pushes it are slice S2 (not described here). Requirement: [security.md §28.5](../requirements/security.md).
+
+```
+forwarder (agent's own TRINITY_MCP_API_KEY)
+  └─ POST /api/agents/{name}/guardrail-events          routers/guardrail_events.py
+       ├─ authorize_heartbeat (own key only) ......... 403
+       ├─ guardrail_event_service.check_rate ......... 429 + Retry-After (60 / 60 s / agent)
+       ├─ body > 256 KiB / events > 500 .............. 413
+       ├─ authorize_heartbeat again, body in hand .... 403 (a body that outlived a delete / rename)
+       ├─ GuardrailEventBatch (envelope only) ........ 422
+       └─ guardrail_event_service.ingest
+            ├─ normalize_event, one at a time ........ rejected++ on a shape failure
+            ├─ db.insert_guardrail_events ............ ON CONFLICT (agent_name, event_id) DO NOTHING RETURNING id
+            └─ record_report → Redis agent:guardrail_reporter:{name}
+
+owner / admin (OwnedAgentByName, uniform 404)
+  └─ GET /api/agents/{name}/guardrail-events?since&until&kind&execution_id&limit&before
+       └─ list_events → {events, next_cursor, reporting}
+```
+
+| Piece | Where | What it decides |
+|---|---|---|
+| Ingest + read routes | `src/backend/routers/guardrail_events.py` | Status order the forwarder branches on (403 → 429 → 413 → 422 → 200). The body is read under the byte cap, never buffered past it, and the own-key check runs again once it is in, so a slow body cannot write after its agent was deleted or renamed. |
+| Validation, reporting, counts | `src/backend/services/guardrail_event_service.py` | `KINDS` / `HOOKS` (the §6.1 closed sets; unknown → `other` + `kind_raw` / `hook_raw` in `details`), the open `code` (`^[a-z0-9_]{1,64}$`), `execution_id` > 128 chars → null, the field allowlist (`patterns`, `verb`, `tier`, `turn_kind`, `rule` ≤ 200, `path` ≤ 512, `session_id`, `tool_use_id`), free text through `sanitize_text`. A NUL or a lone surrogate (no store can hold either) becomes U+FFFD in display text and drops an id, so one such event never fails the batch or the read. A `ts` later than the receive time is stored at the receive time (`occurred_at` ≤ `received_at`; the agent's value kept as `details.occurred_at_reported`), so a skewed clock neither loses the event nor keeps it in every window. Reporting state: `never` / `reporting` (≤ 15 min) / `stale`; a missing Redis record falls back to the newest row's `received_at`. `first_report_at` is the coverage start: `HSETNX` on the first report (first write wins), else the oldest row's `received_at`, else `last_report_at`; capped at `last_report_at` (two racing reports can write the start after a later-dated last); null exactly when `never`. A lost Redis can only move it later. The create path (`crud.create_agent_internal`) clears a recycled name's reporter record beside the #1560 breakers, so a predecessor's start (a fail-open teardown clear, or an ingest in flight during the delete) never dates a new agent's coverage. `count_by_execution` reads reporting before the counts. |
+| Store | `src/backend/db/guardrail_events.py`, table `guardrail_events` | Keyset paging on `(occurred_at, id)`; `count_by_execution` (one `IN` query, filtered by agent); `count_by_agent`; the retention count and prune share one predicate on `received_at`. |
+| Migrations | `db/migrations.py::guardrail_events_table`, Alembic `0123_guardrail_events` | Additive table + three indexes on both tracks (Invariant #9). |
+| Lifecycle | `db/agent_cleanup.py` `AGENT_REFS` (CASCADE); `services/agent_runtime_state.py` `CLEARED_KEYSPACES` | Rows rename with the agent and go with its hard delete. The reporter key is cleared on teardown only — not on start, or a restarted agent would read `never`. |
+| Retention | `guardrail_event_retention_days` (default 90, `0` off) in `config.py`; `cleanup_service._sweep_guardrail_events_retention` | Pruned by server receive time behind the #1644 guard, in bounded chunks. |
+| Censuses | `services/agent_route_tiers.json` (POST `self`, GET `owner`); `tests/unit/_route_census.py` `AGENT_CALLABLE_ANY` | Both routes classified; the frozen baseline does not grow. |
+
+**Seams for other features.** `count_by_execution(agent, execution_ids)` → `{"reporting": {...}, "executions": {id: {"by_kind": {...}, "by_hook_code": {"hook:code": n}}}}` (executions without events are absent; `reporting.first_report_at` lets a consumer read a run that ended before coverage started as "no data", not as a clean 0); `count_by_agent(hours, agent_names=None)` → `{"agents": {name: {"by_kind": {...}}}}`. Consumers read at request time: an event lands a few seconds after the hook fired. Neither reads the spool.
+
+**Not covered by S1.** No forwarder exists until S2 lands, so on this slice alone every agent reads `never`. No UI, no fleet endpoint (S4), no MCP tool. Events are agent-reported, not tamper-proof.
+
+**Tests.** `tests/unit/test_ent165_guardrail_event_store.py` (real rows, SQLite + PostgreSQL), `test_ent165_guardrail_event_route.py` (real router over a real DB), `test_ent165_guardrail_event_retention.py`, `test_ent165_guardrail_event_contract.py` (enum parity with the hook library; skips until S2 adds `EVENT_KINDS` / `EVENT_HOOKS`).
+
+---
+
+## Fleet guardrail counts and the two UI surfaces (GUARD-005, trinity-enterprise#165 S4)
+
+Built on the S1 read seams; nothing here reads the spool. Requirement: [security.md §28.5](../requirements/security.md).
+
+```
+Operations › Health (admin)                      Agent › Settings › Guardrails (owner, agent.can_share)
+  MonitoringPanel → GuardrailStatsCard             GuardrailsPane → GuardrailEventsSection (runtime = agent.runtime)
+    store guardrailEvents.loadFleet(24)              store guardrailEvents.loadAgent(name)
+      GET /api/ops/guardrail-stats?hours=24            GET /api/agents/{name}/guardrail-events?since=<now-24h>&limit=50
+        require_person ............. 403 for agent / system / ops / connector keys
+        is_fleet_admin ? every live agent : db.get_agents_by_owner(username)
+        guardrail_event_service.fleet_stats(hours, names)
+          count_by_agent(hours, names)          ── per-kind counts
+          reporting_states(names)               ── one Redis pipeline + one grouped DB fallback
+          _container_runtimes()                 ── docker_service.agent_container_runtimes (one round trip)
+          coverage_of(runtime, state)           ── no_hooks | never | stale | reporting
+```
+
+| Piece | Where | What it decides |
+|---|---|---|
+| Fleet route | `src/backend/routers/guardrail_events.py::ops_router` (`GET /api/ops/guardrail-stats`) | A person only (`require_person`): an agent key carries its owner's role, so on an admin-owned install it would otherwise read the whole fleet. `hours` 1–2160 (the 90-day retention default), else 422. |
+| Scope | `guardrail_event_service.fleet_agent_names` | Admin → every live agent; anyone else → the live agents they **own** (not shared — the per-agent read's owner tier, D8). |
+| Coverage | `guardrail_event_service.coverage_of` | `no_hooks` when the runtime (container label, else the forwarder's last report) is not Claude Code — before the reporting state, because a Codex/Gemini forwarder's keepalives read `reporting` while no hook can ever fire. An unknown runtime is Claude Code, the platform default. `HOOKED_RUNTIMES` is pinned equal to `agent_service.helpers.CLAUDE_RUNTIME_NAMES`. |
+| Every agent listed | `fleet_stats` | Agents with no events are rows too, so the card can name the silent ones. Loudest first, then by name. |
+| Card | `src/frontend/src/components/GuardrailStatsCard.vue` | Total + per-kind badges; the total is `—` and the card says why when no agent reports; "No guardrail events in the last 24 h" only when some agent reports; one bounded list of agents with events or a non-reporting coverage, each with its own words; rows open the agent's Settings › Guardrails. |
+| Recent events | `src/frontend/src/components/agent-settings/GuardrailEventsSection.vue` | One notice per non-reporting coverage (never / stale with its time / no hooks), then the rows (kind, `hook · code`, tool and path/rule/patterns, relative time with the absolute on hover), at most 50 with "Latest N shown". The empty copy only while reporting. |
+| Shared rule and copy | `src/frontend/src/utils/guardrailEvents.js` | `agentCoverage` mirrors `coverage_of` for the per-agent read, which carries only `reporting`. |
+
+**States, both surfaces.** Loading is a skeleton in the loaded footprint; a failed first read is `LoadFailed`, never an empty copy; a failed refresh keeps the data and raises the stale banner (`InlineError`); the Health tab's 30 s refresh reloads the card in place.
+
+**Not covered by S4.** GUARD-005 stays 🚧: the blocked/allowed ratio (allows are not forwarded), top blocked patterns, notifications (trinity-enterprise#141) and export are not part of #165. No MCP tool. The `ops` read-only key is not admitted (the route is not in its allowlist and `require_person` refuses it).
+
+**Tests.** `tests/unit/test_ent165_guardrail_stats.py` (real router over a real DB); `src/frontend/tests/unit/guardrailStatsCard.mount.spec.js`, `guardrailEventsSection.mount.spec.js`, `guardrailEventsUtils.spec.js`.
+
+---
+
 ## Relationship to Read-Only Mode (CFG-007 / #887)
 
 Guardrails and read-only mode are **independent, complementary** layers:

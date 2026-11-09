@@ -6246,6 +6246,39 @@ def _migrate_channel_client_blocks(cursor, conn):
     """)
 
 
+def _migrate_guardrail_events_table(cursor, conn):
+    """trinity-enterprise#165 (GUARD-005) — the guardrail event store: one row
+    per refusal / redaction / hook error an agent's own key reported. Schema is
+    also in db/schema.py for fresh installs; mirrored by Alembic revision
+    0123_guardrail_events. Additive: a new table, no existing row touched.
+    """
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS guardrail_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            agent_name TEXT NOT NULL,
+            event_id TEXT NOT NULL,
+            occurred_at TEXT NOT NULL,
+            received_at TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            hook TEXT NOT NULL,
+            tool TEXT,
+            code TEXT,
+            execution_id TEXT,
+            details TEXT,
+            UNIQUE(agent_name, event_id)
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_guardrail_events_agent_occurred ON guardrail_events(agent_name, occurred_at)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_guardrail_events_execution ON guardrail_events(execution_id)"
+    )
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_guardrail_events_received ON guardrail_events(received_at)"
+    )
+
+
 def run_mcp_external_access_backfill(run, *, now_iso: str) -> bool:
     """abilityai/trinity-enterprise#1101 — an install that already has users
     was serving `/mcp` to off-box clients before the switch existed, so it
@@ -6495,4 +6528,5 @@ MIGRATIONS = [
     ("public_user_memory_writes_section", _migrate_public_user_memory_writes_section),
     ("agent_ownership_wake_on_ending", _migrate_agent_ownership_wake_on_ending),
     ("channel_client_blocks", _migrate_channel_client_blocks),
+    ("guardrail_events_table", _migrate_guardrail_events_table),
 ]
