@@ -420,7 +420,8 @@ export const INTER_AGENT_DEPTH_EXCEEDED = "inter_agent_depth_exceeded";
 
 /**
  * #4357: mirrors the backend's `InterAgentDepthExceeded.RESETS`. Used when the
- * refusal body carries no `resets` of its own.
+ * refusal body carries no `resets` of its own. Kept equal to the backend's by
+ * `tests/unit/test_4357_depth_resets_parity.py`.
  */
 export const DEPTH_RESETS =
   "The depth falls when that execution finishes: every call you make counts " +

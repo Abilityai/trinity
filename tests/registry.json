@@ -8724,6 +8724,18 @@
         "reliability"
       ],
       "description": "#4357: a caller wake stands at the delegator's own depth (max(callee - 1, MAX(running caller), 0)), so twenty delegate->wake rounds and a reminder fired while the last wake runs are all admitted through the real /task depth guard; a synchronous chain is still refused past the max and answered/ended asks stay roots. The per-pair hourly wake budget caller_wake_max_per_hour (default 120, <=0 unlimited) skips and audits skipped_budget past the cap with one notification per window, fails open without Redis, and a collapsed window spends nothing."
+    },
+    {
+      "file": "unit/test_4357_depth_resets_parity.py",
+      "feature": "#4357",
+      "added": "2026-11-08",
+      "categories": [
+        "unit",
+        "backend",
+        "mcp",
+        "agent-collaboration"
+      ],
+      "description": "#4357: the MCP server's fallback depth-reset sentence (client.ts DEPTH_RESETS, used when a refusal body carries no resets) equals the backend's InterAgentDepthExceeded.RESETS, and the backend's refusal body sends that sentence, so the two copies cannot drift."
     }
   ]
 }
