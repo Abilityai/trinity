@@ -174,6 +174,8 @@ describe('restrictedTurnOf: the slice C record on turn_integrity', () => {
     expect(restrictedTurnOf(JSON.stringify({ killed_notice: 'x' }))).toBeNull()
     expect(restrictedTurnOf('{not json')).toBeNull()
     expect(restrictedTurnOf(JSON.stringify({ restricted_turn: 'nope' }))).toBeNull()
+    expect(restrictedTurnOf(JSON.stringify({ restricted_turn: [record] }))).toBeNull()
+    expect(restrictedTurnOf(JSON.stringify([record]))).toBeNull()
   })
 })
 

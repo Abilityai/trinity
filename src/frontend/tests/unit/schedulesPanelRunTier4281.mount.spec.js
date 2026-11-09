@@ -340,6 +340,93 @@ describe('Take over', () => {
     w.unmount()
   })
 
+  // Review of slice F: these pin the guards that a revert left green.
+
+  it('a "keep" chosen on one version is not carried to the next (D8)', async () => {
+    // The creator changes the delivery to someone else between the open and
+    // the confirm. The next confirm must not keep that new address unasked.
+    const later = restricted('a', { updated_at: '2026-12-01T00:00:00Z', deliver_to_workspace_email: 'q@example.com' })
+    lists = [[restricted('a', { deliver_to_workspace_email: 'p@example.com' })], [later]]
+    takeOver = vi.fn(async () => { throw conflict('schedule_changed_since_review') })
+    const w = mountPanel()
+    await flush()
+    const d = await open(w)
+    await d.find('[data-testid="take-over-delivery-keep"]').setValue(true)
+    await d.find('[data-testid="take-over-confirm"]').trigger('click')
+    await flush()
+    expect(takeOverPosts()[0][1]).toMatchObject({ delivery: 'keep', keep_delivery_to: 'p@example.com' })
+    expect(page().find('[data-testid="take-over-delivery"]').text()).toContain('q@example.com')
+    takeOver = vi.fn(async () => ({ data: {} }))
+    await page().find('[data-testid="take-over-confirm"]').trigger('click')
+    await flush()
+    const last = takeOverPosts().at(-1)[1]
+    expect(last.delivery).toBe('clear')
+    expect(last).not.toHaveProperty('keep_delivery_to')
+    w.unmount()
+  })
+
+  it('a "keep" chosen and cancelled is not carried into the next review', async () => {
+    lists = [[restricted('a', { deliver_to_workspace_email: 'p@example.com' })]]
+    const w = mountPanel()
+    await flush()
+    let d = await open(w)
+    await d.find('[data-testid="take-over-delivery-keep"]').setValue(true)
+    await d.find('[data-testid="take-over-cancel"]').trigger('click')
+    await flush()
+    d = await open(w)
+    await d.find('[data-testid="take-over-confirm"]').trigger('click')
+    await flush()
+    expect(takeOverPosts().at(-1)[1].delivery).toBe('clear')
+    w.unmount()
+  })
+
+  it('409 not_restricted: shows the current version and offers nothing to adopt', async () => {
+    lists = [[restricted('a')], [schedule('a', { updated_at: '2026-12-01T00:00:00Z' })]]
+    takeOver = vi.fn(async () => { throw conflict('schedule_not_restricted') })
+    const w = mountPanel()
+    await flush()
+    const d = await open(w)
+    await d.find('[data-testid="take-over-confirm"]').trigger('click')
+    await flush()
+    expect(page().find('[data-testid="take-over-error"]').text()).toMatch(/already have the owner's access/)
+    const confirm = page().find('[data-testid="take-over-confirm"]')
+    expect(confirm.attributes('disabled')).toBeDefined()
+    await confirm.trigger('click')
+    await flush()
+    expect(takeOverPosts()).toHaveLength(1)
+    w.unmount()
+  })
+
+  it('409 changed_since_review on a schedule that is gone: nothing left to adopt', async () => {
+    lists = [[restricted('a')], []]
+    takeOver = vi.fn(async () => { throw conflict('schedule_changed_since_review') })
+    const w = mountPanel()
+    await flush()
+    const d = await open(w)
+    await d.find('[data-testid="take-over-confirm"]').trigger('click')
+    await flush()
+    expect(page().find('[data-testid="take-over-confirm"]').attributes('disabled')).toBeDefined()
+    w.unmount()
+  })
+
+  it('Esc does not close the review while the take-over is in flight', async () => {
+    lists = [[restricted('a')]]
+    let release
+    takeOver = vi.fn(() => new Promise((resolve) => { release = () => resolve({ data: {} }) }))
+    const w = mountPanel()
+    await flush()
+    const d = await open(w)
+    await d.find('[data-testid="take-over-confirm"]').trigger('click')
+    await flush()
+    await page().find('[role="dialog"]').trigger('keydown', { key: 'Escape' })
+    await flush()
+    expect(page().find('[data-testid="take-over-dialog"]').exists()).toBe(true)
+    release()
+    await flush()
+    expect(page().find('[data-testid="take-over-dialog"]').exists()).toBe(false)
+    w.unmount()
+  })
+
   it('initial focus is not on the Take over button', async () => {
     lists = [[restricted('a')]]
     const w = mountPanel()
