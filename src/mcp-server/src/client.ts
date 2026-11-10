@@ -4418,6 +4418,12 @@ export class TrinityClient {
     return res.entries;
   }
 
+  /** trinity-enterprise#1193: one budget-sized part of a brief marked for agents. */
+  async readProjectContext(projectId: string, itemId: string, offset = 0, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("GET",
+      this.projectPath(projectId, `/context/${encodeURIComponent(itemId)}?offset=${offset}`), turn);
+  }
+
   async addProjectLogEntry(projectId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
     return this.projectRequest("POST", this.projectPath(projectId, "/log"), turn, body);
   }
@@ -4444,6 +4450,7 @@ export class TrinityClient {
 
   /** trinity-enterprise#588: import one of the agent's OWN folder projects (projects.manage). */
   async importProjectAsAgent(path: string, turn?: string): Promise<Record<string, unknown>> {
+    // No steward: another agent as steward needs an approval (propose_project_changes, #1194 ruling).
     return this.projectRequest("POST", "/api/enterprise/projects/agent/projects/import", turn, { path });
   }
 

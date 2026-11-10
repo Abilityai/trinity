@@ -887,7 +887,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // is unavailable.
     async startPortalChat(agentName, message, sessionId = null,
                     { newThread = false, openCanvasId = null, model = null, replyToMessageId = null,
-                      attachments = null, tags = null, voiceCallId = null } = {}) {
+                      attachments = null, tags = null, voiceCallId = null, idempotencyKey = null } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat/stream`,
         {
@@ -913,7 +913,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
           // as picked). Only when there are some: every other body is unchanged.
           ...(tags && tags.length ? { tags } : {}),
         },
-        { headers: this.authHeader }
+        // trinity-enterprise#1195: a task's Start sends its first message with
+        // a deterministic key, so a double click or a retry runs ONE turn
+        // (Invariant #18). Every other caller is unchanged.
+        { headers: idempotencyKey ? { ...this.authHeader, 'Idempotency-Key': idempotencyKey } : this.authHeader }
       )
       return data   // {execution_id, session_id}
     },

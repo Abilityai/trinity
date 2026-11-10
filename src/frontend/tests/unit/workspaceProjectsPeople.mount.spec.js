@@ -144,6 +144,23 @@ describe('the steward', () => {
     expect(projects.create).toHaveBeenCalledWith(expect.objectContaining({ steward: { kind: 'person', ref: BOB.email } }))
   })
 
+  it('editing an existing project looks the steward up through the project, never the company (ent#1165)', async () => {
+    projects.fetchProjectPeople = vi.fn(async () => [BOB])
+    const existing = {
+      id: 'prj_1', name: 'Q4', goal: 'Ship it.', status: 'active', visibility: 'members', created_by: ME,
+      steward: { kind: 'person', ref: ME }, members: [{ email: ME, role: 'creator', label: 'Me' }], can: { edit: true },
+    }
+    mount(ProjectCreateModal, { props: { modelValue: true, myEmail: ME, project: existing }, attachTo: document.body })
+    await flushPromises()
+    const steward = document.getElementById('project-steward')
+    steward.value = 'person'
+    steward.dispatchEvent(new Event('change'))
+    await flushPromises()
+    await pick(document.getElementById('project-steward-email'), 'bo', 'Bob Baker')
+    expect(projects.fetchProjectPeople).toHaveBeenCalledWith('prj_1', 'bo', 'steward')
+    expect(projects.fetchCompanyPeople).not.toHaveBeenCalled()
+  })
+
   it('a steward typed but not picked is not sent', async () => {
     projects.create = vi.fn().mockResolvedValue({ id: 'prj_9' })
     mount(ProjectCreateModal, { props: { modelValue: true, myEmail: ME }, attachTo: document.body })
