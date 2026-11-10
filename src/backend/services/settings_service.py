@@ -91,6 +91,7 @@ OPS_SETTINGS_DESCRIPTIONS = {
     "metrics_daily_point_cap": "Maximum metric points one agent may record per UTC day (default: 100000, bounds 0-10000000; 0 is unlimited). Bootstrap via METRICS_DAILY_POINT_CAP until a value is saved here (trinity-enterprise#478)",
     "inter_agent_max_chain_depth": "Maximum agent-to-agent hops in one call chain (default: 8, bounds 1-32). A hop past it is refused with 403 inter_agent_depth_exceeded before any model work. Bootstrap via INTER_AGENT_MAX_CHAIN_DEPTH until a value is saved here (#2806)",
     "event_dispatch_max_fires_per_hour": "Maximum event-subscription dispatches from one source agent to one subscriber agent per hour, across all subscriptions between them (default: 120, bounds 1-10000). Dispatches past it are skipped and the subscriber gets one alert per window (#2973)",
+    "caller_wake_max_per_hour": "Maximum wakes one agent's ended runs may send the agent that delegated them per hour (default: 120, bounds 0-10000, 0 = unlimited). A wake past it is skipped and audited, the delegator gets one alert per window, and the ending stays readable with get_execution_result. Bootstrap via CALLER_WAKE_MAX_PER_HOUR until a value is saved here (#4357)",
 }
 
 

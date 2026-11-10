@@ -29,6 +29,7 @@ from services.docker_utils import (
 )
 from services.agent_service.helpers import validate_base_image
 from services.agent_runtime_state import clear_agent_breakers
+from services.agent_ssh_binding import agent_ssh_port_binding, raise_for_ssh_bind_failure
 from services.settings_service import get_anthropic_api_key, get_github_pat, get_agent_full_capabilities, get_agent_default_resources
 from services import skill_packaging
 from services.skill_service import skill_service
@@ -1193,6 +1194,10 @@ async def recreate_container_with_updated_config(
     # once enforcement is on). check_agent_auth_token_env_matches forces this
     # recreate whenever the running token is missing or stale.
     env_vars['TRINITY_AGENT_AUTH_TOKEN'] = derive_agent_token(agent_name)
+    # trinity-enterprise#1168: this dict is seeded from the OLD container, which
+    # may carry a baked ENABLE_SSH=true from before the change. Set, never
+    # setdefault — no listener until a grant starts one on demand.
+    env_vars['ENABLE_SSH'] = 'false'
     # #3813: the agent's own identity follows the same rule. Replaying the old
     # AGENT_NAME left a renamed agent's /health, heartbeat, pull workers and
     # result callback calling in under the dead name (403).
@@ -1523,43 +1528,54 @@ async def _provision_folders_and_run_agent_container(
     # - Always drop ALL caps, then add back only what's needed
     # - Always apply AppArmor profile
     # - Always apply noexec,nosuid to /tmp
-    new_container = await containers_run(
-        image,
-        detach=True,
-        name=f"agent-{agent_name}",
-        ports={'22/tcp': ssh_port},
-        volumes=volumes,
-        environment=env_vars,
-        labels=labels,
-        # Always apply AppArmor for additional sandboxing
-        security_opt=['apparmor:docker-default'],
-        # Always drop ALL capabilities first (defense in depth)
-        cap_drop=['ALL'],
-        # Add back only the capabilities needed for the mode
-        cap_add=FULL_CAPABILITIES if full_capabilities else RESTRICTED_CAPABILITIES,
-        read_only=False,
-        # Always apply noexec,nosuid to /tmp for security (#1098: scratch is
-        # redirected off this tiny tmpfs via the TMPDIR env var above).
-        tmpfs=AGENT_TMPFS_MOUNT,
-        # #1871: bound the container's json-file log (Docker's default is
-        # unbounded). This is the retrofit seam — `log_config` is creation-time,
-        # so an existing agent adopts the cap when it passes through here, which
-        # covers BOTH recreate_container_with_updated_config and
-        # recreate_missing_container (this is their shared tail).
-        log_config=AGENT_LOG_CONFIG,
-        network='trinity-agent-network',
-        mem_limit=memory,
-        # #1126: nano_cpus (Linux CFS quota → HostConfig.NanoCpus), NOT
-        # cpu_count — docker-py's cpu_count maps to the Windows-only CpuCount
-        # and leaves NanoCpus=0 on Linux, so the CPU limit was never enforced.
-        nano_cpus=int(cpu) * 1_000_000_000,
-        # #2541: re-bake the restart policy unconditionally — this is the
-        # retrofit seam for BOTH recreate paths, so an agent born `no` before
-        # #2541 adopts `unless-stopped` the first time it passes through here.
-        # Unconditional on purpose: the old container's policy is exactly what
-        # must NOT be preserved (see the docstring).
-        restart_policy=AGENT_RESTART_POLICY,
-    )
+    try:
+        new_container = await containers_run(
+            image,
+            detach=True,
+            name=f"agent-{agent_name}",
+            # trinity-enterprise#1168: published on AGENT_SSH_BIND_ADDRESS
+            # (loopback by default), never a bare int (= every interface). This
+            # is the retrofit seam — an existing agent adopts the binding the
+            # first time it passes through here (both recreate paths).
+            ports=agent_ssh_port_binding(ssh_port),
+            volumes=volumes,
+            environment=env_vars,
+            labels=labels,
+            # Always apply AppArmor for additional sandboxing
+            security_opt=['apparmor:docker-default'],
+            # Always drop ALL capabilities first (defense in depth)
+            cap_drop=['ALL'],
+            # Add back only the capabilities needed for the mode
+            cap_add=FULL_CAPABILITIES if full_capabilities else RESTRICTED_CAPABILITIES,
+            read_only=False,
+            # Always apply noexec,nosuid to /tmp for security (#1098: scratch is
+            # redirected off this tiny tmpfs via the TMPDIR env var above).
+            tmpfs=AGENT_TMPFS_MOUNT,
+            # #1871: bound the container's json-file log (Docker's default is
+            # unbounded). This is the retrofit seam — `log_config` is creation-time,
+            # so an existing agent adopts the cap when it passes through here, which
+            # covers BOTH recreate_container_with_updated_config and
+            # recreate_missing_container (this is their shared tail).
+            log_config=AGENT_LOG_CONFIG,
+            network='trinity-agent-network',
+            mem_limit=memory,
+            # #1126: nano_cpus (Linux CFS quota → HostConfig.NanoCpus), NOT
+            # cpu_count — docker-py's cpu_count maps to the Windows-only CpuCount
+            # and leaves NanoCpus=0 on Linux, so the CPU limit was never enforced.
+            nano_cpus=int(cpu) * 1_000_000_000,
+            # #2541: re-bake the restart policy unconditionally — this is the
+            # retrofit seam for BOTH recreate paths, so an agent born `no` before
+            # #2541 adopts `unless-stopped` the first time it passes through here.
+            # Unconditional on purpose: the old container's policy is exactly what
+            # must NOT be preserved (see the docstring).
+            restart_policy=AGENT_RESTART_POLICY,
+        )
+    except Exception as exc:  # noqa: BLE001 — classified, then re-raised unchanged
+        # trinity-enterprise#1168: name the knob when Docker cannot bind the
+        # configured host IP ("cannot assign requested address"); anything else
+        # re-raises as-is.
+        raise_for_ssh_bind_failure(exc)
+        raise
 
     logger.info(f"Recreated container for agent {agent_name} with updated configuration")
     return new_container
@@ -1746,7 +1762,8 @@ async def recreate_missing_container(agent_name: str):
     env_vars = {
         "AGENT_NAME": agent_name,
         "CREDENTIALS_FILE": "/config/credentials.json",
-        "ENABLE_SSH": "true",
+        # trinity-enterprise#1168: no sshd until a grant starts it on demand.
+        "ENABLE_SSH": "false",
         "ENABLE_AGENT_UI": "true",
         "AGENT_SERVER_PORT": "8000",
         "AGENT_RUNTIME": runtime,

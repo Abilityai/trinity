@@ -78,6 +78,8 @@ beforeEach(() => {
 
 describe('TermsAcceptance — reading and accepting', () => {
   it('shows the version and the rendered text', async () => {
+    const auth = useAuthStore()
+    auth.user = { username: 'maya@example.com', email: 'maya@example.com', role: 'creator' }
     const { wrapper } = await mountAt()
     expect(api.get).toHaveBeenCalledWith(CURRENT_URL)
     expect(wrapper.find('[data-testid="terms-version"]').text()).toContain('2026-11')
@@ -112,6 +114,8 @@ describe('TermsAcceptance — reading and accepting', () => {
   })
 
   it('a stale version reloads the text, says so, and asks for a fresh tick', async () => {
+    const auth = useAuthStore()
+    auth.user = { username: 'maya@example.com', email: 'maya@example.com', role: 'creator' }
     api.post.mockRejectedValue(refusal(409, { code: 'version_stale', message: 'changed', version: '2026-12' }))
     const { wrapper, router } = await mountAt()
     api.get.mockResolvedValue(current({ version: '2026-12', text: 'New text.' }))
@@ -134,6 +138,14 @@ describe('TermsAcceptance — reading and accepting', () => {
     await flushPromises()
     expect(wrapper.find('[data-testid="inline-error"]').exists()).toBe(true)
     expect(router.currentRoute.value.path).toBe('/terms')
+  })
+
+  it('a role-user sees the terms text but not the version label', async () => {
+    const auth = useAuthStore()
+    auth.user = { username: 'maya@example.com', email: 'maya@example.com', role: 'user' }
+    const { wrapper } = await mountAt()
+    expect(wrapper.find('[data-testid="terms-text"]').html()).toContain('Be kind.')
+    expect(wrapper.find('[data-testid="terms-version"]').exists()).toBe(false)
   })
 })
 

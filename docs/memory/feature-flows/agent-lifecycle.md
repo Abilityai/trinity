@@ -1170,7 +1170,7 @@ When an agent container starts, it follows this initialization flow:
    - Copies `.mcp.json`, `.env`, and other generated config files
 
 4. **Service Startup**:
-   - SSH server (if `ENABLE_SSH=true`)
+   - SSH server (if `ENABLE_SSH=true` — the backend passes `false` at create since trinity-enterprise#1168; the SSH grant starts sshd on demand)
    - Agent Web Server on port 8000 (if `ENABLE_AGENT_UI=true`)
 
 ### File Persistence (Bug Fix 2025-12-09)

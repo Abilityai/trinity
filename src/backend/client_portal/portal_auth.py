@@ -28,6 +28,7 @@ from dependencies import (
     PORTAL_MINT_OTP,
     oauth2_scheme,
     decode_portal_session,
+    is_interactive_principal,
     is_person_principal,
     portal_session_is_interactive,
     portal_session_minted_by,
@@ -127,6 +128,12 @@ class PortalPrincipal(NamedTuple):
     #: (ent#362) — two identity spaces — so the email alone cannot say which
     #: rooms are the caller's. None for a portal token, which has no username.
     username: str | None = None
+    #: trinity-enterprise#1165 — a platform person who signed in INTERACTIVELY
+    #: (a JWT session, ``mcp_scope is None``: the predicate behind
+    #: ``dependencies.is_interactive_principal``). Every MCP key is False —
+    #: user-scoped, system, ops — and so is a portal token. An authorization
+    #: input, unlike ``credential``: a company-wide read is offered only here.
+    is_interactive: bool = False
 
 
 #: Response header carrying a rotated Workspace session token (ent#375). The
@@ -265,6 +272,7 @@ async def get_portal_principal(
         self_approves=is_person,
         credential="platform_session" if scope is None else f"mcp_key:{scope}",
         username=user.username,
+        is_interactive=is_interactive_principal(user),
     )
 
 

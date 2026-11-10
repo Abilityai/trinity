@@ -197,15 +197,33 @@ RUN npm install -g @google/gemini-cli@0.62.0
 # the linux-x64 build lands here. Bump deliberately after testing.
 RUN npm install -g @openai/codex@0.147.0
 
+# trinity-enterprise#1168: `developer` has NO password (`passwd -l`, a `!`-locked
+# hash). Key-based SSH is the only login method, and a locked account still logs
+# in by key under `UsePAM yes` (asserted below). The NOPASSWD sudo rule is what
+# startup.sh uses to launch sshd and is out of this change's scope.
 RUN useradd -m -s /bin/bash -u 1000 developer && \
-    echo "developer:developer" | chpasswd && \
+    passwd -l developer && \
     usermod -aG sudo developer && \
     echo "developer ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
-RUN mkdir /var/run/sshd && \
-    sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' /etc/ssh/sshd_config && \
-    sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config && \
-    sed -i 's/#PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+# sshd policy as a drop-in, not a `sed` over upstream's commented defaults — a
+# sed that no longer matches is a silent no-op; a drop-in applies through
+# Debian's `Include /etc/ssh/sshd_config.d/*.conf` (first value wins). The RUN
+# then asserts the EFFECTIVE configuration with `sshd -T`, so the image build
+# fails — rather than shipping an sshd that accepts passwords — if the Include
+# line disappears, the drop-in has a typo, or a directive stops applying.
+COPY --chown=root:root ./sshd_trinity.conf /etc/ssh/sshd_config.d/10-trinity.conf
+RUN mkdir -p /var/run/sshd && chmod 0644 /etc/ssh/sshd_config.d/10-trinity.conf && \
+    grep -q '^Include /etc/ssh/sshd_config.d/\*.conf' /etc/ssh/sshd_config && \
+    /usr/sbin/sshd -t && \
+    /usr/sbin/sshd -T > /tmp/sshd-effective.txt && \
+    grep -qx 'passwordauthentication no' /tmp/sshd-effective.txt && \
+    grep -qx 'kbdinteractiveauthentication no' /tmp/sshd-effective.txt && \
+    grep -qx 'permitemptypasswords no' /tmp/sshd-effective.txt && \
+    grep -qx 'permitrootlogin no' /tmp/sshd-effective.txt && \
+    grep -qx 'pubkeyauthentication yes' /tmp/sshd-effective.txt && \
+    grep -qx 'usepam yes' /tmp/sshd-effective.txt && \
+    rm -f /tmp/sshd-effective.txt
 
 RUN mkdir -p /home/developer/.ssh /home/developer/.config /home/developer/mcp-servers && \
     chown -R developer:developer /home/developer

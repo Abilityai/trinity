@@ -244,7 +244,8 @@ import PortalAgentAutonomy from './PortalAgentAutonomy.vue'
 import PortalAsksWaitingLine from './PortalAsksWaitingLine.vue'
 import { agentDisplayName } from '@/utils/agentName'
 import { capCount } from '@/utils/tabTitle'
-import { availabilityChip, threadTitle, MAIN_TAB_LABEL, asksHomeRoute, capabilitySection } from './portalUtils'
+import { availabilityChip, viewerIsMemberTier, assistantStarting, threadTitle, MAIN_TAB_LABEL, asksHomeRoute, capabilitySection } from './portalUtils'
+import { usePortalProgressStore } from '@/stores/portalProgress'
 import { useRouter } from 'vue-router'
 import { usePortalAgentPage } from '@/composables/usePortalAgentPage'
 
@@ -315,10 +316,14 @@ const healthDot = computed(() => ({
 
 // #2196: the same pure rule the sidebar row and the composer notice use — one
 // decision, several surfaces. `owner` comes off the header so the copy names
-// who to ask.
+// who to ask. ent#1201: not to a member-tier viewer — their copy names no one,
+// and says nothing while their assistant is starting (its progress card does).
+const progressStore = usePortalProgressStore()
+const memberTier = computed(() => viewerIsMemberTier(props.agent))
 const availability = computed(() => availabilityChip(
   { ...(props.agent || {}), owner: header.value?.owner ?? props.agent?.owner },
-  { detailed: true },
+  { detailed: !memberTier.value, memberTier: memberTier.value,
+    starting: memberTier.value && assistantStarting(progressStore.progressFor(props.agentName)) },
 ))
 const availabilityDot = computed(() => (
   availability.value?.state === 'stopped'

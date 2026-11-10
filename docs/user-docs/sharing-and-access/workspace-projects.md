@@ -11,7 +11,7 @@ Projects appear on instances licensed for them. On an instance without the entit
 - **Agent on the project** — An agent that may work on it. Adding an agent you do not own asks its owner first; until they approve, the agent is listed as *Waiting for owner* and is not offered.
 - **Linked chat** — A Workspace chat (or room) that belongs to the project. Every turn in it tells the agent which project it is in.
 - **Log** — The project's shared, append-only record: decisions, deliverables, task changes, blockers, hand-offs and notes, written by members and by agents.
-- **Task** — A unit of work with an owner or an agent, a priority, an objective and a definition of done. Its status moves through *active*, *blocked*, *needs a decision*, *paused*, *awaiting verification* and *done*.
+- **Task** — A unit of work with an owner or an agent, a priority, an objective and a definition of done. The owner is the project's creator or one of its members (or, on a project an agent stewards, a canon role written `role:<id>`); Trinity refuses anyone else when an owner is set or changed, from the page, the API or an agent. Owners written before this rule, or by a folder **Import**, are kept as they are, and the project page warns when one reaches nobody. Its status moves through *active*, *blocked*, *needs a decision*, *paused*, *awaiting verification* and *done*.
 - **Steward** — The person or agent who owns the project's health, verifies finished tasks and gets the digest of what needs attention. The creator stewards a project unless they name someone else.
 - **Health** — The steward's read of the project — **On track**, **At risk** or **Off track** — with a line of explanation, and a note when it is overdue.
 - **Guest** — An outside client invited to the project. They see their own chats and what was shared with them, nothing else.
@@ -74,6 +74,10 @@ The steward owns the project's health and the verification of finished work, and
 
 The **Steward** card on the Overview shows who it is, the project's health as a badge, and the state behind that. With nobody named it reads *The creator stewards it until someone is named.* For an agent steward: the last sweep (the last time it read its digest), its next scheduled run when it has one, the project's health and whether an update is due. It says **No sweep recorded yet** and **No sweep scheduled** plainly when that is the case, and **Scheduled** without a time when the schedule belongs to an agent you cannot read. For a person steward: the project's health and what is waiting on them, with **Open I steward** when the steward is you.
 
+**Being on a project does not give you its steward agent.** To chat with an agent steward, or to get its questions, you need access to that agent itself, the same access its owner gives on the agent's **Channels** settings. When you don't have it, the Steward card says **You can't use {agent} yet**, and **Ask for access** sends the agent's owner an access request. The card then reads **Access requested** until they decide. The agent's owner sees, on the same card, which members can't use it, marked **Asked** where they have asked, and gives access with **Give access**. If the owner declines, the card says so and **Ask again** sends a new request. Only members get this: a guest, or someone viewing a company-visible project they are not on, sees no access block.
+
+**An agent steward gets the project-management skills.** When you pick an agent as steward, in **New project** or later in **Edit project**, Trinity also puts it on the project and gives it the library's project-management skills, the ones it uses to verify finished tasks, record health and write the log. The line under **Steward** says what will happen before you save: the agent gets the skills, it already has them, only its owner or an admin can give them (you can still make it the steward), or the skills aren't available on this Trinity yet. The project is created in every case, and the **Steward** card keeps saying whether the agent has the skills. Changing the steward later leaves the old one's skills alone. A person steward works too; the card then says what having no steward agent means.
+
 **An agent steward needs its own schedule.** Trinity does not run the steward; the platform only answers its questions. The agent-dev plugin's `/project-steward` skill is the sweep: on each run it reads the digest, verifies pending claims, dispatches labeled work, escalates stalls and open loops as asks, records the project's health with `set_project_health`, and writes one log entry per outcome. Give the steward agent a schedule for it (the skill ships a default weekday one) — without it, nothing moves between your chats, and the Steward card says so. The skills are described on the [agent-dev plugin page](../abilities/agent-dev-plugin.md).
 
 ### How a project moves forward
@@ -84,9 +88,28 @@ The **Steward** card on the Overview shows who it is, the project's health as a 
 4. **The steward checks on it.** A person confirms tasks from the Tasks tab and sets health from the Overview; an agent steward does both on its schedule.
 5. **Everyone sees the result.** The Log is the shared record; **Where it stands** rolls the tasks up; the Projects list shows each project's health and attention count.
 
+### Running a task from the project
+
+Open a task and use **Run this task** to start its work from the project itself:
+
+- **Pick the agent.** You're offered the agents working on the project that you can use. An agent on the project that you can't use yet is named, with what to do (ask its owner for access). With none at all, add one in **Members & access** first.
+- **Preview what it gets.** This is the exact first message the agent will receive: the task's objective and definition of done, the context marked for agents (it reads each item itself), and the last few log entries.
+- **Start** opens a chat with that agent, tied to the task. The first message is sent once, even if you press Start twice. Starting again with the same agent reopens the same chat, and the task lists **Chat for this task** so you can get back to it. The run uses the agent's own Claude subscription or API key, and its cost shows on the turn when it's done.
+
+Only members and the creator can start a run. Picking the agent also sets the task's **Agent**.
+
 ### Files, reports and decisions
 
 **Files & reports** gathers material on the project: a file, a report or a recorded decision you can already see from one of the project's agents, added with **Add from…**. Markdown files render in place. The creator can share a file or report with the project's guests.
+
+### Context for agents
+
+A brief often needs more room than a task's fields: a call transcript, your view, the background. Put it on the project instead of preparing it somewhere else. On **Files & reports**, **Write a brief** opens a markdown editor. **Upload** takes a `.md` or `.txt` file and opens it in the same editor, so you can check it and mark it before it's saved. A task's detail has the same two buttons, for a brief about that task only. No agent is needed: the project stores the brief itself.
+
+- **Agents on this project get this** marks a brief, or a linked text file, for the project's agents. Everyone who can read the project can read what you mark, and the page tells you so.
+- An agent sees the marked items when it reads the project and reads a brief with `read_project_context`, 200 KB at a time. A longer brief is never cut silently: the agent is told how much it got and reads on from there. **Preview** shows exactly what one read returns.
+- A brief can be up to 512 KB, and a project's briefs up to 5 MB in total. Anything larger is refused with a message saying so, never shortened.
+- Members write briefs. Whoever added a brief, or the creator, can edit or remove it. Anyone who can open the project can read them. Guests never see them.
 
 ### Members, agents and visibility
 
@@ -95,11 +118,14 @@ The **Steward** card on the Overview shows who it is, the project's health as a 
 - **Visibility** is **Members only** (the default) or **Company** — every platform user at your company can open a Company project and work on it with its agents, but only members write its tasks and log; only members can open a Members-only one.
 - **Adding an agent** you own takes effect at once. Adding someone else's agent raises an ask to its owner in their Inbox; the agent is listed as *Waiting for owner* until they approve, and as *Owner declined* if they refuse.
 - **Guests** — invited outside clients — see the project's name and goal, their own chats on it, and the files and reports shared with them. They never see the log, the tasks, the members or other people's chats, and their chats carry no project context to the agent.
+- **Where you stand.** Under the goal, the project page says your role and what it lets you do: the creator can change everything; a member can add and change tasks, write in the log and add files; a company viewer can open the project and chat with its agents, but only members change its tasks, log and files. If you aren't a member, one line in place of **New task**, the log entry form and **Add from…** says who can add you. On an archived project the line says nothing changes until the creator restores it. The **Awaiting verification** group says who confirms a finished task: a member, or the steward agent by name when it is active on the project.
+- **Ask to join.** Someone who can open a company project but isn't on it gets **Ask to join** under the role line. The project's creator gets one decision in their **Inbox**. **Approve** adds them as a member, and **Decline** sends back the reason the creator gives. While a request waits, the page says who it waits on, and asking again doesn't send a second one. Guests are invited and never see this.
+- **Ask to add a room's agent.** In a room linked to the project, a member who can't add an agent gets **Ask to add** in the room's agents list. The creator decides in their Inbox. If they approve and the agent is someone else's, its owner is asked next, as always.
 - **Archiving** keeps the project readable and its chats yours, but nothing new can be linked and agents stop receiving its context. **Restore** undoes it.
 
 ## For Agents
 
-Agents reach a project through the MCP tools the platform exposes to them — `list_projects`, `get_project`, `list_project_tasks`, `get_project_log`, `create_project_task`, `update_project_task`, `add_project_task_note`, `add_project_log_entry`, `link_to_project`, `propose_project_changes` (any agent on the project, with the project-management permission), and for a steward agent `get_steward_digest` and `set_project_health`. An agent sees only the projects it is active on, and only in a turn whose audience is internal: a chat or room with no outside client in it. The agent-dev plugin's `project-*` skills wrap these tools; see the [agent-dev plugin page](../abilities/agent-dev-plugin.md).
+Agents reach a project through the MCP tools the platform exposes to them — `list_projects`, `get_project`, `list_project_tasks`, `get_project_log`, `read_project_context` (a brief people marked for agents, 200 KB a call), `create_project_task`, `update_project_task`, `add_project_task_note`, `add_project_log_entry`, `link_to_project`, `propose_project_changes` (any agent on the project, with the project-management permission), and for a steward agent `get_steward_digest` and `set_project_health`. An agent sees only the projects it is active on, and only in a turn whose audience is internal: a chat or room with no outside client in it. The agent-dev plugin's `project-*` skills wrap these tools; see the [agent-dev plugin page](../abilities/agent-dev-plugin.md).
 
 ## Limitations
 

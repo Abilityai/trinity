@@ -55,7 +55,10 @@
         </div>
 
         <template v-else>
-          <p class="mt-1 text-sm text-gray-600 dark:text-gray-300 tabular-nums" data-testid="terms-version">
+          <!-- ent#1172 AC 4: version label is a platform detail; share-tier
+               members (role=user) see the terms text without it. The version
+               still records in the acceptance row on submit. -->
+          <p v-if="!isUserRole" class="mt-1 text-sm text-gray-600 dark:text-gray-300 tabular-nums" data-testid="terms-version">
             Version {{ terms.version }}
           </p>
           <p
@@ -130,6 +133,9 @@ const router = useRouter()
 const authStore = useAuthStore()
 const store = useTermsStore()
 
+// ent#1172 AC 4: suppress the version label for share-tier (role=user) viewers.
+const isUserRole = computed(() => authStore.user?.role === 'user')
+
 const agreed = ref(false)
 const accepting = ref(false)
 const acceptError = ref('')
@@ -151,8 +157,8 @@ function errorDetail(e) {
   return String((d && (d.message || d.code)) || d || e.message || '')
 }
 
-function leave() {
-  return router.replace(afterTermsLocation(route.query.redirect, authStore.user?.role))
+function leave(landing) {
+  return router.replace(afterTermsLocation(route.query.redirect, authStore.user?.role, landing))
 }
 
 async function onAccept() {
@@ -162,8 +168,10 @@ async function onAccept() {
   acceptErrorDetail.value = ''
   const version = terms.value.version
   try {
-    await store.accept(version)
-    await leave()
+    const accepted = await store.accept(version)
+    // trinity-enterprise#1170: the accept may name where to land — the
+    // conversation with the agent just handed over, where its welcome is.
+    await leave(accepted?.landing)
   } catch (e) {
     const detail = e.response?.data?.detail
     const code = detail?.code

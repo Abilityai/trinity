@@ -1,0 +1,75 @@
+{
+  "version": "1.2.3",
+  "date": "2026-11-07",
+  "mode": "daily",
+  "scope": "diff",
+  "branch": "feature/1168-agent-ssh-bind",
+  "merge_base": "9d280314895f0b649a5c9ddec881e7219045c9f6",
+  "issue": "abilityai/trinity-enterprise#1168",
+  "counts_as_full_run": false,
+  "docker_available": true,
+  "phases_run": [0, 1, 2, 5, 7, 8, 9, 10, 11, 12, 13, 14],
+  "phases_skipped_no_overlap": [3, 4, 6],
+  "stack_cve_quicklist": [
+    {"component": "Claude Code / Node CLIs in the base image", "verdict": "not reachable (pins unchanged by this diff)"},
+    {"component": "runc / Docker host", "verdict": "not reachable (unchanged; two new static root execs, deploy floor unchanged)"},
+    {"component": "Starlette BadHost", "verdict": "no overlap (no request.url.path added)"},
+    {"component": "Vite / Vitest / axios / Redis image", "verdict": "no overlap"}
+  ],
+  "attack_surface": {
+    "endpoints_added": 0,
+    "endpoints_changed": ["POST /api/agents/{name}/ssh-access (admin-only; response gains warnings[] + connection.bind_address)"],
+    "root_execs_added": ["SSHD_START_CMD", "SSHD_STOP_CMD"],
+    "env_knobs_added": ["AGENT_SSH_BIND_ADDRESS"],
+    "published_ports_delta": "agent 22/tcp: 0.0.0.0 -> 127.0.0.1 by default for new/recreated containers; legacy unchanged until recreate",
+    "pre_auth_listeners_delta": "one sshd per agent from boot -> none until a grant; idle ones stopped at boot when ssh_access_enabled is off",
+    "agent_context_ingress_added": 0
+  },
+  "findings": [
+    {
+      "id": "L1",
+      "severity": "LOW",
+      "confidence": 9,
+      "status": "VERIFIED",
+      "evidence": "SUPPORTED",
+      "category": "info-disclosure",
+      "owasp_2025": "A01",
+      "asi": null,
+      "llm": null,
+      "phase": 9,
+      "file": "src/backend/services/agent_ssh_binding.py",
+      "symbol": "describe_ssh_bind_failure",
+      "title": "create API 400 names the configured bind IP to a creator-tier caller",
+      "description": "When AGENT_SSH_BIND_ADDRESS is a specific interface IP that is not assigned at create time, crud.py raises HTTPException(400, detail=...) whose text includes that IP. POST /api/agents is require_role(\"creator\"), so a creator learns the host's VPN/interface address.",
+      "exploit_scenario": "A creator-tier user times agent creates during a VPN outage and reads the tailnet address of the Trinity host from the 400 detail.",
+      "impact": "Disclosure of a private-range interface address to an authenticated platform user who already reaches the host; no privilege change; only on a non-default configuration.",
+      "recommendation": "Accept. Alternative: keep the IP in the log line and drop it from the HTTP detail.",
+      "verifier": "sequential (single LOW finding; no independent agent spawned)"
+    }
+  ],
+  "hypotheses": [
+    {
+      "id": "H1",
+      "title": "sshd started by a grant keeps running after the key expires until the next boot (and only stops then if ssh_access_enabled is off)",
+      "why_not_a_finding": "the key line is removed at expires_at by the cleanup sweep; the port is loopback for containers this change creates; a cleanup_service extension could stop sshd when the last key expires"
+    }
+  ],
+  "coverage_gaps": [
+    "diff mode: phases 3, 4, 6 had no overlap and were not run beyond the overlap check",
+    "not a Docker pass: the image was not rebuilt here; the drop-in was verified live by mounting it into trinity-agent-base:latest (sshd -t, sshd -T) and the start/stop commands were run against it",
+    "no off-box probe of a loopback-bound port from another host"
+  ],
+  "supply_chain_summary": {"scanner": "n/a — no dependency, lockfile or pin changes in the diff"},
+  "guard_tests": {
+    "run": ["test_293_admin_gate_rejects_agent_keys", "test_1310_auth_wiring", "test_186_enumeration_uniformity", "test_2996_human_only_routes", "test_2094_dependency_path_param_pairing", "test_agent_auth_header_guard", "test_292_cmdline_credential_leak"],
+    "result": "213 passed"
+  },
+  "filter_stats": {"candidates": 3, "below_gate": 0, "excluded_by_rule": 1, "hypotheses": 1, "reported": 1},
+  "totals": {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 1},
+  "trend": {
+    "prior": "cso-2026-09-30 finding 10",
+    "resolved": ["DEPLOYMENT.md DOCKER-USER/ufw guidance (new docs/DEPLOYMENT.md section + Security Recommendations item)"],
+    "persistent": ["8000/8686/OTel published on all interfaces in prod/hosted (not touched here)"],
+    "new": ["L1"]
+  }
+}

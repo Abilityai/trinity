@@ -32,6 +32,7 @@ WORKSPACE_WS_EVENT_TYPES = frozenset({
     "loop_completed",
     "agent_skills_changed",
     "resync_required",
+    "member_progress_update",  # ent#1175: member setup progress card
 })
 
 # The fields those consumers read: the kind (`type`, or `event` for a lifecycle

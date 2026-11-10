@@ -12,6 +12,12 @@
   people who may (contributors on a live project). Objectives and task-log
   bodies render as markdown through the shared renderer (#3692).
 
+  trinity-enterprise#1133: contributors edit the title, objective and
+  definition of done in the same form, with one Save and one dirty path; each
+  change leaves a line in the task's log. The read-only objective / DoD blocks
+  show only when those fields are not offered (a viewer, an archived project,
+  or a done task), so a contributor never reads the same text twice.
+
   #867: contributors change a task's owner here — blank clears it.
   trinity-enterprise#1155: the owner is picked from the project's own people
   (must-pick, over `GET /projects/{id}/people?purpose=owner`); a `role:<id>`
@@ -25,6 +31,8 @@
       <span class="flex-1"></span>
       <BaseButton v-if="canContribute && !archived" size="sm" data-testid="project-task-new" @click="openCreate">New task</BaseButton>
     </div>
+    <!-- trinity-enterprise#1132: the withheld control, said where it would be. -->
+    <p v-if="withheld" class="text-xs text-gray-600 dark:text-gray-300" data-testid="project-tasks-withheld">{{ withheld }}</p>
 
     <SkeletonLoader v-if="view.state === 'loading'" :count="4" height="3rem" gap="0.5rem" />
     <LoadFailed
@@ -44,7 +52,7 @@
           {{ g.label }} <span class="tabular-nums">· {{ g.rows.length }}</span>
         </h3>
         <p v-if="g.key === 'verifying' && g.rows.length" class="text-xs text-gray-600 dark:text-gray-300" data-testid="project-tasks-verification-rule">
-          An agent's completion claim waits here until a person — or the steward agent — confirms it. Open a task to see its evidence{{ canConfirm ? ', then Confirm' : '' }}.
+          {{ rule }} Open a task to see its evidence{{ canConfirm ? ', then Confirm' : '' }}.
         </p>
         <ul class="divide-y divide-gray-100 dark:divide-gray-750 rounded-lg border border-gray-200 dark:border-gray-750 bg-white dark:bg-gray-800">
           <li v-for="t in g.rows" :key="t.id" class="flex items-center gap-2 pr-2">
@@ -80,8 +88,8 @@
       <form class="space-y-4" @submit.prevent="create">
         <h2 id="task-create-title" class="text-lg font-semibold text-gray-900 dark:text-gray-100">New task</h2>
         <BaseInput id="task-title" v-model="form.title" label="Title" :error="formError.title" placeholder="Draft the launch brief" />
-        <BaseTextarea id="task-objective" v-model="form.objective" label="Objective (optional)" :rows="2" />
-        <BaseTextarea id="task-dod" v-model="form.done_definition" label="Definition of done (optional)" :rows="3" mono placeholder="- [ ] Brief reviewed by two leads" />
+        <BaseTextarea id="task-objective" v-model="form.objective" label="Objective (optional)" :rows="2" :error="formError.objective" />
+        <BaseTextarea id="task-dod" v-model="form.done_definition" label="Definition of done (optional)" :rows="3" mono placeholder="- [ ] Brief reviewed by two leads" :error="formError.done_definition" />
         <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <BasePeopleInput
             id="task-owner"
@@ -127,13 +135,66 @@
           <div><dt class="text-xs text-gray-500 dark:text-gray-400">Priority</dt><dd class="uppercase text-gray-900 dark:text-gray-100">{{ task.priority }}</dd></div>
           <div><dt class="text-xs text-gray-500 dark:text-gray-400">Updated</dt><dd class="text-gray-900 dark:text-gray-100" :title="formatLocalDateTime(task.updated_at)">{{ formatRelativeTime(task.updated_at) }}</dd></div>
         </dl>
-        <div v-if="task.objective">
+        <div v-if="task.objective && showRead">
           <h3 class="text-xs font-semibold text-gray-500 dark:text-gray-400">Objective</h3>
           <div class="mt-1 text-sm text-gray-800 dark:text-gray-200" data-testid="project-task-objective"><PortalMarkdown :content="task.objective" /></div>
         </div>
-        <div v-if="task.done_definition"><h3 class="text-xs font-semibold text-gray-500 dark:text-gray-400">Definition of done</h3><p class="mt-1 whitespace-pre-line font-mono text-xs text-gray-800 dark:text-gray-200">{{ task.done_definition }}</p></div>
+        <div v-if="task.done_definition && showRead"><h3 class="text-xs font-semibold text-gray-500 dark:text-gray-400">Definition of done</h3><p class="mt-1 whitespace-pre-line font-mono text-xs text-gray-800 dark:text-gray-200">{{ task.done_definition }}</p></div>
+
+        <!-- trinity-enterprise#1193: this task's briefs, for the agent working it. -->
+        <ProjectContext
+          :project-id="projectId"
+          :task-id="task.id"
+          :items="(task.context || []).filter((c) => c.kind === 'project-file')"
+          :can-contribute="canContribute"
+          :archived="archived"
+          :my-email="myEmail"
+          :is-creator="isCreator"
+          :limits="project?.context_limits || null"
+          @changed="refreshTask"
+        />
+
+        <!-- trinity-enterprise#1195: pick the agent, see what it gets, start the task's chat. -->
+        <ProjectTaskStart
+          v-if="canContribute"
+          :project-id="projectId"
+          :task-id="task.id"
+          :can-contribute="canContribute"
+          :archived="archived"
+          @open-thread="openThread"
+        />
 
         <form v-if="canContribute && !archived" class="space-y-2 rounded-lg border border-gray-200 dark:border-gray-750 p-3" @submit.prevent="saveTask">
+          <BaseInput
+            id="task-title-edit"
+            v-model="edit.title"
+            label="Title"
+            :disabled="locked"
+            :error="editError.title"
+            :help="locked ? 'Reopen the task to change its title.' : ''"
+            data-testid="project-task-title-edit"
+          />
+          <BaseTextarea
+            id="task-objective-edit"
+            v-model="edit.objective"
+            label="Objective (optional)"
+            :rows="4"
+            :disabled="locked"
+            :error="editError.objective"
+            :help="locked ? 'Reopen the task to change its objective.' : ''"
+            data-testid="project-task-objective-edit"
+          />
+          <BaseTextarea
+            id="task-dod-edit"
+            v-model="edit.done_definition"
+            label="Definition of done (optional)"
+            :rows="5"
+            mono
+            :disabled="locked"
+            :error="editError.done_definition"
+            :help="locked ? 'Reopen the task to change its definition of done.' : ''"
+            data-testid="project-task-dod-edit"
+          />
           <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <BaseSelect id="task-status" v-model="edit.status" label="Status">
               <option v-for="s in taskStatusOptions(task)" :key="s" :value="s">{{ s === 'active' && task.status === 'done' ? 'Reopen (active)' : taskStatusLabel(s) }}</option>
@@ -198,21 +259,28 @@ import LoadFailed from '@/components/LoadFailed.vue'
 import InlineError from '@/components/InlineError.vue'
 import PortalMarkdown from '@/components/portal/PortalMarkdown.vue'
 import { useProjectsStore } from '@/stores/projects'
+import ProjectContext from './ProjectContext.vue'
+import ProjectTaskStart from './ProjectTaskStart.vue'
 import { viewState } from '@/utils/loadingState'
 import { formatRelativeTime, formatLocalDateTime } from '@/utils/timestamps'
 import {
-  TASK_STATUS_BADGE, authorLabel, groupTasks, projectErrorMessage, taskLogKindLabel, taskStatusLabel, taskStatusOptions,
-} from './projectsUtils'
+  TASK_FIELD_ERROR_CODES, TASK_STATUS_BADGE, authorLabel, groupTasks, projectErrorMessage, taskLogKindLabel,
+  taskStatusLabel, taskStatusOptions, validateTaskFields, verificationRule, withheldLine } from './projectsUtils'
 
 const props = defineProps({
+  // trinity-enterprise#1132: the page read, for the withheld line and the rule.
+  project: { type: Object, default: null },
   projectId: { type: String, required: true },
   canContribute: { type: Boolean, default: false },
   archived: { type: Boolean, default: false },
   myEmail: { type: String, default: '' },
   // The project's members `{email, label}` — names an owner on a row.
   members: { type: Array, default: () => [] },
+  // trinity-enterprise#1193: the viewer holds the creator role (may change anyone's brief).
+  isCreator: { type: Boolean, default: false },
 })
 
+const emit = defineEmits(['open-thread'])
 const store = useProjectsStore()
 const createOpen = ref(false)
 const taskOpen = ref(false)
@@ -221,7 +289,10 @@ const busy = ref(false)
 const actionError = ref('')
 const form = reactive({ title: '', objective: '', done_definition: '', owner: '', priority: 'p2' })
 const formError = ref({})
-const edit = reactive({ status: '', priority: 'p2', owner: '', note: '' })
+const edit = reactive({ status: '', priority: 'p2', owner: '', note: '', title: '', objective: '', done_definition: '' })
+const editError = ref({})
+// The three editable text fields, and the key each one sends.
+const EDIT_TEXT = ['title', 'objective', 'done_definition']
 const createPicked = ref(null)
 const editPicked = ref(null)
 const createOwnerField = ref(null)
@@ -250,11 +321,31 @@ const groups = computed(() => {
   ]
 })
 const canConfirm = computed(() => props.canContribute && !props.archived)
+const withheld = computed(() => withheldLine({ project: props.project, myEmail: props.myEmail, canContribute: props.canContribute, archived: props.archived }, 'tasks'))
+const rule = computed(() => verificationRule(props.project))
 const confirming = ref('')
 const confirmError = ref('')
+// A done task is frozen until it is reopened — the server refuses every other
+// key with 409 `task_done`, so the form says so rather than letting a save fail.
+const locked = computed(() => task.value?.status === 'done')
+// The rendered objective / DoD show only when the editable fields do not.
+const showRead = computed(() => !(props.canContribute && !props.archived) || locked.value)
+
+/** The text fields this save changes, trimmed, with blank meaning "cleared". */
+function changedText() {
+  const out = {}
+  if (!task.value || locked.value) return out
+  for (const f of EDIT_TEXT) {
+    const next = edit[f].trim()
+    if (next !== (task.value[f] || '')) out[f] = next
+  }
+  return out
+}
+
 const dirty = computed(() => task.value && (
   edit.status !== task.value.status || edit.priority !== task.value.priority || edit.note.trim() !== ''
-  || (task.value.status !== 'done' && edit.owner.trim() !== (task.value.owner || ''))))
+  || (task.value.status !== 'done' && edit.owner.trim() !== (task.value.owner || ''))
+  || Object.keys(changedText()).length > 0))
 
 function load() { return store.fetchTasks(props.projectId) }
 watch(() => props.projectId, load, { immediate: true })
@@ -268,9 +359,10 @@ function openCreate() {
 }
 
 async function create() {
-  formError.value = form.title.trim() ? {} : { title: 'Give the task a title, e.g. "Draft the launch brief".' }
+  // The same limits as an edit, from the one validator (ent#1133).
+  formError.value = validateTaskFields(form)
   const ownerOk = !!createOwnerField.value?.validate()
-  if (formError.value.title || !ownerOk) return
+  if (Object.keys(formError.value).length || !ownerOk) return
   busy.value = true
   actionError.value = ''
   try {
@@ -299,6 +391,21 @@ async function confirmDone(t) {
   }
 }
 
+async function refreshTask() {
+  if (!task.value) return
+  try {
+    task.value = await store.fetchTask(props.projectId, task.value.id)
+  } catch (err) {
+    actionError.value = projectErrorMessage(err)
+  }
+}
+
+// ent#1195: the task's chat opens in the Workspace; the task dialog closes first.
+function openThread(t) {
+  taskOpen.value = false
+  emit('open-thread', t)
+}
+
 async function openTask(id) {
   task.value = null
   actionError.value = ''
@@ -314,17 +421,29 @@ async function openTask(id) {
 
 function resetEdit() {
   editPicked.value = ownerPerson(task.value.owner)
-  Object.assign(edit, { status: task.value.status, priority: task.value.priority, owner: task.value.owner || '', note: '' })
+  editError.value = {}
+  Object.assign(edit, {
+    status: task.value.status, priority: task.value.priority, owner: task.value.owner || '', note: '',
+    title: task.value.title || '', objective: task.value.objective || '',
+    done_definition: task.value.done_definition || '',
+  })
 }
 
 async function saveTask() {
   if (editOwnerField.value && !editOwnerField.value.validate()) return
+  // Only the fields this save sends are checked: a legacy stored value over
+  // the limit must not block a status, owner or note change.
+  const text = changedText()
+  editError.value = validateTaskFields(edit, Object.keys(text))
+  if (Object.keys(editError.value).length) return
   const body = {}
   if (edit.status !== task.value.status) body.status = edit.status
   if (edit.priority !== task.value.priority && task.value.status !== 'done') body.priority = edit.priority
   const owner = edit.owner.trim()
   if (task.value.status !== 'done' && owner !== (task.value.owner || '')) body.owner = owner || null
   if (edit.note.trim()) body.note = edit.note.trim()
+  // Blank clears a long field; a title is required, so it is never sent blank.
+  for (const [f, v] of Object.entries(text)) body[f] = f === 'title' ? v : (v || null)
   busy.value = true
   actionError.value = ''
   try {
@@ -332,7 +451,11 @@ async function saveTask() {
     task.value = await store.fetchTask(props.projectId, task.value.id)
     resetEdit()
   } catch (err) {
-    actionError.value = projectErrorMessage(err)
+    // A refusal that names a field belongs under it; anything else is the
+    // form's own error, and what was typed is kept either way.
+    const field = TASK_FIELD_ERROR_CODES[err?.response?.data?.detail?.code]
+    if (field) editError.value = { [field]: projectErrorMessage(err) }
+    else actionError.value = projectErrorMessage(err)
   } finally {
     busy.value = false
   }

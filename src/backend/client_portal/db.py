@@ -88,6 +88,7 @@ def get_shared_roster(email: str) -> list[dict]:
             # `agent_ownership`, so it is one column rather than a per-card read,
             # and the roster's model control needs it for every row.
             agent_ownership.c.public_channel_model,
+            agent_ownership.c.default_model,
             users.c.username.label("owner"),
         )
         .select_from(
@@ -142,6 +143,7 @@ def get_owned_roster(email: str) -> list[dict]:
             agent_ownership.c.tts_voice_replies_enabled,   # #2157
             agent_ownership.c.display_label,        # #2159, same rationale as above
             agent_ownership.c.public_channel_model,  # ent#403, same rationale
+            agent_ownership.c.default_model,         # ent#1202, same rationale
             users.c.username.label("owner"),
         )
         .select_from(
@@ -194,6 +196,47 @@ def add_portal_message(msg_id: str, agent_name: str, client_email: str,
             "source": source, "call": voice_call_id, "attachments": attachments,
             "execution": execution_id, "gate_hold": gate_hold,
         })
+
+
+def add_portal_message_once(msg_id: str, agent_name: str, client_email: str,
+                            role: str, content: str, now: str, session_id: str,
+                            source: Optional[str] = None) -> bool:
+    """Insert a platform-written row under a deterministic id, at most once
+    (trinity-enterprise#1170). True when THIS call wrote it.
+
+    The insert and the session touch are one transaction, and the touch runs
+    only when the insert landed — so a duplicate counts nothing, and there is
+    no committed row whose ``message_count`` was never advanced. Duplicates are
+    decided by ``ON CONFLICT (id) DO NOTHING`` (SQLite >= 3.24 and PostgreSQL),
+    never by catching an IntegrityError."""
+    insert_stmt = text(
+        "INSERT INTO enterprise_portal_messages "
+        "(id, agent_name, client_email, session_id, role, content, cost, created_at, source) "
+        "VALUES (:id, :agent, :email, :session, :role, :content, NULL, :now, :source) "
+        "ON CONFLICT (id) DO NOTHING"
+    )
+    touch_stmt = text(
+        "UPDATE enterprise_portal_sessions "
+        "SET last_message_at = :now, message_count = message_count + 1 "
+        "WHERE id = :id"
+    )
+    with get_engine().begin() as conn:
+        res = conn.execute(insert_stmt, {
+            "id": msg_id, "agent": agent_name, "email": (client_email or "").lower(),
+            "session": session_id, "role": role, "content": content, "now": now,
+            "source": source,
+        })
+        if res.rowcount != 1:
+            return False
+        conn.execute(touch_stmt, {"now": now, "id": session_id})
+    return True
+
+
+def portal_message_exists(msg_id: str) -> bool:
+    """Whether a row with this id exists (trinity-enterprise#1170)."""
+    stmt = text("SELECT 1 FROM enterprise_portal_messages WHERE id = :id")
+    with get_engine().connect() as conn:
+        return conn.execute(stmt, {"id": msg_id}).first() is not None
 
 
 def mark_portal_messages_held(message_ids: list, gate_hold: Optional[str]) -> None:

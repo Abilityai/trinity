@@ -65,7 +65,7 @@
       data-testid="portal-work-title-toggle"
       @click="titleOpen = !titleOpen"
     >{{ titleOpen ? 'Show less' : 'Show more' }}</BaseButton>
-    <p v-if="showAgent && item.agent_name" class="mt-0.5 text-xs text-gray-500 dark:text-gray-400 truncate">{{ item.agent_name }}</p>
+    <p v-if="showAgent && item.agent_name" class="mt-0.5 text-xs text-gray-500 dark:text-gray-400 truncate">{{ item.agent_display_label || item.agent_name }}</p>
     <p v-else-if="showAgent && !item.agent_name" class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">another agent</p>
 
     <!-- What it is doing right now (trinity-enterprise#620): ONE row of fixed

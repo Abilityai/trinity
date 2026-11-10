@@ -918,10 +918,16 @@ _ROW_READERS = {
         "addressee", "the ask a chat discusses: addressed to the viewer in SQL, then the roster"),
     (_PORTAL_ASKS, "_linked_request_id"): (
         "addressee", "the linked row's request_id only, when this ask's addressee could already see it"),
+    (_PORTAL_ASKS, "_notices_in"): (
+        "internal", "trinity-enterprise#1134 AC4: a chat's own fallen-to-the-operators asks as notices "
+                    "with no content — id, agent, kind, status, created_at, chat id and the reason enum, "
+                    "never a title, question, options or context — shown only to the chat's owner "
+                    "(`get_portal_session`, then the roster)"),
     (_PORTAL_ASKS, "_owned_ask"): (
         "addressee", "the viewer's own ask (`_is_addressed_to`, visible kinds, then the roster — or, for "
-                     "the reserved reach family the gate raised about them, trinity-enterprise#981, the "
-                     "address alone), else the uniform 404"),
+                     "the reserved reach family the gate raised about them, trinity-enterprise#981, or an "
+                     "agent's ask `to: project`, trinity-enterprise#1134, the address alone), else the "
+                     "uniform 404"),
     (_PORTAL_ASKS, "_recent_answers"): (
         "addressee", "the viewer's own recent answers: addressed to the viewer in SQL"),
     (_PORTAL_ASKS, "discuss_ask"): (
@@ -932,8 +938,9 @@ _ROW_READERS = {
                  "names no person)"),
     (_PORTAL_ASKS, "list_asks_page"): (
         "addressee", "the Workspace inbox: addressed to the viewer in SQL, before the limit; the roster "
-                     "set OR the reserved reach family the gate raised about them (trinity-enterprise#981), "
-                     "both in the same SQL for the page and its count"),
+                     "set OR the reserved reach family the gate raised about them (trinity-enterprise#981) "
+                     "OR an agent's ask `to: project` (trinity-enterprise#1134), all in the same SQL for "
+                     "the page and its count"),
     (_ROUTER_FILE, "bulk_cancel_queue_items"): ("door", "§6: person only"),
     (_ROUTER_FILE, "cancel_queue_item"): ("door", "§6: person only"),
     (_ROUTER_FILE, "get_agent_queue_items"): ("door", "§6: `_for_principal`, the exclusion in SQL"),
@@ -1042,6 +1049,10 @@ _ENDING_OBSERVERS = {
         "operator_resume_service._wakes_on_ending",
     ("services/skill_gate_service.py", "on_ending"):
         "the gate consumes its own asks' endings (`resolve`, ruled above)",
+    ("shared_sessions/service.py", "on_ask_ending"):
+        "abilityai/trinity-enterprise#1135: one system line in the room the ask was raised in; "
+        "who ended it renders as the actor's seated room identity, else a role word, never a "
+        "non-member's email, and never the answer, the notes or a cancel reason",
 }
 _TABLE_HOMES = frozenset({"db.tables", "db.operator_queue", "db.queue_mentions"})
 _RAW_SQL = re.compile(r"\b(FROM|JOIN|UPDATE|INTO)\s+operator_queue\b", re.IGNORECASE)

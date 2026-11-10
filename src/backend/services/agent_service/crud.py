@@ -75,6 +75,11 @@ from .capabilities import (
     normalize_cpu,
     normalize_memory,
 )
+from services.agent_ssh_binding import (
+    AgentSshBindAddressError,
+    agent_ssh_port_binding,
+    raise_for_ssh_bind_failure,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -417,6 +422,10 @@ class _TemplateResolution:
     # "copy" import intent. When set, `github_repo_for_agent` stays None by
     # design — the container gets NO GitHub env, no git-config row, no PAT.
     copy_snapshot: Optional["snapshot_import.SnapshotStaging"] = None
+    # ent#1173 (AC-2): bytes of a GitHub template's bundled avatar file (avatar.webp
+    # or avatar.png). None when no such file exists or fetch failed. Installed
+    # after `_register_agent` via `_install_bundled_avatar_bytes`.
+    bundled_avatar_bytes: Optional[bytes] = None
 
 
 @dataclass
@@ -2045,6 +2054,24 @@ async def _resolve_template(
             tr.git_instance_id, tr.git_working_branch = await _reserve_git_instance(
                 config, current_user, tr.github_repo_for_agent
             )
+            # ent#1173 (AC-2): try to fetch a bundled avatar from the template
+            # repo. Best-effort — a missing file or fetch failure does not
+            # block creation; the agent gets an AI-generated avatar later.
+            if not config.ephemeral:
+                for _avatar_fname in _BUNDLED_AVATAR_NAMES:
+                    try:
+                        _avatar_bytes = await asyncio.to_thread(
+                            _fetch_github_file_bytes, tr.github_repo_for_agent,
+                            tr.github_pat_for_agent, url_branch, _avatar_fname,
+                            _BUNDLED_AVATAR_MAX_BYTES,
+                        )
+                    except Exception as _e:
+                        logger.debug("[AVATAR-003] could not fetch %s from %s: %s",
+                                     _avatar_fname, tr.github_repo_for_agent, _e)
+                        _avatar_bytes = None
+                    if _avatar_bytes:
+                        tr.bundled_avatar_bytes = _avatar_bytes
+                        break
         elif config.template.startswith("local:"):
             tr.template_data, tr.template_shared_folders = _resolve_local_template(config)
             # Same normalizer as the `github:` branch above — symmetric by
@@ -2202,7 +2229,9 @@ def _build_base_env(config: AgentConfig) -> dict:
         'AGENT_NAME': config.name,
         'CREDENTIALS_FILE': '/config/credentials.json',
         'ANTHROPIC_API_KEY': get_anthropic_api_key(),
-        'ENABLE_SSH': 'true',
+        # trinity-enterprise#1168: no sshd until an admin asks for one — the
+        # grant endpoint starts it on demand (ssh_service.ensure_sshd_running).
+        'ENABLE_SSH': 'false',
         'ENABLE_AGENT_UI': 'true',
         'AGENT_SERVER_PORT': '8000',
         'TEMPLATE_NAME': config.template if config.template else '',
@@ -2667,41 +2696,55 @@ async def _create_agent_container(
         # (durable or ephemeral), pairing with the DB columns.
         container_labels['trinity.spawned-by'] = current_user.agent_name
 
-    return await containers_run(
-        config.base_image,
-        detach=True,
-        name=f"agent-{config.name}",
-        ports={'22/tcp': config.port},
-        volumes=volumes,
-        environment=env_vars,
-        labels=container_labels,
-        # Always apply AppArmor for additional sandboxing
-        security_opt=['apparmor:docker-default'],
-        # Always drop ALL capabilities first (defense in depth)
-        cap_drop=['ALL'],
-        # Add back only the capabilities needed for the mode
-        cap_add=FULL_CAPABILITIES if full_capabilities else RESTRICTED_CAPABILITIES,
-        read_only=False,
-        # Always apply noexec,nosuid to /tmp for security (#1098: scratch
-        # is redirected off this tiny tmpfs via the TMPDIR env var).
-        tmpfs=AGENT_TMPFS_MOUNT,
-        # #1871: bound the container's json-file log. Docker's default is
-        # unbounded, so without this the log grows until the Docker data root
-        # fills and dockerd wedges. Creation-time — see AGENT_LOG_CONFIG.
-        log_config=AGENT_LOG_CONFIG,
-        # #2541: born `unless-stopped` so the agent survives a host reboot or a
-        # daemon restart. Docker's default is `no` — 8 of 19 agents stayed dead
-        # ~42h after the 2026-09-04 power-off. Creation-time, like log_config.
-        restart_policy=AGENT_RESTART_POLICY,
-        network='trinity-agent-network',
-        # #1197: cpu/memory normalized + validated above (raises 400 on
-        # a bad template value), so these are guaranteed Docker-valid.
-        mem_limit=config.resources['memory'],
-        # #1126: nano_cpus (Linux CFS quota), NOT cpu_count — the latter
-        # is Windows-only in docker-py and left NanoCpus=0, so newly
-        # created agents never got a CPU limit on Linux.
-        nano_cpus=int(config.resources['cpu']) * 1_000_000_000,
-    )
+    try:
+        return await containers_run(
+            config.base_image,
+            detach=True,
+            name=f"agent-{config.name}",
+            # trinity-enterprise#1168: published on AGENT_SSH_BIND_ADDRESS
+            # (loopback by default), never a bare int (= every interface).
+            ports=agent_ssh_port_binding(config.port),
+            volumes=volumes,
+            environment=env_vars,
+            labels=container_labels,
+            # Always apply AppArmor for additional sandboxing
+            security_opt=['apparmor:docker-default'],
+            # Always drop ALL capabilities first (defense in depth)
+            cap_drop=['ALL'],
+            # Add back only the capabilities needed for the mode
+            cap_add=FULL_CAPABILITIES if full_capabilities else RESTRICTED_CAPABILITIES,
+            read_only=False,
+            # Always apply noexec,nosuid to /tmp for security (#1098: scratch
+            # is redirected off this tiny tmpfs via the TMPDIR env var).
+            tmpfs=AGENT_TMPFS_MOUNT,
+            # #1871: bound the container's json-file log. Docker's default is
+            # unbounded, so without this the log grows until the Docker data root
+            # fills and dockerd wedges. Creation-time — see AGENT_LOG_CONFIG.
+            log_config=AGENT_LOG_CONFIG,
+            # #2541: born `unless-stopped` so the agent survives a host reboot or a
+            # daemon restart. Docker's default is `no` — 8 of 19 agents stayed dead
+            # ~42h after the 2026-09-04 power-off. Creation-time, like log_config.
+            restart_policy=AGENT_RESTART_POLICY,
+            network='trinity-agent-network',
+            # #1197: cpu/memory normalized + validated above (raises 400 on
+            # a bad template value), so these are guaranteed Docker-valid.
+            mem_limit=config.resources['memory'],
+            # #1126: nano_cpus (Linux CFS quota), NOT cpu_count — the latter
+            # is Windows-only in docker-py and left NanoCpus=0, so newly
+            # created agents never got a CPU limit on Linux.
+            nano_cpus=int(config.resources['cpu']) * 1_000_000_000,
+        )
+    except Exception as exc:  # noqa: BLE001 — classified, then re-raised unchanged
+        # trinity-enterprise#1168: Docker's "cannot assign requested address"
+        # never names the knob that caused it. Only that one text is wrapped
+        # (as a 400 naming AGENT_SSH_BIND_ADDRESS); everything else re-raises
+        # as-is so the bind-conflict / name-conflict classifiers downstream
+        # see the original exception.
+        try:
+            raise_for_ssh_bind_failure(exc)
+        except AgentSshBindAddressError as named:
+            raise HTTPException(status_code=400, detail=str(named)) from exc
+        raise
 
 
 async def _broadcast_agent_created(agent_status: AgentStatus, ws_manager) -> None:
@@ -2770,6 +2813,63 @@ def _install_bundled_avatar(config: AgentConfig) -> None:
             f.write(optimize_avatar(data))
         logger.info(f"[AVATAR-003] Installed bundled avatar from {config.template} for {config.name}")
         return
+
+
+def _fetch_github_file_bytes(
+    repo: str, pat: Optional[str], ref: Optional[str], filename: str, max_bytes: int
+) -> Optional[bytes]:
+    """ent#1173 (AC-2): Fetch raw bytes of a file from a GitHub repo via the
+    contents API.  Returns None on 404 or any error. Only a 200 with valid
+    base64 content returns bytes; everything else is None (best-effort caller).
+    """
+    import base64 as _base64
+    import httpx as _httpx
+    try:
+        headers = {"Accept": "application/vnd.github+json"}
+        if pat:
+            headers["Authorization"] = f"Bearer {pat}"
+        with _httpx.Client(timeout=10.0) as client:
+            resp = client.get(
+                f"https://api.github.com/repos/{repo}/contents/{filename}",
+                headers=headers,
+                params={"ref": ref} if ref else None,
+            )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        raw = _base64.b64decode(data["content"])
+        if len(raw) > max_bytes:
+            logger.debug("[AVATAR-003] bundled avatar %s/%s is %d bytes (max %d); skipping",
+                         repo, filename, len(raw), max_bytes)
+            return None
+        return raw
+    except Exception as e:
+        logger.debug("[AVATAR-003] could not fetch %s from %s: %s", filename, repo, e)
+        return None
+
+
+def _install_bundled_avatar_bytes(agent_name: str, data: bytes) -> None:
+    """ent#1173 (AC-2): install a GitHub template's bundled avatar from raw bytes.
+
+    Unlike the `local:` path (which reads from a filesystem path), the GitHub
+    path delivers raw bytes fetched from the API. Same size/pixel caps as the
+    local version. Stored as a default avatar (is_default_avatar=1) so
+    Settings → Generate Default Avatars can still overwrite it.
+    """
+    import io as _io
+    from PIL import Image
+    from utils.image_optimize import optimize_avatar
+
+    dest = avatar_paths.avatar_path_or_none(agent_name, ".webp")
+    if dest is None:
+        return
+    with Image.open(_io.BytesIO(data)) as img:
+        if img.width * img.height > 4096 * 4096:
+            raise ValueError(f"bundled avatar is {img.width}x{img.height}, max 4096x4096")
+    avatar_paths.ensure_avatar_store()
+    with open(dest, "wb") as f:
+        f.write(optimize_avatar(data))
+    logger.info(f"[AVATAR-003] Installed GitHub bundled avatar for {agent_name}")
 
 
 def _register_agent(
@@ -3968,6 +4068,14 @@ async def create_agent_internal(
                 ephemeral_expires_at,
                 auto_assigned_subscription_id,
             )
+            # ent#1173 (AC-2): install a GitHub template's bundled avatar bytes
+            # (fetched during _resolve_template). Best-effort — the agent is
+            # already registered and fully functional without an avatar.
+            if tr.bundled_avatar_bytes and not config.ephemeral:
+                try:
+                    _install_bundled_avatar_bytes(config.name, tr.bundled_avatar_bytes)
+                except Exception as _e:
+                    logger.warning(f"[AVATAR-003] Failed to install GitHub avatar for {config.name}: {_e}")
             await _materialize_agent_files(
                 config,
                 tr.template_data,
