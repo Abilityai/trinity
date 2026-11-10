@@ -47,6 +47,7 @@ from services.template_service import (
 )
 from services.template_schedules import normalize_declared_schedules
 from services.template_plugins import normalize_declared_plugins
+from services.template_skills import normalize_declared_library_skills
 from services import metric_registry
 from services import git_service
 from services.settings_service import get_anthropic_api_key, resolve_github_pat, resolve_github_pat_candidates, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email, get_ephemeral_agent_quota, get_ephemeral_ttl_ceiling_seconds
@@ -418,6 +419,10 @@ class _TemplateResolution:
     # reconcile, not a no-op: a template that DROPPED its block retires the
     # rows it used to declare.
     declared_metrics: list = field(default_factory=list)
+    # §21.3.4: NORMALIZED declared `library_skills:` (skills-library names to
+    # assign at creation), fed by ALL THREE resolver branches — the same
+    # one-carrier shape as `declared_plugins`, for the same reason. Empty = none.
+    declared_library_skills: list = field(default_factory=list)
     # trinity-enterprise#15: staged backend-materialized snapshot for the
     # "copy" import intent. When set, `github_repo_for_agent` stays None by
     # design — the container gets NO GitHub env, no git-config row, no PAT.
@@ -822,6 +827,26 @@ def _declared_plugins_for_snapshot(snapshot) -> dict:
             snapshot.source_repo, e,
         )
         return {}
+
+
+def _declared_library_skills_for_snapshot(snapshot) -> list:
+    """Normalized `library_skills:` for a copy-intent agent, read from the
+    STAGED tree (§21.3.4) — twin of `_declared_plugins_for_snapshot`. Non-fatal:
+    any read failure yields the empty declaration."""
+    template_yaml = Path(snapshot.staging_dir) / "template.yaml"
+    if not template_yaml.is_file():
+        return []
+    try:
+        metadata = load_template_yaml(template_yaml.read_text(encoding="utf-8"))
+        if not isinstance(metadata, dict):
+            return []
+        return normalize_declared_library_skills(metadata.get("library_skills"))
+    except Exception as e:  # noqa: BLE001 — advisory, never fatal
+        logger.warning(
+            "snapshot-import: could not read template.yaml library_skills for %s: %s",
+            snapshot.source_repo, e,
+        )
+        return []
 
 
 def _declared_metrics_for_snapshot(snapshot) -> list:
@@ -1902,6 +1927,9 @@ async def _resolve_template(
                 tr.declared_metrics = _declared_metrics_for_snapshot(
                     tr.copy_snapshot
                 )
+                tr.declared_library_skills = _declared_library_skills_for_snapshot(
+                    tr.copy_snapshot
+                )
                 return tr
 
             (
@@ -1969,6 +1997,9 @@ async def _resolve_template(
             )
             tr.declared_metrics = metric_registry.declared_metrics_from_template(
                 source_metadata
+            )
+            tr.declared_library_skills = normalize_declared_library_skills(
+                source_metadata.get("library_skills")
             )
             (
                 tr.github_repo_for_agent,
@@ -2056,6 +2087,9 @@ async def _resolve_template(
             )
             tr.declared_metrics = metric_registry.declared_metrics_from_template(
                 tr.template_data
+            )
+            tr.declared_library_skills = normalize_declared_library_skills(
+                tr.template_data.get("library_skills")
             )
     return tr
 
@@ -3030,6 +3064,140 @@ def reconcile_declared_schedules(
     )
 
 
+# §21.3.4 — template-declared library skills ----------------------------------
+
+# Creation starts the container directly (not via `start_agent_internal`), so
+# nothing else delivers assigned skills until the agent's next start. Startup can
+# install plugins and clone repos, so the readiness wait is generous.
+LIBRARY_SKILLS_READY_TIMEOUT_S = int(os.getenv("LIBRARY_SKILLS_READY_TIMEOUT_S", "900"))
+
+# Strong refs for the fire-and-forget deliveries (the asyncio `create_task`
+# garbage-collection footgun; same pattern as `spawn_gitignore_merge_after_clone`).
+_inflight_library_skill_deliveries: set = set()
+
+
+def _permitted_library_skills(current_user, declared: list) -> list:
+    """The declared names this creator may have assigned — all or none.
+
+    The §21.3.1 fence, applied at creation: assigning skills is the
+    `skills.manage` capability. People, user keys and the system key pass; an
+    agent key passes only while its agent holds the grant; every other scope,
+    and a principal with no scope at all, is refused. Without this, any agent
+    key could obtain library skills by creating an agent from a template that
+    names them. A refusal costs the skills, never the creation.
+    """
+    if not declared:
+        return []
+    try:
+        from db.capability_grants import CAPABILITY_SKILLS_MANAGE
+        from dependencies import capability_refusal
+
+        refusal = capability_refusal(current_user, CAPABILITY_SKILLS_MANAGE)
+    except Exception as e:  # noqa: BLE001 — runs inside the creation fence
+        logger.warning(
+            "[§21.3.4] Could not check skills.manage for template library_skills "
+            "(%s); the agent is created without them.", e,
+        )
+        return []
+    if refusal is None:
+        return list(declared)
+    logger.warning(
+        "[§21.3.4] Not assigning template library_skills %s: the creating key "
+        "lacks skills.manage (%s). The agent is created without them.",
+        declared, refusal[0],
+    )
+    return []
+
+
+def _library_skills_attribution(current_user) -> Optional[str]:
+    """`dependencies.acting_agent_name`, never raising (it runs inside the
+    creation fence). None for a person, the agent for an agent or system key."""
+    try:
+        from dependencies import acting_agent_name
+
+        return acting_agent_name(current_user)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _assign_declared_library_skills(
+    agent_name: str, declared: list, owner_username: str,
+    assigned_by_agent: Optional[str],
+) -> list:
+    """Assign each declared name the library has, as the owner. Returns the
+    names now assigned. Names the library lacks are skipped and logged; the
+    route's own rule (assign only what the library has) applies here too."""
+    from services.skill_service import skill_service
+
+    assigned: list = []
+    missing: list = []
+    for name in declared:
+        if not skill_service.get_skill(name):
+            missing.append(name)
+            continue
+        db.assign_skill(
+            agent_name, name, owner_username, assigned_by_agent=assigned_by_agent,
+        )
+        assigned.append(name)
+    if missing:
+        logger.warning(
+            "[§21.3.4] Template library_skills not in the skills library, skipped "
+            "for %s: %s", agent_name, missing,
+        )
+    if assigned:
+        logger.info("[§21.3.4] Assigned library skills to %s: %s", agent_name, assigned)
+    return assigned
+
+
+async def _deliver_library_skills_when_ready(agent_name: str) -> None:
+    """Wait for the new agent's server, then run the start-path injection.
+
+    Reuses `lifecycle.inject_assigned_skills`, so sets, gates and the prune
+    behave exactly as on a start. Never raises: assignments are already in the
+    DB, so the next agent start delivers anything this misses.
+    """
+    from . import lifecycle
+
+    try:
+        ready = await lifecycle.wait_for_agent_ready(
+            agent_name, timeout_s=LIBRARY_SKILLS_READY_TIMEOUT_S
+        )
+        if not ready:
+            logger.warning(
+                "[§21.3.4] %s was not ready within %ss; its library skills will "
+                "be delivered on its next start.",
+                agent_name, LIBRARY_SKILLS_READY_TIMEOUT_S,
+            )
+            return
+        result = await lifecycle.inject_assigned_skills(agent_name)
+        logger.info(
+            "[§21.3.4] Delivered library skills to %s: %s",
+            agent_name, (result or {}).get("status"),
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "[§21.3.4] Could not deliver library skills to %s (%s); they will be "
+            "delivered on its next start.", agent_name, e,
+        )
+
+
+def _spawn_library_skill_delivery(agent_name: str) -> None:
+    """Fire `_deliver_library_skills_when_ready` without delaying creation.
+    With no running loop the coroutine is closed and logged, never raised."""
+    coro = _deliver_library_skills_when_ready(agent_name)
+    try:
+        task = asyncio.create_task(coro)
+    except RuntimeError as e:
+        coro.close()
+        logger.info(
+            "[§21.3.4] Library skill delivery for %s deferred to its next start "
+            "(no event loop: %s).", agent_name, e,
+        )
+        return
+    _inflight_library_skill_deliveries.add(task)
+    task.add_done_callback(_inflight_library_skill_deliveries.discard)
+
+
 async def _materialize_agent_files(
     config: AgentConfig,
     template_data: dict,
@@ -3040,6 +3208,9 @@ async def _materialize_agent_files(
     owner_username: str = "",
     declared_plugins: Optional[dict] = None,
     declared_metrics: Optional[list] = None,
+    *,
+    declared_library_skills: Optional[list] = None,
+    library_skills_assigned_by_agent: Optional[str] = None,
 ) -> None:
     """Materialize the S4 persistent-state allowlist (#383), the declared
     data_paths (#1169), the declared `plugins:` (#1704) and the declared
@@ -3101,6 +3272,25 @@ async def _materialize_agent_files(
         except Exception as e:
             logger.warning(
                 f"[#1704] Failed to materialize plugins.yaml for "
+                f"{config.name}: {e}"
+            )
+
+    # §21.3.4: assign the template's declared `library_skills:` as the owner,
+    # then deliver them once the agent is ready. `declared_library_skills` has
+    # already passed the §21.3.1 fence (`_permitted_library_skills`). Ghost-
+    # skipped (an ephemeral agent never persists an assignment), and non-fatal
+    # inside the rollback fence: a raise must never cost a successful creation.
+    if declared_library_skills and not config.ephemeral:
+        try:
+            assigned = _assign_declared_library_skills(
+                config.name, declared_library_skills, owner_username,
+                library_skills_assigned_by_agent,
+            )
+            if assigned:
+                _spawn_library_skill_delivery(config.name)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                f"[§21.3.4] Failed to assign template library skills to "
                 f"{config.name}: {e}"
             )
 
@@ -4058,6 +4248,10 @@ async def create_agent_internal(
                 current_user.username,
                 tr.declared_plugins,
                 tr.declared_metrics,
+                declared_library_skills=_permitted_library_skills(
+                    current_user, tr.declared_library_skills
+                ),
+                library_skills_assigned_by_agent=_library_skills_attribution(current_user),
             )
             return agent_status
         except Exception as e:

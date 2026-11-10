@@ -688,6 +688,14 @@ skills:
   - name: my-skill
     description: "What this skill enables"
 
+# Skills from the platform skills library to ASSIGN when an agent is created
+# from this template (names only; skill sets are not supported here). Names the
+# library does not have are skipped. They are delivered once the agent is up,
+# then managed on its Skills tab like any other assignment.
+library_skills:
+  - plan-interview-research
+  - user-research
+
 # Supported platforms (if applicable)
 platforms:
   - trinity
