@@ -263,3 +263,7 @@ It makes no model/provider calls. This registry contract does not itself supply
 cross-worker backend capacity or durable ownership across an agent-server
 restart. Nor does it close the pending-before-Popen gap when a started worker
 has not yet registered its child; those are separate execution boundaries.
+
+## Model for a turn that names none (ent#1202)
+
+One resolver, `services/agent_model_service.resolve_default_model`, answers it for every rung (`task_execution_service._default_model_for`, the a2a pre-create, the portal ladder and label, the public-channel model read): explicit model > public-channel override (public paths only) > `agent_ownership.default_model` when `model_catalog.unrunnable_reason` passes it (catalog ids and Claude Code aliases only) > platform default. Non-Claude runtimes resolve to `None`. NULL changes nothing; an unrunnable stored value is skipped and named (`refused_reason`, one WARNING per agent and value per process). The read is fail-open except the a2a pre-create (`strict=True`). A row created elsewhere (scheduler reminder/schedule/loop rows) gets the resolved id via `db.stamp_model_used_if_null`, which fills a blank only. `GET /api/agents/{name}/model` reports `backend_turn_model`, `default_model`, `default_model_source` and `default_model_refused` beside the container's own `model`. There is no HTTP setter.

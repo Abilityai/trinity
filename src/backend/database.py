@@ -1830,6 +1830,18 @@ class DatabaseManager:
     def set_public_channel_model(self, agent_name: str, model):
         return self._agent_ops.set_public_channel_model(agent_name, model)
 
+    def get_default_model_raw(self, agent_name: str):
+        return self._agent_ops.get_default_model_raw(agent_name)
+
+    def get_default_models_raw(self, agent_names):
+        return self._agent_ops.get_default_models_raw(agent_names)
+
+    def set_default_model(self, agent_name: str, model):
+        return self._agent_ops.set_default_model(agent_name, model)
+
+    def set_default_model_if(self, agent_name: str, expected, model):
+        return self._agent_ops.set_default_model_if(agent_name, expected, model)
+
     # =========================================================================
     # MCP API Key Management (delegated to db/mcp_keys.py)
     # =========================================================================
@@ -2032,6 +2044,9 @@ class DatabaseManager:
 
     def restamp_execution_dispatch(self, execution_id: str) -> bool:
         return self._schedule_ops.restamp_execution_dispatch(execution_id)
+
+    def stamp_model_used_if_null(self, execution_id: str, model) -> bool:
+        return self._schedule_ops.stamp_model_used_if_null(execution_id, model)
 
     def stamp_execution_channel_context(self, execution_id: str, **kwargs) -> bool:
         """ent#498 — attach a delivery destination to a pre-created row."""

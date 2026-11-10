@@ -194,10 +194,15 @@ def _default_model_for(agent_name: str) -> Optional[str]:
     it. A Codex or Gemini agent gets ``None`` and runs on its own model
     (``AGENT_RUNTIME_MODEL`` from its template, or the CLI default): handed
     ``claude-sonnet-4-6``, Codex is refused by OpenAI with a 404.
+
+    ent#1202: a Claude Code agent's own ``default_model`` comes first when this
+    instance can run it — one resolver, ``agent_model_service``, for every rung.
     """
-    if _resolve_agent_runtime(agent_name) != "claude-code":
-        return None
-    return settings_service.get_platform_default_model()
+    from services.agent_model_service import resolve_default_model
+
+    return resolve_default_model(
+        agent_name, runtime=_resolve_agent_runtime(agent_name), db_ops=db, settings=settings_service,
+    ).model
 
 
 def _resolve_agent_runtime(agent_name: str) -> str:
@@ -1764,6 +1769,14 @@ class TaskExecutionService:
         # hardcode in base-image.
         if model is None:
             model = _default_model_for(agent_name)
+            # ent#1202: a row created elsewhere (the scheduler's reminder,
+            # schedule and loop rows) was stamped before this resolution, so
+            # record what the turn actually runs on. Fills a blank only.
+            if execution_id and model:
+                try:
+                    db.stamp_model_used_if_null(execution_id, model)
+                except Exception as e:  # noqa: BLE001 — never fail a turn over the stamp
+                    logger.warning(f"[ent#1202] model_used stamp failed for {execution_id}: {type(e).__name__}")
 
         # Dispatch circuit breaker (#526): combined global master-switch AND
         # per-agent opt-in. Drives the acquire() gate (this path), the

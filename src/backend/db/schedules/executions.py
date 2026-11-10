@@ -1063,6 +1063,32 @@ class ScheduleExecutionsMixin:
                 .where(schedule_executions.c.id == execution_id)
             ).scalar()
 
+    def stamp_model_used_if_null(self, execution_id: str, model: Optional[str]) -> bool:
+        """Record the resolved model on a row created elsewhere (ent#1202).
+
+        ``model_used`` is written at INSERT, and the standalone scheduler
+        pre-creates reminder, schedule and loop rows before it dispatches with
+        ``execution_id`` — so ``execute_task``'s own stamp (inside
+        ``if not execution_id:``) never runs for them and a turn that named no
+        model left the row NULL while it ran on the resolved one.
+
+        Guarded on ``model_used IS NULL``: it only ever FILLS a blank. A row
+        stamped at creation with an explicit model is never rewritten. Returns
+        whether the stamp landed.
+        """
+        if not execution_id or not model:
+            return False
+        stmt = (
+            update(schedule_executions)
+            .where(and_(
+                schedule_executions.c.id == execution_id,
+                schedule_executions.c.model_used.is_(None),
+            ))
+            .values(model_used=model)
+        )
+        with get_engine().begin() as conn:
+            return conn.execute(stmt).rowcount > 0
+
     def stamp_execution_channel_context(
         self,
         execution_id: str,

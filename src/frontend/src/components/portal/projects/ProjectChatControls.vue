@@ -117,11 +117,21 @@
               data-testid="project-room-agent-add"
               @click="addRoomAgent(r.name)"
             >Add</BaseButton>
+            <!-- trinity-enterprise#1131 part 2: a member asks the creator to add it. -->
+            <BaseButton
+              v-else-if="r.action === 'request'"
+              size="sm"
+              variant="secondary"
+              :loading="adding === r.name"
+              :disabled="Boolean(adding) && adding !== r.name"
+              data-testid="project-room-agent-request"
+              @click="requestRoomAgent(r.name)"
+            >{{ r.requested === 'declined' ? 'Ask again' : 'Ask to add' }}</BaseButton>
             <span v-else-if="r.note" class="text-xs text-gray-600 dark:text-gray-300">{{ r.note }}</span>
           </li>
         </ul>
         <p v-if="!roomAgents.canManage && !roomAgents.degraded" class="text-sm text-gray-600 dark:text-gray-300">
-          Only the project's creator can add agents. Ask them to add the ones this room needs.
+          Only the project's creator can add agents. Ask to add the ones this room needs, and they decide.
         </p>
         <InlineError v-if="agentsError" :message="agentsError" @dismiss="agentsError = ''" />
         <div class="flex justify-end">
@@ -226,6 +236,19 @@ async function addRoomAgent(name) {
   agentsError.value = ''
   try {
     await store.addAgent(project.value.id, name)
+    await store.fetchForLink('room', props.targetId)
+  } catch (err) {
+    agentsError.value = projectErrorMessage(err)
+  } finally {
+    adding.value = ''
+  }
+}
+
+async function requestRoomAgent(name) {
+  adding.value = name
+  agentsError.value = ''
+  try {
+    await store.requestAgent(project.value.id, name)
     await store.fetchForLink('room', props.targetId)
   } catch (err) {
     agentsError.value = projectErrorMessage(err)

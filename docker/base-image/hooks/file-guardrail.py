@@ -70,6 +70,17 @@ def _new_content(tool_input: dict) -> list:
     return [p for p in parts if isinstance(p, str)]
 
 
+# trinity-enterprise#1158: a `.env` denial names the way forward, the same
+# pointer as the protected-paths sentence in platform_prompt_service.
+_ENV_PATTERNS = (".env", ".env.*")
+_ENV_DENY_REASON = (
+    "protected path (.env) — the platform writes this file. For a credential an "
+    "agent on another Trinity needs, raise ask_for_credential with "
+    "destination.instance naming the registered instance (the platform uses its "
+    "stored key); for a value a person provides, raise ask_for_credential."
+)
+
+
 def main() -> None:
     data = read_stdin_json()
     tool_input = data.get("tool_input") or {}
@@ -87,7 +98,7 @@ def main() -> None:
     match = _matches_glob(path, baseline, path_allow)
     if match:
         deny(
-            f"protected path ({match})",
+            _ENV_DENY_REASON if match in _ENV_PATTERNS else f"protected path ({match})",
             tool=tool_name,
             path=path,
             pattern=match,
