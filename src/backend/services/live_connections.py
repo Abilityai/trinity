@@ -65,7 +65,6 @@ from __future__ import annotations
 
 import asyncio
 import enum
-import hashlib
 import logging
 import uuid
 from dataclasses import dataclass
@@ -100,27 +99,30 @@ class AccessSnapshot:
     """What a door read about an account when a connection opened.
 
     Equality IS the comparison: two snapshots that differ in any field mean the
-    connection's scope may have changed. The password is held only as a digest
-    of the stored hash.
+    connection's scope may have changed. The stored password hash is held only
+    as a fingerprint: Python's per-process salted ``hash()`` of it. A snapshot
+    is only ever compared with another read by the same worker, so the
+    fingerprint never leaves the process; it detects a change and is not a
+    credential digest, so a cryptographic hash would add nothing.
     """
 
     exists: bool
     role: Optional[str]
     suspended: bool
     email: str
-    password_digest: str
+    password_fingerprint: int
 
     @classmethod
     def of(cls, row: Optional[Mapping[str, Any]]) -> "AccessSnapshot":
         if not row:
-            return cls(exists=False, role=None, suspended=False, email="", password_digest="")
+            return cls(exists=False, role=None, suspended=False, email="", password_fingerprint=0)
         stored = row.get("password") or ""
         return cls(
             exists=True,
             role=row.get("role"),
             suspended=bool(row.get("suspended_at")),
             email=row.get("email") or "",
-            password_digest=hashlib.sha256(stored.encode("utf-8")).hexdigest() if stored else "",
+            password_fingerprint=hash(stored) if stored else 0,
         )
 
 

@@ -264,6 +264,16 @@ async def test_the_tick_closes_a_connection_whose_account_changed(people, change
     assert closes.by_name() == {"alice": reason}
 
 
+def test_a_snapshot_tells_password_hashes_apart_without_holding_one():
+    row = {"role": "creator", "email": ALICE_EMAIL, "password": "hash-a1"}
+    snap = lc.access_snapshot(row)
+    assert snap == lc.access_snapshot(dict(row))
+    assert snap != lc.access_snapshot({**row, "password": "hash-a2"})
+    assert snap != lc.access_snapshot({**row, "password": None})
+    assert "hash-a1" not in repr(snap)
+    assert all("hash-a1" not in str(value) for value in vars(snap).values())
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cleared", [None, ""])
 async def test_an_active_account_stays_open_whatever_form_its_active_state_takes(people, cleared):
