@@ -9,18 +9,18 @@ event_id)`` makes a resend idempotent. ``execution_id`` is attribution only and
 carries no foreign key: execution rows have their own retention. The three
 indexes serve the per-agent read, the per-execution counts and the retention
 sweep, which keys on the server receive time. Additive: nothing existing is
-touched. Chained after 0122_channel_client_blocks so the version-line keeps ONE
-head (#2068).
+touched. Chained after 0123_agent_ownership_default_model so the version-line
+keeps ONE head (#2068).
 
-Revision ID: 0123_guardrail_events
-Revises: 0122_channel_client_blocks
+Revision ID: 0124_guardrail_events
+Revises: 0123_agent_ownership_default_model
 """
 import sqlalchemy as sa
 from alembic import op
 
 
-revision = "0123_guardrail_events"
-down_revision = "0122_channel_client_blocks"
+revision = "0124_guardrail_events"
+down_revision = "0123_agent_ownership_default_model"
 branch_labels = None
 depends_on = None
 

@@ -31,6 +31,8 @@
       <span class="flex-1"></span>
       <BaseButton v-if="canContribute && !archived" size="sm" data-testid="project-task-new" @click="openCreate">New task</BaseButton>
     </div>
+    <!-- trinity-enterprise#1132: the withheld control, said where it would be. -->
+    <p v-if="withheld" class="text-xs text-gray-600 dark:text-gray-300" data-testid="project-tasks-withheld">{{ withheld }}</p>
 
     <SkeletonLoader v-if="view.state === 'loading'" :count="4" height="3rem" gap="0.5rem" />
     <LoadFailed
@@ -50,7 +52,7 @@
           {{ g.label }} <span class="tabular-nums">· {{ g.rows.length }}</span>
         </h3>
         <p v-if="g.key === 'verifying' && g.rows.length" class="text-xs text-gray-600 dark:text-gray-300" data-testid="project-tasks-verification-rule">
-          An agent's completion claim waits here until a person — or the steward agent — confirms it. Open a task to see its evidence{{ canConfirm ? ', then Confirm' : '' }}.
+          {{ rule }} Open a task to see its evidence{{ canConfirm ? ', then Confirm' : '' }}.
         </p>
         <ul class="divide-y divide-gray-100 dark:divide-gray-750 rounded-lg border border-gray-200 dark:border-gray-750 bg-white dark:bg-gray-800">
           <li v-for="t in g.rows" :key="t.id" class="flex items-center gap-2 pr-2">
@@ -138,6 +140,29 @@
           <div class="mt-1 text-sm text-gray-800 dark:text-gray-200" data-testid="project-task-objective"><PortalMarkdown :content="task.objective" /></div>
         </div>
         <div v-if="task.done_definition && showRead"><h3 class="text-xs font-semibold text-gray-500 dark:text-gray-400">Definition of done</h3><p class="mt-1 whitespace-pre-line font-mono text-xs text-gray-800 dark:text-gray-200">{{ task.done_definition }}</p></div>
+
+        <!-- trinity-enterprise#1193: this task's briefs, for the agent working it. -->
+        <ProjectContext
+          :project-id="projectId"
+          :task-id="task.id"
+          :items="(task.context || []).filter((c) => c.kind === 'project-file')"
+          :can-contribute="canContribute"
+          :archived="archived"
+          :my-email="myEmail"
+          :is-creator="isCreator"
+          :limits="project?.context_limits || null"
+          @changed="refreshTask"
+        />
+
+        <!-- trinity-enterprise#1195: pick the agent, see what it gets, start the task's chat. -->
+        <ProjectTaskStart
+          v-if="canContribute"
+          :project-id="projectId"
+          :task-id="task.id"
+          :can-contribute="canContribute"
+          :archived="archived"
+          @open-thread="openThread"
+        />
 
         <form v-if="canContribute && !archived" class="space-y-2 rounded-lg border border-gray-200 dark:border-gray-750 p-3" @submit.prevent="saveTask">
           <BaseInput
@@ -234,22 +259,28 @@ import LoadFailed from '@/components/LoadFailed.vue'
 import InlineError from '@/components/InlineError.vue'
 import PortalMarkdown from '@/components/portal/PortalMarkdown.vue'
 import { useProjectsStore } from '@/stores/projects'
+import ProjectContext from './ProjectContext.vue'
+import ProjectTaskStart from './ProjectTaskStart.vue'
 import { viewState } from '@/utils/loadingState'
 import { formatRelativeTime, formatLocalDateTime } from '@/utils/timestamps'
 import {
   TASK_FIELD_ERROR_CODES, TASK_STATUS_BADGE, authorLabel, groupTasks, projectErrorMessage, taskLogKindLabel,
-  taskStatusLabel, taskStatusOptions, validateTaskFields,
-} from './projectsUtils'
+  taskStatusLabel, taskStatusOptions, validateTaskFields, verificationRule, withheldLine } from './projectsUtils'
 
 const props = defineProps({
+  // trinity-enterprise#1132: the page read, for the withheld line and the rule.
+  project: { type: Object, default: null },
   projectId: { type: String, required: true },
   canContribute: { type: Boolean, default: false },
   archived: { type: Boolean, default: false },
   myEmail: { type: String, default: '' },
   // The project's members `{email, label}` — names an owner on a row.
   members: { type: Array, default: () => [] },
+  // trinity-enterprise#1193: the viewer holds the creator role (may change anyone's brief).
+  isCreator: { type: Boolean, default: false },
 })
 
+const emit = defineEmits(['open-thread'])
 const store = useProjectsStore()
 const createOpen = ref(false)
 const taskOpen = ref(false)
@@ -290,6 +321,8 @@ const groups = computed(() => {
   ]
 })
 const canConfirm = computed(() => props.canContribute && !props.archived)
+const withheld = computed(() => withheldLine({ project: props.project, myEmail: props.myEmail, canContribute: props.canContribute, archived: props.archived }, 'tasks'))
+const rule = computed(() => verificationRule(props.project))
 const confirming = ref('')
 const confirmError = ref('')
 // A done task is frozen until it is reopened — the server refuses every other
@@ -356,6 +389,21 @@ async function confirmDone(t) {
   } finally {
     confirming.value = ''
   }
+}
+
+async function refreshTask() {
+  if (!task.value) return
+  try {
+    task.value = await store.fetchTask(props.projectId, task.value.id)
+  } catch (err) {
+    actionError.value = projectErrorMessage(err)
+  }
+}
+
+// ent#1195: the task's chat opens in the Workspace; the task dialog closes first.
+function openThread(t) {
+  taskOpen.value = false
+  emit('open-thread', t)
 }
 
 async function openTask(id) {

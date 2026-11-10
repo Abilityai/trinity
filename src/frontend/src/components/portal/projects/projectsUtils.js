@@ -151,6 +151,10 @@ export function chatProjectActions({ projectsAvailable, isPlatform, isMain, sess
  */
 const ROOM_AGENT_BADGE = { active: 'success', pending: 'warning', declined: 'neutral', off: 'neutral' }
 const ROOM_AGENT_NOTE = { not_on_your_list: 'Not on your list' }
+const REQUEST_NOTE = {
+  pending: 'Asked — waiting on the creator',
+  blocked: 'You have a request waiting on the creator',
+}
 
 export function roomAgentRows(project) {
   if (!project || !('room_agents' in project)) return null
@@ -163,8 +167,14 @@ export function roomAgentRows(project) {
     state: a.state,
     label: agentStateLabel(a.state),
     badge: ROOM_AGENT_BADGE[a.state] || 'neutral',
-    action: canManage && a.can_add === true ? 'add' : null,
-    note: canManage ? ROOM_AGENT_NOTE[a.reason] || null : null,
+    action: canManage && a.can_add === true ? 'add'
+      // ent#1131 part 2: a member who can't add asks the creator instead —
+      // one request at a time, so none beside a pending one (`blocked`).
+      : (a.can_request === true && !['pending', 'blocked'].includes(a.my_request) ? 'request' : null),
+    // My request for it: `pending` reads as waiting; a decline offers Ask again.
+    requested: a.can_request === true ? (a.my_request || null) : null,
+    note: canManage ? ROOM_AGENT_NOTE[a.reason] || null
+      : (a.can_request === true ? REQUEST_NOTE[a.my_request] || null : null),
   }))
   const notOn = rows.filter((r) => r.state === 'off' || r.state === 'declined').length
   const waiting = rows.filter((r) => r.state === 'pending').length
@@ -181,6 +191,14 @@ const CODE_MESSAGE = {
   archived: 'This project is archived. Restore it to add to it.',
   not_permitted: 'Only the person who created this project can change that.',
   unknown_person: 'Only people at your company can be added. Check the email, e.g. name@your-company.com.',
+  owner_not_on_project: "A task's owner must be the project's creator or one of its members. Add them to the project first.",
+  invalid_owner: "Pick the owner from the project's people, or write a role as role:<id>. A name on its own reaches nobody.",
+  session_required: 'Looking people up needs you signed in to Trinity. Reload the page and try again.',
+  context_too_large: 'A brief can be at most 512 KB. Split it into several files.',
+  project_context_full: "This project's briefs can total at most 5 MB. Remove one you no longer need first.",
+  unsupported_type: 'A brief is markdown (.md) or plain text (.txt). Link other files from Add from… instead.',
+  not_text: "This file isn't text. Save it as .md or .txt and try again.",
+  empty_brief: 'The brief is empty.',
   agent_not_found: "That agent isn't on your list, so you can't add it.",
   too_many_members: 'This project has reached its member limit.',
   too_many_links: 'This project has reached its link limit.',
@@ -238,6 +256,27 @@ export function stewardFormValue(steward, myEmail) {
     return { steward: 'person', steward_email: steward.ref }
   }
   return { steward: 'me', steward_email: '' }
+}
+
+/**
+ * ent#1169 — the dialog's one line under Steward: what picking it does about
+ * the library's project-management skills. `options` is the steward-options
+ * read: null while it loads ("Checking…"), false when it failed (no line,
+ * nothing guessed).
+ */
+export function stewardSkillHint(steward, options) {
+  if (!String(steward || '').startsWith('agent:')) {
+    return 'A person steward checks finished tasks and health by hand. An agent steward with the project-management skills does it on its own schedule.'
+  }
+  if (options === false) return ''        // the read failed: say nothing rather than guess
+  if (!options) return 'Checking the project-management skills…'
+  const name = steward.slice(6)
+  const row = (options.agents || []).find((a) => a.agent_name === name)
+  if (row?.holds_set) return `${name} already has the project-management skills, so it can keep this project's record.`
+  if (row && row.holds_set === null) return `Trinity couldn't check ${name}'s skills. You can still make it the steward.`
+  if (options.set && !options.set.available) return options.set.message || "The project-management skills aren't available on this Trinity yet."
+  if (row?.can_assign) return `${name} gets the project-management skills, so it can verify finished tasks, record health and write the log.`
+  return `Only ${name}'s owner or an admin can give it the project-management skills. It can be the steward, but it can't keep the record until they do.`
 }
 
 /** The API's steward for the form's fields; null leaves the server default. */
@@ -412,4 +451,109 @@ export function projectNeedsYouRows(asks, mineIds, { expanded = {}, dismissals =
       open: Boolean(expanded[a.id]) || Boolean(dismissals[a.id]),
       ask: a,
     }))
+}
+
+// --- trinity-enterprise#1132: where a person stands on a project, in plain words ---
+// One place for the wording, so the header, the withheld-control lines and the
+// task rule never disagree. Roles come from the read (`my_role`: creator /
+// member / null for a company viewer); a guest has its own narrow page.
+
+/** The one email comparison (case-insensitive), shared by every project control. */
+export const sameEmail = (a, b) => Boolean(a) && Boolean(b) && String(a).toLowerCase() === String(b).toLowerCase()
+const same = sameEmail
+
+/** The creator, as the reader should see them. */
+export function creatorName(project, myEmail) {
+  const c = project?.created_by || ''
+  return same(c, myEmail) ? 'you' : (c || 'the creator')
+}
+
+/** The header's one line: my role on this project and what it lets me do. */
+export function roleLine(project, myEmail) {
+  const role = project?.my_role || null
+  const creator = creatorName(project, myEmail)
+  if (project?.archived_at) {
+    return role === 'creator' || creator === 'you'
+      ? 'This project is archived. Nothing on it changes until you restore it.'
+      : `This project is archived. Nothing on it changes until ${creator} restores it.`
+  }
+  if (role === 'creator') {
+    return 'You created this project. You can change its name, goal, steward, members, visibility and tasks, and write in the log.'
+  }
+  if (role === 'member') {
+    return `You're a member. You can add and change tasks, write in the log and add files. Only ${creator} changes the name, goal, steward, members and visibility.`
+  }
+  if (!role && project?.visibility === 'company') {
+    // ent#1132 part 2: with Ask to join offered, the line points at it.
+    const ask = project?.my_request?.can_ask_to_join ? `Ask to join, and ${creator} decides.` : `Ask ${creator} to add you as a member.`
+    return `You can view this project because it's open to everyone at the company. You can chat with its agents about it, but only members add or change tasks, the log and files. ${ask}`
+  }
+  return `You can view this project. ${creator === 'you' ? 'You decide' : `${creator} decides`} who else can change it.`
+}
+
+/**
+ * The line shown IN PLACE of a withheld control (no lost layout). `what` names
+ * the thing: "tasks", "log entries", "files and reports". Decided from the
+ * SAME inputs the control's own v-if uses (`canContribute`, `archived`), and
+ * only for someone who is not a member (a member has nobody to ask to be
+ * added; an archived project already says why nothing changes).
+ */
+export function withheldLine({ project, myEmail, canContribute, archived }, what) {
+  if (canContribute || archived || !project) return ''
+  if (project.my_role === 'creator' || project.my_role === 'member') return ''
+  if (project.my_request?.can_ask_to_join) return `Only members add or change ${what}. Use Ask to join at the top of the page.`
+  return `Only members add or change ${what}. Ask ${creatorName(project, myEmail)} to add you.`
+}
+
+/**
+ * Who confirms a finished task: a member, or the steward agent when it is an
+ * ACTIVE agent on the project (only then can it verify — projects/work.py).
+ */
+export function verificationRule(project) {
+  const s = project?.steward
+  const active = s?.kind === 'agent'
+    && (project?.agents || []).some((a) => a.agent_name === s.ref && a.state === 'active')
+  const who = active ? `a member, or the steward agent ${s.ref},` : 'a member'
+  return `An agent's completion claim waits here until ${who} confirms it.`
+}
+
+// --- trinity-enterprise#1193: context for agents ------------------------------------
+/** One agent read returns at most this many bytes; past it the agent reads on by offset. */
+export const AGENT_READ_BYTES = 200 * 1024
+/** A file an agent can read as text (the server's `context._is_text`). */
+export const isTextMime = (mime) => {
+  const m = String(mime || '')
+  return m.startsWith('text/') || m === 'application/json' || m === 'application/x-yaml'
+}
+export const CONTEXT_SHARED_NOTICE = 'Everyone who can read this project can read it.'
+
+/**
+ * What an agent receives from one read of `text`: the first part, and whether it
+ * is cut. `budget` is the server's `context_limits.agent_read_bytes` (the page
+ * read carries it); the constant is only the fallback for an older read. The cut
+ * mirrors `context._part` on the server (a character is never split).
+ */
+export function agentPreview(text, budget = AGENT_READ_BYTES) {
+  const bytes = new TextEncoder().encode(text || '')
+  if (bytes.length <= budget) return { text: text || '', truncated: false, total: bytes.length, shown: bytes.length }
+  let end = budget
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1     // never split a character
+  return { text: new TextDecoder().decode(bytes.slice(0, end)), truncated: true, total: bytes.length, shown: end }
+}
+
+// --- trinity-enterprise#1132 part 2: Ask to join ------------------------------------
+/**
+ * What the page shows a company viewer about joining, from the read's
+ * `my_request`: `ask` (offer the button), `pending` (waiting on the creator),
+ * `declined` (the reason, and Ask again), or null (nothing to say — a member,
+ * a guest, an older backend, or a read that failed).
+ */
+export function joinRequestState(project) {
+  const mine = project?.my_request
+  if (!mine || mine.unknown) return null
+  const last = mine.last && mine.last.request === 'join' ? mine.last : null
+  if (last && last.state === 'pending') return { kind: 'pending', waitingOn: last.waiting_on || project.created_by }
+  if (!mine.can_ask_to_join) return null
+  if (last && last.state === 'declined') return { kind: 'declined', reason: last.reason || null }
+  return { kind: 'ask' }
 }

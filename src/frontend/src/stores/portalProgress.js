@@ -13,6 +13,7 @@
  */
 import { defineStore } from 'pinia'
 import { portalHttp, useClientPortalStore } from './clientPortal'
+import { assistantStarting } from '../components/portal/portalUtils'
 
 const EMPTY = Object.freeze({ loading: false, steps: [], all_done: false, active: false, error: null })
 
@@ -73,5 +74,8 @@ export const usePortalProgressStore = defineStore('portalProgress', {
 
   getters: {
     progressFor: (state) => (agentName) => state.byAgent[agentName] || EMPTY,
+    // ent#1201: the member's assistant is still being started — its card's
+    // assistant_ready step is in progress. One cached card, several readers.
+    startingFor: (state) => (agentName) => assistantStarting(state.byAgent[agentName]),
   },
 })

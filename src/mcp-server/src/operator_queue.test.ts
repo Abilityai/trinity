@@ -911,6 +911,65 @@ describe("trinity-enterprise#1066 ask_for_credential", () => {
     });
   }
 
+  // trinity-enterprise#1158 — destination.instance: the registered instance by
+  // name; the platform delivers under the key stored for it.
+  const destinationSchema = () => (makeTool(raisingClient().fake).parameters as any).shape.destination;
+
+  for (const [label, dest] of [
+    ["instance shape", { instance: "instance-x", agent_name: "digest" }],
+    ["key_env shape", { instance_url: "https://remote.example.com", agent_name: "digest", key_env: "REMOTE_KEY" }],
+  ] as const) {
+    it(`the destination schema accepts the ${label}`, () => {
+      assert.equal(destinationSchema().safeParse(dest).success, true);
+    });
+  }
+
+  for (const [label, dest] of [
+    ["both shapes", { instance: "instance-x", instance_url: "https://remote.example.com", agent_name: "digest", key_env: "K" }],
+    ["instance with key_env", { instance: "instance-x", agent_name: "digest", key_env: "K" }],
+    ["instance with instance_url", { instance: "instance-x", instance_url: "https://remote.example.com", agent_name: "digest" }],
+    ["instance without agent_name", { instance: "instance-x" }],
+    ["key_env shape missing key_env", { instance_url: "https://remote.example.com", agent_name: "digest" }],
+    ["neither shape", { agent_name: "digest" }],
+    ["empty instance", { instance: "", agent_name: "digest" }],
+    ["instance over 200 characters", { instance: "x".repeat(201), agent_name: "digest" }],
+  ] as const) {
+    it(`the destination schema refuses ${label}`, () => {
+      assert.equal(destinationSchema().safeParse(dest).success, false);
+    });
+  }
+
+  it("an instance destination travels with instance and agent_name only", async () => {
+    const { fake, calls } = raisingClient({ status: "created", request_id: "cred-i" });
+    await makeTool(fake).execute(
+      {
+        name: "TELEGRAM_BOT_TOKEN", why: "For the digest.", request_id: "cred-i",
+        destination: { instance: "instance-x", agent_name: "digest", key: "trinity_mcp_leak", instance_url: undefined },
+      } as any,
+      agentCtx("self"),
+    );
+    assert.deepEqual(calls[0][1].context, {
+      credential_name: "TELEGRAM_BOT_TOKEN",
+      credential_destination: { instance: "instance-x", agent_name: "digest" },
+    });
+    assert.doesNotMatch(JSON.stringify(calls), /trinity_mcp_leak|key_env|instance_url/);
+  });
+
+  it("the destination description leads with instance and lists the raise refusals", () => {
+    const d: string = destinationSchema().description;
+    assert.ok(d.indexOf("instance") < d.indexOf("key_env"), "instance is named before key_env");
+    assert.match(d, /Settings → Integrations → Outbound A2A endpoints/);
+    assert.match(d, /you never hold it/);
+    assert.doesNotMatch(d, /its own credential is never used here/);
+    for (const code of [
+      "destination_invalid", "destination_instance_invalid", "destination_agent_invalid",
+      "destination_outbound_disabled", "destination_not_approved", "destination_instance_no_credential",
+      "destination_url_invalid", "destination_key_env_invalid", "destination_key_env_missing",
+      "instance_moved", "destination_unreadable", "destination_key_refused",
+    ]) assert.match(d, new RegExp(code), code);
+    assert.ok(d.length <= 2048, `destination description is ${d.length} characters`);
+  });
+
   it("the description says: only in a conversation with the person, never in a plain message, by name only", () => {
     const d: string = makeTool(raisingClient().fake).description;
     assert.ok(d.length <= 2048, `ask_for_credential description is ${d.length} characters`);

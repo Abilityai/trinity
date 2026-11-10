@@ -71,7 +71,8 @@ EXEMPT_DIRS = ("db/", "enterprise/", "tests/", "migrations/")
 EXPECTED_SITES = frozenset({
     "routers/skills.py::update_agent_skills",
     "routers/skills.py::inject_skills",
-    "routers/skills.py::assign_skill_set",
+    # trinity-enterprise#1169: the set-assign route delegates its write to
+    # assign_set_and_deliver (shared with the Workspace steward pick).
     "routers/skills.py::unassign_skill_set",
     "services/agent_service/lifecycle.py::inject_assigned_skills",
     "services/skills_sync_service.py::SkillsLibrarySyncService._reinject_agent",

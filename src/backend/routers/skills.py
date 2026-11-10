@@ -682,20 +682,11 @@ async def assign_skill_set(
 
     if not validate_skill_name(set_name):
         raise HTTPException(status_code=422, detail=f"invalid_set_name: {set_name!r}")
-    conflict = skill_assignment_service.conflict_names(agent_name)
     try:
-        result = await asyncio.to_thread(
-            skill_set_service.assign,
-            agent_name, set_name, current_user.username, acting_agent_name(current_user))
+        result = await skill_assignment_service.assign_set_and_deliver(
+            agent_name, set_name, current_user, acting_agent=acting_agent_name(current_user))
     except skill_set_service.SetError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
-    # ent#753: gated before delivered. This route removes no package, so a gate
-    # on a member the re-plan dropped stays until the start path prunes it.
-    gates = await skill_assignment_service.sync_gates(agent_name, current_user,
-                                                       removed=result.get("removed") or [], conflict=conflict)
-    delivery = (await skill_assignment_service.deliver_assigned_skills(agent_name, result["added"])
-                if result["added"] else None)
-    await broadcast_skills_changed(agent_name)
     # The assign response probes prerequisites: one exec, on a write the fence already gated.
     status = next((s for s in await skill_set_service.agent_set_status(agent_name, probe=True)
                    if s["name"] == set_name), None)
@@ -704,10 +695,10 @@ async def assign_skill_set(
         "set_name": set_name,
         "created": result["created"],
         "members_added": result["added"],
-        "delivery": delivery,
+        "delivery": result["delivery"],
         "status": status,
         "suggested_schedules": result["entry"]["schedules"],
-        "gates": gates,
+        "gates": result["gates"],
     }
 
 

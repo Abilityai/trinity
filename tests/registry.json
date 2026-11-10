@@ -8564,6 +8564,44 @@
       "description": "trinity-enterprise#1109: a credential ask with a destination. Validated and stored at raise (URL gate, agent slug, key variable name), said in plain words on the receipt and the Workspace projection (never the key's name); the sink reads the asking agent's key by name, pins the connection and merge-injects one .env line into the agent on the other instance, writes nothing here, unstages after a 2xx and audits credential_delivered; every delivery failure is a named plain retry with the value in no log, audit row or message; the inject route's mode merge keeps every other byte; manifest credentials: names are parsed, validated and previewed while the legacy map form stays an unknown key."
     },
     {
+      "file": "unit/test_ent1158_instance_destination.py",
+      "feature": "trinity-enterprise#1158",
+      "added": "2026-11-09",
+      "categories": [
+        "backend",
+        "credentials",
+        "workspace",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1158: a credential destination naming a registered outbound instance ({instance, agent_name}). Shape union and named raise refusals read from the entry's metadata through a2a_outbound.resolve_endpoint; the answer path fails closed (409 destination_unreadable) on a destination it cannot read; raise/delivery parity over every entry state; delivery under the entry's stored key resolved by id at every delivery (rotation, instance_moved), the asking agent's .env never read; exactly one credential_instance_delivery audit row per delivery on success and on each refusal."
+    },
+    {
+      "file": "unit/test_ent1158_key_env_raise_check.py",
+      "feature": "trinity-enterprise#1158",
+      "added": "2026-11-09",
+      "categories": [
+        "backend",
+        "credentials",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1158 §2: a key_env destination is checked at raise. One classifier (classify_key) for raise and delivery; key_env_state returns only the label and None when it cannot tell (fail open, 5 s budget, off the loop); raise_ask applies the label after every earlier refusal and the replay; the route reads only a key_env destination."
+    },
+    {
+      "file": "unit/test_ent1158_credential_key_journey.py",
+      "feature": "trinity-enterprise#1158",
+      "added": "2026-11-09",
+      "categories": [
+        "backend",
+        "credentials",
+        "workspace",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1158 journey: an admin registers an instance with its key (real upsert_endpoint, real encrypted envelope), the asking agent raises over the real raise_my_ask route naming destination.instance (201), the person answers through provide_credential, the remote instance receives one merge inject under the entry key, the ask is provided, one audit row, the asking agent's .env byte-identical; variants: the key cleared before the answer (destination_instance_no_credential, nothing sent) and a key_env destination without the variable (destination_key_env_missing at raise)."
+    },
+    {
       "file": "journeys/test_j24_external_mcp_access_journey.py",
       "feature": "abilityai/trinity-enterprise#1101",
       "added": "2026-11-05",
@@ -9012,6 +9050,40 @@
         "docker"
       ],
       "description": "GUARD-004 S5: the output scanner covers Read, Grep, WebFetch and owner MCP tools. Each case runs the hook only when the managed file's matchers select it, judged by a port of CLI 2.1.281's matcher rule (letters, digits, `_` and `|` = exact list; anything else = unanchored regex), so an unregistered tool reads as unscanned. Pins: the registration reaches Read/Grep/WebFetch/`mcp__*` (and an MCP error result on `PostToolUseFailure`) but not NotebookRead, ReadMcpResourceTool, Glob or Write; a Read file's `file.content` is redacted with the line counts kept, including the agent's own `.env`, `.mcp.json` and credentials file and a background Bash `tasks/*.output` file; a source file with fixtures and prefixes is byte-identical; binary payloads (Read image/pdf/parts `base64`, a notebook output's `image_data`, an MCP image's `source.data`) are never rewritten nor counted against the scan cap, with the precondition that the base64 fixture matches two shapes; Grep content, WebFetch `result` and MCP text blocks are redacted with numbers and images kept; an MCP error string stays a string; the platform `trinity` MCP server is not scanned on either event, by the same predicate as turn-tier-guard (parity-tested) while `trinity_`/`trinity__x` servers are; a withhold has each tool's shape (Read as a text read, Grep as content, WebFetch keeping its numbers, MCP keeping list or string); the write-back refusals steer to Edit on only the needed lines instead of dropping the value; Write/Edit to the agent's own credential files stays refused by the path rule; and the build smoke checks Read/MCP redaction, the platform exemption and the registration coverage."
+    },
+    {
+      "file": "unit/test_ent1174_member_seat.py",
+      "feature": "trinity-enterprise#1174",
+      "added": "2026-11-09",
+      "categories": [
+        "unit",
+        "systems",
+        "security"
+      ],
+      "description": "trinity-enterprise#1174: person_seats holder: member (primary only, one per agent, email refused naming the fix); can_seat_member gate matrix (JWT/user-key admin only); reserved settings off the generic /api/settings routes; apply plans member_seat_set / seat_filled / member_seat_differs / member_not_recorded / held-back over the real db and a fake provider on the real seam; E4 owner rule; created members seated; audit with no address; agent seat and grants unchanged."
+    },
+    {
+      "file": "unit/test_ent1174_journey.py",
+      "feature": "trinity-enterprise#1174",
+      "added": "2026-11-09",
+      "categories": [
+        "unit",
+        "systems",
+        "workspace"
+      ],
+      "description": "trinity-enterprise#1174 AC4/AC2: apply with an admin-owned user-scoped key + the real enterprise assignments module seats and shares the recorded member; the Workspace roster lists the agent; the door mints a code and hands the platform account to /login; admin-role and user-role members keep their role (R31). Skips without the private submodule."
+    },
+    {
+      "file": "unit/test_ent1202_default_model_resolution.py",
+      "feature": "trinity-enterprise#1202",
+      "added": "2026-11-09",
+      "categories": [
+        "backend",
+        "execution",
+        "database",
+        "api"
+      ],
+      "description": "ent#1202: agent_ownership.default_model (nullable, dual-track migration 0123) and the one resolver: explicit > public-channel override > the agent's own model when the catalog/alias allowlist passes it > platform default; non-Claude runtimes resolve to None; an unrunnable stored value is skipped by name; fail-open except the strict a2a pre-create. execute_task runs and stamps the own model, fills a pre-created row's blank model_used only, never restamps an explicit model. Portal ladder/label, a2a pre-create and the GET /model additive fields read the same resolver."
     }
   ]
 }
