@@ -1496,29 +1496,38 @@ def _with_switch(
 _TIMEOUT_ATTRIBUTION_GRACE_S = 30
 
 
-# The phrases the execution error's readers match. The sync /task mapper
-# (`chat_execution_service._map_task_failure`) and the public and inline-auth
-# chats answer 429 on "at capacity" and 504 on "timed out", case and all; the
-# client portal does the same after lowercasing. The scheduler lowercases and
-# doubles its retry delay on "429", "rate limit" or "too many requests".
+# The phrases the execution error's status readers match. The sync /task
+# mapper (`chat_execution_service._map_task_failure`) and the public and
+# inline-auth chats answer 429 on "at capacity" and 504 on "timed out", case
+# and all; the client portal does the same after lowercasing. The scheduler
+# lowercases and doubles its retry delay on "429", "rate limit" or "too many
+# requests". The chat panel's banner and the public chat's refusal check read
+# the error too, but on words this path does not pass on ("usage limit", the
+# refusal sentences), so they do not fire on it (#4360).
 _READER_PHRASES = ("timed out", "at capacity", "429", "rate limit", "too many requests")
+
+# "429" only as a number of its own: not the digits inside 14290, 1.429 or 429s,
+# which would read as a rate limit to the scheduler and to anyone reading the
+# error (#4352).
+_HTTP_429 = re.compile(r"(?<![\w.])429(?!\w|\.\d)")
 
 
 def _phrase_as_said(phrase: str, text: str) -> str | None:
-    """``phrase`` spelled as ``text`` spells it, or None when it is absent.
+    """``phrase`` in a fixed spelling when ``text`` holds it, else None.
 
-    The lowercase spelling wins when the text holds it, so a reader that
-    matches case and all still matches. Otherwise the first spelling that
-    lowercases to the phrase, so a reader that lowercases first still matches
-    and one that does not still misses, as it did on the text (#4352).
+    The lowercase spelling when the text holds it, so a reader that matches
+    case and all still matches. Otherwise the title-case spelling when the
+    lowercased text holds it, so a reader that lowercases first still matches
+    and one that does not still misses, as each did on the text. Neither
+    spelling comes from the text, so its own letters never reach the error
+    (#4284, #4352).
     """
+    if phrase == "429":
+        return phrase if _HTTP_429.search(text) else None
     if phrase in text:
         return phrase
-    # Overlapping candidates, each checked with `str.lower` itself: IGNORECASE
-    # also folds characters `lower()` does not (dotless i, long s).
-    for found in re.finditer(f"(?=({re.escape(phrase)}))", text, re.IGNORECASE):
-        if found.group(1).lower() == phrase:
-            return found.group(1)
+    if phrase in text.lower():
+        return phrase.title()
     return None
 
 
@@ -1527,8 +1536,9 @@ def _exception_words(exc: BaseException) -> str:
 
     The text itself stays in the log (abilityai/trinity#4284): this message is
     the execution's error, which the sync routes answer at 5xx. A reader phrase
-    survives in the case the text used, so each reader answers the status it
-    gave the exception's own text.
+    survives in a fixed spelling, so each status reader in `_READER_PHRASES`
+    answers the status it gave the exception's own text ("429" aside, which
+    counts only as a number of its own).
     """
     text = str(exc)
     said = [w for w in (_phrase_as_said(p, text) for p in _READER_PHRASES) if w]

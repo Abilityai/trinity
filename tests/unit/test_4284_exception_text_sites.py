@@ -842,16 +842,17 @@ def _reader_status(reader: str, monkeypatch, result) -> int:
 
 
 def _assert_only_reader_phrases(error: str) -> None:
-    """The error names the class and, at most, reader phrases in the case the
-    exception used. Nothing else from the exception's text."""
+    """The error names the class and, at most, reader phrases in one of their
+    two fixed spellings. Nothing else from the exception's text."""
     from services.task_execution_service import _READER_PHRASES
     prefix, suffix = "Task execution failed (RuntimeError", " — details in backend logs)"
     assert error.startswith(prefix) and error.endswith(suffix), error
     said = error[len(prefix):-len(suffix)]
     if said:
         assert said.startswith(": "), error
+        fixed = set(_READER_PHRASES) | {p.title() for p in _READER_PHRASES}
         for word in said[2:].split(", "):
-            assert word.lower() in _READER_PHRASES, f"{word!r} is not a reader phrase: {error!r}"
+            assert word in fixed, f"{word!r} is not a reader phrase: {error!r}"
 
 
 # The sync /task mapper, the public and the inline-auth chats match "timed out"
@@ -886,11 +887,13 @@ def test_execute_task_error_keeps_the_status_its_text_had(monkeypatch, reader, w
     assert _reader_status(reader, monkeypatch, result) == status
 
 
-def test_execute_task_error_keeps_the_phrase_in_the_case_it_was_said():
-    result = _execute_with(RuntimeError(f"{_PLANT} Lock Timed Out; Agent AT CAPACITY"))
+def test_execute_task_error_spells_a_phrase_one_fixed_way():
+    """The exception's own letters never reach the error, only a fixed
+    spelling of the phrase (#4284)."""
+    result = _execute_with(RuntimeError(f"{_PLANT} Lock tImEd OuT; Agent AT CAPACITY"))
     _assert_answer_clean(
         result.error,
-        "Task execution failed (RuntimeError: Timed Out, AT CAPACITY — details in backend logs)")
+        "Task execution failed (RuntimeError: Timed Out, At Capacity — details in backend logs)")
 
 
 @pytest.mark.parametrize("reader", _READERS)
@@ -906,18 +909,27 @@ def test_execute_task_error_with_no_text_names_only_the_class(monkeypatch, reade
 
 
 @pytest.mark.parametrize("text, words", [
-    ("TıMED OUTIMED OUT", "RuntimeError: TIMED OUT"),
+    ("TıMED OUTIMED OUT", "RuntimeError: Timed Out"),
     ("Lock tımed out", "RuntimeError"),
     ("HTTP 429 Too Many Requests", "RuntimeError: 429, Too Many Requests"),
     ("Too Many Requeſts", "RuntimeError"),
-], ids=["overlapping-candidates", "dotless-i", "two-phrases", "long-s"])
+    ("upstream said 429.", "RuntimeError: 429"),
+    ("lock held by worker 14290", "RuntimeError"),
+    ("load average 0.429", "RuntimeError"),
+    ("retry in 429s", "RuntimeError"),
+], ids=["overlapping-candidates", "dotless-i", "two-phrases", "long-s",
+        "429-sentence-end", "429-in-a-number", "429-in-a-decimal", "429-with-a-unit"])
 def test_exception_words_passes_on_what_each_reader_would_match(text, words):
     """Both reader shapes find a phrase in the words exactly when they find it
-    in the text, and nothing else of the text is passed on."""
-    from services.task_execution_service import _READER_PHRASES, _exception_words
+    in the text, and nothing else of the text is passed on. "429" counts only as
+    a number of its own: the digits inside a longer number are not a rate limit."""
+    from services.task_execution_service import _HTTP_429, _READER_PHRASES, _exception_words
     said = _exception_words(RuntimeError(text))
     assert said == words
     for phrase in _READER_PHRASES:
+        if phrase == "429":
+            assert ("429" in said) == bool(_HTTP_429.search(text))
+            continue
         assert (phrase in said) == (phrase in text), phrase
         assert (phrase in said.lower()) == (phrase in text.lower()), phrase
 
@@ -963,6 +975,15 @@ def test_execute_task_error_keeps_the_schedulers_rate_limit_delay(words, delay):
     _assert_only_reader_phrases(result.error)
     assert _retry_delay_seconds(str(exc)) == delay
     assert _retry_delay_seconds(result.error) == delay
+
+
+def test_execute_task_error_a_429_inside_a_number_keeps_the_plain_retry_delay():
+    """A number that merely contains 429 is not passed on, so a scheduled run's
+    retry is not doubled as though the agent were rate limited (#4352)."""
+    result = _execute_with(RuntimeError(f"{_PLANT} lock held by worker 14290"))
+    _assert_answer_clean(
+        result.error, "Task execution failed (RuntimeError — details in backend logs)")
+    assert _retry_delay_seconds(result.error) == 60
 
 
 def test_execute_task_short_timeout_names_the_class(caplog):
