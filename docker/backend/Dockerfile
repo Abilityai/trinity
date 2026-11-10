@@ -120,7 +120,7 @@ RUN pip install --no-cache-dir \
     jsonschema==4.26.0 \
     websocket-client==1.9.2 \
     helicone-helpers==1.2.1 \
-    black==26.5.1 \
+    black==26.10.1 \
     mkdocs==1.6.1 \
     mkdocs-material==9.7.7 \
     "mkdocstrings[python]==0.29.1" \
