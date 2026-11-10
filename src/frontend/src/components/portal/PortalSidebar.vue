@@ -270,7 +270,13 @@
              depends on who is looking — a platform user can go make an agent,
              an external client can only ask whoever invited them. -->
         <div v-if="!roster.length && !loadingRoster" class="px-2 py-3 text-xs text-gray-500 dark:text-gray-400">
-          <template v-if="isPlatformSession && !workspaceOnly">
+          <!-- ent#1201: the person accepted and their agent is being prepared.
+               One line, no agent name; the dot is the progress card's own
+               in-progress mark, so the two read as one state. -->
+          <span v-if="setupPending" class="inline-flex items-center gap-2" data-testid="portal-sidebar-setup-pending">
+            <span class="w-1.5 h-1.5 rounded-full bg-current motion-safe:animate-pulse" aria-hidden="true"></span>{{ setupOverdue ? SETUP_OVERDUE_LINE : SETUP_PENDING_LINE }}
+          </span>
+          <template v-else-if="isPlatformSession && !workspaceOnly">
             No agents yet.
             <a href="/" class="text-action-primary-600 hover:underline">Create one →</a>
           </template>
@@ -465,16 +471,17 @@ import BaseBadge from '@/components/base/BaseBadge.vue'
 import DraftMark from '@/components/base/DraftMark.vue'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
+import { usePortalProgressStore } from '@/stores/portalProgress'
 import { agentsWithDrafts, threadKey } from './portalDrafts'
 import {
-  groupThreadsByDate, partitionStarred, unreadByAgent, availabilityChip,
+  groupThreadsByDate, partitionStarred, unreadByAgent, availabilityChip, viewerIsMemberTier,
   agentRowMeta,
   asksByAgent, agentRowTitle as buildAgentRowTitle,
   visibleAgentRows, AGENT_COLLAPSE_LIMIT,
   signOutLabelFor,
   searchAgents, sidebarSearchState, searchEmptyLines,
   agentResultsLabel, agentToggleLabel, showAgentToggle, SEARCH_PLACEHOLDER,
-  WORKSPACE_INBOX, askBadgeTitle,
+  WORKSPACE_INBOX, askBadgeTitle, SETUP_PENDING_LINE, SETUP_OVERDUE_LINE,
 } from './portalUtils'
 import { inboxCounts } from './portalInbox'
 // ent#621: every key hint on this sidebar is DERIVED from the one map. A typed
@@ -519,6 +526,11 @@ const props = defineProps({
   projectsActive: { type: Boolean, default: false },
   // #2159: distinguishes "still loading" from "loaded, and you have none".
   loadingRoster: { type: Boolean, default: false },
+  // ent#1201: the roster says the viewer's own agent is being set up, so an
+  // empty roster is not "none shared with you" — it is "on its way".
+  setupPending: { type: Boolean, default: false },
+  // …and past the shell's poll ceiling, the stage's "taking longer" line.
+  setupOverdue: { type: Boolean, default: false },
   // #3672: the list's ONE first-load verdict (`sidebarSettled`, latched by the
   // shell). False → both sections hold skeleton rows. Defaults to true so a
   // caller that never loads (a test, a static mount) renders as before.
@@ -653,7 +665,17 @@ const agentLabel = (a) => (a.display_label || '').trim() || a.name
 // operator looking at their own fleet sees stopped-vs-no-container, an external
 // client sees one label for both — the two differ only in whether the operator
 // deleted or lost the agent, and neither is actionable for a client.
-const chipFor = (a) => availabilityChip(a, { detailed: props.isPlatformSession })
+//
+// ent#1201: a member's own assistant (`viewerIsMemberTier`, read off the card)
+// gets no chip while it is starting — its progress card says so — and never a
+// chip that names an account. The card is read for member rows only.
+const progressStore = usePortalProgressStore()
+const chipFor = (a) => availabilityChip(a, { detailed: props.isPlatformSession, starting: progressStore.startingFor(a.name) })
+watch(
+  () => props.roster.filter(viewerIsMemberTier).map((a) => a.name).join('\n'),
+  (names) => { for (const n of names.split('\n')) if (n) progressStore.fetchProgress(n) },
+  { immediate: true },
+)
 
 // The state must be reachable without relying on colour — which is why #2424
 // is an accessibility fix too: a blocked agent's title was the bare
