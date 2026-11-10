@@ -113,3 +113,30 @@ def test_the_image_build_smoke_carries_a_claude_json_row_and_it_decides(hook, mo
         with pytest.raises(SystemExit) as exc:
             hook.run_hook(hook.main)
         assert exc.value.code == want, payload
+
+
+# ---- trinity-enterprise#1158: a `.env` denial names the way forward --------------
+
+def _deny_reason(hook, monkeypatch, capsys, file_path):
+    assert _exit_code(hook, monkeypatch, file_path) == 2
+    return capsys.readouterr().err
+
+
+@pytest.mark.parametrize("path", ["/home/developer/.env", "~/.env", "/home/developer/sub/.env.local"])
+def test_an_env_denial_points_at_destination_instance(hook, monkeypatch, capsys, path):
+    monkeypatch.setenv("HOME", "/home/developer")
+    reason = _deny_reason(hook, monkeypatch, capsys, path)
+    assert "protected path (.env) — the platform writes this file." in reason
+    assert "destination.instance naming the registered instance" in reason
+    assert "raise ask_for_credential" in reason
+    assert "key_ref" not in reason
+
+
+def test_other_protected_paths_keep_their_reason(hook, monkeypatch, capsys):
+    reason = _deny_reason(hook, monkeypatch, capsys, "/home/developer/.ssh/authorized_keys")
+    assert "protected path (/home/developer/.ssh/*)" in reason
+    assert "destination.instance" not in reason
+
+
+def test_env_example_stays_writable(hook, monkeypatch):
+    assert _exit_code(hook, monkeypatch, "/home/developer/.env.example") == 0
