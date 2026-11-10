@@ -1,3 +1,4 @@
+# mcp: a2a.ts (get_agent_a2a_card → /a2a/agent-card) + a2a_call.ts (call_a2a_agent → /a2a/call, get_a2a_task → /a2a/task); the inbound A2A server (well-known card + JSON-RPC endpoint) is the external-protocol surface, called by outside orchestrators, not by agents
 """
 A2A (Agent-to-Agent) protocol endpoints (#737 card; ent#157 inbound server;
 #736 outbound calls).

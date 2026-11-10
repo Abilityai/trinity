@@ -1,3 +1,4 @@
+# mcp: chat.ts (chat_with_agent → /chat, /task, /executions/{id}/report-back; get_chat_history → /chat/history) + connector.ts (run_playbook, ask → /chat); the session, activity, model, running-executions, terminate and stream routes are UI-only — no tool calls them
 """
 Agent chat and activity routes for the Trinity backend.
 
