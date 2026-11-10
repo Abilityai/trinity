@@ -286,28 +286,20 @@ describe("ent#588 — an agent starts or imports a project (projects.manage)", (
     assert.equal(out.code, "project_management_not_permitted");
   });
 
-  it("create_project forwards an explicit steward (ent#1169)", async () => {
+  it("create_project and import_project offer no steward: another agent needs an approval (#1194 ruling)", async () => {
     const calls: unknown[][] = [];
     const tools = makeTools({
-      createProjectAsAgent: async (body: Record<string, unknown>) => {
-        calls.push(["create", body]);
-        return { ...PROJECT, steward: { kind: "agent", ref: "pm" } };
-      },
+      createProjectAsAgent: async (body: Record<string, unknown>) => { calls.push(["create", body]); return PROJECT; },
+      importProjectAsAgent: async (...args: unknown[]) => { calls.push(["import", ...args]); return PROJECT; },
     } as Partial<TrinityClient>);
-    await tools.create_project.execute({ name: "x", goal: "y", steward: "pm" });
-    assert.deepEqual(calls, [["create", { name: "x", goal: "y", steward: "pm" }]]);
-  });
-
-  it("import_project forwards an explicit steward (ent#1169)", async () => {
-    const calls: unknown[][] = [];
-    const tools = makeTools({
-      importProjectAsAgent: async (path: string, _turn?: string, steward?: string) => {
-        calls.push(["import", path, steward]);
-        return PROJECT;
-      },
-    } as Partial<TrinityClient>);
-    await tools.import_project.execute({ path: "project_files/q4", steward: "pm" });
-    assert.deepEqual(calls, [["import", "project_files/q4", "pm"]]);
+    assert.equal("steward" in (tools.create_project.parameters as any).shape, false);
+    assert.equal("steward" in (tools.import_project.parameters as any).shape, false);
+    await tools.create_project.execute({ name: "x", goal: "y", steward: "pm" } as any);
+    await tools.import_project.execute({ path: "project_files/q4", steward: "pm" } as any);
+    assert.deepEqual(calls[0], ["create", { name: "x", goal: "y" }]);
+    assert.deepEqual(calls[1].slice(0, 2), ["import", "project_files/q4"]);
+    assert.equal(calls[1].includes("pm"), false);
+    assert.match(tools.create_project.description, /propose_project_changes/);
   });
 
   it("import_project forwards only the path; a second import's 409 is surfaced", async () => {

@@ -4449,10 +4449,9 @@ export class TrinityClient {
   }
 
   /** trinity-enterprise#588: import one of the agent's OWN folder projects (projects.manage). */
-  async importProjectAsAgent(path: string, turn?: string, steward?: string): Promise<Record<string, unknown>> {
-    // trinity-enterprise#1169: an explicit steward agent, only when given.
-    return this.projectRequest("POST", "/api/enterprise/projects/agent/projects/import", turn,
-      steward ? { path, steward } : { path });
+  async importProjectAsAgent(path: string, turn?: string): Promise<Record<string, unknown>> {
+    // No steward: another agent as steward needs an approval (propose_project_changes, #1194 ruling).
+    return this.projectRequest("POST", "/api/enterprise/projects/agent/projects/import", turn, { path });
   }
 
   /** trinity-enterprise#980: the steward proposes people and owners; the creator approves once. */
