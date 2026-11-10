@@ -150,7 +150,9 @@ NOT_GRANT_GUARDS: Dict[str, Tuple[str, FrozenSet[str]]] = {
         "access removes the send tool, and a person, the system key and a "
         "Workspace visitor are never refused there; each route keeps its own "
         "access gate beside it. Listed by the merge train (2026-11-04) when "
-        "#4232 landed on dev ahead of this PR",
+        "#4232 landed on dev ahead of this PR. `continue_chain` (trinity#4302) "
+        "calls it for parity with `/messages`; its person check is "
+        "`_is_room_person` in the service",
         frozenset(
             {
                 "routers/agent_files.py::share_agent_file",
@@ -161,6 +163,7 @@ NOT_GRANT_GUARDS: Dict[str, Tuple[str, FrozenSet[str]]] = {
                 "routers/slack.py::send_agent_slack_channel_message",
                 "routers/telegram.py::send_telegram_group_message",
                 "routers/voip.py::place_voip_call",
+                "shared_sessions/router.py::continue_chain",
                 "shared_sessions/router.py::post_message",
             }
         ),
@@ -196,6 +199,26 @@ NOT_GRANT_GUARDS: Dict[str, Tuple[str, FrozenSet[str]]] = {
         "secret; the check narrows an agent key to its own key "
         "(trinity-enterprise#872); nothing granted",
         frozenset({"routers/mcp_keys.py::get_mcp_api_key_endpoint"}),
+    ),
+    "services/person_mention_service.py::tagger_for": (
+        "never runs on these routes: they reach it only through the room engine "
+        "posting an agent's reply (`_wake_agent_locked` -> `post_message` with "
+        "`_sender_override` and no `tags`), and `post_message` asks for a tagger "
+        "only for a sender's own tags (`if tags and not is_agent_reply`). The "
+        "path is the room wake: an ask that ends returns to its room on the "
+        "agent's next start (trinity-enterprise#1135), and a paused chain is "
+        "continued (trinity#4302). The person routes that do tag are in "
+        "REVIEWED_CREDITS",
+        frozenset(
+            {
+                "routers/agents.py::start_agent_endpoint",
+                "routers/chat.py::chat_with_agent",
+                "routers/internal.py::internal_task_result",
+                "routers/systems.py::deploy_system",
+                "routers/systems.py::restart_system",
+                "shared_sessions/router.py::continue_chain",
+            }
+        ),
     ),
 }
 
