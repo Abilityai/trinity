@@ -119,20 +119,58 @@ class TestTemplateSchedulesPredicted:
         assert _plan_codes(mp) == [("schedule:daily", "pending_template_resolution")]
 
     def test_the_template_read_per_source(self, world):
-        assert system_service._template_declared_schedules("acme-a", None) == []
-        assert system_service._template_declared_schedules("acme-a", "github:org/repo") is None
-        assert system_service._template_declared_schedules("acme-a", "local:nope") is None
-        assert [e["name"] for e in system_service._template_declared_schedules(
-            "acme-a", "local:sched")] == ["daily"]
+        def schedules(template):
+            return system_service._preflight_template("acme-a", "a", template)[1]
 
-    def test_a_template_read_error_is_a_retryable_read_failure(self, world, monkeypatch):
+        assert schedules(None) == []
+        assert schedules("github:org/repo") is None
+        assert schedules("local:nope") is None
+        assert [e["name"] for e in schedules("local:sched")] == ["daily"]
+
+    def test_a_template_read_error_is_one_blocker(self, world, monkeypatch):
         def broken(config):
             raise OSError("disk went away")
 
         monkeypatch.setattr(crud, "_resolve_local_template", broken)
-        snap = world.snapshot(_one("local:sched"))
-        assert [(b.code, b.member, b.retryable) for b in snap.blockers] == [
-            ("member_reads_unavailable", "acme-a", True)]
+        plan = _plan(world, _one("local:sched"))
+        assert [(b.code, b.member, b.retryable) for b in plan.blockers] == [
+            ("template_unresolvable", "acme-a", False)]
+
+    def test_a_template_repeating_a_name_is_predicted_once(self, ew):
+        """The template normalizer keeps one row per name, so the plan never
+        sees two stand-in rows with one name."""
+        _write_template(ew, "repeats", (
+            "name: repeats\nschedules:\n"
+            "  - {name: daily, cron: '0 9 * * *', message: /first}\n"
+            "  - {name: daily, cron: '0 8 * * *', message: /second}\n"))
+        dry = W.apply(ew, _one("local:repeats"), dry_run=True)
+        assert dry.status == "valid", dry.blockers
+        assert _codes(dry) == [("schedule:daily", "schedule_undeclared")]
+
+
+class TestOneTemplateReadPerMember:
+    """`template.yaml` is resolved once per member per preview, not once per
+    consumer (the preflight, the schedule prediction, the collision warning)."""
+
+    @pytest.fixture
+    def reads(self, monkeypatch):
+        real = crud._resolve_local_template
+        seen = []
+
+        def counting(config):
+            seen.append(config.name)
+            return real(config)
+
+        monkeypatch.setattr(crud, "_resolve_local_template", counting)
+        return seen
+
+    def test_apply_dry_run(self, ew, reads):
+        W.apply(ew, _one("local:sched", DAILY_OTHER_CRON), dry_run=True)
+        assert reads == ["acme-a"]
+
+    def test_create_mode_dry_run(self, world, reads):
+        _deploy_preview(world, _one("local:sched", DAILY_OTHER_CRON))
+        assert reads == ["acme-a"]
 
     def test_a_predicted_update_error_is_a_blocker_and_the_run_writes_nothing(
             self, ew, monkeypatch, tmp_path):
@@ -171,7 +209,7 @@ class TestTemplateOnlySchedules:
     def test_both_runs_report_the_template_row(self, ew, schedules):
         mf = _one("local:sched", schedules)
         assert [op.args for op in _plan(ew, mf).members["a"].ops
-                if op.kind == "created_schedules"] == [{"entries": []}]
+                if op.kind == "created_schedules"] == [{"entries": [], "re_read": True}]
         dry = W.apply(ew, mf, dry_run=True)
         assert _codes(dry) == [("schedule:daily", "schedule_undeclared")]
         real = W.apply(ew, mf, dry_run=False)
@@ -180,14 +218,17 @@ class TestTemplateOnlySchedules:
 
     def test_a_github_template_re_reads_too(self, world):
         assert [op.args for op in _plan(world, _one("github:org/repo")).members["a"].ops
-                if op.kind == "created_schedules"] == [{"entries": []}]
+                if op.kind == "created_schedules"] == [{"entries": [], "re_read": True}]
 
     def test_a_template_without_schedules_adds_no_re_read(self, world):
         assert [op for op in _plan(world, _one("local:plain")).members["a"].ops
                 if op.kind == "created_schedules"] == []
 
-    def test_a_failed_post_create_read_is_a_failure_never_an_unfiltered_create(
+    def test_a_failed_re_read_with_nothing_to_write_is_a_warning_not_a_failure(
             self, ew, monkeypatch):
+        """No manifest entry: apply planned no schedule write, so a read that
+        fails after a create that worked costs the report its lines, not the
+        member its `applied`."""
         real_list = db.list_agent_schedules
         calls = {"n": 0}
 
@@ -201,9 +242,14 @@ class TestTemplateOnlySchedules:
         monkeypatch.setattr(db, "list_agent_schedules", flaky)
         result = W.apply(ew, _one("local:sched"), dry_run=False)
         monkeypatch.setattr(db, "list_agent_schedules", real_list)
-        assert result.status == "partial"
-        assert [(f.name, f.step) for f in result.failed] == [("acme-a", "schedules")]
-        assert "the template's schedules" in result.failed[0].reason
+        assert result.status == "applied", result.failed
+        assert result.failed == []
+        (member,) = result.members
+        assert member.applied is True
+        assert [(c.field, c.code) for c in member.changes
+                if system_service._is_schedule_field(c.field)] == [
+            ("schedules", "pending_template_resolution")]
+        assert [w for w in result.warnings if "acme-a" in w and "read back" in w], result.warnings
         assert [s.name for s in db.list_agent_schedules("acme-a")] == ["daily"]
 
     def test_a_failed_create_reports_no_skipped_re_read(self, ew):
@@ -236,6 +282,13 @@ def _deploy_preview(world, manifest_yaml):
         manifest_yaml, world.user(W.ALICE), dry_run=True))
 
 
+def _same_as_template(**override) -> str:
+    """`sched`'s `daily` restated field for field (timezone UTC on both sides)."""
+    fields = {"name": "daily", "cron": "'0 9 * * *'", "message": "/template-daily",
+              "description": "from the template", "enabled": "false", **override}
+    return "    schedules:\n      - {" + ", ".join(f"{k}: {v}" for k, v in fields.items()) + "}\n"
+
+
 def _template_warnings(response):
     return [w for w in response.warnings if "declares schedule(s)" in w]
 
@@ -253,6 +306,19 @@ class TestCreateModeCollisionWarning:
     def test_no_collision_and_a_github_member_add_no_warning(self, world):
         for mf in (_one("local:sched", WEEKLY), _one("github:org/repo", DAILY_OTHER_CRON)):
             assert _template_warnings(_deploy_preview(world, mf)) == []
+
+    def test_an_entry_equal_to_the_template_row_adds_no_warning(self, world):
+        """Deploy keeps the template's row; when it equals the entry, nothing
+        the manifest says is skipped."""
+        result = _deploy_preview(world, _one("local:sched", _same_as_template()))
+        assert _template_warnings(result) == []
+
+    @pytest.mark.parametrize("override", [
+        {"cron": "'0 7 * * *'"}, {"message": "/other"}, {"enabled": "true"},
+        {"timezone": "Asia/Tokyo"}, {"description": "other"}, {"model": "claude-sonnet-4-5"}])
+    def test_any_field_that_differs_is_warned(self, world, override):
+        result = _deploy_preview(world, _one("local:sched", _same_as_template(**override)))
+        assert len(_template_warnings(result)) == 1
 
 
 # ===========================================================================
@@ -293,6 +359,29 @@ class TestLeftoverWorkspaceVolume:
               "  c:\n    template: local:plain\n")
         world.snapshot(mf)
         assert world.docker.volume_probes == ["acme-c"]
+
+    def test_a_refusal_create_adds_is_refused_by_the_dry_run_too(self, ew, monkeypatch):
+        """Create's guard and the snapshot ask one function, so a volume
+        refusal added there (a config volume, say) reaches both."""
+        refusal = crud.CreateVolumeRefusal(
+            kind="config_volume_leftover", volume="agent-acme-a-config",
+            detail="Config volume left over.")
+
+        async def refuses(name):
+            return refusal if name == "acme-a" else None
+
+        monkeypatch.setattr(crud, "create_volume_refusal", refuses)
+        dry = W.apply(ew, _one("local:plain"), dry_run=True)
+        (blocker,) = dry.blockers
+        assert (blocker.code, blocker.member, blocker.detail, blocker.retryable) == (
+            "member_config_volume_leftover", "acme-a", "Config volume left over.", False)
+        assert "docker volume rm agent-acme-a-config" in blocker.remedy
+
+        monkeypatch.setattr(crud, "docker_client", object())
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(crud._guard_leftover_workspace_volume(
+                AgentConfig(name="acme-a", template="local:plain"), False))
+        assert (exc.value.status_code, exc.value.detail) == (409, "Config volume left over.")
 
     def test_no_probe_while_docker_is_unreadable(self, world):
         world.docker.readable = False
@@ -447,11 +536,18 @@ class TestFollowUps:
                 if system_service._is_schedule_field(c.field)]
 
     def test_a_failed_create_reports_the_schedules_pending_not_predicted(self, ew):
+        """The manifest's entry stays pending beside the failure; the template's
+        own schedules do not exist, so no line says they are known later."""
         ew.fail_create.add("acme-a")
         result = W.apply(ew, _one("local:sched", DAILY_OTHER_CRON), dry_run=False)
         assert self._pending_only(result) == [
-            ("schedule:daily", "pending_template_resolution"),
-            ("schedules", "pending_template_resolution")]
+            ("schedule:daily", "pending_template_resolution")]
+
+    def test_a_failed_create_of_an_unprobed_template_has_no_schedule_line(self, ew):
+        ew.fail_create.add("acme-a")
+        result = W.apply(ew, _one("github:org/repo"), dry_run=False)
+        assert [(f.name, f.step) for f in result.failed] == [("acme-a", "create")]
+        assert self._pending_only(result) == []
 
     @pytest.mark.parametrize("resources", ["", "    resources: {cpu: '2'}\n"])
     def test_a_failed_re_read_reports_the_schedules_pending(self, ew, monkeypatch, resources):
@@ -474,29 +570,22 @@ class TestFollowUps:
             ("schedule:daily", "pending_template_resolution"),
             ("schedules", "pending_template_resolution")]
 
-    def test_the_planner_refuses_a_name_the_template_repeats(self, world):
-        manifest = system_service.parse_manifest(_one("local:sched", DAILY_OTHER_CRON))
-        mp = system_service.ApplyMemberPlan(name="acme-a", short_name="a", verdict="create",
-                                            config=manifest.agents["a"])
-        row = {"name": "daily", "cron": "0 9 * * *", "message": "/d", "enabled": False,
-               "timezone": "UTC", "description": None}
-        blockers: list = []
-        system_service._plan_created_member(mp, manifest, {}, {}, blockers, [row, dict(row)])
-        assert [b.code for b in blockers] == ["schedule_name_ambiguous"]
-
     def test_the_create_mode_warning_names_a_schedule_once(self, world):
         twice = ("    schedules:\n      - {name: daily, cron: '0 7 * * *', message: /a}\n"
                  "      - {name: daily, cron: '0 8 * * *', message: /b}\n")
         (line,) = _template_warnings(_deploy_preview(world, _one("local:sched", twice)))
         assert line.count("'daily'") == 1
 
-    def test_the_create_409_text_is_unchanged(self):
+    def test_the_refusal_text_promises_only_the_reclaim_that_happens(self):
+        """#3214: the sweep reclaims only volumes this install labelled; an
+        older, unlabelled leftover is never reclaimed automatically."""
         assert crud.leftover_workspace_volume_detail("acme-a") == (
             "Data volume 'agent-acme-a-workspace' already exists and no agent claims it, "
             "so its contents would silently become this agent's home directory. Refusing "
             "to adopt another agent's leftover data. Remove it (docker volume rm "
-            "agent-acme-a-workspace) or choose a different name — unclaimed agent volumes "
-            "are also reclaimed automatically.")
+            "agent-acme-a-workspace) or choose a different name. Only volumes this install "
+            "labelled as its own are reclaimed automatically; one created before that label "
+            "existed stays until it is removed by hand.")
 
 
 class TestTheExecutorRefusesWhatItCannotWrite:
