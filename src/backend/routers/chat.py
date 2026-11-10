@@ -822,7 +822,7 @@ async def get_agent_model(
             body = response.json()
     except httpx.HTTPError as e:
         _raise_model_route_error(name, e, "Failed to get model info", "get model info")
-    resolved = resolve_default_model(name)
+    resolved = await asyncio.to_thread(resolve_default_model, name)
     if isinstance(body, dict):
         body.update({
             "default_model": resolved.stored,

@@ -851,6 +851,23 @@ class AgentOperations(
             )
             return result.rowcount > 0
 
+    def set_default_model_if(self, agent_name: str, expected: Optional[str],
+                             model: Optional[str]) -> bool:
+        """``set_default_model``, but only while the column still holds
+        ``expected`` (None = NULL). True when this call changed the row, so of
+        several writers that read the same old value exactly one sees True."""
+        value = (model or "").strip()[: self.DEFAULT_MODEL_MAX_LEN] or None
+        with get_engine().begin() as conn:
+            result = conn.execute(
+                update(agent_ownership)
+                .where(
+                    agent_ownership.c.agent_name == agent_name,
+                    agent_ownership.c.default_model.is_not_distinct_from(expected),
+                )
+                .values(default_model=value)
+            )
+            return result.rowcount > 0
+
     # =========================================================================
     # Public/Channel System Prompt (#1205)
     # Custom instructions injected into public-facing conversations only

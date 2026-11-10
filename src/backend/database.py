@@ -1831,6 +1831,9 @@ class DatabaseManager:
     def set_default_model(self, agent_name: str, model):
         return self._agent_ops.set_default_model(agent_name, model)
 
+    def set_default_model_if(self, agent_name: str, expected, model):
+        return self._agent_ops.set_default_model_if(agent_name, expected, model)
+
     # =========================================================================
     # MCP API Key Management (delegated to db/mcp_keys.py)
     # =========================================================================

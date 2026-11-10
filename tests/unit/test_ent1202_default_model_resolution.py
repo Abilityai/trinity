@@ -225,6 +225,18 @@ def test_set_and_get_default_model_round_trip(tmp_db):
     assert ops.set_default_model("missing", OWN) is False
 
 
+def test_set_default_model_if_lands_only_on_the_value_read(tmp_db):
+    """Two writers that read the same old value: exactly one changes the row."""
+    from db.agents import AgentOperations
+    ops = AgentOperations.__new__(AgentOperations)
+    assert ops.set_default_model_if("live-a", None, OWN) is True        # NULL matched
+    assert ops.set_default_model_if("live-a", None, OWN) is False       # already changed
+    assert ops.get_default_model_raw("live-a") == OWN
+    assert ops.set_default_model_if("live-a", "stale", "other") is False
+    assert ops.set_default_model_if("live-a", OWN, None) is True        # back to NULL
+    assert ops.get_default_model_raw("live-a") is None
+
+
 def test_stamp_model_used_if_null_fills_only_a_blank(tmp_db):
     from sqlalchemy import insert, select
     from db.tables import schedule_executions
