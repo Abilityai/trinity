@@ -286,6 +286,21 @@ describe('ent#1201 a member-tier viewer', () => {
     expect(memberTierRefusal({ response: { status: 502, data: { detail: 'The agent has reached its usage limit.' } } }, MEMBER)).toBeNull()
     expect(memberTierRefusal({ response: { status: 422, data: { detail: 'x' } } }, MEMBER)).toBeNull()
   })
+
+  // The match is on the server's free-text 502 body — no category reaches the
+  // response — so every refusal the server can send is read from its source and
+  // run through the rule. A copy edit there turns this red, not the rewrite off.
+  // Its consumer is CI: the backend file is the contract, not this component.
+  it("matches every availability refusal the server sends", () => {
+    const service = read('../../../backend/client_portal/service.py')
+    const body = service.slice(service.indexOf('_AVAILABILITY_REFUSAL = {'),
+                               service.indexOf('def _usage_limit_detail'))
+    const copies = [...body.matchAll(/"(This agent [^"]+)"/g)].map((m) => m[1])
+    expect(copies.length).toBe(3)
+    for (const detail of copies) {
+      expect(memberTierRefusal({ response: { status: 502, data: { detail } } }, MEMBER)).toBe(MEMBER_RESTARTING_NOTICE)
+    }
+  })
 })
 
 describe('ent#1201 the set-up poll', () => {

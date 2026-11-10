@@ -54,6 +54,13 @@ describe('ent#1201 the sidebar while the assistant is being set up', () => {
     w.unmount()
   })
 
+  it('past the ceiling it says what the stage says', () => {
+    const w = sidebar({ setupPending: true, setupOverdue: true })
+    expect(w.find('[data-testid="portal-sidebar-setup-pending"]').text())
+      .toBe("This is taking longer than usual — we're looking into it.")
+    w.unmount()
+  })
+
   it('without the flag the empty roster is unchanged', () => {
     const w = sidebar({})
     expect(w.text()).toContain('No agents shared with you yet')

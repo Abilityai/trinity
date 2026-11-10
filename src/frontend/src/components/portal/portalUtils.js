@@ -1205,6 +1205,11 @@ export function assistantStarting(progress) {
   return steps.some((s) => s?.key === 'assistant_ready' && s.state === 'in_progress')
 }
 
+// The set-up landing's one line, said the same way on the stage and in the
+// sidebar; past the ceiling both say it is taking longer.
+export const SETUP_PENDING_LINE = 'Your assistant is being set up'
+export const SETUP_OVERDUE_LINE = "This is taking longer than usual — we're looking into it."
+
 // The set-up landing's poll (ent#1201). While the roster says the viewer's
 // agent is being set up, the shell re-reads it every few seconds, for at most
 // three minutes; past that it stops and says so rather than polling forever.

@@ -192,6 +192,7 @@
           :projects-active="projectsRoute"
           :loading-roster="store.loading && !store.rosterLoaded"
           :setup-pending="store.agentSetupPending"
+          :setup-overdue="setupOverdue"
           :settled="sidebarReady"
           :threads-failed="store.sessionsFailed"
           v-model:search="search"
@@ -247,6 +248,7 @@
             :projects-active="projectsRoute"
             :loading-roster="store.loading && !store.rosterLoaded"
             :setup-pending="store.agentSetupPending"
+            :setup-overdue="setupOverdue"
             :settled="sidebarReady"
             :threads-failed="store.sessionsFailed"
             v-model:search="search"
@@ -1082,7 +1084,7 @@ import {
   // #3672: the sidebar's one first-load verdict.
   sidebarSettled,
   // ent#1201: the set-up landing's bounded poll.
-  setupPollVerdict,
+  setupPollVerdict, SETUP_PENDING_LINE, SETUP_OVERDUE_LINE,
 } from '@/components/portal/portalUtils'
 // ent#621 — the Workspace key map. The rules are pure and live there; this view
 // owns the one listener and the dispatch table (T3).
@@ -3281,8 +3283,6 @@ let asksTimer = null
 // that, stop and say it is taking longer. Only while pending, so an ordinary
 // Workspace pays nothing (#3058's landing cost is untouched).
 const SETUP_POLL_MS = 3000
-const SETUP_PENDING_LINE = 'Your assistant is being set up'
-const SETUP_OVERDUE_LINE = "This is taking longer than usual — we're looking into it."
 const setupOverdue = ref(false)
 let setupPollTimer = null
 let setupPollStartedAt = 0

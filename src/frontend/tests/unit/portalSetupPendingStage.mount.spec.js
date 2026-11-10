@@ -142,6 +142,8 @@ describe('ent#1201 the set-up landing', () => {
     expect(calls).toBeGreaterThan(0)
     expect(calls).toBeLessThanOrEqual(60)
     expect(stageLine(w).text()).toBe("This is taking longer than usual — we're looking into it.")
+    // The sidebar says the same thing, not "being set up" beside it.
+    expect(w.findAllComponents({ name: 'PortalSidebar' })[0].props('setupOverdue')).toBe(true)
     await vi.advanceTimersByTimeAsync(30000)
     expect(store.refreshRoster.mock.calls.length).toBe(calls)
   })

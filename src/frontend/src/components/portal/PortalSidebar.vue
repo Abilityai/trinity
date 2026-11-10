@@ -274,7 +274,7 @@
                One line, no agent name; the dot is the progress card's own
                in-progress mark, so the two read as one state. -->
           <span v-if="setupPending" class="inline-flex items-center gap-2" data-testid="portal-sidebar-setup-pending">
-            <span class="w-1.5 h-1.5 rounded-full bg-current motion-safe:animate-pulse" aria-hidden="true"></span>Your assistant is being set up
+            <span class="w-1.5 h-1.5 rounded-full bg-current motion-safe:animate-pulse" aria-hidden="true"></span>{{ setupOverdue ? SETUP_OVERDUE_LINE : SETUP_PENDING_LINE }}
           </span>
           <template v-else-if="isPlatformSession && !workspaceOnly">
             No agents yet.
@@ -481,7 +481,7 @@ import {
   signOutLabelFor,
   searchAgents, sidebarSearchState, searchEmptyLines,
   agentResultsLabel, agentToggleLabel, showAgentToggle, SEARCH_PLACEHOLDER,
-  WORKSPACE_INBOX, askBadgeTitle,
+  WORKSPACE_INBOX, askBadgeTitle, SETUP_PENDING_LINE, SETUP_OVERDUE_LINE,
 } from './portalUtils'
 import { inboxCounts } from './portalInbox'
 // ent#621: every key hint on this sidebar is DERIVED from the one map. A typed
@@ -529,6 +529,8 @@ const props = defineProps({
   // ent#1201: the roster says the viewer's own agent is being set up, so an
   // empty roster is not "none shared with you" — it is "on its way".
   setupPending: { type: Boolean, default: false },
+  // …and past the shell's poll ceiling, the stage's "taking longer" line.
+  setupOverdue: { type: Boolean, default: false },
   // #3672: the list's ONE first-load verdict (`sidebarSettled`, latched by the
   // shell). False → both sections hold skeleton rows. Defaults to true so a
   // caller that never loads (a test, a static mount) renders as before.
