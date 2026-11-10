@@ -852,6 +852,14 @@ async def provide_credential(item_id: str, email: str, is_platform: bool, value:
     # trinity-enterprise#1109: read from the STORED row, never the request —
     # the person's field cannot redirect a value the agent asked for itself.
     destination = credential_destination.destination_of(item.get("context"))
+    if destination is None and credential_destination.carries_destination(item.get("context")):
+        # trinity-enterprise#1158: the row names a destination this Trinity
+        # cannot read (a shape from another version, a damaged row). Falling
+        # through would land the value in the ASKING agent's own `.env` —
+        # exactly where it was meant never to be. Refuse; write nothing.
+        raise AskError(409, "destination_unreadable",
+                       "This ask names a destination this Trinity cannot read, so nothing was "
+                       "stored. Ask the agent to request the credential again.")
 
     try:
         await credential_sink.set_env_value(

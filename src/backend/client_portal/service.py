@@ -780,6 +780,15 @@ def _card_model_default(row: dict, ctx: ModelContext, runtime: str) -> Optional[
             return PortalModelDefault(
                 model=stored, label=catalog_label(stored), source="agent"
             )
+        # ent#1202: the agent's own model, through the same pure precedence the
+        # turn resolves with, so the label and the turn agree.
+        from services.agent_model_service import SOURCE_AGENT, choose
+
+        own = choose(row.get("default_model"), (runtime or _DEFAULT_RUNTIME).lower(), ctx.platform_default)
+        if own.source == SOURCE_AGENT:
+            return PortalModelDefault(
+                model=own.model, label=catalog_label(own.model), source="own"
+            )
         return PortalModelDefault(
             model=ctx.platform_default, label=ctx.platform_label, source="platform"
         )
@@ -1182,12 +1191,15 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
     # ent#534: the Workspace's real-time voice capability — instance-level and
     # principal-kind-level, resolved once here like `multi_agent_chat`. The
     # roster is THE capability channel for this surface (#2128).
+    from services import portal_capabilities
+
     from .voice import direct_voice_capability, realtime_voice_capability
     return PortalRoster(
         client_email=(email or None),
         agents=cards,
         multi_agent_chat_available=multi_agent_chat,
         projects_available=_projects_available(include_owned, email),
+        agent_setup_pending=portal_capabilities.has("agent_setup_pending", (email or "").strip().lower()),
         realtime_voice=realtime_voice_capability(include_owned),
         direct_voice=direct_voice_capability(include_owned),
         # ent#403: instance-level, so it rides the roster rather than every card.
@@ -2784,7 +2796,8 @@ def resolve_turn_model(agent_name: str, requested: str | None) -> str | None:
     """The ONE model ladder for a portal turn (ent#403).
 
     ``requested`` (the user's explicit pick, already validated at the router)
-    → the agent's #894 ``public_channel_model`` → the PLATFORM DEFAULT. The
+    → the agent's #894 ``public_channel_model`` → the agent's own
+    ``default_model`` (ent#1202) → the PLATFORM DEFAULT. The
     ladder resolves to a concrete id and only degrades to ``None`` when the
     platform default itself is unreadable.
 
@@ -2838,17 +2851,12 @@ def resolve_turn_model(agent_name: str, requested: str | None) -> str | None:
         override = None
     if override:
         return override
-    # The platform default is a Claude model id: a Codex or Gemini agent runs on
-    # its own model instead (`task_execution_service._default_model_for`).
+    # ent#1202: the agent's own model, then the platform default — the same
+    # resolver `execute_task` uses, so the row and the turn agree. A Codex or
+    # Gemini agent resolves to None and runs on its own model.
     try:
-        from services.docker_service import get_agent_runtime
-        if get_agent_runtime(agent_name) != "claude-code":
-            return None
-    except Exception as e:  # noqa: BLE001 — an unknown runtime keeps the default
-        logger.warning("[ent#403] runtime read failed for %s: %s", agent_name, e)
-    try:
-        from services import settings_service
-        return settings_service.get_platform_default_model() or None
+        from services.agent_model_service import resolve_default_model
+        return resolve_default_model(agent_name).model
     except Exception as e:  # noqa: BLE001 — never fail a turn over the stamp
         # Degrading to None is the pre-ent#403 behaviour: the row goes back to
         # NULL and `execute_task` resolves the default itself. Worse than a

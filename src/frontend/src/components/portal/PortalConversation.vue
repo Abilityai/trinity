@@ -662,6 +662,12 @@
           class="mb-2 text-xs text-status-warning-700 dark:text-status-warning-300"
           data-testid="portal-availability-notice"
         >{{ availabilityNotice.message }}</p>
+        <!-- ent#1201: a send held while the member's assistant is starting. -->
+        <p
+          v-if="heldSend"
+          class="mb-2 text-xs text-status-info-700 dark:text-status-info-300"
+          data-testid="portal-held-send"
+        >Your assistant is starting — your message will send when it's ready.</p>
         <!-- ent#524: one chip per file, each with its OWN progress and its own
              outcome — a batch has no shared verdict, which is what makes "one
              failure does not fail the batch" true rather than aspirational. A
@@ -978,7 +984,7 @@ import PortalAvatar from './PortalAvatar.vue'
 import PortalStarButton from './PortalStarButton.vue'
 import PortalEditableTitle from './PortalEditableTitle.vue'
 import PortalChatTabs from './PortalChatTabs.vue'
-import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline, agentChatTabs, NEW_CHAT_TAB_ID, pairRepliesWithQuestions, turnGateFlags, isNewChatTranscript } from './portalUtils'
+import { newChatHotkeyLabel, MAIN_TAB_LABEL, composerAvailabilityNotice, viewerIsMemberTier, assistantStarting, memberTierRefusal, assistantRow, replyFromHistory, replyBaseline, readReplyBaseline, agentChatTabs, NEW_CHAT_TAB_ID, pairRepliesWithQuestions, turnGateFlags, isNewChatTranscript } from './portalUtils'
 import { tailSignature, tailLimit, adoptLocalIds, freshRows, tailOverflowed, TAIL_LIMIT_CAP } from './portalThreadTail'
 // ent#621: the same wrap the typeahead's roving selection uses — one modulo.
 import { cycleIndex } from './portalKeymap'
@@ -1230,7 +1236,9 @@ const messageLimit = computed(() => messageLimitState(input.value.trim()))
 const resetting = ref(false)
 // ent#523 AC 10 — the same pure rule the sidebar chip and the details header
 // read, so the four surfaces cannot disagree about one agent.
-const availabilityNotice = computed(() => composerAvailabilityNotice(props.agent))
+// ent#1201: a member's assistant that is being started says so on its progress
+// card, not here — `starting` silences the notice for that window.
+const availabilityNotice = computed(() => composerAvailabilityNotice(props.agent, { starting: assistantIsStarting.value }))
 const replyTo = computed(() => (
   props.replyTarget && props.replyTarget.messageId && props.replyTarget.sessionId === currentSessionId.value
     ? props.replyTarget : null
@@ -1417,8 +1425,72 @@ let stopWhenStarted = false
 // ---- ent#1175: member onboarding progress card ------------------------------
 const progressStore = usePortalProgressStore()
 const progressData = computed(() => progressStore.progressFor(props.agent.name))
-// Fetch on mount (idempotent — cache-hits skip the network round-trip)
-onMounted(() => { if (isMainChat.value) progressStore.fetchProgress(props.agent.name) })
+const memberTier = computed(() => viewerIsMemberTier(props.agent))
+// Fetch on mount (idempotent — cache-hits skip the network round-trip). A
+// member-tier chat reads it on every tab too: whether the assistant is still
+// starting decides what a send does (ent#1201).
+onMounted(() => { if (isMainChat.value || memberTier.value) progressStore.fetchProgress(props.agent.name) })
+
+// ---- ent#1201: a send while the member's assistant is starting --------------
+// The hand-over recreates the member's agent, and the server refuses every turn
+// until it is up. The row reads ready and the card says "starting", so a send in
+// that window is HELD here rather than walked into the refusal: it goes out when
+// the assistant_ready step flips to done (the progress WS trigger refetches the
+// card), and is handed back as text if the start failed or three minutes pass.
+// Text, reply and tags are held; a send carrying files is not held — it goes out
+// as ever, because a held file chip would have to outlive the composer.
+const HELD_SEND_CEILING_MS = 3 * 60 * 1000
+const assistantIsStarting = computed(() => memberTier.value && assistantStarting(progressData.value))
+const heldSend = ref(null)
+let heldSendTimer = null
+
+function holdSend(text, reply, tags) {
+  heldSend.value = { text, reply, tags }
+  clearTimeout(heldSendTimer)
+  heldSendTimer = setTimeout(handBackHeldSend, HELD_SEND_CEILING_MS)
+}
+
+function takeHeldSend() {
+  clearTimeout(heldSendTimer)
+  heldSendTimer = null
+  const h = heldSend.value
+  heldSend.value = null
+  return h
+}
+
+function handBackHeldSend() {
+  const h = takeHeldSend()
+  if (!h) return
+  input.value = restoreDraft(h.text, input.value)
+  autoGrowAfterUpdate()
+}
+
+watch(assistantIsStarting, (isStarting) => {
+  if (isStarting || !heldSend.value) return
+  const failed = (progressData.value?.steps || [])
+    .some((s) => s?.key === 'assistant_ready' && s.state === 'failed')
+  if (failed) return handBackHeldSend()
+  const h = takeHeldSend()
+  void submitUserText(h.text, { replyId: h.reply?.messageId || null, replyExcerpt: h.reply?.excerpt || '',
+                                tags: h.tags })
+})
+
+// While a send is held its words ARE this chat's draft, ahead of anything typed
+// since — so a reload or a closed tab finds them (no unmount hook runs then).
+// `flush: 'post'` runs after `useComposerDraft`'s write of the emptied field.
+// The draft lets go of them when the hold ends: sent, or handed back (the
+// composer then holds them, and the draft follows the composer as ever).
+watch([input, heldSend], ([text, h], [, wasHeld]) => {
+  if (!draftKey.value || (!h && !wasHeld)) return
+  drafts.set(draftKey.value, h ? restoreDraft(h.text, text) : text)
+}, { flush: 'post' })
+
+// Leaving the chat with a send still held keeps the words as this chat's draft.
+onBeforeUnmount(() => {
+  clearTimeout(heldSendTimer)
+  const h = heldSend.value
+  if (h && draftKey.value) drafts.set(draftKey.value, restoreDraft(h.text, input.value))
+})
 
 // ---- ent#525: the live card and the terminal card ---------------------------
 const workStore = usePortalWorkStore()
@@ -2407,6 +2479,11 @@ async function deliver(text, { replyId = null, attachments = null, tags = null }
     }
     const refused = messageRefusalReason(err)
     if (refused) return { error: refused, retryable: false, restoreText: text }
+    // ent#1201: "its owner needs to start it" means nothing to a member, who
+    // cannot start it and does not know the account. Same verdict, their words.
+    // Not retryable while it is down, so the words go back to the composer.
+    const memberCopy = memberTierRefusal(err, props.agent)
+    if (memberCopy) return { error: memberCopy, retryable: false, restoreText: text }
     return { error: deliveryFailureReason(err) }
   } finally {
     sending.value = false
@@ -2788,6 +2865,17 @@ async function send() {
       }
       return
     }
+  }
+
+  // ent#1201: held while the member's assistant is starting (see `holdSend`).
+  if (assistantIsStarting.value && !heldSend.value && !attachments.value.length) {
+    const heldReply = replyTo.value
+    if (heldReply) emit('reply-done')
+    holdSend(text, heldReply, peoplePicker.tagsFor(text))
+    peoplePicker.reset()
+    input.value = ''
+    autoGrowAfterUpdate()
+    return
   }
 
   input.value = ''

@@ -5900,6 +5900,27 @@ def _migrate_agent_ownership_wake_on_ending(cursor, conn):
     conn.commit()
 
 
+def _migrate_agent_ownership_default_model(cursor, conn):
+    """ent#1202 — the agent's own model for turns that name none.
+
+    Adds ``default_model TEXT`` to ``agent_ownership``, nullable with no
+    default: NULL means "no opinion", so a turn that names no model keeps
+    running on the platform default exactly as before. The value is stored as
+    written and checked against the model catalog on read
+    (``services/agent_model_service.py``), so a stored id this instance cannot
+    run is skipped by name, never passed to the CLI.
+
+    No backfill. Mirrored by Alembic revision 0123_agent_ownership_default_model.
+    """
+    _safe_add_column(
+        cursor,
+        "agent_ownership",
+        "default_model",
+        "ALTER TABLE agent_ownership ADD COLUMN default_model TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_agent_memory_facts(cursor, conn):
     """trinity-enterprise#1022 (MEM-002) — retrieval memory facts.
 
@@ -6495,4 +6516,5 @@ MIGRATIONS = [
     ("public_user_memory_writes_section", _migrate_public_user_memory_writes_section),
     ("agent_ownership_wake_on_ending", _migrate_agent_ownership_wake_on_ending),
     ("channel_client_blocks", _migrate_channel_client_blocks),
+    ("agent_ownership_default_model", _migrate_agent_ownership_default_model),
 ]

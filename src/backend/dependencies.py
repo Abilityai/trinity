@@ -1898,6 +1898,25 @@ def require_person(current_user: User = Depends(get_current_user)) -> User:
     return current_user
 
 
+def can_seat_member(current_user: User) -> bool:
+    """May this caller seat the instance's recorded hub member through apply
+    (trinity-enterprise#1174, operator ruling T2)?
+
+    A PERSON (`assert_person`: a JWT session or the person's own `user` key —
+    never an agent, system, connector, delegate, ops or loopback principal)
+    who passes `assert_admin`. The only write it opens is the ONE person an
+    interactive admin recorded, as `primary`; every other seat, share and
+    grant keeps `is_interactive_admin`. A principal without `mcp_scope` fails
+    closed through both predicates' sentinels.
+    """
+    try:
+        assert_person(current_user)
+        assert_admin(current_user)
+    except HTTPException:
+        return False
+    return True
+
+
 def require_interactive(current_user: User = Depends(get_current_user)) -> User:
     """`Depends` form of the INTERACTIVE rule: a JWT session only.
 

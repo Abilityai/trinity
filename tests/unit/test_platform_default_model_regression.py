@@ -147,9 +147,13 @@ class TestTaskExecutionServiceModelResolution:
             "execute_task() must resolve a null model through _default_model_for(). "
             "Removing this call re-introduces the #831 bug."
         )
-        # The platform default still reaches a Claude Code agent through it.
+        # The platform default still reaches a Claude Code agent through it —
+        # since ent#1202 via the one resolver, which ranks the agent's own
+        # model first and falls to the platform default.
         helper = _func_source(src, _find_function(tree, "_default_model_for"))
-        assert "get_platform_default_model()" in helper
+        assert "resolve_default_model(" in helper
+        resolver = (_TASK_EXEC_SERVICE.parent / "agent_model_service.py").read_text()
+        assert "get_platform_default_model()" in resolver
 
     def test_execute_task_does_not_hardcode_bare_sonnet(self):
         """execute_task must not assign the bare 'sonnet' alias as a model fallback."""

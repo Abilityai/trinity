@@ -627,8 +627,10 @@
   through the effective provider — Settings → Integrations → Outbound A2A
   endpoints), checked at raise (`destination_not_approved`) and again at
   delivery; and **the outbound A2A kill switch governs the path** at both
-  points (`destination_outbound_disabled`). The registry entry is the
-  approval only — its own credential is never used. No resolver runs at
+  points (`destination_outbound_disabled`). In the `key_env` form the
+  registry entry is the approval only and the key is the asking agent's; in
+  the `instance` form (trinity-enterprise#1158) the entry's own stored key is
+  used, resolved at delivery (below). No resolver runs at
   raise time (`raise_ask` is synchronous under an async route); the sink
   resolves the URL off the loop at delivery (`a2a_client.validate_endpoint`),
   pins the connection to the resolved address with the registered host in
@@ -649,6 +651,31 @@
   staged and says "may or may not have been stored". The receiving route's
   gate is unchanged (`require_person`); `mode: "merge"` only narrows what a
   caller can change to the named lines.
+- **An instance destination (trinity-enterprise#1158)**: `{instance,
+  agent_name}` names a registered outbound entry; the platform presents the
+  key stored on that entry (AES-GCM in `system_settings`, Invariant #12), so
+  the asking agent holds no copy and its `.env` is never read. The key is
+  read once per delivery at one resolve point
+  (`credential_sink._resolve_instance_key`, through
+  `a2a_outbound.resolve_endpoint(asking_agent, endpoint_id)` — the reach of
+  `call_a2a_agent`, and the seam a per-agent grant plugs into), passed only to
+  the `Authorization` header and the capped reader's `secret=`, and kept out
+  of every refusal, log and audit row by the ent#1066 AST guard (extended to
+  `key`, `credential`, `headers`, and `asdict`/`vars` on a resolved
+  endpoint). Raise reduces the entry to metadata on the spot. One audit row,
+  `credential_instance_delivery`, per delivery. The person's consent is bound
+  to the host they read: an entry repointed elsewhere refuses
+  (`instance_moved`). `instance_unknown` is uniform for unknown and out of
+  reach. **Stated authority change**: the entry key, registered for A2A
+  messaging, is presented to the receiving instance's owner-tier inject route
+  for an agent the asker names — it needs inject rights there (else
+  `destination_key_refused`); if it is user- or admin-scoped there, every
+  agent here that can resolve the entry can reach every agent that key
+  reaches (person-gated and audited each time); an entry that is not a
+  Trinity would receive the key and the value (the person sees the host
+  first). A stored destination that parses as neither shape refuses with 409
+  `destination_unreadable` and writes nothing (previously a fail-open to the
+  asking agent's own `.env`).
 - **Residuals (stated, not closed here)**: the guard is not wired into channel
   adapters (Slack, Telegram, voice); the owner's Credentials-tab inject and the
   other non-sink `.env` writers are whole-file and do not take the sink's lease,
@@ -656,7 +683,9 @@
   (ent#279).
 - **Tests**: `tests/unit/test_ent1066_credential_ask_kind.py`,
   `test_ent1066_credential_sink.py`, `test_ent1066_credential_route_gates.py`,
-  `test_ent1066_secret_paste_guard.py`, `test_ent1109_credential_handover.py`;
+  `test_ent1066_secret_paste_guard.py`, `test_ent1109_credential_handover.py`,
+  `test_ent1158_instance_destination.py`, `test_ent1158_key_env_raise_check.py`,
+  `test_ent1158_credential_key_journey.py`;
   `src/mcp-server/src/operator_queue.test.ts`;
   `src/frontend/tests/unit/{portalCredentialField,credentialAskSurfaces,portalSecretInMessage}.mount.spec.js`.
 

@@ -390,6 +390,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // actually says otherwise, and the component never sees an undefined
     // tri-state.
     multiAgentChatAvailable: false,
+    // ent#1201 — the viewer's own agent is still being set up (seated or
+    // started). Carried on the roster; only a successful roster that says
+    // exactly `true` raises it, so an OSS build and an older backend read false.
+    agentSetupPending: false,
     // ent#661 — may THIS principal use Workspace Projects? Same channel and
     // same fail-closed direction as the flag above: only a successful roster
     // that says so raises it (internal-only, so an outside client never does).
@@ -887,7 +891,7 @@ export const useClientPortalStore = defineStore('clientPortal', {
     // is unavailable.
     async startPortalChat(agentName, message, sessionId = null,
                     { newThread = false, openCanvasId = null, model = null, replyToMessageId = null,
-                      attachments = null, tags = null, voiceCallId = null } = {}) {
+                      attachments = null, tags = null, voiceCallId = null, idempotencyKey = null } = {}) {
       const { data } = await portalHttp.post(
         `/api/enterprise/client-portal/agents/${agentName}/chat/stream`,
         {
@@ -913,7 +917,10 @@ export const useClientPortalStore = defineStore('clientPortal', {
           // as picked). Only when there are some: every other body is unchanged.
           ...(tags && tags.length ? { tags } : {}),
         },
-        { headers: this.authHeader }
+        // trinity-enterprise#1195: a task's Start sends its first message with
+        // a deterministic key, so a double click or a retry runs ONE turn
+        // (Invariant #18). Every other caller is unchanged.
+        { headers: idempotencyKey ? { ...this.authHeader, 'Idempotency-Key': idempotencyKey } : this.authHeader }
       )
       return data   // {execution_id, session_id}
     },
@@ -2780,21 +2787,23 @@ export const useClientPortalStore = defineStore('clientPortal', {
       return data
     },
 
-    async fetchRoster() {
-      this.loading = true
-      this.error = null
+    async fetchRoster({ quiet = false } = {}) {
+      if (!quiet) {
+        this.loading = true
+        this.error = null
+      }
       // #2163: re-enter loading ONLY when there is no data on screen. A retry
       // after a failed first load must show the stage's scanline rather than
       // the "No agents shared with you yet" copy it flashed before (p15:
       // loading is not empty); a refetch WITH a roster rendered keeps its
       // verdict, so the standard motion stays invisible on a background
       // refresh (p13). `loading` above is in-flight and is never the key.
-      if (!this.agents.length) this.rosterLoaded = false
+      if (!this.agents.length && !quiet) this.rosterLoaded = false
       // Reset with `error`, not just alongside it: a 404 followed by a
       // successful retry would otherwise keep rendering "not available on this
       // instance" over a roster that loaded fine — and the retry button added
       // for that state makes the stale case one click away.
-      this.unavailable = false
+      if (!quiet) this.unavailable = false
       try {
         const { data } = await portalHttp.get('/api/enterprise/client-portal/my-agents', {
           headers: this.authHeader,
@@ -2823,6 +2832,8 @@ export const useClientPortalStore = defineStore('clientPortal', {
         // every background refetch would unmount a live room and flash a
         // refusal at an entitled client before taking it back.
         this.multiAgentChatAvailable = data.multi_agent_chat_available === true
+        // ent#1201: same strictness, same reason.
+        this.agentSetupPending = data.agent_setup_pending === true
         // ent#661: same strictness, same reason.
         this.projectsAvailable = data.projects_available === true
         // ent#534: same strictness — an older backend without the field reads
@@ -2852,6 +2863,9 @@ export const useClientPortalStore = defineStore('clientPortal', {
         // the roster must not wait for it, which is the entire point.
         if (briefingHydrationPlan(this.agents).batch) void this.hydrateBriefings()
       } catch (err) {
+        // ent#1201: a quiet refresh that fails changes nothing on screen — the
+        // next tick reads again. A session that ended is still handled below.
+        if (quiet && err.response?.status !== 401) return
         // Two DIFFERENT failures, kept distinct — neither may swallow the other.
         //
         // 401 (ent#375): the session ended. Say so and remember the page, so
@@ -2892,8 +2906,15 @@ export const useClientPortalStore = defineStore('clientPortal', {
         // attempt finished at some point".
         this.rosterLoaded = this.isClientSignedIn
       } finally {
-        this.loading = false
+        if (!quiet) this.loading = false
       }
+    },
+
+    // ent#1201: re-read the roster without re-entering the loading phase (no
+    // skeleton, no reset `error`/`unavailable`, and a failed read is silent) —
+    // the set-up landing's poll, and the re-read when a member's progress flips.
+    refreshRoster() {
+      return this.fetchRoster({ quiet: true })
     },
 
     /**
