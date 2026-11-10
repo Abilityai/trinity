@@ -277,6 +277,8 @@ class TestReservedNamesMirrorTheAgentImage:
         agent_side = set(agent_env.PROTECTED_KEYS) | set(agent_env.ROUTING_KEYS)
         for names in agent_env.RUNTIME_ENDPOINT_KEYS.values():
             agent_side |= set(names)
+        for names in agent_env.RUNTIME_OPT_OUT_KEYS.values():
+            agent_side |= set(names)
         missing = agent_side - set(policy.RESERVED_ENV_NAMES)
         assert not missing, sorted(missing)
 
