@@ -1475,9 +1475,20 @@ watch(assistantIsStarting, (isStarting) => {
                                 tags: h.tags })
 })
 
+// While a send is held its words ARE this chat's draft, ahead of anything typed
+// since — so a reload or a closed tab finds them (no unmount hook runs then).
+// `flush: 'post'` runs after `useComposerDraft`'s write of the emptied field.
+// The draft lets go of them when the hold ends: sent, or handed back (the
+// composer then holds them, and the draft follows the composer as ever).
+watch([input, heldSend], ([text, h], [, wasHeld]) => {
+  if (!draftKey.value || (!h && !wasHeld)) return
+  drafts.set(draftKey.value, h ? restoreDraft(h.text, text) : text)
+}, { flush: 'post' })
+
 // Leaving the chat with a send still held keeps the words as this chat's draft.
 onBeforeUnmount(() => {
-  const h = takeHeldSend()
+  clearTimeout(heldSendTimer)
+  const h = heldSend.value
   if (h && draftKey.value) drafts.set(draftKey.value, restoreDraft(h.text, input.value))
 })
 
@@ -2470,8 +2481,9 @@ async function deliver(text, { replyId = null, attachments = null, tags = null }
     if (refused) return { error: refused, retryable: false, restoreText: text }
     // ent#1201: "its owner needs to start it" means nothing to a member, who
     // cannot start it and does not know the account. Same verdict, their words.
+    // Not retryable while it is down, so the words go back to the composer.
     const memberCopy = memberTierRefusal(err, props.agent)
-    if (memberCopy) return { error: memberCopy, retryable: false }
+    if (memberCopy) return { error: memberCopy, retryable: false, restoreText: text }
     return { error: deliveryFailureReason(err) }
   } finally {
     sending.value = false

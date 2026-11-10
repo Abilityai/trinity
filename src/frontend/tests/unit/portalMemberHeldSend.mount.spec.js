@@ -56,6 +56,7 @@ function seed(name, state) {
 
 beforeEach(() => {
   document.body.innerHTML = ''
+  localStorage.clear()
   setActivePinia(createPinia())
   store = useClientPortalStore()
   progress = usePortalProgressStore()
@@ -118,6 +119,37 @@ describe('ent#1201 a send while the member assistant is starting', () => {
     expect(wrapper.find('textarea').element.value).toBe('hello there')
   })
 
+  it('survives a reload: the held words are the chat\'s draft until sent or handed back', async () => {
+    store.clientEmail = 'member@example.com'
+    seed(MEMBER.name, 'in_progress')
+    await mountAndSend(MEMBER)
+    expect(held().exists()).toBe(true)
+    // A reload never runs unmount hooks: what it finds is what is stored now.
+    const before = wrapper
+    setActivePinia(createPinia())
+    useClientPortalStore().clientEmail = 'member@example.com'
+    const reloaded = shallowMount(PortalConversation, {
+      props: { agent: MEMBER, sessionId: 's1' }, global: { renderStubDefaultSlot: true },
+    })
+    await flushPromises()
+    expect(reloaded.find('textarea').element.value).toBe('hello there')
+    reloaded.unmount()
+
+    // Sent on the ready flip: the draft lets go of it.
+    seed(MEMBER.name, 'done')
+    await flushPromises()
+    expect(store.startPortalChat).toHaveBeenCalledTimes(1)
+    expect(before.find('textarea').element.value).toBe('')
+    setActivePinia(createPinia())
+    useClientPortalStore().clientEmail = 'member@example.com'
+    const again = shallowMount(PortalConversation, {
+      props: { agent: MEMBER, sessionId: 's1' }, global: { renderStubDefaultSlot: true },
+    })
+    await flushPromises()
+    expect(again.find('textarea').element.value).toBe('')
+    again.unmount()
+  })
+
   it('an operator-facing agent is never held', async () => {
     seed(OPERATOR.name, 'in_progress')
     await mountAndSend(OPERATOR)
@@ -134,5 +166,12 @@ describe('ent#1201 a member whose assistant is down', () => {
     expect(wrapper.find('[data-testid="portal-availability-notice"]').text()).toBe('Your assistant is restarting.')
     expect(wrapper.text()).toContain('Your assistant is restarting.')
     expect(wrapper.text()).not.toMatch(/ops-account|its owner/)
+  })
+
+  it('hands the refused words back to the composer', async () => {
+    store.startPortalChat = vi.fn().mockRejectedValue({ response: { status: 502,
+      data: { detail: "This agent isn't running right now — its owner needs to start it." } } })
+    await mountAndSend(MEMBER, 'please look at this')
+    expect(wrapper.find('textarea').element.value).toBe('please look at this')
   })
 })
