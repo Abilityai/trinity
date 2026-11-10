@@ -11,8 +11,10 @@ safe:
 * a platform turn's end is not a delegation's end: the four reserved triggers
   (including the wake's own) never wake anyone, so no wake chain can be
   self-sustaining;
-* the hop is bounded by the same ``chain_depth`` setting as the call chain it
-  answers (#2806 — Premise P9, proven here rather than assumed);
+* the wake carries the delegator's standing, ``max(callee − 1, MAX(running
+  caller), 0)`` — not one hop more (#4357; it was ``callee + 1``, which added
+  two per delegate→wake round). The rounds themselves are driven through the
+  real guard in ``test_4357_wake_chain_depth.py``;
 * one wake per caller per 15 s bucket, so a cleanup sweep that terminates 200
   stale rows cannot become 200 billed turns;
 * a stopped caller is audited, not dispatched at.
@@ -87,6 +89,7 @@ def wake(monkeypatch):
     monkeypatch.setattr(mod, "_fail_idempotency", lambda *a, **k: None)
     monkeypatch.setattr(mod, "_pending_ask_ids", lambda execution_id: calls.get("ask_ids", []))
     monkeypatch.setattr(mod, "_caller_subscribes_to", lambda caller, callee, status: False)
+    monkeypatch.setattr(mod, "_running_depth", lambda agent_name: calls.get("running_depth", 0))
 
     def _policy(agent_name):
         from services.wake_policy import WakeVerdict
@@ -221,16 +224,49 @@ class TestSafety:
 
 
 class TestTheFrame:
-    def test_chain_depth_is_the_callees_plus_one(self, wake):
-        """Premise P9: the wake is a hop, bounded by the same
-        ``inter_agent_max_chain_depth`` as the call chain (#2806/#2973)."""
-        _run(wake.maybe_wake_caller("exec-callee"))
-        assert wake._calls["dispatch"][0]["chain_depth"] == 3
-
-    def test_a_missing_chain_depth_starts_the_count(self, wake):
-        wake._calls["row"] = _row(chain_depth=None)
+    def test_chain_depth_is_the_delegators_standing(self, wake):
+        """#4357: the callee was stamped ``1 + MAX(running caller)``, so the
+        delegator stood at ``callee − 1`` — the wake continues from there."""
         _run(wake.maybe_wake_caller("exec-callee"))
         assert wake._calls["dispatch"][0]["chain_depth"] == 1
+
+    def test_a_missing_chain_depth_is_a_root(self, wake):
+        wake._calls["row"] = _row(chain_depth=None)
+        _run(wake.maybe_wake_caller("exec-callee"))
+        assert wake._calls["dispatch"][0]["chain_depth"] == 0
+
+    def test_a_callee_at_the_max_leaves_the_wake_room_for_one_hop(self, wake):
+        wake._calls["row"] = _row(chain_depth=8)
+        _run(wake.maybe_wake_caller("exec-callee"))
+        assert wake._calls["dispatch"][0]["chain_depth"] == 7
+
+    def test_a_deeper_running_turn_of_the_caller_lifts_the_wake(self, wake):
+        """A collapsed window can read the shallower ending; the wake must not
+        stand below a deep turn of the caller that is still running."""
+        wake._calls["running_depth"] = 5
+        _run(wake.maybe_wake_caller("exec-callee"))
+        assert wake._calls["dispatch"][0]["chain_depth"] == 5
+
+    def test_an_unreadable_running_depth_still_wakes_at_the_callees_standing(self, wake, monkeypatch):
+        def _boom(agent_name):
+            raise RuntimeError("db gone")
+
+        monkeypatch.setattr(wake, "_running_depth", _boom)
+        wake._calls["row"] = _row(chain_depth=4)
+        assert _run(wake.maybe_wake_caller("exec-callee")) == "exec-wake"
+        assert wake._calls["dispatch"][0]["chain_depth"] == 3
+
+    def test_a_non_integer_chain_depth_falls_back_to_the_running_depth(self, wake):
+        wake._calls["row"] = _row(chain_depth="garbage")
+        wake._calls["running_depth"] = 2
+        _run(wake.maybe_wake_caller("exec-callee"))
+        assert wake._calls["dispatch"][0]["chain_depth"] == 2
+
+    def test_the_audit_names_the_callees_depth_beside_the_wakes(self, wake):
+        wake._calls["row"] = _row(chain_depth=6)
+        _run(wake.maybe_wake_caller("exec-callee"))
+        (audit,) = wake._calls["audit"]
+        assert (audit["chain_depth"], audit["callee_chain_depth"]) == (5, 6)
 
     def test_the_frame_names_the_run_the_callee_and_the_ending(self, wake):
         _run(wake.maybe_wake_caller("exec-callee"))

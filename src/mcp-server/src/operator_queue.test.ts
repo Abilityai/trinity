@@ -736,6 +736,61 @@ describe("trinity-enterprise#1007 ask_operator to a canon role", () => {
 });
 
 // ---------------------------------------------------------------------------
+// trinity-enterprise#1134 — ask_operator may address the turn's project:
+// `to: "project"`. The backend resolves who that reaches (the project's
+// steward, else its creator) from the platform's turn; the schema admits the
+// word, the parameter teaches the three named refusals, the tool description
+// keeps its headroom.
+// ---------------------------------------------------------------------------
+
+describe("trinity-enterprise#1134 ask_operator to the project", () => {
+  const tool = makeAskOperator(raisingClient().fake);
+  const schema = tool.parameters as any;
+
+  it('accepts to="project"', () => {
+    assert.equal(schema.safeParse({ ...ASK, to: "project" }).success, true);
+  });
+
+  for (const to of ["Project", "projects", "project:x", "role:project "]) {
+    it(`rejects to=${JSON.stringify(to)}`, () => {
+      assert.equal(schema.safeParse({ ...ASK, to }).success, false);
+    });
+  }
+
+  it("forwards the word to the backend unchanged — the backend resolves the person", async () => {
+    const { fake, calls } = raisingClient({ status: "created", request_id: "deploy-1", to_role: "project" });
+    const body: OperatorAskCreate = { ...(ASK as any), to: "project" };
+    const out = JSON.parse(await makeAskOperator(fake).execute(body, agentCtx("self")));
+    assert.deepEqual(calls, [["self", body]]);
+    assert.equal(out.to_role, "project");
+  });
+
+  for (const code of ["project_unavailable", "not_in_project_turn", "project_unreachable"]) {
+    it(`a ${code} refusal reaches the agent by name, never a person`, async () => {
+      const detail = { code, message: "Address primary or operator instead.", role: "project" };
+      const fake = {
+        raiseAsk: async () => { throw new ApiError(422, JSON.stringify({ detail })); },
+      } as Partial<TrinityClient>;
+      const out = JSON.parse(await makeAskOperator(fake).execute({ ...ASK, to: "project" } as any, agentCtx("self")));
+      assert.deepEqual(out, { success: false, status: 422, ...detail });
+    });
+  }
+
+  it("the `to` parameter teaches the project target and its three refusals", () => {
+    const d = schema.shape.to.description as string;
+    assert.match(d, /Or project\b/);
+    assert.match(d, /steward, else its creator/);
+    for (const code of ["project_unavailable", "not_in_project_turn", "project_unreachable"]) {
+      assert.ok(d.includes(code), code);
+    }
+  });
+
+  it("the tool description keeps its headroom", () => {
+    assert.ok(tool.description.length <= 1800, `ask_operator description is ${tool.description.length} characters`);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // trinity-enterprise#1066 — ask_for_credential: an agent asks the person of the
 // conversation for a secret BY NAME. The ask is a `credential` ask addressed to
 // primary; the value is typed into the masked field in the person's Workspace
@@ -855,6 +910,65 @@ describe("trinity-enterprise#1066 ask_for_credential", () => {
       assert.deepEqual(out, { success: false, status: 422, ...detail });
     });
   }
+
+  // trinity-enterprise#1158 — destination.instance: the registered instance by
+  // name; the platform delivers under the key stored for it.
+  const destinationSchema = () => (makeTool(raisingClient().fake).parameters as any).shape.destination;
+
+  for (const [label, dest] of [
+    ["instance shape", { instance: "instance-x", agent_name: "digest" }],
+    ["key_env shape", { instance_url: "https://remote.example.com", agent_name: "digest", key_env: "REMOTE_KEY" }],
+  ] as const) {
+    it(`the destination schema accepts the ${label}`, () => {
+      assert.equal(destinationSchema().safeParse(dest).success, true);
+    });
+  }
+
+  for (const [label, dest] of [
+    ["both shapes", { instance: "instance-x", instance_url: "https://remote.example.com", agent_name: "digest", key_env: "K" }],
+    ["instance with key_env", { instance: "instance-x", agent_name: "digest", key_env: "K" }],
+    ["instance with instance_url", { instance: "instance-x", instance_url: "https://remote.example.com", agent_name: "digest" }],
+    ["instance without agent_name", { instance: "instance-x" }],
+    ["key_env shape missing key_env", { instance_url: "https://remote.example.com", agent_name: "digest" }],
+    ["neither shape", { agent_name: "digest" }],
+    ["empty instance", { instance: "", agent_name: "digest" }],
+    ["instance over 200 characters", { instance: "x".repeat(201), agent_name: "digest" }],
+  ] as const) {
+    it(`the destination schema refuses ${label}`, () => {
+      assert.equal(destinationSchema().safeParse(dest).success, false);
+    });
+  }
+
+  it("an instance destination travels with instance and agent_name only", async () => {
+    const { fake, calls } = raisingClient({ status: "created", request_id: "cred-i" });
+    await makeTool(fake).execute(
+      {
+        name: "TELEGRAM_BOT_TOKEN", why: "For the digest.", request_id: "cred-i",
+        destination: { instance: "instance-x", agent_name: "digest", key: "trinity_mcp_leak", instance_url: undefined },
+      } as any,
+      agentCtx("self"),
+    );
+    assert.deepEqual(calls[0][1].context, {
+      credential_name: "TELEGRAM_BOT_TOKEN",
+      credential_destination: { instance: "instance-x", agent_name: "digest" },
+    });
+    assert.doesNotMatch(JSON.stringify(calls), /trinity_mcp_leak|key_env|instance_url/);
+  });
+
+  it("the destination description leads with instance and lists the raise refusals", () => {
+    const d: string = destinationSchema().description;
+    assert.ok(d.indexOf("instance") < d.indexOf("key_env"), "instance is named before key_env");
+    assert.match(d, /Settings → Integrations → Outbound A2A endpoints/);
+    assert.match(d, /you never hold it/);
+    assert.doesNotMatch(d, /its own credential is never used here/);
+    for (const code of [
+      "destination_invalid", "destination_instance_invalid", "destination_agent_invalid",
+      "destination_outbound_disabled", "destination_not_approved", "destination_instance_no_credential",
+      "destination_url_invalid", "destination_key_env_invalid", "destination_key_env_missing",
+      "instance_moved", "destination_unreadable", "destination_key_refused",
+    ]) assert.match(d, new RegExp(code), code);
+    assert.ok(d.length <= 2048, `destination description is ${d.length} characters`);
+  });
 
   it("the description says: only in a conversation with the person, never in a plain message, by name only", () => {
     const d: string = makeTool(raisingClient().fake).description;

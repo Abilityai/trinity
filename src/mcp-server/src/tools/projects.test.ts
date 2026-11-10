@@ -181,13 +181,15 @@ describe("ent#661 — the turn id rides every project call; the audience gate's 
       listProjectTasks: rec(2) as never,
       getProjectLog: rec(2) as never,
       addProjectLogEntry: rec(2) as never,
+      readProjectContext: rec(3) as never,
     });
     await tools.list_projects.execute({}, session);
     await tools.get_project.execute({ project_id: PROJECT.id }, session);
     await tools.list_project_tasks.execute({ project_id: PROJECT.id }, session);
     await tools.get_project_log.execute({ project_id: PROJECT.id }, session);
     await tools.add_project_log_entry.execute({ project_id: PROJECT.id, kind: "note", body: "x" }, session);
-    assert.deepEqual(turns, ["exec-42", "exec-42", "exec-42", "exec-42", "exec-42"]);
+    await tools.read_project_context.execute({ project_id: PROJECT.id, item_id: "ctx_1" }, session);
+    assert.deepEqual(turns, ["exec-42", "exec-42", "exec-42", "exec-42", "exec-42", "exec-42"]);
   });
 
   it("the client sends it as X-Trinity-Execution-Id, and nothing without one", async () => {
@@ -282,6 +284,22 @@ describe("ent#588 — an agent starts or imports a project (projects.manage)", (
     const out = JSON.parse(await tools.create_project.execute({ name: "x", goal: "y" }));
     assert.equal(out.success, false);
     assert.equal(out.code, "project_management_not_permitted");
+  });
+
+  it("create_project and import_project offer no steward: another agent needs an approval (#1194 ruling)", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      createProjectAsAgent: async (body: Record<string, unknown>) => { calls.push(["create", body]); return PROJECT; },
+      importProjectAsAgent: async (...args: unknown[]) => { calls.push(["import", ...args]); return PROJECT; },
+    } as Partial<TrinityClient>);
+    assert.equal("steward" in (tools.create_project.parameters as any).shape, false);
+    assert.equal("steward" in (tools.import_project.parameters as any).shape, false);
+    await tools.create_project.execute({ name: "x", goal: "y", steward: "pm" } as any);
+    await tools.import_project.execute({ path: "project_files/q4", steward: "pm" } as any);
+    assert.deepEqual(calls[0], ["create", { name: "x", goal: "y" }]);
+    assert.deepEqual(calls[1].slice(0, 2), ["import", "project_files/q4"]);
+    assert.equal(calls[1].includes("pm"), false);
+    assert.match(tools.create_project.description, /propose_project_changes/);
   });
 
   it("import_project forwards only the path; a second import's 409 is surfaced", async () => {
@@ -386,5 +404,43 @@ describe("trinity-enterprise#1089 — any agent on the project requests; its pri
       "primary_cannot_apply", "already_pending", "proposal_pending", "project_management_not_permitted"]) {
       assert.ok(d.includes(code), `missing ${code}`);
     }
+  });
+});
+
+
+describe("ent#1193 read_project_context", () => {
+  it("forwards the item and the offset, and returns the part with its named truncation", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      readProjectContext: (async (pid: string, item: string, offset: number) => {
+        calls.push([pid, item, offset]);
+        return { id: item, text: "part one", truncated: true, shown_bytes: 8, total_bytes: 20, next_offset: 8 };
+      }) as never,
+    });
+    const first = JSON.parse(await tools.read_project_context.execute({ project_id: PROJECT.id, item_id: "ctx_1" }, {}));
+    assert.equal(first.success, true);
+    assert.equal(first.truncated, true);
+    assert.equal(first.next_offset, 8);
+    await tools.read_project_context.execute({ project_id: PROJECT.id, item_id: "ctx_1", offset: 8 }, {});
+    assert.deepEqual(calls, [[PROJECT.id, "ctx_1", 0], [PROJECT.id, "ctx_1", 8]]);
+  });
+
+  it("a 404 comes back as a structured result, never a throw", async () => {
+    const tools = makeTools({
+      readProjectContext: (async () => { throw apiError(404, { code: "context_not_found", message: "Not found." }); }) as never,
+    });
+    const out = JSON.parse(await tools.read_project_context.execute({ project_id: PROJECT.id, item_id: "nope" }, {}));
+    assert.equal(out.success, false);
+  });
+
+  it("the client calls the agent route with the offset", async () => {
+    const client = new RealClient("http://localhost:8000");
+    const seen: unknown[] = [];
+    (client as unknown as { request: unknown }).request = async (...args: unknown[]) => {
+      seen.push([args[0], args[1]]);
+      return {};
+    };
+    await client.readProjectContext("prj_1", "ctx 1", 204800);
+    assert.deepEqual(seen, [["GET", "/api/enterprise/projects/agent/projects/prj_1/context/ctx%201?offset=204800"]]);
   });
 });

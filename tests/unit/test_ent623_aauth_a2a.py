@@ -92,6 +92,7 @@ def b(monkeypatch):
         create_task_execution=lambda **kw: (
             state["minted"].append(kw) or types.SimpleNamespace(id="exec-minted-623")),
         get_agent_subscription_id=lambda name: None,
+        get_default_model_raw=lambda name: None,  # ent#1202
     ))
     monkeypatch.setattr(a2a, "get_agent_container",
                         lambda name: types.SimpleNamespace(status="running", labels={}))

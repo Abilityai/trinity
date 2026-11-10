@@ -308,6 +308,7 @@ _EXPECTED_UPDATE_SITES = {
     "rotate_claim_token",                  # #3487: wins one SUB-003 walk attempt on a pulled turn — writes `claim_token` only; CAS on status == RUNNING + the old token, `status` untouched, so a row is never moved between states (in-place retry, not a re-delivery)
     "set_backlog_metadata_for_token",      # #3487: saves a pulled turn's walk state (never the secret) in `backlog_metadata`; gated on the claim token that owns the row; `status` untouched and not read
     "set_execution_chat_session",          # #3380: names the /chat thread a turn answers (`chat_session_id`), written once by prepare_chat_execution; `status` untouched and not read
+    "stamp_model_used_if_null",            # ent#1202: records the resolved model on a row the scheduler pre-created; writes `model_used` only, CAS on model_used IS NULL so it fills a blank and never rewrites an explicit pick; `status` untouched and not read
 }
 
 
