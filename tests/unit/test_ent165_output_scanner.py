@@ -787,6 +787,84 @@ def test_eight_mib_of_escapes_is_scanned_well_inside_the_hook_timeout(tmp_path, 
     assert cpu < 10, f"8 MiB took {cpu:.1f}s of CPU"
 
 
+# --- the matcher's first-character lookahead ----------------------------------
+# Backslash or `ESC [` output passes the boundary at every position, so without
+# a cheap test there every shape was tried 8 million times (the 8 MiB cases
+# above took 10.9 s of CPU on a CI runner). The lookahead after the boundary
+# keeps such positions to one character test; it may only ever drop positions
+# where no shape can start.
+
+def _scanner_module(monkeypatch):
+    monkeypatch.syspath_prepend(str(H.HOOKS))
+    lib_spec = importlib.util.spec_from_file_location("lib", H.HOOKS / "lib.py")
+    lib = importlib.util.module_from_spec(lib_spec)
+    lib_spec.loader.exec_module(lib)
+    monkeypatch.setitem(sys.modules, "lib", lib)
+    spec = importlib.util.spec_from_file_location("_s165_scanner_first_char", H.HOOKS / _SCANNER)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_every_shipped_shape_shows_its_first_character_so_the_matcher_has_the_lookahead(monkeypatch):
+    scanner = _scanner_module(monkeypatch)
+    baseline = json.loads(H.BASELINE.read_text())
+    starts = {scanner._first_char(shape["pattern"]) for shape in baseline["credential_patterns"]}
+    assert starts == {shape["pattern"][0] for shape in baseline["credential_patterns"]}
+    matcher = scanner._shapes(baseline)[0]
+    assert matcher.pattern.startswith(baseline["credential_boundary"] + "(?=[" + "".join(sorted(starts)) + "])")
+
+
+@pytest.mark.parametrize("pattern, first, elsewhere", [
+    ("sk-[A-Za-z0-9]{20,}", "s", None),
+    ("trinity_mcp_(?:[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])|[a-zA-Z0-9]{16,})", "t", None),
+    ("a[|]b", "a", None), ("a[]|]b", "a", None), ("a[^]|]b", "a", None), ("a\\|b", "a", None),
+    ("a(b|c)", "a", None), ("a+b", "a", None),
+    # None because a match can start with another character (`elsewhere` is one).
+    ("a|b", None, "b"), ("ab|cd", None, "cd"), ("(?:a|b)c", None, "bc"), ("[ab]c", None, "bc"),
+    ("a?b", None, "b"), ("a*b", None, "b"), ("a{0,2}b", None, "b"),
+    ("a[\\](]|b", None, "b"), ("a[\\](]|b[\\])]", None, "b)"), ("a(?#()|b", None, "b"),
+    # None because the text does not show it for certain.
+    ("\\d{3}", None, None), ("é1", None, None), ("", None, None), ("a(?i:b)c", None, None),
+    ("ab(?P<x>c)(?(x)d|e)", None, None),
+], ids=lambda v: repr(v))
+def test_a_pattern_shows_its_first_character_only_when_every_match_starts_with_it(
+        monkeypatch, pattern, first, elsewhere):
+    scanner = _scanner_module(monkeypatch)
+    assert scanner._first_char(pattern) == first
+    if elsewhere is not None:
+        assert re.fullmatch(pattern, elsewhere) and elsewhere[0] != pattern[0]
+
+
+def test_a_shape_without_a_first_character_drops_the_lookahead_and_is_still_found(monkeypatch):
+    scanner = _scanner_module(monkeypatch)
+    baseline = json.loads(H.BASELINE.read_text())
+    baseline["credential_patterns"].append({"name": "zz", "pattern": "(?:ZZ|YY)[0-9]{8}"})
+    shapes = scanner._shapes(baseline)
+    assert "(?=[" not in shapes[0].pattern
+    assert scanner._redact_text(f"id YY12345678 and {_SECRET}", shapes, set()) == (
+        "id [REDACTED:zz] and [REDACTED:sk]")
+
+
+def test_the_lookahead_changes_no_match(monkeypatch):
+    """The same spans with and without it, over keys, the benign corpus and
+    escape-dense text."""
+    scanner = _scanner_module(monkeypatch)
+    baseline = json.loads(H.BASELINE.read_text())
+    with_ahead = scanner._shapes(baseline)
+    monkeypatch.setattr(scanner, "_first_char", lambda pattern: None)
+    without = scanner._shapes(baseline)
+    assert "(?=[" in with_ahead[0].pattern and "(?=[" not in without[0].pattern
+    keys = [_SECRET, _GITHUB, _GOOGLE, "xoxb-" + "1" * 24, "AKIA" + "B" * 16, "trinity_mcp_" + "Q" * 43,
+            "ops_eyJ" + "c" * 40, "dop_v1_" + "e" * 64, "github_pat_" + "d" * 30]
+    corpus = BENIGN + [
+        " ".join(keys), "\\n" + _SECRET + "%3D" + _GITHUB, _CSI_GREP + _SECRET + "\x1b[m",
+        "\\" * 50 + _GOOGLE, "\x1b[" * 50 + "trinity_mcp_ab_sk-" + "Q" * 37, "trinity_mcp\x1b[m_" + "P" * 43,
+    ]
+    for text in corpus:
+        assert scanner._spans(text, with_ahead) == scanner._spans(text, without), text
+
+
 # --- a key that output colouring splits is still one key ----------------------
 # `grep --color=always <prefix>` wraps the matched part of a key in colour
 # codes, so the escape sits INSIDE the key (`trinity_mcp\x1b[m_PPP...`) and no

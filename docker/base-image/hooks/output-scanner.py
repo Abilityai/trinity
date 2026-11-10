@@ -98,6 +98,7 @@ PERSISTED_CAP_BYTES = 8 * 1024 * 1024
 TOOL_RESULTS_ROOT = "/home/developer"
 TOOL_RESULTS_DIR = "tool-results"
 _NAME = re.compile(r"[a-z0-9_]{1,32}")
+_PLAIN_GROUPS = ("(?:", "(?=", "(?!", "(?<=", "(?<!", "(?P<")
 PLATFORM_MCP_PREFIX = "mcp__trinity__"
 # Strings that are binary payloads: Read's image/pdf `base64`, a notebook
 # output's `image_data`, and an MCP image block's `source.data`.
@@ -126,6 +127,39 @@ class _Unverifiable(Exception):
     pass
 
 
+def _first_char(pattern):
+    """The character every match of `pattern` starts with, or None when the
+    pattern's text does not show it for certain: it must open with an ASCII
+    letter or digit that no `?`, `*` or `{` makes optional, hold no `|` outside
+    a group or a character class, and use no group form but `(`, `(?:`, a
+    lookaround and `(?P<name>` (a comment, a flag or a conditional reads as
+    None)."""
+    if not pattern[:1].isascii() or not pattern[:1].isalnum() or pattern[1:2] in ("?", "*", "{"):
+        return None
+    depth, i = 0, 0
+    while i < len(pattern):
+        c = pattern[i]
+        if c == "\\":
+            i += 1
+        elif c == "[":
+            i += 2 if pattern[i + 1:i + 2] == "^" else 1
+            i += 2 if pattern[i:i + 1] == "\\" else 1  # the first member, which may be `]`
+            while i < len(pattern) and pattern[i] != "]":
+                i += 2 if pattern[i] == "\\" else 1
+        elif c == "(":
+            if pattern.startswith("(?", i) and not pattern.startswith(_PLAIN_GROUPS, i):
+                return None
+            depth += 1
+        elif c == ")":
+            depth -= 1
+            if depth < 0:
+                return None
+        elif c == "|" and depth == 0:
+            return None
+        i += 1
+    return pattern[0] if depth == 0 else None
+
+
 def _shapes(config):
     """One matcher for every shape: `credential_boundary`, then each entry's
     `pattern` as the named group `s<index>`; the list of shape names; and a
@@ -134,7 +168,12 @@ def _shapes(config):
     One pass finds the leftmost key, so a shape that starts inside another key's
     random body (with `_` a left boundary, `trinity_mcp_ab_sk-...`) is part of
     that key instead of cutting it short, and the boundary is tested once per
-    position instead of once per shape."""
+    position instead of once per shape. When every shape shows the character it
+    starts with (`_first_char`), a lookahead on those characters follows the
+    boundary: no shape can match anywhere else, so the matches are the same,
+    and a position that starts none of them fails at one character test instead
+    of trying every shape (output that is all backslashes or `ESC [` passes the
+    boundary at every position)."""
     boundary = config.get("credential_boundary")
     escape = config.get("credential_escape")
     entries = config.get("credential_patterns")
@@ -144,7 +183,7 @@ def _shapes(config):
         raise ValueError("no credential_escape")
     if not isinstance(entries, list) or not entries:
         raise ValueError("no credential_patterns")
-    names, groups = [], []
+    names, groups, starts = [], [], set()
     for entry in entries:
         name = entry.get("name") if isinstance(entry, dict) else None
         pattern = entry.get("pattern") if isinstance(entry, dict) else None
@@ -153,7 +192,10 @@ def _shapes(config):
         re.compile(pattern)
         groups.append(f"(?P<s{len(names)}>{pattern})")
         names.append(name)
-    return re.compile(boundary + "(?:" + "|".join(groups) + ")"), names, re.compile(f"(?:{escape})+")
+        starts.add(_first_char(pattern))
+    ahead = "" if None in starts else "(?=[" + "".join(sorted(starts)) + "])"
+    return (re.compile(boundary + ahead + "(?:" + "|".join(groups) + ")"), names,
+            re.compile(f"(?:{escape})+"))
 
 
 def is_platform_mcp_tool(tool):
