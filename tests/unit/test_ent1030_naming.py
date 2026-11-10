@@ -456,5 +456,6 @@ def test_apply_op_phase_order():
         "gate_set",  # CP3: gated before delivered (ent#753)
         "skill_assign", "skill_set_assign",  # CP1
         "grant",  # CP2
-        "seat_set",  # CP4: the agent's own seat, last
+        "seat_set",  # CP4: the agent's own seat
+        "member_seat_set",  # ent#1174: the hub member's primary seat + share, last
     )

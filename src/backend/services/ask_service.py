@@ -893,9 +893,18 @@ def raise_ask(
     to_role_override: Optional[str] = None,
     attach_chat: bool = True,
     platform_context: Optional[Mapping[str, Any]] = None,
+    destination_key_state: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Raise an ask through the platform and return its receipt
     (trinity-enterprise#611).
+
+    `destination_key_state` (trinity-enterprise#1158 §2) is what the raise
+    route read from the asking agent's own `.env` for a `key_env` destination
+    (`credential_sink.key_env_state`): `missing` → 422
+    `destination_key_env_missing`, `invalid` → 422 `destination_key_invalid`,
+    `ok` or None (could not tell — delivery re-checks) → no effect. Applied
+    LAST, after every other refusal and the replay, and only to a stored
+    `key_env` destination; gate and file callers pass nothing.
 
     `attach_chat` and `platform_context` (trinity-enterprise#981) are the
     gate's too — an agent's raise passing either is a programming error.
@@ -1043,6 +1052,7 @@ def raise_ask(
             422, "no_person",
             "A credential ask must reach exactly one person; ask it from a conversation "
             "with the person who holds the credential, addressed to primary.")
+    _refuse_key_state(norm, destination_key_state)
 
     context = dict(norm["context"])
     if turn:
@@ -1445,6 +1455,32 @@ def _validated_ask(ask: Any, oqs, *, raised_by: str = "agent",
         "supersedes_expired": supersedes,
         "replaces": replaces,
     }
+
+
+def _refuse_key_state(norm: Mapping[str, Any], state: Optional[str]) -> None:
+    """trinity-enterprise#1158 §2: the raise route's read of the asking
+    agent's key, applied to a stored `key_env` destination only. The message
+    names the field, never the variable or its value."""
+    if state not in ("missing", "invalid") or norm.get("type") != "credential":
+        return
+    from services import credential_destination
+    destination = (norm.get("context") or {}).get(credential_destination.CONTEXT_KEY)
+    if not isinstance(destination, Mapping) or "key_env" not in destination:
+        return
+    if state == "missing":
+        raise AskRejected(
+            422, "destination_key_env_missing",
+            "Your environment holds no value under the variable named in destination.key_env, "
+            "so a person's value could not be delivered. Name the registered instance with "
+            "destination.instance instead (the platform uses the key stored for it), or ask "
+            "your owner to set that variable, then raise the ask again.")
+    raise AskRejected(
+        422, "destination_key_invalid",
+        "The value under the variable named in destination.key_env cannot be sent as a key "
+        "(it is blank or contains whitespace, control or non-ASCII characters), so a person's "
+        "value could not be delivered. Name the registered instance with destination.instance "
+        "instead (the platform uses the key stored for it), or ask your owner to fix that "
+        "variable, then raise the ask again.")
 
 
 def _deadline(value: Any, *, floor: bool) -> Optional[datetime]:
