@@ -45,7 +45,7 @@
             Agents on this project get this
           </label>
           <BaseButton size="sm" variant="ghost" @click="openWrite(c)">Edit</BaseButton>
-          <BaseButton size="sm" variant="ghost" :data-testid="`context-delete-${c.id}`" @click="remove(c)">Remove</BaseButton>
+          <BaseButton size="sm" variant="ghost" :data-testid="`context-delete-${c.id}`" @click="removing = c">Remove</BaseButton>
         </template>
       </li>
     </ul>
@@ -88,6 +88,17 @@
         <div class="flex justify-end"><BaseButton variant="secondary" @click="previewOpen = false">Close</BaseButton></div>
       </div>
     </BaseModal>
+    <!-- #4395 review: removing a brief is destructive — confirm and say what it ends. -->
+    <ConfirmDialog
+      :visible="Boolean(removing)"
+      title="Remove this brief?"
+      :message="`${removing?.filename || 'This brief'} is deleted from the project${removing?.for_agents ? ', and agents stop reading it' : ''}. This can't be undone.`"
+      confirm-text="Remove"
+      cancel-text="Keep it"
+      variant="danger"
+      @update:visible="(v) => { if (!v) removing = null }"
+      @confirm="confirmRemove"
+    />
   </section>
 </template>
 
@@ -98,6 +109,7 @@ import BaseButton from '@/components/base/BaseButton.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
 import BaseModal from '@/components/base/BaseModal.vue'
 import BaseTextarea from '@/components/base/BaseTextarea.vue'
+import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import InlineError from '@/components/InlineError.vue'
 import SkeletonLoader from '@/components/SkeletonLoader.vue'
 import { useProjectsStore } from '@/stores/projects'
@@ -252,6 +264,12 @@ async function mark(c, event) {
   if (!out) event.target.checked = !on       // refused: the box shows the server's state again
 }
 const remove = (c) => run(c.id, () => store.deleteContext(props.projectId, c.id))
+const removing = ref(null)
+function confirmRemove() {
+  const c = removing.value
+  removing.value = null
+  if (c) remove(c)
+}
 
 async function preview(c) {
   const ticket = ++previewTicket

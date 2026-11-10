@@ -113,7 +113,7 @@
         </li>
         <li v-if="steward.schedule" data-testid="project-steward-schedule">{{ scheduleLine }}<span v-if="scheduleAt" :title="absolute(scheduleAt)"> {{ relative(scheduleAt) }}</span></li>
         <!-- ent#1169: does the agent carry the project-management skills? -->
-        <li v-if="skillLine" :class="skillSet.held ? '' : 'font-medium text-status-warning-700 dark:text-status-warning-300'" data-testid="project-steward-skills">{{ skillLine }}</li>
+        <li v-if="skillLine" :class="skillSet?.held ? '' : 'font-medium text-status-warning-700 dark:text-status-warning-300'" data-testid="project-steward-skills">{{ skillLine }}</li>
         <li v-if="!health">No health update yet</li>
         <li v-if="rollup.health_due" class="font-medium text-status-warning-700 dark:text-status-warning-300" data-testid="project-steward-health-due">Health update due</li>
       </ul>
@@ -135,7 +135,7 @@
       </p>
       <!-- ent#1169 (R5 on ent#1137): what having no steward AGENT means. -->
       <p class="mt-2 text-xs text-gray-500 dark:text-gray-400" data-testid="project-steward-no-agent">
-        No steward agent: nothing reads this project's digest or checks done claims between visits. Pick an agent as steward in Edit project to have that done on a schedule.
+        No steward agent: nothing reads this project's digest or checks done claims between visits.<template v-if="project.can?.edit"> Pick an agent as steward in Edit project to have that done on a schedule.</template>
       </p>
       <BaseButton v-if="isMe" class="mt-3" size="sm" variant="secondary" data-testid="project-steward-open-stewarding" @click="$emit('open-stewarding')">Open I steward</BaseButton>
     </template>
@@ -157,6 +157,8 @@ import { useProjectsStore } from '@/stores/projects'
 const props = defineProps({
   project: { type: Object, required: true },
   myEmail: { type: String, default: '' },
+  // ent#1169: this session's create/edit answer for the steward's skills.
+  stewardOutcome: { type: Object, default: null },
 })
 defineEmits(['open-stewarding'])
 
@@ -190,7 +192,18 @@ const inboxRoute = computed(() => {
 const scheduleLine = computed(() => stewardScheduleLine(steward.value?.schedule))
 // ent#1169: the read's `skill_set` ({held, available}); absent on an older backend → no line.
 const skillSet = computed(() => steward.value?.skill_set || null)
+// The outcome names WHY nothing was assigned; it is shown only while it still
+// describes this steward and the page read doesn't already say it holds the set.
+const OUTCOME_REASONS = ['awaiting_owner', 'not_permitted', 'failed', 'unavailable']
+const outcomeLine = computed(() => {
+  const o = props.stewardOutcome
+  if (!o || !OUTCOME_REASONS.includes(o.state) || !o.message) return ''
+  if (steward.value?.kind !== 'agent' || steward.value.ref !== o.agent) return ''
+  if (skillSet.value?.held) return ''
+  return o.message
+})
 const skillLine = computed(() => {
+  if (outcomeLine.value) return outcomeLine.value
   const s = skillSet.value
   if (!s || s.held === null || s.held === undefined) return ''
   if (s.held) return 'Has the project-management skills'

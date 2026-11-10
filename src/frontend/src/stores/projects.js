@@ -24,6 +24,13 @@ export const useProjectsStore = defineStore('projects', () => {
   const listError = ref(null)
   const pages = ref({})     // id → { data, loaded, loading, error, notFound }
   const links = ref({})     // `${kind}:${id}` → project | null
+  // ent#1169: the last create/edit answer's `steward_skills` outcome, by project
+  // id — the Steward card says WHY the set wasn't assigned (awaiting_owner,
+  // not_permitted, failed, unavailable), which the page read alone can't.
+  const stewardOutcomes = ref({})
+  const _keepStewardOutcome = (id, data) => {
+    if (id && data?.steward_skills) stewardOutcomes.value = { ...stewardOutcomes.value, [id]: data.steward_skills }
+  }
 
   const headers = () => useClientPortalStore().authHeader
 
@@ -87,6 +94,7 @@ export const useProjectsStore = defineStore('projects', () => {
   // `projectErrorMessage(err)` next to itself (principle 18).
   async function create(body) {
     const { data } = await portalHttp.post(BASE, body, { headers: headers() })
+    _keepStewardOutcome(data?.id, data)
     if (body.link_thread_id) _dropLink('thread', body.link_thread_id)
     void fetchList()
     return data
@@ -102,7 +110,11 @@ export const useProjectsStore = defineStore('projects', () => {
   const url = (id, tail = '') => `${BASE}/${encodeURIComponent(id)}${tail}`
 
   const update = (id, body) =>
-    _write(id, () => portalHttp.patch(url(id), body, { headers: headers() }))
+    _write(id, async () => {
+      const out = await portalHttp.patch(url(id), body, { headers: headers() })
+      _keepStewardOutcome(id, out?.data)
+      return out
+    })
   const setArchived = (id, archived) =>
     _write(id, () => portalHttp.post(url(id, archived ? '/archive' : '/restore'), {}, { headers: headers() }))
   const addMember = (id, email) =>
@@ -308,7 +320,7 @@ export const useProjectsStore = defineStore('projects', () => {
   }
 
   return {
-    list, listLoaded, listLoading, listError,
+    list, listLoaded, listLoading, listError, stewardOutcomes,
     fetchList, pageState, fetchProject, forLink, fetchForLink,
     create, update, setArchived, addMember, removeMember, addAgent, removeAgent, link, unlink,
     tasks, logs, fetchTasks, fetchTask, createTask, updateTask, addTaskNote, fetchLog, addLogEntry,

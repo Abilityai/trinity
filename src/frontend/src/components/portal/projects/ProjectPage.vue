@@ -231,7 +231,7 @@
 
         <!-- ===================== side stack ===================== -->
         <div class="min-w-0 space-y-4" data-testid="project-overview-side">
-          <ProjectStewardCard v-if="!guest" :project="p" :my-email="myEmail" @open-stewarding="$emit('open-stewarding')" />
+          <ProjectStewardCard v-if="!guest" :project="p" :my-email="myEmail" :steward-outcome="store.stewardOutcomes[p.id] || null" @open-stewarding="$emit('open-stewarding')" />
           <ProjectHealthCard v-if="!guest" :project="p" :my-email="myEmail" />
           <ProjectNeedsYouCard v-if="!guest" :project="p" @open-thread="(t) => $emit('open-thread', t)" />
 

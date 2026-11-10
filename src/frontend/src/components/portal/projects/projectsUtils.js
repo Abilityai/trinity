@@ -478,7 +478,7 @@ export function roleLine(project, myEmail) {
       : `This project is archived. Nothing on it changes until ${creator} restores it.`
   }
   if (role === 'creator') {
-    return 'You created this project. You can change everything on it: name, goal, steward, members, visibility, tasks and the log.'
+    return 'You created this project. You can change its name, goal, steward, members, visibility and tasks, and write in the log.'
   }
   if (role === 'member') {
     return `You're a member. You can add and change tasks, write in the log and add files. Only ${creator} changes the name, goal, steward, members and visibility.`

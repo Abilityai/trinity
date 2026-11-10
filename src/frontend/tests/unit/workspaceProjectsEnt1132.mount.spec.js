@@ -100,7 +100,7 @@ async function page(p, me) {
 describe('ent#1132 — the header says my role and what it allows', () => {
   it('the creator', async () => {
     await page(project('creator'), EVA)
-    expect(byTestId('project-my-role').textContent).toContain('You created this project. You can change everything on it')
+    expect(byTestId('project-my-role').textContent).toContain('You created this project. You can change its name, goal, steward, members, visibility and tasks')
   })
 
   it('a member, told who changes the rest', async () => {

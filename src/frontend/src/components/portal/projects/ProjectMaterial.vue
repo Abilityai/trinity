@@ -34,7 +34,9 @@
     <p v-if="!files.length && !reports.length && !decisions.length" class="rounded-lg border border-dashed border-gray-300 dark:border-gray-700 p-6 text-center text-sm text-gray-600 dark:text-gray-300" data-testid="project-material-empty">
       {{ guest
         ? 'Nothing has been shared with you here yet.'
-        : 'Nothing added yet. Agents put what they produce here, or use "Add from…" to add a file, report or decision you already have.' }}
+        : projectBriefs.length
+          ? 'No files, reports or decisions yet. Agents put what they produce here, or use "Add from…" to add one you already have.'
+          : 'Nothing added yet. Agents put what they produce here, or use "Add from…" to add a file, report or decision you already have.' }}
     </p>
 
     <section v-if="files.length">
