@@ -143,6 +143,7 @@ def get_owned_roster(email: str) -> list[dict]:
             agent_ownership.c.tts_voice_replies_enabled,   # #2157
             agent_ownership.c.display_label,        # #2159, same rationale as above
             agent_ownership.c.public_channel_model,  # ent#403, same rationale
+            agent_ownership.c.default_model,         # ent#1202, same rationale
             users.c.username.label("owner"),
         )
         .select_from(
