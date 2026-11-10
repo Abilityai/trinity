@@ -26,6 +26,13 @@ import sys
 import types
 from pathlib import Path
 
+# #4439: pin httpcore before any test can snapshot sys.modules. httpx 0.28
+# imports it lazily and caches its exception map on the first request; a
+# `patch.dict(sys.modules, ...)` that first imported httpcore drops it on exit,
+# the re-import is a second module, and its ConnectError then escapes every
+# `except httpx.HTTPError` raw. Loaded here, it is in every snapshot and no
+# restore can evict it. Guarded by test_4439_httpcore_pinned.py.
+import httpcore  # noqa: F401
 import pytest
 
 # Issue #589 + #645: backend/config.py raises at import if REDIS_URL lacks
