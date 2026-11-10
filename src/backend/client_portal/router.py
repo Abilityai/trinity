@@ -949,6 +949,30 @@ def portal_agent_autonomy(
     return autonomy.page(agent_name, email, is_platform=principal.is_platform)
 
 
+@router.get("/agents/{agent_name}/progress")
+def portal_agent_progress(
+    agent_name: str,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Setup progress card for the member's onboarding (ent#1175).
+
+    Returns the five ordered steps, their state and notes, and an
+    ``all_done`` flag. Roster-gated — the member sees their own agent's
+    progress; platform admins see any. When the enterprise module is
+    absent (OSS-only build) the response is a benign empty payload so
+    the caller never needs to branch on edition.
+    """
+    _require_roster(agent_name, principal.email, principal.is_platform)
+    try:
+        from enterprise.backend.member_agents.progress import get_progress_by_agent
+        result = get_progress_by_agent(agent_name)
+        if result is None:
+            return {"steps": [], "all_done": False, "active": False}
+        return {**result, "active": True}
+    except ImportError:
+        return {"steps": [], "all_done": False, "active": False}
+
+
 @router.post("/agents/{agent_name}/autonomy/classes/{ask_class}",
              response_model=PortalAutonomyResult)
 def portal_agent_autonomy_act(

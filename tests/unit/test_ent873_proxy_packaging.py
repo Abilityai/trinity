@@ -205,7 +205,7 @@ def test_prod_and_hosted_wire_the_same_knobs_raw():
     `--env-file /dev/null` must work) and is documented in .env.example."""
     example = (_ROOT / ".env.example").read_text()
     for knob in ("TRINITY_PROXY_PREFIX", "TRUSTED_PROXIES", "FRONTEND_BIND_ADDRESS", "CADDY_PROXY_PORT",
-                 "MCP_BIND_ADDRESS", "MCP_EXTERNAL_ACCESS"):
+                 "MCP_BIND_ADDRESS", "MCP_EXTERNAL_ACCESS", "AGENT_SSH_BIND_ADDRESS"):
         assert re.search(rf"^#?\s*{knob}=", example, re.M), f".env.example does not document {knob}"
         for name in _PROD_LIKE:
             text = (_ROOT / name).read_text()

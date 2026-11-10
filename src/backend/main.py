@@ -527,6 +527,17 @@ async def _init_docker_and_system_agent() -> None:
         except Exception as e:
             logger.error(f"Error checking agents: {e}")
 
+        # trinity-enterprise#1168: one pass over existing agent containers —
+        # log the resolved SSH bind address, name containers still publishing
+        # SSH on every interface, stop idle listeners where SSH access is off.
+        # Fail-open inside; inside THIS phase (not a new one) because
+        # test_1028 pins the phase list by name.
+        try:
+            from services.ssh_service import sweep_agent_ssh_posture
+            await sweep_agent_ssh_posture()
+        except Exception as e:
+            logger.warning(f"Agent SSH posture sweep skipped: {e}")
+
         # Auto-deploy system agent (Phase 11.1)
         try:
             result = await system_agent_service.ensure_deployed()
@@ -625,6 +636,14 @@ async def _start_maintenance_services() -> None:
         skill_gate_service.register_ending_observer()
     except Exception as e:
         logger.error(f"Error registering the skill gate ending observer: {e}")
+
+    # abilityai/trinity-enterprise#1135: an ask raised in a room shows in that
+    # room how it ended — every worker, for the same reason as the gate's.
+    try:
+        from shared_sessions import service as rooms_service
+        rooms_service.register_ask_observers()
+    except Exception as e:
+        logger.error(f"Error registering the rooms ask ending observer: {e}")
 
 
 async def _schedule_staggered_services() -> None:

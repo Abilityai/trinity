@@ -114,9 +114,28 @@ class InterAgentDepthExceeded(Exception):
     idempotency claim, capacity slot or execution row exists. Not retryable:
     the depth only falls when the caller's own running turns finish, so the
     message tells the calling model to stop rather than retry or re-route.
+
+    ``exhausted_by`` (#4357) names the hop that set the depth: the caller's
+    deepest running row (``execution_id``, ``chain_depth``, ``triggered_by``,
+    ``source_agent`` — its own row, no person or channel data), or
+    ``{"kind": "event_claim", "chain_depth"}`` when the signed event loopback
+    claim set it, or None when it could not be read.
     """
 
-    def __init__(self, caller: Optional[str], target: str, depth: int, max_depth: int):
+    # What lowers the depth. Worded so it never claims more than the guard does:
+    # every hop counts from the deepest RUNNING row, whoever started the turn.
+    RESETS = (
+        "The depth falls when that execution finishes: every call you make counts "
+        "from the deepest of your executions still running. A turn a person starts "
+        "(a chat, an answered or cancelled ask) and a reminder start no depth of "
+        "their own, and a wake when a run you delegated ends stands where you stood "
+        "when you delegated."
+    )
+
+    def __init__(
+        self, caller: Optional[str], target: str, depth: int, max_depth: int,
+        exhausted_by: Optional[dict] = None,
+    ):
         super().__init__(
             f"{INTER_AGENT_DEPTH_EXCEEDED}: {caller} -> {target} at depth {depth} > {max_depth}"
         )
@@ -124,6 +143,23 @@ class InterAgentDepthExceeded(Exception):
         self.target = target
         self.depth = depth
         self.max_depth = max_depth
+        self.exhausted_by = exhausted_by
+
+    def _hop_sentence(self) -> str:
+        hop = self.exhausted_by
+        if not hop:
+            return ""
+        if hop.get("kind") == "event_claim":
+            return (
+                f" The event that started this turn already carried depth "
+                f"{hop.get('chain_depth')}."
+            )
+        via = f", called by `{hop['source_agent']}`" if hop.get("source_agent") else ""
+        return (
+            f" Your running execution `{hop.get('execution_id')}` "
+            f"({hop.get('triggered_by') or 'unknown trigger'}{via}) stands at depth "
+            f"{hop.get('chain_depth')}, so this call would be depth {self.depth}."
+        )
 
     def detail(self) -> dict:
         return {
@@ -132,8 +168,11 @@ class InterAgentDepthExceeded(Exception):
             "max_depth": self.max_depth,
             "caller": self.caller,
             "target": self.target,
+            "exhausted_by": self.exhausted_by,
+            "resets": self.RESETS,
             "message": (
-                f"Inter-agent chain depth limit reached ({self.depth} > {self.max_depth}). "
+                f"Inter-agent chain depth limit reached ({self.depth} > {self.max_depth})."
+                f"{self._hop_sentence()} "
                 "Do not retry this call or route it through another agent; finish your "
                 "turn with what you have and report back to your caller."
             ),

@@ -148,15 +148,18 @@ const askOperatorParameters = z.object({
   // lower-cases the id, so a retry spelt differently still replays). A union
   // publishes as `anyOf`, which strictJsonSchema leaves alone. trinity-enterprise#1053:
   // the answer to an `approver` ask is fenced to the seat (`ask_service.may_end`).
+  // trinity-enterprise#1134: `project` — the platform resolves the person from
+  // the turn's project; the answer is fenced to them like a role id's.
   to: z
     .union([
-      z.enum(["primary", "approver", "viewer", "operator"]),
+      z.enum(["primary", "approver", "viewer", "operator", "project"]),
       z.string().regex(/^role:[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/),
     ])
     .optional()
     .describe(
       "Who should answer: primary (your owner — it also shows in their Workspace; the default for approval and question) or operator (the platform's operators; the default for alert). approver and viewer are refused with role_unassigned until someone fills them. approver: only a person seated as approver can answer (anyone else is refused with not_addressee). A role several people fill reaches every one of them: the first answer wins. " +
-        "Or role:<id> — a canon role on your own roster, reaching every person seated in it who can open you; refused by name with role_unavailable (the assignments module is absent, has no answer for the role or could not answer: address primary or operator), role_unassigned (nobody is seated) or role_cannot_open_agent (nobody seated can open you: ask your owner to share you with them).",
+        "Or role:<id> — a canon role on your own roster, reaching every person seated in it who can open you; refused by name with role_unavailable (the assignments module is absent, has no answer for the role or could not answer: address primary or operator), role_unassigned (nobody is seated) or role_cannot_open_agent (nobody seated can open you: ask your owner to share you with them). " +
+        "Or project — from a chat or room turn on a project you work on, reaching that project's steward, else its creator, even if they cannot open you; only they can answer; refused by name with project_unavailable (not on this install), not_in_project_turn (this turn is not on such a project) or project_unreachable (nobody on it can be reached): address primary or operator instead.",
     ),
   expires_at: z
     .string()
@@ -208,17 +211,41 @@ const askForCredentialParameters = z.object({
     .describe("An ISO-8601 time WITH a timezone, at least 15 minutes out. When it passes unanswered the ask ends denied by timeout."),
   destination: z
     .object({
-      instance_url: z.string().min(1).max(512).describe("The other Trinity's base URL (https://host, no path)."),
+      instance: z
+        .string()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe("The NAME of an instance an admin registered under Settings → Integrations → Outbound A2A endpoints. Send it with agent_name only."),
       agent_name: z.string().min(1).max(64).describe("The agent there that the credential is for."),
+      instance_url: z
+        .string()
+        .min(1)
+        .max(512)
+        .optional()
+        .describe("Older form, with key_env: the other Trinity's base URL (https://host, no path)."),
       key_env: z
         .string()
         .min(1)
         .max(64)
-        .describe("The NAME of the variable in YOUR OWN environment that holds your key to that Trinity. The key itself never travels: the platform reads it by name when it delivers."),
+        .optional()
+        .describe("Older form, with instance_url: the NAME of the variable in YOUR OWN environment that holds your key to that Trinity. The key itself never travels: the platform reads it by name when it delivers."),
+    })
+    .superRefine((v, ctx) => {
+      // trinity-enterprise#1158: exactly one shape — {instance, agent_name} or
+      // {instance_url, agent_name, key_env}; the backend refuses the same
+      // mix with destination_invalid.
+      const byName = v.instance !== undefined;
+      const byUrl = v.instance_url !== undefined || v.key_env !== undefined;
+      if (byName && byUrl) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "send instance with agent_name only, or instance_url + agent_name + key_env — not both" });
+      } else if (!byName && (v.instance_url === undefined || v.key_env === undefined)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: "send instance + agent_name, or instance_url + agent_name + key_env" });
+      }
     })
     .optional()
     .describe(
-      "trinity-enterprise#1109: where the value LANDS when that is not you — an agent on another Trinity you hold a key to. The instance must be one an admin has registered as an outbound A2A endpoint on this Trinity (Settings → Integrations → Outbound A2A endpoints; scheme, host and port must match) and outbound A2A must be switched on. The person's field says so in plain words, the value is merged into that agent's .env there under your key, nothing is kept here, and your wake says it was delivered (it is never in your environment). Left out, the value is stored in your own environment as before. Refusals: 422 destination_not_approved / destination_outbound_disabled (ask an admin) / destination_url_invalid / destination_agent_invalid / destination_key_env_invalid (reason says which).",
+      "Where the value LANDS when that is not you — an agent on another Trinity. Name it with instance: the name of an instance an admin registered under Settings → Integrations → Outbound A2A endpoints; the platform delivers under the key stored for it — you never hold it. Outbound A2A must be switched on. The older form, instance_url + key_env, delivers under the key in your own environment variable of that name. The person's field says where the value goes, it is merged into that agent's .env there, nothing is kept here, and your wake says it was delivered (it is never in your environment). Left out, the value is stored in your own environment as before. Refusals at raise (422, reason says which): destination_invalid (both shapes or neither) / destination_instance_invalid / destination_agent_invalid / destination_url_invalid / destination_key_env_invalid; ask an admin for destination_outbound_disabled / destination_not_approved (no registered instance by that name) / destination_instance_no_credential (no key stored for it); destination_key_env_missing / destination_key_invalid (older form: nothing usable in that variable). Refusals at delivery (the person sees them; nothing is stored): destination_not_approved / instance_moved (the entry now points elsewhere — ask again), destination_unreadable, destination_key_refused (the key has no inject rights there).",
     ),
 });
 
@@ -720,7 +747,7 @@ export function createOperatorQueueTools(
         "to ask — ask from a chat with them), 422 invalid_credential_name (a malformed " +
         "or reserved name; reason says which), 429 rate_limited or queue_full. Acts " +
         "as the agent your key belongs to; there is no agent parameter. For an " +
-        "agent on another Trinity you hold a key to, set destination (see the parameter).",
+        "agent on another Trinity, set destination with the registered instance (see the parameter).",
       parameters: askForCredentialParameters,
       execute: async (
         params: {
@@ -728,7 +755,9 @@ export function createOperatorQueueTools(
           why: string;
           request_id?: string;
           expires_at?: string;
-          destination?: { instance_url: string; agent_name: string; key_env: string };
+          destination?:
+            | { instance: string; agent_name: string }
+            | { instance_url: string; agent_name: string; key_env: string };
         },
         context?: { session?: McpAuthContext },
       ) => {
@@ -755,17 +784,20 @@ export function createOperatorQueueTools(
         // agent passes — least of all a value — reaches the backend.
         const turn = authContext?.executionId;
         const derived = `credential-${params.name}${turn ? `-${turn}` : ""}`.replace(/[^A-Za-z0-9._:-]/g, "-").slice(0, 256);
-        // trinity-enterprise#1109: the destination's three declared fields
-        // only — the key's NAME, never a key.
-        const destination = params.destination
-          ? {
-              credential_destination: {
-                instance_url: params.destination.instance_url,
-                agent_name: params.destination.agent_name,
-                key_env: params.destination.key_env,
-              },
-            }
-          : {};
+        // trinity-enterprise#1109/#1158: the matched shape's declared fields
+        // only — an instance's NAME or a key's NAME, never a key.
+        const d = params.destination;
+        const destination = !d
+          ? {}
+          : "instance" in d && d.instance !== undefined
+            ? { credential_destination: { instance: d.instance, agent_name: d.agent_name } }
+            : {
+                credential_destination: {
+                  instance_url: (d as { instance_url: string }).instance_url,
+                  agent_name: d.agent_name,
+                  key_env: (d as { key_env: string }).key_env,
+                },
+              };
         const body: OperatorAskCreate = {
           request_id: params.request_id ?? derived,
           type: "credential",

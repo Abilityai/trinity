@@ -36,6 +36,7 @@ from db_models import User
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services.operator_queue_choices import ReservedAnswerError, ResponseNotOfferedError
 from services import ask_service, operator_queue_service, skill_gate_service
+from services import credential_ask_policy, credential_destination, credential_sink
 
 logger = logging.getLogger(__name__)
 
@@ -167,7 +168,7 @@ _MACHINE_ROW_FIELDS = (
     "replaces", "replaced_by",  # #3247 — uuids; the readback maps them to request_ids
     "aging", "aged_since",
     "subject", "last_seen_at",  # #3246: a platform alert's condition key + latest reading
-    "wake_state",  # abilityai/trinity-enterprise#1108 AC #4: pending (not yet woken) | woken
+    "wake_state",  # ent#1108 AC #4, ent#1135: pending (not woken) | owed (being delivered) | woken
 )
 
 
@@ -625,16 +626,26 @@ async def raise_my_ask(
     FIRST ask's receipt (`status: "replayed"`) when this `request_id` was
     already raised, so a retry is a no-op. Refusals carry named codes — 422
     for a malformed ask, 429 for the caps.
+
+    A credential ask whose destination names `key_env` has that variable read
+    from this agent's own `.env` first (trinity-enterprise#1158 §2), so a
+    missing or unusable key is refused before a person types anything. The
+    sink decides whether the result applies; an unreadable file decides nothing.
     """
+    ask = body.model_dump(exclude_none=True)
+    key_env = _destination_key_env(ask)
+    key_state = (await credential_sink.key_env_state(name, key_env)
+                 if key_env is not None else None)
     try:
         receipt = ask_service.raise_ask(
             name,
-            body.model_dump(exclude_none=True),
+            ask,
             raised_by="agent",
             channel="mcp",
             actor_user=current_user,
             # ent#661 v3: the raising turn as the platform saw it (#2392).
             platform_execution_id=x_trinity_execution_id,
+            destination_key_state=key_state,
         )
     except ask_service.AskRejected as e:
         raise HTTPException(
@@ -643,6 +654,21 @@ async def raise_my_ask(
         )
     response.status_code = 201 if receipt["status"] == "created" else 200
     return receipt
+
+
+def _destination_key_env(ask: Dict[str, Any]) -> Optional[str]:
+    """The `key_env` a credential ask's destination names, when it names a
+    valid variable (trinity-enterprise#1158 §2); None for every other ask, an
+    `instance` destination, or a shape `raise_ask` will refuse anyway."""
+    if ask.get("type") != "credential":
+        return None
+    destination = (ask.get("context") or {}).get(credential_destination.CONTEXT_KEY)
+    if not isinstance(destination, dict) or "instance" in destination:
+        return None
+    key_env = destination.get("key_env")
+    if credential_ask_policy.credential_name_problem(key_env) is not None:
+        return None
+    return key_env
 
 
 @agent_router.get("/{name}/operator-queue/{request_id}")

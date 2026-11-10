@@ -2961,6 +2961,9 @@ class ApplyMemberState:
     # observed on this install) and each declared person seat's status.
     seat: Optional[Dict[str, object]] = None
     person_seats: Dict[Tuple[str, str], str] = field(default_factory=dict)
+    # trinity-enterprise#1174: the hub member's seat (`seats.read_member_seat`),
+    # read for a member to create as well; None when not declared.
+    member_seat: Optional[str] = None
     # trinity-enterprise#1030 CP5: a `deploy: false` member. Only two facts
     # are read: whether its name is live, and whether its template is one the
     # catalog offers. Nothing else is read, gated or written.
@@ -3002,6 +3005,10 @@ class ApplySnapshot:
     # (`dependencies.is_interactive_admin`)? Decides write vs. held-back report
     # for every `grants:` and `seat:` entry; never a blocker.
     grant_writer: bool = False
+    # trinity-enterprise#1174: does the caller pass `dependencies.can_seat_member`
+    # (an admin person, key or session)? With `grant_writer` it decides the
+    # `holder: member` seat; see `_member_writer`.
+    member_writer: bool = False
     # trinity-enterprise#1068: `apply_unassign_on_failed_gate`, read once here
     # so the dry run and the run decide the same consequence.
     unassign_on_failed_gate: bool = True
@@ -3101,7 +3108,7 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
     `member_name_unavailable`; free -> create. Never "absent -> create" for a
     taken name, so apply cannot suffix.
     """
-    from dependencies import agent_may_reach, is_interactive_admin
+    from dependencies import agent_may_reach, can_seat_member, is_interactive_admin
 
     from services import docker_service
     from services.agent_service.crud import agent_name_is_taken
@@ -3122,6 +3129,7 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
         caller_role=current_user.role,
         caller_is_admin=caller_is_admin,
         grant_writer=is_interactive_admin(current_user),
+        member_writer=can_seat_member(current_user),
     )
 
     # 1. Roster (see the docstring).
@@ -3210,6 +3218,13 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
             if not docker_ok:
                 # P-B: with Docker unreadable a name held only by a container
                 # reads as free; its verdict is unknown, never `create`.
+                state.blocked = True
+                continue
+            try:  # trinity-enterprise#1174: the dry run says whether a member is recorded
+                from services.system_apply import seats as apply_seats
+                state.member_seat = apply_seats.read_member_seat(name, manifest.agents[short])
+            except Exception as e:  # noqa: BLE001
+                blockers.append(_read_failed(name, f"the configuration of '{name}'", e))
                 state.blocked = True
             continue  # absent -> create
 
@@ -3310,6 +3325,8 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
             from services.system_apply import seats as apply_seats
             if apply_seats.declares(manifest.agents[state.short_name]):  # trinity-enterprise#1030 CP4
                 state.seat, state.person_seats = apply_seats.read_member(
+                    name, manifest.agents[state.short_name])
+                state.member_seat = apply_seats.read_member_seat(  # trinity-enterprise#1174
                     name, manifest.agents[state.short_name])
         except Exception as e:  # noqa: BLE001
             blockers.append(_read_failed(name, f"the configuration of '{name}'", e))
@@ -3609,6 +3626,9 @@ _APPLY_OP_STEP = {
     # trinity-enterprise#1030 CP4: the agent's own seat, last, through the
     # assignment module's optional writer.
     "seat_set": "seat",
+    # trinity-enterprise#1174: the hub member's primary seat (and the share
+    # that shows them the agent), after the agent's own seat.
+    "member_seat_set": "person_seats",
 }
 _APPLY_OP_PHASES = tuple(_APPLY_OP_STEP)
 
@@ -4111,10 +4131,26 @@ def _plan_seats(mp: ApplyMemberPlan, state: Optional[ApplyMemberState],
     written only when the caller passes the grant gate
     (`snapshot.grant_writer`); else reported as held back."""
     from services.system_apply import seats as apply_seats
+    read = snapshot.members.get(mp.short_name)
     apply_seats.plan(
         mp, seat=None if state is None else state.seat,
         people=None if state is None else state.person_seats, creating=state is None,
-        seat_writer=snapshot.grant_writer, apply_change=_apply_change, make_op=ApplyOp)
+        seat_writer=snapshot.grant_writer, apply_change=_apply_change, make_op=ApplyOp,
+        member=None if read is None else read.member_seat,
+        member_writer=_member_writer(state, snapshot))
+
+
+def _member_writer(state: Optional[ApplyMemberState], snapshot: ApplySnapshot) -> bool:
+    """trinity-enterprise#1174: may the caller write the `holder: member` seat
+    on this member? An admin in a signed-in session: on any member apply
+    manages. Any other admin person (`can_seat_member`, ruling T2 — e.g. the
+    Regent's controller key): only on a member this run creates, or one the
+    caller owns (E4: a personal admin key must not share an unrelated agent)."""
+    if snapshot.grant_writer:
+        return True
+    if not snapshot.member_writer:
+        return False
+    return state is None or state.owner_username == snapshot.caller_username
 
 
 def _plan_grants(mp: ApplyMemberPlan, state: Optional[ApplyMemberState],
@@ -4678,6 +4714,9 @@ async def _run_op(op: ApplyOp, current_user: User, out: ApplyOutcome, attempt,
     elif op.kind == "seat_set":  # trinity-enterprise#1030 CP4
         from services.system_apply import seats as apply_seats
         await apply_seats.run(op, current_user, out, attempt)
+    elif op.kind == "member_seat_set":  # trinity-enterprise#1174
+        from services.system_apply import seats as apply_seats
+        await apply_seats.run_member(op, current_user, out, attempt, request=request)
 
 
 async def _apply_created_resources(op: ApplyOp, out: ApplyOutcome, attempt) -> None:

@@ -33,6 +33,7 @@ from services.docker_utils import (
 )
 from services.agent_runtime_state import clear_agent_breakers
 from services.agent_auth import derive_agent_token
+from services.agent_ssh_binding import agent_ssh_port_binding, raise_for_ssh_bind_failure
 from services.settings_service import get_anthropic_api_key
 from services.agent_service.helpers import check_base_image_state, check_pull_mode_env_matches
 from services.agent_service.pull_mode import apply_pull_mode_env
@@ -382,7 +383,10 @@ class SystemAgentService:
         env_vars = {
             'AGENT_NAME': SYSTEM_AGENT_NAME,
             'ANTHROPIC_API_KEY': get_anthropic_api_key(),
-            'ENABLE_SSH': 'true',
+            # trinity-enterprise#1168: no sshd until a grant starts it on demand;
+            # the grant path resolves `trinity-system` to this container by the
+            # same `agent-{name}` lookup as any agent.
+            'ENABLE_SSH': 'false',
             'ENABLE_AGENT_UI': 'true',
             'AGENT_SERVER_PORT': '8000',
             'TEMPLATE_NAME': SYSTEM_AGENT_TEMPLATE,
@@ -493,37 +497,45 @@ class SystemAgentService:
         # Create the container with security settings
         # System agent uses FULL_CAPABILITIES for package installation, etc.
         # Security: Always apply baseline protections even for privileged containers
-        container = await containers_run(
-            'trinity-agent-base:latest',
-            name=f"agent-{SYSTEM_AGENT_NAME}",
-            detach=True,
-            network='trinity-agent-network',
-            ports={'22/tcp': ssh_port},
-            volumes=volumes,
-            environment=env_vars,
-            labels=labels,
-            # #1197: normalize/validate before Docker (int(cpu) NanoCpus / mem_limit).
-            mem_limit=normalize_memory(resources.get("memory"), "8g"),
-            # #1126: nano_cpus (Linux CFS quota), NOT cpu_count (Windows-only → NanoCpus=0).
-            nano_cpus=int(normalize_cpu(resources.get("cpu"), "4")) * 1_000_000_000,
-            # #2541: the shared constant, not a literal — this site had the
-            # only correct policy in the backend, and a by-name guard can only
-            # pin all three create sites if they name the same thing.
-            restart_policy=AGENT_RESTART_POLICY,
-            # Always apply AppArmor for additional sandboxing
-            security_opt=['apparmor:docker-default'],
-            # Always drop ALL capabilities first (defense in depth)
-            cap_drop=['ALL'],
-            # System agent gets full capabilities for operational tasks
-            cap_add=FULL_CAPABILITIES,
-            # Always apply noexec,nosuid to /tmp for security (#1098: scratch
-            # redirected off this tiny tmpfs via the TMPDIR env var).
-            tmpfs=AGENT_TMPFS_MOUNT,
-            # #1871: bound the container's json-file log. The system agent is
-            # long-lived and permanently recycled under a fixed name, so an
-            # unbounded log here accumulates for the life of the install.
-            log_config=AGENT_LOG_CONFIG,
-        )
+        try:
+            container = await containers_run(
+                'trinity-agent-base:latest',
+                name=f"agent-{SYSTEM_AGENT_NAME}",
+                detach=True,
+                network='trinity-agent-network',
+                # trinity-enterprise#1168: published on AGENT_SSH_BIND_ADDRESS
+                # (loopback by default), never a bare int (= every interface).
+                ports=agent_ssh_port_binding(ssh_port),
+                volumes=volumes,
+                environment=env_vars,
+                labels=labels,
+                # #1197: normalize/validate before Docker (int(cpu) NanoCpus / mem_limit).
+                mem_limit=normalize_memory(resources.get("memory"), "8g"),
+                # #1126: nano_cpus (Linux CFS quota), NOT cpu_count (Windows-only → NanoCpus=0).
+                nano_cpus=int(normalize_cpu(resources.get("cpu"), "4")) * 1_000_000_000,
+                # #2541: the shared constant, not a literal — this site had the
+                # only correct policy in the backend, and a by-name guard can only
+                # pin all three create sites if they name the same thing.
+                restart_policy=AGENT_RESTART_POLICY,
+                # Always apply AppArmor for additional sandboxing
+                security_opt=['apparmor:docker-default'],
+                # Always drop ALL capabilities first (defense in depth)
+                cap_drop=['ALL'],
+                # System agent gets full capabilities for operational tasks
+                cap_add=FULL_CAPABILITIES,
+                # Always apply noexec,nosuid to /tmp for security (#1098: scratch
+                # redirected off this tiny tmpfs via the TMPDIR env var).
+                tmpfs=AGENT_TMPFS_MOUNT,
+                # #1871: bound the container's json-file log. The system agent is
+                # long-lived and permanently recycled under a fixed name, so an
+                # unbounded log here accumulates for the life of the install.
+                log_config=AGENT_LOG_CONFIG,
+            )
+        except Exception as exc:  # noqa: BLE001 — classified, then re-raised unchanged
+            # trinity-enterprise#1168: name the knob when Docker cannot bind the
+            # configured host IP; anything else re-raises as-is.
+            raise_for_ssh_bind_failure(exc)
+            raise
 
         # Register ownership with is_system=True
         db.register_agent_owner(SYSTEM_AGENT_NAME, owner, is_system=True)

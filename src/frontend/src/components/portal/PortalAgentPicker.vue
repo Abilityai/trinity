@@ -8,9 +8,7 @@
              participants — every door says which it opens. -->
         <h2 class="text-sm font-semibold">{{ isRoom ? 'Start a room' : 'Start a chat' }}</h2>
         <p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">
-          {{ isRoom ? 'Pick the agents for this room.'
-            : multi ? 'Pick one agent to chat with, or several to start a room with them.'
-            : 'Pick an agent to chat with.' }}
+          {{ isRoom ? 'Pick the agents for this room.' : 'Pick an agent to chat with.' }}
         </p>
       </div>
 
@@ -50,19 +48,16 @@
       <p v-if="error" class="shrink-0 px-4 pt-3 text-xs text-status-danger-600 dark:text-status-danger-400">{{ error }}</p>
 
       <div class="shrink-0 px-4 py-3 border-t border-gray-200 dark:border-gray-800 flex items-center gap-2">
-        <!-- The count is the only hint that picking two behaves differently
-             (a room rather than a thread); the wording stays in the user's
-             vocabulary — they are choosing who is in the conversation. In
-             single-select the third clause is unreachable, so it is not shown:
-             #2128 hides the affordance rather than explaining its absence, and
-             an explanation here would put the operator's billing tier in front
-             of their customer to no purpose. -->
+        <!-- The wording stays in the user's vocabulary — they are choosing who
+             is in the conversation. Chat mode is single-select (#4353), so its
+             count is always one; #2128 hides the room affordance where rooms
+             do not exist rather than explaining its absence, since an
+             explanation here would put the operator's billing tier in front of
+             their customer to no purpose. -->
         <span class="text-xs text-gray-500 dark:text-gray-400 flex-1">
           {{ selected.length === 0 ? 'Nobody selected'
             : isRoom ? `${selected.length} agent${selected.length === 1 ? '' : 's'} in this room`
-            : selected.length === 1 ? '1 agent'
-            : multi ? `${selected.length} agents — this starts a room`
-            : `${selected.length} agents` }}
+            : '1 agent' }}
         </span>
         <button
           type="button"
@@ -74,7 +69,7 @@
           class="px-3 py-1.5 rounded-lg text-sm font-medium bg-action-primary-600 hover:bg-action-primary-700 text-white disabled:opacity-40 transition"
           :disabled="!selected.length || busy"
           @click="confirm"
-        >{{ busy ? 'Starting…' : (isRoom || selected.length > 1 ? 'Start room' : 'Start chat') }}</button>
+        >{{ busy ? 'Starting…' : (isRoom ? 'Start room' : 'Start chat') }}</button>
       </div>
     </div>
   </div>
@@ -88,10 +83,13 @@
  * meant you could never PLAN to put two agents on a problem, and the header had
  * nobody to show until someone spoke. Selecting is now an explicit act.
  *
- * The one-vs-many distinction is deliberately not surfaced as a mode: one agent
- * stays a portal thread (which resumes and streams), two or more becomes a room
- * (the only substrate that models several agents and @mention-waking). The
- * caller decides which; this component only reports who was chosen.
+ * The one-vs-many distinction IS the mode (ent#701, #4353): chat mode picks one
+ * agent and stays a portal thread (which resumes and streams); room mode picks
+ * any number and becomes a room (the only substrate that models several agents
+ * and @mention-waking). Chat mode used to multi-select and start a room on the
+ * second tick — a second door to the thing New room owns — so a chat is
+ * single-select whatever `multi` says. This component only reports who was
+ * chosen; the caller creates the thread or the room.
  */
 import { computed, ref, watch } from 'vue'
 import PortalAvatar from './PortalAvatar.vue'
@@ -103,35 +101,36 @@ const props = defineProps({
   // Shown in place rather than closing the dialog: dismissing on failure would
   // leave the user guessing whether a chat was created.
   error: { type: String, default: null },
-  // #2128 — may this chat hold more than one agent? A chat with two or more is
-  // a room, and a build without that substrate serves no room endpoint at all,
-  // so offering the multi-select there is an affordance that can only ever
-  // dead-end.
+  // #2128 — does this install have rooms at all? A build without that
+  // substrate serves no room endpoint, so offering a multi-select there is an
+  // affordance that can only ever dead-end.
   //
   // Default FALSE, not true: a caller that forgets to bind gets the surface
   // that works everywhere rather than reintroducing this bug. The component
   // reports who was chosen and nothing else — it says nothing about WHY the
   // affordance is missing, because the viewer here is the operator's customer.
   multi: { type: Boolean, default: false },
-  // trinity-enterprise#701: 'chat' (New chat — one agent, or a room once
-  // several are picked) or 'room' (New room — always a room, even with one
-  // agent, so people can be seated in it). Room mode needs `multi`.
+  // trinity-enterprise#701: 'chat' (⌘J with nothing on stage — one agent,
+  // single-select since #4353) or 'room' (New room — always a room, even with
+  // one agent, so people can be seated in it). Room mode needs `multi`.
   mode: { type: String, default: 'chat' },
 })
 const isRoom = computed(() => props.mode === 'room' && props.multi)
-const multiSelect = computed(() => props.multi)
+// Multi-select is room mode's alone: a chat is one-to-one by ruling (ent#701),
+// so the capability bit enables the room door, never a many-agent "chat".
+const multiSelect = computed(() => isRoom.value)
 const emit = defineEmits(['confirm', 'cancel'])
 
 const selected = ref([])
 
 function toggle(name) {
-  selected.value = applyAgentSelection(selected.value, name, { multi: props.multi })
+  selected.value = applyAgentSelection(selected.value, name, { multi: multiSelect.value })
 }
 
 // The capability can flip while the dialog is open — a late roster resolving,
 // or the store's self-heal firing on a definitive refusal. Collapse rather than
 // leaving a two-agent selection that Start can no longer confirm.
-watch(() => props.multi, (isMulti) => {
+watch(multiSelect, (isMulti) => {
   selected.value = collapseSelection(selected.value, { multi: isMulti })
 })
 

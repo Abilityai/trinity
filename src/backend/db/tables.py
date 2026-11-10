@@ -114,6 +114,7 @@ agent_ownership = Table(
     Column("voice_system_prompt", Text),
     Column("voice_name", Text),
     Column("public_channel_model", Text),  # #894: per-agent public-channel model override (NULL = platform default)
+    Column("default_model", Text),  # ent#1202: the agent's own model for turns that name none (NULL = platform default)
     Column("public_channel_system_prompt", Text),  # #1205: per-agent public/channel custom instructions
     Column("guardrails_config", Text),
     Column("file_sharing_enabled", Integer),
@@ -636,6 +637,8 @@ enterprise_room_messages = Table(
     Column("seq", Integer),
     Column("sender_kind", Text),
     Column("sender_identity", Text),
+    # What the row is: message | system | chain_paused | chain_continued (#4302).
+    # `sender_kind` says who wrote it; readers key on that, not on `kind`.
     Column("kind", Text),
     Column("mentions", Text),
     Column("content", Text),

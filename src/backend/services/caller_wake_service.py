@@ -41,9 +41,29 @@ one turn for each. One turn per caller per window instead, and the frame says
 plainly that other runs may have ended in the same window — so the caller reads
 ``list_recent_executions`` rather than being told a half-truth.
 
-**The hop is bounded.** ``chain_depth = callee + 1``, so a wake is governed by
-the same ``inter_agent_max_chain_depth`` setting as the call chain it answers
-(#2806/#2973) rather than being an unbounded side channel around it.
+**The wake stands where the delegator stood (#4357).** A wake continues the
+delegator's own work, so it carries the delegator's standing, not one more hop:
+``max(callee − 1, MAX(running caller), 0)``, NULL counted as 0. The callee row
+was stamped ``1 + MAX(running caller)`` at dispatch, so ``callee − 1`` is the
+depth the delegator stood at when it delegated; the live MAX keeps a wake from
+standing below a deep turn of the caller that is still running (a collapsed
+window can read the shallower ending). It was ``callee + 1``, and the wake turn's
+next delegation is ``1 + MAX(running)`` over a set that includes the wake row, so
+every delegate→wake round added two and an orchestrator working through wakes
+was refused after about four rounds. A wake is therefore at most ``max − 1``
+unless a turn of the delegator that is still running stands deeper, and it can
+make one hop whenever the delegator's own turns allow one; a genuine chain —
+hops from turns still running — is still counted and refused by the guard
+exactly as before.
+
+**The wake budget.** Depth therefore no longer bounds how many wakes follow one
+another, so a per-pair hourly budget does: ``caller_wake_max_per_hour`` (default
+120, ``0`` or less = unlimited) wakes from one callee into one delegator per
+one-hour Redis window, the #2973 event-budget shape. It is spent only by a wake
+about to be dispatched — a collapsed window spends nothing. A wake past it is
+skipped, audited ``skipped_budget``, and the delegator gets one notification
+per window; the ending stays readable through ``get_execution_result``. Redis
+trouble fails open: the budget must not cost an agent the wake it was promised.
 
 Never raises: this runs on the path of an already-billed terminal.
 """
@@ -74,6 +94,11 @@ RESERVED_TRIGGERS = frozenset({
 # one delegation is woken promptly, and long enough that a sweep of hundreds of
 # stale rows collapses into a handful of turns.
 WAKE_BUCKET_SECONDS = 15
+
+# #4357: the per-pair hourly wake budget (the #2973 event-budget shape).
+_WAKE_BUDGET_SETTING = "caller_wake_max_per_hour"
+_WAKE_WINDOW_SECONDS = 3600
+_WAKE_KEY_PREFIX = "trinity:wake_fires:"
 
 # The same cap and chokepoint the #1578 event payload uses, for the same reason.
 SUMMARY_MAX = 2000
@@ -168,6 +193,98 @@ def _agent_scope(agent_name: str) -> str:
     from services import idempotency_service
 
     return idempotency_service.make_agent_scope(agent_name)
+
+
+def _running_depth(agent_name: str) -> int:
+    from database import db
+
+    return db.get_max_running_chain_depth(agent_name)
+
+
+def _standing_depth(caller: str, callee_depth: Any) -> int:
+    """The delegator's standing: ``max(callee − 1, MAX(running caller), 0)`` (#4357).
+
+    NULL (a root callee) counts as 0. A depth that is not an integer leaves the
+    live MAX as the floor — the row was read, so the caller's running turns are
+    the honest measure, never 0 under them. A MAX that cannot be read leaves
+    ``callee − 1`` alone: the wake is still owed, and this never raises.
+    """
+    try:
+        from_callee = int(callee_depth or 0) - 1
+    except (TypeError, ValueError):
+        from_callee = 0
+    try:
+        running = int(_running_depth(caller) or 0)
+    except Exception:  # noqa: BLE001 — never raise on the billed terminal path
+        logger.debug("#4357: running depth unreadable for %s", caller)
+        running = 0
+    return max(from_callee, running, 0)
+
+
+def _wake_budget_limit() -> int:
+    """The configured cap; ``0`` or less is unlimited. The code default on any read error."""
+    from config import OPS_SETTINGS_DEFAULTS, OPS_SETTINGS_VALIDATION
+    from services.settings_service import settings_service
+
+    default = int(OPS_SETTINGS_DEFAULTS[_WAKE_BUDGET_SETTING])
+    _kind, _low, high = OPS_SETTINGS_VALIDATION[_WAKE_BUDGET_SETTING]
+    try:
+        value = settings_service.get_ops_setting(_WAKE_BUDGET_SETTING, int)
+    except Exception as e:  # noqa: BLE001 — a bad setting must not cost the wake
+        logger.warning("[#4357] %s unreadable (%s); using %d", _WAKE_BUDGET_SETTING, e, default)
+        return default
+    return min(high, value)
+
+
+def _wake_budget_redis():
+    """Separate function so tests have one obvious patch point."""
+    from routers.auth import get_redis_client
+    return get_redis_client()
+
+
+async def _within_wake_budget(callee: str, caller: str) -> Optional[int]:
+    """Spend one ``callee`` → ``caller`` wake; the cap once the hour's is spent, else None.
+
+    INCR and the TTL go in one transaction (``EXPIRE NX`` never extends a live
+    window): split, a crash between them leaves a TTL-less key that stops the
+    pair's wakes for good. Fail-OPEN on Redis trouble.
+    """
+    limit = _wake_budget_limit()
+    if limit <= 0:
+        return None
+    key = f"{_WAKE_KEY_PREFIX}{callee}:{caller}"
+    try:
+        client = _wake_budget_redis()
+        if client is None:
+            logger.warning("[#4357] Redis unavailable; caller-wake budget not enforced")
+            return None
+        pipe = client.pipeline(transaction=True)
+        pipe.incr(key)
+        pipe.expire(key, _WAKE_WINDOW_SECONDS, nx=True)
+        count, _ = pipe.execute()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[#4357] caller-wake budget check failed (%s); allowing", e)
+        return None
+
+    if count <= limit:
+        return None
+    logger.warning(
+        "[#4357] wake %s -> %s skipped: %d this hour > cap %d", callee, caller, count, limit,
+    )
+    # One alert per window. A flag (not `count == limit + 1`) so a cap lowered
+    # mid-window below the running count still alerts once.
+    try:
+        first_skip = client.set(f"{key}:alerted", 1, nx=True, ex=_WAKE_WINDOW_SECONDS)
+    except Exception:  # noqa: BLE001 — alerting is best-effort
+        first_skip = False
+    if first_skip:
+        try:
+            from services.monitoring_alerts import get_alert_service
+            await get_alert_service().alert_caller_wake_budget_exhausted(caller, callee, limit)
+        except Exception:  # noqa: BLE001 — the skip stands whether or not the alert lands
+            logger.exception("[#4357] could not raise the wake-budget alert for %s -> %s",
+                             callee, caller)
+    return limit
 
 
 async def _dispatch_wake(**kwargs):
@@ -314,11 +431,23 @@ async def maybe_wake_caller(execution_id: Optional[str]) -> Optional[str]:
         )
         return None
 
+    capped_at = await _within_wake_budget(callee, caller)
+    if capped_at is not None:
+        # Released, not completed: no turn ran, so the window holds nothing to
+        # replay — a later ending in it is skipped by the same budget anyway.
+        if idem is not None:
+            try:
+                _fail_idempotency(idem)
+            except Exception:  # noqa: BLE001
+                logger.exception("ent#1102: idempotency release failed")
+        await _audit(caller=caller, callee=callee, callee_execution_id=execution_id,
+                     execution_id=None, status="skipped_budget", error=None,
+                     policy_source=verdict.source, limit=capped_at)
+        return None
+
     ask_ids = _pending_ask_ids(execution_id)
-    try:
-        chain_depth = int(getattr(row, "chain_depth", None) or 0) + 1
-    except (TypeError, ValueError):
-        chain_depth = 1
+    callee_depth = getattr(row, "chain_depth", None)
+    chain_depth = _standing_depth(caller, callee_depth)
 
     try:
         result = await _dispatch_wake(
@@ -351,5 +480,6 @@ async def maybe_wake_caller(execution_id: Optional[str]) -> Optional[str]:
     await _audit(caller=caller, callee=callee, callee_execution_id=execution_id,
                  execution_id=result.execution_id, status=result.status,
                  error=result.error, policy_source=verdict.source,
-                 ask_ids=ask_ids, chain_depth=chain_depth)
+                 ask_ids=ask_ids, chain_depth=chain_depth,
+                 callee_chain_depth=callee_depth)
     return result.execution_id

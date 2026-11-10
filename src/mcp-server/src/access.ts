@@ -560,6 +560,7 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   update_project_task: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
   add_project_task_note: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
   get_project_log: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
+  read_project_context: { kind: "in-tool", how: ACT_AS + " — a project id and a context item marked for agents; the backend answers only for a project the calling agent is active on, in an internal turn (ent#1193)" },
   add_project_log_entry: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
   link_to_project: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
   get_steward_digest: { kind: "in-tool", how: ACT_AS + " — the calling agent's own stewarded projects (ent#661 v3)" },
@@ -575,6 +576,8 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   // --- permissions.ts ---
   get_agent_permissions: { kind: "enforce", param: "agent_name" },
   get_agent_capability_grants: { kind: "baselined", owner: GRANTS_OWNER_TIER },
+  // --- member_progress.ts ---
+  set_member_progress: { kind: "enforce", param: "agent_name" },
   // --- connector.ts (connector / anonymous tiers) ---
   list_playbooks: { kind: "baselined", owner: CONNECTOR_SCOPE },
   run_playbook: { kind: "baselined", owner: CONNECTOR_SCOPE },

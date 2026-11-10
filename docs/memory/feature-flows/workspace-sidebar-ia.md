@@ -481,7 +481,18 @@ The Projects link is the one arrival left unheld, by operator ruling. Its capabi
 rides the roster and most installs (every OSS one) are not entitled to it, so a held
 slot appeared and then vanished there — a new shift on every load to spare a late
 pop-in on the few entitled installs. Those accept the pop-in; nothing renders between
-**New chat** and the search box before the roster answers.
+the Inbox row and the search box before the roster answers.
+
+**The sidebar has no New chat button (#4353).** A roster row already lands on a new
+chat with that agent (ent#784) and the conversation header carries **New chat** with
+its ⌘J / Ctrl+J hotkey (ent#451), so the sidebar button was a slower route to both —
+and its picker multi-selected, so a second tick started a *room* from a door labelled
+"chat", the thing **New room** owns (ent#701: a chat is one-to-one, a room has many
+participants). The one action left in the top block is **New room**, rendered only
+where the roster says rooms exist. The picker's chat mode — reached now only by ⌘J
+with nothing on stage — is single-select whatever the capability bit says
+(`PortalAgentPicker.vue::multiSelect`). Tests: `portalSidebarTopOrder.mount.spec.js`,
+`portalRoomPeople.mount.spec.js` (picker).
 
 Tests: `portalSidebarCalmLoad.mount.spec.js`.
 

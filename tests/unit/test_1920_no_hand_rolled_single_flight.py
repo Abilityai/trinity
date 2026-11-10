@@ -123,6 +123,8 @@ _ALLOWED = {
     "services/heartbeat_service.py": "agent:heartbeat:seen:{name} liveness marker — not a lock",
     "services/event_dispatch_service.py": "trinity:evt_fires:{source}:{subscriber}:alerted once-per-window alert "
     "flag (#2973) — a once-guard, not a mutex: no release, no token, TTL-expiry with the budget window only",
+    "services/caller_wake_service.py": "{wake budget key}:alerted once-per-window 'wakes capped' notification "
+    "marker (#4357) — a once-guard, not a mutex: no release, no token, TTL-expiry with the wake window only",
 }
 
 # The sync-lock files #1920 adopted MUST no longer hand-roll a nx=True set.
