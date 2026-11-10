@@ -315,6 +315,12 @@ class PortalRoster(BaseModel):
     # user on an entitled build, or an outside client invited to a project.
     # Defaults False (fails closed on an older backend or a failed read).
     projects_available: bool = False
+    # ent#1201 — the viewer's own agent is still being set up (accepted, not
+    # yet seated or not yet started), so the Workspace shows a "being set up"
+    # landing instead of an empty roster. Asked through
+    # `services.portal_capabilities` (only a module knows); keyed on the
+    # caller's address. Defaults False: no provider, a raise, an older backend.
+    agent_setup_pending: bool = False
     # ent#403 — the curated model list the composer offers. INSTANCE-level, like
     # the two fields above and for the same reason `realtime_voice` is: the
     # option list is identical for every agent, and putting it on each card would

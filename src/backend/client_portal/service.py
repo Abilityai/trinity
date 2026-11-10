@@ -1182,12 +1182,15 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
     # ent#534: the Workspace's real-time voice capability — instance-level and
     # principal-kind-level, resolved once here like `multi_agent_chat`. The
     # roster is THE capability channel for this surface (#2128).
+    from services import portal_capabilities
+
     from .voice import direct_voice_capability, realtime_voice_capability
     return PortalRoster(
         client_email=(email or None),
         agents=cards,
         multi_agent_chat_available=multi_agent_chat,
         projects_available=_projects_available(include_owned, email),
+        agent_setup_pending=portal_capabilities.has("agent_setup_pending", (email or "").strip().lower()),
         realtime_voice=realtime_voice_capability(include_owned),
         direct_voice=direct_voice_capability(include_owned),
         # ent#403: instance-level, so it rides the roster rather than every card.

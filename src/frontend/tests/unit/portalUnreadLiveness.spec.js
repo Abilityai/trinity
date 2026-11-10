@@ -42,8 +42,12 @@ describe('ent#557 — the indicator arrives without a navigation', () => {
 
   it('adds no second timer', () => {
     // One cadence. A `setInterval` count that grows here is the thing to notice.
+    // ent#1201 noticed it on purpose: the set-up landing's poll runs only while
+    // the roster says the viewer's agent is being set up, at 3 s, and stops at
+    // a 3-minute ceiling (`setupPollVerdict`) — a different cadence for a
+    // different, bounded wait, so it does not ride the 20 s asks tick.
     const timers = SHELL.match(/setInterval\(/g) || []
-    expect(timers.length, 'a new poll timer appeared').toBeLessThanOrEqual(2)
+    expect(timers.length, 'a new poll timer appeared').toBeLessThanOrEqual(3)
   })
 })
 
