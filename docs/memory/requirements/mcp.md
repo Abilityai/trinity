@@ -252,7 +252,7 @@ outcomes ARE audit-logged (`AuditEventType.AUTHENTICATION`, `login_success`/`log
 #### 7.7.2 The target-state keys on the systems tools (trinity-enterprise#1030)
 
 - **Status**: ✅ Implemented (text only, no new tool or parameter).
-- **Rules**: `deploy_system`'s manifest text shows `skills` / `skill_sets`, `gates`, `grants` (written only for an admin in a signed-in session), `seat` / `person_seats` (no person) and `deploy: false`. `apply_system`'s description says these keys are additive — an absent key or a held extra is reported, never revoked — that grants need a signed-in admin, and that `summary` counts write | report | unobserved per group; its manifest text lists the keys, says a person seat never carries a person or an email, and names the `declared_only` verdict. Every systems tool description stays under the 2,048-character cut (#3234; `apply_system` is at 1,983).
+- **Rules**: `deploy_system`'s manifest text shows `skills` / `skill_sets`, `gates`, `grants` (written only for an admin in a signed-in session), `seat` / `person_seats` (no person; `holder: member` + `kind: primary` seats the instance's recorded member — trinity-enterprise#1174, stated in `apply_system`'s manifest parameter text, not its description) and `deploy: false`. `apply_system`'s description says these keys are additive — an absent key or a held extra is reported, never revoked — that grants need a signed-in admin, and that `summary` counts write | report | unobserved per group; its manifest text lists the keys, says a person seat never carries a person or an email, and names the `declared_only` verdict. Every systems tool description stays under the 2,048-character cut (#3234; `apply_system` is at 2,033).
 - **Tests**: `src/mcp-server/src/tools/systems.naming.test.ts`.
 
 ### 7.8 External MCP access (trinity-enterprise#1101)
@@ -1518,6 +1518,12 @@ description also carries the delegation contract verbatim (abilityai/trinity-ent
   A 403 without that code (access denial, SELF-EXEC-001) still throws as before.
   Since #2973 `run_agent_loop`, `trigger_agent_schedule` and `emit_event` return the same
   refusal object (`client.ts::depthRefusalFromError`).
+  Since #4357 the refusal also carries `exhausted_by` (the caller's own execution that set the
+  depth, or `{"kind": "event_claim", "chain_depth"}`; `null` is passed through as `null` when the
+  backend could not read it, and a non-object is dropped) and `resets` (what lowers the depth;
+  `client.ts::DEPTH_RESETS` when the body has none). The fallback `message`, used only when the
+  body carries none, keeps "Do not retry this call or route it through another agent" verbatim
+  and ends with the reset sentence. No tool description mentions depth, so none changed.
 - **FR-5b — `execution_id` parity (#3232)**: dedicated `chat_with_<slug>` tools declare and
   forward `execution_id` with `chat_with_agent`'s semantics, including the async report-back
   default and the `manual` opt-out ([public-access.md §15.1h](public-access.md), MCP caller

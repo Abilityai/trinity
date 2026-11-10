@@ -345,7 +345,7 @@ AES-256-GCM envelopes. What changed is how git *reads* one.
 - **Security surface**: `docs/memory/requirements/security.md` §20.11.
 - **Flow**: [credential-in-chat.md](../feature-flows/credential-in-chat.md).
 
-### 3.11 A Credential Handed Over to Another Instance (trinity-enterprise#1109)
+### 3.11 A Credential Handed Over to Another Instance (trinity-enterprise#1109, #1158)
 
 - **Status**: ✅ Implemented (OSS core, platform half). The asking agent's
   wording around the ask (where the secret will live, who can read it, how to
@@ -357,15 +357,78 @@ AES-256-GCM envelopes. What changed is how git *reads* one.
   that needs it runs elsewhere. The ask needs a destination, and the delivery
   must merge into that agent's `.env` (the owner inject is a whole-file write).
 - **Behaviour**:
-  - `ask_for_credential(name, why, destination?)` — `destination` is
+  - **The instance form (trinity-enterprise#1158, preferred)** —
+    `destination` is `{instance, agent_name}`: `instance` names an entry an
+    admin registered under Settings → Integrations → Outbound A2A endpoints
+    (by name, case-insensitive, or by id; 1..200 characters, else
+    `destination_instance_invalid`), and the platform delivers under the key
+    stored on that entry. **The asking agent holds no copy of that key**; its
+    own `.env` is neither read nor written. The entry is resolved through
+    `a2a_outbound.resolve_endpoint(asking_agent, ref)` — the call
+    `call_a2a_agent` makes, so the reach is exactly "calling that endpoint
+    today" — and reduced at raise to metadata (never the key). Named 422s at
+    raise: `destination_invalid` (`ambiguous_shape` when `instance` comes with
+    `instance_url`/`key_env`, `missing_field` when neither shape is complete),
+    `destination_outbound_disabled`, `destination_not_approved` /
+    `instance_unknown` (unknown and out of this agent's reach are one answer),
+    `destination_instance_no_credential` (`no_credential` / `aauth` /
+    `payment_token`: the entry holds no key Trinity can present as Bearer; an
+    admin stores it on the entry). Stored as `{instance: <entry name>,
+    endpoint_id, instance_url: <origin of the entry URL>, agent_name}`.
+  - At delivery the key is resolved again, by the stored `endpoint_id`, and
+    never cached: a rotated key is used for the next delivery; a removed,
+    renamed-and-re-added or emptied entry refuses by the same names
+    (nothing sent); an entry now pointing at another host than the person read
+    is `destination_not_approved` / `instance_moved` (the agent raises again);
+    a key that cannot travel as a header is `destination_key_invalid` (422).
+    The POST is the same pinned merge inject as below, under
+    `Authorization: Bearer <entry key>`. **One audit row per delivery**,
+    `credentials` / `credential_instance_delivery` with the name, the ask id,
+    the entry name and id, the destination (host + agent), the outcome
+    (`delivered` or the refusal code) and `may_have_written` — written in a
+    `finally` on success and on every refusal, never a value or key. The two
+    rows below (`credential_delivery_attempt`, `credential_delivered`) are for
+    the `key_env` form only.
+  - **The entry key needs inject rights on the receiving instance**: its
+    `POST /api/agents/{agent}/credentials/inject` is `require_person` (a
+    `user`-scoped key qualifies). A key registered for A2A messaging only
+    refuses every delivery with `destination_key_refused` ("refused the key
+    registered for that Trinity"; the admin rotates or re-scopes it on the
+    entry).
+  - **Key reuse, stated** (accepted within the ruling): (a) if the entry key
+    is user- or admin-scoped on the receiving instance, any agent here that
+    can resolve the entry may ask a person to send a value to any agent that
+    key reaches there — each delivery person-gated (the person reads the
+    agent and host first) and audited; under OSS the registry is
+    platform-wide, so that is every agent here, and per-agent narrowing is a
+    grant at the resolve point; (b) an entry that is not a Trinity (a
+    vendor's A2A URL) would receive the key and the person's value at
+    `/api/agents/{agent}/credentials/inject` — the person sees that host
+    before typing.
+  - **Fail closed on an unreadable destination**: an ask row that carries
+    `context.credential_destination` which parses as neither shape is refused
+    at answer time with 409 `destination_unreadable`, and nothing is written
+    anywhere (before ent#1158 it fell through to the asking agent's own
+    `.env`). Rollback caveat: code from before ent#1158 reads an `instance`
+    row as no destination and writes locally, so pending `credential` asks
+    carrying `credential_destination.instance` must be ended before rolling
+    back across the release.
+  - **The key_env form (ent#1109, the older form, still supported)** —
+    `destination` is
     `{instance_url, agent_name, key_env}`: the other instance's base URL —
     **an instance an admin has approved**: its origin (scheme + host + port)
     must match an endpoint in the outbound A2A endpoint registry (Settings →
     Integrations → Outbound A2A endpoints; read through the effective
     provider, so a module that scopes endpoints per agent counts) — the
     agent there, and the NAME of the variable in the ASKING agent's own
-    `.env` that holds its key to that instance. The registry entry is the
-    approval only; its own credential is not used. The key itself never
+    `.env` that holds its key to that instance. In this form the registry
+    entry is the approval only and the key comes from the asking agent's
+    `.env`; the instance form above uses the entry's key instead. Since
+    ent#1158 the raise route reads that variable first (off the loop, 5 s;
+    the same `classify_key` delivery uses) and refuses
+    `destination_key_env_missing` / `destination_key_invalid` (422, the
+    message naming `destination.instance` as the way forward); an unreadable
+    file or a stopped agent decides nothing. The key itself never
     travels through the tool call or the ask. **The outbound A2A kill switch
     governs this path**: with outbound A2A off (default) a destination is
     refused. Stored on the ask row as `context.credential_destination`,
@@ -382,7 +445,7 @@ AES-256-GCM envelopes. What changed is how git *reads* one.
     Workspace projection carries `credential_destination: {agent_name, host}` —
     never the key's name. The agent's receipt carries the same view.
   - On Send the sink (`services/credential_sink.py`) stages the value in the
-    scrub as before, then: reads the asking agent's key BY NAME from its own
+    scrub as before, then (key_env form): reads the asking agent's key BY NAME from its own
     `.env` through the agent's read endpoint (`destination_key_missing`, 409,
     when the agent holds no such variable; `destination_key_invalid`, 409,
     when it cannot travel as a header; the asking agent must be running),

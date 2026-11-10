@@ -403,11 +403,32 @@ export interface DepthRefusal {
   agent: string;
   depth?: number;
   max_depth?: number;
+  /**
+   * #4357: the hop that set the depth — the caller's deepest running execution
+   * (`execution_id`, `chain_depth`, `triggered_by`, `source_agent`) or
+   * `{kind: "event_claim", chain_depth}`. `null` when the backend could not
+   * read it; absent from a backend that predates the field.
+   */
+  exhausted_by?: Record<string, unknown> | null;
+  /** #4357: what lowers the depth, in one fixed sentence. */
+  resets: string;
   retryable: false;
   message: string;
 }
 
 export const INTER_AGENT_DEPTH_EXCEEDED = "inter_agent_depth_exceeded";
+
+/**
+ * #4357: mirrors the backend's `InterAgentDepthExceeded.RESETS`. Used when the
+ * refusal body carries no `resets` of its own. Kept equal to the backend's by
+ * `tests/unit/test_4357_depth_resets_parity.py`.
+ */
+export const DEPTH_RESETS =
+  "The depth falls when that execution finishes: every call you make counts " +
+  "from the deepest of your executions still running. A turn a person starts " +
+  "(a chat, an answered or cancelled ask) and a reminder start no depth of " +
+  "their own, and a wake when a run you delegated ends stands where you stood " +
+  "when you delegated.";
 
 /**
  * #3244: a 429 from `/chat` that is NOT the admission refusal. Only
@@ -506,17 +527,27 @@ export function parseDepthRefusal(
     const parsed = JSON.parse(body) as unknown;
     const d = ((parsed as { detail?: unknown })?.detail ?? parsed) as Record<string, unknown>;
     if (d?.error !== INTER_AGENT_DEPTH_EXCEEDED) return undefined;
+    const hop = d.exhausted_by;
+    const resets = typeof d.resets === "string" && d.resets ? d.resets : DEPTH_RESETS;
     return {
       status: INTER_AGENT_DEPTH_EXCEEDED,
       agent,
       depth: typeof d.depth === "number" ? d.depth : undefined,
       max_depth: typeof d.max_depth === "number" ? d.max_depth : undefined,
+      exhausted_by:
+        hop === null
+          ? null
+          : hop && typeof hop === "object" && !Array.isArray(hop)
+            ? (hop as Record<string, unknown>)
+            : undefined,
+      resets,
       retryable: false,
       message:
         typeof d.message === "string" && d.message
           ? d.message
           : "Inter-agent chain depth limit reached. Do not retry this call or route it " +
-            "through another agent; finish your turn and report back to your caller.",
+            "through another agent; finish your turn and report back to your caller. " +
+            resets,
     };
   } catch {
     return undefined;
@@ -4387,6 +4418,12 @@ export class TrinityClient {
     return res.entries;
   }
 
+  /** trinity-enterprise#1193: one budget-sized part of a brief marked for agents. */
+  async readProjectContext(projectId: string, itemId: string, offset = 0, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("GET",
+      this.projectPath(projectId, `/context/${encodeURIComponent(itemId)}?offset=${offset}`), turn);
+  }
+
   async addProjectLogEntry(projectId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
     return this.projectRequest("POST", this.projectPath(projectId, "/log"), turn, body);
   }
@@ -4413,6 +4450,7 @@ export class TrinityClient {
 
   /** trinity-enterprise#588: import one of the agent's OWN folder projects (projects.manage). */
   async importProjectAsAgent(path: string, turn?: string): Promise<Record<string, unknown>> {
+    // No steward: another agent as steward needs an approval (propose_project_changes, #1194 ruling).
     return this.projectRequest("POST", "/api/enterprise/projects/agent/projects/import", turn, { path });
   }
 

@@ -3,7 +3,7 @@
 **Status**: Implemented
 **Date**: 2025-11-29
 **Priority**: High
-**Last Updated**: 2026-09-30 (Chain depth carried through loops, schedule triggers and events #2973)
+**Last Updated**: 2026-11-08 (A wake stands at the delegator's depth, per-pair wake budget, refusal names the hop #4357)
 
 ---
 
@@ -340,14 +340,30 @@ Stops a call bouncing A→B→A→B… forever. Every agent-to-agent path goes t
 2. **Limit** = `settings_service.get_ops_setting("inter_agent_max_chain_depth", int)` (row → env `INTER_AGENT_MAX_CHAIN_DEPTH` → default 8), clamped to 1–32; a read error falls back to 8.
 3. **Depth** = `1 + db.get_max_running_chain_depth(caller)` — `MAX(chain_depth)` over the caller's `status='running'` rows (`db/schedules/executions.py`).
 4. **Admitted** → depth is stamped on the child row: `ChatAdmission.chain_depth` → `prepare_chat_execution(chain_depth=)`; `create_task_execution_and_activities(chain_depth=)`; `FanOutService.execute(chain_depth=)` → every subtask insert.
-5. **Refused** (`depth > max`) → an `inter_agent_depth_exceeded` audit row and a FAILED `agent_collaboration` activity on the caller (both best-effort), then `InterAgentDepthExceeded` → router → **403** `{"detail": {"error": "inter_agent_depth_exceeded", depth, max_depth, caller, target, message}}` + `X-Trinity-Error-Code`. No execution row, no idempotency claim, no slot.
-6. **MCP** → `client.ts::parseDepthRefusal` turns that 403 into a `DepthRefusal` result; `runAgentChat` returns `{status: "inter_agent_depth_exceeded", retryable: false, ...}` to the calling model.
+5. **Refused** (`depth > max`) → `db.get_deepest_running_chain_row(caller)` names the hop (`exhausted_by`: the caller's deepest running row, or `{"kind": "event_claim"}` when the loopback claim set the depth, or `null` on a read failure — read on this path only, #4357), then an `inter_agent_depth_exceeded` audit row and a FAILED `agent_collaboration` activity on the caller (both best-effort, both carrying `exhausted_by`), then `InterAgentDepthExceeded` → router → **403** `{"detail": {"error": "inter_agent_depth_exceeded", depth, max_depth, caller, target, exhausted_by, resets, message}}` + `X-Trinity-Error-Code`. No execution row, no idempotency claim, no slot.
+6. **MCP** → `client.ts::parseDepthRefusal` turns that 403 into a `DepthRefusal` result, passing `exhausted_by` and `resets` through; `runAgentChat` returns `{status: "inter_agent_depth_exceeded", retryable: false, exhausted_by, resets, ...}` to the calling model.
 
 7. **New roots (#2973)** → the same helper runs on `POST /api/agents/{name}/sessions/{id}/message` (depth passed to `execute_task(chain_depth=)`), `POST /api/agents/{name}/loops` (depth persisted on `agent_loops.chain_depth`, stamped on every iteration by `loop_service._dispatch_run`), `POST /api/agents/{name}/schedules/{id}/trigger` (depth forwarded to the scheduler in the trigger body; a retry keeps it), and both event-emit routes when at least one subscription matches (depth signed into the EVT-001 loopback JWT as `chain_depth` → `User.loopback_chain_depth`, read by the helper before its root early-return; `_chain_caller` also falls back to `vouched_source_agent`). These routes let the refusal propagate to the app-level handler `error_handlers.inter_agent_depth_exceeded` (same 403 body and header). `agent.task.*` terminal events carry the finished row's depth + 1.
 
-Access (`get_authorized_agent`, uniform 404) resolves before the helper, so a depth 403 never discloses whether a target exists. Residuals and deferrals (non-agent keys held by agents, calls with no running row, webhook/cron/reminder roots #3116): `requirements/core-agent.md` §9.1.1. Tests: `tests/unit/test_2806_inter_agent_depth.py`, `tests/unit/test_2973_depth_new_roots.py`, `src/mcp-server/src/chat-depth.test.ts`, `src/mcp-server/src/tools/depth-refusal.test.ts`, J10 `test_two_agents_cannot_bounce_a_call_between_each_other_forever`.
+8. **Wake when a delegated run ends (#4357)** → `caller_wake_service.maybe_wake_caller` stamps the wake row with the delegator's standing, `_standing_depth` = `max(callee.chain_depth − 1, db.get_max_running_chain_depth(caller), 0)` (NULL → 0), not one hop more; the wake's own next delegation is then `1 + MAX(running)` as in step 3, so a delegate→wake round no longer grows the count. Before dispatch it spends one unit of the per-pair hourly budget `caller_wake_max_per_hour` (default 120, `0` = unlimited; key `trinity:wake_fires:{callee}:{caller}`, fail-open); past it the wake is skipped, audited `skipped_budget`, and the delegator gets one notification per window. Wakes on answered/ended asks and reminders stay roots. Turn-kind table: `requirements/core-agent.md` §9.1.1.
+
+Access (`get_authorized_agent`, uniform 404) resolves before the helper, so a depth 403 never discloses whether a target exists. Residuals and deferrals (non-agent keys held by agents, calls with no running row, webhook/cron/reminder roots #3116): `requirements/core-agent.md` §9.1.1. Tests: `tests/unit/test_2806_inter_agent_depth.py`, `tests/unit/test_2973_depth_new_roots.py`, `tests/unit/test_4357_wake_chain_depth.py`, `src/mcp-server/src/chat-depth.test.ts`, `src/mcp-server/src/tools/depth-refusal.test.ts`, J10 `test_two_agents_cannot_bounce_a_call_between_each_other_forever`.
 
 ---
+
+## The Callee's Tier (trinity-enterprise#1148)
+
+A delegated turn is rated on the callee, not inherited from the caller. The callee row carries the person the caller acted for (`turn_origin_user_id` / `turn_origin_email`) and `source_agent_name` = the caller — the dispatching key's own agent on every path, fan-out included, never the target. `services/turn_tier_service.turn_actor` then answers:
+
+| Person P on the callee | Calling agent's owner on the callee | Callee turn |
+|---|---|---|
+| owner / admin | any | `owner` (as before) |
+| can open it (shared) | any | `share` / `person` — P's own tier |
+| cannot open it | owner or admin | `owner` / `delegated` / P — shell, Gemini/Codex, standing work |
+| cannot open it | anything less | `share` / `person` |
+| any lookup unreadable | — | `share` (fail closed) |
+
+A self-call (caller == callee: a self-task or self fan-out) never takes the delegation row: it is rated by P's own tier on the agent, so a self fan-out inside a `delegated` turn rates `share`. The rule re-applies at every hop: a turn dispatched from a `delegated` turn carries P again. The caller's key, acting for P, reads no rows of a callee P cannot open (`dependencies.viewer_row_scope` on the per-agent routes, `helpers.acting_person_agents` on the fleet executions and activity reads). Detail: `architecture/security.md` §5g; requirement: `requirements/auth.md` §2.12. Tests: `tests/unit/test_ent1148_delegation_tier.py`, `test_ent1148_caller_reads_stay_person.py`, `test_ent1148_fleet_reads_stay_person.py`, `test_ent1148_fan_out_source.py`.
 
 ## Backend Layer
 

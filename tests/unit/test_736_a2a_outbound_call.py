@@ -227,6 +227,7 @@ def test_loopback_round_trip_against_trinitys_own_inbound_server(monkeypatch):
         # #3749: message/send mints the row before dispatch.
         create_task_execution=lambda **kw: types.SimpleNamespace(id="exec-minted-736"),
         get_agent_subscription_id=lambda name: None,
+        get_default_model_raw=lambda name: None,  # ent#1202
         # ent#679: the card producer reads the payment config to decide whether
         # to declare a price. `remotebot` is not priced here — stub it
         # explicitly so the card this loopback fetches is the unpriced one

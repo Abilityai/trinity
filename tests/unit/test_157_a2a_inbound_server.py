@@ -97,6 +97,7 @@ def client(monkeypatch):
         create_task_execution=lambda **kw: (
             state.__setitem__("minted", kw), types.SimpleNamespace(id="exec-123"))[1],
         get_agent_subscription_id=lambda name: None,
+        get_default_model_raw=lambda name: None,  # ent#1202
         # ent#679: the card producer reads the payment config to decide whether
         # to declare a price. Nothing in this file is priced — stub it
         # explicitly so the "card unchanged" assertions below prove the

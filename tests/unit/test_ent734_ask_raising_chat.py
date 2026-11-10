@@ -410,3 +410,51 @@ def test_the_file_sync_does_not_read_the_platform_flag_as_a_rewrite():
     row = {"type": "question", "title": "t", "question": "q", "context": {"k": 1}}
 
     assert "context" not in oqs.changed_fields(row, req)
+
+
+# ---------------------------------------------------------------------------
+# ent#1171 — a reminder the person's own agent set for that person's work
+# tiles in their conversation (raised_in_turn = True), not only the Inbox.
+# Cross-member delegation (source_user_email != addressee) stays Inbox-only.
+# ---------------------------------------------------------------------------
+
+def _raised_in_turn(ask, receipt):
+    return (ask.db.get_operator_queue_item(receipt["id"])["context"] or {}).get(
+        "workspace_raised_in_turn"
+    )
+
+
+def test_a_reminder_for_the_same_person_raises_in_turn(world, real_db):
+    """ent#1171 AC: a wake the person's own agent set for that person's work
+    tiles in their Main conversation (raised_in_turn = True), not Inbox-only."""
+    main = _main(world.agent, OWNER)
+    run = _execution(real_db, world.agent, triggered_by="reminder")
+
+    r = _raise(world, "t1171-wake-in-turn", platform_execution_id=run)
+
+    assert _thread(world, r) == main
+    assert _raised_in_turn(world, r) is True
+
+
+def test_a_reminder_for_a_different_person_stays_inbox_only(world, real_db):
+    """ent#1171: cross-member delegation — the wake's source_user_email is a
+    different person than the addressee — stays Inbox-only (raised_in_turn falsy)."""
+    main = _main(world.agent, OWNER)
+    run = _execution(real_db, world.agent, triggered_by="reminder", client=OTHER)
+
+    r = _raise(world, "t1171-wake-xmember", platform_execution_id=run)
+
+    assert _thread(world, r) == main
+    assert _raised_in_turn(world, r) is not True
+
+
+def test_a_reminder_for_the_same_person_attaches_to_main_not_a_stray_chat(world, real_db):
+    """ent#1171: the wake attaches to Main, not to any other open chat."""
+    main = _main(world.agent, OWNER)
+    other_chat = _chat(world.agent, OWNER)
+    run = _execution(real_db, world.agent, triggered_by="reminder")
+
+    r = _raise(world, "t1171-wake-main", platform_execution_id=run)
+
+    assert _thread(world, r) == main != other_chat
+    assert _raised_in_turn(world, r) is True

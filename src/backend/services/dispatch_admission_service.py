@@ -122,7 +122,8 @@ async def _record_depth_refusal(*, exc, current_user, endpoint, x_via_mcp):
         target_type="agent",
         target_id=exc.target,
         endpoint=endpoint,
-        details={"depth": exc.depth, "max_depth": exc.max_depth},
+        details={"depth": exc.depth, "max_depth": exc.max_depth,
+                 "exhausted_by": exc.exhausted_by},
     )
     if exc.caller is None:
         # #2973: an unvouched event loopback names no calling agent; the audit
@@ -141,6 +142,7 @@ async def _record_depth_refusal(*, exc, current_user, endpoint, x_via_mcp):
             "error_code": INTER_AGENT_DEPTH_EXCEEDED,
             "depth": exc.depth,
             "max_depth": exc.max_depth,
+            "exhausted_by": exc.exhausted_by,
         },
     )
     await activity_service.complete_activity(
@@ -148,6 +150,32 @@ async def _record_depth_refusal(*, exc, current_user, endpoint, x_via_mcp):
         status=ActivityState.FAILED,
         error=f"{INTER_AGENT_DEPTH_EXCEEDED}: depth {exc.depth} > {exc.max_depth}",
     )
+
+
+def _exhausted_by(caller: Optional[str], from_rows: int, claimed: Optional[int]) -> Optional[dict]:
+    """Which hop set a refused depth (#4357). Read only on the refusal path.
+
+    The signed event claim when it is deeper than the caller's rows; otherwise
+    (a tie included) the caller's deepest running row. A read failure answers
+    None — the refusal stands either way.
+    """
+    if claimed is not None and claimed > from_rows:
+        return {"kind": "event_claim", "chain_depth": claimed}
+    if not caller:
+        return None
+    try:
+        row = db.get_deepest_running_chain_row(caller)
+    except Exception:  # noqa: BLE001 — naming the hop never blocks the refusal
+        logger.exception("[#4357] could not read the deepest running row of %s", caller)
+        return None
+    if not row:
+        return None
+    return {
+        "execution_id": row.get("id"),
+        "chain_depth": row.get("chain_depth"),
+        "triggered_by": row.get("triggered_by"),
+        "source_agent": row.get("source_agent_name"),
+    }
 
 
 async def enforce_inter_agent_depth(
@@ -176,12 +204,16 @@ async def enforce_inter_agent_depth(
     if caller is None and claimed is None:
         return None
     max_depth = _max_chain_depth()
-    depth = 1 + db.get_max_running_chain_depth(caller) if caller else 0
+    from_rows = 1 + db.get_max_running_chain_depth(caller) if caller else 0
+    depth = from_rows
     if claimed is not None:
         depth = max(depth, claimed)
     if depth <= max_depth:
         return depth
-    exc = InterAgentDepthExceeded(caller, target, depth, max_depth)
+    exc = InterAgentDepthExceeded(
+        caller, target, depth, max_depth,
+        exhausted_by=_exhausted_by(caller, from_rows, claimed),
+    )
     logger.warning("[#2806] refused %s (%s)", exc, endpoint)
     try:
         await _record_depth_refusal(

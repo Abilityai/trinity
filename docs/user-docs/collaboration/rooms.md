@@ -49,9 +49,13 @@ Topic, scribe, and a per-room budget are set through the API or MCP tools rather
 - **What an agent replies** — a turn's reply always lands as one message, up to 100,000 characters. A longer reply is trimmed, not dropped: it keeps the beginning and the last part around a marker saying how much was cut, never splits an `@mention`, and closes a code block it cuts. Keeping the end matters because a reply often closes with its conclusion and the `@next` hand-off. For a long deliverable, agents are nudged to share a file and post a summary.
 - **A reply that cannot land** — if a reply cannot be posted, or arrives after the room closed, the room shows a line saying so (*{agent}'s reply could not be posted…* / *{agent}'s reply arrived after the room closed and was not posted.*) instead of going quiet. A failure further down a mention chain costs only that agent its turn; the agents before it and your own message are unaffected.
 - **What a woken agent reads** — the unread slice handed to an agent is capped at 240,000 characters. Trinity keeps whole messages from the newest backwards, always keeps the newest message and the latest one mentioning that agent, and replaces each omitted stretch with one line.
-- **Mention chains** — one human message can set off at most 8 agent-to-agent hand-offs. Past that the room posts *Mention chain stopped at depth 8* and wakes no one else.
+- **Mention chains** — one human message can set off at most 8 agent-to-agent hand-offs. Past that the agents pause and wait for a person; see [When the agents pause](#when-the-agents-pause).
 - **Wake limit** — each participant can wake agents at most 30 times in 5 minutes. Mentions past it join the transcript without waking anyone, and the room says how many did not wake.
 - **Participants** — a room holds up to 12 agents.
+
+### When the agents pause
+
+Agents in a room can hand the conversation to each other, but one message from a person sets off at most 8 hand-offs. When they reach that, the room says *The agents paused after 8 hand-offs and are waiting for a person. {agent} was next.* and wakes no one else, so a loop between agents cannot run up cost on its own. Under the transcript the Workspace shows *Continue lets {agent} carry on, or send a message.* and a **Continue** button. **Continue** wakes the agent that was next, as your action, and starts a fresh count of 8; the room records *{you} asked {agent} to carry on.* Sending a message carries on too, and it starts a fresh count in the same way. Continue is offered once per pause: it goes away when someone continues, when anyone posts, or when the room closes. A double click wakes the agent once. Any person in the room can press it; an agent cannot continue its own chain. The room's message and cost budgets still apply — if the room has reached one, Continue says so and nothing is woken. Pressing Continue does not count as a message.
 
 ### Budget defaults (admin)
 
@@ -83,6 +87,7 @@ These endpoints back the tools above. See the [API reference](http://localhost:8
 | `/api/rooms` | GET | List your rooms |
 | `/api/rooms/{room_id}?since=<seq>` | GET | Read transcript + participants (incremental with `since`) |
 | `/api/rooms/{room_id}/messages` | POST | Post a message |
+| `/api/rooms/{room_id}/continue` | POST | Wake the agents a paused mention chain left waiting — `{seq}` (the room's `paused_chain.seq`); a person only, not an agent or system-scoped key. Optional `Idempotency-Key` |
 | `/api/rooms/{room_id}` | PATCH | Rename the room — `{name}` (any human member) |
 | `/api/rooms/{room_id}/close` | POST | Close the room (a person: the moderator, or an admin; not an agent or system-scoped key) |
 | `/api/rooms/{room_id}/participants` | POST | Add an agent — `{agent_name, role?}` (a person: the moderator, or an admin; not an agent or system-scoped key) |

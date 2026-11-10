@@ -14,6 +14,7 @@ import { useReportsStore, useFleetReportsStore } from '../stores/reports'
 import { useRoomsStore } from '../stores/rooms'
 import { useSkillsStore } from '../stores/skills'
 import { useClientPortalStore } from '../stores/clientPortal'
+import { usePortalProgressStore } from '../stores/portalProgress'
 import { useAuthStore } from '../stores/auth'
 import { isWorkspaceOnlyRole } from './workspaceOnly'
 import { socketActionFor } from './socketSession'
@@ -78,6 +79,7 @@ export function useWebSocket() {
   const fleetReportsStore = useFleetReportsStore()
   const skillsStore = useSkillsStore()
   const clientPortalStore = useClientPortalStore()
+  const portalProgressStore = usePortalProgressStore()
   const authStore = useAuthStore()
 
   const connect = async () => {
@@ -204,6 +206,8 @@ export function useWebSocket() {
         try { agentsStore.fetchAgents && agentsStore.fetchAgents() } catch (_) {}
         try { notificationsStore.fetchPendingCount && notificationsStore.fetchPendingCount() } catch (_) {}
       }
+      // ent#1175: a Workspace store — the progress card re-reads too.
+      try { portalProgressStore.refetchAll() } catch (_) {}
       return
     }
     switch (data.event) {
@@ -319,6 +323,10 @@ export function useWebSocket() {
         // refetches over REST (#918 pattern). No-op when Sessions isn't mounted.
         if (data.type === 'room_message' || data.type === 'room_participant_state' || data.type === 'room_closed') {
           roomsStore.handleWebSocketEvent(data)
+        }
+        // ent#1175: member onboarding progress card — live step updates.
+        if (data.type === 'member_progress_update') {
+          portalProgressStore.handleWebSocketEvent(data)
         }
         break
     }
