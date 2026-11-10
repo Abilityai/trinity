@@ -7,7 +7,8 @@
 > carries the live to-do list. **Design:** `TARGET_ARCHITECTURE.md` (v2 / Direction B, #1404).
 
 **Last verified against `dev` and the tracker: 2026-09-09.** When you change the migration's state,
-change this file in the same PR.
+change this file in the same PR. (2026-11-09: Phase 4's status corrected to merged; nothing else in
+this file was re-verified on that date.)
 
 ---
 
@@ -27,7 +28,7 @@ behind **`PULL_MODE_PILOT_AGENTS`** (default empty ⇒ inert).
 | **Phase 1** | Dark pull endpoints — atomic claim + result CAS | ✅ done |
 | **Phase 2** | Agent worker pool behind `PULL_MODE_PILOT_AGENTS`; scoped-key auth | ✅ done |
 | **Phase 3** | Lease reaper + `MAX_REDELIVERY` + capacity shadow meter + canary lease-awareness | ✅ done (Alembic `0017`) |
-| **Phase 4** | Sync edge adapter + async fan-out join | 🔶 **in review — [#2532](https://github.com/abilityai/trinity/pull/2532)** |
+| **Phase 4** | Sync edge adapter + async fan-out join | ✅ done — [#2532](https://github.com/abilityai/trinity/pull/2532), merged 2026-09-15 |
 | **Phase 5** | Default-ON + delete ZSET / overflow LIST / dispatch-breaker-gate / canary S-01–S-03 and B-02's push arm (B-02 stays as the pull check, alongside B-08 pull-worker liveness, #2840) | ⬜ blocked — see §4 |
 
 ## 3. Trigger reach — which work can actually reach the queue
@@ -58,9 +59,8 @@ The spec names the gates (`TARGET_ARCHITECTURE.md`, §Re-Delivery and Side-Effec
 
 **All three are built** (fail-closed injection by #2392). The full remaining list, in order:
 
-1. **Land Phase 4** — [#2532](https://github.com/abilityai/trinity/pull/2532). Rebased on `dev`, migration
-   renumbered to `0059`, full unit suite matched against unmodified `dev` (same single pre-existing
-   failure, 21 net new tests). Blocked only on review.
+1. **Land Phase 4** — done: [#2532](https://github.com/abilityai/trinity/pull/2532) merged 2026-09-15
+   (migration `0059`).
 2. **Fail-closed `execution_id` injection** — [#2392](https://github.com/abilityai/trinity/issues/2392).
    The agent's MCP config sends each turn's id as `X-Trinity-Execution-Id`; on a pull-mode agent an effect
    without a usable id is refused with an operator alarm, and a person's terminal session (`manual`) is sent
