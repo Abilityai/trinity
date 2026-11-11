@@ -744,6 +744,11 @@ async def _schedule_staggered_services() -> None:
     from services import git_service as _git_service_boot
     _git_service_boot.schedule_fleet_git_remote_token_sweep()
 
+    # #4442: ONE-SHOT fill of each agent's NULL `default_model` (fill-blank and
+    # conditional, so every worker may run it; stagger and rationale in the service).
+    from services import agent_model_seed as _agent_model_seed_boot
+    _agent_model_seed_boot.schedule_boot_fill()
+
     # #447: subscription recovery probe — re-asks the provider whether a
     # subscription believed rate-limited is back. Nothing else can clear the
     # badge (no success path clears a failure row), and the ambient refresh is

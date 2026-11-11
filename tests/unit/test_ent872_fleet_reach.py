@@ -809,6 +809,8 @@ _ALLOW = {
         "routers/ops.py gates it with assert_admin (ops scope opted in), which refuses agent keys",
     ("services/fleet_ops_service.py", "stop_fleet_impl"):
         "routers/ops.py gates it with assert_admin, which refuses agent keys",
+    ("services/agent_model_seed.py", "_live_agents"):
+        "startup: no principal; only fills blank model values (#4442)",
     ("services/git_service/token_scrub.py", "sweep_fleet_git_remote_tokens"):
         "background sweep: no principal",
     ("services/github_pat_propagation_service.py", "propagate_github_pat"):

@@ -1,17 +1,6 @@
 {
   "test_files": [
     {
-      "file": "unit/test_ent1221_web_delivery.py",
-      "feature": "trinity-enterprise#1221",
-      "added": "2026-11-11",
-      "categories": [
-        "backend",
-        "proactive-messaging",
-        "client-portal"
-      ],
-      "description": "trinity-enterprise#1221: send_message(channel=web) lands one source=proactive row in the person's Workspace Main through the scheduled-delivery reachability gate (agent's own key only, never in the recipient's own Main turn, deterministic id); every channel refusal carries a named code; reachable_channels agrees with the send."
-    },
-    {
       "file": "unit/test_ent863_socket_door_account_state.py",
       "feature": "trinity-enterprise#863",
       "added": "2026-11-08",
@@ -9073,6 +9062,29 @@
         "api"
       ],
       "description": "ent#1202: agent_ownership.default_model (nullable, dual-track migration 0123) and the one resolver: explicit > public-channel override > the agent's own model when the catalog/alias allowlist passes it > platform default; non-Claude runtimes resolve to None; an unrunnable stored value is skipped by name; fail-open except the strict a2a pre-create. execute_task runs and stamps the own model, fills a pre-created row's blank model_used only, never restamps an explicit model. Portal ladder/label, a2a pre-create and the GET /model additive fields read the same resolver."
+    },
+    {
+      "file": "unit/test_4442_wake_model.py",
+      "feature": "#4442",
+      "added": "2026-11-11",
+      "categories": [
+        "backend",
+        "execution",
+        "database",
+        "api"
+      ],
+      "description": "#4442: platform-started turns (wakes, ask endings, events, unpinned reminders/schedules/loops) run on the agent's own model. PUT /model stores what the agent accepted (500 model_not_saved on a failed save, audited, nothing on refusal or a non-Claude agent); create seeds default_model from runtime.model or a top-level model: on the local and github paths (fill-blank, catalog-gated); a boot pass fills NULL columns from AGENT_RUNTIME_MODEL then the live template.yaml (conditional write, one per agent across workers, env never logged); push /chat resolves and stamps the model; per-kind execute_task resolution; pinned models win; AST guard that wake producers pass no model."
+    },
+    {
+      "file": "unit/test_ent1221_web_delivery.py",
+      "feature": "trinity-enterprise#1221",
+      "added": "2026-11-11",
+      "categories": [
+        "backend",
+        "proactive-messaging",
+        "client-portal"
+      ],
+      "description": "trinity-enterprise#1221: send_message(channel=web) lands one source=proactive row in the person's Workspace Main through the scheduled-delivery reachability gate (agent's own key only, never in the recipient's own Main turn, deterministic id); every channel refusal carries a named code; reachable_channels agrees with the send."
     },
     {
       "file": "unit/test_1220_ws_roster_share_refresh.py",
