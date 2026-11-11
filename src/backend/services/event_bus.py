@@ -557,8 +557,10 @@ class StreamDispatcher:
         nothing, and the events that change accessibility (create / delete /
         share / unshare / rename) are rare. A MISSED invalidation degrades to
         the pre-existing ``/ws/events`` behaviour — stale until the client
-        reconnects — never to a leak, because the stale roster is the older,
-        smaller one."""
+        reconnects. A missed create or share leaves the roster smaller (events
+        withheld, never leaked); a missed unshare or delete leaves it LARGER,
+        so the slot keeps receiving that agent's events until it refreshes or
+        reconnects — which is why ``refresh_again`` re-reads rather than drops."""
         if not isinstance(payload, dict):
             return
         event = payload.get("event") or payload.get("type")

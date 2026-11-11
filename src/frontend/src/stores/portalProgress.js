@@ -20,6 +20,9 @@ const EMPTY = Object.freeze({ loading: false, steps: [], all_done: false, active
 // ent#1220: the read in flight per agent. A caller that must act on a fresh
 // card (a held send's re-read) awaits it instead of an early return.
 const inFlight = new Map()
+// A forced read that met one in flight: the re-read it chained, shared by
+// every forced caller until it starts.
+const again = new Map()
 
 export const usePortalProgressStore = defineStore('portalProgress', {
   state: () => ({
@@ -31,7 +34,18 @@ export const usePortalProgressStore = defineStore('portalProgress', {
     async fetchProgress(agentName, { force = false } = {}) {
       if (!agentName) return
       const existing = this.byAgent[agentName]
-      if (existing?.loading) return inFlight.get(agentName)
+      if (existing?.loading) {
+        if (!force) return inFlight.get(agentName)
+        // The read in flight may predate the change this forced read is for
+        // (the step went done after it was issued): re-read once it settles.
+        if (!again.has(agentName)) {
+          again.set(agentName, inFlight.get(agentName).then(() => {
+            again.delete(agentName)
+            return this.fetchProgress(agentName, { force: true })
+          }))
+        }
+        return again.get(agentName)
+      }
       // A good read is reused on remount; a failed one (error set) is retried.
       if (!force && existing?.loaded && !existing.error) return
 
