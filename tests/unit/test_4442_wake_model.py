@@ -219,32 +219,32 @@ def _fill(ops, *, env=None, templates=None, agents=None, live=None):
     return counts, reads
 
 
-def test_boot_fill_takes_the_running_agents_live_model_over_its_env(ops):
-    """A Settings pick made before #4442 lived only in the agent's memory; the
-    env still holds the template's model. The live value wins."""
-    counts, reads = _fill(ops, live={"env-only": "claude-fable-5-1", "template-only": OWN})
-    assert ops.get_default_model_raw("env-only") == "claude-fable-5-1"
-    assert ops.get_default_model_raw("template-only") == OWN
-    assert ("env", "env-only") not in reads and ("template", "template-only") not in reads
+def test_boot_fill_prefers_a_declared_model_over_the_live_one(ops):
+    """The live model is whatever the last /api/chat turn sent -- before #4442
+    possibly the platform default. A declared env or template model wins, and
+    the live route is not even asked when one exists."""
+    counts, reads = _fill(ops, live={"env-only": DEFAULT, "template-only": DEFAULT})
+    assert ops.get_default_model_raw("env-only") == OWN
+    assert ops.get_default_model_raw("template-only") == PINNED
+    assert ("live", "env-only") not in reads and ("live", "template-only") not in reads
     assert ("live", "stopped") not in reads   # a stopped agent is not asked
     assert counts["filled"] == 2
 
 
-def test_boot_fill_falls_back_to_env_then_template_when_the_agent_does_not_answer(ops):
-    """`_read_live_model` answers None for an unreachable agent; the env, then
-    the template, still fill the column."""
-    counts, reads = _fill(ops, live={"env-only": None, "template-only": None})
-    assert ops.get_default_model_raw("env-only") == OWN
-    assert ops.get_default_model_raw("template-only") == PINNED
-    assert reads.index(("live", "env-only")) < reads.index(("env", "env-only"))
-    assert ("env", "template-only") in reads and ("template", "template-only") in reads
-    assert counts["filled"] == 2
+def test_boot_fill_falls_back_to_the_live_model_when_nothing_is_declared(ops):
+    """With no env and no template model, the running agent's own answer fills
+    the column -- after env and template were both read."""
+    counts, reads = _fill(ops, live={"nothing": "claude-fable-5-1"})
+    assert ops.get_default_model_raw("nothing") == "claude-fable-5-1"
+    assert reads.index(("env", "nothing")) < reads.index(("template", "nothing")) \
+        < reads.index(("live", "nothing"))
+    assert counts["filled"] == 3
 
 
 def test_boot_fill_keeps_the_allowlist_and_fill_blank_guards_on_the_live_model(ops):
     ops.set_default_model("preset", "claude-fable-5-1")
-    counts, reads = _fill(ops, live={"env-only": "claude-opus-9; rm -rf /", "preset": OWN})
-    assert ops.get_default_model_raw("env-only") is None and counts["refused"] == 1
+    counts, reads = _fill(ops, live={"nothing": "claude-opus-9; rm -rf /", "preset": OWN})
+    assert ops.get_default_model_raw("nothing") is None and counts["refused"] == 1
     assert ops.get_default_model_raw("preset") == "claude-fable-5-1"
     assert ("live", "preset") not in reads
 

@@ -10,8 +10,9 @@ writers are:
   agent accepted (``routers/chat.py``);
 * the create seed, ``seed_default_model``, from the template's declared model;
 * the boot fill, ``fill_blank_default_models``, for agents created before this:
-  the running agent's own ``GET /api/model`` first, then its env, then its
-  template.yaml.
+  its container env first, then its template.yaml, and only when neither
+  declares one, the running agent's own ``GET /api/model`` (whatever the last
+  chat turn sent, so it is never preferred over a declared model).
 
 The seed and the fill write only into a NULL column (``set_default_model_if``
 with ``expected=None``), so they never overwrite a value another writer set,
@@ -118,10 +119,12 @@ async def fill_blank_default_models(
     read_live_model: Callable[[str], Awaitable[Optional[str]]] = None,
 ) -> Dict[str, int]:
     """The boot pass: give every Claude Code agent whose column is NULL the
-    model it runs now. A running agent is asked first (``GET /api/model``: a
-    Settings pick made before #4442 lived only there); then its container env
-    (``AGENT_RUNTIME_MODEL``), the source for a stopped or unreachable agent;
-    then the model its own ``template.yaml`` declares (running agents only).
+    model it runs now: its container env (``AGENT_RUNTIME_MODEL``) first; then
+    the model its own ``template.yaml`` declares (running agents only); and only
+    when neither declares one, the running agent's live ``GET /api/model``.
+    The live value is last because it is whatever the last ``/api/chat`` turn
+    sent, which before #4442 could be the platform default, and storing that
+    would make the cheaper model permanent (merge-train decision on #4466).
     Idempotent, unclaimed: every worker may run it. Returns counts only (no
     names, no values)."""
     if db_ops is None:
@@ -143,11 +146,11 @@ async def fill_blank_default_models(
             continue
         counts["blank"] += 1
         try:
-            candidate = await read_live_model(name) if status == "running" else None
-            if not candidate:
-                candidate = await asyncio.to_thread(read_env_model, name)
+            candidate = await asyncio.to_thread(read_env_model, name)
             if not candidate and status == "running":
                 candidate = declared_model(await read_template(name))
+            if not candidate and status == "running":
+                candidate = await read_live_model(name)
             if not candidate:
                 counts["nothing_declared"] += 1
             elif unrunnable_reason(candidate, "claude-code"):
