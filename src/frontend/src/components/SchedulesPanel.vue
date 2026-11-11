@@ -398,14 +398,18 @@
             </div>
             <p v-if="schedule.description" class="text-sm text-gray-500 dark:text-gray-400 mt-1">{{ schedule.description }}</p>
             <!-- #4281: why, who created it (a name only when the read carries
-                 one: D5 keeps it to the owner tier), and the owner's remedy. -->
+                 one: D5 keeps it to the owner tier), and the owner's remedy.
+                 Below `sm` the button goes under the text: side by side on a phone
+                 the text was left a few pixels wide. -->
             <div
               v-if="runTierView(schedule)"
-              class="mt-2 flex flex-wrap items-start justify-between gap-2 rounded-md border border-status-warning-200 bg-status-warning-50 px-3 py-2 dark:border-status-warning-500/30 dark:bg-status-warning-500/10"
+              class="mt-2 flex flex-col items-start gap-2 rounded-md border border-status-warning-200 bg-status-warning-50 px-3 py-2 dark:border-status-warning-500/30 dark:bg-status-warning-500/10 sm:flex-row sm:flex-wrap sm:justify-between"
             >
-              <div class="min-w-0 flex-1 text-[12.5px] text-status-warning-700 dark:text-status-warning-300">
+              <div class="min-w-0 sm:flex-1 text-[12.5px] text-status-warning-700 dark:text-status-warning-300">
                 <p data-testid="schedule-runs-as-reason">{{ runTierView(schedule).reason }}</p>
-                <p v-if="runTierView(schedule).creatorLine" class="mt-0.5 font-medium" data-testid="schedule-created-by">{{ runTierView(schedule).creatorLine }}</p>
+                <!-- A creator's email is one unbreakable word: let it break, or it holds
+                     the row wider than a phone and pushes the action icons off. -->
+                <p v-if="runTierView(schedule).creatorLine" class="mt-0.5 font-medium [overflow-wrap:anywhere]" data-testid="schedule-created-by">{{ runTierView(schedule).creatorLine }}</p>
               </div>
               <BaseButton
                 v-if="schedule.can_take_over === true"
