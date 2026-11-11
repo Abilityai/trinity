@@ -9073,6 +9073,17 @@
         "api"
       ],
       "description": "ent#1202: agent_ownership.default_model (nullable, dual-track migration 0123) and the one resolver: explicit > public-channel override > the agent's own model when the catalog/alias allowlist passes it > platform default; non-Claude runtimes resolve to None; an unrunnable stored value is skipped by name; fail-open except the strict a2a pre-create. execute_task runs and stamps the own model, fills a pre-created row's blank model_used only, never restamps an explicit model. Portal ladder/label, a2a pre-create and the GET /model additive fields read the same resolver."
+    },
+    {
+      "file": "unit/test_1220_ws_roster_share_refresh.py",
+      "feature": "trinity-enterprise#1220",
+      "added": "2026-11-11",
+      "categories": [
+        "backend",
+        "unit",
+        "websocket"
+      ],
+      "description": "A Workspace-only /ws slot that gains a share mid-connection: an allowed event about the agent is withheld until agent_shared is read and delivered (cut to the Workspace fields) right after; an access change observed while the slot's roster refresh is in flight sets refresh_again and the dispatcher reads once more instead of swallowing it; a quiet refresh reads once."
     }
   ]
 }
