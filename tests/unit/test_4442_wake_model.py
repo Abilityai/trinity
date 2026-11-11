@@ -517,6 +517,12 @@ def _payload(request_model, stored, *, runtime="claude-code"):
     user = SimpleNamespace(email="o@example.com", username="o", mcp_key_name=None)
     import services.agent_model_service as ams
     import services.docker_service as ds
+    # build_chat_payload imports these lazily, and each binds `from database
+    # import db` at import time. Import them before `database.db` is patched, or
+    # they keep the mock for the rest of the session and break later files
+    # (test_ent872_fleet_reach, merge-train finding on #4466).
+    import services.ask_service  # noqa: F401
+    import services.operator_queue_service.deps  # noqa: F401
     with patch.object(ces, "db", fake_db), \
             patch.object(ds, "get_agent_runtime", lambda n: runtime), \
             patch("database.db", fake_db), \
