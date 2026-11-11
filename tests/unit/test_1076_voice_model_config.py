@@ -81,7 +81,7 @@ def test_voice_model_override_is_respected(monkeypatch):
 
 @pytest.mark.parametrize(
     "compose_file",
-    ["docker-compose.yml", "docker-compose.prod.yml"],
+    ["docker-compose.yml", "docker-compose.prod.yml", "docker-compose.hosted.yml"],
 )
 def test_compose_default_is_non_empty(compose_file):
     """Defense-in-depth: compose must not inject an empty VOICE_MODEL.
