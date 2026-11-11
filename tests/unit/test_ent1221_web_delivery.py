@@ -249,6 +249,56 @@ class TestWebRefusals:
         assert e.channels["telegram"] == "telegram_blocked"
 
 
+class TestTheRoute:
+    """The own-key rule is decided in `routers/messages.py`, so it is driven
+    through the real route: a person's key is refused `web`, the agent's own
+    key delivers it."""
+
+    def _post(self, monkeypatch, agent, principal):
+        from fastapi import FastAPI
+        from fastapi.routing import APIRoute
+        from fastapi.testclient import TestClient
+
+        from routers import messages
+
+        def _walk(dep):
+            for sub in dep.dependencies:
+                yield sub
+                yield from _walk(sub)
+
+        app = FastAPI()
+        app.include_router(messages.router)
+        for r in messages.router.routes:
+            if isinstance(r, APIRoute) and r.path.endswith("/messages"):
+                for d in _walk(r.dependant):
+                    name = getattr(d.call, "__name__", "")
+                    if name == "get_current_user":
+                        app.dependency_overrides[d.call] = lambda: principal
+                    if name == "get_authorized_agent_by_name":
+                        dep_db = d.call.__globals__["db"]
+                        monkeypatch.setattr(dep_db, "get_agent_owner", lambda n: "owner")
+                        monkeypatch.setattr(dep_db, "can_user_access_agent", lambda u, n: True)
+        return TestClient(app).post(f"/api/agents/{agent}/messages", json={
+            "text": "Your brief is ready.", "recipient_email": EMAIL, "channel": "web"})
+
+    def test_a_persons_key_is_refused_and_the_agents_own_key_delivers(self, svc, monkeypatch):
+        from models import User
+
+        agent = _uniq("agent")
+        person = User(id=2, username="owner", role="admin", email="owner@example.com")
+        resp = self._post(monkeypatch, agent, person)
+        assert resp.status_code == 404, resp.text
+        assert resp.json()["detail"]["channels"] == {"web": "web_agent_only"}
+        assert _rows(agent) == []
+
+        own_key = User(id=1, username="owner", role="user", email=None, agent_name=agent)
+        resp = self._post(monkeypatch, agent, own_key)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["channel"] == "web"
+        assert resp.json()["delivery"] == "workspace_inbox"
+        assert len(_rows(agent)) == 1
+
+
 class TestReachability:
     """`reachable_channels` is what the Execution Context asks; it must agree
     with the gates `send_message` applies — checked by sending, not by

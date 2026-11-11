@@ -1,3 +1,4 @@
+# mcp: messages.ts (send_message → POST /api/agents/{name}/messages); the proactive-shares consent toggle (person-only, ent#872) and its read are owner UI, not exposed
 """
 Proactive Messaging Router (Issue #321).
 
