@@ -1,63 +1,78 @@
-## Code Health Report — 2026-11-03 (93658be60)
+## Code Health Report — 2026-11-11 (b99c23f6e)
 
 ### Executive Summary
 
 | Metric | Value | Trend |
 |--------|-------|-------|
-| Top hotspot score | 22968 | ↑ (was 19513) |
-| Files > 800 lines (critical size) | 89 | → (was 86) |
-| Stale TODOs | 10 | ↑ (was 6) |
-| High fan-out files (>20 imports) | 17 | → (was 16) |
-| Circular imports | 0 | → (was 0) |
+| Top hotspot score | 27072 | ↑ (was 22968) |
+| Files > 300 lines | 293 | ↑ (was 89) |
+| Stale TODOs | 10 | → |
+| High fan-out files (>20 imports) | 20 | ↑ (was 17) |
+| Circular imports | 0 | → |
 
 ### Top 3 Hotspots (churn × complexity — highest refactoring ROI)
 
 | Rank | File | Churn (90d) | CC Score | Hotspot Score | Lines |
 |------|------|-------------|----------|---------------|-------|
-| 1 | src/backend/client_portal/service.py | 87 | 264 | 22968 | 6468 |
-| 2 | src/backend/services/task_execution_service.py | 53 | 266 | 14098 | 3748 |
-| 3 | src/backend/services/chat_execution_service.py | 40 | 271 | 10840 | 3549 |
+| 1 | src/backend/client_portal/service.py | 96 | 282 | 27072 | 6689 |
+| 2 | src/backend/services/system_service.py | 28 | 664 | 18592 | 4971 |
+| 3 | src/backend/services/task_execution_service.py | 57 | 271 | 15447 | 3787 |
 
 **Interpretation**: These files are both frequently changed and cognitively expensive.
-`client_portal/service.py` stayed the #1 hotspot and its score rose ~18% this run — churn
-jumped from 79→87 commits in the 90-day window while complexity held roughly flat (247→264).
-Refactoring it reduces ongoing maintenance cost the most.
+Refactoring them reduces ongoing maintenance cost the most. `system_service.py` is new
+to the top 3 this run (previously #3 was `chat_execution_service.py` at 10840; it now
+ranks #4 at 12240). `system_service.py` carries by far the highest single-file complexity
+score (664) in the backend, with much lower churn (28) than the other two — a dense,
+rarely-touched file is a different risk profile than a frequently-touched one and may
+warrant a dedicated read before refactoring.
 
 ### Top 3 Size Violations
 
 | File | Lines | Threshold Exceeded | Suggested Action |
 |------|----|------|---------|
-| src/backend/client_portal/service.py | 6468 | critical (>800) | Extract service layer (per client_portal area owner) |
-| src/backend/models.py | 6242 | critical (>800) | Audit for split-by-domain; centralization invariant (#654) still applies to scope only |
-| src/backend/db/migrations.py | 6197 | critical (>800) | Expected growth pattern (append-only versioned migrations); not a refactor candidate |
+| src/backend/client_portal/service.py | 6689 | critical (>800) | Extract service layer |
+| src/backend/models.py | 6612 | critical (>800) | Split by domain (Invariant #14 scope is routers; this is the Pydantic model file itself growing unreviewable) |
+| src/backend/db/migrations.py | 6520 | critical (>800) | Expected growth — append-only versioned migration log (Invariant #3); not a refactor target |
 
 ### Top 3 Coupling Issues
 
 | File | Import Count | Issue |
 |------|-------------|-------|
-| src/backend/main.py | 145 | High fan-out — expected for the app-wiring entrypoint (72 routers) |
-| src/backend/database.py | 69 | High fan-out — consider splitting responsibilities |
-| src/backend/services/chat_execution_service.py | 39 | High fan-out — also a top-3 hotspot; prime split candidate |
+| src/backend/main.py | 147 | High fan-out — expected for the app entrypoint wiring every router |
+| src/backend/database.py | 72 | High fan-out — the DB facade importing every `XOperations` mixin class |
+| src/backend/services/agent_service/crud.py | 43 | High fan-out — consider narrowing dependencies |
 
 ### Stale Smell Inventory
 
-- **Total TODO/FIXME/HACK markers**: 10 (↑ from 6 last run)
+- **Total TODO/FIXME/HACK markers**: 10
 - Top smell-dense files: `services/skill_gate_service.py` (2), `services/monitoring_service.py` (2), `routers/ops.py` (2)
 
 ### Suggested Refactorings (Top 3 Hotspots)
 
-1. **`client_portal/service.py`** — extract the asks/approval sub-flow (already partially
-   split into `client_portal/asks/service.py`, itself a top-7 hotspot at score 4564) into its
-   own service module; estimated 1500–2000 line reduction. Supports Invariant #1
-   (Router → Service → DB, one file per concern) and Invariant #2 (mixin/package
-   composition once a service outgrows one file).
-2. **`services/task_execution_service.py`** — the CAS-gated terminal-write paths documented
-   in `architecture/execution.md` are dense branching logic; splitting status-transition
-   helpers into a sibling module (mirroring the `agent_service/` package split) would lower
-   both churn-surface and cyclomatic load without touching the CAS invariant itself.
-3. **`services/chat_execution_service.py`** — highest per-line complexity density of the
-   top 3 (271 CC over 3549 lines); a mixin-style split along session-turn vs dispatch
-   concerns (same pattern as `db/schedules/__init__.py`, Invariant #2) is the lowest-risk cut.
+1. **`client_portal/service.py`** (score 27072, churn 96, cc 282, 6689 lines) — highest
+   churn AND highest complexity in the backend; top hotspot for three consecutive runs.
+   Candidate for splitting by sub-domain (it already has sibling modules under
+   `client_portal/asks/`) into smaller service files behind the existing router/service/db
+   layering (Invariant #1).
 
-*(Findings are dashboard input only — conversion into `type-refactor` issues is a human call
-in `/groom`'s Debt Health section, per the Dashboard-not-registry policy.)*
+2. **`services/system_service.py`** (score 18592, churn 28, cc 664, 4971 lines) — lower
+   churn than the other two but by far the densest single file measured (cc 664 vs. next
+   highest 282). A complexity-first read (not churn-first) — extract cohesive sub-flows
+   into smaller functions/services before this file's edit frequency rises to match its
+   size.
+
+3. **`services/task_execution_service.py`** (score 15447, churn 57, cc 271, 3787 lines) —
+   this is the file `architecture/execution.md` already flags for the CAS/dispatch-closing
+   invariant; any extraction here must preserve that every terminal writer still closes its
+   own dispatch activity (#1804).
+
+### Methodology Notes
+
+- `radon` was not on `PATH` in this run's worktree (installed under
+  `~/.local/lib/python3.13/site-packages` via `--user`); invoked as `python3 -m radon`
+  instead of the bare `radon` command — same tool, no fallback-proxy used.
+- `size_violations_count` jumped from 89 → 293 between this run and the 2026-11-03
+  baseline. Both runs count the same way (files >300 lines, same exclusions), so this
+  reflects either a prior under-count or real backend growth during an unusually high
+  commit-velocity window (1505 commits / 90d measured on `dev` this cycle) — flagged for
+  a human read rather than resolved here.
