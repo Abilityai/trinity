@@ -142,6 +142,22 @@ class TestWebLandsInTheWorkspace:
         _send(pms, agent, execution_id=exe, dedup_label="b")
         assert len(_rows(agent)) == 2
 
+    def test_a_suppressed_repeat_writes_no_second_row_and_no_note(self, svc):
+        """An intent-key repeat (ent#665) of a web send is suppressed. The web
+        result records no public_chat session, so no "Not sent" note is written
+        anywhere — accepted: the person sees the one message, never a note about
+        a repeat they could not see."""
+        pms, svc_db, _ = svc
+        agent = _uniq("agent")
+        key = _uniq("brief")
+        first = _send(pms, agent, execution_id=_uniq("exe"), idempotency_key=key)
+        again = _send(pms, agent, execution_id=_uniq("exe"), idempotency_key=key)
+        assert first.success is True and first.channel == "web"
+        assert again.success is True and again.suppressed_by
+        assert len(_rows(agent)) == 1
+        svc_db.get_or_create_public_chat_session.assert_not_called()
+        svc_db.add_public_chat_message.assert_not_called()
+
 
 class TestWebRefusals:
     def _refused(self, pms, agent, **kw):
