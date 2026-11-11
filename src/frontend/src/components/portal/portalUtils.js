@@ -2434,20 +2434,22 @@ export function assistantRow({ content = '', id = null, my_rating = null,
 // would never grow, the poll would idle out, and a turn that answered would
 // be reported as "check shortly". The baseline is the id of the newest TYPED
 // assistant row (`replyBaseline`); a reply is new when that id changed. A
-// spoken reply (`source === 'voice'`) is never this turn's answer. The count
+// row with any `source` — spoken (`voice`), a completion report, a message the
+// agent sent between turns (`proactive`, ent#1221) — is never this turn's
+// answer: typed is `!source`, the backend's `_TYPED = "source IS NULL"`. The count
 // survives only as the fallback for a row with no id (the best-effort write).
 export function latestTypedReply(messages) {
   const rows = Array.isArray(messages) ? messages : []
   for (let i = rows.length - 1; i >= 0; i--) {
     const m = rows[i]
-    if (m && m.role === 'assistant' && m.source !== 'voice') return m
+    if (m && m.role === 'assistant' && !m.source) return m
   }
   return null
 }
 
 function typedReplyCount(messages) {
   return (Array.isArray(messages) ? messages : [])
-    .filter((m) => m && m.role === 'assistant' && m.source !== 'voice').length
+    .filter((m) => m && m.role === 'assistant' && !m.source).length
 }
 
 // What a reply must differ from: taken BEFORE dispatch, from the same rows the
