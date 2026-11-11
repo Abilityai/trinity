@@ -5,8 +5,10 @@ WORKDIR /app
 # Copy package files
 COPY package.json package-lock.json ./
 
-# Install dependencies (use npm install to get correct native binaries for container arch)
-RUN rm -f package-lock.json && npm install
+# Install from the tracked lockfile (#4435). npm ci is lockfile-exact and fails on
+# drift. A missing native binary for the container platform is fixed in
+# package-lock.json, never by deleting the lockfile.
+RUN npm ci
 
 # Copy application code
 COPY . .
