@@ -49,6 +49,7 @@ from services import login_policy_gate, skill_gate_map_service, turn_context
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
 from services.channel_completion_report import (
     COMPLETION_SOURCE_DONE, COMPLETION_SOURCE_FAILED, COMPLETION_SOURCE_NOTICE,
+    PROACTIVE_SOURCE,
 )
 
 from . import db
@@ -2681,6 +2682,8 @@ def _context_lines(rows: list[dict], spoken_budget: int) -> list[str]:
       hiding from the agent that a call ended or that Main was reset;
     * a background task's completion report (ent#610 marker) →
       ``[Background task report: …]``, for the same reason;
+    * a message the agent sent between turns (ent#1221 marker) →
+      ``[You messaged them between turns: …]``, so it is not read as a reply;
     * spoken rows beyond the budget are dropped oldest-first, and every cut is
       named where the call's kept rows begin — a count only, no pointer to a
       place the agent cannot read.
@@ -2698,6 +2701,9 @@ def _context_lines(rows: list[dict], spoken_budget: int) -> list[str]:
             continue
         if m.get("source") in _COMPLETION_SOURCES:
             lines.append(f"[Background task report: {content}]")
+            continue
+        if m.get("source") == PROACTIVE_SOURCE:  # ent#1221
+            lines.append(f"[You messaged them between turns: {content}]")
             continue
         spoken = m.get("source") == "voice"
         if spoken:
