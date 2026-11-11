@@ -33,8 +33,9 @@ def test_the_mcp_fork_body_survives_agent_config():
     assert cfg.import_intent == "fork"
     assert cfg.fork_to_own is not None
     assert cfg.fork_to_own.destination_repo == "acme/sales-agent"
-    # No PAT over MCP: the backend resolves the caller's saved token (#3164)
-    # or, under an agent key, refuses FORK_PAT_REQUIRED.
+    # No PAT over MCP: the backend spends the caller's saved token (#3164)
+    # only for a signed-in session, so under any key it refuses
+    # FORK_PAT_REQUIRED (trinity-enterprise#719).
     assert cfg.fork_to_own.github_pat is None
     assert cfg.fork_to_own.private is True
 
@@ -42,8 +43,8 @@ def test_the_mcp_fork_body_survives_agent_config():
 def test_the_agent_key_refusal_names_a_remedy_that_works_over_mcp():
     """MCP drops `github_pat`, so a refusal telling an agent to pass one sends
     it round the same refusal with a token in its transcript."""
-    from services.agent_service.fork_to_own import saved_token_not_for_agents
-    refusal = saved_token_not_for_agents()
+    from services.agent_service.fork_to_own import saved_token_needs_a_session
+    refusal = saved_token_needs_a_session()
     assert refusal.detail["code"] == "FORK_PAT_REQUIRED"
     assert "Pass fork_to_own.github_pat" not in refusal.detail["error"]
     assert "owner" in refusal.detail["error"]

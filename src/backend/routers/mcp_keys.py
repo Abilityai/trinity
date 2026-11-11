@@ -21,6 +21,7 @@ from dependencies import (
     require_interactive,
     require_person,
 )
+from services import live_connections
 from services.platform_audit_service import platform_audit_service, AuditEventType
 
 logger = logging.getLogger(__name__)
@@ -234,6 +235,11 @@ async def revoke_mcp_api_key_endpoint(
     if not success:
         raise HTTPException(status_code=404, detail="MCP API key not found")
 
+    # abilityai/trinity-enterprise#863: close the event streams opened with this
+    # key, on every worker. Keyed on the key, not the caller: the owner's other
+    # connections stay open, and an admin revoking someone else's key reaches it.
+    live_connections.notify_key_changed(key_id)
+
     await platform_audit_service.log(
         event_type=AuditEventType.MCP_OPERATION,
         event_action="key_revoke",
@@ -265,6 +271,9 @@ async def delete_mcp_api_key_endpoint(
 
     if not success:
         raise HTTPException(status_code=404, detail="MCP API key not found")
+
+    # abilityai/trinity-enterprise#863: same as revoke above.
+    live_connections.notify_key_changed(key_id)
 
     await platform_audit_service.log(
         event_type=AuditEventType.MCP_OPERATION,

@@ -14,7 +14,7 @@ the engine is resolved via ``db/engine.py``. The public API of
 import secrets
 import hashlib
 from datetime import datetime
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Set
 
 from sqlalchemy import select, insert, update, delete
 
@@ -294,6 +294,20 @@ class McpKeyOperations:
         with get_engine().connect() as conn:
             row = conn.execute(stmt).first()
         return (row.agent_name or None) if row else None
+
+    def get_keys_active(self, key_ids) -> Set[str]:
+        """The ids among ``key_ids`` whose key exists and is active, in one
+        query (abilityai/trinity-enterprise#863: the live-connection re-check).
+        A revoked or deleted key is absent from the result."""
+        ids = sorted({k for k in key_ids if k})
+        if not ids:
+            return set()
+        stmt = select(mcp_api_keys.c.id).where(
+            mcp_api_keys.c.id.in_(ids),
+            mcp_api_keys.c.is_active == 1,
+        )
+        with get_engine().connect() as conn:
+            return {row[0] for row in conn.execute(stmt)}
 
     def list_active_agent_key_ids(self, agent_name: str) -> List[str]:
         """Ids of the agent's ACTIVE ``scope='agent'`` keys (#1854).

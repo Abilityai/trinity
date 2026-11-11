@@ -348,7 +348,7 @@ VOICE_ENABLED = os.getenv("VOICE_ENABLED", "true").lower() == "true"
 # defends against an empty value from any source. This line is the authoritative
 # source of the default model id — keep compose/.env.example in agreement.
 # (mirrors the GEMINI_API_KEY `or` coalesce above.)
-VOICE_MODEL = os.getenv("VOICE_MODEL") or "models/gemini-3.1-flash-live-preview"
+VOICE_MODEL = os.getenv("VOICE_MODEL") or "models/gemini-3.8-live"
 VOICE_MAX_DURATION = int(os.getenv("VOICE_MAX_DURATION", "300"))  # seconds
 # Workspace voice mode (ent#534): the cap for a call started from the Workspace
 # conversation — 30 min, ruled 2026-09-07 — kept apart from the Agent Detail
