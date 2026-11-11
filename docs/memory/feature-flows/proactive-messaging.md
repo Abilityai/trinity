@@ -58,13 +58,13 @@ Enables agents to send proactive messages to specific users by verified email ac
 │   ┌─────────────────┐       ┌─────────────────┐       ┌─────────────────┐  │
 │   │ Telegram        │       │ Slack           │       │ Web             │  │
 │   │ _deliver_tg()   │       │ _deliver_slack()│       │ _deliver_web()  │  │
-│   │                 │       │                 │       │ (v2 deferred)   │  │
+│   │                 │       │                 │       │ (agent key only)│  │
 │   └────────┬────────┘       └────────┬────────┘       └────────┬────────┘  │
 │            │                         │                         │            │
 │            ▼                         ▼                         ▼            │
 │   ┌─────────────────┐       ┌─────────────────┐       ┌─────────────────┐  │
-│   │ Bot API         │       │ Slack API       │       │ WebSocket +     │  │
-│   │ sendMessage     │       │ chat.postMessage│       │ DB persist      │  │
+│   │ Bot API         │       │ Slack API       │       │ Workspace Main  │  │
+│   │ sendMessage     │       │ chat.postMessage│       │ row (proactive) │  │
 │   └─────────────────┘       └─────────────────┘       └─────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -161,10 +161,26 @@ Max: 10 messages per key
 **Auto mode** tries channels in order:
 1. **Telegram**: Look up `telegram_chat_links` by `verified_email` field
 2. **Slack**: Call `users.lookupByEmail` API in each connected workspace
-3. **Web**: (Deferred to v2 — requires refactoring public_chat)
+3. **Web** (trinity-enterprise#1221): the person's **Workspace** conversation with the agent — one assistant row, `source="proactive"`, in their Main thread. Detailed in [Web delivery](#web-delivery-the-workspace-trinity-enterprise1221) below.
+
+**Every refusal is named.** Each channel raises `RecipientNotFoundError` with a stable `reason` (`telegram_no_bot`, `telegram_not_linked`, `slack_not_connected`, `slack_user_not_found`, `workspace_not_shared`, `workspace_blocked`, `workspace_unverifiable`, `workspace_in_turn`, `web_agent_only`, and `<channel>_blocked` for an owner's channel block). `auto` collects them instead of skipping silently; when every channel refuses, the 404 detail carries the map — `{"code": "role_no_channel", "role": …, "message": …, "channels": {channel: code}}` for a role-addressed send, `{"code": "no_channel", …}` for an email-addressed one. Codes only, never an address. The MCP tool reads that body (`ApiError.body`) before any substring check and returns `code`, `error`, `channels`.
 
 **Explicit-only channels** (not in `auto`):
 - **WhatsApp** (`channel="whatsapp"`, #467): look up `whatsapp_chat_links` by `verified_email`; send via Twilio REST with `_send_message`, chunked to Twilio's 1600-char body limit. Out-of-24h-window messages fail with Twilio error 63016; the failure surfaces in `DeliveryResult.error`.
+
+### Web delivery: the Workspace (trinity-enterprise#1221)
+
+`channel="web"` means the person's Workspace conversation with this agent — the only web conversation keyed by person (a public-link `public_chat` session is keyed by link and has no agent-initiated surface).
+
+- **Who may receive** — the gate scheduled Workspace delivery already used, extracted in `services/schedule_workspace_delivery.py` as `check_workspace_reachable` (Workspace block list, fail closed → `agent_on_roster(..., include_owned=True)`) and `resolve_main_destination` (+ `ensure_main_session`). `resolve_and_stamp` calls the same functions, behaviour unchanged. Consent is unchanged too: `allow_proactive` (or ownership) still gates the send first.
+- **Who may send** — the agent's own key only (`as_agent_key`, set by the route when `current_user.agent_name == agent_name`); any other principal is refused `web_agent_only`, and `auto` skips web for it. Otherwise a person the agent is shared with could place an agent-voiced row in another person's thread.
+- **Not from inside the recipient's own Main turn** — `workspace_in_turn`: that turn's reply is the message.
+- **The write** — `client_portal.db.add_portal_message_once(…, source=PROACTIVE_SOURCE)` (insert + session touch in one transaction). The row id derives from the effect identity (`agent, execution_id, recipient, "web", dedup_label`), so a retry after a post-commit failure — the effect guard releases its claim — writes nothing new. A keyless send gets a uuid. `_persist_outbound` is skipped (`history_written=True`): the Workspace row is the history, and a `public_chat` twin would be a session nobody reads. An intent-key repeat is suppressed with no "Not sent" note (the web result records no `public_chat` session).
+- **Honest status** — the result carries `delivery: "workspace_inbox"`, and the MCP tool adds a note: the person sees it on their next visit; no push, email or WebSocket reaches someone who is away.
+- **Next turn** — the row has a non-NULL `source`, so it reaches the agent's next resumed turn through `get_platform_rows_since_last_reply`, and `_context_lines` renders it as `[You messaged them between turns: …]`, not as a reply. The Workspace UI picks it up on its thread poll; `portalUtils.latestTypedReply` treats only `!source` rows as a turn's answer, so a proactive row landing mid-wait is never shown as the reply.
+- **Known gap** — a proactive row landing while a typed turn on the same Main is still running is older than that turn's reply, so the resumed session's cursor skips it (the cold replay still shows it). Completion rows share the gap.
+
+**Reachability for the prompt** — `reachable_channels(agent_name, email)` answers which channels could deliver now, sync and local-only (Telegram binding + verified link, Slack = any workspace connected, web = `check_workspace_reachable`), built from the same predicates as the send. Only channels `send_message` accepts are probed: WhatsApp is not one (and `auto` never tries it), so a WhatsApp link alone does not count as reachable. The assignment provider reports it on the prompt seam as `proactive_reachable`; with consent but `False`, the Execution Context says no channel reaches the primary instead of "proactive contact permitted". Slack-connected counts as possibly reachable, so the answer can under-claim "impossible", never over-claim.
 
 ### 4. Audit Logging
 
@@ -294,9 +310,21 @@ Response 429:
   "error": "Rate limit exceeded: max 10 messages per hour to this recipient"
 }
 
-Response 404:
+Response 200 (web):
 {
-  "error": "No delivery channel available for recipient"
+  "success": true,
+  "channel": "web",
+  "message_id": "proactive-…",
+  "delivery": "workspace_inbox"   // delivered, but nothing notifies the person
+}
+
+Response 404 (every channel refused):
+{
+  "detail": {
+    "code": "no_channel",          // "role_no_channel" (+ "role") for a `to` send
+    "message": "No delivery channel available for recipient",
+    "channels": {"telegram": "telegram_not_linked", "slack": "slack_not_connected", "web": "workspace_not_shared"}
+  }
 }
 ```
 
@@ -386,7 +414,6 @@ WHERE allow_proactive = 1;
 
 ## Future Work (v2)
 
-- **Web delivery**: Requires refactoring `public_chat` from link_id-based to agent+email-based sessions
 - **Threading**: Support for `reply_to_thread` to continue conversations
 - **Batch sends**: Send to multiple recipients in one call
 - **Delivery receipts**: Track whether messages were read
