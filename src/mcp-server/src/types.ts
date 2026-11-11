@@ -300,6 +300,15 @@ export interface Schedule {
   // ent#498: deliver this schedule's output into that person's Workspace
   // conversation with the agent. Absent = no delivery.
   deliver_to_workspace_email?: string;
+  // #4281: the tier this schedule's runs get, computed live from its creator.
+  // `shared_person` runs have no shell and no owner-added tools; null means
+  // the backend could not compute it (never a guessed "owner").
+  runs_as?: "owner" | "shared_person" | null;
+  runs_as_reason?: { code: string; message: string } | null;
+  created_by_you?: boolean;
+  // The creator's display name, else username: only for the agent's owner
+  // tier and for an agent key that is not acting for a shared person.
+  created_by?: string | null;
 }
 
 export interface ScheduleCreate {
@@ -385,6 +394,11 @@ export interface ScheduleExecution {
   attempt_number?: number;
   retry_of_execution_id?: string;
   retry_scheduled_at?: string;
+  // #4281: turn-tier refusals on a schedule-backed run, counted by the backend
+  // when the run is read. guardrail_reporting null = the count is complete;
+  // both null = not a schedule-backed run.
+  guardrail_refusals?: number | null;
+  guardrail_reporting?: "pending" | "stale" | "never" | "not_claude_code" | "unavailable" | null;
 }
 
 /** The aggregated result a completed `POST /fan-out` returns. */

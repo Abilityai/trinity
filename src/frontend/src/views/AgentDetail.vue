@@ -245,6 +245,7 @@
                 :agent-name="agent.name"
                 :initial-message="schedulePrefillMessage"
                 :autonomy-enabled="!!agent.autonomy_enabled"
+                :owner-tier="!!agent.can_share"
                 @enable-autonomy="toggleAutonomy"
               />
             </div>

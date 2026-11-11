@@ -34,6 +34,7 @@ a mock would have happily accepted the pre-fix signature.
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 import sqlite3
@@ -475,9 +476,12 @@ def _backend_trigger_endpoint() -> str:
     source = (_REPO / "src" / "backend" / "routers" / "schedules.py").read_text(
         encoding="utf-8"
     )
-    marker = "async def trigger_schedule("
-    assert marker in source, "the backend manual-trigger endpoint was renamed"
-    return source[source.index(marker):][:4000]
+    # The whole handler, not a fixed-size prefix: a prefix silently drops the
+    # scheduler POST out of view as soon as the guards in front of it grow.
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "trigger_schedule":
+            return ast.get_source_segment(source, node)
+    raise AssertionError("the backend manual-trigger endpoint was renamed")
 
 
 def test_backend_forwards_the_caller_to_the_scheduler():

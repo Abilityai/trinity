@@ -506,6 +506,7 @@ class TestListReadersCarryTheColumn:
                 turn_integrity TEXT,
                 queued_at TEXT,
                 lease_expires_at TEXT,
+                redelivery_count INTEGER DEFAULT 0,
                 source_channel TEXT,
                 source_channel_chat_id TEXT,
                 loop_id TEXT

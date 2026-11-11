@@ -23,6 +23,7 @@ The Agent Scheduling feature enables users to automate agent tasks by configurin
 - **Make Repeatable** - Create schedule from existing task execution (2026-01-12)
 - **Configurable Timeout** - Per-schedule timeout (5m, 15m, 30m, 1h, 2h) (2026-02-20)
 - **Tool Restrictions** - Per-schedule allowed tools list (null = all tools) (2026-02-20)
+- **Run tier on every read** - each schedule says what access its runs get and why (`runs_as`, `runs_as_reason`, `created_by_you`, `created_by`), computed live from its creator; switching on a shared-person schedule on a Gemini/Codex agent is refused (#4281, see "Run Tier" below)
 
 **Refactored (2025-12-31):**
 - Access control via `AuthorizedAgent` dependency (not inline checks)
@@ -135,6 +136,122 @@ schedules                         validate cron expression          INSERT agent
 - `src/backend/routers/schedules.py:85-113` - create_schedule endpoint
 - `src/backend/db/schedules.py:99-168` - create_schedule() with next_run_at calculation
 - `src/scheduler/service.py:224-316` - _sync_schedules() auto-detects new schedules
+
+### 1a. Run Tier (#4281)
+
+A schedule's runs are rated by its creator (`agent_schedules.owner_id`): an admin or the agent's owner gives owner-tier runs, anyone else a shared person's (no shell, no owner-added tools). Every read says which, computed live:
+
+```
+GET/POST/PUT /api/agents/{name}/schedules[/{id}]      routers/schedules.py
+POST .../enable | .../disable                          _ScheduleView (once per request:
+GET /api/ops/schedules (routers/ops.py)                  viewer tier, "you", RunTierLookups memo)
+        |                                                       |
+        v                                                       v
+turn_tier_service.schedule_read_fields(lookups, agent, schedule, show_creator, viewer_id)
+        -> schedule_run_tier(lookups, agent, schedule) -> RunTier(tier, kind, cause, creator_id)
+             _schedule_tier  (the creator rule; turn_actor reads the same function)
+             schedule_run_cause (total: a failed lookup -> "unknown", the tier stands)
+        -> {runs_as, runs_as_reason{code,message}, created_by_you, created_by}
+```
+
+- `runs_as`: `owner` | `shared_person` | null (the tier lookup failed; never a guessed owner).
+- Causes: `creator_owner_tier`, `no_recorded_creator` (owner); `creator_not_owner_tier`, `creator_missing`, `agent_has_no_owner` (shared person); `unknown`.
+- `created_by` (display name, else username) only for viewer tier owner or key; a share holder, or an agent key acting for one, gets `created_by_you` only.
+- The fleet read preloads the memo with `db.get_agent_owners` + `db.get_users_by_ids` (two queries in all).
+- Create (enabled), `POST .../enable` and a PUT that turns a disabled schedule on: on a Gemini/Codex agent, a shared-person rating is 409 `schedule_cannot_run_for_creator_on_runtime` (`_refuse_if_it_could_never_run`). On Claude Code it is allowed and the response says so. The runtime comes from `docker_utils.agent_runtime_async`, which falls back to Claude Code.
+- The agent's hook reads the same answer at run time: `GET /api/agents/{name}/executions/{id}/turn-tier` adds `cause`, `schedule`, `creator`, `remedy` (`take_over` | `repair_agent_owner`) for a schedule-backed shared turn (`turn_tier_service.turn_tier_answer`).
+
+#### Take-over (#4281 slice D)
+
+The remedy for a creator-caused `shared_person` rating: the agent's owner or an admin becomes the creator.
+
+```
+POST /api/agents/{name}/schedules/{id}/take-over        routers/schedules.py::take_over_schedule
+  dependencies=[require_person]  (agent/system/connector keys, loopback -> 403 person_required)
+  name: OwnedAgent               (owner or admin; uniform 404 — also for an agent whose owner user row is gone)
+  body ScheduleTakeOverRequest {expected_updated_at, reviewed{message, allowed_tools, model,
+                                validation_enabled, validation_prompt}, delivery?, keep_delivery_to?}
+        |
+        v
+services/schedule_take_over_service.take_over(db, agent, schedule, taker, body)
+  taker already creator           -> no-op (200, no audit)
+  schedule_run_tier == owner      -> 409 schedule_not_restricted
+  delivery to someone else (D8)   -> clear | keep + echoed address, else 409 schedule_delivers_to_another_person
+        |
+        v
+db.reassign_schedule_creator (db/schedules/crud.py)
+  _take_over_snapshot -> compare owner_id, updated_at (as an instant), reviewed fields, delivery
+  one UPDATE pinned to that snapshot (IS NOT DISTINCT FROM per column) AND NOT EXISTS
+     an execution in queued/running/pending_retry
+  SET owner_id=taker, webhook columns revoked (_webhook_revoked_values, shared with revoke_webhook_token),
+      delivery NULL when cleared, updated_at=now
+  rowcount 0 -> in_progress (409 schedule_run_in_progress) | changed (409 schedule_changed_since_review)
+        |
+        v
+audit authorization/schedule_taken_over {schedule_id, previous_creator_id, new_creator_id,
+                                         webhook_revoked, delivery_cleared}
+-> ScheduleResponse (runs_as owner)
+```
+
+- **The former creator's in-flight writes**: `update_schedule` and `delete_schedule` add `owner_id = <caller>` for a non-admin; `generate_webhook_token(schedule_id, creator_id=)` adds it when the router allowed the caller at share tier (as creator). A write authorized just before the take-over gets rowcount 0 → 403.
+- **`ScheduleResponse.can_take_over`** (`schedule_take_over_service.can_take_over`): a person at owner tier (`_ScheduleView.owner_tier_person`), not the creator, `runs_as == shared_person` with cause `creator_not_owner_tier` or `creator_missing`.
+- **Run now (D9)**: `trigger_schedule` calls `_refuse_key_run_of_a_shared_persons_schedule` — a non-person principal on a schedule not rated owner → 409 `schedule_runs_as_shared_person` before the scheduler hop. A person's manual run has the person's tier. MCP `trigger_agent_schedule` tells the 409s apart (`schedules.ts::triggerConflictDetail`): the scheduler's running lock (body exactly `{"detail": "Schedule is already executing"}`) → `already_running`; any other 409 → `refused` with the backend's `code` and `message` (test: `src/mcp-server/src/tools/schedules.trigger-conflict.test.ts`). The backend sends that lock detail only when the scheduler's 409 says `status: already_running` (`_scheduler_conflict_body`); any other scheduler 409 is relayed as `{code, message}`, `code` defaulting to `scheduler_conflict`.
+- **Not yet wired**: slice C's `schedule_tier_alerts.sync(agent, creator_id)` is to be called after a successful take-over for the previous creator and for the taker (hand-off; whichever of C/D lands second adds it).
+- Tests: `tests/unit/test_4281_schedule_take_over.py`.
+
+**A restricted run says so, and the operator is told once per creator (slice C):**
+
+```
+apply_result / pull apply_task_result      (task_execution_service.py, pull_coordination_service.py)
+   -> schedule_tier_alerts.run_restriction(db, agent, execution)
+        turn_tier_service.schedule_backed_run_tier -> RunTier   (None: not schedule-backed)
+   -> turn_integrity.restricted_turn = {tier, kind, cause, schedule_id, creator_id, shell:false}
+   -> (CAS won) schedule_tier_alerts.after_run -> sync(agent, creator_id)
+
+create | PUT | enable | disable | delete    (routers/schedules.py, after the write)
+admin pause | resume                        (routers/ops.py)
+emergency stop                              (services/fleet_ops_service.py)
+POST /api/internal/execute-task             (routers/internal.py, at_dispatch, off the loop)
+   -> schedule_tier_alerts.sync(agent, creator_id)
+        creator's LIVE enabled schedules on the agent, rated with schedule_run_tier
+        any shared person -> platform_alerts.observe(agent, "schedule_runs_restricted", creator_id)
+        none              -> platform_alerts.clear(...)
+```
+
+- One row per agent × creator: subject `schedule_runs_restricted:<creator id>`, id prefix `schedule-restricted-`, priority `medium`, 30-day net lifetime. Context: `cause`, `remedy`, `creator_id`, `schedule_ids` (≤20), `schedule_count`. The text names the creator (display name, else username), the cause, the remedy and up to 5 schedules.
+- A person's ending is final for that cause (`person_ending_is_final`, material key `cause`); a new cause files again.
+- The prefix is reserved, about-a-person and owner-only: the agent's owner tier sees it, a share holder and machine keys do not.
+- A schedule that cannot be read mid-run (deleted) is stamped `schedule_unreadable` with no creator and files no row.
+- Take-over (slice D) calls `schedule_tier_alerts.sync` for the former and the new creator after its write.
+
+#### On the Schedules tab (#4281 slice F)
+
+```
+AgentDetail.vue  <SchedulesPanel :owner-tier="!!agent.can_share">
+SchedulesPanel.vue
+  row: utils/scheduleRunTier.js::runTierView(schedule)    runs_as shared_person only (owner/null -> nothing)
+       -> BaseBadge "Runs without shell" + runs_as_reason.message
+       -> "Created by {created_by}" | "You created this schedule" (created_by_you) | none
+       -> [Take over] when schedule.can_take_over === true
+  Take over -> openTakeOver(schedule): a COPY of the read, so a refetch cannot change what is sent
+       -> stores/schedules.js::fetchWebhookStatus   (live | none | failed, all said in the review)
+       -> ScheduleTakeOverDialog.vue (BaseModal): full prompt, tools, model, validation + prompt,
+          Workspace delivery (another person's -> clear (default) | keep), webhook, what changes
+       -> confirm: utils/scheduleRunTier.js::takeOverBody(copy, {viewerEmail, delivery})
+       -> stores/schedules.js::takeOver -> POST .../take-over (shared api client)
+          200 -> close, reload list
+          409/404 -> takeOverRefusalText(code) in the dialog; changed_since_review / not_restricted /
+                 delivers_to_another_person (decided before the version, so a delivery added after
+                 the open arrives as this code) / schedule_not_found reload the list and show the
+                 current version (confirm disabled if nothing to adopt, or if the reload fails)
+  Run now -> requestRun: warnsOnRunNow(schedule, ownerTier) -> ConfirmDialog "this one run has your access" (D9)
+  create dialog: !ownerTier -> the share-holder notice; a named refusal on save shows detail.message
+  history row / execution modal: RestrictedRunMarker (badge / line) from exec.turn_integrity.restricted_turn
+```
+
+- `TasksPanel.vue` rows and `ExecutionDetail.vue` carry the same marker (`task-run-restricted`, `execution-restricted-line`).
+- Slice E's `guardrail_refusals` / `guardrail_reporting` are not rendered yet (follow-up).
+- Tests: `src/frontend/tests/unit/scheduleRunTier4281.spec.js`, `schedulesPanelRunTier4281.mount.spec.js`, `restrictedRunMarker4281.mount.spec.js`.
 
 ### 1b. Make Repeatable Flow (Create Schedule from Task)
 

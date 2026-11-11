@@ -30,7 +30,8 @@ from services.task_execution_service import get_task_execution_service
 from services.skill_gate_errors import SkillGateError
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services import (
-    heartbeat_service, idempotency_service, schedule_seat_memory, schedule_workspace_delivery,
+    heartbeat_service, idempotency_service, schedule_seat_memory, schedule_tier_alerts,
+    schedule_workspace_delivery,
 )
 from services.runtime_secret_scrub import get_staged_values, scrub_text
 from utils.credential_sanitizer import redact_url_userinfo, sanitize_text
@@ -435,6 +436,14 @@ async def execute_task_internal(
             "idempotent_replay": True,
         }
     idempotency_service.attach_execution(idem, request.execution_id)
+
+    # #4281: every schedule-backed run passes here, whatever terminal path it
+    # takes later (the watchdog and the scheduler's own failure writers never
+    # reach `apply_result`), so a schedule that came to run as a shared person
+    # after it was created is raised on its next run. Off the event loop: it
+    # reads the creator's schedules and rates them. Never raises.
+    await asyncio.to_thread(
+        schedule_tier_alerts.at_dispatch, request.agent_name, request.execution_id)
 
     # Audit schedule-triggered execution (source=scheduler, actor=system)
     if request.triggered_by == "schedule":

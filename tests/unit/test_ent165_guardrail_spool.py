@@ -493,7 +493,8 @@ def _turn(hook, monkeypatch, tool, tool_input, *, tier, shell=False, kind=None):
             else {"AGENT_NAME": "agent-a", "TRINITY_MCP_API_KEY": "k"}
         ),
     )
-    monkeypatch.setattr(hook, "ask_turn", lambda c, a, r: (tier, shell, kind))
+    # (tier, shell, kind, schedule): trinity#4281 B added the schedule detail.
+    monkeypatch.setattr(hook, "ask_turn", lambda c, a, r: (tier, shell, kind, None))
     monkeypatch.setattr(hook, "ask_tier", lambda c, a, r: tier)
     # The image's /home/developer, whatever the host does with /home (macOS
     # resolves it under /System/Volumes/Data).

@@ -10,6 +10,39 @@ import type { McpAuthContext } from "../types.js";
 import { accessDenied } from "../access.js";
 
 /**
+ * #4281: the `detail` the backend's trigger route sends on its running-lock 409
+ * (`routers/schedules.py::trigger_schedule`, #1968). The lock is exactly
+ * `{"detail": "<this>"}`; the same words in any other shape are not it. If the
+ * backend ever rewords it, the lock degrades to a refusal that still carries
+ * the backend's text, never to "poll for a run" on a refusal.
+ */
+const RUNNING_LOCK_DETAIL = "Schedule is already executing";
+
+/**
+ * #4281: a trigger 409's code and message, read defensively (this runs on an
+ * error path). A coded refusal is `detail: {code, message}`; the lock and any
+ * uncoded conflict are a plain string; a body that is not JSON is its own text.
+ */
+function triggerConflictDetail(body: string): { lock: boolean; code: string | null; message: string } {
+  let detail: unknown;
+  try {
+    detail = (JSON.parse(body) as { detail?: unknown })?.detail;
+  } catch {
+    return { lock: false, code: null, message: body };
+  }
+  if (typeof detail === "string") {
+    return { lock: detail === RUNNING_LOCK_DETAIL, code: null, message: detail };
+  }
+  if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+    const d = detail as { code?: unknown; message?: unknown };
+    const code = typeof d.code === "string" && d.code ? d.code : null;
+    const message = typeof d.message === "string" && d.message ? d.message : body;
+    return { lock: false, code, message };
+  }
+  return { lock: false, code: null, message: body };
+}
+
+/**
  * Create schedule management tools with the given client
  * @param client - Base Trinity client (provides base URL, no auth when requireApiKey=true)
  * @param requireApiKey - Whether API key authentication is enabled
@@ -95,6 +128,9 @@ export function createScheduleTools(
       description:
         "List all schedules configured for an agent with their status, last/next execution times. " +
         "Returns schedule details including cron expression, message, enabled status, and timezone. " +
+        "Each schedule also says what access its runs get: `runs_as` is `owner` or `shared_person` (runs with no shell " +
+        "and no owner-added tools, because its creator is not the agent's owner or an admin), with `runs_as_reason` " +
+        "{code, message}; `created_by_you`, and `created_by` (the creator's name) when the caller may see it. " +
         "Access control: agents can only list schedules on self or permitted agents.",
       parameters: z.object({
         agent_name: z.string().describe("Name of the agent to list schedules for"),
@@ -315,6 +351,7 @@ export function createScheduleTools(
       name: "get_agent_schedule",
       description:
         "Get detailed information about a specific schedule including full configuration and execution history timestamps. " +
+        "Includes `runs_as` (`owner` | `shared_person`), `runs_as_reason`, `created_by_you` and, when the caller may see it, `created_by`. " +
         "Access control: agents can only get schedules on self or permitted agents.",
       parameters: z.object({
         agent_name: z.string().describe("Agent name"),
@@ -618,7 +655,10 @@ export function createScheduleTools(
       description:
         "Manually trigger immediate execution of a schedule, regardless of its cron timing. " +
         "Creates an execution record with triggered_by='manual'. The execution goes through the standard queue. " +
-        "Access control: agents can trigger schedules on self or permitted agents.",
+        "Access control: agents can trigger schedules on self or permitted agents. " +
+        "Returns status 'already_running' when a run of this schedule is in flight, or " +
+        "'refused' with the backend's code and message on any other 409 conflict " +
+        "(e.g. schedule_runs_as_shared_person: a key cannot run a shared person's schedule); no run was started.",
       parameters: z.object({
         agent_name: z.string().describe("Agent name"),
         schedule_id: z.string().describe("Schedule ID to trigger"),
@@ -663,15 +703,31 @@ export function createScheduleTools(
           // raw ApiError would hand the calling agent a stack-shaped string it
           // has to parse; a structured status lets it decide to wait and poll
           // instead of retrying into the same lock.
+          // #4281: only the running-lock 409 means that. Any other 409 (the
+          // backend's `schedule_runs_as_shared_person`, or a later one) is a
+          // refusal: no run exists, so "poll for it" would send the agent after
+          // nothing and hide that it was refused.
           if (error instanceof ApiError && error.status === 409) {
-            console.log(`[trigger_agent_schedule] Schedule '${schedule_id}' is already executing`);
+            const conflict = triggerConflictDetail(error.body);
+            if (conflict.lock) {
+              console.log(`[trigger_agent_schedule] Schedule '${schedule_id}' is already executing`);
+              return JSON.stringify({
+                status: "already_running",
+                schedule_id,
+                agent_name,
+                message:
+                  "This schedule is already executing, so no new run was started. " +
+                  "Poll list_recent_executions for the run in flight.",
+              }, null, 2);
+            }
+            console.log(`[trigger_agent_schedule] Refused for schedule '${schedule_id}': ${conflict.code ?? "uncoded 409"}`);
             return JSON.stringify({
-              status: "already_running",
+              status: "refused",
               schedule_id,
               agent_name,
-              message:
-                "This schedule is already executing, so no new run was started. " +
-                "Poll list_recent_executions for the run in flight.",
+              code: conflict.code,
+              message: conflict.message,
+              retryable: false,
             }, null, 2);
           }
           // #2973: a chain-depth refusal is a result to stop on, not an error.
@@ -714,6 +770,8 @@ export function createScheduleTools(
       description:
         "Get execution history for a specific schedule or all schedules on an agent. " +
         "Returns status, timing, cost, and context usage for each execution. " +
+        "A scheduled run also carries guardrail_refusals (tool calls the turn-tier guard refused; null = unknown) " +
+        "and guardrail_reporting (null = the count is complete; otherwise pending, stale, never, not_claude_code or unavailable). " +
         "Access control: agents can only view executions on self or permitted agents.",
       parameters: z.object({
         agent_name: z.string().describe("Agent name"),

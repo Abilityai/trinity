@@ -246,6 +246,8 @@
                   :self-approved="!!task.gate_self_approved"
                   :by-viewer="!!task.gate_self_approved_by_viewer"
                 />
+                <!-- #4281: a schedule run that did not have owner tier. -->
+                <RestrictedRunMarker :turn-integrity="task.turn_integrity" testid="task-run-restricted" />
                 <!-- Time -->
                 <span class="text-xs text-gray-500 dark:text-gray-400">
                   {{ formatRelativeTime(task.started_at) }}
@@ -566,6 +568,7 @@ import ModelSelector from './ModelSelector.vue'
 import LoadFailed from './LoadFailed.vue'
 import OwnRowsNote from './OwnRowsNote.vue'  // trinity-enterprise#875
 import ExecutionGateMarker from './skills/ExecutionGateMarker.vue'  // trinity-enterprise#754
+import RestrictedRunMarker from './RestrictedRunMarker.vue'  // #4281
 import { apiErrorMessage } from '../utils/apiError'
 import { isGateRefusal, pendingApprovalMessage } from '../utils/skillGate'
 
