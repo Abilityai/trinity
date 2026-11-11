@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent1221_web_delivery.py",
+      "feature": "trinity-enterprise#1221",
+      "added": "2026-11-11",
+      "categories": [
+        "backend",
+        "proactive-messaging",
+        "client-portal"
+      ],
+      "description": "trinity-enterprise#1221: send_message(channel=web) lands one source=proactive row in the person's Workspace Main through the scheduled-delivery reachability gate (agent's own key only, never in the recipient's own Main turn, deterministic id); every channel refusal carries a named code; reachable_channels agrees with the send."
+    },
+    {
       "file": "unit/test_ent863_socket_door_account_state.py",
       "feature": "trinity-enterprise#863",
       "added": "2026-11-08",
