@@ -366,13 +366,17 @@ def build_chat_payload(
     # #4442: a turn that names no model runs on the agent's own model, resolved
     # here as on every other backend path, so a restarted agent (back on its env
     # model) and the turns the platform starts agree, and the row records it.
-    # On a failure the model is left to the agent, as before.
+    # Only the agent's own accepted stored value is sent: when nothing is stored,
+    # or the stored value is outside the catalog, the agent keeps its own model
+    # rather than being moved to the platform default. On a failure the model is
+    # left to the agent, as before.
     model = request.model
     if not model:
         try:
-            from services.agent_model_service import resolve_default_model
+            from services.agent_model_service import SOURCE_AGENT, resolve_default_model
 
-            model = resolve_default_model(name, runtime=agent_runtime).model
+            resolved = resolve_default_model(name, runtime=agent_runtime)
+            model = resolved.model if resolved.source == SOURCE_AGENT else None
         except Exception as e:  # noqa: BLE001
             logger.warning(f"[Chat] model resolution failed for {name}: {type(e).__name__}")
             model = None

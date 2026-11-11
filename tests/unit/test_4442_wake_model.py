@@ -542,6 +542,20 @@ def test_push_chat_naming_a_model_keeps_it():
     fake_db.stamp_model_used_if_null.assert_called_once_with("exec-4442", "haiku")
 
 
+def test_push_chat_leaves_a_stored_model_outside_the_catalog_to_the_agent():
+    # Settings accepts any claude-* id the agent takes; the catalog is narrower.
+    # Sending the platform default here would move chat off the agent's pick.
+    payload, fake_db = _payload(None, "claude-sonnet-4-6[1m]")
+    assert "model" not in payload
+    fake_db.stamp_model_used_if_null.assert_not_called()
+
+
+def test_push_chat_with_no_stored_model_leaves_the_model_to_the_agent():
+    payload, fake_db = _payload(None, None)
+    assert "model" not in payload
+    fake_db.stamp_model_used_if_null.assert_not_called()
+
+
 def test_push_chat_on_a_non_claude_agent_names_no_model():
     payload, fake_db = _payload(None, OWN, runtime="codex")
     assert "model" not in payload
