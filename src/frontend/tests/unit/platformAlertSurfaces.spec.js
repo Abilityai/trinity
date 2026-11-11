@@ -196,3 +196,92 @@ describe('/m (mounted)', () => {
     expect(ended.map((c) => c.text()).join(' ')).toContain('Ended by the platform — the condition cleared')
   })
 })
+
+// #4139 — since #4016 the sync-health kinds keep their own row type
+// (`sync_failing`, `sync_diverged`, `git_bloat`). They are still platform
+// alerts: one row per `subject`, re-read in place, so the seen line and the
+// alert's expiry wording follow the subject, not `type === 'alert'`.
+describe('platform alerts with their own row type (#4139)', () => {
+  const syncRow = (over = {}) => alertRow({
+    id: 's1', type: 'sync_failing', subject: 'sync_failing:agent-a',
+    title: 'Sync failing', question: 'git push failed 3 times', ...over,
+  })
+
+  it('a re-read sync_failing row shows its seen line', () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const w = mount(QueueCard, {
+      props: { item: syncRow({ context: { seen_count: 3 }, last_seen_at: new Date().toISOString() }) },
+      global: { plugins: [pinia], stubs: { AgentAvatar: true } },
+    })
+    expect(w.find('[data-testid="queue-seen-line"]').text()).toBe('seen 3 times · last seen just now')
+  })
+
+  it('an expired sync_failing row says nobody acted on it', () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const w = mount(ResolvedCard, {
+      props: { item: syncRow({ status: 'expired', disposition: 'expired', disposed_by: 'timeout', disposed_at: ENDED }) },
+      global: { plugins: [pinia], stubs: { AgentAvatar: true } },
+    })
+    expect(w.find('[data-testid="queue-ending"]').text()).toBe('Expired — nobody acted on it')
+  })
+
+  it('QueueItemDetail: a re-read sync_failing row shows its seen line, an expired one says nobody acted on it', async () => {
+    const store = reactive({ selectedItem: null, selectedItemId: null })
+    vi.resetModules()
+    vi.doMock('@/stores/operatorQueue', () => ({ useOperatorQueueStore: () => store }))
+    vi.doMock('@/stores/agents', () => ({ useAgentsStore: () => ({ agents: [], agentRefForSlug: (name) => ({ name }) }) }))
+    try {
+      const { default: QueueItemDetail } = await import('@/components/operator/QueueItemDetail.vue')
+      store.selectedItem = syncRow({ context: { seen_count: 3 }, last_seen_at: new Date().toISOString() })
+      store.selectedItemId = 's1'
+      const live = mount(QueueItemDetail)
+      expect(live.find('[data-testid="queue-seen-line"]').text()).toBe('seen 3 times · last seen just now')
+      store.selectedItem = syncRow({ id: 's2', status: 'expired', disposition: 'expired', disposed_by: 'timeout', disposed_at: ENDED })
+      store.selectedItemId = 's2'
+      const ended = mount(QueueItemDetail)
+      expect(ended.find('[data-testid="queue-detail-ending"]').text()).toContain('Expired — nobody acted on it')
+    } finally {
+      vi.doUnmock('@/stores/operatorQueue')
+      vi.doUnmock('@/stores/agents')
+    }
+  })
+
+  it('/m: a re-read sync_failing row shows its seen line, an expired one says nobody acted on it', async () => {
+    vi.clearAllMocks()
+    const items = [
+      syncRow({ id: 'live', context: { seen_count: 4 }, last_seen_at: new Date().toISOString() }),
+      syncRow({ id: 'gone', status: 'expired', disposition: 'expired', disposed_by: 'timeout', disposed_at: ENDED }),
+    ]
+    http.get.mockImplementation((url) => {
+      if (url === '/api/operator-queue') return Promise.resolve({ data: { items, count: items.length } })
+      if (url === '/api/notifications') return Promise.resolve({ data: { items: [], count: 0 } })
+      return Promise.reject(new Error(`unexpected ${url}`))
+    })
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    useAuthStore().isAuthenticated = true
+    const w = mount(MobileAdmin, { global: { plugins: [pinia], stubs: { LoadFailed: true, InlineError: true } } })
+    try {
+      await flushPromises()
+      expect(w.find('[data-testid="queue-seen-line"]').text()).toBe('seen 4 times · last seen just now')
+      const ended = w.find('[data-testid="queue-recently-ended"]').findAll('[data-testid="queue-ended-card"]')
+      expect(ended.map((c) => c.text()).join(' ')).toContain('Expired — nobody acted on it')
+    } finally {
+      w.unmount()
+    }
+  })
+
+  it.each(['sync_diverged', 'git_bloat', 'queue_flood'])('%s follows the same rule', (type) => {
+    const row = syncRow({ type, subject: `${type}:agent-a`, context: { seen_count: 2 } })
+    expect(queueSeenLine(row, NOW)).toBe('seen 2 times')
+    expect(queueEnding({ ...row, status: 'expired', disposition: 'expired' }).alert).toBe(true)
+  })
+
+  it('a row with no subject keeps the ask wording', () => {
+    const ask = { type: 'question', status: 'expired', disposition: 'expired', context: { seen_count: 2 } }
+    expect(queueEndingText(queueEnding(ask))).toBe('Expired — nobody answered in time')
+    expect(queueSeenLine({ ...ask, status: 'pending' }, NOW)).toBe('')
+  })
+})
