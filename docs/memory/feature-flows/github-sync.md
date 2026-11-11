@@ -1191,6 +1191,8 @@ When a pull operation fails due to local changes conflicting with remote:
 | `stash_reapply` | Stash local changes, pull, reapply stash | When you want to keep local changes |
 | `force_reset` | Hard reset to remote, discard all local changes | When remote is source of truth |
 
+**A pinned agent is never pulled (trinity#4470).** An agent created from `github:owner/repo@<tag>` runs on a detached HEAD (trinity#4165). Every strategy above is refused `400` on it — "pinned to a tag or commit … Nothing was changed" — before anything is fetched, so `force_reset` cannot discard a pinned workspace. The automatic cycle records the same condition as a named skip. A detached HEAD left by a rebase that stopped part-way is not a pin and keeps the conflict handling. Moving a pinned agent to another ref is a recreate. `agent_server/routers/git.py::pull_from_github`; `tests/unit/test_4470_manual_pull_pinned_tag.py`.
+
 ### Sync (Push) Conflict Strategies
 
 When a push operation fails because remote has newer changes:

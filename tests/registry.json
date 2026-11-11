@@ -9062,6 +9062,17 @@
         "api"
       ],
       "description": "ent#1202: agent_ownership.default_model (nullable, dual-track migration 0123) and the one resolver: explicit > public-channel override > the agent's own model when the catalog/alias allowlist passes it > platform default; non-Claude runtimes resolve to None; an unrunnable stored value is skipped by name; fail-open except the strict a2a pre-create. execute_task runs and stamps the own model, fills a pre-created row's blank model_used only, never restamps an explicit model. Portal ladder/label, a2a pre-create and the GET /model additive fields read the same resolver."
+    },
+    {
+      "file": "unit/test_4470_manual_pull_pinned_tag.py",
+      "feature": "trinity#4470",
+      "added": "2026-11-11",
+      "categories": [
+        "unit",
+        "agent-server",
+        "git"
+      ],
+      "description": "trinity#4470: a manual Pull (POST /api/git/pull) on an agent cloned -b <tag> or detached at a commit is refused 400 for clean, stash_reapply and force_reset, before any fetch; HEAD, edited files, untracked files and the stash are untouched. An agent on a branch still pulls; a detached HEAD from a stopped rebase, or a symbolic-ref error, is not answered as pinned."
     }
   ]
 }
