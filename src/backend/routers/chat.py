@@ -840,9 +840,17 @@ async def set_agent_model(
     # ent#875: the model is the agent's for every user — owner tier. An agent key
     # keeps its `agents.manage` capability fence on the route decorator.
     name: str = Depends(get_owned_agent),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
+    http_request: Request = None,
 ):
-    """Set agent's model for subsequent messages."""
+    """Set agent's model for subsequent messages.
+
+    #4442: on a Claude Code agent the value the agent accepted is also stored
+    as its own model (``default_model``), so the turns the platform starts
+    (wakes, ask endings, events, unpinned reminders and schedules) run on it
+    too, and it survives a restart. The agent stays the judge of the value
+    (#3677); the resolver re-checks it on every read.
+    """
     container = get_agent_container(name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -861,10 +869,44 @@ async def set_agent_model(
                 timeout=10.0
             )
             response.raise_for_status()
-
-            return response.json()
+            body = response.json()
     except httpx.HTTPError as e:
         _raise_model_route_error(name, e, "Failed to set model", "set model")
+
+    try:
+        runtime = (container.labels or {}).get("trinity.agent-runtime") or "claude-code"
+    except Exception:  # noqa: BLE001
+        runtime = "claude-code"
+    if runtime != "claude-code":
+        return body  # a non-Claude agent runs on its own model (ent#1202)
+    model = (request.model or "").strip() or None
+    try:
+        saved = await asyncio.to_thread(db.set_default_model, name, model)
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger("trinity.errors").error(
+            f"Model of {name} set on the agent but not saved: {type(e).__name__}")
+        saved = False
+    if not saved:
+        raise HTTPException(status_code=500, detail={
+            "error": "model_not_saved",
+            "message": (f"The agent now runs {model} for chat, but it was not saved, so "
+                        "the turns the platform starts still run on the previous model "
+                        "and a restart loses it. Set it again."),
+        })
+    await platform_audit_service.log(
+        event_type=AuditEventType.CONFIGURATION,
+        event_action="update_agent_model",
+        source="api",
+        actor_user=current_user,
+        actor_ip=(http_request.client.host
+                  if http_request is not None and http_request.client else None),
+        target_type="agent",
+        target_id=name,
+        endpoint=http_request.scope["path"] if http_request is not None else None,
+        request_id=getattr(getattr(http_request, "state", None), "request_id", None),
+        details={"default_model": model},
+    )
+    return body
 
 
 def _raise_model_route_error(name: str, e: httpx.HTTPError, unavailable: str, action: str):
