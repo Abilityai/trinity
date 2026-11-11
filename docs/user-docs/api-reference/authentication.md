@@ -116,7 +116,7 @@ Every MCP key carries a scope. The scope is fixed at creation and decides what t
 
 | Scope | What it can reach | How it is created |
 |-------|-------------------|-------------------|
-| `user` | **The owner's full role**, including admin. Every write, every MCP tool. Never expires. | Any user, for themselves — **Settings → MCP Keys → Create API Key** (the default; admins see it as the **Standard** choice under **Key scope**) |
+| `user` | **The owner's full role**, including admin, as a person. Every write except those that take a signed-in session, such as binding a credential or creating and listing keys (below); MCP lists every operator tool to it except the ones whose route takes a signed-in session. Never expires. | Any user, for themselves — **Settings → MCP Keys → Create API Key** (the default; admins see it as the **Standard** choice under **Key scope**) |
 | `agent` | Its own agent (heartbeats, reports, result callbacks), the agents it is permitted to call, and the agents it spawned — see [What an agent key reaches](#what-an-agent-key-reaches). **Never satisfies an admin gate.** | Minted automatically when an agent is created and injected into the container |
 | `system` | The platform's own system agent; bypasses agent permission checks | Minted for `trinity-system` only |
 | `connector` | Consumption-only, bound to one agent: its exposed skills and chat, nothing else | Minted from the agent's **Expose via MCP** panel (`POST /api/agents/{name}/connector/key`, owner only); the secret is shown once |
