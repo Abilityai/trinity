@@ -1157,6 +1157,13 @@ class DatabaseManager:
     def update_user_role(self, username: str, role: str):
         return self._user_ops.update_user_role(username, role)
 
+    # abilityai/trinity-enterprise#863 — the live-connection re-check's batched reads
+    def get_users_access_state(self, usernames):
+        return self._user_ops.get_users_access_state(usernames)
+
+    def get_keys_active(self, key_ids):
+        return self._mcp_key_ops.get_keys_active(key_ids)
+
     # --- Per-user GitHub PAT (ent#162) ---
 
     def get_user_github_pat(self, user_id: int):
