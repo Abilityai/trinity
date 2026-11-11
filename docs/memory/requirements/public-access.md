@@ -709,7 +709,8 @@
     → 200, `env_removed: false`, the file left exactly as it is and an
     `env_note` starting `env_unreadable` (trinity-enterprise#1073).
   - **MCP**: `get_agent_spending` (GET pass-through) and
-    `revoke_agent_delegation` (DELETE; advertised to `user`/`system` keys only).
+    `revoke_agent_delegation` (DELETE; advertised to `user` keys only, the one
+    key scope `require_person` admits — trinity-enterprise#719).
 - **FR-4 Errors** are `{"detail": {"code", "message"}}` so the panel (ent#967)
   branches on `code`. Secrets, the session token, the agent's `.env` and any
   upstream body never appear in a response or a log line.

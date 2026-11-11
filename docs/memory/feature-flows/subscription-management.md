@@ -121,8 +121,8 @@ create_agent_internal()
 | **Settings Page: Delete Button** | `DELETE /api/subscriptions/{id}` | Delete with cascade confirmation |
 | MCP Tool: `register_subscription` | `POST /api/subscriptions` | Register new subscription — the SAME endpoint, so the #2572 sweep fires here too |
 | MCP Tool: `list_subscriptions` | `GET /api/subscriptions` | List all subscriptions with agents |
-| MCP Tool: `assign_subscription` | `PUT /api/subscriptions/agents/{agent_name}` | Assign subscription to agent |
-| MCP Tool: `clear_agent_subscription` | `DELETE /api/subscriptions/agents/{agent_name}` | Clear subscription from agent |
+| MCP Tool: `assign_subscription` | `PUT /api/subscriptions/agents/{agent_name}` | Assign subscription to agent. The route takes a signed-in session, so the tool is listed to no MCP key (trinity-enterprise#719) |
+| MCP Tool: `clear_agent_subscription` | `DELETE /api/subscriptions/agents/{agent_name}` | Clear subscription from agent. Listed to a person's own user-scoped key only (trinity-enterprise#719) |
 | MCP Tool: `get_agent_auth` | `GET /api/subscriptions/agents/{agent_name}/auth` | Get agent auth status |
 | MCP Tool: `delete_subscription` | `DELETE /api/subscriptions/{subscription_id}` | Delete subscription |
 | Fleet Dashboard | `GET /api/ops/auth-report` | Fleet-wide auth status report |

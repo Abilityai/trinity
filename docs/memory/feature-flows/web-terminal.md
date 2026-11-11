@@ -445,6 +445,18 @@ finally:
             logger.info(f"Terminal session ended for {user_email}@{agent_name} (duration: {session_duration:.1f}s)")
 ```
 
+### Access changes (abilityai/trinity-enterprise#863)
+
+Both terminal doors follow the account they were opened for, through the worker's live-connection registry (`services/live_connections.py`, mechanism in `architecture/integrations.md` → Real-time Delivery). The shared helper is `TerminalAccess` in `services/agent_service/terminal.py`; `routers/system_agent.py` imports it.
+
+1. **Register.** Right after the access checks pass (decode, floor, owner/admin), in the same synchronous step as the account read, the door creates `TerminalAccess(websocket, door, user)`. Its snapshot takes the role and email from the decoded identity the door authorized on, and the rest from a read of the row just after. Doors: `agent_terminal`, `system_agent_terminal`.
+2. **Start.** The shell starts with `TRINITY_TERMINAL_SESSION=<random id>` in its environment (`shell_env`). After `api_exec_start` returns, the door calls `go_live()`. If a re-check decided to close while the start was running, the door closes the socket it got and sends the access-close frame instead of `auth_success`. The start is never cancelled: it runs in a Docker executor thread that a cancel would not stop.
+3. **Serve.** The two forwarders run as tasks the session owns (`forward`). The browser forwarder stops at the next message once the session is revoked.
+4. **Close.** The closer sends `{"type": "error", "message": ..., "close": true}`, closes with `4003`, and cancels the two forwarder tasks. It never cancels the handler's task, so the handler returns through its `finally`: the container socket is closed, the session slot is freed, and the entry is released (`finish`).
+5. **End the shell.** A session closed for an access change (and only such a session) also has its shell ended: `finish` runs one exec as `developer` (`END_SHELL_TIMEOUT_S` = 10 s) that ends, HUP first and then KILL, the processes started from that terminal session (found by its marker; `_END_SHELL_SCRIPT`). Best effort: a failure is logged as a warning. An ordinary close by the browser ends nothing, as before.
+
+The re-check runs at once on the worker that served a role change, and on every worker every 15 s.
+
 ---
 
 ## Error Handling
@@ -453,7 +465,7 @@ finally:
 |------------|----------------|---------|
 | Missing auth message | 4001 | "Expected auth message first" |
 | Missing token | 4001 | "Token required" |
-| Invalid token | 4001 | "Invalid token" |
+| Invalid token, or the account is missing or deactivated (`decode_token` returns `None`; abilityai/trinity-enterprise#863). Refused before any container lookup | 4001 | "Invalid token" |
 | Access denied | 4003 | "You don't have access to this agent" |
 | Admin required (System Agent) | 4003 | "Admin access required" |
 | Auth timeout (10s) | 4001 | "Authentication timeout" |
@@ -461,6 +473,8 @@ finally:
 | Existing session | 4002 | "You already have an active terminal session for this agent" |
 | Container not found | 4004 | "Agent '{name}' container not found" |
 | Container not running | 4004 | "Agent '{name}' is not running. Please start it first." |
+| Access changed while open or opening (#863) | 4003 | "Your access changed. Open the terminal again to continue." |
+| Access ended while open or opening (#863) | 4003 | "Your access to this terminal has ended." |
 
 Frontend error display (AgentTerminal.vue lines 84-89):
 ```vue
@@ -621,6 +635,7 @@ No cleanup required - sessions terminate automatically on disconnect.
 
 | Date | Change |
 |------|--------|
+| 2026-11-08 | **Terminals follow the account** (abilityai/trinity-enterprise#863): both doors register with the live-connection registry, close with an error frame and `4003` when the account's access changes, and end the session's shell. See Side Effects → Access changes. |
 | 2026-02-24 | **Async Docker Operations**: Uses `api_exec_create` and `api_exec_start` from docker_utils.py to prevent event loop blocking (DOCKER-001). |
 | 2026-01-23 | Updated documentation with current line numbers, added model parameter support, documented Gemini CLI mode |
 | 2025-12-28 | Second fix: Replaced broken `add_reader` callback approach with proper asyncio socket coroutines (`sock_recv`/`sock_sendall`) |

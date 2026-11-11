@@ -20,7 +20,7 @@ from typing import Optional, Literal
 from database import db
 from services import channel_history, idempotency_service
 from services.platform_audit_service import platform_audit_service, AuditEventType
-from services.runtime_secret_scrub import get_staged_values, scrub_text
+from services.runtime_secret_scrub import scrub_staged
 from services.settings_service import get_proactive_rate_limit  # #1609
 
 logger = logging.getLogger(__name__)
@@ -375,9 +375,7 @@ class ProactiveMessageService:
         # already scrub-before-send transitively (the applier scrubs before result
         # construction); an agent pasting a fetched vault value into a proactive
         # message adds nothing the operator does not already hold in Settings.
-        _staged = get_staged_values()
-        if _staged:
-            text = scrub_text(_staged, text)
+        text = scrub_staged(text)
 
         # Effect-scoped dedup (#1084): guard at the entry, keyed on the resolved
         # recipient + channel (never the body). A chunked message is ONE effect —
