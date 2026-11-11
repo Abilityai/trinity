@@ -38,7 +38,6 @@ Discipline:
     never write it to a log line.
 """
 import logging
-import os
 import re
 import uuid
 from typing import Dict, Optional
@@ -47,6 +46,7 @@ import httpx
 
 from config import OPERATOR_INTAKE_ENABLED, OPERATOR_INTAKE_URL
 from database import db
+from utils.app_version import resolve_release_version
 from utils.helpers import utc_now_iso
 
 logger = logging.getLogger(__name__)
@@ -216,7 +216,7 @@ async def submit_operator_intake(
             "role": role or None,
             "use_case": use_case or None,
             "consent": "security_and_product_updates",
-            "trinity_version": os.getenv("GIT_COMMIT_SHORT", "unknown"),
+            "trinity_version": resolve_release_version(),
             "submitted_at": submitted_at,
         }
 
