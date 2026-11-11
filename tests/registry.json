@@ -9084,6 +9084,18 @@
         "websocket"
       ],
       "description": "A Workspace-only /ws slot that gains a share mid-connection: an allowed event about the agent is withheld until agent_shared is read and delivered (cut to the Workspace fields) right after; an access change observed while the slot's roster refresh is in flight sets refresh_again and the dispatcher reads once more instead of swallowing it; a quiet refresh reads once."
+    },
+    {
+      "file": "unit/test_4442_wake_model.py",
+      "feature": "#4442",
+      "added": "2026-11-11",
+      "categories": [
+        "backend",
+        "execution",
+        "database",
+        "api"
+      ],
+      "description": "#4442: platform-started turns (wakes, ask endings, events, unpinned reminders/schedules/loops) run on the agent's own model. PUT /model stores what the agent accepted (500 model_not_saved on a failed save, audited, nothing on refusal or a non-Claude agent); create seeds default_model from runtime.model or a top-level model: on the local and github paths (fill-blank, catalog-gated); a boot pass fills NULL columns from AGENT_RUNTIME_MODEL then the live template.yaml (conditional write, one per agent across workers, env never logged); push /chat resolves and stamps the model; per-kind execute_task resolution; pinned models win; AST guard that wake producers pass no model."
     }
   ]
 }
