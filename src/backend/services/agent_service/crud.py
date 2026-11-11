@@ -541,6 +541,68 @@ def _apply_ephemeral_pregates(config: AgentConfig, current_user: User) -> Option
     return ephemeral_expires_at
 
 
+def leftover_workspace_volume_detail(name: str) -> str:
+    """The #1667 refusal text, shared by create's 409 and apply's dry-run
+    blocker (trinity-enterprise#984), so both say the same thing."""
+    volume = f"agent-{name}-workspace"
+    return (
+        f"Data volume '{volume}' already exists and no agent "
+        f"claims it, so its contents would silently become this "
+        f"agent's home directory. Refusing to adopt another agent's "
+        f"leftover data. Remove it (docker volume rm "
+        f"{volume}) or choose a different name. Only volumes this "
+        f"install labelled as its own are reclaimed automatically; one "
+        f"created before that label existed stays until it is removed by "
+        f"hand."  # #3214: the sweep never reclaims an unlabelled volume
+    )
+
+
+async def workspace_volume_exists(name: str) -> bool:
+    """Does `agent-<name>-workspace` exist? (#1667, trinity-enterprise#984)
+
+    `False` on NotFound, `True` when the volume exists, and RAISES on any
+    other error (including no Docker client).
+    """
+    if not docker_client:
+        raise RuntimeError("Docker is not available")
+    try:
+        await volume_get(f"agent-{name}-workspace")
+    except docker.errors.NotFound:
+        return False
+    return True
+
+
+@dataclass(frozen=True)
+class CreateVolumeRefusal:
+    """A volume create refuses to adopt for a name (`create_volume_refusal`)."""
+
+    kind: str    # e.g. "workspace_volume_leftover"; apply's blocker is `member_<kind>`
+    volume: str  # the Docker volume to remove
+    detail: str  # create's 409 text, also apply's blocker detail
+
+
+async def create_volume_refusal(name: str) -> Optional[CreateVolumeRefusal]:
+    """Does create refuse `name` over a leftover volume? None -> it proceeds.
+
+    The one answer both callers use, so they agree by construction
+    (trinity-enterprise#984): create's guard raises it as a 409
+    (`_guard_leftover_workspace_volume`), and apply's snapshot
+    (`system_service.read_apply_snapshot`) refuses the member before its dry
+    run can say `create`. A new create-time volume refusal goes HERE.
+
+    RAISES when it cannot answer (including no Docker client); each caller
+    picks its own policy: create proceeds, apply refuses with a retryable
+    read failure.
+    """
+    if await workspace_volume_exists(name):
+        return CreateVolumeRefusal(
+            kind="workspace_volume_leftover",
+            volume=f"agent-{name}-workspace",
+            detail=leftover_workspace_volume_detail(name),
+        )
+    return None
+
+
 async def _guard_leftover_workspace_volume(
     config: AgentConfig, adopt_existing_workspace: bool
 ) -> None:
@@ -553,29 +615,17 @@ async def _guard_leftover_workspace_volume(
         and not adopt_existing_workspace
         and docker_client
     ):
-        _workspace_vol = f"agent-{config.name}-workspace"
         try:
-            await volume_get(_workspace_vol)
-        except docker.errors.NotFound:
-            pass  # the normal path: no leftover, create it below
+            refusal = await create_volume_refusal(config.name)
         except Exception as e:  # noqa: BLE001 — a probe failure must not block creation
             logger.warning(
                 "[#1667] could not probe workspace volume %s (%s); proceeding",
-                _workspace_vol,
+                f"agent-{config.name}-workspace",
                 e,
             )
-        else:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Data volume '{_workspace_vol}' already exists and no agent "
-                    f"claims it, so its contents would silently become this "
-                    f"agent's home directory. Refusing to adopt another agent's "
-                    f"leftover data. Remove it (docker volume rm "
-                    f"{_workspace_vol}) or choose a different name — unclaimed "
-                    f"agent volumes are also reclaimed automatically."
-                ),
-            )
+            return
+        if refusal is not None:
+            raise HTTPException(status_code=409, detail=refusal.detail)
 
 
 # ent#123: owner/repo charset guard. The repo path is interpolated into
