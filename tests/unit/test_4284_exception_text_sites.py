@@ -768,23 +768,222 @@ def _mapped_status(result) -> int:
     return exc.value.status_code
 
 
-@pytest.mark.parametrize("words, status", [
-    ("Lock Timed Out", 503),
-    ("Read timed out.", 504),
-    ("the agent is at capacity", 429),
-    ("Agent At Capacity", 503),
-    ("", 503),
-], ids=["capitalised-timeout", "timed-out", "at-capacity", "capitalised-capacity", "plain"])
-def test_execute_task_error_keeps_the_status_its_text_had(words, status):
-    """The sync /task mapper, the public, inline-auth and portal chats match
-    "timed out" and "at capacity" case and all. Each answers the class-only
-    error with the status it gave the exception's own text."""
+def _public_status(result) -> int:
+    from services import public_chat_service as pcs
+    with pytest.raises(pcs.PublicChatError) as exc:
+        pcs.raise_for_failed_public_result("test-agent", result)
+    return exc.value.status_code
+
+
+def _mcp_status(monkeypatch, result) -> int:
+    from unittest.mock import MagicMock
+
+    import services.task_execution_service as tes
+    from services import mcp_auth_service as mas
+
+    monkeypatch.setattr(mas, "assert_email_may_reach_agent", lambda *a: {})
+    monkeypatch.setattr(mas, "db", MagicMock(get_public_channel_model=lambda a: None))
+    monkeypatch.setattr(tes, "dispatch_and_await_terminal", AsyncMock(return_value=result))
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(mas.dispatch_chat("u@example.com", "test-agent", "hi"))
+    return exc.value.status_code
+
+
+def _portal_status(monkeypatch, result) -> int:
+    """The REAL `portal_chat` with its boundaries stubbed (test_2320's harness),
+    so the status comes from the portal's own lowercasing match."""
+    from client_portal import db as portal_db
+    from client_portal import service as svc
+    from client_portal import voice as portal_voice
+    from services import session_turn_service as sts
+
+    async def _ready(_name):
+        return "ready"
+
+    async def _no_inbox(*_a):
+        return ([], [], [])
+
+    async def _turn(**_kw):
+        return sts.ResumableTurn(result=result, real_uuid=None)
+
+    for target, name, value in [
+        (svc, "agent_on_roster", lambda *a, **k: True),
+        (portal_voice, "voice_call_active", lambda _sid: False),
+        (svc, "_agent_availability", _ready),
+        (svc, "_resolve_session_id", lambda *a, **k: "sess-4352"),
+        (svc, "_build_portal_system_prompt", lambda *a: None),
+        (svc, "_spawn_title_generation", lambda *a, **k: None),
+        (svc, "_persist_user_turn", lambda *a, **k: None),
+        (svc, "_collect_inbox_for_turn", _no_inbox),
+        (portal_db, "get_portal_session", lambda *a, **k: {"title": "t"}),
+        (portal_db, "get_portal_messages", lambda *a, **k: []),
+        (portal_db, "add_portal_message", lambda *a, **k: None),
+        (portal_db, "touch_portal_session", lambda *a, **k: None),
+        (portal_db, "get_cached_claude_session_id", lambda _sid: None),
+        (portal_db, "update_cached_claude_session_id", lambda *a: None),
+        (sts, "supports_session_resume", lambda _a: True),
+        (sts, "resolve_turn_timeout", lambda _a: 600),
+        (sts, "run_resumable_turn", _turn),
+    ]:
+        monkeypatch.setattr(target, name, value)
+    with pytest.raises(svc.ClientPortalError) as exc:
+        asyncio.run(svc.portal_chat("test-agent", "hello", "bob@example.com", "sess-4352"))
+    return exc.value.status_code
+
+
+def _reader_status(reader: str, monkeypatch, result) -> int:
+    if reader == "task":
+        return _mapped_status(result)
+    if reader == "public":
+        return _public_status(result)
+    if reader == "mcp":
+        return _mcp_status(monkeypatch, result)
+    return _portal_status(monkeypatch, result)
+
+
+def _assert_only_reader_phrases(error: str) -> None:
+    """The error names the class and, at most, reader phrases in one of their
+    two fixed spellings. Nothing else from the exception's text."""
+    from services.task_execution_service import _READER_PHRASES
+    prefix, suffix = "Task execution failed (RuntimeError", " — details in backend logs)"
+    assert error.startswith(prefix) and error.endswith(suffix), error
+    said = error[len(prefix):-len(suffix)]
+    if said:
+        assert said.startswith(": "), error
+        fixed = set(_READER_PHRASES) | {p.title() for p in _READER_PHRASES}
+        for word in said[2:].split(", "):
+            assert word in fixed, f"{word!r} is not a reader phrase: {error!r}"
+
+
+# The sync /task mapper, the public and the inline-auth chats match "timed out"
+# and "at capacity" case and all; the client portal lowercases first.
+_READERS = ["task", "public", "mcp", "portal"]
+_STATUS_BY_WORDS = [
+    # id                      words                                    task public mcp portal
+    ("capitalised-timeout",   "Lock Timed Out",                        503, 502, 502, 504),
+    ("timed-out",             "Read timed out.",                       504, 504, 504, 504),
+    ("both-spellings",        "Lock Timed Out, then read timed out",   504, 504, 504, 504),
+    ("at-capacity",           "the agent is at capacity",              429, 429, 429, 429),
+    ("capitalised-capacity",  "Agent At Capacity",                     503, 502, 502, 429),
+    ("plain",                 "",                                      503, 502, 502, 502),
+]
+
+
+@pytest.mark.parametrize("reader", _READERS)
+@pytest.mark.parametrize(
+    "words, statuses", [(row[1], row[2:]) for row in _STATUS_BY_WORDS],
+    ids=[row[0] for row in _STATUS_BY_WORDS])
+def test_execute_task_error_keeps_the_status_its_text_had(monkeypatch, reader, words, statuses):
+    """Every reader of the execution error answers the class-only error with the
+    status it gave the exception's own text (#4352: a lowercasing reader lost
+    its 504/429 on a mixed-case phrase)."""
+    status = statuses[_READERS.index(reader)]
     exc = RuntimeError(f"{_PLANT} {words}")
     result = _execute_with(exc)
     _assert_answer_clean(result.error, "RuntimeError")
+    _assert_only_reader_phrases(result.error)
     as_text = SimpleNamespace(**{**vars(result), "error": str(exc)})
-    assert _mapped_status(as_text) == status
-    assert _mapped_status(result) == status
+    assert _reader_status(reader, monkeypatch, as_text) == status
+    assert _reader_status(reader, monkeypatch, result) == status
+
+
+def test_execute_task_error_spells_a_phrase_one_fixed_way():
+    """The exception's own letters never reach the error, only a fixed
+    spelling of the phrase (#4284)."""
+    result = _execute_with(RuntimeError(f"{_PLANT} Lock tImEd OuT; Agent AT CAPACITY"))
+    _assert_answer_clean(
+        result.error,
+        "Task execution failed (RuntimeError: Timed Out, At Capacity — details in backend logs)")
+
+
+@pytest.mark.parametrize("reader", _READERS)
+def test_execute_task_error_with_no_text_names_only_the_class(monkeypatch, reader):
+    """An exception that says nothing at all: the class alone, and each reader
+    answers its generic status."""
+    result = _execute_with(RuntimeError())
+    assert result.error == "Task execution failed (RuntimeError — details in backend logs)"
+    as_text = SimpleNamespace(**{**vars(result), "error": ""})
+    generic = {"task": 503, "public": 502, "mcp": 502, "portal": 502}[reader]
+    assert _reader_status(reader, monkeypatch, as_text) == generic
+    assert _reader_status(reader, monkeypatch, result) == generic
+
+
+@pytest.mark.parametrize("text, words", [
+    ("TıMED OUTIMED OUT", "RuntimeError: Timed Out"),
+    ("Lock tımed out", "RuntimeError"),
+    ("HTTP 429 Too Many Requests", "RuntimeError: 429, Too Many Requests"),
+    ("Too Many Requeſts", "RuntimeError"),
+    ("upstream said 429.", "RuntimeError: 429"),
+    ("lock held by worker 14290", "RuntimeError"),
+    ("load average 0.429", "RuntimeError"),
+    ("retry in 429s", "RuntimeError"),
+], ids=["overlapping-candidates", "dotless-i", "two-phrases", "long-s",
+        "429-sentence-end", "429-in-a-number", "429-in-a-decimal", "429-with-a-unit"])
+def test_exception_words_passes_on_what_each_reader_would_match(text, words):
+    """Both reader shapes find a phrase in the words exactly when they find it
+    in the text, and nothing else of the text is passed on. "429" counts only as
+    a number of its own: the digits inside a longer number are not a rate limit."""
+    from services.task_execution_service import _HTTP_429, _READER_PHRASES, _exception_words
+    said = _exception_words(RuntimeError(text))
+    assert said == words
+    for phrase in _READER_PHRASES:
+        if phrase == "429":
+            assert ("429" in said) == bool(_HTTP_429.search(text))
+            continue
+        assert (phrase in said) == (phrase in text), phrase
+        assert (phrase in said.lower()) == (phrase in text.lower()), phrase
+
+
+def _retry_delay_seconds(error: str) -> float:
+    """The scheduler's RETRY-001 delay for a failed run whose row says ``error``:
+    it doubles a 60s delay on "429", "rate limit" or "too many requests",
+    lowercasing first. `src/scheduler` cannot import the backend, so its service
+    is driven via `object.__new__` (the test_3993 precedent)."""
+    from datetime import datetime
+    from unittest.mock import patch
+    if str(_REPO) not in sys.path:
+        sys.path.append(str(_REPO))
+    import src.scheduler.service as scheduler_service
+    from src.scheduler.models import ExecutionStatus
+
+    now = datetime.fromisoformat("2026-11-07T12:00:00")  # naive, as the scheduler's clock is
+    armed = []
+    svc = object.__new__(scheduler_service.SchedulerService)
+    svc.db = SimpleNamespace(
+        get_schedule=lambda _id: SimpleNamespace(id="s1", max_retries=2, retry_delay_seconds=60),
+        schedule_retry=lambda _eid, retry_at: armed.append(retry_at))
+    svc._schedule_retry_job = lambda **_kw: None
+    row = SimpleNamespace(id="e-4352", status=ExecutionStatus.FAILED, schedule_id="s1",
+                          attempt_number=1, error=error)
+    with patch.object(scheduler_service, "datetime", SimpleNamespace(utcnow=lambda: now)):
+        asyncio.run(svc._maybe_schedule_retry(execution=row, error_msg=error))
+    return (armed[0] - now).total_seconds()
+
+
+@pytest.mark.parametrize("words, delay", [
+    ("upstream answered 429", 120),
+    ("Rate Limit reached", 120),
+    ("Too Many Requests", 120),
+    ("", 60),
+], ids=["429", "rate-limit", "too-many-requests", "plain"])
+def test_execute_task_error_keeps_the_schedulers_rate_limit_delay(words, delay):
+    """A scheduled run's retry waits as long for the class-only error as it did
+    for the exception's own text."""
+    exc = RuntimeError(f"{_PLANT} {words}")
+    result = _execute_with(exc)
+    _assert_answer_clean(result.error, "RuntimeError")
+    _assert_only_reader_phrases(result.error)
+    assert _retry_delay_seconds(str(exc)) == delay
+    assert _retry_delay_seconds(result.error) == delay
+
+
+def test_execute_task_error_a_429_inside_a_number_keeps_the_plain_retry_delay():
+    """A number that merely contains 429 is not passed on, so a scheduled run's
+    retry is not doubled as though the agent were rate limited (#4352)."""
+    result = _execute_with(RuntimeError(f"{_PLANT} lock held by worker 14290"))
+    _assert_answer_clean(
+        result.error, "Task execution failed (RuntimeError — details in backend logs)")
+    assert _retry_delay_seconds(result.error) == 60
 
 
 def test_execute_task_short_timeout_names_the_class(caplog):
@@ -793,6 +992,22 @@ def test_execute_task_short_timeout_names_the_class(caplog):
     assert result.error_code == "network"
     _assert_answer_clean(result.error, "(ReadTimeout: timed out)")
     _assert_log_keeps_text(caplog.records, "TIMEOUT on test-agent")
+
+
+@pytest.mark.parametrize("reader", _READERS)
+def test_execute_task_short_timeout_keeps_a_mixed_case_phrase(monkeypatch, reader):
+    """The early-abort network message (`_classify_timeout_failure`) passes a
+    phrase on the same way, so each reader answers what it answered when that
+    message carried the exception's own text."""
+    exc = httpx.ReadTimeout(f"{_PLANT} Read Timed Out")
+    result = _execute_with(exc)
+    assert result.error_code == "network"
+    _assert_answer_clean(result.error, "(ReadTimeout: Timed Out)")
+    with_text = result.error.replace("(ReadTimeout: Timed Out)", f"(ReadTimeout: {exc})")
+    as_text = SimpleNamespace(**{**vars(result), "error": with_text})
+    status = {"task": 503, "public": 502, "mcp": 502, "portal": 504}[reader]
+    assert _reader_status(reader, monkeypatch, as_text) == status
+    assert _reader_status(reader, monkeypatch, result) == status
 
 
 def test_slot_admission_error_names_the_conflict_class():

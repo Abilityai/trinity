@@ -35,7 +35,8 @@ SKILL_GATES_MARKER = "/opt/trinity/skill-gates-active"
 # `tool-results` directory under the agent's home.
 SMOKE_HOME = "/home/developer"
 
-SECRET = "sk-ant-api03-" + "A" * 93
+# A made-up key in the Anthropic shape, never a real one: the scanner must hide it.
+SAMPLE_SK = "sk-ant-api03-" + "A" * 93
 CASES = {
     "bash-guardrail.py": [
         ({"tool_name": "Bash", "tool_input": {"command": "rm -rf /"}}, 2),
@@ -69,7 +70,7 @@ CASES = {
     ],
     "output-scanner.py": [
         ({"tool_name": "Bash", "tool_input": {"command": "cat x"},
-          "tool_response": {"stdout": "token=" + SECRET}}, 0),
+          "tool_response": {"stdout": "token=" + SAMPLE_SK}}, 0),
     ],
 }
 
@@ -155,19 +156,19 @@ def _check_output_scanner(argv: list, failures: list) -> None:
     base = {"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"command": "cat x"}}
     shape = {"stdout": "", "stderr": "", "interrupted": False, "isImage": False}
     for field in ("stdout", "stderr"):
-        response = {**shape, field: "token=" + SECRET}
+        response = {**shape, field: "token=" + SAMPLE_SK}
         r, out = _scanner_run(argv, {**base, "tool_response": response})
-        if (r.returncode != 0 or SECRET in r.stdout or out.get("hookEventName") != "PostToolUse"
+        if (r.returncode != 0 or SAMPLE_SK in r.stdout or out.get("hookEventName") != "PostToolUse"
                 or out.get("updatedToolOutput") != {**response, field: "token=[REDACTED:sk]"}):
             fail(f"a key on {field} was not redacted", r)
     # A failed call reaches PostToolUse with the error as a plain string; only a
     # Bash-shaped object rewrite is accepted by the CLI (2.1.281).
-    r, out = _scanner_run(argv, {**base, "tool_response": "Error: Exit code 1\ntoken=" + SECRET})
+    r, out = _scanner_run(argv, {**base, "tool_response": "Error: Exit code 1\ntoken=" + SAMPLE_SK})
     if out.get("updatedToolOutput") != {"stdout": "Error: Exit code 1\ntoken=[REDACTED:sk]",
-                                        "stderr": "", "interrupted": False} or SECRET in r.stdout:
+                                        "stderr": "", "interrupted": False} or SAMPLE_SK in r.stdout:
         fail("a failed call's string output was not rewritten as a Bash object", r)
     # `grep --color=always sk-ant` puts the colour codes INSIDE the key.
-    split = {**shape, "stdout": "cfg \x1b[m\x1b[1;31msk-ant\x1b[m" + SECRET[6:] + " end"}
+    split = {**shape, "stdout": "cfg \x1b[m\x1b[1;31msk-ant\x1b[m" + SAMPLE_SK[6:] + " end"}
     r, out = _scanner_run(argv, {**base, "tool_response": split})
     if out.get("updatedToolOutput") != {**split, "stdout": "cfg \x1b[m\x1b[1;31m[REDACTED:sk]\x1b[m end"}:
         fail("a key that colour codes split was not redacted whole", r)
@@ -176,20 +177,20 @@ def _check_output_scanner(argv: list, failures: list) -> None:
     if r.returncode != 0 or r.stdout.strip():
         fail("clean output was rewritten", r)
     r, out = _scanner_run(argv, {**base, "hook_event_name": "PostToolUseFailure",
-                                 "error": "Exit code 1\ntoken=" + SECRET})
-    if (r.returncode != 0 or SECRET in r.stdout or out.get("hookEventName") != "PostToolUseFailure"
+                                 "error": "Exit code 1\ntoken=" + SAMPLE_SK})
+    if (r.returncode != 0 or SAMPLE_SK in r.stdout or out.get("hookEventName") != "PostToolUseFailure"
             or not out.get("additionalContext")):
         fail("a failing command with a key was not warned about", r)
-    read = {"type": "text", "file": {"filePath": "/home/developer/.env", "content": "K=" + SECRET + "\n",
+    read = {"type": "text", "file": {"filePath": "/home/developer/.env", "content": "K=" + SAMPLE_SK + "\n",
                                      "numLines": 2, "startLine": 1, "totalLines": 2}}
     r, out = _scanner_run(argv, {**base, "tool_name": "Read", "tool_input": {}, "tool_response": read})
-    if SECRET in r.stdout or out.get("updatedToolOutput") != {
+    if SAMPLE_SK in r.stdout or out.get("updatedToolOutput") != {
             **read, "file": {**read["file"], "content": "K=[REDACTED:sk]\n"}}:
         fail("a key in a Read file was not redacted", r)
-    blocks = [{"type": "text", "text": "token=" + SECRET}]
+    blocks = [{"type": "text", "text": "token=" + SAMPLE_SK}]
     r, out = _scanner_run(argv, {**base, "tool_name": "mcp__owner__fetch", "tool_input": {},
                                  "tool_response": blocks})
-    if SECRET in r.stdout or out.get("updatedToolOutput") != [{"type": "text", "text": "token=[REDACTED:sk]"}]:
+    if SAMPLE_SK in r.stdout or out.get("updatedToolOutput") != [{"type": "text", "text": "token=[REDACTED:sk]"}]:
         fail("a key in an owner MCP result was not redacted", r)
     r, _ = _scanner_run(argv, {**base, "tool_name": "mcp__trinity__list_agents", "tool_input": {},
                                "tool_response": blocks})
@@ -200,12 +201,12 @@ def _check_output_scanner(argv: list, failures: list) -> None:
         path = os.path.join(tmp, "tool-results", "smoke.txt")
         os.makedirs(os.path.dirname(path))
         with open(path, "w") as f:
-            f.write("build output\n" * 3000 + "token=" + SECRET + "\n")
+            f.write("build output\n" * 3000 + "token=" + SAMPLE_SK + "\n")
         r, _ = _scanner_run(argv, {**base, "tool_response": {
             **shape, "stdout": "build output\n" * 100, "persistedOutputPath": path}})
         with open(path) as f:
             body = f.read()
-        if r.returncode != 0 or SECRET in body or "token=[REDACTED:sk]" not in body:
+        if r.returncode != 0 or SAMPLE_SK in body or "token=[REDACTED:sk]" not in body:
             fail("a key in the persisted output file was not redacted", r)
     finally:
         shutil.rmtree(tmp)

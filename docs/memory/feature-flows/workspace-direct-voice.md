@@ -44,7 +44,11 @@ browser send() ─▶ POST …/chat/stream {voice_call_id: vd_…} ◀──┘ 
    did not. A held turn's notice is not read; a failed turn gets "The agent couldn't answer
    that."; a reply with nothing speakable (only code, a table, links) gets "The reply is in the
    chat."; a cancelled one is silent. `SpokenBudget` closes a long reply with "The rest is in
-   the chat." Spoken text is scrubbed of staged secrets.
+   the chat." Staged secret values are scrubbed from each stream text block and from the
+   saved reply before `sentences()` runs `speakable()`, which rewrites markup and would stop an
+   exact match; what is spoken says `redacted`, and a stored `***REDACTED***` in the saved reply
+   is said the same way. `_speak_sentence` scrubs each line again before TTS and the `spoken`
+   frame ([runtime-secret-scrub.md](runtime-secret-scrub.md) → Speech sinks, #4359).
 6. **Barge-in.** Speech over playback pauses it; a real utterance sends `interrupt` (drop the
    queue, `audio_flush`) and the browser stops the running turn through the existing cancel
    route with `restore:false`. Over playback the endpointer's bar is
@@ -105,3 +109,5 @@ speaker faked);
 `tests/unit/test_ent1087_direct_call_interrupt.py` (no audio after a flush) and
 `src/frontend/tests/unit/directCallInterrupt.spec.js` (stop words, Escape, endpointer over
 playback, player level, stop protocol), plus the stopping block in the mount spec.
+`tests/unit/test_4359_portal_tts_scrub.py` drives `speak_execution` with a staged value
+`speakable()` would rewrite, one staged after the reply was saved, and a stored marker.

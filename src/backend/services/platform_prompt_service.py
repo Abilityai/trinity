@@ -941,6 +941,9 @@ class ExecutionContext:
     role_id: Optional[str] = None
     stakeholders: Optional[List[str]] = None
     proactive_consent: Optional[bool] = None
+    # trinity-enterprise#1221: whether any channel could deliver to the primary.
+    # Only an explicit False changes the line; None renders as before.
+    proactive_reachable: Optional[bool] = None
     # trinity-enterprise#611: asks this agent raised that ended in the last day —
     # `{request_id, disposition, disposed_at}` each, no human text. Auto-filled
     # from the DB; stateless, so a wake that was lost (a crash, a stopped agent)
@@ -1134,6 +1137,11 @@ def _render_assignment(ctx: ExecutionContext) -> Optional[str]:
     unresolved bit (``None`` — a provider may validly answer a name and a role
     and nothing else) renders the restrictive clause, exactly like ``False``,
     because a permission statement that nobody made is not a permission.
+
+    Consent is not reachability (trinity-enterprise#1221): with consent but an
+    explicit ``proactive_reachable is False`` — no channel can deliver to them —
+    the line says so instead of "permitted", so the agent does not send into a
+    refusal. Unknown reachability (``None``) keeps the consent wording.
     """
     display = _sanitize_field(ctx.primary_user_display, max_len=MAX_DISPLAY_NAME_LEN)
     if not display:
@@ -1142,6 +1150,11 @@ def _render_assignment(ctx: ExecutionContext) -> Optional[str]:
     role = _sanitize_field(ctx.role_id, max_len=MAX_ROLE_ID_LEN)
     if role:
         line = f"{line} (role: {role})"
+    if ctx.proactive_consent is True and ctx.proactive_reachable is False:
+        return (
+            f"{line} — consented to proactive contact, but no channel reaches "
+            "them; do not message them — it waits for their next turn"
+        )
     if ctx.proactive_consent is True:
         return f"{line} — proactive contact permitted"
     return (
@@ -1493,6 +1506,11 @@ def compose_system_prompt(
                     ctx.proactive_consent
                     if ctx.proactive_consent is not None
                     else assignment.get("proactive_consent")
+                ),
+                proactive_reachable=(
+                    ctx.proactive_reachable
+                    if ctx.proactive_reachable is not None
+                    else assignment.get("proactive_reachable")
                 ),
                 ended_asks=(
                     ctx.ended_asks

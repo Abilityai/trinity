@@ -7,7 +7,7 @@
 import { z } from "zod";
 import { ApiError, TrinityClient } from "../client.js";
 import type { McpAuthContext, StartAgentResult } from "../types.js";
-import { accessDenied } from "../access.js";
+import { accessDenied, HUMAN_ONLY_WHO_MAY_CALL, humanOnlyToolAccess } from "../access.js";
 import { deriveMcpIdempotencyKey } from "./chat.js";
 
 /** Statuses of a start's skill delivery that need no follow-up line. */
@@ -39,31 +39,37 @@ export function skillsDeliveryLines(result: StartAgentResult): string[] {
 }
 
 /**
- * #3435: the scopes that may see the three credential-portability tools. An
- * ALLOW-list (#848 — a null or unknown scope fails closed), equal to what the
- * backend admits: import/export take `get_owned_agent_by_name` +
- * `reject_agent_principal`, the key takes `require_admin`; both refuse every
- * agent-scoped key, so an agent session is never shown a tool it cannot call.
- */
-const CREDENTIAL_TOOL_SCOPES: ReadonlySet<string> = new Set(["user", "system"]);
-const credentialToolAccess = (auth: any): boolean => CREDENTIAL_TOOL_SCOPES.has(auth?.scope ?? "");
-
-/**
  * #3435: a backend 403 on a credential tool, as a typed envelope stamped
  * `denied` on the audit row (#2807). Only the backend `detail` is copied — never
  * a body: a 403 without a JSON `detail` (a proxy or WAF page) gets a fixed
  * sentence. Every other failure (400/404/503, transport) is rethrown unchanged.
+ *
+ * trinity-enterprise#719: both human-only gates (#2996) map to `human_only`.
+ * PERSON (`require_person`) refuses with an object detail, `{code:
+ * "person_required", message}`: its code is what is read, not its wording, and
+ * its `message` is copied only when it is a string. INTERACTIVE
+ * (`require_interactive`) refuses every key-authenticated caller with a string
+ * that carries no code: the sentence `reject_non_interactive_principal` raises
+ * in `src/backend/dependencies.py`. That one is compared whole, so a detail that
+ * merely contains its words keeps its own flag, and a change to the sentence
+ * must change `INTERACTIVE_REFUSAL` below.
  */
 function credentialRefusal(error: unknown, context: { session?: McpAuthContext } | undefined): string {
   if (!(error instanceof ApiError) || error.status !== 403) throw error;
   let detail = "Access denied (HTTP 403)";
+  let personRequired = false;
   try {
     const parsed = JSON.parse(error.body);
     if (typeof parsed?.detail === "string") detail = parsed.detail;
+    else if (parsed?.detail?.code === "person_required") {
+      personRequired = true;
+      if (typeof parsed.detail.message === "string") detail = parsed.detail.message;
+    }
   } catch {
     // not JSON — keep the fixed sentence; the body is never echoed
   }
-  const flag = /human-only/i.test(detail)
+  const INTERACTIVE_REFUSAL = "This operation requires an interactive session; MCP API keys cannot perform it";
+  const flag = personRequired || detail === INTERACTIVE_REFUSAL || /human-only/i.test(detail)
     ? "human_only"
     : /admin access required/i.test(detail)
       ? "admin_only"
@@ -281,9 +287,10 @@ export function createAgentTools(
         "(2) pre-defined templates from list_templates, or (3) local templates. " +
         "The agent will be started automatically after creation. " +
         "Fork-to-own (import_intent 'fork' + a fork_to_own block) copies a 'github:owner/repo' template into a new repo " +
-        "you own and creates the agent from that copy, using your saved personal GitHub token (Settings); there is no PAT " +
-        "argument here because tool arguments land in transcripts. With an agent key the backend refuses it with " +
-        "`FORK_PAT_REQUIRED` — an agent cannot spend its owner's token. A template that declares fork_to_own required " +
+        "you own and creates the agent from that copy. There is no PAT argument here because tool arguments land in " +
+        "transcripts, and the backend spends your saved personal GitHub token (Settings) only from a signed-in session, " +
+        "because the fork makes it the new agent's token; so over MCP every key is refused with `FORK_PAT_REQUIRED`, " +
+        "and the fork is created from the web UI. A template that declares fork_to_own required " +
         "is refused with `FORK_TO_OWN_REQUIRED` unless the block is present.",
       parameters: z.object({
         name: z
@@ -370,7 +377,7 @@ export function createAgentTools(
           .optional()
           .describe(
             "Fork-to-own (trinity-enterprise#93): copy the 'github:' template into destination_repo " +
-            "first; the agent is created from the copy. Uses your saved personal GitHub token."
+            "first; the agent is created from the copy. Spends your saved personal GitHub token, from a signed-in session only."
           ),
         ephemeral: z
           .object({
@@ -490,8 +497,10 @@ export function createAgentTools(
       description:
         "Rename an agent in the Trinity platform. " +
         "Changes the agent name across all references (database, container, UI). " +
-        "System agents cannot be renamed. Only owners or admins can rename agents. " +
-        "The agent will be briefly stopped during the rename operation.",
+        "System agents cannot be renamed. " +
+        "The agent will be briefly stopped during the rename operation. " +
+        HUMAN_ONLY_WHO_MAY_CALL.person,
+      canAccess: humanOnlyToolAccess("person"),
       parameters: z.object({
         name: z.string().describe("The current name of the agent to rename"),
         new_name: z.string().describe("The new name for the agent (will be sanitized for Docker compatibility)"),
@@ -652,7 +661,9 @@ export function createAgentTools(
         "without Redis or template processing. Supports a curated set of credential " +
         "file types: .env, .mcp.json, cloud service-account JSON (.config/gcloud/**), " +
         "kubeconfig (.kube/config), TLS/cert material (*.pem/*.key/*.crt/*.p12/*.pfx), " +
-        "and SSH keys (.ssh/id_*). Use files_b64 for binary material. The agent must be running.",
+        "and SSH keys (.ssh/id_*). Use files_b64 for binary material. The agent must be running. " +
+        HUMAN_ONLY_WHO_MAY_CALL.person,
+      canAccess: humanOnlyToolAccess("person"),
       parameters: z.object({
         name: z.string().describe("The name of the agent to inject credentials into"),
         files: z.record(z.string(), z.string()).optional().describe(
@@ -689,13 +700,12 @@ export function createAgentTools(
         "to the agent's workspace. This file can be committed to git for portable credential storage. " +
         "Requires CREDENTIAL_ENCRYPTION_KEY to be configured on the backend. " +
         "The agent must be running. " +
-        "WHO MAY CALL: the agent's owner or an admin, with a user-scoped or system-scoped key, or a signed-in session; " +
-        "agent-scoped keys can never call it (human-only), so agent sessions are not shown it. " +
+        HUMAN_ONLY_WHO_MAY_CALL.person + " " +
         "A refusal returns {success:false, error, human_only|not_authorized}.",
       parameters: z.object({
         name: z.string().describe("The name of the agent to export credentials from"),
       }),
-      canAccess: credentialToolAccess,
+      canAccess: humanOnlyToolAccess("person"),
       execute: async ({ name }: { name: string }, context?: { session?: McpAuthContext }) => {
         const authContext = context?.session;
         const apiClient = getClient(authContext);
@@ -723,13 +733,13 @@ export function createAgentTools(
         "This is useful after cloning an agent's git repo. " +
         "Requires CREDENTIAL_ENCRYPTION_KEY to be configured on the backend (the same key " +
         "that encrypted the file). The agent must be running. " +
-        "WHO MAY CALL: the agent's owner or an admin, with a user-scoped or system-scoped key, or a signed-in session; " +
-        "agent-scoped keys can never call it (human-only), so agent sessions are not shown it. " +
+        HUMAN_ONLY_WHO_MAY_CALL.interactive +
+        " Use Import from Git in the web UI instead. " +
         "A refusal returns {success:false, error, human_only|not_authorized}.",
       parameters: z.object({
         name: z.string().describe("The name of the agent to import credentials into"),
       }),
-      canAccess: credentialToolAccess,
+      canAccess: humanOnlyToolAccess("interactive"),
       execute: async ({ name }: { name: string }, context?: { session?: McpAuthContext }) => {
         const authContext = context?.session;
         const apiClient = getClient(authContext);
@@ -817,7 +827,7 @@ export function createAgentTools(
         "agent-scoped keys can never call it (human-only), so agent sessions are not shown it. " +
         "A refusal returns {success:false, error, admin_only|human_only}.",
       parameters: z.object({}),
-      canAccess: credentialToolAccess,
+      canAccess: humanOnlyToolAccess("admin"),
       execute: async (_params: unknown, context?: { session?: McpAuthContext }) => {
         const authContext = context?.session;
         const apiClient = getClient(authContext);
@@ -1017,7 +1027,9 @@ export function createAgentTools(
         "commits the current state, pushes to GitHub, and creates a working branch for sync. " +
         "Requires GitHub Personal Access Token (PAT) to be configured in system settings with 'repo' scope. " +
         "Note: Agents created from GitHub templates already have git sync enabled in source mode (pull-only). " +
-        "Agent must be running.",
+        "Agent must be running. " +
+        HUMAN_ONLY_WHO_MAY_CALL.person,
+      canAccess: humanOnlyToolAccess("person"),
       parameters: z.object({
         agent_name: z
           .string()
@@ -1141,7 +1153,9 @@ export function createAgentTools(
         "The token must carry the scopes the operation needs (e.g. `repo`, or Issues: " +
         "Read and write) — wiring makes it available but cannot grant missing scopes. " +
         "To clear the PAT and revert to global, pass an empty string. " +
-        "Note: Agent must be restarted for the new PAT to take effect.",
+        "Note: Agent must be restarted for the new PAT to take effect. " +
+        HUMAN_ONLY_WHO_MAY_CALL.person,
+      canAccess: humanOnlyToolAccess("person"),
       parameters: z.object({
         agent_name: z
           .string()

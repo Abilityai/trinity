@@ -11,14 +11,16 @@ Key features:
 - Channel resolution by verified email
 """
 
+import hashlib
 import logging
+import uuid
 from dataclasses import dataclass
 from typing import Optional, Literal
 
 from database import db
 from services import channel_history, idempotency_service
 from services.platform_audit_service import platform_audit_service, AuditEventType
-from services.runtime_secret_scrub import get_staged_values, scrub_text
+from services.runtime_secret_scrub import scrub_staged
 from services.settings_service import get_proactive_rate_limit  # #1609
 
 logger = logging.getLogger(__name__)
@@ -32,8 +34,19 @@ RATE_LIMIT_WINDOW_SECONDS = 3600  # 1 hour
 
 
 class ProactiveMessageError(Exception):
-    """Base exception for proactive messaging errors."""
-    pass
+    """Base exception for proactive messaging errors.
+
+    ``reason`` is a stable machine code beside the sentence
+    (trinity-enterprise#1221), so a refusal can say WHY without the caller
+    parsing text — and without naming the person, for a role-addressed send.
+    """
+
+    def __init__(self, message: str = "", reason: Optional[str] = None,
+                 channels: Optional[dict] = None):
+        super().__init__(message)
+        self.reason = reason
+        # The per-channel reason map of a send that tried several channels.
+        self.channels = channels
 
 
 class NotAuthorizedError(ProactiveMessageError):
@@ -75,6 +88,120 @@ class DeliveryResult:
     suppressed_by: Optional[str] = None
     first_sent_at: Optional[str] = None
     first_execution_id: Optional[str] = None
+    # trinity-enterprise#1221: the helper wrote its own history (a Workspace
+    # row IS the conversation), so `_persist_outbound` must not write a twin.
+    history_written: bool = False
+    # How the person will see it. "workspace_inbox" = a row in their Workspace
+    # conversation: delivered, but nothing notifies them — they see it on their
+    # next visit. None for channels that push (Telegram, Slack, WhatsApp).
+    delivery: Optional[str] = None
+
+
+#: Every web refusal from the shared Workspace gate, as this send's code.
+_WORKSPACE_REFUSAL_CODES = {
+    "workspace_delivery_no_target": "workspace_not_shared",
+    "workspace_delivery_target_unreachable": "workspace_not_shared",
+    "workspace_delivery_target_blocked": "workspace_blocked",
+    "workspace_delivery_target_unverifiable": "workspace_unverifiable",
+}
+
+WEB_DELIVERY_WORKSPACE_INBOX = "workspace_inbox"
+
+
+def _web_message_id(agent_name: str, execution_id: Optional[str], recipient_email: str,
+                    channel: str, dedup_label: str, idempotency_key: Optional[str]) -> str:
+    """The Workspace row id for one send (trinity-enterprise#1221).
+
+    Derived from the effect identity, so a retry after a post-commit failure (the
+    effect guard releases its claim when the audit or rate-limit bump raises)
+    writes nothing: ``add_portal_message_once`` decides the duplicate in SQL.
+    Keyless sends get a fresh id, matching the effect guard's own keyless rule.
+    The requested ``channel`` is in the material because it is in the guard's
+    identity: ``auto`` and ``web`` are two effects, so they must be two rows.
+    """
+    if not execution_id:
+        return f"proactive-{uuid.uuid4().hex}"
+    material = "\x1f".join([agent_name, execution_id, recipient_email.lower(), "web",
+                            channel, dedup_label or "", idempotency_key or ""])
+    return f"proactive-{hashlib.sha256(material.encode()).hexdigest()[:32]}"
+
+
+def _telegram_target(agent_name: str, recipient_email: str):
+    """(binding, chat_link) for a Telegram DM, or RecipientNotFoundError.
+    Sync and local — shared by the send and `reachable_channels`."""
+    binding = db.get_telegram_binding(agent_name)
+    if not binding:
+        raise RecipientNotFoundError(
+            f"No Telegram bot configured for agent '{agent_name}'", reason="telegram_no_bot")
+    chat_link = db.get_telegram_chat_link_by_verified_email(binding["id"], recipient_email)
+    if not chat_link:
+        raise RecipientNotFoundError(
+            f"No Telegram user with verified email '{recipient_email}' for agent '{agent_name}'",
+            reason="telegram_not_linked",
+        )
+    _refuse_blocked(agent_name, "telegram", str(chat_link["telegram_user_id"]))
+    return binding, chat_link
+
+
+def _whatsapp_target(agent_name: str, recipient_email: str):
+    """(binding, chat_link) for a WhatsApp DM, or RecipientNotFoundError."""
+    binding = db.get_whatsapp_binding(agent_name)
+    if not binding:
+        raise RecipientNotFoundError(
+            f"No WhatsApp binding configured for agent '{agent_name}'", reason="whatsapp_no_bot")
+    chat_link = db.get_whatsapp_chat_link_by_verified_email(binding["id"], recipient_email)
+    if not chat_link:
+        raise RecipientNotFoundError(
+            f"No WhatsApp user with verified email '{recipient_email}' for agent '{agent_name}'",
+            reason="whatsapp_not_linked",
+        )
+    _refuse_blocked(agent_name, "whatsapp", chat_link["wa_user_phone"])
+    return binding, chat_link
+
+
+def _slack_workspaces() -> list:
+    """The connected Slack workspaces, or RecipientNotFoundError. Whether the
+    person is a member of one is a network lookup, made only by the send."""
+    workspaces = db.get_all_slack_workspaces()
+    if not workspaces:
+        raise RecipientNotFoundError("No Slack workspaces connected", reason="slack_not_connected")
+    return workspaces
+
+
+def reachable_channels(agent_name: str, recipient_email: str) -> set:
+    """The channels that could deliver a proactive message to this person now.
+
+    Sync, local reads only, no writes and no network (trinity-enterprise#1221) —
+    the Execution Context asks it on prompt composition. Built from the same
+    predicates the send applies, so the prompt and the send cannot disagree.
+    Slack counts as reachable when any workspace is connected (membership needs
+    a network lookup): the answer can under-claim "impossible", never
+    over-claim. Staleness is the caller's cache (the assignment provider's 60 s).
+    Only channels ``send_message`` accepts are probed: WhatsApp is not one, and
+    ``auto`` never tries it, so a WhatsApp link alone reaches nobody here.
+    """
+    from services.schedule_workspace_delivery import (
+        WorkspaceDeliveryRefused, check_workspace_reachable,
+    )
+
+    email = (recipient_email or "").lower()
+    out: set = set()
+    try:
+        _telegram_target(agent_name, email)
+        out.add("telegram")
+    except ProactiveMessageError:
+        pass
+    try:
+        if any(w.get("bot_token") for w in _slack_workspaces()):
+            out.add("slack")
+    except ProactiveMessageError:
+        pass
+    try:
+        check_workspace_reachable(agent_name, email)
+        out.add("web")
+    except WorkspaceDeliveryRefused:
+        pass
+    return out
 
 
 def _refuse_blocked(agent_name: str, channel: str, client_id: str) -> None:
@@ -83,7 +210,10 @@ def _refuse_blocked(agent_name: str, channel: str, client_id: str) -> None:
     A ChannelDeliveryError, so `auto` still tries the next channel (the block is
     per channel) and an explicit channel fails with this reason."""
     if db.is_channel_client_blocked(agent_name, channel, client_id):
-        raise ChannelDeliveryError(f"recipient_blocked: this client is blocked on the agent's {channel} channel")
+        raise ChannelDeliveryError(
+            f"recipient_blocked: this client is blocked on the agent's {channel} channel",
+            reason=f"{channel}_blocked",
+        )
 
 
 class ProactiveMessageService:
@@ -100,7 +230,8 @@ class ProactiveMessageService:
     - whatsapp: Look up whatsapp_chat_links by verified_email (explicit only;
       NOT part of `auto` fallback because Twilio's 24-hour session window can
       cause unexpected failures outside recent user interaction)
-    - web: WebSocket push + persist to public_chat_messages
+    - web: a row in the person's Workspace Main conversation with this agent
+      (trinity-enterprise#1221) — the agent's own key only; nothing notifies them
     - auto: Try channels in order: telegram -> slack -> web
     """
 
@@ -198,6 +329,7 @@ class ProactiveMessageService:
         dedup_label: str = "",
         idempotency_key: Optional[str] = None,
         idempotency_ttl: Optional[int] = None,
+        as_agent_key: bool = False,
     ) -> DeliveryResult:
         """
         Send a proactive message to a user.
@@ -222,6 +354,10 @@ class ProactiveMessageService:
                 key (ent#665): one delivery per (agent, recipient, key) within the
                 TTL across ALL executions. A suppressed send returns
                 ``sent=False`` and is audited and noted in the conversation.
+            as_agent_key: The caller is this agent's own key. Only then may the
+                send write into a person's Workspace (`web`, trinity-enterprise#1221):
+                a human the agent is shared with must not plant an agent-voiced
+                row in another member's conversation (the ent#610 class).
 
         Returns:
             DeliveryResult with success status and channel used
@@ -239,9 +375,7 @@ class ProactiveMessageService:
         # already scrub-before-send transitively (the applier scrubs before result
         # construction); an agent pasting a fetched vault value into a proactive
         # message adds nothing the operator does not already hold in Settings.
-        _staged = get_staged_values()
-        if _staged:
-            text = scrub_text(_staged, text)
+        text = scrub_staged(text)
 
         # Effect-scoped dedup (#1084): guard at the entry, keyed on the resolved
         # recipient + channel (never the body). A chunked message is ONE effect —
@@ -272,12 +406,19 @@ class ProactiveMessageService:
                     suppressed_by=snap.get("suppressed_by"),
                     first_sent_at=snap.get("first_sent_at"),
                     first_execution_id=snap.get("first_execution_id"),
+                    delivery=snap.get("delivery"),
                 )
             result = await self._send_message_inner(
                 agent_name, recipient_email, text, channel, reply_to_thread,
                 execution_id=execution_id,
                 idempotency_key=idempotency_key,
                 idempotency_ttl=idempotency_ttl,
+                web=_WebSend(
+                    allowed=as_agent_key,
+                    execution_id=execution_id,
+                    message_id=_web_message_id(agent_name, execution_id, recipient_email,
+                                               channel, dedup_label, idempotency_key),
+                ),
             )
             guard.snapshot = {
                 "success": result.success,
@@ -288,6 +429,7 @@ class ProactiveMessageService:
                 "suppressed_by": result.suppressed_by,
                 "first_sent_at": result.first_sent_at,
                 "first_execution_id": result.first_execution_id,
+                "delivery": result.delivery,
             }
             return result
 
@@ -301,6 +443,7 @@ class ProactiveMessageService:
         execution_id: Optional[str] = None,
         idempotency_key: Optional[str] = None,
         idempotency_ttl: Optional[int] = None,
+        web: Optional["_WebSend"] = None,
     ) -> DeliveryResult:
         """Auth → intent key → rate-limit → channel delivery. Wrapped by
         send_message's effect guard (#1084), so a success here is recorded for
@@ -348,6 +491,7 @@ class ProactiveMessageService:
                 return DeliveryResult(success=True, channel=first_channel, **intent.result_fields())
             result = await self._rate_limit_and_deliver(
                 agent_name, recipient_email, text, channel, reply_to_thread, message_preview,
+                web=web,
             )
             intent.record = {"channel": result.channel, "session_identifier": result.session_identifier}
             for k, v in intent.result_fields().items():
@@ -362,8 +506,14 @@ class ProactiveMessageService:
         channel: str,
         reply_to_thread: bool,
         message_preview: str,
+        web: Optional["_WebSend"] = None,
     ) -> DeliveryResult:
-        """Rate limit, then try each channel; raises when none delivers."""
+        """Rate limit, then try each channel; raises when none delivers.
+
+        Every channel that does not deliver leaves its reason in a
+        ``{channel: code}`` map carried on the final RecipientNotFoundError
+        (trinity-enterprise#1221) — before, `auto` dropped each reason and the
+        agent was told only that nothing reached the person."""
         # 2. Rate limit check
         if not self.check_rate_limit(agent_name, recipient_email):
             await self.audit_send(agent_name, recipient_email, channel, False, "rate_limited")
@@ -378,10 +528,14 @@ class ProactiveMessageService:
         )
 
         last_error = None
+        reasons: dict = {}
         for ch in channels_to_try:
             try:
+                # The web context reaches only the web helper; every other
+                # channel keeps its call shape.
                 result = await self._deliver_via_channel(
-                    agent_name, recipient_email, text, ch, reply_to_thread
+                    agent_name, recipient_email, text, ch, reply_to_thread,
+                    **({"web": web} if ch == "web" else {}),
                 )
                 if result.success:
                     self.increment_rate_limit(agent_name, recipient_email)
@@ -392,25 +546,30 @@ class ProactiveMessageService:
                     # persistence is out of scope (#951). Keeping the call on the
                     # send_message path draws that line structurally rather than
                     # with a flag.
-                    self._persist_outbound(agent_name, recipient_email, text, result)
+                    if not result.history_written:
+                        self._persist_outbound(agent_name, recipient_email, text, result)
                     await self.audit_send(
                         agent_name, recipient_email, ch, True,
                         message_preview=message_preview
                     )
                     return result
                 last_error = result.error
-            except RecipientNotFoundError:
-                # Try next channel
+                reasons[ch] = "delivery_failed"
+            except RecipientNotFoundError as e:
+                # Try next channel, keeping why this one could not.
+                reasons[ch] = e.reason or "unavailable"
                 continue
             except Exception as e:
                 last_error = str(e)
+                reasons[ch] = getattr(e, "reason", None) or "delivery_failed"
                 logger.warning(f"Proactive message to {ch} failed: {e}")
                 continue
 
         # All channels failed
         error_msg = last_error or "No delivery channel available for recipient"
-        await self.audit_send(agent_name, recipient_email, channel, False, error_msg)
-        raise RecipientNotFoundError(error_msg)
+        await self.audit_send(agent_name, recipient_email, channel, False, error_msg,
+                              extra={"channels": reasons})
+        raise RecipientNotFoundError(error_msg, reason="no_channel", channels=reasons)
 
     async def send_access_grant_notification(
         self,
@@ -536,6 +695,7 @@ class ProactiveMessageService:
         text: str,
         channel: str,
         reply_to_thread: bool,
+        web: Optional["_WebSend"] = None,
     ) -> DeliveryResult:
         """Deliver message via specific channel."""
         if channel == "telegram":
@@ -545,7 +705,7 @@ class ProactiveMessageService:
         elif channel == "whatsapp":
             return await self._deliver_whatsapp(agent_name, recipient_email, text)
         elif channel == "web":
-            return await self._deliver_web(agent_name, recipient_email, text)
+            return await self._deliver_web(agent_name, recipient_email, text, web or _WebSend())
         else:
             raise ValueError(f"Unknown channel: {channel}")
 
@@ -559,18 +719,7 @@ class ProactiveMessageService:
         from adapters.base import NormalizedMessage
         from adapters.telegram_adapter import TelegramAdapter
 
-        # Get binding for this agent
-        binding = db.get_telegram_binding(agent_name)
-        if not binding:
-            raise RecipientNotFoundError(f"No Telegram bot configured for agent '{agent_name}'")
-
-        # Look up chat link by verified email
-        chat_link = db.get_telegram_chat_link_by_verified_email(binding["id"], recipient_email)
-        if not chat_link:
-            raise RecipientNotFoundError(
-                f"No Telegram user with verified email '{recipient_email}' for agent '{agent_name}'"
-            )
-        _refuse_blocked(agent_name, "telegram", str(chat_link["telegram_user_id"]))
+        binding, chat_link = _telegram_target(agent_name, recipient_email)
 
         # Get bot token (decrypted)
         bot_token = db.get_telegram_bot_token(agent_name)
@@ -637,9 +786,7 @@ class ProactiveMessageService:
 
         # Get Slack workspace connections
         # We need to find a workspace where this user exists
-        workspaces = db.get_all_slack_workspaces()
-        if not workspaces:
-            raise RecipientNotFoundError("No Slack workspaces connected")
+        workspaces = _slack_workspaces()
 
         for workspace in workspaces:
             bot_token = workspace.get("bot_token")
@@ -688,7 +835,8 @@ class ProactiveMessageService:
                 return DeliveryResult(success=False, channel="slack", error=error)
 
         raise RecipientNotFoundError(
-            f"User '{recipient_email}' not found in any connected Slack workspace"
+            f"User '{recipient_email}' not found in any connected Slack workspace",
+            reason="slack_user_not_found",
         )
 
     async def _deliver_whatsapp(
@@ -708,16 +856,7 @@ class ProactiveMessageService:
         from adapters.base import NormalizedMessage
         from adapters.whatsapp_adapter import WhatsAppAdapter
 
-        binding = db.get_whatsapp_binding(agent_name)
-        if not binding:
-            raise RecipientNotFoundError(f"No WhatsApp binding configured for agent '{agent_name}'")
-
-        chat_link = db.get_whatsapp_chat_link_by_verified_email(binding["id"], recipient_email)
-        if not chat_link:
-            raise RecipientNotFoundError(
-                f"No WhatsApp user with verified email '{recipient_email}' for agent '{agent_name}'"
-            )
-        _refuse_blocked(agent_name, "whatsapp", chat_link["wa_user_phone"])
+        binding, chat_link = _whatsapp_target(agent_name, recipient_email)
 
         auth_token = db.get_whatsapp_auth_token(agent_name)
         if not auth_token:
@@ -772,19 +911,86 @@ class ProactiveMessageService:
         agent_name: str,
         recipient_email: str,
         text: str,
+        web: "_WebSend",
     ) -> DeliveryResult:
-        """Deliver via web (WebSocket push + DB persist).
+        """Deliver into the person's Workspace conversation (trinity-enterprise#1221).
 
-        NOTE: Web delivery requires the recipient to have an active public link session
-        with this agent. For v1, we skip web delivery and rely on Telegram/Slack.
-        Full web delivery (with inbox-style persistence) is deferred to v2.
+        "web" is the person's Workspace conversation with this agent — the only
+        web conversation keyed by person. The row lands in their **Main**,
+        through the same gate a scheduled Workspace delivery uses (block list
+        fail-closed, then the roster incl. owned agents), so a person who cannot
+        open the agent is never written to. Marked ``source="proactive"``: the UI
+        never reads it as a turn's answer, and the agent's next turn is told it
+        as a message it sent between turns. Nothing pushes it — the person sees
+        it on their next visit, which the result says (``delivery``).
         """
-        # v1: Web delivery not yet implemented - requires refactoring public_chat
-        # to support agent_name-based sessions instead of link_id-based sessions.
-        raise RecipientNotFoundError(
-            f"Web delivery not yet implemented for proactive messaging. "
-            f"Recipient '{recipient_email}' must have Telegram or Slack configured."
+        from client_portal import db as portal_db
+        from services.channel_completion_report import PROACTIVE_SOURCE
+        from services.schedule_workspace_delivery import (
+            WorkspaceDeliveryRefused, resolve_main_destination,
         )
+        from utils.helpers import utc_now_iso
+
+        if not web.allowed:
+            raise RecipientNotFoundError(
+                "Only the agent itself may write into a person's Workspace conversation.",
+                reason="web_agent_only",
+            )
+        try:
+            session_id = resolve_main_destination(agent_name, recipient_email)
+        except WorkspaceDeliveryRefused as e:
+            code = _WORKSPACE_REFUSAL_CODES.get(e.reason)
+            if code is None:  # session_unavailable — a fault, not an address
+                return DeliveryResult(success=False, channel="web", error=e.detail)
+            raise RecipientNotFoundError(e.detail, reason=code) from e
+
+        if self._is_recipients_own_turn(web.execution_id, session_id):
+            raise RecipientNotFoundError(
+                "This turn is already their conversation with you — reply in this turn instead.",
+                reason="workspace_in_turn",
+            )
+
+        msg_id = web.message_id or f"proactive-{uuid.uuid4().hex}"
+        try:
+            portal_db.add_portal_message_once(
+                msg_id, agent_name, recipient_email, "assistant", text, utc_now_iso(),
+                session_id, source=PROACTIVE_SOURCE,
+            )
+        except Exception as e:  # noqa: BLE001 — reported, never a silent success
+            logger.error("[ent#1221] Workspace write for agent %s failed: %s", agent_name, e)
+            return DeliveryResult(success=False, channel="web",
+                                  error=f"Workspace write failed ({type(e).__name__})")
+        # A False from the insert is an earlier attempt's row under the same
+        # identity: the message is there, which is what this send promises.
+        return DeliveryResult(
+            success=True, channel="web", message_id=msg_id,
+            history_written=True, delivery=WEB_DELIVERY_WORKSPACE_INBOX,
+        )
+
+    @staticmethod
+    def _is_recipients_own_turn(execution_id: Optional[str], session_id: str) -> bool:
+        """The calling turn is the recipient's own Main turn: its reply is the
+        message, and a row written mid-turn would sit beside that reply."""
+        from config import PORTAL_SOURCE_CHANNEL
+
+        if not execution_id:
+            return False
+        try:
+            row = db.get_execution(execution_id)
+        except Exception:  # noqa: BLE001 — an unreadable row is not a turn match
+            return False
+        if row is None:
+            return False
+        return (getattr(row, "source_channel", None) == PORTAL_SOURCE_CHANNEL
+                and getattr(row, "source_channel_chat_id", None) == session_id)
+
+
+@dataclass
+class _WebSend:
+    """What a `web` delivery needs from the send that asked for it."""
+    allowed: bool = False
+    execution_id: Optional[str] = None
+    message_id: Optional[str] = None
 
 
 # Singleton instance

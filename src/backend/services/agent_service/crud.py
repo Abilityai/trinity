@@ -48,6 +48,7 @@ from services.template_service import (
 from services.template_schedules import normalize_declared_schedules
 from services.template_plugins import normalize_declared_plugins
 from services import metric_registry
+from services import agent_model_seed
 from services import git_service
 from services.settings_service import get_anthropic_api_key, resolve_github_pat, resolve_github_pat_candidates, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email, get_ephemeral_agent_quota, get_ephemeral_ttl_ceiling_seconds
 from services.entitlement_service import entitlement_service
@@ -62,7 +63,7 @@ from utils import avatar_paths
 from utils.log_masking import masked_traceback
 from .fork_to_own import (
     SAVED_TOKEN_TIERS, fork_pat_required, fork_template_to_own_repo, saved_token_message,
-    saved_token_not_for_agents,
+    saved_token_needs_a_session,
 )
 from . import snapshot_import
 from .helpers import validate_base_image, is_claude_runtime, validate_runtime
@@ -418,6 +419,11 @@ class _TemplateResolution:
     # reconcile, not a no-op: a template that DROPPED its block retires the
     # rows it used to declare.
     declared_metrics: list = field(default_factory=list)
+    # #4442: the model the template declares (`runtime.model`, else a top-level
+    # `model:`), fed by both resolver branches. Seeds the agent's own model
+    # (`default_model`) at registration; the `github:` path never set
+    # `config.runtime_model`, so its agents' wakes ran on the platform default.
+    declared_model: Optional[str] = None
     # trinity-enterprise#15: staged backend-materialized snapshot for the
     # "copy" import intent. When set, `github_repo_for_agent` stays None by
     # design — the container gets NO GitHub env, no git-config row, no PAT.
@@ -541,6 +547,68 @@ def _apply_ephemeral_pregates(config: AgentConfig, current_user: User) -> Option
     return ephemeral_expires_at
 
 
+def leftover_workspace_volume_detail(name: str) -> str:
+    """The #1667 refusal text, shared by create's 409 and apply's dry-run
+    blocker (trinity-enterprise#984), so both say the same thing."""
+    volume = f"agent-{name}-workspace"
+    return (
+        f"Data volume '{volume}' already exists and no agent "
+        f"claims it, so its contents would silently become this "
+        f"agent's home directory. Refusing to adopt another agent's "
+        f"leftover data. Remove it (docker volume rm "
+        f"{volume}) or choose a different name. Only volumes this "
+        f"install labelled as its own are reclaimed automatically; one "
+        f"created before that label existed stays until it is removed by "
+        f"hand."  # #3214: the sweep never reclaims an unlabelled volume
+    )
+
+
+async def workspace_volume_exists(name: str) -> bool:
+    """Does `agent-<name>-workspace` exist? (#1667, trinity-enterprise#984)
+
+    `False` on NotFound, `True` when the volume exists, and RAISES on any
+    other error (including no Docker client).
+    """
+    if not docker_client:
+        raise RuntimeError("Docker is not available")
+    try:
+        await volume_get(f"agent-{name}-workspace")
+    except docker.errors.NotFound:
+        return False
+    return True
+
+
+@dataclass(frozen=True)
+class CreateVolumeRefusal:
+    """A volume create refuses to adopt for a name (`create_volume_refusal`)."""
+
+    kind: str    # e.g. "workspace_volume_leftover"; apply's blocker is `member_<kind>`
+    volume: str  # the Docker volume to remove
+    detail: str  # create's 409 text, also apply's blocker detail
+
+
+async def create_volume_refusal(name: str) -> Optional[CreateVolumeRefusal]:
+    """Does create refuse `name` over a leftover volume? None -> it proceeds.
+
+    The one answer both callers use, so they agree by construction
+    (trinity-enterprise#984): create's guard raises it as a 409
+    (`_guard_leftover_workspace_volume`), and apply's snapshot
+    (`system_service.read_apply_snapshot`) refuses the member before its dry
+    run can say `create`. A new create-time volume refusal goes HERE.
+
+    RAISES when it cannot answer (including no Docker client); each caller
+    picks its own policy: create proceeds, apply refuses with a retryable
+    read failure.
+    """
+    if await workspace_volume_exists(name):
+        return CreateVolumeRefusal(
+            kind="workspace_volume_leftover",
+            volume=f"agent-{name}-workspace",
+            detail=leftover_workspace_volume_detail(name),
+        )
+    return None
+
+
 async def _guard_leftover_workspace_volume(
     config: AgentConfig, adopt_existing_workspace: bool
 ) -> None:
@@ -553,29 +621,17 @@ async def _guard_leftover_workspace_volume(
         and not adopt_existing_workspace
         and docker_client
     ):
-        _workspace_vol = f"agent-{config.name}-workspace"
         try:
-            await volume_get(_workspace_vol)
-        except docker.errors.NotFound:
-            pass  # the normal path: no leftover, create it below
+            refusal = await create_volume_refusal(config.name)
         except Exception as e:  # noqa: BLE001 — a probe failure must not block creation
             logger.warning(
                 "[#1667] could not probe workspace volume %s (%s); proceeding",
-                _workspace_vol,
+                f"agent-{config.name}-workspace",
                 e,
             )
-        else:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Data volume '{_workspace_vol}' already exists and no agent "
-                    f"claims it, so its contents would silently become this "
-                    f"agent's home directory. Refusing to adopt another agent's "
-                    f"leftover data. Remove it (docker volume rm "
-                    f"{_workspace_vol}) or choose a different name — unclaimed "
-                    f"agent volumes are also reclaimed automatically."
-                ),
-            )
+            return
+        if refusal is not None:
+            raise HTTPException(status_code=409, detail=refusal.detail)
 
 
 # ent#123: owner/repo charset guard. The repo path is interpolated into
@@ -1176,10 +1232,18 @@ async def _apply_fork_to_own(
     if config.fork_to_own.github_pat is not None:
         user_pat, token_source = config.fork_to_own.github_pat.get_secret_value(), "form"
     elif github_pat_tier in SAVED_TOKEN_TIERS and github_pat_for_agent:
-        # An agent key carries its owner's identity; the owner's saved token
-        # is the owner's to spend, not the agent's.
-        if getattr(current_user, "agent_name", None):
-            raise saved_token_not_for_agents()
+        # This arm makes the creator's saved personal token the new agent's
+        # own, a credential bind, so it takes the INTERACTIVE rule
+        # (requirements/auth.md §2.8; trinity-enterprise#719): a signed-in
+        # session only, the predicate and loopback refusal of
+        # `require_interactive`. A key carries its owner's identity, and the
+        # saved token stays the owner's to spend.
+        from dependencies import is_interactive_principal
+
+        if not is_interactive_principal(current_user) or getattr(
+            current_user, "vouched_source_agent", None
+        ):
+            raise saved_token_needs_a_session()
         user_pat, token_source = github_pat_for_agent, "saved"
     else:
         raise fork_pat_required()
@@ -1970,6 +2034,7 @@ async def _resolve_template(
             tr.declared_metrics = metric_registry.declared_metrics_from_template(
                 source_metadata
             )
+            tr.declared_model = agent_model_seed.declared_model(source_metadata)
             (
                 tr.github_repo_for_agent,
                 tr.github_pat_for_agent,
@@ -2057,6 +2122,7 @@ async def _resolve_template(
             tr.declared_metrics = metric_registry.declared_metrics_from_template(
                 tr.template_data
             )
+            tr.declared_model = agent_model_seed.declared_model(tr.template_data)
     return tr
 
 
@@ -2850,10 +2916,12 @@ def _register_agent(
     template_data: dict,
     ephemeral_expires_at: Optional[str],
     auto_assigned_subscription_id: Optional[str],
+    declared_model: Optional[str] = None,
 ) -> None:
     """DB registration: ownership row (require_email #1129 + ephemeral fields +
     provenance), the ent#69 parent→child spawn edge, the auto-assigned
-    subscription (#74), the AVATAR-003 avatar seed, and default permissions.
+    subscription (#74), the AVATAR-003 avatar seed, the agent's own model
+    (#4442), and default permissions.
     Each post-registration grant is log-and-continue (non-fatal)."""
     # #1129: seed require_email from the fleet-wide default
     # (secure-by-default ON) at creation; owners can override per agent.
@@ -2892,6 +2960,16 @@ def _register_agent(
             db.set_display_label(config.name, config.display_label)
         except Exception as e:
             logger.warning(f"Could not set display label for {config.name}: {e}")
+
+    # #4442: seed the agent's own model, the one its wakes and other
+    # platform-started turns run on, from the request's runtime model or the
+    # template's declared one. Fill-blank only, so another writer's value stays.
+    _own_model = config.runtime_model or declared_model
+    if _own_model:
+        try:
+            agent_model_seed.seed_default_model(config.name, _own_model, config.runtime, db_ops=db)
+        except Exception as e:
+            logger.warning(f"Could not seed the model of {config.name}: {type(e).__name__}")
 
     # trinity-enterprise#69 Part 2: auto-grant the parent→child
     # permission edge so the spawning agent can immediately
@@ -4046,6 +4124,7 @@ async def create_agent_internal(
                 tr.template_data,
                 ephemeral_expires_at,
                 auto_assigned_subscription_id,
+                declared_model=tr.declared_model,
             )
             # ent#1173 (AC-2): install a GitHub template's bundled avatar bytes
             # (fetched during _resolve_template). Best-effort — the agent is
