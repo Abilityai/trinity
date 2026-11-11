@@ -10,6 +10,7 @@ import {
   INTAKE_QUESTIONS,
   answerIntake,
   buildAvailableFor,
+  opensBuild,
   buildPhase,
   auditEmphasis,
   auditIntro,
@@ -24,6 +25,7 @@ import {
   companyFromProfile,
   companyToPublish,
   rebindToGuide,
+  keepGuideCard,
   shouldStartResearch,
   chooseAudit,
   chooseProfileChat,
@@ -319,6 +321,11 @@ describe('normalizeState: an agent wrote this, so nothing is trusted', () => {
     expect(s.agents[0].connections[0].status).toBe('needed')
   })
 
+  it("keeps that they moved on from Level 3 only when the guide wrote exactly true", () => {
+    expect(normalizeState({ schema: BUILD_SCHEMA, keys_not_needed: true }).keys_not_needed).toBe(true)
+    for (const odd of ['true', 1, undefined, {}]) expect(normalizeState({ schema: BUILD_SCHEMA, keys_not_needed: odd }).keys_not_needed).toBe(false)
+  })
+
   it('drops malformed rows instead of throwing', () => {
     const s = normalizeState({
       schema: BUILD_SCHEMA,
@@ -441,10 +448,27 @@ describe('the profile: Trinity knows who they are and what the company does', ()
     expect(worldView(state({ audit: { status: 'done' } }), finished()).profileComplete).toBe(true)
   })
 
-  it('answering the questions is no longer enough on its own', () => {
+  it('answering the questions is no longer enough on its own, but it is no alarm: the guide fills the rest in as they talk', () => {
     const v = worldView(state(), finished())
     expect(v.profileComplete).toBe(false)
-    expect(v.profileIncomplete).toBe(true)
+    // Red is for questions left unanswered. With all of them answered the profile is in
+    // progress with the guide, said calmly, with one offer to tell it about their work.
+    expect(v.profileIncomplete).toBe(false)
+    expect(v.profileNote).toBe('talk')
+    expect(stepState('profile', v)).toBe('filling')
+    // Once they have asked for that talk, the offer is not made again.
+    const asked = worldView(state(), chooseProfileChat(finished()))
+    expect(asked.profileIncomplete).toBe(false)
+    expect(asked.profileNote).toBe('filling')
+    expect(chooseProfileChat(finished()).profileAsked).toBe(true)
+  })
+
+  it('says nothing about the profile once it is complete, or while nothing is open', () => {
+    expect(worldView(state({ profile_complete: true }), finished()).profileNote).toBe('')
+    expect(worldView(state({ audit: { status: 'in_progress' } }), finished()).profileNote).toBe('')
+    expect(worldView(null, finished()).profileNote).toBe('')
+    // Questions skipped: that is the red one, not a note.
+    expect(worldView(null, skipIntake(emptyIntake())).profileNote).toBe('')
   })
 
   it('is never red while the audit is running, or before the guide has written anything', () => {
@@ -600,6 +624,14 @@ describe('one Atlas per person', () => {
   })
 })
 
+describe('keys left for later', () => {
+  it('is read from the world as a plain yes or no', () => {
+    expect(normalizeState({ schema: BUILD_SCHEMA, keys_later: true }).keys_later).toBe(true)
+    expect(normalizeState({ schema: BUILD_SCHEMA, keys_later: 'yes' }).keys_later).toBe(false)
+    expect(normalizeState({ schema: BUILD_SCHEMA }).keys_later).toBe(false)
+  })
+})
+
 describe('buildAvailableFor: who gets the door', () => {
   it('is for people who can make agents', () => {
     expect(buildAvailableFor({ isPlatformSession: true, workspaceOnly: false })).toBe(true)
@@ -609,6 +641,16 @@ describe('buildAvailableFor: who gets the door', () => {
     expect(buildAvailableFor({ isPlatformSession: false, workspaceOnly: false })).toBe(false)
     expect(buildAvailableFor({ isPlatformSession: true, workspaceOnly: true })).toBe(false)
     expect(buildAvailableFor({})).toBe(false)
+  })
+
+  it('is closed to an operator, who has the Dashboard but may not create agents', () => {
+    const on = { isPlatformSession: true, workspaceOnly: false }
+    expect(buildAvailableFor({ ...on, role: 'operator' })).toBe(false)
+    expect(buildAvailableFor({ ...on, role: 'creator' })).toBe(true)
+    expect(buildAvailableFor({ ...on, role: 'admin' })).toBe(true)
+    // A role still loading closes nothing: the server refuses whatever it must.
+    expect(buildAvailableFor({ ...on, role: undefined })).toBe(true)
+    expect(buildAvailableFor({ ...on, role: '' })).toBe(true)
   })
 })
 
@@ -1000,6 +1042,36 @@ describe('final review: a guide whose name Trinity changed, and answers for anot
     expect(moved).not.toHaveProperty('research')
   })
 
+  it("keeps the guide's card when the roster brings the same one again, and takes a changed one", () => {
+    const card = { name: 'atlas-11111111', display_label: 'Atlas', avatar_url: null }
+    expect(keepGuideCard(card, { ...card })).toBe(card)
+    const pictured = { ...card, avatar_url: '/avatars/atlas.webp' }
+    expect(keepGuideCard(card, pictured)).toBe(pictured)
+    expect(keepGuideCard(null, card)).toBe(card)
+    expect(keepGuideCard(card, null)).toBe(null)
+  })
+
+  it('a guide set up again under the same name, with no page and no chat of theirs, is told again', () => {
+    // Atlas's address comes from the person, so the guide set up after a deleted one has its name.
+    const now = Date.parse('2026-11-06T10:30:00Z')
+    const yesterday = now - 20 * 60 * 60 * 1000
+    const sent = markIntakeSent({ ...emptyIntake(), answers: { company: 'Acme' }, done: true, research: { started: true, executionId: 'e1', at: yesterday, guide: 'atlas-22222222' } }, 'atlas-22222222')
+    expect(rebindToGuide(sent, 'atlas-22222222', { fresh: false, now })).toBe(sent)
+    const again = rebindToGuide(sent, 'atlas-22222222', { fresh: true, now })
+    expect(again.sent).toBe(false)
+    expect(again).not.toHaveProperty('sentTo')
+    // Yesterday's research went with the guide before, so this one runs its own.
+    expect(again).not.toHaveProperty('research')
+    // Research from minutes ago was started in this guide, and may still be running.
+    const recent = { ...sent, research: { ...sent.research, at: now - 5 * 60 * 1000 } }
+    const resent = rebindToGuide(recent, 'atlas-22222222', { fresh: true, now })
+    expect(resent.sent).toBe(false)
+    expect(resent.research).toEqual(recent.research)
+    // Answers that never went anywhere have nothing to undo, nor has research started for them.
+    const unsent = { ...emptyIntake(), answers: { company: 'Acme' }, done: true, research: { started: true, executionId: 'e1', at: yesterday, guide: 'atlas-22222222' } }
+    expect(rebindToGuide(unsent, 'atlas-22222222', { fresh: true, now })).toBe(unsent)
+  })
+
   it("a colleague's shared research stays, but is copied again into the new guide", () => {
     const shared = { ...emptyIntake(), sent: true, sentTo: 'atlas-a', research: { started: true, shared: true, copied: true, at: 1 } }
     expect(rebindToGuide(shared, 'atlas-b').research).toEqual({ started: true, shared: true, copied: false, at: 1 })
@@ -1022,3 +1094,36 @@ describe('final review: publishing the company profile', () => {
   })
 })
 
+
+describe('the guide has one page', () => {
+  const threads = [
+    { id: 'main-1', agent_name: 'atlas-1a2b3c4d', is_main: true },
+    { id: 'side-1', agent_name: 'atlas-1a2b3c4d', is_main: false },
+    { id: 'other-1', agent_name: 'game-filler', is_main: true },
+    { id: 'room-1', agent_name: 'atlas-1a2b3c4d', is_main: true, is_room: true },
+  ]
+  const on = { buildAvailable: true, guideName: 'atlas-1a2b3c4d', threads }
+
+  it("their own guide's row, and its main chat, open the Build page", () => {
+    expect(opensBuild({ ...on, agentName: 'atlas-1a2b3c4d' })).toBe(true)
+    expect(opensBuild({ ...on, sessionId: 'main-1' })).toBe(true)
+    expect(opensBuild({ ...on, threads: [{ session_id: 'main-1', agent_name: 'atlas-1a2b3c4d', is_main: true }], sessionId: 'main-1' })).toBe(true)
+  })
+
+  it('every other agent and chat opens as before', () => {
+    expect(opensBuild({ ...on, agentName: 'game-filler' })).toBe(false)
+    expect(opensBuild({ ...on, sessionId: 'other-1' })).toBe(false)
+    // Another chat of the guide's isn't the one the Build page shows, so it stays reachable.
+    expect(opensBuild({ ...on, sessionId: 'side-1' })).toBe(false)
+    expect(opensBuild({ ...on, sessionId: 'room-1' })).toBe(false)
+    expect(opensBuild({ ...on, sessionId: 'unknown' })).toBe(false)
+    expect(opensBuild({ ...on })).toBe(false)
+  })
+
+  it('never for someone who cannot build, or who has no guide', () => {
+    expect(opensBuild({ ...on, buildAvailable: false, agentName: 'atlas-1a2b3c4d' })).toBe(false)
+    expect(opensBuild({ ...on, guideName: '', agentName: '' })).toBe(false)
+    expect(opensBuild({ ...on, guideName: null, sessionId: 'main-1' })).toBe(false)
+    expect(opensBuild()).toBe(false)
+  })
+})

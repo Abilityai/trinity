@@ -168,7 +168,9 @@ import {
   countsAsSetupStart,
   isFirstRunOverlayVisible,
   litNodes,
+  nextStepKey,
   persistFirstRunClosed,
+  previousStepKey,
   persistFirstRunSkipped,
   readFirstRunClosed,
   readFirstRunSkipped,
@@ -374,16 +376,18 @@ function goTo(key) {
   if (reachable.value.includes(key)) currentKey.value = key
 }
 
+// Continue and Back pass over steps already done (Claude connected before setup opened,
+// an email bound at /setup): they keep their check in the rail, where a click still
+// opens them, but nobody is walked through a page with nothing on it.
 function advance() {
-  const i = order.value.indexOf(currentKey.value)
-  currentKey.value = order.value[Math.min(i + 1, order.value.length - 1)]
-  furthest.value = Math.max(furthest.value, i + 1)
+  const next = nextStepKey(order.value, currentKey.value, states.value)
+  currentKey.value = next
+  furthest.value = Math.max(furthest.value, order.value.indexOf(next))
   if (currentKey.value === 'claude') telemetry.record('setup_step_credential')
 }
 
 function back() {
-  const i = order.value.indexOf(currentKey.value)
-  if (i > 0) currentKey.value = order.value[i - 1]
+  currentKey.value = previousStepKey(order.value, currentKey.value, states.value)
   // Back does not exist on the first panel, so focus must not stay on it.
   if (isFirst.value) focusSafeAction()
 }

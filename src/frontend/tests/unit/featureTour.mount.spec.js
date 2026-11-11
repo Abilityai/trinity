@@ -29,7 +29,7 @@ describe('the feature tour, mounted', () => {
     const w = mount(PortalBuildTour, { attachTo: document.body, props: { open: true, steps: featureTourSteps() } })
     await settle()
     expect(document.querySelector('[data-testid="build-tour-progress"]').textContent.trim()).toBe('1 of 3')
-    expect(document.querySelector('#build-tour-title').textContent).toBe('Your agents')
+    expect(document.querySelector('#build-tour-title').textContent).toBe('Three views of your agents')
     expect(w.emitted('close')).toBeUndefined()
     w.unmount()
   })

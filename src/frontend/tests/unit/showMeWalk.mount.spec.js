@@ -40,10 +40,28 @@ async function start(path) {
 
 beforeEach(() => {
   document.body.innerHTML = ''
+  // The Dashboard's own stop shows on the first walk only; these tests start after it.
+  localStorage.setItem('trinity-walk-dashboard-seen', '1')
   setActivePinia(createPinia())
   useNetworkStore().agents = [{ name: 'game-promoter', display_label: 'Game Promoter' }]
 })
 afterEach(() => { wrapper?.unmount(); wrapper = null })
+
+describe('the first walk', () => {
+  it('opens on the Dashboard itself with Next, then the agent, and is said only once', async () => {
+    localStorage.removeItem('trinity-walk-dashboard-seen')
+    place({ 'data-walk': 'dashboard' }, { left: 0, top: 60, width: 1200, height: 700 })
+    place({ 'data-walk-agent': 'game-promoter' })
+    await start('/?walk=credentials&walk_agent=game-promoter')
+    expect(title()).toBe('This is the Dashboard')
+    await click('show-me-walk-next')
+    expect(title()).toBe('Your agents live here')
+    expect(localStorage.getItem('trinity-walk-dashboard-seen')).toBe('1')
+    wrapper.unmount()
+    await start('/?walk=credentials&walk_agent=game-promoter')
+    expect(title()).toBe('Your agents live here')
+  })
+})
 
 describe('the credentials walk, on the pages', () => {
   it('starts from the address, takes itself out of it, and lights up the agent on the Dashboard', async () => {
@@ -232,30 +250,47 @@ describe('the schedules walk, on the pages', () => {
     })
   }
 
-  it('lights the switch, then Enable autonomy while it is off, then the last word', async () => {
+  it('lights the switch, then the Autonomy switch at the top while it is off, then the last word', async () => {
     const [digest] = schedules('off')
+    place({ 'data-walk': 'autonomy-switch' }, { left: 40, top: 20, width: 90, height: 24 })
+    place({ 'data-walk': 'autonomy-enable' })
     await start('/agents/scout?tab=schedules&walk=schedules&walk_agent=scout&walk_schedule=s1')
     expect(title()).toBe('Turn on Daily digest')
     digest.setAttribute('data-walk-enabled', 'true')
-    const button = place({ 'data-walk': 'autonomy-enable' })
     await wait()
     expect(title()).toBe('Turn on Autonomy')
+    expect(body()).toBe("This is Scout's Autonomy switch, at the top of its page. While it says Manual, none of its schedules run. Click it, and it says AUTO.")
+    document.querySelector('[data-walk-autonomy]').setAttribute('data-walk-autonomy', 'on')
+    await wait()
+    expect(title()).toBe("That's it")
+  })
+
+  it('lights Enable autonomy instead when the page has no Autonomy switch at the top', async () => {
+    const [digest] = schedules('off')
+    const button = place({ 'data-walk': 'autonomy-enable' })
+    await start('/agents/scout?tab=schedules&walk=schedules&walk_agent=scout&walk_schedule=s1')
+    digest.setAttribute('data-walk-enabled', 'true')
+    await wait()
+    expect(title()).toBe('Turn on Autonomy')
+    expect(body()).toBe("Autonomy is Scout's switch for working on its own. While it's off, none of its schedules run. Click Enable autonomy.")
     button.remove()
+    document.querySelector('[data-walk-autonomy]').setAttribute('data-walk-autonomy', 'on')
     await wait()
     expect(title()).toBe("That's it")
   })
 
   it('skips Autonomy when it is already on', async () => {
     const [digest] = schedules('on')
+    place({ 'data-walk': 'autonomy-switch' })
     await start('/agents/scout?tab=schedules&walk=schedules&walk_agent=scout&walk_schedule=s1')
     digest.setAttribute('data-walk-enabled', 'true')
     await wait()
     expect(title()).toBe("That's it")
   })
 
-  it('still lights Enable autonomy when the schedule was already on', async () => {
+  it('still lights the Autonomy switch when the schedule was already on', async () => {
     schedules('off', [{ id: 's1', enabled: 'true', name: 'Daily digest' }])
-    place({ 'data-walk': 'autonomy-enable' })
+    place({ 'data-walk': 'autonomy-switch' })
     await start('/agents/scout?tab=schedules&walk=schedules&walk_agent=scout&walk_schedule=s1')
     expect(title()).toBe('Already on')
     await click('show-me-walk-next')
@@ -305,11 +340,11 @@ describe('final review: what is off screen, and nothing to save', () => {
     expect(scrolled).toBe(1)
   })
 
-  it('never skips Enable autonomy just because the banner is scrolled out of view', async () => {
+  it('never skips the Autonomy switch just because it is scrolled out of view', async () => {
     const panel = place({ 'data-tour': 'showme-schedules', 'data-walk-autonomy': 'off' })
     const row = inside(panel, { 'data-walk-schedule': 's1', 'data-walk-enabled': 'true', 'data-walk-schedule-name': 'Daily digest' }, { left: 40, top: 200, width: 600, height: 60 })
     inside(row, { 'data-walk': 'schedule-toggle' }, { left: 600, top: 210, width: 24, height: 24 })
-    place({ 'data-walk': 'autonomy-enable' }, { left: 40, top: -600, width: 160, height: 36 })
+    place({ 'data-walk': 'autonomy-switch' }, { left: 40, top: -600, width: 90, height: 24 })
     await start('/agents/scout?tab=schedules&walk=schedules&walk_agent=scout&walk_schedule=s1')
     expect(title()).toBe('Already on')
     await click('show-me-walk-next')

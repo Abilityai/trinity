@@ -84,6 +84,11 @@ const agentsStore = useAgentsStore()
 
 const walk = ref(null)
 const index = ref(0)
+// The first walk on this browser opens on the Dashboard itself (`showMeWalk.js`).
+const DASHBOARD_SEEN = 'trinity-walk-dashboard-seen'
+const intro = ref(false)
+const dashboardSeen = () => { try { return localStorage.getItem(DASHBOARD_SEEN) === '1' } catch { return true } }
+const markDashboardSeen = () => { try { localStorage.setItem(DASHBOARD_SEEN, '1') } catch { /* private window: shown again next time */ } }
 const picked = ref(null)
 const rect = ref(null)
 const lost = ref(false)
@@ -110,6 +115,7 @@ function nameOf(name) {
 }
 const label = computed(() => nameOf(walk.value?.agent))
 const toLabel = computed(() => nameOf(walk.value?.to))
+const fromLabel = computed(() => nameOf(walk.value?.from))
 
 // The steps an `expand` step stands for, from the rows the page showed (`picked`).
 function expanded(kind, rows, who) {
@@ -119,8 +125,8 @@ function expanded(kind, rows, who) {
 }
 const steps = computed(() => {
   if (!walk.value) return []
-  const who = { agent: walk.value.agent, label: label.value, toLabel: toLabel.value }
-  const base = walkSteps(walk.value, who)
+  const who = { agent: walk.value.agent, label: label.value, toLabel: toLabel.value, fromLabel: fromLabel.value }
+  const base = walkSteps(walk.value, who, { intro: intro.value })
   return picked.value ? base.flatMap((s) => (s.expand ? expanded(s.expand, picked.value, who) : [s])) : base
 })
 const step = computed(() => steps.value[index.value] || null)
@@ -210,6 +216,13 @@ async function measure(el) {
   rect.value = { left: r.left, top: r.top, width: r.width, height: r.height }
   await nextTick()
   const box = card.value?.getBoundingClientRect?.()
+  // A stop that lights a whole page has no room beside it: its card sits in the middle.
+  if (step.value?.center) {
+    const width = box?.width || 340
+    const height = box?.height || 200
+    cardPlace.value = { left: `${Math.max(16, (window.innerWidth - width) / 2)}px`, top: `${Math.max(16, (window.innerHeight - height) / 2)}px` }
+    return
+  }
   cardPlace.value = tourCardPosition(
     { left: hole.value.left, top: hole.value.top, width: hole.value.right - hole.value.left, height: hole.value.bottom - hole.value.top },
     { width: box?.width || 340, height: box?.height || 200 },
@@ -223,6 +236,7 @@ function unlit() {
 }
 
 function go(i) {
+  if (intro.value && i > 0) markDashboardSeen()
   index.value = i
   startedAt = Date.now()
   seen = false
@@ -316,6 +330,7 @@ const onKey = (event) => {
 }
 
 function begin(found) {
+  intro.value = !dashboardSeen()
   walk.value = found
   picked.value = null
   go(0)
@@ -327,6 +342,7 @@ function begin(found) {
   tick()
 }
 function stop() {
+  if (intro.value && walk.value) markDashboardSeen()
   walk.value = null
   picked.value = null
   clearInterval(timer)

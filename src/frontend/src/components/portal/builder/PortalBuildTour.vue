@@ -6,7 +6,7 @@
 -->
 <template>
   <Teleport to="body">
-    <div v-if="open && step" class="fixed inset-0 z-50" :data-testid="testid" role="dialog" aria-modal="true" aria-labelledby="build-tour-title" @keydown.esc="$emit('close')">
+    <div v-if="open && step" class="fixed inset-0 z-50" :data-testid="testid" role="dialog" aria-modal="true" aria-labelledby="build-tour-title" @keydown.esc="$emit('close', 'escape')">
       <!-- The light is the hole left by one huge shadow, so everything else stays dim. -->
       <div
         class="absolute rounded-xl ring-2 ring-action-primary-500 transition-all duration-200 motion-reduce:transition-none"
@@ -23,10 +23,10 @@
         <h2 id="build-tour-title" class="mt-1 text-base font-semibold text-gray-900 dark:text-gray-100">{{ step.title }}</h2>
         <p class="mt-1 text-sm text-gray-600 dark:text-gray-300" data-testid="build-tour-body">{{ step.body }}</p>
         <div class="mt-4 flex items-center gap-2">
-          <BaseButton v-if="skippable && index < steps.length - 1" variant="ghost" size="sm" data-testid="build-tour-skip" @click="$emit('close')">Skip the tour</BaseButton>
+          <BaseButton v-if="skippable && index < steps.length - 1" variant="ghost" size="sm" data-testid="build-tour-skip" @click="$emit('close', 'skipped')">Skip the tour</BaseButton>
           <span class="flex-1"></span>
           <BaseButton v-if="index > 0" variant="secondary" size="sm" data-testid="build-tour-back" @click="index -= 1">Back</BaseButton>
-          <BaseButton size="sm" data-testid="build-tour-next" @click="next">{{ index < steps.length - 1 ? 'Next' : 'Got it' }}</BaseButton>
+          <BaseButton size="sm" data-testid="build-tour-next" @click="next">{{ index < steps.length - 1 ? 'Next' : doneLabel }}</BaseButton>
         </div>
       </div>
     </div>
@@ -48,6 +48,8 @@ const props = defineProps({
   // A level moment is one or two stops, with nothing to skip.
   skippable: { type: Boolean, default: true },
   testid: { type: String, default: 'build-tour' },
+  // What the last stop's button says: the way to the Dashboard opens it.
+  doneLabel: { type: String, default: 'Got it' },
 })
 const emit = defineEmits(['close'])
 
@@ -86,18 +88,19 @@ async function place() {
 }
 
 // A part that left the screen after the stops were picked (a nav link folding into
-// "N more", a resize) is left out rather than pointed at.
+// "N more", a resize) is left out rather than pointed at. Closing with nothing left to
+// show is "dropped", so a level moment can come back once its card has drawn.
 function dropHidden() {
   if (!step.value) return
   steps.value = steps.value.filter((s) => visible(target(s)))
-  if (steps.value.length < props.minSteps) { emit('close'); return }
+  if (steps.value.length < props.minSteps) { emit('close', 'dropped'); return }
   index.value = Math.min(index.value, steps.value.length - 1)
   place()
 }
 
 function next() {
   if (index.value < steps.value.length - 1) index.value += 1
-  else emit('close')
+  else emit('close', 'done')
 }
 
 async function begin() {
@@ -107,7 +110,7 @@ async function begin() {
   steps.value = (props.steps || tourSteps(props.guideName)).filter((s) => visible(target(s)))
   index.value = 0
   // On a phone the chat is about all that's on screen, so there's nothing to walk round.
-  if (steps.value.length < props.minSteps) { emit('close'); return }
+  if (steps.value.length < props.minSteps) { emit('close', 'dropped'); return }
   await place()
   card.value?.focus?.()
 }

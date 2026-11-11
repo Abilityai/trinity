@@ -95,19 +95,6 @@ const REGISTRY = [
     pending: (c) => !c.claudeAuthConfigured,
   },
   {
-    key: 'keys',
-    name: 'Optional extras',
-    tag: 'Optional',
-    required: false,
-    minutes: 2,
-    settingsPath: 'Settings → Integrations',
-    ridesAlong: true,
-    eligible: (c) => !!c.isAdmin,
-    // No state says "the optional keys are done"; it reads done only once the
-    // step itself emits `complete` this session.
-    pending: () => true,
-  },
-  {
     key: 'company',
     name: 'Your company',
     tag: 'Recommended',
@@ -131,6 +118,19 @@ const REGISTRY = [
     // consent on, or "Don't ask again", or disabled by config.
     eligible: (c) => !!c.isAdmin && !c.telemetryHardDisabled,
     pending: (c) => !c.telemetryEnabled && !c.telemetryDismissed,
+  },
+  {
+    key: 'keys',
+    name: 'Optional extras',
+    tag: 'Optional',
+    required: false,
+    minutes: 2,
+    settingsPath: 'Settings → Integrations',
+    ridesAlong: true,
+    eligible: (c) => !!c.isAdmin,
+    // No state says "the optional keys are done"; it reads done only once the
+    // step itself emits `complete` this session.
+    pending: () => true,
   },
   {
     key: 'audit',
@@ -242,6 +242,32 @@ export function canContinue({ step, ctx = {}, completed = [] }) {
   // step isn't recorded as skipped. Skip stays offered beside it.
   if (!step?.required && !step?.gated) return true
   return completed.includes(step.key) || !step.applies(ctx)
+}
+
+/**
+ * Where Continue lands from `from`: the next step in `order` with something still to do.
+ * A step done before the panel opened (Claude connected, an email bound at /setup, an
+ * agent already made) keeps its row and its check in the rail, but Continue never stops
+ * on a page with nothing on it. The last panel (`done`) is always reachable.
+ */
+export function nextStepKey(order = [], from, states = {}) {
+  const i = order.indexOf(from)
+  const last = order.length - 1
+  if (i < 0 || i >= last) return order[last] ?? null
+  for (let j = i + 1; j < last; j++) {
+    if (states[order[j]] !== 'done') return order[j]
+  }
+  return order[last]
+}
+
+/** Where Back lands: the previous step with something to do, or the first panel. */
+export function previousStepKey(order = [], from, states = {}) {
+  const i = order.indexOf(from)
+  if (i <= 0) return order[0] ?? null
+  for (let j = i - 1; j > 0; j--) {
+    if (states[order[j]] !== 'done') return order[j]
+  }
+  return order[0]
 }
 
 /** "About N minutes" for the welcome step. */

@@ -63,6 +63,9 @@ const canvas = (state) => ({
 })
 
 // Not an admin unless a test says so: an admin's onboarding is the setup panel.
+// The door to the Build page once their guide exists: its own row under Agents.
+const openGuide = (page) => page.getByText('Builds and runs agents', { exact: true }).first().click()
+
 async function mockWorkspace(page, { agents, state = null, orchestration = false, claude = true, role = 'creator', guide = GUIDE } = {}) {
   const sent = []
   const tasks = []
@@ -167,7 +170,7 @@ test.describe('Workspace Build @smoke', () => {
     await page.getByTestId('build-help-intro').click()
     await expect(page.locator('[data-testid="intro-video-file"], [data-testid="intro-video"]').first()).toBeVisible()
     await page.getByTestId('build-help-close').click()
-    await page.getByTestId('sidebar-build').click()
+    await openGuide(page)
     await page.getByTestId('build-world-get-help').click()
     await expect(help).toBeVisible()
   })
@@ -189,7 +192,6 @@ test.describe('Workspace Build @smoke', () => {
     await page.getByTestId('build-onboarding-start').click()
     await page.getByTestId('build-onboarding-input').fill('Head of Marketing')
     await page.getByTestId('build-onboarding-continue').click()
-    await expect(page.getByTestId('build-role')).toContainText('Head of Marketing')
     await page.getByRole('button', { name: 'None' }).click()
     await page.getByRole('button', { name: "I've never built one" }).click()
     await page.getByTestId('what-is-an-agent-done').click()
@@ -206,6 +208,9 @@ test.describe('Workspace Build @smoke', () => {
     expect(sent).toHaveLength(0)
     await page.getByTestId('build-onboarding-audit-start').click()
     await expect(page.getByTestId('build-onboarding')).toHaveCount(0)
+    // Who they are is under You, beside the company.
+    await page.locator('[data-testid="build-world"] [data-tab="you"]').click()
+    await expect(page.getByTestId('build-role')).toContainText('Head of Marketing')
     await expect(page.getByTestId('build-level')).toContainText('explains each step')
     // The first message waits for the tour, and acting on the page dismisses it.
     await expect(async () => {
@@ -269,7 +274,7 @@ test.describe('Workspace Build @smoke', () => {
     await expect(page.getByTestId('build-onboarding')).toHaveCount(0)
     await expect(red).toBeVisible()
 
-    await page.getByTestId('sidebar-build').click()
+    await openGuide(page)
     await expect(page.getByTestId('build-profile-incomplete')).toBeVisible()
     await expect(page.getByTestId('build-audit-nudge')).toBeVisible()
     await expect(page.locator('[data-step-state="incomplete"]')).toHaveCount(1)
@@ -365,7 +370,7 @@ test.describe('Workspace Build @smoke', () => {
 
     await expect(page.getByTestId('build-tour')).toBeVisible()
     await expect(page.getByTestId('build-tour-body')).toContainText('Build Guide is yours: it helps you find the best agents to build, and builds them with you.')
-    for (const title of ['This is where you talk', 'This is your company page', 'This is your Inbox', 'You can always get help']) {
+    for (const title of ['This is where you talk', 'This is your company page', 'This is your Inbox', 'This is the way to the Dashboard', 'You can always get help']) {
       await page.getByTestId('build-tour-next').click()
       await expect(page.locator('#build-tour-title')).toHaveText(title)
     }
@@ -377,10 +382,20 @@ test.describe('Workspace Build @smoke', () => {
     await expect(page.getByTestId('build-tour')).toBeVisible()
   })
 
-  test('the world draws what the guide reports, follows it, and zooms in', async ({ page }) => {
+  // Your company, pressed again if a level moment put the right side back on You meanwhile.
+  const openCompany = (p) => expect(async () => {
+    await p.locator('[data-testid="build-world"] [data-tab="world"]').first().dispatchEvent('click')
+    await expect(p.locator('[data-testid="build-agent-detail"], [data-testid="build-world-map"]').first()).toBeVisible({ timeout: 1000 })
+    await expect(p.getByTestId('build-moment')).toHaveCount(0, { timeout: 1000 })
+  }).toPass({ timeout: 15000 })
+
+  test('the world draws what the guide reports, shows You while it builds, and Your company opens on the agent', async ({ page }) => {
     await mockWorkspace(page, { agents: [GUIDE_CARD], state: { ...STATE, focus: { agent: 'email-triage', skill: 'draft-reply' } } })
     await page.goto('/workspace/build')
 
+    // While an agent is being built the right side shows You, where the levels are.
+    await expect(page.getByTestId('build-you')).toBeVisible()
+    await openCompany(page)
     await expect(page.getByTestId('build-agent-detail')).toBeVisible()
     await expect(page.getByTestId('build-agent-variables')).toContainText('GOOGLE_OAUTH_TOKEN')
     await expect(page.getByTestId('build-agent-schedules')).toContainText('Off until you turn it on')
@@ -404,6 +419,7 @@ test.describe('Workspace Build @smoke', () => {
     const live = { ...STATE, stage: 'live', agents: [{ ...STATE.agents[0], status: 'live', live_name: 'not-on-this-instance' }], focus: { agent: 'email-triage' } }
     await mockWorkspace(page, { agents: [GUIDE_CARD], state: live })
     await page.goto('/workspace/build')
+    await openCompany(page)
     await expect(page.getByTestId('build-agent-not-found')).toBeVisible()
     await expect(page.getByTestId('build-agent-open')).toHaveCount(0)
   })
@@ -412,6 +428,7 @@ test.describe('Workspace Build @smoke', () => {
     const ready = { ...STATE, agents: [{ ...STATE.agents[0], status: 'ready', live_name: 'email-triage' }], focus: { agent: 'email-triage' } }
     await mockWorkspace(page, { agents: [GUIDE_CARD, { name: 'email-triage', availability: 'stopped', playbooks: [] }], state: ready })
     await page.goto('/workspace/build')
+    await openCompany(page)
     await expect(page.getByTestId('build-agent-open')).toHaveAttribute('href', '/workspace/a/email-triage')
     await expect(page.getByTestId('build-agent-add-keys')).toHaveAttribute('href', '/agents/email-triage?tab=credentials')
     await expect(page.getByTestId('build-agent-detail')).toContainText('Stopped')
@@ -449,7 +466,7 @@ test.describe('Workspace Build @smoke', () => {
     await mockWorkspace(page, { agents: [GUIDE_CARD], state: { ...STATE, focus: {} } })
     await page.goto('/workspace/build')
     await expect(page.getByTestId('build-world')).toBeHidden()
-    await page.getByRole('tab', { name: 'Your company' }).click()
+    await page.getByRole('tab', { name: 'Your page' }).click()
     await expect(page.getByTestId('build-world')).toBeVisible()
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)
     expect(overflow).toBeLessThanOrEqual(0)
@@ -471,7 +488,7 @@ test.describe('Workspace Build @smoke', () => {
     await page.goto('/workspace')
     await expect(page).toHaveURL(/\/workspace\/inbox/)
     await expect(page.getByTestId('build-onboarding')).toHaveCount(0)
-    await page.getByTestId('sidebar-build').click()
+    await openGuide(page)
     await expect(page.getByTestId('build-onboarding')).toBeVisible()
   })
 
@@ -479,7 +496,7 @@ test.describe('Workspace Build @smoke', () => {
     await mockWorkspace(page, { agents: [GUIDE_CARD], state: { ...STATE, focus: {} } })
     await page.goto('/workspace')
     await expect(page).toHaveURL(/\/workspace\/inbox/)
-    await page.getByTestId('sidebar-build').click()
+    await openGuide(page)
     await expect(page.getByTestId('portal-build')).toBeVisible()
     await expect(page.getByTestId('build-onboarding')).toHaveCount(0)
   })
@@ -525,6 +542,11 @@ test.describe('Workspace Build @smoke', () => {
     }).toPass()
     expect(sent[0].message).toContain('Acme Freight')
 
+    // The guide's Main chat holds that message now.
+    const at = new Date().toISOString()
+    await page.route(`${API}/sessions*`, (route) => route.fulfill(json({
+      sessions: [{ id: 'main-1', agent_name: GUIDE, title: null, is_main: true, created_at: at, last_message_at: at, message_count: 1, archived_at: null }],
+    })))
     await page.reload()
     await expect(page.locator('main textarea').first()).toBeVisible()
     expect(sent).toHaveLength(1)
@@ -537,7 +559,7 @@ test.describe('Workspace Build @smoke', () => {
     await answerYou(page)
     await page.getByTestId('build-onboarding-skip').click()
     await expect(page.getByTestId('sidebar-profile-incomplete')).toBeVisible()
-    await page.getByTestId('sidebar-build').click()
+    await openGuide(page)
     await expect(page.getByTestId('build-connect')).toBeVisible()
     await expect(page.getByTestId('build-onboarding')).toHaveCount(0)
   })
@@ -573,7 +595,7 @@ test.describe('Workspace Build @smoke', () => {
     await mockWorkspace(page, { agents: [GUIDE_CARD] })
     await page.goto('/workspace/inbox')
     await page.getByTestId('build-onboarding-skip').click()
-    await page.getByTestId('sidebar-build').click()
+    await openGuide(page)
     await expect(page).toHaveURL(/\/workspace\/build$/)
     await expect(page.getByTestId('portal-build')).toBeVisible()
   })
@@ -625,7 +647,7 @@ test.describe('Workspace Build @smoke', () => {
     expect(sent[0].message).toContain('AI audit: skipped for now. First agent: from scratch.')
   })
 
-  test("with every question answered, the red profile opens Atlas's chat, not the questions", async ({ page }) => {
+  test("with every question answered, the profile is no alarm: one calm offer opens Atlas's chat, once", async ({ page }) => {
     const sent = await mockWorkspace(page, { agents: [GUIDE_CARD] })
     await page.goto('/workspace')
     await page.getByTestId('build-onboarding-start').click()
@@ -647,12 +669,21 @@ test.describe('Workspace Build @smoke', () => {
     const notYet = { ...STATE, stage: 'profile', profile_complete: false, audit: { status: 'not_started', summary: '' }, agents: [], focus: {} }
     await page.route(`${API}/agents/${GUIDE}/canvas/build`, (route) => route.fulfill(json(canvas(notYet))))
     await page.reload()
-    await expect(page.getByTestId('sidebar-profile-incomplete')).toBeVisible()
-    await page.getByTestId('build-step-finish-profile').click()
+    // Nothing red: every question is answered, and the rest fills in as they talk.
+    const note = page.getByTestId('sidebar-profile-note').first()
+    await expect(note).toHaveText('Profile: tell Atlas about your work')
+    await expect(page.getByTestId('sidebar-profile-incomplete')).toHaveCount(0)
+    await expect(page.getByTestId('build-profile-incomplete')).toHaveCount(0)
+    await expect(page.getByTestId('build-step-finish-profile')).toHaveCount(0)
+    await expect(page.getByTestId('build-profile-filling')).toBeVisible()
+    await note.click()
     await expect(page.getByTestId('build-onboarding')).toHaveCount(0)
     await expect.poll(() => sent.length).toBe(2)
     // Atlas already has their answers, so this asks for the talk and nothing else.
     expect(sent[1].message).toBe("Profile: I'd like to tell you about my work first, so you know what my job involves.")
+    // Asked once: the line now only says so, and can't send the same message again.
+    await expect(note).toHaveText('Profile: Atlas fills it in as you talk')
+    expect(await note.evaluate((el) => el.tagName)).toBe('P')
   })
 
   // The main app restores a session only from a token that names its sign-in mode, and the
@@ -707,7 +738,7 @@ test.describe('Workspace Build @smoke', () => {
     await expect(page.getByTestId('first-run-overlay')).toHaveCount(0)
     await expect(page).toHaveURL(/\/$/)
     await expect(page.getByTestId('build-tour')).toBeVisible()
-    await expect(page.locator('#build-tour-title')).toHaveText('Your agents')
+    await expect(page.locator('#build-tour-title')).toHaveText('Three views of your agents')
     await page.getByTestId('build-tour-skip').click()
     await expect(page.getByTestId('build-tour')).toHaveCount(0)
 
@@ -823,7 +854,7 @@ test.describe('Workspace Build @smoke', () => {
     await panelUntil(page, 'done')
     await page.getByTestId('first-run-next-done').click()
     await expect(page).toHaveURL(/localhost(:\d+)?\/$/)
-    await expect(page.locator('#build-tour-title')).toHaveText('Your agents')
+    await expect(page.locator('#build-tour-title')).toHaveText('Three views of your agents')
   })
 
   test('where the nav folds links into "N more", the tour only stops at what is on screen', async ({ page }) => {
@@ -832,7 +863,7 @@ test.describe('Workspace Build @smoke', () => {
     await asAdminOnTheDashboard(page)
     await page.goto('/?tour=features')
     await expect(page.getByTestId('build-tour')).toBeVisible()
-    const TITLES = { 'view-modes': 'Your agents', 'nav-operations': 'Operations', 'nav-library': 'Library', 'nav-workspace': 'Workspace', 'nav-settings': 'Settings' }
+    const TITLES = { 'view-modes': 'Three views of your agents', 'nav-operations': 'Operations', 'nav-library': 'Library', 'nav-workspace': 'Workspace', 'nav-settings': 'Settings' }
     const titles = []
     for (let i = 0; i < 6 && await page.getByTestId('build-tour').count(); i++) {
       titles.push(await page.locator('#build-tour-title').textContent())
@@ -846,6 +877,9 @@ test.describe('Workspace Build @smoke', () => {
     expect(titles).toEqual(Object.keys(TITLES).filter((t) => onScreen.includes(t)).map((t) => TITLES[t]))
   })
 
+  // The levels live under You: opened by hand where no moment has switched there yet.
+  // A click sent straight to the tab, so a moment's dimming never gets in its way.
+  const openYou = (p) => p.locator('[data-testid="build-world"] [data-tab="you"]').first().dispatchEvent('click')
   // Levels: one agent of the person's own, and its executions as the instance has them.
   const OWN_AGENT = { name: 'email-triage', owned: true, display_label: 'Email triage', description: 'e2e fixture', availability: 'ready', playbooks: [] }
   const RAN = { status: 'success', triggered_by: 'chat', source_agent_name: null, started_at: '2026-11-03T10:00:00Z', completed_at: '2026-11-03T10:01:00Z' }
@@ -858,6 +892,13 @@ test.describe('Workspace Build @smoke', () => {
         if (!localStorage.getItem(key)) localStorage.setItem(key, value)
       }
     }, JSON.stringify({ current: null, done: true, skipped: false, finished: true, savedAt: Date.now(), ...intake }))
+  }
+  // A test of the agent's connections that passed: one of its own runs, and its reply.
+  const passedTest = async (page) => {
+    const at = '2026-11-03T10:00:00Z'
+    const run = { id: 't1', schedule_id: 'none', agent_name: OWN_AGENT.name, status: 'success', triggered_by: 'agent', source_agent_name: GUIDE, started_at: at, completed_at: at, message: 'Test your connections, changing nothing: for each key you have, make one read-only request to its service.' }
+    await page.route((url) => url.pathname === `/api/agents/${OWN_AGENT.name}/executions`, (route) => route.fulfill(json([run])))
+    await page.route((url) => url.pathname === `/api/agents/${OWN_AGENT.name}/executions/t1`, (route) => route.fulfill(json({ ...run, response: 'Mail: worked\nSheets: worked\n\nCONNECTIONS: OK' })))
   }
   const levelRoute = (page, path, body) => page.route(`**/api/agents/${OWN_AGENT.name}/${path}`, (route) => route.fulfill(json(body)))
 
@@ -874,7 +915,8 @@ test.describe('Workspace Build @smoke', () => {
     await seedAnswersOnce(page, { ...LEVEL_ANSWERS, sent: true })
     const sent = await mockWorkspace(page, { agents: [GUIDE_CARD, OWN_AGENT], state: STATE })
     await page.goto('/workspace/build')
-    await expect(page.getByTestId('build-levels-count')).toHaveText('1 of 7')
+    await openYou(page)
+    await expect(page.getByTestId('build-levels-count')).toHaveText('1 of 8')
     await expect(page.getByTestId('build-level-celebrate')).toContainText('Level 1 reached: First agent')
     // Atlas is told once they've seen the moment, not over it.
     await expect(page.getByTestId('build-moment')).toBeVisible()
@@ -884,16 +926,18 @@ test.describe('Workspace Build @smoke', () => {
     await expect.poll(() => sent.length).toBe(1)
     expect(sent[0].message).toBe(`Level reached: Level 1, First agent.\n${NEXT_2}`)
     await page.reload()
-    await expect(page.getByTestId('build-levels-count')).toHaveText('1 of 7')
+    await openYou(page)
+    await expect(page.getByTestId('build-levels-count')).toHaveText('1 of 8')
     await page.waitForTimeout(1500)
     await expect(page.getByTestId('build-level-celebrate')).toHaveCount(0)
     expect(sent).toHaveLength(1)
   })
 
-  test('the levels moment: lit once when the first build starts, on Your company', async ({ page }) => {
+  test('the levels moment: lit once when the first build starts, under You', async ({ page }) => {
     await seedAnswersOnce(page, { ...LEVEL_ANSWERS, sent: true })
     await mockWorkspace(page, { agents: [GUIDE_CARD], state: STATE })
     await page.goto('/workspace/build')
+    await openYou(page)
     const moment = page.getByTestId('build-moment')
     await expect(moment.locator('#build-tour-title')).toHaveText('Your levels')
     await expect(moment.getByTestId('build-tour-body')).toContainText("We'll take you through these steps to learn Trinity")
@@ -902,7 +946,8 @@ test.describe('Workspace Build @smoke', () => {
     await moment.getByTestId('build-tour-next').click()
     await expect(moment).toHaveCount(0)
     await page.reload()
-    await expect(page.getByTestId('build-levels-count')).toHaveText('0 of 7')
+    await openYou(page)
+    await expect(page.getByTestId('build-levels-count')).toHaveText('0 of 8')
     await page.waitForTimeout(1500)
     await expect(moment).toHaveCount(0)
   })
@@ -911,6 +956,7 @@ test.describe('Workspace Build @smoke', () => {
     await seedAnswersOnce(page, { ...LEVEL_ANSWERS, sent: true, levelsIntroSeen: true })
     await mockWorkspace(page, { agents: [GUIDE_CARD, OWN_AGENT], state: { ...STATE, focus: { agent: '', skill: '' } } })
     await page.goto('/workspace/build')
+    await openYou(page)
     const moment = page.getByTestId('build-moment')
     await expect(moment.locator('#build-tour-title')).toHaveText('Email triage is yours')
     await expect(moment.getByTestId('build-tour-body')).toHaveText('Your agents live here: click one any time to talk to it.')
@@ -927,14 +973,16 @@ test.describe('Workspace Build @smoke', () => {
     // The right side follows Atlas into the agent, so each moment brings it back to Your company.
     const sent = await mockWorkspace(page, { agents: [GUIDE_CARD, OWN_AGENT], state: { ...STATE, focus: { agent: 'email-triage', skill: '' } } })
     await levelRoute(page, 'credential-requirements', { state: 'ok', summary: { total: 2, set: 2, missing: 0, unknown: 0, blocking: 0 } })
+    await passedTest(page)
     let shared = false
     await page.route(`**/api/agents/${OWN_AGENT.name}/shares`, (route) => route.fulfill(json(shared ? [{ shared_with_email: 'sam@example.com' }] : [])))
     await page.goto('/workspace/build')
+    await openYou(page)
     const moment = page.getByTestId('build-moment')
     await expect(moment.locator('#build-tour-title')).toHaveText('Level 3 done: Connected')
     shared = true
     await page.evaluate(() => window.dispatchEvent(new Event('focus')))
-    await expect(page.getByTestId('build-levels-count')).toHaveText('3 of 7')
+    await expect(page.getByTestId('build-levels-count')).toHaveText('3 of 8')
     await moment.getByTestId('build-tour-next').click()
     await expect(moment.locator('#build-tour-title')).toHaveText('Level 4 done: In control')
     await expect(page.getByTestId('build-level-celebrate')).toContainText('Level 4 reached: In control')
@@ -942,7 +990,8 @@ test.describe('Workspace Build @smoke', () => {
     await expect(moment).toHaveCount(0)
     // And back to the agent Atlas was on.
     await expect(page.getByTestId('build-world-map')).toHaveCount(0)
-    await expect.poll(() => sent.filter((m) => /Level reached: Level [34]/.test(m.message)).length).toBeGreaterThan(0)
+    // Each level is told once its own moment has closed.
+    await expect.poll(() => sent.filter((m) => /Level reached: Level 4/.test(m.message)).length).toBe(1)
     const told = sent.map((m) => m.message).join('\n')
     expect(told.match(/Level reached: Level 3/g)).toHaveLength(1)
     expect(told.match(/Level reached: Level 4/g)).toHaveLength(1)
@@ -952,17 +1001,21 @@ test.describe('Workspace Build @smoke', () => {
     await seedAnswersOnce(page, { ...LEVEL_ANSWERS, sent: true, levelsSeen: [1], levelsIntroSeen: true })
     const sent = await mockWorkspace(page, { agents: [GUIDE_CARD, OWN_AGENT], state: STATE })
     await levelRoute(page, 'credential-requirements', { state: 'ok', summary: { total: 2, set: 2, missing: 0, unknown: 0, blocking: 0 } })
+    await passedTest(page)
     await page.goto('/workspace/build')
+    await openYou(page)
     const moment = page.getByTestId('build-moment')
     await expect(moment.locator('#build-tour-title')).toHaveText('Level 3 done: Connected')
     await page.reload()
+    await openYou(page)
     await expect(moment.locator('#build-tour-title')).toHaveText('Level 3 done: Connected')
     expect(sent).toHaveLength(0)
     await moment.getByTestId('build-tour-next').click()
     await expect.poll(() => sent.length).toBe(1)
     expect(sent[0].message).toBe(`Level reached: Level 3, Connected.\n${NEXT_2}`)
     await page.reload()
-    await expect(page.getByTestId('build-levels-count')).toHaveText('2 of 7')
+    await openYou(page)
+    await expect(page.getByTestId('build-levels-count')).toHaveText('2 of 8')
     await page.waitForTimeout(1500)
     await expect(moment).toHaveCount(0)
     expect(sent).toHaveLength(1)
@@ -974,6 +1027,7 @@ test.describe('Workspace Build @smoke', () => {
     // Atlas is still answering, so the line stays as sent.
     await page.route(`${API}/agents/${GUIDE}/chat/stream`, () => new Promise(() => {}))
     await page.goto('/workspace/build')
+    await openYou(page)
     await expect(page.getByTestId('portal-note-line')).toHaveText('Level 1 reached. Build Guide was told.')
     await expect(page.getByTestId('build-chat').getByText(/Level reached: Level 1/)).toHaveCount(0)
   })
@@ -984,14 +1038,16 @@ test.describe('Workspace Build @smoke', () => {
     let names = ['sort-inbox', 'onboarding']
     await page.route(`**/api/agents/${OWN_AGENT.name}/playbooks*`, (route) => route.fulfill(json(PLAYBOOKS(names))))
     await page.goto('/workspace/build')
-    await expect(page.getByTestId('build-levels-count')).toHaveText('1 of 7')
+    await openYou(page)
+    await expect(page.getByTestId('build-levels-count')).toHaveText('1 of 8')
     await page.waitForTimeout(1000)
     expect(sent).toHaveLength(0)
     // Reloaded, the page still compares with its first look, not with what it sees now.
     names = [...names, 'weekly-report']
     await page.reload()
+    await openYou(page)
     await expect(page.getByTestId('build-level-celebrate')).toContainText('Level 2 reached: A new playbook')
-    await expect(page.getByTestId('build-levels-count')).toHaveText('2 of 7')
+    await expect(page.getByTestId('build-levels-count')).toHaveText('2 of 8')
     await expect(page.getByTestId('build-moment').locator('#build-tour-title')).toHaveText('Level 2 done: A new playbook')
     await passMoment(page.getByTestId('build-moment'))
     await expect.poll(() => sent.length).toBe(1)
@@ -1002,18 +1058,32 @@ test.describe('Workspace Build @smoke', () => {
     await seedAnswers(page, { ...LEVEL_ANSWERS, sent: true, levelsSeen: [1] })
     const sent = await mockWorkspace(page, { agents: [GUIDE_CARD, OWN_AGENT], state: STATE })
     await page.goto('/workspace/build')
-    await expect(page.getByTestId('build-levels-count')).toHaveText('1 of 7')
+    await openYou(page)
+    await expect(page.getByTestId('build-levels-count')).toHaveText('1 of 8')
     await page.getByTestId('build-level-ask').click()
     await expect(page.locator('main textarea').first()).toHaveValue('Help me reach Level 2: add a new playbook to one of my agents.')
     await page.waitForTimeout(1000)
     expect(sent).toHaveLength(0)
   })
 
-  test('every key their agent needs being set reaches Level 3 with its moment; with none needed it is skipped', async ({ page }) => {
+  test('keys that are set but not tested do not reach Level 3', async ({ page }) => {
+    await seedAnswers(page, { ...LEVEL_ANSWERS, sent: true, levelsSeen: [1, 2], levelsIntroSeen: true, levelsBase: { [OWN_AGENT.name]: [] } })
+    await mockWorkspace(page, { agents: [GUIDE_CARD, OWN_AGENT], state: STATE })
+    await levelRoute(page, 'credential-requirements', { state: 'ok', summary: { total: 2, set: 2, missing: 0, unknown: 0, blocking: 0 } })
+    await page.goto('/workspace/build')
+    await openYou(page)
+    // Level 1 only: the keys are in, and nothing has shown that they work.
+    await expect(page.getByTestId('build-levels-count')).toHaveText('1 of 8')
+    await expect(page.getByTestId('build-level-3')).toHaveAttribute('data-reached', 'false')
+  })
+
+  test('every key their agent needs being set, and tested, reaches Level 3 with its moment; with none needed it is skipped', async ({ page }) => {
     await seedAnswers(page, { ...LEVEL_ANSWERS, sent: true, levelsSeen: [1] })
     const sent = await mockWorkspace(page, { agents: [GUIDE_CARD, OWN_AGENT], state: STATE })
     await levelRoute(page, 'credential-requirements', { state: 'ok', summary: { total: 2, set: 2, missing: 0, unknown: 0, blocking: 0 } })
+    await passedTest(page)
     await page.goto('/workspace/build')
+    await openYou(page)
     await expect(page.getByTestId('build-level-celebrate')).toContainText('Level 3 reached: Connected')
     await expect(page.getByTestId('build-moment').locator('#build-tour-title')).toHaveText('Level 3 done: Connected')
     await passMoment(page.getByTestId('build-moment'))
@@ -1021,23 +1091,40 @@ test.describe('Workspace Build @smoke', () => {
     expect(sent[0].message).toBe(`Level reached: Level 3, Connected.\n${NEXT_2}`)
   })
 
-  test('with no keys to set, Level 3 shows as not needed, and nothing is said about it', async ({ page }) => {
-    await seedAnswers(page, { ...LEVEL_ANSWERS, sent: true, levelsSeen: [1] })
+  test('with no keys to set, Level 3 is still the next step after Level 2, and says there is nothing to connect', async ({ page }) => {
+    await seedAnswersOnce(page, { ...LEVEL_ANSWERS, sent: true, levelsSeen: [1, 2], levelsVersion: 8, levelsBase: { [OWN_AGENT.name]: ['sort-inbox'] } })
     const sent = await mockWorkspace(page, { agents: [GUIDE_CARD, OWN_AGENT], state: STATE })
     await levelRoute(page, 'credential-requirements', { state: 'no_credentials_required', summary: {} })
+    await page.route(`**/api/agents/${OWN_AGENT.name}/playbooks*`, (route) => route.fulfill(json(PLAYBOOKS(['sort-inbox', 'fill-game']))))
     await page.goto('/workspace/build')
-    await expect(page.getByTestId('build-level-3')).toContainText('Not needed')
-    await expect(page.getByTestId('build-levels-count')).toHaveText('2 of 7')
+    await openYou(page)
+    const row = page.getByTestId('build-level-3')
+    await expect(row).toContainText('None of your agents needs a key')
+    await expect(row).not.toContainText('Not needed')
+    await expect(page.getByTestId('build-levels-count')).toHaveText('2 of 8')
     await page.waitForTimeout(1500)
     expect(sent).toHaveLength(0)
   })
 
-  test("levels already reached when they arrive show on the card, but aren't told over Atlas's first question; a later one is told (no moment: the card is on screen)", async ({ page }) => {
+  test('once they agreed to move on, Level 3 shows as not needed, and nothing is said about it', async ({ page }) => {
+    await seedAnswers(page, { ...LEVEL_ANSWERS, sent: true, levelsSeen: [1] })
+    const sent = await mockWorkspace(page, { agents: [GUIDE_CARD, OWN_AGENT], state: { ...STATE, keys_not_needed: true } })
+    await levelRoute(page, 'credential-requirements', { state: 'no_credentials_required', summary: {} })
+    await page.goto('/workspace/build')
+    await openYou(page)
+    await expect(page.getByTestId('build-level-3')).toContainText('Not needed')
+    await expect(page.getByTestId('build-levels-count')).toHaveText('2 of 8')
+    await page.waitForTimeout(1500)
+    expect(sent).toHaveLength(0)
+  })
+
+  test("levels already reached when they arrive show on the card, but aren't told over Atlas's first question; a later one is told after its moment", async ({ page }) => {
     await seedAnswersOnce(page, LEVEL_ANSWERS)
     const sent = await mockWorkspace(page, { agents: [GUIDE_CARD, OWN_AGENT] })
     let shared = false
     await page.route(`**/api/agents/${OWN_AGENT.name}/shares`, (route) => route.fulfill(json(shared ? [{ shared_with_email: 'sam@example.com' }] : [])))
     await page.goto('/workspace/build')
+    await openYou(page)
     await expect.poll(() => sent.length).toBe(1)
     expect(sent[0].message).toContain('My role: Head of Operations.')
     await expect(page.getByTestId('build-level-celebrate')).toContainText('Level 1 reached: First agent')
@@ -1046,13 +1133,16 @@ test.describe('Workspace Build @smoke', () => {
     // One reached later in the same visit is told as usual.
     shared = true
     await page.evaluate(() => window.dispatchEvent(new Event('focus')))
-    // The Levels card is whole on screen here: its own tick, no moment, and Atlas is told.
+    // The card is lit every time; once the moment is pressed through, Atlas is told.
+    const later = page.getByTestId('build-moment')
+    await expect(later.locator('#build-tour-title')).toHaveText('Level 4 done: In control')
+    await passMoment(later)
     await expect.poll(() => sent.length).toBe(2)
-    await expect(page.getByTestId('build-moment')).toHaveCount(0)
     expect(sent[1].message).toBe(`Level reached: Level 4, In control.\n${NEXT_2}`)
     // And Level 1 was saved as seen, so it isn't celebrated again.
     await page.reload()
-    await expect(page.getByTestId('build-levels-count')).toHaveText('2 of 7')
+    await openYou(page)
+    await expect(page.getByTestId('build-levels-count')).toHaveText('2 of 8')
     await page.waitForTimeout(1500)
     await expect(page.getByTestId('build-level-celebrate')).toHaveCount(0)
   })
@@ -1062,7 +1152,8 @@ test.describe('Workspace Build @smoke', () => {
     const sent = await mockWorkspace(page, { agents: [GUIDE_CARD, OWN_AGENT], state: STATE })
     await levelRoute(page, 'shares', [{ shared_with_email: 'sam@example.com' }])
     await page.goto('/workspace/build')
-    await expect(page.getByTestId('build-levels-count')).toHaveText('2 of 7')
+    await openYou(page)
+    await expect(page.getByTestId('build-levels-count')).toHaveText('2 of 8')
     await expect(page.getByTestId('build-level-celebrate')).toContainText('Level 4 reached: In control')
     // Their only agent lit first, as Level 1 is one of them, then both levels on the card.
     const moment = page.getByTestId('build-moment')
@@ -1072,6 +1163,25 @@ test.describe('Workspace Build @smoke', () => {
     await moment.getByTestId('build-tour-next').click()
     await expect.poll(() => sent.length).toBe(1)
     expect(sent[0].message).toBe(`Level reached: Level 1, First agent.\nLevel reached: Level 4, In control.\n${NEXT_2}`)
+  })
+
+  test('one of their agents did a job for another: the page says so once and offers the walk to it', async ({ page }) => {
+    await seedAnswers(page, { ...LEVEL_ANSWERS, sent: true, levelsSeen: [1, 2, 3, 4, 5, 6, 7, 8] })
+    const helper = { name: 'marketing-agent', owned: true, display_label: 'Marketing Agent', availability: 'ready', playbooks: [] }
+    await mockWorkspace(page, { agents: [GUIDE_CARD, OWN_AGENT, helper], state: STATE })
+    const asked = { ...RAN, triggered_by: 'agent', source_agent_name: OWN_AGENT.name }
+    await page.route(`**/api/agents/${helper.name}/executions*`, (route) => route.fulfill(json([asked])))
+    await page.goto('/workspace/build')
+    const note = page.getByTestId('build-handoff')
+    await expect(note).toContainText(`Marketing Agent just did a job for ${OWN_AGENT.display_label}`)
+    await expect(note.getByTestId('build-handoff-show-me'))
+      .toHaveAttribute('href', `/?walk=tasks&walk_agent=marketing-agent&walk_from=${OWN_AGENT.name}`)
+    await note.getByTestId('build-handoff-dismiss').click()
+    await expect(note).toHaveCount(0)
+    // Put away stays put away: the next read of the same job says nothing.
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+    await page.waitForTimeout(800)
+    await expect(note).toHaveCount(0)
   })
 
   test("opened straight on the Build page, Trinity's samples never count as theirs", async ({ page }) => {
@@ -1084,10 +1194,11 @@ test.describe('Workspace Build @smoke', () => {
       await page.route(`**/api/agents/${name}/permissions`, (route) => route.fulfill(json({ permitted_agents: samples.filter((n) => n !== name).map((n) => ({ name: n, permitted: true })) })))
     }
     await page.goto('/workspace/build')
+    await openYou(page)
     await expect.poll(() => sent.length).toBe(1)
     expect(sent[0].message).toContain('Sample agents that came with Trinity: ')
     expect(sent[0].message).not.toContain('Agents already on this instance: acme')
-    await expect(page.getByTestId('build-levels-count')).toHaveText('0 of 7')
+    await expect(page.getByTestId('build-levels-count')).toHaveText('0 of 8')
     await page.waitForTimeout(1500)
     expect(sent).toHaveLength(1)
   })
@@ -1097,6 +1208,7 @@ test.describe('Workspace Build @smoke', () => {
     const sent = await mockWorkspace(page, { agents: [GUIDE_CARD, OWN_AGENT], state: STATE })
     await page.route('**/api/onboarding/first-run', (route) => route.fulfill(json({ detail: 'down' }, 500)))
     await page.goto('/workspace/build')
+    await openYou(page)
     await expect(page.getByTestId('build-world')).toBeVisible()
     await page.waitForTimeout(1500)
     await expect(page.getByTestId('build-levels')).toHaveCount(0)
@@ -1109,12 +1221,13 @@ test.describe('Workspace Build @smoke', () => {
     let shared = false
     await page.route(`**/api/agents/${OWN_AGENT.name}/shares`, (route) => route.fulfill(json(shared ? [{ shared_with_email: 'sam@example.com' }] : [])))
     await page.goto('/workspace/build')
-    await expect(page.getByTestId('build-levels-count')).toHaveText('1 of 7')
+    await openYou(page)
+    await expect(page.getByTestId('build-levels-count')).toHaveText('1 of 8')
     const composer = page.locator('main textarea').first()
     await composer.fill('Something I am still writing')
     shared = true
     await page.evaluate(() => window.dispatchEvent(new Event('focus')))
-    await expect(page.getByTestId('build-levels-count')).toHaveText('2 of 7')
+    await expect(page.getByTestId('build-levels-count')).toHaveText('2 of 8')
     await page.waitForTimeout(1500)
     expect(sent).toHaveLength(0)
     await expect(composer).toHaveValue('Something I am still writing')
@@ -1125,7 +1238,7 @@ test.describe('Workspace Build @smoke', () => {
     expect(sent[0].message).toBe(`Level reached: Level 4, In control.\n${NEXT_2}`)
   })
 
-  test("a level reached while the guide replies waits, joins a card's outcome, and goes once; with the card on screen, no moment", async ({ page }) => {
+  test("a level reached while the guide replies waits for the reply, then its moment, and is told once", async ({ page }) => {
     const { sent } = await withProposal(page, { id: 'p9', action: 'allow-call', from: 'researcher', to: 'writer' })
     const reply = gate()
     await page.route(`${API}/agents/${GUIDE}/chat/stream`, async (route) => {
@@ -1136,6 +1249,7 @@ test.describe('Workspace Build @smoke', () => {
     let shared = false
     await page.route('**/api/agents/writer/shares', (route) => route.fulfill(json(shared ? [{ shared_with_email: 'sam@example.com' }] : [])))
     await page.goto('/workspace/build')
+    await openYou(page)
     await expect(page.getByTestId('build-fleet-card-words')).toHaveText('Let Researcher call Writer')
     const composer = page.locator('main textarea').first()
     await composer.fill('Hi')
@@ -1148,10 +1262,14 @@ test.describe('Workspace Build @smoke', () => {
     await page.waitForTimeout(1000)
     expect(sent).toHaveLength(1)
     reply.open()
-    await expect.poll(() => sent.length).toBeGreaterThan(1)
-    expect(sent[1].message).toBe(`Done: Let Researcher call Writer.\nLevel reached: Level 4, In control.\n${NEXT_2}`)
-    // The Levels card was already whole on screen: its own tick says it, with no dimming.
-    await expect(page.getByTestId('build-moment')).toHaveCount(0)
+    // The card's outcome goes as soon as the reply ends; the level waits for its moment.
+    await expect.poll(() => sent.length).toBe(2)
+    expect(sent[1].message).toBe('Done: Let Researcher call Writer.')
+    const moment = page.getByTestId('build-moment')
+    await expect(moment.locator('#build-tour-title')).toHaveText('Level 4 done: In control')
+    await passMoment(moment)
+    await expect.poll(() => sent.length).toBe(3)
+    expect(sent[2].message).toBe(`Level reached: Level 4, In control.\n${NEXT_2}`)
     await page.waitForTimeout(1500)
     expect(sent.filter((m) => m.message.includes('Level reached: Level 4'))).toHaveLength(1)
   })
@@ -1167,15 +1285,17 @@ test.describe('Workspace Build @smoke', () => {
     const sentOther = await mockWorkspace(other, { agents: [GUIDE_CARD, OWN_AGENT], state: STATE })
     await other.route(`**/api/agents/${OWN_AGENT.name}/shares`, shares)
     await page.goto('/workspace/build')
+    await openYou(page)
     await other.goto('/workspace/build')
-    await expect(page.getByTestId('build-levels-count')).toHaveText('1 of 7')
-    await expect(other.getByTestId('build-levels-count')).toHaveText('1 of 7')
+    await openYou(other)
+    await expect(page.getByTestId('build-levels-count')).toHaveText('1 of 8')
+    await expect(other.getByTestId('build-levels-count')).toHaveText('1 of 8')
     shared = true
     await page.evaluate(() => window.dispatchEvent(new Event('focus')))
     await passMomentIfShown(page)
     await expect.poll(() => sent.length).toBe(1)
     await other.evaluate(() => window.dispatchEvent(new Event('focus')))
-    await expect(other.getByTestId('build-levels-count')).toHaveText('2 of 7')
+    await expect(other.getByTestId('build-levels-count')).toHaveText('2 of 8')
     await other.waitForTimeout(1500)
     expect(sentOther).toHaveLength(0)
   })
@@ -1204,7 +1324,7 @@ test.describe('Workspace Build @smoke', () => {
     await page.locator('main textarea').first().fill('Hello')
   })
 
-  test('clicking the red profile while Atlas is replying waits for the reply', async ({ page }) => {
+  test('asking for the profile talk while Atlas is replying waits for the reply', async ({ page }) => {
     await seedAnswers(page, { answers: { role: 'Head of Operations', software: 'none', agents: 'tried', company: 'Acme Freight' }, audit: 'skip', sent: true, tourSeen: true })
     const notYet = { ...STATE, stage: 'profile', profile_complete: false, audit: { status: 'not_started', summary: '' }, agents: [], focus: {} }
     const sent = await mockWorkspace(page, { agents: [GUIDE_CARD], state: notYet })
@@ -1220,7 +1340,7 @@ test.describe('Workspace Build @smoke', () => {
     await composer.fill('What can you do?')
     await composer.press('Enter')
     await expect.poll(() => sent.length).toBe(1)
-    await page.getByTestId('build-step-finish-profile').click()
+    await page.getByTestId('sidebar-profile-note').first().click()
     await page.waitForTimeout(1500)
     expect(sent).toHaveLength(1)
     release()
@@ -1273,13 +1393,13 @@ test.describe('Workspace Build @smoke', () => {
     expect(sent[0].message).toBe('What next?')
   })
   // A settings change Atlas proposes: the page's card, Confirm once, and Atlas is told.
-  async function withProposal(page, proposal, { permitted = [], refuse = null } = {}) {
+  async function withProposal(page, proposal, { permitted = [], refuse = null, block = 'proposal' } = {}) {
     // Level 1 is reached by their own agents at once; these tests are about the cards.
     await seedAnswers(page, { answers: { role: 'Head of Operations', software: 'none', agents: 'tried', company: 'Acme Freight' }, audit: 'start', sent: true, tourSeen: true, levelsSeen: [1] })
     const mine = (name, label) => ({ name, display_label: label, owned: true, availability: 'ready', playbooks: [] })
     const sent = await mockWorkspace(page, { agents: [GUIDE_CARD, mine('researcher', 'Researcher'), mine('writer', 'Writer')], state: STATE })
     await page.route(`${API}/agents/${GUIDE}/canvas/fleet`, (route) => route.fulfill(json({
-      id: 'fleet', title: 'Fleet', blocks: [{ id: 'proposal', kind: 'json', payload: proposal }],
+      id: 'fleet', title: 'Fleet', blocks: [{ id: block, kind: 'json', payload: proposal }],
     })))
     const changes = []
     const files = []
@@ -1310,6 +1430,32 @@ test.describe('Workspace Build @smoke', () => {
     expect(changes).toEqual(['POST'])
     expect(sent[0].message).toBe('Done: Let Researcher call Writer.')
     expect(JSON.parse(files.at(-1)).agents[0].may_call).toEqual(['writer'])
+  })
+
+  test("a card Atlas stored under another name still shows, so its 'click the card' is true", async ({ page }) => {
+    await withProposal(page, { id: 'share-l4-1', action: 'share', agent: 'writer', email: 'sam@example.com' }, { block: 'share-l4-1' })
+    await page.goto('/workspace/build')
+    await expect(page.getByTestId('build-fleet-card')).toBeVisible()
+    await expect(page.getByTestId('build-fleet-card-words')).toContainText('Writer')
+    await expect(page.getByTestId('build-fleet-card-words')).toContainText('sam@example.com')
+  })
+
+  test("a card naming a schedule Atlas made in the same turn is read against a fresh list, never refused", async ({ page }) => {
+    // Seen live (9 Nov): Atlas created the schedule, then proposed its walk; the page still
+    // had the list from before, and said it couldn't make the change.
+    let made = false
+    let fleetCanvas = null
+    await withProposal(page, null)
+    await page.route(`${API}/agents/${GUIDE}/canvas/fleet`, (route) => (fleetCanvas ? route.fulfill(json(fleetCanvas)) : route.fulfill(json({ detail: 'not found' }, 404))))
+    await page.route('**/api/agents/researcher/schedules', (route) => route.fulfill(json(made ? [{ id: 's9', name: 'Daily game check', enabled: false, cron_expression: '0 8 * * *' }] : [])))
+    await page.goto('/workspace/build')
+    await page.waitForTimeout(1000)
+    made = true
+    fleetCanvas = { id: 'fleet', title: 'Fleet', blocks: [{ id: 'proposal', kind: 'json', payload: { id: 'p9', action: 'show-me', key: 'schedules', agent: 'researcher', schedule_id: 's9' } }] }
+    await page.evaluate(() => window.dispatchEvent(new Event('focus')))
+    const card = page.getByTestId('build-fleet-card')
+    await expect(card).toContainText("Show me how to turn on Researcher's Daily game check", { timeout: 15000 })
+    await expect(card).not.toContainText("can't make")
   })
 
   test('a change the page does not know is never a card, and nothing is sent anywhere', async ({ page }) => {
@@ -1369,6 +1515,81 @@ test.describe('Workspace Build @smoke', () => {
     expect(rosterReads).toBeGreaterThan(1)
   })
 
+  // A turn of the guide's that finishes: the send is accepted, the stream ends, and the
+  // reply is in the history. `hold` keeps the send pending until it is opened.
+  async function finishedTurn(page, sent, { reply = 'Done.', hold = null } = {}) {
+    await page.route(`${API}/agents/${GUIDE}/chat/stream`, async (route) => {
+      sent.push(route.request().postDataJSON())
+      if (hold) await hold.opened
+      return route.fulfill(json({ execution_id: `exec-${sent.length}`, session_id: 'sess-1' }))
+    })
+    await page.route(`${API}/agents/${GUIDE}/executions/*/stream`, (route) => route.fulfill({
+      status: 200, contentType: 'text/event-stream', body: 'data: {"type":"stream_end"}\n\n',
+    }))
+    await page.route(`${API}/agents/${GUIDE}/history*`, (route) => route.fulfill(json({
+      agent_name: GUIDE, session_id: 'sess-1',
+      messages: sent.flatMap((m, i) => [
+        { role: 'user', content: m.message, id: `u${i + 1}` },
+        { role: 'assistant', content: reply, id: `a${i + 1}`, execution_id: `exec-${i + 1}`, created_at: '2026-11-05T13:32:00Z' },
+      ]),
+    })))
+  }
+
+  test('an agent the guide created without writing the page still reaches the sidebar, and ticks Level 1, when its turn ends', async ({ page }) => {
+    await seedAnswers(page, { ...LEVEL_ANSWERS, sent: true, sentTo: GUIDE, levelsIntroSeen: true })
+    const sent = await mockWorkspace(page, { agents: [GUIDE_CARD], state: STATE })
+    await finishedTurn(page, sent, { reply: 'Email triage is live on Trinity.' })
+    // The instance has the new agent from the guide's turn on; the page is never rewritten.
+    await page.route(`${API}/my-agents*`, (route) => route.fulfill(json({
+      client_email: 'e2e@example.com', agents: sent.length ? [GUIDE_CARD, OWN_AGENT] : [GUIDE_CARD], multi_agent_chat_available: true,
+    })))
+    await page.goto('/workspace/build')
+    await openYou(page)
+    await expect(page.getByTestId('build-levels-count')).toHaveText('0 of 8', { timeout: 15000 })
+    const composer = page.locator('main textarea').first()
+    await composer.fill('Create it')
+    await composer.press('Enter')
+    await expect.poll(() => sent.length).toBe(1)
+    await expect(page.locator('[data-tour-agent="email-triage"]')).toBeVisible({ timeout: 10000 })
+    await expect(page.getByTestId('build-levels-count')).toHaveText('1 of 8', { timeout: 10000 })
+  })
+
+  test("the guide's turn ending while the page is mid-read still brings the page it wrote, not the one from before", async ({ page }) => {
+    await seedAnswers(page, { ...LEVEL_ANSWERS, sent: true, sentTo: GUIDE })
+    const sent = await mockWorkspace(page, { agents: [GUIDE_CARD], state: STATE })
+    const hold = gate()
+    await finishedTurn(page, sent, { reply: 'The first playbook is next.', hold })
+    const readsAt = []
+    let sentAt = 0
+    let written = false
+    await page.route(`${API}/agents/${GUIDE}/canvas/build`, async (route) => {
+      readsAt.push(Date.now())
+      // What a read brings is what was there when it started (a page written later has
+      // a later `updated_at`); a read while the guide works is slow, so its turn ends
+      // while the read is out.
+      const body = written
+        ? { ...canvas({ ...STATE, next_step: 'Add the first playbook.' }), updated_at: '2026-11-05T13:32:08Z' }
+        : canvas(STATE)
+      if (sentAt) await new Promise((done) => setTimeout(done, 3000))
+      return route.fulfill(json(body))
+    })
+    await page.goto('/workspace/build')
+    await expect(page.getByTestId('build-next-step')).toContainText('Atlas is writing the draft-reply skill.')
+    const composer = page.locator('main textarea').first()
+    await composer.fill('Create it')
+    await composer.press('Enter')
+    await expect.poll(() => sent.length).toBe(1)
+    sentAt = Date.now()
+    // While the guide works the page reads every few seconds: wait for its poll to be out.
+    await expect.poll(() => readsAt.some((at) => at - sentAt >= 3500), { timeout: 10000 }).toBe(true)
+    written = true
+    hold.open()
+    await expect(page.getByTestId('build-next-step')).toContainText('Add the first playbook.', { timeout: 15000 })
+    // The read that brought it began as soon as the one in flight was back, not a poll later.
+    const poll = readsAt.findIndex((at) => at - sentAt >= 3500)
+    expect(readsAt[poll + 1] - readsAt[poll]).toBeLessThan(4500)
+  })
+
   test("answers sent to the shared guide before go again to the person's own Atlas", async ({ page }) => {
     const mineGuide = 'atlas-22222222'
     await seedAnswers(page, { answers: { role: 'Head of Operations', software: 'none', agents: 'tried', company: 'Acme Freight' }, audit: 'start', sent: true, tourSeen: true })
@@ -1376,6 +1597,244 @@ test.describe('Workspace Build @smoke', () => {
     await page.goto('/workspace/build')
     await expect.poll(() => sent.length).toBe(1)
     expect(sent[0].message).toContain('My role: Head of Operations.')
+  })
+
+  test('a guide set up again under the same name, with no page and no chat of theirs, gets the answers again', async ({ page }) => {
+    // Its address comes from the person, so the guide after a deleted one has the same name.
+    await seedAnswers(page, { answers: { role: 'Head of Operations', software: 'none', agents: 'tried', company: 'Acme Freight' }, audit: 'start', sent: true, sentTo: GUIDE, tourSeen: true })
+    const sent = await mockWorkspace(page, { agents: [GUIDE_CARD] })
+    await page.goto('/workspace/build')
+    await expect.poll(() => sent.length).toBe(1)
+    expect(sent[0].message).toContain('My role: Head of Operations.')
+  })
+
+  test('a guide with a chat of theirs is not told the answers again', async ({ page }) => {
+    await seedAnswers(page, { answers: { role: 'Head of Operations', software: 'none', agents: 'tried', company: 'Acme Freight' }, audit: 'start', sent: true, sentTo: GUIDE, tourSeen: true })
+    const sent = await mockWorkspace(page, { agents: [GUIDE_CARD] })
+    const at = '2026-11-06T10:00:00Z'
+    await page.route(`${API}/sessions*`, (route) => route.fulfill(json({
+      sessions: [{ id: 'main-1', agent_name: GUIDE, title: null, is_main: true, created_at: at, last_message_at: at, message_count: 2, archived_at: null }],
+    })))
+    await page.goto('/workspace/build')
+    await expect(page.getByTestId('build-chat')).toBeVisible()
+    await page.waitForTimeout(2000)
+    expect(sent).toHaveLength(0)
+  })
+
+  test("the guide's first reply stays on screen when its turn ends, and the next message goes to the same chat", async ({ page }) => {
+    await seedAnswers(page, { answers: { role: 'Founder', software: 'none', agents: 'never', company: 'Acme Freight' }, audit: 'start', tourSeen: true })
+    const sent = await mockWorkspace(page, { agents: [GUIDE_CARD] })
+    // The turn's end reads the roster again, which brings a new copy of the guide's card.
+    const reply = "Hi, I'm Atlas, your guide. First question: what should Acme Freight achieve this year?"
+    await finishedTurn(page, sent, { reply })
+    // As on a real instance, the reply is in the history once the turn has ended, and the
+    // turn outlasts the chat reading its new session.
+    let ended = 0
+    const sessionRead = gate()
+    await page.route(`${API}/agents/${GUIDE}/executions/*/stream`, async (route) => {
+      await sessionRead.opened
+      ended += 1
+      return route.fulfill({ status: 200, contentType: 'text/event-stream', body: 'data: {"type":"stream_end"}\n\n' })
+    })
+    // Its picture arrives during the turn, so the roster read at its end has a changed card.
+    let rosterReads = 0
+    await page.route(`${API}/my-agents*`, (route) => {
+      rosterReads += 1
+      return route.fulfill(json({ client_email: 'e2e@example.com', agents: [ended ? { ...GUIDE_CARD, avatar_url: '/avatars/build-guide.webp' } : GUIDE_CARD], multi_agent_chat_available: true }))
+    })
+    await page.route(`${API}/agents/${GUIDE}/history*`, async (route) => {
+      await route.fulfill(json({
+        agent_name: GUIDE, session_id: 'sess-1',
+        messages: sent.flatMap((m, i) => [
+          { role: 'user', content: m.message, id: `u${i + 1}` },
+          ...(i < ended ? [{ role: 'assistant', content: reply, id: `a${i + 1}`, execution_id: `exec-${i + 1}`, created_at: '2026-11-06T12:25:01Z' }] : []),
+        ]),
+      }))
+      if (new URL(route.request().url()).searchParams.get('session_id') === 'sess-1') setTimeout(sessionRead.open, 300)
+    })
+    await page.goto('/workspace/build')
+    await expect.poll(() => sent.length).toBe(1)
+    await expect(page.getByTestId('build-getting-ready')).toHaveCount(0)
+    const shown = page.getByText(reply)
+    await expect(shown).toBeVisible()
+    await expect.poll(() => rosterReads).toBeGreaterThan(1)
+    await page.waitForTimeout(1500)
+    await expect(shown).toHaveCount(1)
+    await expect(page.getByTestId('build-welcome')).toHaveCount(0)
+    const composer = page.locator('main textarea').first()
+    await composer.fill('More customers')
+    await composer.press('Enter')
+    await expect.poll(() => sent.length).toBe(2)
+    expect(sent[1].session_id).toBe('sess-1')
+    await expect(shown).toHaveCount(2)
+  })
+
+  test('an empty chat after choosing the audit starts the audit, never a build', async ({ page }) => {
+    await seedAnswers(page, { answers: { role: 'Founder', software: 'none', agents: 'never', company: 'Acme Freight' }, audit: 'start', sent: true, sentTo: GUIDE, tourSeen: true, levelsIntroSeen: true })
+    const notYet = { ...STATE, stage: 'audit', profile_complete: false, audit: { status: 'not_started', summary: '' }, agents: [] }
+    const sent = await mockWorkspace(page, { agents: [GUIDE_CARD], state: notYet })
+    await page.goto('/workspace/build')
+    const welcome = page.getByTestId('build-welcome')
+    await expect(welcome).toContainText("Let's build your first agent")
+    await expect(welcome).toContainText('The AI audit')
+    await expect(welcome).toContainText('I create your agent')
+    await expect(welcome.getByRole('button', { name: 'Build my first agent' })).toHaveCount(0)
+    await expect(welcome.getByRole('button', { name: 'Suggest one for me' })).toHaveCount(0)
+    await welcome.getByRole('button', { name: 'Start the AI audit' }).click()
+    await expect.poll(() => sent.length).toBe(1)
+    expect(sent[0].message).toBe("Let's do the AI audit now.")
+  })
+
+  test("their guide's line in the sidebar says what it does, in full, never a chat's title", async ({ page }) => {
+    await seedAnswers(page, { answers: { role: 'Head of Operations', software: 'none', agents: 'none', company: 'Acme Freight' }, audit: 'start', sent: true, tourSeen: true })
+    await mockWorkspace(page, { agents: [GUIDE_CARD], state: STATE })
+    await page.route(`${API}/sessions*`, (route) => route.fulfill(json({ sessions: [{ id: 's1', agent_name: GUIDE_CARD.name, title: 'AI audit for Acme Freight logistics', is_main: true, last_message_at: new Date().toISOString(), message_count: 4 }] })))
+    await page.goto('/workspace/build')
+    const line = page.getByText('Builds and runs agents', { exact: true })
+    await expect(line).toBeVisible()
+    expect(await line.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true)
+  })
+
+  test('Build an agent is the door until their guide exists; then the guide is, and it is marked while they are there', async ({ page }) => {
+    await seedAnswers(page, { answers: { role: 'Head of Operations', software: 'none', agents: 'none', company: 'Acme Freight' }, audit: 'start', sent: true, tourSeen: true })
+    await mockWorkspace(page, { agents: [GUIDE_CARD], state: STATE })
+    await page.goto('/workspace/build')
+    await expect(page.getByTestId('build-world')).toBeVisible()
+    await expect(page.getByTestId('sidebar-dashboard')).toBeVisible()
+    await expect(page.getByTestId('sidebar-build')).toHaveCount(0)
+    await expect(page.locator(`[data-tour-agent="${GUIDE_CARD.name}"]`).first()).toHaveAttribute('aria-current', 'true')
+  })
+
+  test('someone with no guide yet still has Build an agent', async ({ page }) => {
+    await mockWorkspace(page, { agents: [{ name: 'email-triage', owned: true, availability: 'ready', playbooks: [] }] })
+    await page.goto('/workspace/inbox')
+    await expect(page.getByTestId('sidebar-build')).toBeVisible()
+  })
+
+  // Signed in to Trinity with a role: the session a browser restores, refreshed from the server.
+  async function signedInAs(page, role) {
+    const b64 = (o) => Buffer.from(JSON.stringify(o)).toString('base64url')
+    const token = `${b64({ alg: 'none', typ: 'JWT' })}.${b64({ sub: 'sam', mode: 'email', exp: 4102444800 })}.x`
+    await page.addInitScript(({ t, r }) => {
+      localStorage.setItem('token', t)
+      localStorage.setItem('auth0_user', JSON.stringify({ email: 'e2e@example.com', role: r }))
+    }, { t: token, r: role })
+  }
+  const SHARED = { name: 'email-triage', owned: false, availability: 'ready', playbooks: [] }
+
+  test('a Workspace-only user is told what their account has, and takes the tour of their agents and Inbox', async ({ page, context }) => {
+    await mockWorkspace(page, { agents: [SHARED], role: 'user' })
+    await signedInAs(page, 'user')
+    await page.goto('/workspace')
+    const welcome = page.getByTestId('account-welcome')
+    await expect(welcome).toContainText('You have a Workspace account.')
+    await expect(welcome).toContainText('Not part of this account')
+    await expect(welcome).toContainText('Building agents')
+    await expect(page.getByTestId('account-welcome-empty')).toHaveCount(0)
+    await expect(page.getByTestId('sidebar-dashboard')).toHaveCount(0)
+    await expect(page.getByTestId('sidebar-build')).toHaveCount(0)
+    await page.getByTestId('account-welcome-tour').click()
+    const tour = page.getByTestId('account-tour')
+    await expect(tour).toContainText('These are your agents')
+    await tour.getByTestId('build-tour-next').click()
+    await expect(tour).toContainText('This is your Inbox')
+    await tour.getByTestId('build-tour-next').click()
+    await expect(tour).toHaveCount(0)
+    expect(context.pages()).toHaveLength(1)
+    // Said once: it is kept with their saved answers.
+    await expect.poll(() => page.evaluate(() => Object.keys(localStorage)
+      .filter((k) => k.startsWith('trinity-workspace-onboarding:'))
+      .some((k) => JSON.parse(localStorage.getItem(k)).accountWelcome === 'user'))).toBe(true)
+    await page.reload()
+    await expect(page.getByTestId('sidebar-agents-content')).toBeVisible()
+    await expect(welcome).toHaveCount(0)
+  })
+
+  test("an operator is told what belongs to an agent's owner, and the tour ends by opening the Dashboard on an agent's Tasks", async ({ page, context }) => {
+    await mockWorkspace(page, { agents: [SHARED], role: 'operator' })
+    await signedInAs(page, 'operator')
+    await page.goto('/workspace')
+    const welcome = page.getByTestId('account-welcome')
+    await expect(welcome).toContainText('You have an operator account.')
+    await expect(welcome).toContainText('belong to its owner or an admin')
+    await page.getByTestId('account-welcome-tour').click()
+    const tour = page.getByTestId('account-tour')
+    await tour.getByTestId('build-tour-next').click()
+    await tour.getByTestId('build-tour-next').click()
+    await expect(tour).toContainText('This is how you get to the Dashboard')
+    const [tab] = await Promise.all([context.waitForEvent('page'), tour.getByRole('button', { name: 'Open the Dashboard' }).click()])
+    expect(tab.url()).toContain('walk=tasks')
+    expect(tab.url()).toContain('walk_agent=email-triage')
+    await tab.close()
+    await expect(tour).toHaveCount(0)
+  })
+
+  test('someone with nothing shared yet is told who to ask; someone who builds gets no such welcome', async ({ page }) => {
+    await mockWorkspace(page, { agents: [], role: 'user' })
+    await signedInAs(page, 'user')
+    await page.goto('/workspace')
+    await expect(page.getByTestId('account-welcome-empty')).toContainText('No agents have been shared with you yet')
+    await page.getByTestId('account-welcome-skip').click()
+    await expect(page.getByTestId('account-welcome')).toHaveCount(0)
+  })
+
+  test('an operator has the Dashboard link and nothing about building', async ({ page }) => {
+    await mockWorkspace(page, { agents: [{ name: 'email-triage', owned: false, availability: 'ready', playbooks: [] }], role: 'operator' })
+    // A restored session carries the person, and the page refreshes their role from the server.
+    await signedInAs(page, 'operator')
+    await page.goto('/workspace/inbox')
+    await expect(page.getByTestId('sidebar-dashboard')).toBeVisible()
+    await expect(page.getByTestId('sidebar-build')).toHaveCount(0)
+    await page.goto('/workspace/build')
+    await expect(page.getByTestId('build-unavailable')).toBeVisible()
+  })
+
+  test('their guide has one page: its row, its main chat and their links all open Build', async ({ page }) => {
+    await seedAnswers(page, { answers: { role: 'Head of Operations', software: 'none', agents: 'none', company: 'Acme Freight' }, audit: 'start', sent: true, tourSeen: true })
+    await mockWorkspace(page, { agents: [GUIDE_CARD, { name: 'email-triage', owned: true, availability: 'ready', playbooks: [] }], state: STATE })
+    const at = new Date().toISOString()
+    await page.route(`${API}/sessions*`, (route) => route.fulfill(json({ sessions: [
+      { id: 'main-1', agent_name: GUIDE_CARD.name, title: 'AI audit for Acme Freight logistics', is_main: true, created_at: at, last_message_at: at, message_count: 4, archived_at: null },
+      { id: 'triage-1', agent_name: 'email-triage', title: 'Triage', is_main: true, created_at: at, last_message_at: at, message_count: 2, archived_at: null },
+    ] })))
+    // A link to its plain chat, or to its agent page, lands on Build.
+    await page.goto('/workspace/c/main-1')
+    await expect(page).toHaveURL(/\/workspace\/build$/)
+    await expect(page.getByTestId('build-world')).toBeVisible()
+    await page.goto('/workspace/a/' + GUIDE_CARD.name)
+    await expect(page).toHaveURL(/\/workspace\/build$/)
+    // Another agent's chat is still a plain chat, and the guide's row brings them back.
+    await page.goto('/workspace/c/triage-1')
+    await expect(page).toHaveURL(/\/workspace\/c\/triage-1$/)
+    await page.getByText('Builds and runs agents', { exact: true }).click()
+    await expect(page).toHaveURL(/\/workspace\/build$/)
+    await expect(page.getByTestId('build-world')).toBeVisible()
+  })
+
+  test('an empty chat with the guide says what it is for, and starts the first agent in one press', async ({ page }) => {
+    await seedAnswers(page, { ...LEVEL_ANSWERS, sent: true, sentTo: GUIDE, levelsIntroSeen: true })
+    const sent = await mockWorkspace(page, { agents: [GUIDE_CARD], state: STATE })
+    await page.goto('/workspace/build')
+    const welcome = page.getByTestId('build-welcome')
+    await expect(welcome).toBeVisible()
+    await expect(welcome).toContainText("Let's build your first agent")
+    await expect(welcome).toContainText('I create your agent')
+    await expect(welcome).toContainText('Level 1')
+    await welcome.getByRole('button', { name: 'Build my first agent' }).click()
+    await expect.poll(() => sent.length).toBe(1)
+    expect(sent[0].message).toBe("Let's build my first agent.")
+  })
+
+  test('an empty chat with the guide, for someone with agents already, offers the next one', async ({ page }) => {
+    await seedAnswers(page, { ...LEVEL_ANSWERS, sent: true, sentTo: GUIDE, levelsIntroSeen: true, levelsSeen: [1] })
+    const sent = await mockWorkspace(page, { agents: [GUIDE_CARD, OWN_AGENT], state: STATE })
+    await page.goto('/workspace/build')
+    const welcome = page.getByTestId('build-welcome')
+    await expect(welcome).toContainText('What shall we build next?')
+    await expect(welcome).not.toContainText('Level 1')
+    await welcome.getByRole('button', { name: 'Build a new agent' }).click()
+    await expect.poll(() => sent.length).toBe(1)
+    expect(sent[0].message).toBe("Let's build a new agent.")
   })
 
   test('a change the page cannot confirm says so, and never claims nothing changed', async ({ page }) => {

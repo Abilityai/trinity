@@ -6,7 +6,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   FLEET_CANVAS_ID, FLEET_PROPOSAL_BLOCK, FLEET_STATE_FILE, KNOWN_CHANGES, SHOW_ME_KEYS,
-  cardFor, fleetStateFor, proposalFrom,
+  cardFor, fleetStateFor, outcomeNote, proposalFrom,
 } from '../../src/components/portal/builder/fleetChanges'
 
 const fleet = fleetStateFor({
@@ -46,9 +46,18 @@ describe('proposalFrom', () => {
     expect(proposalFrom(canvas([{ id: 'proposal', kind: 'json', payload: { id: 'p1', action: 'allow-call', from: 'researcher', to: 'writer' } }])))
       .toEqual({ id: 'p1', action: 'allow-call', from: 'researcher', to: 'writer' })
   })
+  it("reads a proposal the guide put under another name, the block named proposal first", () => {
+    // Seen live (9 Nov): the block was named after the proposal, `share-l4-1`, and no card showed
+    // while the guide told them to click it. The words still come from the page (`cardFor`).
+    const share = { id: 'share-l4-1', action: 'share', agent: 'writer', email: 'sam@example.com' }
+    expect(proposalFrom(canvas([{ id: 'share-l4-1', kind: 'json', payload: share }]))).toEqual(share)
+    expect(proposalFrom(canvas([{ id: 'old', kind: 'json', payload: { id: 'p0', action: 'share' } }, { id: 'share-l4-1', kind: 'json', payload: share }]))).toEqual(share)
+    expect(proposalFrom(canvas([{ id: 'share-l4-1', kind: 'json', payload: share }, { id: 'proposal', kind: 'json', payload: { id: 'p1', action: 'allow-call' } }]))).toEqual({ id: 'p1', action: 'allow-call' })
+    expect(proposalFrom(canvas([{ id: 'notes', kind: 'json', payload: { text: 'not a proposal' } }]))).toBe(null)
+  })
   it('ignores anything else', () => {
     expect(proposalFrom(canvas([{ id: 'proposal', kind: 'markdown', payload: { id: 'p1', action: 'allow-call' } }]))).toBe(null)
-    expect(proposalFrom(canvas([{ id: 'other', kind: 'json', payload: { id: 'p1', action: 'allow-call' } }]))).toBe(null)
+    expect(proposalFrom(canvas([{ id: 'other', kind: 'markdown', payload: { id: 'p1', action: 'allow-call' } }]))).toBe(null)
     expect(proposalFrom(canvas([{ id: 'proposal', kind: 'json', payload: { id: 'x'.repeat(81), action: 'allow-call' } }]))).toBe(null)
     expect(proposalFrom(canvas([{ id: 'proposal', kind: 'json', payload: 'allow-call' }]))).toBe(null)
     expect(proposalFrom(null)).toBe(null)
@@ -167,5 +176,25 @@ describe('Show me walks for sharing, calling and schedules', () => {
       // Final review: a walk after a share would wait on an email box that refuses the same email again.
       { id: 'c2', action: 'share', agent: 'writer', email: 'a@example.com' },
     ]) expect(cardFor(proposal, fleet).walk).toBe(null)
+  })
+})
+
+describe("a card's outcome in the chat", () => {
+  it('reads as a note that the guide was told, not as something the person typed', () => {
+    expect(outcomeNote('Done: Let Researcher call Writer.', 'Atlas')).toBe('Done: Let Researcher call Writer. Atlas was told.')
+    expect(outcomeNote('Not now: Share Writer with sam@example.com.', 'Atlas')).toBe('Not now: Share Writer with sam@example.com. Atlas was told.')
+    expect(outcomeNote("That didn't work: Let Researcher call Writer. Only the owner can modify agent permissions", 'Atlas'))
+      .toBe("That didn't work: Let Researcher call Writer. Only the owner can modify agent permissions Atlas was told.")
+    expect(outcomeNote("Not sure it worked: Turn on Morning scan for Researcher. Trinity took it, but it doesn't show yet.", 'Atlas')).toMatch(/ Atlas was told\.$/)
+    expect(outcomeNote('Done: Create a public chat link for Writer.')).toBe('Done: Create a public chat link for Writer. Atlas was told.')
+  })
+
+  it('leaves everything else as the person wrote it', () => {
+    expect(outcomeNote('Done with the plan, thanks.', 'Atlas')).toBeNull()
+    expect(outcomeNote('Done: I have checked the keys myself.', 'Atlas')).toBeNull()
+    expect(outcomeNote('Level reached: Level 1, First agent.', 'Atlas')).toBeNull()
+    expect(outcomeNote('Done: Let Researcher call Writer.\nLevel reached: Level 4, In control.', 'Atlas')).toBeNull()
+    expect(outcomeNote('', 'Atlas')).toBeNull()
+    expect(outcomeNote(null, 'Atlas')).toBeNull()
   })
 })

@@ -84,6 +84,19 @@ const SHOW_ME_THING = Object.freeze({
 })
 
 const CANT = `${BUILD_GUIDE_NAME} suggested a change this page can't make.`
+// The lines the page sends the guide after a card (`fleetActions.outcomeMessage`).
+const OUTCOME_LINE = /^(Done|Not now|That didn't work|Not sure it worked): (Let|Stop|Share|Turn on|Turn off|Create a public chat link for|Add the) .+\./
+
+/**
+ * A card's outcome, which the page sent to the guide for the person, shown in the chat
+ * as a short note rather than as something they typed. Anything else: null.
+ */
+export function outcomeNote(text, guideName = BUILD_GUIDE_NAME) {
+  if (typeof text !== 'string') return null
+  const flat = text.trim()
+  if (!flat || flat.includes('\n') || !OUTCOME_LINE.test(flat)) return null
+  return `${flat} ${guideName} was told.`
+}
 const NOT_YOURS = "That agent isn't one of yours."
 
 const names = (list) => (Array.isArray(list) ? list.filter((n) => typeof n === 'string') : [])
@@ -112,12 +125,20 @@ export function fleetStateFor({ owned = [], permissions = {}, shares = {}, sched
   return { updated_at: new Date(now()).toISOString(), agents }
 }
 
-/** The guide's proposal on its `fleet` canvas, or null. Only its string fields count. */
+const proposalShaped = (raw) => Boolean(raw) && typeof raw === 'object' && !Array.isArray(raw)
+  && typeof raw.id === 'string' && Boolean(raw.id) && raw.id.length <= 80 && typeof raw.action === 'string'
+
+/**
+ * The guide's proposal on its `fleet` canvas, or null. Only its string fields count. The
+ * block is named `proposal`; one the guide named otherwise (after the proposal, say) is
+ * still read, the last such, since only the guide writes this canvas and the card's
+ * words come from the page (`cardFor`), never from it.
+ */
 export function proposalFrom(canvas) {
-  const blocks = Array.isArray(canvas?.blocks) ? canvas.blocks : []
-  const raw = blocks.find((b) => b?.id === FLEET_PROPOSAL_BLOCK && b?.kind === 'json')?.payload
-  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
-  if (typeof raw.id !== 'string' || !raw.id || raw.id.length > 80 || typeof raw.action !== 'string') return null
+  const json = (Array.isArray(canvas?.blocks) ? canvas.blocks : []).filter((b) => b?.kind === 'json')
+  const named = json.find((b) => b?.id === FLEET_PROPOSAL_BLOCK)
+  const raw = named ? named.payload : [...json].reverse().find((b) => proposalShaped(b?.payload))?.payload
+  if (!proposalShaped(raw)) return null
   return Object.fromEntries(Object.entries(raw).filter(([, v]) => typeof v === 'string'))
 }
 

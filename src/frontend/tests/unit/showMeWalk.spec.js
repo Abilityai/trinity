@@ -63,6 +63,23 @@ describe('reading the walk back from the address', () => {
   })
 })
 
+describe('the first walk, on the Dashboard itself', () => {
+  const who = { agent: 'game-promoter', label: 'Game Promoter' }
+  it('says what the Dashboard is first, lighting the whole page, then goes on to the agent', () => {
+    for (const key of ['credentials', 'people', 'permissions', 'schedules']) {
+      const steps = walkSteps({ key, agent: 'game-promoter' }, who, { intro: true })
+      expect(steps[0]).toMatchObject({ id: 'dashboard', next: true, center: true, target: '[data-walk="dashboard"]', title: 'This is the Dashboard' })
+      expect(steps[0].body).toMatch(/every agent on your Trinity/)
+      expect(steps[1]).toMatchObject({ id: 'agent', title: 'Your agents live here' })
+      expect(steps[1].body).not.toMatch(/This is the Dashboard/)
+      expect(steps[1].body).toContain('Click Game Promoter to open it.')
+    }
+  })
+  it('after that, starts on the agent', () => {
+    expect(walkSteps({ key: 'credentials', agent: 'game-promoter' }, who)[0].id).toBe('agent')
+  })
+})
+
 describe('the credentials walk', () => {
   const steps = credentialsWalk({ agent: 'game-promoter', label: 'Game Promoter' })
 
@@ -328,10 +345,16 @@ describe('the schedules walk', () => {
     expect(steps[1].alt.body).toBe("It's under More. Click More, then Schedules.")
     expect(steps[2]).toMatchObject({ expand: 'schedules', waitFor: '[data-tour="showme-schedules"]' })
     expect(steps[2].fallback).toEqual({ label: 'Open Schedules', to: '/agents/scout?tab=schedules' })
+    // The Autonomy switch at the top of the agent's page, where it always is; the banner's
+    // Enable autonomy button only while that switch isn't there (an agent shared with them).
     expect(after[1]).toMatchObject({
-      target: '[data-walk="autonomy-enable"]', optional: true, until: 'gone', waitFor: '[data-walk-autonomy]', title: 'Turn on Autonomy',
+      target: '[data-walk="autonomy-switch"]', optional: true, until: '[data-walk-autonomy="on"]', waitFor: '[data-walk-autonomy]', title: 'Turn on Autonomy',
     })
-    expect(after[1].body).toBe("Autonomy is Scout's switch for working on its own. While it's off, none of its schedules run. Click Enable autonomy.")
+    expect(after[1].body).toBe("This is Scout's Autonomy switch, at the top of its page. While it says Manual, none of its schedules run. Click it, and it says AUTO.")
+    expect(after[1].alt).toEqual({
+      target: '[data-walk="autonomy-enable"]',
+      body: "Autonomy is Scout's switch for working on its own. While it's off, none of its schedules run. Click Enable autonomy.",
+    })
     expect(after[2]).toMatchObject({ end: true })
     expect(after[2].body).toBe("Scout now runs Daily digest on its own, at the next time shown on its row. Go back to your chat with Atlas and tell it you're done.")
   })

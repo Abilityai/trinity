@@ -87,3 +87,45 @@ describe('final review: a card that is not sure', () => {
   })
 })
 
+
+// Tester feedback, 9 Nov: "those cards are not SOO visible". The card is an alert in the page's own
+// recipe now: Atlas's face, a tinted ground whose family says where it stands, the action
+// inline. Nothing about what it does changed.
+describe('how the card stands out', () => {
+  const guide = { name: 'atlas-0a1b2c3d', display_label: 'Atlas', avatar_url: '/api/agents/atlas-0a1b2c3d/avatar' }
+  const showMe = { kind: 'show-me', id: 'p5', key: 'schedules', agent: 'researcher', schedule: 's1', words: "Show me how to turn on Researcher's Morning scan" }
+  const tone = (w) => w.get('[data-testid="build-fleet-card"]').attributes('data-tone')
+
+  it("carries Atlas's face and name, so it reads as Atlas asking", () => {
+    const w = mount(PortalBuildFleetCard, { props: { card: confirm, guide } })
+    expect(w.find('img').attributes('src')).toBe(guide.avatar_url)
+    expect(w.get('[data-testid="build-fleet-card-lead"]').text()).toBe('Atlas suggests one change')
+    expect(w.get('[data-testid="build-fleet-card-words"]').text()).toBe('Let Researcher call Writer')
+  })
+
+  it('is tinted in the action family while it waits, and in the outcome family after', () => {
+    expect(tone(mount(PortalBuildFleetCard, { props: { card: confirm, guide } }))).toBe('action')
+    expect(tone(mount(PortalBuildFleetCard, { props: { card: confirm, guide, status: 'working' } }))).toBe('action')
+    expect(tone(mount(PortalBuildFleetCard, { props: { card: confirm, guide, status: 'done' } }))).toBe('success')
+    expect(tone(mount(PortalBuildFleetCard, { props: { card: confirm, guide, status: 'failed', reason: 'No.' } }))).toBe('danger')
+    expect(tone(mount(PortalBuildFleetCard, { props: { card: confirm, guide, status: 'unsure', reason: '?' } }))).toBe('warning')
+    expect(tone(mount(PortalBuildFleetCard, { props: { card: showMe, guide } }))).toBe('action')
+    expect(tone(mount(PortalBuildFleetCard, { props: { card: { kind: 'refused', id: 'p6', reason: "Atlas suggested a change this page can't make." }, guide } }))).toBe('warning')
+  })
+
+  it('keeps Show me a real link to a new tab, said as such, with its action inline', () => {
+    const w = mount(PortalBuildFleetCard, { props: { card: showMe, guide } })
+    const link = w.get('[data-testid="build-fleet-show-me"]')
+    expect(link.element.tagName).toBe('A')
+    expect(link.attributes('target')).toBe('_blank')
+    expect(link.text()).toBe('Show me')
+    expect(link.find('svg').exists()).toBe(true)
+    expect(w.text()).toContain('Opens a new tab')
+    expect(w.get('[data-testid="build-fleet-card-words"]').text()).toBe("Show me how to turn on Researcher's Morning scan")
+  })
+
+  it('works without the guide, with its initials', () => {
+    const w = mount(PortalBuildFleetCard, { props: { card: confirm } })
+    expect(w.get('[data-testid="build-fleet-card-lead"]').text()).toBe('Atlas suggests one change')
+  })
+})

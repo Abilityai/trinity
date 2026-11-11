@@ -1,6 +1,6 @@
 // The tour of Trinity's features on the Dashboard, for people who build agents all the
 // time. It uses the Workspace tour's component, so each stop points at one part of the
-// screen and a part that isn't on screen is left out. A draft, to be polished.
+// screen and a part that isn't on screen is left out.
 
 import { experienceRoute } from '../portal/builder/portalBuild'
 
@@ -8,8 +8,8 @@ export function featureTourSteps() {
   return [
     {
       target: 'view-modes',
-      title: 'Your agents',
-      body: 'Open any agent for its schedules, its channels like Slack and WhatsApp, which agents it may call and its public chat link. Timeline shows them working over time, including when one calls another.',
+      title: 'Three views of your agents',
+      body: 'Timeline shows your agents working over time, including when one calls another. Grid and List line them up. Open any agent for its schedules, its channels like Slack and WhatsApp, which agents it may call and its public chat link.',
     },
     {
       target: 'nav-operations',

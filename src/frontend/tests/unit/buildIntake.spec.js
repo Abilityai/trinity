@@ -64,9 +64,14 @@ describe('no more handover: the guide builds the agent itself', () => {
 })
 
 describe('the Workspace tour', () => {
-  it('covers agents, the chat, the company page, the Inbox and help, by name', () => {
+  it('covers agents, the chat, the company page, the Inbox, the way to the Dashboard and help, by name', () => {
     const steps = tourSteps('Atlas')
-    expect(steps.map((s) => s.target)).toEqual(['agents', 'chat', 'company', 'inbox', 'help'])
+    expect(steps.map((s) => s.target)).toEqual(['agents', 'chat', 'company', 'inbox', 'dashboard', 'help'])
+    // The Dashboard is named from the start, as somewhere they are taken to, not sent off to.
+    const dashboard = steps.find((s) => s.target === 'dashboard')
+    expect(dashboard.title).toBe('This is the way to the Dashboard')
+    expect(dashboard.body).toMatch(/don't need it yet/)
+    expect(dashboard.body).toMatch(/Atlas walks you there, click by click/)
     expect(steps[0].body).toContain('Atlas')
     expect(steps.map((s) => s.body).join(' ')).not.toContain('Agent Builder')
     expect(steps.find((s) => s.target === 'chat').body).toContain('Atlas builds it with you, right here')

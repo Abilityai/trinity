@@ -16,6 +16,14 @@
 export const BUILD_GUIDE_AGENT = 'build-guide'
 // What people call it. The address stays `build-guide`, which links and skills depend on.
 export const BUILD_GUIDE_NAME = 'Atlas'
+// What the welcome in an empty Build chat sends. The guide's CLAUDE.md answers each one.
+export const WELCOME_STARTS = {
+  audit: { label: 'Start the AI audit', message: "Let's do the AI audit now." },
+  first: { label: 'Build my first agent', message: "Let's build my first agent." },
+  suggest: { label: 'Suggest one for me', message: 'Suggest a first agent for me.' },
+  next: { label: 'Build a new agent', message: "Let's build a new agent." },
+  improve: { label: 'Improve one I have', message: "I'd like to improve one of my agents." },
+}
 // The audit and the plans are the hardest thinking on this page.
 export const BUILD_CREW_MODEL = 'claude-opus-5-5'
 // Phase 1 deployed an Agent Builder beside the guide. Instances may still run it.
@@ -265,18 +273,40 @@ export function markIntakeSent(intake, guideName = '') {
  * Answers sent to another guide (before guides were per person, that was build-guide)
  * haven't reached this one, so they go again, and its own research runs. A colleague's
  * shared research stays, and is copied into this guide too.
+ *
+ * `fresh`: this guide has no page and no chat of theirs. A guide's address comes from
+ * the person, so one set up again after a deleted one has the same name, and answers
+ * sent to that name went to the guide before it. Research started there over an hour
+ * ago has finished, so it went with that guide too and runs again; newer research was
+ * started in this one, and may still be running, so it stays.
  */
-export function rebindToGuide(intake, guideName) {
+/**
+ * The guide's card as the Build chat holds it. The roster is read again after each of the
+ * guide's turns, which brings a new copy of the card, and the conversation reloads its chat
+ * (and jumps to the bottom) for a new card; so the one it has is kept unless something on it
+ * changed.
+ */
+export function keepGuideCard(previous, next) {
+  return previous && next && JSON.stringify(previous) === JSON.stringify(next) ? previous : next
+}
+
+export const RESEARCH_SETTLED_MS = 60 * 60 * 1000
+
+export function rebindToGuide(intake, guideName, { fresh = false, now = Date.now() } = {}) {
   if (!intake || !guideName) return intake
   const told = intake.sentTo || (intake.sent ? BUILD_GUIDE_AGENT : '')
   const research = intake.research
   // Research records its guide; older answers only say where they were sent.
   const researchedBy = research && !research.shared ? (research.guide || (told && told !== guideName ? told : '')) : ''
   const copiedTo = research?.shared && research.copied ? (research.copiedTo || told) : ''
-  const stale = (told && told !== guideName) || (researchedBy && researchedBy !== guideName) || (copiedTo && copiedTo !== guideName)
+  const moved = (name) => Boolean(name) && name !== guideName
+  const before = fresh && told === guideName
+  const settled = before && Number(research?.at) > 0 && now - research.at > RESEARCH_SETTLED_MS
+  const stale = before || moved(told) || moved(researchedBy) || moved(copiedTo)
   if (!stale) return intake
   const { sentTo: _told, research: _research, ...rest } = intake
   const next = { ...rest, sent: false }
+  if (before && !settled && !moved(researchedBy) && !moved(copiedTo)) return research ? { ...next, research } : next
   if (research?.shared) {
     const { copiedTo: _copiedTo, ...shared } = research
     next.research = { ...shared, copied: false }
@@ -289,7 +319,7 @@ export function rebindToGuide(intake, guideName) {
  * still lacks. A started audit carries on; otherwise it counts as skipped for now.
  */
 export function chooseProfileChat(intake) {
-  return { ...intake, profileChat: true, tellGuide: true, audit: intake.audit || 'skip' }
+  return { ...intake, profileChat: true, profileAsked: true, tellGuide: true, audit: intake.audit || 'skip' }
 }
 
 /** What the red profile opens: the questions while one is unanswered, otherwise the guide's chat. */
@@ -684,6 +714,10 @@ export function normalizeState(raw) {
     person: { role: text(person.role, FREE_TEXT_MAX) },
     level: oneOf(raw.level, LEVELS, null),
     profile_complete: raw.profile_complete === true,
+    // They agreed with the guide that Level 3 has nothing to connect (`levels.js`).
+    keys_not_needed: raw.keys_not_needed === true,
+    // They agreed with the guide to leave the keys for later (`levels.js` `deferred`).
+    keys_later: raw.keys_later === true,
     audit: { status: oneOf(audit.status, AUDIT_STATUSES, 'not_started'), summary: text(audit.summary, 1000) },
     departments: list(raw.departments, 30, normalizeDepartment),
     data_sources: list(raw.data_sources, 60, (d) => {
@@ -749,6 +783,9 @@ export function worldView(state, intake) {
   // Trinity knows who they are and what the company does once the guide says so
   // (questions, research and a short talk about their work), or the audit is done.
   const profileComplete = Boolean(state && (state.profile_complete || state.audit.status === 'done'))
+  const profileOpen = !profileComplete
+    && Boolean(intake?.skipped || (intake?.done && state && state.audit.status !== 'in_progress'))
+  const questionsLeft = finishProfileAction(intake) === 'questions'
   return {
     stage: state?.stage || 'profile',
     company: {
@@ -759,10 +796,13 @@ export function worldView(state, intake) {
     person: { role: state?.person.role || answers.role || '' },
     level: state?.level || intakeLevel,
     profileComplete,
-    // Red in the stepper. Not while they are still answering, not before the guide
-    // has written anything, and not while the audit is running, which fills it in.
-    profileIncomplete: !profileComplete
-      && Boolean(intake?.skipped || (intake?.done && state && state.audit.status !== 'in_progress')),
+    // Red in the stepper, for questions left unanswered. Not while they are still
+    // answering, not before the guide has written anything, and not while the audit is
+    // running, which fills it in.
+    profileIncomplete: profileOpen && questionsLeft,
+    // Every question answered: what's left is filled in as they talk with the guide, so it
+    // is no alarm. 'talk' offers that talk once; after they asked for it, 'filling'.
+    profileNote: profileOpen && !questionsLeft ? (intake?.profileAsked ? 'filling' : 'talk') : '',
     audit: state?.audit || { status: 'not_started', summary: '' },
     // After they chose to skip it, and not while they are in the middle of doing it.
     auditNudge: Boolean(intake?.skipped || intake?.audit === 'skip')
@@ -794,10 +834,31 @@ export function instanceAgentsFor(roster, reported) {
 
 /**
  * The door: people who can make agents. An external client or a Workspace-only
- * member would be driving agent creation on someone else's instance.
+ * member would be driving agent creation on someone else's instance, and an operator
+ * has the Dashboard but may not create agents (creating one needs `creator`). Only the
+ * server-reported `operator` closes it: a role still loading closes nothing.
  */
-export function buildAvailableFor({ isPlatformSession = false, workspaceOnly = false } = {}) {
+export function buildAvailableFor({ isPlatformSession = false, workspaceOnly = false, role = '' } = {}) {
+  return Boolean(isPlatformSession && !workspaceOnly && role !== 'operator')
+}
+
+/** Who has the Dashboard, and so the sidebar's link to it: anyone not Workspace-only. */
+export function dashboardAvailableFor({ isPlatformSession = false, workspaceOnly = false } = {}) {
   return Boolean(isPlatformSession && !workspaceOnly)
+}
+
+/**
+ * The person's own guide has one page, Build: its row in the sidebar (`agentName`) and
+ * its main chat (`sessionId`), clicked or reached by a link, open it rather than a plain
+ * chat, which has no levels, no page beside it and no cards. Only the main chat, the one
+ * the Build page shows: any other chat of the guide's stays reachable as a plain chat.
+ */
+export function opensBuild({ buildAvailable = false, guideName = '', threads = [], agentName = '', sessionId = '' } = {}) {
+  if (!buildAvailable || !guideName) return false
+  if (agentName) return agentName === guideName
+  if (!sessionId) return false
+  const chat = (Array.isArray(threads) ? threads : []).find((t) => t && !t.is_room && (t.id || t.session_id) === sessionId)
+  return Boolean(chat && chat.is_main && chat.agent_name === guideName)
 }
 
 /**
@@ -843,6 +904,8 @@ export function buildPhase({
  */
 export function stepState(stepId, world) {
   if (stepId === 'profile' && world?.profileIncomplete) return 'incomplete'
+  // Being filled in with the guide: neither a tick nor an alarm.
+  if (stepId === 'profile' && world?.profileNote) return 'filling'
   const index = stageIndex(stepId)
   const current = stageIndex(world?.stage)
   if (index === current) return 'current'

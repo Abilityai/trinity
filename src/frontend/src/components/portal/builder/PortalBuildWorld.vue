@@ -1,9 +1,10 @@
 <!--
   The right-hand column of the Build page: the person's world, filling in as they
-  talk. Company at the top, then each department with the agents in it. Clicking
-  an agent zooms into it, and the view follows along when the guide starts working
-  on one (`focus.agent`). Findings holds what the audit learned, and Context holds
-  the company's context.md.
+  talk. "You" is about the person: their role and experience, and their levels.
+  "Your company" is the company at the top, then each department with the agents in
+  it. Clicking an agent zooms into it, and the view follows along when the guide
+  starts working on one (`focus.agent`). Findings holds what the audit learned, and
+  Context holds the company's context.md.
 -->
 <template>
   <aside class="flex flex-col min-h-0 h-full border-l border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-950" aria-label="Your world" data-testid="build-world">
@@ -23,6 +24,7 @@
         </template>
       </nav>
       <BaseBadge v-if="world.profileIncomplete" variant="danger" size="sm" data-testid="build-profile-incomplete">Incomplete profile</BaseBadge>
+      <BaseBadge v-else-if="world.profileNote" variant="neutral" size="sm" data-testid="build-profile-filling">Profile in progress</BaseBadge>
       <slot name="header-end" />
     </header>
 
@@ -76,8 +78,43 @@
 
     <div class="flex-1 min-h-0 overflow-y-auto p-4">
       <InlineError v-if="readError" class="mb-4" :message="readError" retryable @retry="$emit('retry')" @dismiss="$emit('dismiss-error')" />
+      <!-- One of their agents did a job for another: said once, on whichever tab is open. -->
+      <PortalBuildHandoff
+        v-if="handoff"
+        class="mb-4"
+        :handoff="handoff"
+        :from-label="handoff.fromLabel"
+        :to-label="handoff.toLabel"
+        @shown="(event, link) => $emit('handoff-shown', event, link)"
+        @dismiss="$emit('handoff-dismiss')"
+      />
 
-      <template v-if="tab === 'world'">
+      <!-- You: who they are, as they told setup, and how far they've got. -->
+      <div v-if="tab === 'you'" class="space-y-4" data-testid="build-you">
+        <BaseCard>
+          <p class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">You</p>
+          <p class="mt-1 text-sm font-medium text-gray-900 dark:text-gray-100" data-testid="build-role">{{ world.person.role || 'Your role: not told yet' }}</p>
+          <dl v-if="experience.length" class="mt-2 space-y-1 text-xs">
+            <div v-for="row in experience" :key="row.label" class="flex gap-2">
+              <dt class="w-28 shrink-0 text-gray-500 dark:text-gray-400">{{ row.label }}</dt>
+              <dd class="min-w-0 text-gray-700 dark:text-gray-200">{{ row.value }}</dd>
+            </div>
+          </dl>
+          <p v-if="world.level" class="mt-2 text-xs text-gray-600 dark:text-gray-300" data-testid="build-level">{{ LEVEL_LABELS[world.level] }}</p>
+        </BaseCard>
+
+        <PortalBuildLevels
+          v-if="levels.length"
+          :levels="levels"
+          :celebrate="levelCelebrate"
+          :guide-label="guideLabel"
+          @ask="(prompt) => $emit('ask', prompt)"
+          @dismiss="$emit('dismiss-level')"
+          @later="$emit('keys-later')"
+        />
+      </div>
+
+      <template v-else-if="tab === 'world'">
         <Transition
           mode="out-in"
           enter-active-class="transition duration-200 ease-out motion-reduce:transition-none"
@@ -100,8 +137,6 @@
                 {{ world.company.name || 'Not told yet' }}
               </p>
               <p v-if="companyMeta" class="text-xs text-gray-500 dark:text-gray-400">{{ companyMeta }}</p>
-              <p v-if="world.person.role" class="mt-2 text-xs text-gray-600 dark:text-gray-300" data-testid="build-role">You: {{ world.person.role }}</p>
-              <p v-if="world.level" class="mt-1 text-xs text-gray-600 dark:text-gray-300" data-testid="build-level">{{ LEVEL_LABELS[world.level] }}</p>
               <button
                 v-if="research.status === 'done'"
                 type="button"
@@ -113,15 +148,6 @@
                 Researching your company. It will appear under Findings.
               </p>
             </BaseCard>
-
-            <PortalBuildLevels
-              v-if="levels.length"
-              :levels="levels"
-              :celebrate="levelCelebrate"
-              :guide-label="guideLabel"
-              @ask="(prompt) => $emit('ask', prompt)"
-              @dismiss="$emit('dismiss-level')"
-            />
 
             <div
               v-if="world.auditNudge"
@@ -310,8 +336,9 @@ import InlineError from '@/components/InlineError.vue'
 import OverflowTabs from '@/components/OverflowTabs.vue'
 import PortalMarkdown from '../PortalMarkdown.vue'
 import PortalBuildAgentDetail from './PortalBuildAgentDetail.vue'
+import PortalBuildHandoff from './PortalBuildHandoff.vue'
 import PortalBuildLevels from './PortalBuildLevels.vue'
-import { BUILD_STAGES, LEVEL_LABELS, STATUS_DISPLAY, instanceAgentsFor, liveAgentFor, stepState } from './portalBuild'
+import { BUILD_STAGES, INTAKE_QUESTIONS, LEVEL_LABELS, STATUS_DISPLAY, instanceAgentsFor, liveAgentFor, stepState } from './portalBuild'
 
 const AUDIT_PROMPT = "Let's do the AI audit now."
 const ORCHESTRATOR_PROMPT = 'Orchestrators are turned on for this instance. Help me design one for the agents we have.'
@@ -324,12 +351,14 @@ const props = defineProps({
   readError: { type: String, default: '' },
   research: { type: Object, default: () => ({ status: 'none', report: '', error: '' }) },
   instanceHost: { type: String, default: '' },
-  // The five levels (`levels.js`), empty until the page has read them once.
+  // The eight levels (`levels.js`), empty until the page has read them once.
   levels: { type: Array, default: () => [] },
   levelCelebrate: { type: Object, default: null },
   guideLabel: { type: String, default: 'Atlas' },
+  // A job one of their agents did for another, not shown to them yet (`handoff.js`), with both names.
+  handoff: { type: Object, default: null },
 })
-defineEmits(['ask', 'retry', 'dismiss-error', 'finish-profile', 'retry-research', 'get-help', 'dismiss-level'])
+defineEmits(['ask', 'retry', 'dismiss-error', 'finish-profile', 'retry-research', 'get-help', 'dismiss-level', 'keys-later', 'handoff-shown', 'handoff-dismiss'])
 
 const tab = ref('world')
 const selectedId = ref('')
@@ -338,6 +367,16 @@ const worldName = computed(() => props.world.company.name || 'Your world')
 const selected = computed(() => props.world.agents.find((a) => a.id === selectedId.value) || null)
 
 const companyMeta = computed(() => [props.world.company.industry, props.world.company.size].filter(Boolean).join(', '))
+
+// Their experience, in the words they chose in setup.
+const EXPERIENCE = Object.freeze([['software', 'Software'], ['agents', 'AI agents']])
+const experience = computed(() => {
+  const answers = props.intake?.answers || {}
+  return EXPERIENCE.map(([id, label]) => {
+    const value = INTAKE_QUESTIONS.find((q) => q.id === id)?.choices?.find((c) => c.id === answers[id])?.label
+    return value ? { label, value } : null
+  }).filter(Boolean)
+})
 
 // Departments the guide named, plus any an agent names that the guide has not
 // listed, so an agent is never left off the map.
@@ -361,6 +400,7 @@ const departmentsWithIdeas = computed(() => props.world.departments.filter((d) =
 const tabs = computed(() => {
   const ideas = departmentsWithIdeas.value.reduce((n, d) => n + d.opportunities.length, 0)
   return [
+    { id: 'you', label: 'You' },
     { id: 'world', label: 'Your company' },
     { id: 'findings', label: 'Findings', badge: ideas || undefined, badgeVariant: 'neutral' },
     { id: 'context', label: 'Context' },
@@ -380,31 +420,33 @@ function partsLine(agent) {
 
 const capitalize = (s) => (s ? s[0].toUpperCase() + s.slice(1) : '')
 
-// A level moment lights the Levels card, which lives on Your company: the page brings the
-// right side there and puts it back afterwards with the function this returns.
-// While it is held there, a move of the guide's is kept for the restore rather than made.
+// A level moment lights the Levels card, which lives under You: the page brings the
+// right side there and puts it back afterwards with the function this returns, so the
+// agent being built stays in view once the tick has been seen. While it is held there,
+// a move of the guide's is kept for the restore rather than made.
 let held = null
-function showCompany() {
+function showLevels() {
   const hold = { tab: tab.value, selectedId: selectedId.value, followed: '' }
   held = hold
-  tab.value = 'world'
-  selectedId.value = ''
+  tab.value = 'you'
   return () => {
     if (held === hold) held = null
     const id = hold.followed || hold.selectedId
-    tab.value = hold.followed ? 'world' : hold.tab
+    tab.value = hold.tab
     selectedId.value = props.world.agents.some((a) => a.id === id) ? id : ''
   }
 }
-defineExpose({ showCompany })
+defineExpose({ showLevels })
 
-// The view follows the guide only when it moves to something new, so someone who
-// stepped back to the map is not pulled away again by the next reread.
+// While an agent is being built the right side shows You, where the levels are, so the
+// person sees where they are as they go; Your company opens on the agent the guide is
+// working on. It moves only when the guide moves to something new, so someone who went
+// to another tab is not pulled away again by the next reread.
 watch(() => props.world.focus.agent, (id) => {
   if (id && props.world.agents.some((a) => a.id === id)) {
     if (held) { held.followed = id; return }
     selectedId.value = id
-    tab.value = 'world'
+    tab.value = 'you'
   }
 }, { immediate: true })
 </script>

@@ -46,6 +46,10 @@ async function mockAll(context, proposal) {
   await context.addInitScript(({ t, answers }) => {
     localStorage.setItem('token', t)
     for (const email of ['', 'tester@example.com', 'e2e@example.com']) localStorage.setItem(`trinity-workspace-onboarding:${email}`, answers)
+    // The first walk's Dashboard stop has its own test; the others start after it.
+    if (!sessionStorage.getItem('first-walk')) localStorage.setItem('trinity-walk-dashboard-seen', '1')
+    // The way to the Dashboard, lit in the Workspace before a first walk, has its own test too.
+    if (!sessionStorage.getItem('first-door')) localStorage.setItem('trinity-walk-door-seen', '1')
   }, { t: token, answers: JSON.stringify({ current: null, done: true, skipped: false, finished: true, savedAt: Date.now(), answers: { role: 'Head of Operations', software: 'none', agents: 'tried', company: 'Acme Freight' }, audit: 'start', sent: true, tourSeen: true, featureTourSeen: true }) })
 
   const injected = []
@@ -150,6 +154,49 @@ test.describe('Show me, walked @smoke', () => {
     })
   })
 
+  test('a first Show me lights the way to the Dashboard in the Workspace, then opens the walk; after that it opens at once', async ({ page, context }) => {
+    await context.addInitScript(() => { sessionStorage.setItem('first-door', '1') })
+    await mockAll(context, { id: 'p1', action: 'show-me', key: 'people', agent: AGENT })
+    await page.goto('/workspace/build')
+    const dashboard = page.getByTestId('sidebar-dashboard')
+    await expect(dashboard).toHaveAttribute('href', '/')
+    await page.getByTestId('build-fleet-show-me').click()
+    const door = page.getByTestId('build-walk-door')
+    await expect(door).toContainText('This is how you get to the Dashboard')
+    // The light is on the sidebar's Dashboard link, and no tab has opened yet.
+    const lit = await door.locator('[aria-hidden="true"]').first().boundingBox()
+    const link = await dashboard.boundingBox()
+    expect(lit.x).toBeLessThanOrEqual(link.x)
+    expect(lit.y).toBeLessThanOrEqual(link.y)
+    expect(lit.x + lit.width).toBeGreaterThanOrEqual(link.x + link.width)
+    expect(context.pages()).toHaveLength(1)
+    const [tab] = await Promise.all([context.waitForEvent('page'), door.getByTestId('build-tour-next').click()])
+    expect(tab.url()).toContain('walk=people')
+    await expect(door).toHaveCount(0)
+    expect(await page.evaluate(() => localStorage.getItem('trinity-walk-door-seen'))).toBe('1')
+    await tab.close()
+  })
+
+  test('the first walk opens on the whole Dashboard, says what it is, then lights the agent', async ({ page, context }) => {
+    await context.addInitScript(() => { sessionStorage.setItem('first-walk', '1'); localStorage.removeItem('trinity-walk-dashboard-seen') })
+    await mockAll(context, { id: 'p1', action: 'show-me', key: 'credentials', agent: AGENT, keys: 'SUPABASE_URL,SUPABASE_KEY' })
+    await page.goto('/workspace/build')
+    const [tab] = await Promise.all([context.waitForEvent('page'), page.getByTestId('build-fleet-show-me').click()])
+    await tab.setViewportSize({ width: 1440, height: 900 })
+    await tab.addLocatorHandler(tab.getByTestId('build-tour-skip'), (skip) => skip.click())
+    await expect(title(tab)).toHaveText('This is the Dashboard')
+    // The lit part is the Dashboard itself, not one agent.
+    const lit = await tab.getByTestId('show-me-walk-spot').boundingBox()
+    expect(lit.width).toBeGreaterThan(1000)
+    // Its card sits in the middle, over nothing it explains.
+    const card = tab.getByTestId('show-me-walk').locator('h2').locator('..')
+    await expect.poll(async () => { const b = await card.boundingBox(); return Math.round(Math.abs(b.x + b.width / 2 - 720)) }).toBeLessThan(20)
+    if (process.env.SHOT) await tab.screenshot({ path: process.env.SHOT })
+    await tab.getByTestId('show-me-walk-next').click()
+    await expect(title(tab)).toHaveText('Your agents live here')
+    await expect(tab.getByTestId('show-me-walk-body')).toHaveText('Every agent you have is listed here. Click Game Promoter to open it.')
+  })
+
   test("from Atlas's card to saved keys, one lit-up click at a time", async ({ page, context }) => {
     const { injected } = await mockAll(context, { id: 'p1', action: 'show-me', key: 'credentials', agent: AGENT, keys: 'SUPABASE_URL,SUPABASE_KEY' })
     await page.goto('/workspace/build')
@@ -251,7 +298,7 @@ test.describe('Show me, walked @smoke', () => {
     expect(world.permissionSaves).toEqual([{ permitted_agents: [REPORTER] }])
   })
 
-  test('schedules: the switch, then Enable autonomy, without which no schedule runs', async ({ page, context }) => {
+  test('schedules: the switch, then the Autonomy switch at the top, without which no schedule runs', async ({ page, context }) => {
     const { world } = await mockAll(context, { id: 'w3', action: 'show-me', key: 'schedules', agent: AGENT, schedule_id: 's1' })
     const tab = await openWalk(page, context, "Show me how to turn on Game Promoter's Daily digest")
     await expect(title(tab)).toHaveText('Schedules')
@@ -259,8 +306,12 @@ test.describe('Show me, walked @smoke', () => {
     await expect(title(tab)).toHaveText('Turn on Daily digest')
     await tab.locator('[data-walk-schedule="s1"] [data-walk="schedule-toggle"]').click()
     await expect(title(tab)).toHaveText('Turn on Autonomy')
-    await tab.locator('[data-walk="autonomy-enable"]').click()
+    await expect(tab.getByTestId('show-me-walk-body')).toContainText('While it says Manual')
+    const autonomy = tab.locator('[data-walk="autonomy-switch"]')
+    await expect(autonomy).toContainText('Manual')
+    await autonomy.getByRole('switch').click()
     await expect(title(tab)).toHaveText("That's it")
+    await expect(autonomy).toContainText('AUTO')
     expect(world.digestOn).toBe(true)
     expect(world.autonomy).toBe(true)
   })

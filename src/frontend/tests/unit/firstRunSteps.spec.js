@@ -35,7 +35,9 @@ import {
   estimateMinutes,
   isFirstRunOverlayVisible,
   litNodes,
+  nextStepKey,
   persistFirstRunClosed,
+  previousStepKey,
   persistFirstRunSkipped,
   readFirstRunClosed,
   readFirstRunSkipped,
@@ -81,7 +83,7 @@ beforeEach(() => localStorage.clear())
 
 describe('the registry', () => {
   it('has the steps in the fixed order', () => {
-    expect(keys(FIRST_RUN_STEPS)).toEqual(['intro', 'secure', 'email', 'profile', 'claude', 'keys', 'company', 'sharing', 'audit', 'agent'])
+    expect(keys(FIRST_RUN_STEPS)).toEqual(['intro', 'secure', 'email', 'profile', 'claude', 'company', 'sharing', 'keys', 'audit', 'agent'])
   })
 
   it('has exactly one required step: claude', () => {
@@ -99,7 +101,7 @@ describe('the registry', () => {
 
   it('a fresh marketplace admin gets every step', () => {
     expect(keys(applicableSteps(freshMarketplace))).toEqual([
-      'intro', 'secure', 'email', 'profile', 'claude', 'keys', 'company', 'sharing', 'audit', 'agent',
+      'intro', 'secure', 'email', 'profile', 'claude', 'company', 'sharing', 'keys', 'audit', 'agent',
     ])
     expect(estimateMinutes(applicableSteps(freshMarketplace))).toBeGreaterThan(0)
   })
@@ -205,7 +207,7 @@ describe('Workspace Build: about you, your company, the AI audit', () => {
 
   it('never opens the overlay by itself on an established fleet', () => {
     expect(isFirstRunOverlayVisible(unanswered)).toBe(false)
-    expect(keys(applicableSteps(unanswered))).toEqual(['intro', 'profile', 'keys', 'company', 'audit'])
+    expect(keys(applicableSteps(unanswered))).toEqual(['intro', 'profile', 'company', 'keys', 'audit'])
   })
 
   it('stay skippable, but Continue waits for an answer', () => {
@@ -229,7 +231,7 @@ describe('forced reopen keeps completed steps complete', () => {
   it('the session set is every ELIGIBLE step, and the done ones read done', () => {
     const ctx = { ...established, forced: true }
     const steps = stepsForSession(ctx)
-    expect(keys(steps)).toEqual(['intro', 'secure', 'email', 'profile', 'claude', 'keys', 'company', 'sharing', 'audit', 'agent'])
+    expect(keys(steps)).toEqual(['intro', 'secure', 'email', 'profile', 'claude', 'company', 'sharing', 'keys', 'audit', 'agent'])
     const states = Object.fromEntries(
       steps.map((s) => [s.key, stepState({ step: s, currentKey: 'welcome', ctx })])
     )
@@ -277,6 +279,33 @@ describe('setup_started — the top of the activation funnel (ent#184 / ent#437)
     const overlay = read('../../src/components/onboarding/FirstRunOverlay.vue')
     expect(overlay).toContain("if (countsAsSetupStart(ctx.value)) telemetry.record('setup_started')")
     expect(overlay.match(/'setup_started'/g)).toHaveLength(1)
+  })
+})
+
+describe('Continue and Back pass over steps already done', () => {
+  // The rail keeps a done step with its check (stepsForSession lists every eligible
+  // step), but nobody is walked through a page with nothing on it.
+  const order = ['welcome', 'intro', 'email', 'profile', 'claude', 'keys', 'company', 'done']
+  const states = { intro: 'current', email: 'done', profile: 'upcoming', claude: 'done', keys: 'upcoming', company: 'upcoming' }
+
+  it('Continue lands on the next step with something to do', () => {
+    expect(nextStepKey(order, 'welcome', { ...states, intro: 'upcoming' })).toBe('intro')
+    expect(nextStepKey(order, 'intro', states)).toBe('profile')
+    expect(nextStepKey(order, 'profile', { ...states, intro: 'done', profile: 'current' })).toBe('keys')
+  })
+
+  it('always reaches the last panel, even past done steps', () => {
+    expect(nextStepKey(order, 'keys', { ...states, company: 'done' })).toBe('done')
+    expect(nextStepKey(order, 'done', states)).toBe('done')
+    expect(nextStepKey(order, 'not-a-step', states)).toBe('done')
+    expect(nextStepKey([], 'welcome', {})).toBeNull()
+  })
+
+  it('Back lands on the previous step with something to do, or the first panel', () => {
+    expect(previousStepKey(order, 'profile', { ...states, intro: 'upcoming' })).toBe('intro')
+    expect(previousStepKey(order, 'keys', { ...states, profile: 'done' })).toBe('intro')
+    expect(previousStepKey(order, 'intro', states)).toBe('welcome')
+    expect(previousStepKey(order, 'welcome', states)).toBe('welcome')
   })
 })
 

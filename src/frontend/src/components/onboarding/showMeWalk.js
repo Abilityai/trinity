@@ -15,6 +15,9 @@
 import { BUILD_GUIDE_NAME } from '@/components/portal/builder/portalBuild'
 
 export const SHOW_ME_WALKS = Object.freeze(['credentials', 'people', 'permissions', 'schedules'])
+// Every walk an address may ask for: the guide's, and `tasks`, which the welcome of an
+// account that cannot build opens (an operator looking at what an agent did).
+const WALK_KEYS = Object.freeze([...SHOW_ME_WALKS, 'tasks'])
 
 // Trinity's agent names are Docker container names; key names are what an .env can hold.
 // Both go into a selector, so nothing else gets through.
@@ -23,7 +26,7 @@ const KEY_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/
 // Trinity's schedule ids are url-safe tokens.
 const SCHEDULE_ID = /^[A-Za-z0-9_-]{1,64}$/
 const MAX_KEYS = 10
-const QUERY = Object.freeze({ walk: 'walk', agent: 'walk_agent', keys: 'walk_keys', to: 'walk_to', schedule: 'walk_schedule' })
+const QUERY = Object.freeze({ walk: 'walk', agent: 'walk_agent', keys: 'walk_keys', to: 'walk_to', schedule: 'walk_schedule', from: 'walk_from' })
 
 const isAgentName = (name) => typeof name === 'string' && AGENT_NAME.test(name) && !name.includes('..')
 const isScheduleId = (id) => typeof id === 'string' && SCHEDULE_ID.test(id)
@@ -46,14 +49,15 @@ export function walkKeys(raw) {
 }
 
 // What a walk carries besides the agent, each only where it means something: key names
-// for credentials, the agent to call for permissions, the schedule for schedules. Never an
-// email or a value.
-function walkExtras(key, agent, { keys, to, schedule } = {}) {
+// for credentials, the agent to call for permissions, the schedule for schedules, the agent
+// that asked for a job for tasks. Never an email or a value.
+function walkExtras(key, agent, { keys, to, schedule, from } = {}) {
   const out = {}
   const names = key === 'credentials' ? walkKeys(keys) : []
   if (names.length) out.keys = names
   if (key === 'permissions' && isAgentName(to) && to !== agent) out.to = to
   if (key === 'schedules' && isScheduleId(schedule)) out.schedule = schedule
+  if (key === 'tasks' && isAgentName(from) && from !== agent) out.from = from
   return out
 }
 
@@ -62,13 +66,14 @@ function walkExtras(key, agent, { keys, to, schedule } = {}) {
  * `extra` is the key names (a list or a string, for credentials) or `{ keys, to, schedule }`.
  */
 export function walkLink(key, agent, extra = []) {
-  if (!SHOW_ME_WALKS.includes(key) || !isAgentName(agent)) return null
+  if (!WALK_KEYS.includes(key) || !isAgentName(agent)) return null
   const given = Array.isArray(extra) || typeof extra === 'string' ? { keys: extra } : (extra || {})
-  const { keys, to, schedule } = walkExtras(key, agent, given)
+  const { keys, to, schedule, from } = walkExtras(key, agent, given)
   const query = new URLSearchParams({ [QUERY.walk]: key, [QUERY.agent]: agent })
   if (keys) query.set(QUERY.keys, keys.join(','))
   if (to) query.set(QUERY.to, to)
   if (schedule) query.set(QUERY.schedule, schedule)
+  if (from) query.set(QUERY.from, from)
   return `/?${query}`
 }
 
@@ -76,9 +81,9 @@ export function walkLink(key, agent, extra = []) {
 export function walkFromQuery(query) {
   const key = query?.[QUERY.walk]
   const agent = query?.[QUERY.agent]
-  if (typeof key !== 'string' || !SHOW_ME_WALKS.includes(key) || !isAgentName(agent)) return null
-  const extras = walkExtras(key, agent, { keys: query[QUERY.keys], to: query[QUERY.to], schedule: query[QUERY.schedule] })
-  return { key, agent, keys: extras.keys || [], ...(extras.to ? { to: extras.to } : {}), ...(extras.schedule ? { schedule: extras.schedule } : {}) }
+  if (typeof key !== 'string' || !WALK_KEYS.includes(key) || !isAgentName(agent)) return null
+  const extras = walkExtras(key, agent, { keys: query[QUERY.keys], to: query[QUERY.to], schedule: query[QUERY.schedule], from: query[QUERY.from] })
+  return { key, agent, keys: extras.keys || [], ...(extras.to ? { to: extras.to } : {}), ...(extras.schedule ? { schedule: extras.schedule } : {}), ...(extras.from ? { from: extras.from } : {}) }
 }
 
 /** The address without the walk, so a reload doesn't start it again. */
@@ -99,6 +104,17 @@ const agentStep = (agent, name) => ({
   fallback: { label: `Open ${name}`, to: agentPath(agent) },
 })
 const backToGuide = `Go back to your chat with ${BUILD_GUIDE_NAME} and tell it you're done.`
+
+// The person's first walk opens on the Dashboard itself, lit whole, before the agent.
+const dashboardStep = () => ({
+  id: 'dashboard',
+  next: true,
+  center: true,
+  target: '[data-walk="dashboard"]',
+  title: 'This is the Dashboard',
+  body: "It's where every agent on your Trinity lives: which ones are running, what each is doing right now, and what they did over the last day. Whatever you set up for an agent starts here.",
+  fallback: { label: 'Open the Dashboard', to: '/' },
+})
 
 // A tab on the agent's page. When it doesn't fit, the page shows it under More.
 const tabStep = (agent, tab, label, body) => ({
@@ -237,12 +253,37 @@ export function schedulesWalk({ agent, label }) {
   ]
 }
 
+/** What an agent did: its Tasks. For someone who runs agents shared with them, with no guide to go back to. */
+export function tasksWalk({ agent, label, from, fromLabel }) {
+  const name = label || agent
+  // Opened from a job another agent asked for: the end says which rows those are.
+  const asker = from ? (fromLabel || from) : ''
+  return [
+    agentStep(agent, name),
+    tabStep(agent, 'tasks', 'Tasks', `Everything ${name} has done is listed under Tasks. Click it.`),
+    {
+      id: 'finished',
+      target: null,
+      end: true,
+      title: "That's it",
+      body: asker
+        ? `Each row is one job ${name} did. The rows tagged "agent" are jobs another agent asked for: the newest is what ${asker} asked ${name} to do, with how long it took and how it ended. Click a row to read it, or go back to your Workspace tab to carry on.`
+        : `Each row is one job ${name} did: what started it, how long it took and how it ended. Go back to your Workspace tab to chat with ${name}.`,
+    },
+  ]
+}
+
 /** The steps of a walk read from an address (`walkFromQuery`), for the agent's names. */
-export function walkSteps(walk, who) {
-  if (walk?.key === 'people') return peopleWalk(who)
-  if (walk?.key === 'permissions') return permissionsWalk({ ...who, to: walk.to })
-  if (walk?.key === 'schedules') return schedulesWalk(who)
-  return credentialsWalk(who)
+export function walkSteps(walk, who, { intro = false } = {}) {
+  const steps = walk?.key === 'tasks' ? tasksWalk({ ...who, from: walk.from })
+    : walk?.key === 'people' ? peopleWalk(who)
+    : walk?.key === 'permissions' ? permissionsWalk({ ...who, to: walk.to })
+      : walk?.key === 'schedules' ? schedulesWalk(who)
+        : credentialsWalk(who)
+  if (!intro) return steps
+  // Said once already: the agent's stop doesn't repeat what the Dashboard is.
+  const [agent, ...rest] = steps
+  return [dashboardStep(), { ...agent, body: `Every agent you have is listed here. Click ${who?.label || who?.agent} to open it.` }, ...rest]
 }
 
 /**
@@ -319,14 +360,21 @@ export function scheduleSteps(rows, schedule, { agent, label }) {
       body: `${name} has no schedule yet. Ask ${BUILD_GUIDE_NAME} to plan one with you.`,
     }]
   }
+  // The Autonomy switch at the top of the agent's page, where it always is (the header's
+  // Manual/AUTO). Its Enable autonomy button on the Schedules tab only while the page shows
+  // no switch there (an agent shared with them). Done once the tab says Autonomy is on.
   const autonomy = {
     id: 'autonomy',
-    target: '[data-walk="autonomy-enable"]',
+    target: '[data-walk="autonomy-switch"]',
+    alt: {
+      target: '[data-walk="autonomy-enable"]',
+      body: `Autonomy is ${name}'s switch for working on its own. While it's off, none of its schedules run. Click Enable autonomy.`,
+    },
     optional: true,
-    until: 'gone',
+    until: '[data-walk-autonomy="on"]',
     waitFor: '[data-walk-autonomy]',
     title: 'Turn on Autonomy',
-    body: `Autonomy is ${name}'s switch for working on its own. While it's off, none of its schedules run. Click Enable autonomy.`,
+    body: `This is ${name}'s Autonomy switch, at the top of its page. While it says Manual, none of its schedules run. Click it, and it says AUTO.`,
     fallback,
   }
   const last = (body) => ({ id: 'finished', target: null, end: true, title: "That's it", body: `${body} ${backToGuide}` })

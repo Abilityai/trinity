@@ -51,7 +51,7 @@ export function reachedSteps({ reached, levels, agent = null }) {
   steps.push({
     target: 'levels',
     title: named ? `Level ${named.id} done: ${named.name}` : `Levels ${joinIds(ids)} done`,
-    body: next ? `Next, Level ${next.id}: ${next.name}.` : "That's every level.",
+    body: next ? `Next, Level ${next.id}: ${next.name}.` : "That's every level. You're certified to get started.",
     company: true,
   })
   return steps
@@ -73,4 +73,25 @@ export function levelNote(text, guideName = 'Your guide') {
   if (!flat || !WHOLE.test(flat)) return null
   const ids = [...flat.matchAll(REACHED_ID)].map((m) => Number(m[1]))
   return `${ids.length === 1 ? 'Level' : 'Levels'} ${joinIds(ids)} reached. ${guideName} was told.`
+}
+
+const LATER = /^Level \d+, ([^.:\n]+): left for later\.\s*(?:Next: Level \d+, [^.\n]+\.|That was the last level\.)$/
+
+/** The page's "left for later" line to the guide, as a short note. Anything else: null. */
+export function laterNote(text, guideName = 'Your guide') {
+  const name = typeof text === 'string' ? text.trim().match(LATER)?.[1] : null
+  return name ? `${name} left for later. ${guideName} was told.` : null
+}
+
+export const MOMENT_RETRIES = 3
+
+/**
+ * A moment closed with nothing on screen to light (the Levels card hadn't drawn yet, or
+ * the page was mid-change) comes back, up to `MOMENT_RETRIES` times, rather than counting
+ * as seen: nobody saw it. Null once it has been tried enough, or for any other close.
+ */
+export function retryDropped(moment, reason, max = MOMENT_RETRIES) {
+  if (reason !== 'dropped' || !moment) return null
+  const tries = (Number(moment.tries) || 0) + 1
+  return tries > max ? null : { ...moment, tries }
 }

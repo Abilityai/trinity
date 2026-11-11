@@ -42,6 +42,7 @@
 
     <WhatIsAnAgent
       v-if="explaining"
+      ref="explainer"
       class="pt-1"
       :software="intake.answers.software"
       @done="emit('update-intake', markAgentExplained(intake))"
@@ -70,6 +71,15 @@ const questions = computed(() => INTAKE_QUESTIONS.filter((q) => q.group === prop
 const question = computed(() => questions.value.find((q) => !props.intake.answers[q.id] && !(q.optional && passed.value)) || null)
 // Right after "I've never built one", what an agent is comes before the next question.
 const explaining = computed(() => props.group === 'you' && needsAgentExplainer(props.intake))
+// It lands under the answers they just gave, often below the panel's fold, so the panel
+// scrolls to it: otherwise someone who has never built an agent may never see it.
+const explainer = ref(null)
+watch(explaining, async (now) => {
+  if (!now) return
+  await nextTick()
+  const reduce = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
+  explainer.value?.$el?.scrollIntoView?.({ block: 'start', behavior: reduce ? 'auto' : 'smooth' })
+})
 // While a saved answer is being changed, the next unanswered question waits.
 const asked = computed(() => questions.value.filter((q) => props.intake.answers[q.id] || (q === question.value && !explaining.value && !editingId.value)))
 const active = computed(() => (editingId.value

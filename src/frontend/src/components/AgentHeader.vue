@@ -298,7 +298,8 @@
            drew over CPU/MEM; `basis-full` gives it its own line (#3542). -->
       <div class="flex flex-wrap items-center gap-y-2 min-w-0 grow shrink basis-full sm:basis-0">
         <!-- Autonomy Toggle (not for system agents) -->
-        <div v-if="canEditIdentity" class="flex items-center">
+        <!-- `data-walk`: the last stop of Show me's schedules walk (showMeWalk.js). -->
+        <div v-if="canEditIdentity" class="flex items-center" data-walk="autonomy-switch">
           <AutonomyToggle
             :model-value="agent.autonomy_enabled"
             :loading="autonomyLoading"

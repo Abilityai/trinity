@@ -16,7 +16,7 @@ export function tourSteps(guideName = 'Your guide') {
     {
       target: 'company',
       title: 'This is your company page',
-      body: 'It fills in as you talk. "Your company" shows your teams and agents, "Findings" has the company research and the audit results, and "Context" is what every agent will know about you.',
+      body: 'It fills in as you talk. "You" has your profile and your levels, "Your company" shows your teams and agents, "Findings" has the company research and the audit results, and "Context" is what every agent will know about you.',
     },
     {
       target: 'inbox',
@@ -24,11 +24,34 @@ export function tourSteps(guideName = 'Your guide') {
       body: 'When an agent needs a decision or your approval, it asks you here. Agents wait for your answer before doing anything risky.',
     },
     {
+      target: 'dashboard',
+      title: 'This is the way to the Dashboard',
+      body: `The Dashboard is where Trinity's own settings live: an agent's keys, its schedule, who can use it. You don't need it yet. When you do, ${guideName} walks you there, click by click.`,
+    },
+    {
       target: 'help',
       title: 'You can always get help',
       body: `Ask ${guideName} first. If you're stuck, this reaches the team, and you can take this tour again from there.`,
     },
   ]
+}
+
+// The way from the Workspace to the Dashboard: the first stop of a person's first Show me
+// walk, lit in the sidebar before the walk opens in its new tab, so the route starts
+// where they are. Once per browser, like the walk's own "This is the Dashboard".
+export const WALK_DOOR_SEEN = 'trinity-walk-door-seen'
+
+export function walkDoorSteps() {
+  return [{
+    target: 'dashboard',
+    title: 'This is how you get to the Dashboard',
+    body: "The Dashboard is where Trinity's own settings live. This link is always here, in the sidebar. It opens in a new tab, so your chat stays open, and there each click is lit up for you.",
+  }]
+}
+
+/** Whether a Show me click first lights the Dashboard link: once, and only when it is on screen. */
+export function walkDoorDue({ seen = true, linkVisible = false, busy = false } = {}) {
+  return !seen && linkVisible && !busy
 }
 
 const GAP = 14

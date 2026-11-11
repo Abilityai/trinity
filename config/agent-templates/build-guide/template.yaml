@@ -6,6 +6,9 @@ display_name: Atlas
 description: Walks a person from "what is an agent?" to agents running on their Trinity instance, builds them with them, and draws each step on the Build page as it happens.
 type: guide-agent
 tagline: "Find where agents help, then build them with you"
+# The face is the bundled avatar.webp. The deploy installs a template's bundled image only
+# when it declares a prompt (#2693), which is also what "Generate Default Avatars" redraws from.
+avatar_prompt: A friendly guide shown as a simple globe with a small four-pointed star above it, flat illustration on a deep indigo background, calm and welcoming
 
 resources:
   cpu: "1"

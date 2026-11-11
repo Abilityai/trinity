@@ -13,7 +13,7 @@
     :model-value="open"
     :close-on-backdrop="false"
     labelledby="build-onboarding-title"
-    panel-class="relative flex flex-col w-full max-w-xl h-[480px] max-h-full overflow-hidden rounded-[10px] border border-gray-200 dark:border-gray-750 bg-white dark:bg-gray-800 shadow-2xl"
+    panel-class="relative flex flex-col w-full max-w-xl h-[660px] max-h-full overflow-hidden rounded-[10px] border border-gray-200 dark:border-gray-750 bg-white dark:bg-gray-800 shadow-2xl"
     data-testid="build-onboarding"
   >
     <div class="shrink-0 px-8 pt-6 max-sm:px-4">
@@ -38,6 +38,8 @@
             </span>
           </li>
         </ol>
+        <!-- Only someone who builds but is not the admin reaches this window (an admin has the setup panel). -->
+        <p class="mt-4 text-xs text-gray-500 dark:text-gray-400" data-testid="build-onboarding-account">{{ CREATOR_NOTE }}</p>
       </div>
 
       <form v-else-if="question && !question.choices" :data-testid="`build-onboarding-${question.id}`" @submit.prevent="answer(draft)">
@@ -140,6 +142,7 @@
 </template>
 
 <script setup>
+import { CREATOR_NOTE } from './accountWelcome'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseInput from '@/components/base/BaseInput.vue'

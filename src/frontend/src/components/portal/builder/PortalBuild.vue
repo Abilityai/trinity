@@ -30,7 +30,7 @@
 
     <div class="flex-1 min-h-0 flex">
       <section
-        class="relative min-w-0 flex-col sm:flex sm:flex-[2_1_0%]"
+        class="relative min-w-0 flex-col sm:flex sm:flex-1"
         :class="mobileView === 'chat' ? 'flex flex-1' : 'hidden'"
         aria-label="Chat"
         data-tour="chat"
@@ -62,6 +62,7 @@
           :inert="firstReplyPending || null"
           data-testid="build-chat"
           @first-message-sent="firstMessage = ''"
+          @session-adopted="(id) => { sessionAtMount = id }"
           @sessions-changed="onTurnDone"
           @work-state="onWorkState"
           @open-menu="$emit('open-menu')"
@@ -72,20 +73,41 @@
           <template #header-end>
             <span class="sm:hidden"><slot name="header-end" /></span>
           </template>
+          <template #empty>
+            <!-- Nothing said yet: the guide says what it is for. Not while the answers are
+                 on their way, which would swap it out under the person a moment later. -->
+            <PortalBuildWelcome
+              v-if="!answersOnTheirWay"
+              :guide="guide"
+              :guide-label="guide.display_label || BUILD_GUIDE_NAME"
+              :first-agent="levelOwn.length === 0"
+              :audit-first="auditFirst"
+              @start="startFromWelcome"
+            />
+          </template>
           <template #notice>
             <div class="shrink-0 px-3 sm:px-4 empty:hidden">
-              <PortalBuildFleetCard
-                v-if="activeCard"
-                :key="activeCard.id"
-                :card="activeCard"
-                :status="cardStatus"
-                :reason="cardReason"
-                @confirm="confirmCard"
-                @decline="declineCard"
-                @shown="onWalkOpened(); closeCard()"
-                @opened="onWalkOpened"
-                @dismiss="closeCard"
-              />
+              <!-- Arrives the way a level does, so the eye goes to it (motion-safe only). -->
+              <Transition
+                appear
+                enter-active-class="motion-safe:transition motion-safe:duration-300 motion-safe:ease-out"
+                enter-from-class="motion-safe:opacity-0 motion-safe:-translate-y-1"
+              >
+                <PortalBuildFleetCard
+                  v-if="activeCard"
+                  :key="activeCard.id"
+                  class="mb-2"
+                  :card="activeCard"
+                  :guide="guide"
+                  :status="cardStatus"
+                  :reason="cardReason"
+                  @confirm="confirmCard"
+                  @decline="declineCard"
+                  @shown="onShowMe"
+                  @opened="onWalkOpened"
+                  @dismiss="closeCard"
+                />
+              </Transition>
             </div>
           </template>
         </PortalConversation>
@@ -175,7 +197,7 @@
       </section>
 
       <div
-        class="min-w-0 sm:block sm:flex-[3_1_0%]"
+        class="min-w-0 sm:block sm:flex-1"
         :class="mobileView === 'world' ? 'block flex-1' : 'hidden'"
         data-tour="company"
       >
@@ -192,6 +214,10 @@
           :level-celebrate="levelCelebrate"
           :guide-label="guide?.display_label || BUILD_GUIDE_NAME"
           @dismiss-level="levelCelebrate = null"
+          :handoff="handoff"
+          @keys-later="leaveKeysForLater"
+          @handoff-shown="onHandoffShown"
+          @handoff-dismiss="closeHandoff"
           @ask="ask"
           @retry="refresh"
           @dismiss-error="readError = ''"
@@ -206,12 +232,14 @@
     <PortalBuildTour :open="tourOpen" :guide-name="guide?.display_label || BUILD_GUIDE_NAME" @close="closeTour" />
     <!-- Level moments: the levels at the start of a first build, a new agent in the
          sidebar, a level ticking. The same spotlight, one or two stops. -->
+    <!-- The way to the Dashboard, lit in the sidebar before a person's first walk opens. -->
+    <PortalBuildTour :open="Boolean(door)" :steps="DOOR_STEPS" :min-steps="1" :skippable="false" done-label="Open the Dashboard" testid="build-walk-door" @close="closeDoor" />
     <PortalBuildTour :open="Boolean(moment)" :steps="moment?.steps || []" :min-steps="1" :skippable="false" testid="build-moment" @close="closeMoment" />
   </div>
 </template>
 
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import InlineError from '@/components/InlineError.vue'
 import LoadFailed from '@/components/LoadFailed.vue'
@@ -223,13 +251,16 @@ import PortalConversation from '../PortalConversation.vue'
 import PortalSkeleton from '../PortalSkeleton.vue'
 import { canvasChanged } from '../portalVoiceMode'
 import PortalBuildTour from './PortalBuildTour.vue'
+import { WALK_DOOR_SEEN, walkDoorDue, walkDoorSteps } from './portalBuildTour'
 import PortalBuildFleetCard from './PortalBuildFleetCard.vue'
+import PortalBuildWelcome from './PortalBuildWelcome.vue'
 import PortalBuildWorld from './PortalBuildWorld.vue'
-import { FLEET_CANVAS_ID, cardFor, proposalFrom } from './fleetChanges'
+import { FLEET_CANVAS_ID, cardFor, outcomeNote, proposalFrom } from './fleetChanges'
 import { changeHeld, fleetRefreshDue, outcomeMessage, readFleet, runChange, writeFleetFile } from './fleetActions'
 import { useBuildIntakeStore } from '@/stores/buildIntake'
-import { intakeWithBase, levelAgents, levelMessage, levelsFrom, levelsOf, markLevelsSeen, newlyReached, withLevels } from './levels'
-import { INTRO_STEPS, introDue, levelNote, markLevelsIntroSeen, reachedSteps } from './levelMoments'
+import { intakeWithBase, laterMessage, levelAgents, levelMessage, levelsFrom, levelsOf, levelsSummary, markLevelsSeen, newlyReached, withLevels } from './levels'
+import { handoffDue, latestHandoff, markHandoffSeen } from './handoff'
+import { INTRO_STEPS, introDue, laterNote, levelNote, markLevelsIntroSeen, reachedSteps, retryDropped } from './levelMoments'
 import { readLevelSignals } from './levelSignals'
 import {
   BUILD_CANVAS_ID,
@@ -249,6 +280,7 @@ import {
   markIntakeSent,
   markProposalHandled,
   rebindToGuide,
+  keepGuideCard,
   companyToPublish,
   markResearchStarted,
   myGuideCard,
@@ -262,7 +294,7 @@ import { deployMyGuide, myGuideName } from './useMyGuide'
 
 const MOBILE_VIEWS = Object.freeze([
   { id: 'chat', label: 'Chat' },
-  { id: 'world', label: 'Your company' },
+  { id: 'world', label: 'Your page' },
 ])
 
 const props = defineProps({
@@ -287,11 +319,12 @@ const authStore = useAuthStore()
 const intakeStore = useBuildIntakeStore()
 const instanceHost = typeof window !== 'undefined' ? window.location.host : ''
 
-const guide = computed(() => {
-  // Their own guide, never someone else's shared with them.
-  const card = myGuideCard(props.roster)
-  return card ? { ...card, display_label: card.display_label || BUILD_GUIDE_NAME } : null
-})
+// Their own guide, never someone else's shared with them, kept as it is until something
+// on its card changes (`keepGuideCard`).
+const guide = shallowRef(null)
+watch(() => myGuideCard(props.roster), (card) => {
+  guide.value = keepGuideCard(guide.value, card ? { ...card, display_label: card.display_label || BUILD_GUIDE_NAME } : null)
+}, { immediate: true })
 
 const mobileView = ref('chat')
 const chatGeneration = ref(0)
@@ -315,6 +348,8 @@ const http = store.platformHttp()
 const ownAgents = computed(() => props.roster.filter((a) => a?.owned === true && !isBuildCrew(a.name)))
 const fleet = ref(null)
 const fleetCanvas = ref(null)
+// The proposal the fleet was last read for (see the watch by `refreshFleet`).
+const fleetReadFor = ref('')
 const activeCard = ref(null)
 const cardStatus = ref('idle')
 const cardReason = ref('')
@@ -322,6 +357,8 @@ const pendingMessage = ref('')
 const fleetCard = computed(() => {
   const proposal = proposalFrom(fleetCanvas.value)
   if (!proposal || !fleet.value || (props.intake.fleetHandled || []).includes(proposal.id)) return null
+  // Judged against a list read after it arrived (`fleetReadFor`), never an older one.
+  if (fleetReadFor.value !== proposal.id) return null
   return cardFor(proposal, fleet.value)
 })
 watch(fleetCard, (card) => {
@@ -426,6 +463,38 @@ function retryResearch() {
   setTimeout(startResearchIfDue)
 }
 
+// The first job one of their agents did for another, until they opened the walk to it or
+// put the note away. Read from the jobs the page already reads for the levels.
+const handoff = computed(() => {
+  const found = latestHandoff(levelSignals.value)
+  if (!handoffDue({ handoff: found, intake: props.intake })) return null
+  const labelOf = (name) => props.roster.find((a) => a?.name === name)?.display_label || name
+  return { ...found, fromLabel: labelOf(found.from), toLabel: labelOf(found.to) }
+})
+function closeHandoff() {
+  if (!props.intake?.handoffSeen) emit('update:intake', markHandoffSeen(props.intake))
+}
+function onHandoffShown(event, link) {
+  // A first walk lights the way to the Dashboard first (`onShowMe`), as every Show me does.
+  onShowMe(event, link)
+  closeHandoff()
+}
+
+// The person leaves the keys for later on the card: their own choice, kept with their
+// answers, so the card moves on at once; the guide is told the level and the real next one.
+function leaveKeysForLater() {
+  if (props.intake?.keysLater) return
+  const message = laterMessage(levels.value)
+  emit('update:intake', withLevels(props.intake, { keysLater: true }))
+  sendToGuide(message)
+}
+
+// What the guide's file holds: their agents' settings, and where they are in the levels,
+// so it never has to count to know which level is next.
+function fleetFile() {
+  const summary = levelsSummary(levels.value)
+  return summary ? { ...fleet.value, levels: summary } : fleet.value
+}
 function ask(text) {
   mobileView.value = 'chat'
   prefill.value = ''
@@ -434,14 +503,51 @@ function ask(text) {
 }
 
 // The conversation resumes the guide's Main chat, so a reload picks up where the
-// person left off. It is read once: the first send adopts a session of its own,
-// and the prop must not change under a conversation already running.
+// person left off. A chat that starts without one follows the session its first send
+// adopts, as the Workspace's own chat does. Left without it, the conversation takes a
+// new copy of the guide's card for a new chat, and empties.
 watch(phase, (now, before) => {
   if (now === 'intake') emit('need-onboarding')
   if (now !== 'chat' || before === 'chat') return
   sessionAtMount.value = mainChatId()
+  if (rebindIfNew()) return
   startChatIfReady()
 }, { flush: 'sync' })
+
+// A guide's address comes from the person, so a guide set up again after a deleted one
+// has the same name. With no page and no chat of theirs, it has none of their answers:
+// they go again (`rebindToGuide` says when its research runs again). Checked once per
+// guide when the chat first opens, before this page sends anything itself. True when
+// the answers were rebound.
+const rebindChecked = new Set()
+function rebindIfNew() {
+  const name = guide.value?.name
+  if (!name || rebindChecked.has(name)) return false
+  rebindChecked.add(name)
+  if (state.value || readError.value) return false
+  const used = (t) => t && !t.is_room && t.agent_name === name && (t.last_message_at || Number(t.message_count || 0) > 0)
+  if (props.threads.some(used)) return false
+  const next = rebindToGuide(props.intake, name, { fresh: true })
+  if (next === props.intake) return false
+  emit('update:intake', next)
+  // The prop updates with the next patch.
+  setTimeout(startChatIfReady)
+  return true
+}
+
+// The answers are about to go, or have gone and the guide hasn't replied yet.
+const answersOnTheirWay = computed(() => Boolean(firstMessage.value) || firstReplyPending.value || firstMessagePending(props.intake, state.value))
+
+// They chose the AI audit and it isn't done: the welcome starts it, never a build.
+const auditFirst = computed(() => props.intake.audit === 'start' && levelOwn.value.length === 0 && state.value?.audit?.status !== 'done')
+
+// A start button on the welcome: the message goes as the chat's first, in one press.
+function startFromWelcome(text) {
+  if (!text || firstMessage.value) return
+  firstMessage.value = text
+  sessionAtMount.value = mainChatId()
+  chatGeneration.value += 1
+}
 
 // The first message waits for Trinity's samples to be known (see startChatIfReady).
 watch(() => firstRunStore.loaded, (loaded) => {
@@ -469,13 +575,19 @@ watch(state, (now) => {
 
 let timer = null
 let reading = false
+let readAgain = false
 
 async function refresh() {
   if (!guide.value) {
     canvasRead.value = true
     return
   }
-  if (reading) return
+  // A read asked for while one is in flight (the guide's turn ending during a poll)
+  // is not dropped: the page reads once more as soon as this one is back.
+  if (reading) {
+    readAgain = true
+    return
+  }
   reading = true
   try {
     const next = await store.fetchAgentCanvas(guide.value.name, BUILD_CANVAS_ID)
@@ -489,6 +601,10 @@ async function refresh() {
   } finally {
     reading = false
     canvasRead.value = true
+  }
+  if (readAgain) {
+    readAgain = false
+    return refresh()
   }
   await readFleetCanvas()
   await readResearch()
@@ -510,16 +626,39 @@ async function readFleetCanvas() {
 // The guide reads this file before it proposes anything. A failed write leaves the old
 // one, and the guide says it can't see the fleet yet.
 let fleetReadAt = 0
-async function refreshFleet() {
-  if (!guide.value) return
-  fleetReadAt = Date.now()
-  fleet.value = await readFleet(http, ownAgents.value)
-  try {
-    await writeFleetFile(http, guide.value.name, fleet.value)
-  } catch {
-    // Tried again after the next change, or the next agent.
+// One read at a time: one asked for meanwhile runs once more after it, so an older answer
+// never lands after a newer one.
+let fleetReading = null
+let fleetAgain = false
+function refreshFleet() {
+  if (!guide.value) return Promise.resolve()
+  if (fleetReading) {
+    fleetAgain = true
+    return fleetReading
   }
+  fleetReading = (async () => {
+    do {
+      fleetAgain = false
+      fleetReadAt = Date.now()
+      fleet.value = await readFleet(http, ownAgents.value)
+      try {
+        await writeFleetFile(http, guide.value.name, fleetFile())
+      } catch {
+        // Tried again after the next change, or the next agent.
+      }
+    } while (fleetAgain && guide.value)
+  })().finally(() => { fleetReading = null })
+  return fleetReading
 }
+
+// A new proposal can name what the guide made in the same turn, such as a schedule it
+// just created, so the list is read again before its card is worked out: on the older
+// list it would be refused as a change the page can't make.
+watch(() => proposalFrom(fleetCanvas.value)?.id, async (id) => {
+  if (!id || fleetReadFor.value === id || (props.intake.fleetHandled || []).includes(id)) return
+  await refreshFleet()
+  fleetReadFor.value = id
+})
 
 async function loadCompanyProfile() {
   try {
@@ -665,6 +804,9 @@ async function checkGuideGrant() {
 
 async function onTurnDone(...args) {
   emit('sessions-changed', ...args)
+  // The guide may have created an agent in that turn, whether or not it wrote the page:
+  // the sidebar, the fleet and the levels all read the roster, so it is read again.
+  emit('retry-roster')
   // The guide has had its say about an answered card, so the card goes.
   if (['done', 'failed', 'unsure'].includes(cardStatus.value)) {
     activeCard.value = null
@@ -685,13 +827,20 @@ const LEVELS_READ_MS = 60000
 const KEYS_RECHECK_MS = 120000
 const levelSignals = ref(null)
 const levelCelebrate = ref(null)
-// The levels part of the saved answers, in the seven-level numbers (`levelsOf`).
+// The levels part of the saved answers, in the eight-level numbers (`levelsOf`).
 const savedLevels = computed(() => levelsOf(props.intake))
 // Each agent's playbooks when the page first saw it (Level 2 is one added since), kept
 // here as well as on the saved answers so a save racing another can't lose it.
 const levelBase = ref({ ...savedLevels.value.levelsBase })
 watch(() => savedLevels.value.levelsBase, (base) => { levelBase.value = { ...levelBase.value, ...base } })
-const levels = computed(() => (levelSignals.value ? levelsFrom(levelSignals.value, savedLevels.value.levelsKept, levelBase.value) : []))
+const levels = computed(() => (levelSignals.value ? levelsFrom(levelSignals.value, savedLevels.value.levelsKept, levelBase.value, { keysPassed: Boolean(state.value?.keys_not_needed), keysLater: Boolean(state.value?.keys_later || props.intake?.keysLater) }) : []))
+const levelsLine = computed(() => JSON.stringify(levelsSummary(levels.value)))
+// The levels moved (a tick, a level left for later): the file follows, without a new read.
+watch(levelsLine, (now, before) => {
+  if (now === before || now === 'null' || !fleet.value || !guide.value) return
+  writeFleetFile(http, guide.value.name, fleetFile()).catch(() => { /* written again with the next fleet read */ })
+})
+
 // When the page sends the person's answers itself on this visit, the levels already reached
 // then are shown on the card but not told to the guide, over its first question.
 const arrivingNow = !props.intake.sent
@@ -766,22 +915,29 @@ function announceLevels() {
   emit('update:intake', { ...markLevelsSeen(withLevels(props.intake, { levelsSeen: seen, levelsBase: levelBase.value }), fresh, levels.value), levelsUntold: untold })
   if (tellIds.length) queueReached(tellIds)
 }
-// Level moments (core-agent AC-17). They wait until the guide has finished replying, the
-// tour and the setup window are closed and the first reply is in, one at a time. A stop on
-// the Levels card brings the right side to Your company first, and back after.
+// Level moments (core-agent AC-17). A level reached waits until the guide has finished
+// replying; the intro, when the first build starts, shows while the guide is still writing,
+// because its words say the page is lighting the levels up now. Both wait for the tour and
+// the setup window to close and the first reply to be in, one at a time. A stop on the
+// Levels card brings the right side to You first, and back after.
 const worldPanel = ref(null)
 const moment = ref(null)
 const momentQueue = []
 let momentRestore = null
 let introQueued = false
 // A short pause between two moments, so the right side has redrawn and finished moving
-// before the next one looks at whether the Levels card is on screen.
+// before the next one looks at whether the Levels card is on screen; a longer one before a
+// moment that found nothing to light comes back.
 const MOMENT_GAP_MS = 400
+const MOMENT_RETRY_MS = 1500
 const momentPause = ref(false)
 const guideLabel = computed(() => guide.value?.display_label || BUILD_GUIDE_NAME)
-const noteLine = (text) => levelNote(text, guideLabel.value)
-const momentFree = computed(() => phase.value === 'chat' && !working.value && !firstReplyPending.value
+// Lines the page sends for the person (a level reached, a card's outcome) read as notes.
+const noteLine = (text) => levelNote(text, guideLabel.value) || laterNote(text, guideLabel.value) || outcomeNote(text, guideLabel.value)
+const momentBase = computed(() => phase.value === 'chat' && !firstReplyPending.value
   && !props.onboardingOpen && !tourOpen.value && !moment.value && !momentPause.value)
+const momentFree = computed(() => momentBase.value && !working.value)
+const freeFor = (m) => (m?.kind === 'intro' ? momentBase.value : momentFree.value)
 
 // The agent a Level 1 moment lights in the sidebar: their only one, when it is.
 function firstAgent() {
@@ -795,11 +951,6 @@ function levelsCard() {
   const el = document.querySelector('[data-tour="levels"]')
   const r = el?.getBoundingClientRect?.()
   return r && r.width > 0 && r.height > 0 ? r : null
-}
-// Already on screen, whole: the card's own tick says it, with no dimming.
-const levelsCardInView = () => {
-  const r = levelsCard()
-  return Boolean(r && r.top >= 0 && r.bottom <= window.innerHeight)
 }
 async function levelsCardShown(ms = 1500) {
   const until = Date.now() + ms
@@ -848,7 +999,7 @@ function showUntoldOnce() {
 
 let showing = false
 async function showMomentIfFree() {
-  if (showing || !momentFree.value || !momentQueue.length) return
+  if (showing || !momentQueue.length || !freeFor(momentQueue[0])) return
   showing = true
   let shown = false
   try {
@@ -857,24 +1008,20 @@ async function showMomentIfFree() {
     // Level 1 reached before the intro could show: it has nothing left to say.
     if (next.kind === 'intro' && !introDue({ levels: levels.value, stage: world.value.stage, intake: props.intake })) steps = []
     if (steps.some((s) => s.company)) {
-      if (levelsCardInView()) {
-        // A tick alone needs no dimming with the card whole on screen. A moment that also
-        // lights the sidebar keeps its card stop, which is already in view.
-        if (next.kind === 'reached' && steps.every((s) => s.company)) steps = []
-      } else {
-        const restoreWorld = worldPanel.value?.showCompany?.() || null
-        const view = mobileView.value
-        mobileView.value = 'world'
-        momentRestore = () => { restoreWorld?.(); mobileView.value = view }
-        await nextTick()
-        await levelsCardShown()
-        // Something started meanwhile (a reply, the setup window): it waits for that to end.
-        if (phase.value !== 'chat' || working.value || firstReplyPending.value || props.onboardingOpen || tourOpen.value) {
-          momentRestore?.()
-          momentRestore = null
-          momentQueue.unshift(next)
-          return
-        }
+      // The Levels card is lit every time, wherever the right side was: under You, with
+      // the page put back afterwards.
+      const restoreWorld = worldPanel.value?.showLevels?.() || null
+      const view = mobileView.value
+      mobileView.value = 'world'
+      momentRestore = () => { restoreWorld?.(); mobileView.value = view }
+      await nextTick()
+      await levelsCardShown()
+      // Something started meanwhile (the setup window, a reply for a level reached): it waits.
+      if (!freeFor(next)) {
+        momentRestore?.()
+        momentRestore = null
+        momentQueue.unshift(next)
+        return
       }
     }
     if (steps.length) {
@@ -892,17 +1039,25 @@ async function showMomentIfFree() {
   if (!shown) showMomentIfFree()
 }
 
-function closeMoment() {
+function closeMoment(reason = 'done') {
   const done = moment.value
-  if (done?.kind === 'intro') emit('update:intake', markLevelsIntroSeen(props.intake))
   moment.value = null
   momentRestore?.()
   momentRestore = null
+  // Closed with nothing on screen to light: it comes back, and nobody is told it was seen.
+  const again = retryDropped(done, reason)
+  if (again) {
+    momentQueue.unshift(again)
+    momentPause.value = true
+    setTimeout(() => { momentPause.value = false }, MOMENT_RETRY_MS)
+    return
+  }
+  if (done?.kind === 'intro') emit('update:intake', markLevelsIntroSeen(props.intake))
   momentPause.value = true
   setTimeout(() => { momentPause.value = false }, MOMENT_GAP_MS)
   done?.then?.()
 }
-watch(momentFree, (free) => { if (free) showMomentIfFree() })
+watch([momentBase, momentFree], () => showMomentIfFree())
 
 // The levels, once, when the first build starts.
 watch([levels, () => world.value.stage, () => props.intake.levelsIntroSeen], () => {
@@ -945,6 +1100,39 @@ async function deploy() {
 let walkOpenedAt = 0
 let fleetReturning = null
 function onWalkOpened() { walkOpenedAt = Date.now() }
+
+// Show me teaches the route, and the route starts here: a person's first Show me lights
+// the Dashboard link in the sidebar, and its button opens the walk in the new tab. After
+// that (or with no sidebar on screen) the card's own link opens it.
+const DOOR_STEPS = walkDoorSteps()
+const door = ref(null)
+let doorDropped = false
+function doorSeen() {
+  try { return localStorage.getItem(WALK_DOOR_SEEN) === '1' } catch { return true }
+}
+function onShowMe(event, link) {
+  const box = document.querySelector('[data-tour="dashboard"]')?.getBoundingClientRect?.()
+  const linkVisible = Boolean(box && box.width > 0 && box.height > 0)
+  if (link && event && walkDoorDue({ seen: doorSeen() || doorDropped, linkVisible, busy: tourOpen.value || Boolean(moment.value) })) {
+    event.preventDefault()
+    door.value = { link }
+    return
+  }
+  onWalkOpened()
+  closeCard()
+}
+function closeDoor(reason) {
+  const opened = door.value
+  door.value = null
+  if (!opened) return
+  // Nothing to light after all: the next press opens the walk as before.
+  if (reason === 'dropped') { doorDropped = true; return }
+  if (reason !== 'done') return
+  try { localStorage.setItem(WALK_DOOR_SEEN, '1') } catch { /* private mode: shown again next time */ }
+  window.open(opened.link, '_blank', 'noopener')
+  onWalkOpened()
+  closeCard()
+}
 function refreshFleetOnReturn() {
   // Focus and visibilitychange arrive together: one read for both.
   if (phase.value !== 'chat' || fleetReturning) return

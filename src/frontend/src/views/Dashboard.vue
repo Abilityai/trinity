@@ -2,7 +2,8 @@
   <div class="h-screen flex flex-col bg-gray-100 dark:bg-gray-900 overflow-hidden">
     <NavBar />
 
-    <main class="flex-1 flex overflow-hidden">
+    <!-- data-walk: the first Show me walk lights the whole Dashboard to say what it is. -->
+    <main class="flex-1 flex overflow-hidden" data-walk="dashboard">
       <!-- System Views Sidebar -->
       <SystemViewsSidebar
         @create="openCreateModal"

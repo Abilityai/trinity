@@ -2036,7 +2036,8 @@ watch(typeaheadBound, (b) => { activeIndex.value = clampActiveIndex(activeIndex.
 const composerPlaceholder = computed(() => {
   if (listening.value) return 'Listening…'
   const base = `Message ${agentDisplayName(props.agent)}…  ·  / for skills`
-  return store.multiAgentChatAvailable ? `${base}  ·  @ to add an agent` : base
+  // Workspace Build (`focused`): an @mention opens a room, which leaves the page.
+  return store.multiAgentChatAvailable && !props.focused ? `${base}  ·  @ to add an agent` : base
 })
 
 function closeTypeahead() {

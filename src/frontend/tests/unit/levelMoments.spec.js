@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { LEVELS, levelMessage } from '@/components/portal/builder/levels'
-import { introDue, levelNote, markLevelsIntroSeen, reachedSteps } from '@/components/portal/builder/levelMoments'
+import { INTRO_STEPS, MOMENT_RETRIES, introDue, levelNote, markLevelsIntroSeen, reachedSteps, retryDropped, laterNote } from '@/components/portal/builder/levelMoments'
 
 const levels = (reached = []) => LEVELS.map((l) => ({ ...l, reached: reached.includes(l.id), skipped: false }))
 
@@ -42,7 +42,7 @@ describe('reachedSteps', () => {
   it('names several levels reached at once, and says when none is left', () => {
     expect(reachedSteps({ reached: [4, 5], levels: levels([1, 2, 3, 4, 5]) })[0]).toMatchObject({ title: 'Levels 4 and 5 done', body: 'Next, Level 6: A small team.' })
     expect(reachedSteps({ reached: [1, 2, 3], levels: levels([1, 2, 3]) }).at(-1).title).toBe('Levels 1, 2 and 3 done')
-    expect(reachedSteps({ reached: [7], levels: levels([1, 2, 3, 4, 5, 6, 7]) })[0].body).toBe("That's every level.")
+    expect(reachedSteps({ reached: [8], levels: levels([1, 2, 3, 4, 5, 6, 7, 8]) })[0].body).toBe("That's every level. You're certified to get started.")
   })
   it('skips the sidebar step when no new agent is known', () => {
     expect(reachedSteps({ reached: [1], levels: levels([1]) })).toHaveLength(1)
@@ -53,12 +53,19 @@ describe('reachedSteps', () => {
 })
 
 describe('levelNote', () => {
+  it('shows "left for later" as a note too, never as something the person said', () => {
+    expect(laterNote('Level 3, Connected: left for later.\nNext: Level 7, Working together.', 'Atlas')).toBe('Connected left for later. Atlas was told.')
+    expect(laterNote('Level 3, Connected: left for later.\nThat was the last level.', 'Atlas')).toBe('Connected left for later. Atlas was told.')
+    expect(laterNote('I left Level 3, Connected: left for later.', 'Atlas')).toBeNull()
+    expect(laterNote(null)).toBeNull()
+  })
+
   it("turns the page's line to the guide into a short note", () => {
     expect(levelNote(levelMessage(levels([1]).filter((l) => l.id === 1), levels([1])), 'Atlas')).toBe('Level 1 reached. Atlas was told.')
     const two = levels([1, 2])
     expect(levelNote(levelMessage(two.filter((l) => l.reached), two), 'Atlas')).toBe('Levels 1 and 2 reached. Atlas was told.')
-    const all = levels([1, 2, 3, 4, 5, 6, 7])
-    expect(levelNote(levelMessage(all.filter((l) => l.id === 7), all), 'Atlas')).toBe('Level 7 reached. Atlas was told.')
+    const all = levels([1, 2, 3, 4, 5, 6, 7, 8])
+    expect(levelNote(levelMessage(all.filter((l) => l.id === 8), all), 'Atlas')).toBe('Level 8 reached. Atlas was told.')
   })
   it('reads the one-line form a Working card shows too', () => {
     expect(levelNote('Level reached: Level 1, First agent. Next: Level 2, A new playbook.', 'Atlas')).toBe('Level 1 reached. Atlas was told.')
@@ -73,5 +80,18 @@ describe('levelNote', () => {
     expect(levelNote('I changed the setting.\nLevel reached: Level 4, In control.\nNext: Level 5, On a schedule.', 'Atlas')).toBeNull()
     expect(levelNote('', 'Atlas')).toBeNull()
     expect(levelNote(null, 'Atlas')).toBeNull()
+  })
+})
+
+describe('retryDropped', () => {
+  const moment = { kind: 'intro', steps: INTRO_STEPS }
+  it('brings a moment back when it closed with nothing on screen to light, counting the tries', () => {
+    expect(retryDropped(moment, 'dropped')).toEqual({ ...moment, tries: 1 })
+    expect(retryDropped({ ...moment, tries: 2 }, 'dropped')).toEqual({ ...moment, tries: 3 })
+  })
+  it('gives up after enough tries, and never for a close the person made', () => {
+    expect(retryDropped({ ...moment, tries: MOMENT_RETRIES }, 'dropped')).toBeNull()
+    for (const reason of ['done', 'skipped', 'escape', undefined]) expect(retryDropped(moment, reason)).toBeNull()
+    expect(retryDropped(null, 'dropped')).toBeNull()
   })
 })

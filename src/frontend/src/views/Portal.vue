@@ -182,8 +182,10 @@
           :rooms-available="store.multiAgentChatAvailable"
           :projects-active="projectsRoute"
           :build-available="buildAvailable"
+          :dashboard-available="dashboardAvailable"
           :build-active="buildRoute"
           :profile-incomplete="profileIncomplete"
+          :profile-note="profileNote"
           :loading-roster="store.loading && !store.rosterLoaded"
           :settled="sidebarReady"
           :threads-failed="store.sessionsFailed"
@@ -243,8 +245,10 @@
           :rooms-available="store.multiAgentChatAvailable"
             :projects-active="projectsRoute"
             :build-available="buildAvailable"
+            :dashboard-available="dashboardAvailable"
             :build-active="buildRoute"
             :profile-incomplete="profileIncomplete"
+            :profile-note="profileNote"
             :loading-roster="store.loading && !store.rosterLoaded"
             :settled="sidebarReady"
             :threads-failed="store.sessionsFailed"
@@ -1001,6 +1005,8 @@
       @help="helpOpen = true"
       @finish="finishOnboarding"
     />
+    <!-- An account that cannot build is told so at the start, and shown what it has. -->
+    <PortalAccountWelcome :open="accountWelcomeOpen" :kind="accountKindNow" :agents="store.agents" @done="closeAccountWelcome" />
     <PortalBuildHelp :open="helpOpen" :can-open-dashboard="buildAvailable" @close="helpOpen = false" @tour="retakeTour" @features="showFeatureTour" />
 
     <!-- ent#621: `⌥/`. ALWAYS mounted and v-model driven — a `v-if` toggle
@@ -1090,9 +1096,11 @@ import PortalVoiceCanvas from '@/components/portal/PortalVoiceCanvas.vue'
 import PortalBuild from '@/components/portal/builder/PortalBuild.vue'
 import { useFirstRunStore } from '@/stores/firstRun'
 import PortalBuildHelp from '@/components/portal/builder/PortalBuildHelp.vue'
+import PortalAccountWelcome from '@/components/portal/builder/PortalAccountWelcome.vue'
+import { accountKind, welcomeDue } from '@/components/portal/builder/accountWelcome'
 import PortalBuildOnboarding from '@/components/portal/builder/PortalBuildOnboarding.vue'
 import {
-  BUILD_CANVAS_ID, answerIntake, companyFromProfile, myGuideCard, buildAvailableFor, chooseAudit, chooseFirstAgent, chooseProfileChat, clearResearch,
+  BUILD_CANVAS_ID, answerIntake, companyFromProfile, myGuideCard, buildAvailableFor, dashboardAvailableFor, opensBuild, chooseAudit, chooseFirstAgent, chooseProfileChat, clearResearch,
   canvasToState, finishIntake, finishProfileAction, markAgentExplained, markResearchStarted, reopenIntake, shouldOpenOnboarding,
   skipIntake, worldView,
 } from '@/components/portal/builder/portalBuild'
@@ -1341,7 +1349,9 @@ const buildRoute = computed(() => route.name === 'WorkspaceBuild')
 const buildAvailable = computed(() => buildAvailableFor({
   isPlatformSession: store.isPlatformSession,
   workspaceOnly: workspaceOnly.value,
+  role: authStore.user?.role,
 }))
+const dashboardAvailable = computed(() => dashboardAvailableFor({ isPlatformSession: store.isPlatformSession, workspaceOnly: workspaceOnly.value }))
 // The onboarding window and the answers it collects. The Build page reads them too.
 // Kept on the account, in the same store as the setup panel, so the two share them.
 const buildIntakeEmail = () => store.clientEmail || authStore.user?.email || ''
@@ -1353,9 +1363,18 @@ const helpOpen = ref(false)
 // red follows the same rule as the page's stepper.
 const guideState = ref(null)
 const profileIncomplete = computed(() => buildAvailable.value && worldView(guideState.value, buildIntake.value).profileIncomplete)
+const profileNote = computed(() => (buildAvailable.value ? worldView(guideState.value, buildIntake.value).profileNote : ''))
 
 // The person's own guide, never someone else's shared with them.
 const myGuide = computed(() => myGuideCard(store.agents))
+// Their own guide has one page: its row and its main chat open Build (`opensBuild`).
+const guideDoor = (to) => opensBuild({ buildAvailable: buildAvailable.value, guideName: myGuide.value?.name, threads: threads.value, ...to })
+// The same for a link, a bookmark or the browser's history.
+watch([() => route.name, () => route.params.sessionId, () => route.params.agentName, () => myGuide.value?.name, () => threads.value.length, buildAvailable], () => {
+  const to = route.name === 'WorkspaceAgent' ? { agentName: route.params.agentName }
+    : route.name === 'WorkspaceThread' ? { sessionId: route.params.sessionId } : null
+  if (to && guideDoor(to)) router.replace('/workspace/build')
+}, { immediate: true })
 
 // A colleague already told Trinity about the company, so this person starts from it
 // and isn't asked the company questions again (core-agent AC-14).
@@ -1444,6 +1463,21 @@ async function guideAlreadyKnowsThem() {
   } catch (e) {
     return e?.response?.status !== 404
   }
+}
+
+// A welcome per account type (`accountWelcome.js`): a Workspace-only user or an operator
+// is told at the start what their account has and what it does not, once.
+const accountKindNow = computed(() => accountKind({ isPlatformSession: store.isPlatformSession, role: authStore.user?.role }))
+const accountWelcomeOpen = ref(false)
+async function openAccountWelcomeIfNew() {
+  if (!store.isPlatformSession) return
+  if (!authStore.profileVerified) await authStore.fetchUserProfile().catch(() => {})
+  accountWelcomeOpen.value = welcomeDue({ kind: accountKindNow.value, profileVerified: authStore.profileVerified, intake: buildIntake.value })
+}
+function closeAccountWelcome() {
+  if (!accountWelcomeOpen.value) return
+  accountWelcomeOpen.value = false
+  setBuildIntake({ ...buildIntake.value, accountWelcome: accountKindNow.value })
 }
 
 async function openOnboardingIfNew() {
@@ -2219,6 +2253,7 @@ function openRoom(roomId) {
 // instant instead of pointing at a chat we have not resolved.
 function openAgentPage(name) {
   if (!name) return
+  if (guideDoor({ agentName: name })) { openBuild(); return }
   // ent#551 QA: the rail's agent row. It pushed a route with no guard, so the
   // conversation remounted and the call ended without a word.
   if (guardLeaveCall(() => openAgentPage(name))) return
@@ -2437,6 +2472,7 @@ function openThread(t, { replace = false } = {}) {
   // ent#361: a room row in the merged sidebar opens the room, not a thread.
   if (t.is_room) { openRoom(t.id); return }
   const sid = t.id || t.session_id
+  if (guideDoor({ sessionId: sid })) { openBuild(); return }
   // ent#841: opening a closed chat reopens it — the Archived group is where
   // closed chats are found, and opening one there means "I want it back".
   const listed = threads.value.find((x) => !x.is_room && (x.id || x.session_id) === sid)
@@ -3523,6 +3559,7 @@ async function bootstrap() {
     await refreshThreads()
     startAsksPoll()
     if (justArrived && await openOnboardingIfNew()) return
+    if (justArrived) openAccountWelcomeIfNew()
     const sid = route.params.sessionId
     if (sid) {
       const known = threads.value.find((t) => (t.id || t.session_id) === sid)

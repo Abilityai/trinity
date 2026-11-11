@@ -65,6 +65,10 @@ decision is spec-reachable. Each step has `eligible` (who it is for) and
   connected, an email bound at /setup) is listed as done rather than left out.
   A saved credential shows as dots in its field (`SAVED_CREDENTIAL_DOTS`) on the
   Claude step and the first-run key cards; it is never read back.
+- **Continue and Back pass over done steps** (`nextStepKey` / `previousStepKey`): a
+  step done before the overlay opened keeps its row and its check in the rail, and a
+  click on it still opens it, but nobody is walked through a page with nothing on it.
+  The last panel is always reached.
 - **Completion is derived** (`stepState`): done when the predicate went false
   after a refresh, or the step emitted `complete` this session (the only way
   `keys` reads done). Persisted per browser: `trinity_first_run_closed` ("Finish

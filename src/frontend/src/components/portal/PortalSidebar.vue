@@ -20,7 +20,7 @@
            route watcher is what closes the drawer everywhere else. -->
       <PortalInboxRow data-tour="inbox" :needs="inbox.needs" :came="inbox.came" @click="$emit('open-inbox')" />
 
-      <PortalSidebarBuildLink v-if="buildAvailable" :active="buildActive" :profile-incomplete="profileIncomplete" @open="$emit('open-build')" @finish-profile="$emit('finish-profile')" @get-help="$emit('get-help')" />
+      <PortalSidebarBuildLink v-if="buildAvailable || dashboardAvailable" :can-build="buildAvailable" :guide-shown="guideShown" :active="buildActive" :profile-incomplete="profileIncomplete" :profile-note="profileNote" @open="$emit('open-build')" @finish-profile="$emit('finish-profile')" @get-help="$emit('get-help')" />
 
       <!-- ent#661: the person's Projects list — shown only when the roster
            says this principal has the capability (internal-only).
@@ -135,8 +135,8 @@
           :key="a.name"
           :data-tour-agent="a.name"
           class="w-full flex items-center gap-2.5 rounded-lg px-2 py-2 transition hover:bg-gray-50 dark:hover:bg-gray-800"
-          :class="a.name === activeAgentName ? ROW_ACTIVE : ''"
-          :aria-current="a.name === activeAgentName ? 'true' : undefined"
+          :class="a.name === activeAgentName || onGuidePage(a) ? ROW_ACTIVE : ''"
+          :aria-current="a.name === activeAgentName || onGuidePage(a) ? 'true' : undefined"
           :title="`${agentRowTitle(a)} · ${AGENT_KEY_HINT} switch agent`"
           :aria-keyshortcuts="AGENT_KEY_SHORTCUTS"
           @click="onAgentClick(a.name)"
@@ -172,7 +172,11 @@
               class="flex items-center gap-1.5 min-w-0 text-xs"
             >
               <BaseBadge v-if="chipFor(a)" class="shrink-0" :variant="chipFor(a).variant">{{ chipFor(a).label }}</BaseBadge>
-              <span v-if="rowMeta[a.name]?.preview" class="min-w-0 truncate" :class="META_INK">{{ rowMeta[a.name].preview }}</span>
+              <!-- Workspace Build: their own guide says what it is for, always: not an address
+                   like atlas-34c83614, and not its latest chat's title, which read as its
+                   description ("AI audit for ..."). -->
+              <span v-if="a.owned === true && isGuideName(a.name)" class="min-w-0 truncate" :class="META_INK">Builds and runs agents</span>
+              <span v-else-if="rowMeta[a.name]?.preview" class="min-w-0 truncate" :class="META_INK">{{ rowMeta[a.name].preview }}</span>
               <span v-else-if="agentLabel(a) !== a.name" class="min-w-0 truncate font-mono" :class="META_INK">{{ a.name }}</span>
             </span>
           </span>
@@ -468,6 +472,7 @@ import ChatRow from './PortalChatRow.vue'
 import PortalBrand from './PortalBrand.vue'
 import PortalInboxRow from './PortalInboxRow.vue'
 import PortalSidebarBuildLink from './builder/PortalSidebarBuildLink.vue'
+import { isGuideName } from './builder/portalBuild'
 import PortalSkeleton from './PortalSkeleton.vue'
 import InlineError from '@/components/InlineError.vue'
 import BaseBadge from '@/components/base/BaseBadge.vue'
@@ -528,7 +533,11 @@ const props = defineProps({
   projectsActive: { type: Boolean, default: false },
   // Workspace Build: whether this person may build here, and whether the page is on screen.
   buildAvailable: { type: Boolean, default: false },
+  // Workspace Build: who has the Dashboard, and so the link to it (an operator has it without Build).
+  dashboardAvailable: { type: Boolean, default: false },
   profileIncomplete: { type: Boolean, default: false },
+  // Workspace Build: the calm line once every question is answered ('talk' | 'filling').
+  profileNote: { type: String, default: '' },
   buildActive: { type: Boolean, default: false },
   // #2159: distinguishes "still loading" from "loaded, and you have none".
   loadingRoster: { type: Boolean, default: false },
@@ -742,6 +751,13 @@ const shownAgents = computed(() => (isSearching.value
       // ent#621: and never the agent you are looking at.
       keep: props.activeAgentName,
     })))
+
+// Workspace Build: the person's own guide is the door to the Build page once its row is
+// on screen (or the list is narrowed by a search), so Build an agent steps aside; and its
+// row is the one they are in while the Build page is open.
+const ownGuide = (a) => a?.owned === true && isGuideName(a.name)
+const guideShown = computed(() => props.buildAvailable && (isSearching.value ? props.roster.some(ownGuide) : shownAgents.value.some(ownGuide)))
+const onGuidePage = (a) => props.buildActive && ownGuide(a)
 
 // ent#621 Decision 27/37 — a key walk that lands on an agent behind "N more"
 // must SHOW it. `keep` alone would append one row to an otherwise unchanged
