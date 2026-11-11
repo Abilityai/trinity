@@ -56,6 +56,34 @@ describe('portalProgress store', () => {
     expect(s.progressFor('member-bob').steps[0].state).toBe('done')
   })
 
+  // ent#1220 I1: a forced read (the ready event's, the held send's hand-back)
+  // that meets a poll read already in flight must not join it — that read may
+  // have been issued before the step went done. It re-reads once it settles.
+  it('a forced read during an in-flight read re-reads after it settles', async () => {
+    let release
+    get.mockImplementationOnce(() => new Promise((r) => { release = r }))
+    const s = usePortalProgressStore()
+    const poll = s.fetchProgress('member-bob')
+    get.mockResolvedValue(ok([{ key: 'assistant_ready', state: 'done' }], true))
+    const forced = s.fetchProgress('member-bob', { force: true })
+    const forcedToo = s.fetchProgress('member-bob', { force: true })
+    release(ok([{ key: 'assistant_ready', state: 'in_progress' }]))
+    await Promise.all([poll, forced, forcedToo])
+    expect(get).toHaveBeenCalledTimes(2)
+    expect(s.progressFor('member-bob').steps[0].state).toBe('done')
+  })
+
+  it('an unforced read during an in-flight read joins it', async () => {
+    let release
+    get.mockImplementationOnce(() => new Promise((r) => { release = r }))
+    const s = usePortalProgressStore()
+    const poll = s.fetchProgress('member-bob')
+    const again = s.fetchProgress('member-bob')
+    release(ok([]))
+    await Promise.all([poll, again])
+    expect(get).toHaveBeenCalledTimes(1)
+  })
+
   it('refetchAll re-reads every held card (resync_required)', async () => {
     get.mockResolvedValue(ok([]))
     const s = usePortalProgressStore()

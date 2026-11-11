@@ -551,6 +551,11 @@ COMPLETION_SOURCE_FAILED = "completion:failed"
 # Its run completes even when the request was rejected or expired, so it is
 # neither "done" nor "failed": the Inbox shows no outcome pill for it.
 COMPLETION_SOURCE_NOTICE = "completion:notice"
+# trinity-enterprise#1221: a message the agent sent into a person's Workspace
+# between turns (`send_message(channel="web")`). Non-NULL, so the same rules
+# hold: never a turn's answer, replayed to the agent as its own between-turns
+# message (`client_portal.service._context_lines`).
+PROACTIVE_SOURCE = "proactive"
 
 
 def _is_gate_notice(status: str, triggered_by: Optional[str]) -> bool:

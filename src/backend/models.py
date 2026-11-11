@@ -4387,7 +4387,8 @@ class SendMessageResponse(BaseModel):
     The ent#665 fields are set only when the request carried an idempotency_key;
     the route uses ``response_model_exclude_unset`` so a keyless response is
     unchanged. ``sent=false`` + ``suppressed_by`` means nothing was delivered
-    because an earlier run already sent it.
+    because an earlier run already sent it. ``delivery`` is set only for a
+    Workspace delivery (trinity-enterprise#1221).
     """
     success: bool
     channel: str
@@ -4397,6 +4398,9 @@ class SendMessageResponse(BaseModel):
     suppressed_by: Optional[str] = None
     first_sent_at: Optional[str] = None
     first_execution_id: Optional[str] = None
+    # trinity-enterprise#1221: set only for a Workspace delivery —
+    # "workspace_inbox" = in their conversation, nothing notifies them.
+    delivery: Optional[str] = None
 
 
 class ProactiveShareUpdate(BaseModel):

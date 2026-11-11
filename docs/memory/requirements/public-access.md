@@ -573,6 +573,19 @@
 - **Visibility**: audit event (`suppressed` / `group_message_suppressed` / `voip_call_suppressed`) plus a `Trinity`-labelled `system` row in the first send's conversation session (DM + group; calls audit only).
 - **Order**: consent → key → rate limit → deliver. Composes with the per-turn `effect_guard` (#1084); flow: `feature-flows/effect-idempotency.md`.
 
+### Proactive Messages into the Workspace, with Named Refusals (trinity-enterprise#1221)
+- **Status**: ✅ Implemented (2026-11-11)
+- **Description**: `send_message(channel="web")` delivers into the person's **Workspace** conversation with the agent (their Main thread) instead of always refusing, and `auto` (`telegram → slack → web`) lands there when the person has no other channel. A person who works only in the Workspace is reachable.
+- **Key Features**:
+  - Recipient bounded as before (consent — `allow_proactive` or ownership — rate limit, effect guard) plus the scheduled-Workspace-delivery gate (block list fail-closed, roster incl. owned)
+  - `web` only from the agent's own key (`web_agent_only` otherwise), never from inside the recipient's own Main turn (`workspace_in_turn`)
+  - One row, `source="proactive"`, deterministic id (a retry after a post-commit failure writes nothing new); the agent's next turn reads it as a between-turns message; the Workspace UI never shows it as a turn's answer
+  - Honest status: a web success reports `delivery: "workspace_inbox"` — delivered, but nothing notifies the person
+  - Every refusal is named: a per-channel reason code, and a `channels` map on the 404 for role- and email-addressed sends (codes only, never an address); the MCP tool returns them instead of a hardcoded sentence
+  - The Execution Context stops calling an unreachable primary "permitted" (§12.6.2 `proactive_reachable`)
+- **Out of scope**: proactive voice into the Workspace; any push/email nudge for unread Workspace messages
+- **Flow**: `docs/memory/feature-flows/proactive-messaging.md`
+
 ### Configurable Proactive Message Rate Limits (#1609)
 - **Status**: ✅ Implemented (2026-07-14)
 - **GitHub Issue**: #1609
@@ -696,7 +709,8 @@
     → 200, `env_removed: false`, the file left exactly as it is and an
     `env_note` starting `env_unreadable` (trinity-enterprise#1073).
   - **MCP**: `get_agent_spending` (GET pass-through) and
-    `revoke_agent_delegation` (DELETE; advertised to `user`/`system` keys only).
+    `revoke_agent_delegation` (DELETE; advertised to `user` keys only, the one
+    key scope `require_person` admits — trinity-enterprise#719).
 - **FR-4 Errors** are `{"detail": {"code", "message"}}` so the panel (ent#967)
   branches on `code`. Secrets, the session token, the agent's `.env` and any
   upstream body never appear in a response or a log line.

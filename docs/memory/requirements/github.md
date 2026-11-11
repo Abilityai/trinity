@@ -275,7 +275,7 @@
   proxy timeout can resolve the outcome). Orchestration lives in
   `services/agent_service/repo_binding.py` (Invariant #1); the router is a thin
   HTTP mapper over domain errors.
-- **The token (#3164).** `github_pat` is optional on both fork-to-own (`ForkToOwnRequest`) and the repo binding (`BindAgentRepoRequest`); a supplied token wins. Omitted, the write identity is the user's **saved personal** GitHub token (Settings → MCP Keys → Personal GitHub Token): at create the resolver's `per_user` tier (`crud._apply_fork_to_own`), at bind the caller's own row read by user id (`db.get_user_github_pat` — never the agent's current per-agent token). It is persisted as the agent's per-agent PAT with tier `fork` exactly as a typed one. The **platform/global token is never a fork or bind identity**: with no personal token the request is a named 400 `FORK_PAT_REQUIRED` pointing at Settings — the destination would otherwise belong to the platform account, and the per-agent row would bake in the global PAT (ent#162 Decision 2). A token refusal raised while using the saved token says so (`token_source: "saved"`, message naming Settings). The UI reads presence only (`GET /api/users/me/github-pat` → `configured`) and shows "Using your saved GitHub token" with an explicit "Use a different token" override (`SavedGithubTokenField.vue`).
+- **The token (#3164).** `github_pat` is optional on both fork-to-own (`ForkToOwnRequest`) and the repo binding (`BindAgentRepoRequest`); a supplied token wins. Omitted, the write identity is the user's **saved personal** GitHub token (Settings → MCP Keys → Personal GitHub Token): at create the resolver's `per_user` tier (`crud._apply_fork_to_own`), and only from a signed-in session, because the fork makes it the new agent's token (a credential bind, INTERACTIVE; any key is the named 400 `FORK_PAT_REQUIRED`, trinity-enterprise#719), at bind the caller's own row read by user id (`db.get_user_github_pat` — never the agent's current per-agent token). It is persisted as the agent's per-agent PAT with tier `fork` exactly as a typed one. The **platform/global token is never a fork or bind identity**: with no personal token the request is a named 400 `FORK_PAT_REQUIRED` pointing at Settings — the destination would otherwise belong to the platform account, and the per-agent row would bake in the global PAT (ent#162 Decision 2). A token refusal raised while using the saved token says so (`token_source: "saved"`, message naming Settings). The UI reads presence only (`GET /api/users/me/github-pat` → `configured`) and shows "Using your saved GitHub token" with an explicit "Use a different token" override (`SavedGithubTokenField.vue`).
 
 - **FR-1 — Supported row states are an explicit table; the unclassified is
   refused by name, never guessed.** Partitioned by `source_mode`, which is the
@@ -501,9 +501,10 @@
   trinity-enterprise#1007, a `fork_to_own: {destination_repo, private?}` block — the
   same `ForkToOwnRequest` the REST body takes, minus `github_pat` (MCP tool args land
   in transcripts, so a PAT arg would persist there in plaintext; the audit row records
-  the tool, outcome and target agent, never the arguments themselves). The fork therefore spends
-  the caller's saved personal token (#3164); under an agent key it is the named 400
-  `FORK_PAT_REQUIRED`, unchanged. REST behaviour and the `agents.manage` create gate
+  the tool, outcome and target agent, never the arguments themselves). The fork would
+  therefore spend the caller's saved personal token (#3164), which the backend does only for
+  a signed-in session (trinity-enterprise#719), so over MCP every key gets the named 400
+  `FORK_PAT_REQUIRED` and a fork is created from the web UI. REST behaviour and the `agents.manage` create gate
   are unchanged (`tests/unit/test_ent1007_mcp_fork_body.py` validates the MCP body
   through `AgentConfig`). Fork-scope failures name the alternative intents (never
   silent auto-degrade). `fork_to_own: required` catalog templates reject non-fork intents.

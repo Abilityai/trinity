@@ -1,6 +1,127 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent1221_web_delivery.py",
+      "feature": "trinity-enterprise#1221",
+      "added": "2026-11-11",
+      "categories": [
+        "backend",
+        "proactive-messaging",
+        "client-portal"
+      ],
+      "description": "trinity-enterprise#1221: send_message(channel=web) lands one source=proactive row in the person's Workspace Main through the scheduled-delivery reachability gate (agent's own key only, never in the recipient's own Main turn, deterministic id); every channel refusal carries a named code; reachable_channels agrees with the send."
+    },
+    {
+      "file": "unit/test_ent863_socket_door_account_state.py",
+      "feature": "trinity-enterprise#863",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "auth",
+        "unit",
+        "security"
+      ],
+      "description": "Socket doors apply the #995 account-state check HTTP requests apply: the shared socket decoder dependencies.decode_token returns None for a deactivated account (users.suspended_at set; creator and admin) and the identity once the column is cleared (None or empty string); the real agent-terminal and system-agent-terminal handlers close 4001 before the container lookup for a deactivated account and reach it for a reactivated one. Stubs are patched through decode_token.__globals__ so the read row is the one asserted."
+    },
+    {
+      "file": "unit/test_ent863_live_connections.py",
+      "feature": "trinity-enterprise#863",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "websocket",
+        "unit",
+        "security"
+      ],
+      "description": "Live connections follow the account: services/live_connections.py compares the account snapshot a door recorded at connect with the current row; a changed role (raised or lowered), email or password closes with the reconnect reason (4000), a deactivated or removed account or an inactive or deleted key with the ended reason (4001). The real role route re-checks the account at once on its worker, only when the role changed; a self-change is refused and closes nothing. A second worker's tick closes what the first worker's write left stale; a tick with nothing open reads nothing; a failed tick read keeps everything open and the next tick retries; a failed read after a reported change closes that account's connections; a raising closer does not stop the others or the loop. notify_account_changed from a plain thread closes on the registry's loop. A change while a door connects refuses it, a door that opens after the change stays open, and a re-check before the door's read marks it dirty. The real /ws and /ws/events handlers close with their codes, unregister their dispatcher slot before the handler returns, log no error, and refuse a socket whose account changed while it opened. Shape: each event door registers before it reads and goes live after it connects, releases in a finally; the 15 s loop starts outside the bus's try and stops with it. The batched reads return only existing rows and active keys and skip the database for an empty set."
+    },
+    {
+      "file": "unit/test_ent863_control_events.py",
+      "feature": "trinity-enterprise#863",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "websocket",
+        "unit",
+        "security"
+      ],
+      "description": "An account or key change reaches every worker: notify_account_changed / notify_key_changed re-check on the serving worker and publish one control event (scope control) through an injected publisher; each worker's dispatcher hands it to its registry's handle_control, which re-checks locally and never publishes again. A control entry reaches no client: _fanout routes it to the handler and returns (no roster read, no queue), with or without a handler, no slot of any kind is visible to it, and a last-event-id replay neither delivers nor re-runs it. Two dispatchers fed one entry each close their own registry's matching connections; two workers over one fake stream close from the event alone and publish once. The publisher's own echo closes nothing that already matches; an unrecognised control event is logged and closes nothing; a failing publish or handler is contained. The real MCP key revoke and delete routes close only the streams opened with that key, on both workers and when an admin revokes another person's key, never by account; a refused revoke closes nothing. A password change closes the account's connections (a revoked key's stream as ended). main.py wires the handler into the dispatcher and publishes through the bus at the control scope. Mutation: 18 hunk mutations, each turns a named test red."
+    },
+    {
+      "file": "unit/test_ent863_event_stream_roster.py",
+      "feature": "trinity-enterprise#863",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "websocket",
+        "unit",
+        "security"
+      ],
+      "description": "An event-stream key's agent list follows access changes: the real /ws/events handler gives every non-admin key (user keys too, not only agent keys) a roster read that re-reads the key's owner, and refresh reads the owner's current row (a lowered role reads the smaller list, a deactivated owner none); after an unshare fan-out the slot no longer receives the unshared agent's events. ws_identity_service.event_stream_roster_reader re-reads on every call, reads a gone, deactivated or Workspace-only owner as an empty list, and uses the owner's current email. A change that lands while a roster read is in flight is followed by one more read (/ws and /ws/events slots, and the refresh command); a slot that disconnects is not read again. StreamDispatcher re-reads every non-admin roster about once a minute (ROSTER_REREAD_INTERVAL_S = 60) in a per-worker loop it starts and stops itself: reads run one at a time, nothing is read while no non-admin roster is held, admin slots are never read, and a failing read keeps the previous roster and the loop."
+    },
+    {
+      "file": "unit/test_ent863_terminal_close.py",
+      "feature": "trinity-enterprise#863",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "websocket",
+        "unit",
+        "security"
+      ],
+      "description": "Terminals follow the account: the real agent-terminal and system-agent-terminal handlers register with the worker's live-connection registry and close when the account's access changes (immediate re-check and periodic re-check): error frame plus 4003, the handler returns normally within 1 s without being cancelled and logs no error, the container socket is closed, the one-terminal slot and the registry entry are freed. The close cancels the session's own forwarder tasks (blocked in the browser read and the container read); input arriving during the close is not forwarded; a change while the shell starts refuses the session after the start returns. A session closed for an access change ends its shell with an exec as the terminal's user carrying the session's marker; an unchanged account and an ordinary close end nothing; a failed end is logged. The snapshot holds the role the door authorized on. Shape: each door registers in the step that authorizes it and goes live after the start, before auth_success. The end-of-shell script (Linux, /proc) ends the marked processes and their session and spares another session and a bystander."
+    },
+    {
+      "file": "unit/test_ent719_saved_token_fork_session_only.py",
+      "feature": "trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "github",
+        "unit"
+      ],
+      "description": "POST /api/agents through the real route (require_role creator, the agents.manage gate, create_agent_internal, _resolve_template, _apply_fork_to_own): the fork_to_own arm with no token in the body, which makes the creator's saved personal GitHub token the new agent's, is INTERACTIVE. The agent key, the system key, the person's own user key and a vouched loopback JWT get 400 FORK_PAT_REQUIRED with no fork attempted; a signed-in session forks with the saved token. A fork with a token in the body and a create with no fork are unchanged for every principal. GitHub, name, volume and quota checks are stubbed; the create stops at the step after the arm."
+    },
+    {
+      "file": "unit/test_ent719_no_agent_only_grant_guard.py",
+      "feature": "trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "guard",
+        "unit"
+      ],
+      "description": "The issue's acceptance scan (tests/unit/_grant_guard_scan.py, stdlib AST, never imports src/): every route the census walks is followed into the code it runs, across modules, its signature and decorator dependencies, Annotated aliases and inline Annotated parameters, and a dependency's own dependencies included. A route that reaches an agent-only check (reject_agent_principal, Depends(human_only), an `if <principal>.agent_name: raise` or `is not None` test, a scope test naming the agent scope, an early return for non-agents before a refusal) fails unless its census class is person / interactive / person_or_grant, it is admin-gated, or the check's own function refuses a non-person, each credit read only as a top-level statement before any return and refusing on every path; a reviewed exemption (NOT_GRANT_GUARDS, REVIEWED_CREDITS, DEFERRED) names both the check and the routes it covers, and a named route that no longer rests on it fails as stale. An agent-only check no route reaches is a table problem. Every census portal write must refuse a non-person first, be a reviewed Workspace use, or be listed in DEFERRED (stale once an arm refuses a non-person); outside portal routes the Workspace door is exempt only through a listed fallback. Every admitting exit of the room moderator check must carry a positive person term or follow a top-level person refusal; a person helper's truthy constant counts only on a branch PERSON_BRANCHES lists. Self-tests plant trees for each rule, and each rule's revert turns at least one red."
+    },
+    {
+      "file": "unit/test_ent719_human_only_refusal_audit.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "unit"
+      ],
+      "description": "A refused human-only attempt (require_person / assert_person / require_interactive / reject_non_interactive_principal / reject_non_person_principal now raise HumanOnlyRefused) is recorded once by the app handler in error_handlers.py, through the REAL app in a subprocess (helper tests/unit/_human_only_audit_app.py) on a fresh database: one authorization/human_only_refused row per Depends and imperative refusal, naming the agent, trinity-system or the person (never the owner for a key); every other machine scope filed as itself; the response byte-identical with the handler removed and answered by whatever handler the app registers for HTTPException; an audit failure still answers the same 403 and does not use the window (the same refusal a second later writes its row); the already-auditing owner-tier file read writes no second row; one row per principal, method and route (the template) per 60 s window, a full window recording nothing new rather than forgetting a key; principals naming no agent or key filed as the platform; an unrelated 403 writes none; the path, agent name and request id cut to 256 characters; no row carries a sentinel sent in the body, the query, User-Agent, a custom header or the forwarding headers (X-Forwarded-For, X-Real-IP, CF-Connecting-IP), the handler copying no header but the request id; the driver removes its temp dir."
+    },
+    {
+      "file": "unit/test_ent719_workspace_autonomy_person_only.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-11-04",
+      "categories": [
+        "unit",
+        "backend",
+        "auth",
+        "workspace"
+      ],
+      "description": "The autonomy dial's owner writes (release of a held class, the guard cap; trinity-enterprise#641) take a person: through the real Workspace router, door and keys, the system key is refused 403 person_required before the roster and the held/capped seed does not move; the owner on a session or a user key still releases and sets the guard."
+    },
+    {
       "file": "unit/test_ent1148_delegation_tier.py",
       "feature": "trinity-enterprise#1148",
       "added": "2026-11-07",
@@ -8861,6 +8982,17 @@
       "description": "trinity-enterprise#1117: the git_sync tool schema refuses a `paths` element starting with '-' through the same ~standard.validate seam FastMCP calls; the issue sits at paths.<i> and its message leads with the element (capped at 200 chars). Decides every row of tests/fixtures/git-sync-path-cases.json the same way as the backend model (shared table). node:test."
     },
     {
+      "file": "unit/test_ent1093_claude_vendor_telemetry.py",
+      "feature": "trinity-enterprise#1093",
+      "added": "2026-11-07",
+      "categories": [
+        "agent-server",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1093: Claude Code vendor traffic off by default (CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC + DISABLE_TELEMETRY + DISABLE_ERROR_REPORTING) in a root-owned managed-settings.d drop-in, installed before every build-time claude run but the install's --version; no image ENV for the names (a recreate would freeze it); no other managed source declares them; every managed env name is one .env cannot set; a Claude agent's .env cannot blank the opt-out while a Gemini/Codex agent's may set the generic names, and no runtime's .env can detach managed env (real build_execution_env); /health vendor_telemetry_opt_out (ok/missing/not_root_owned/writable/altered/unsupported_runtime); CLI-pin gate incl. the OTLP cost-metric check."
+    },
+    {
       "file": "unit/test_ent1135_ask_room_attachment.py",
       "feature": "trinity-enterprise#1135",
       "added": "2026-11-07",
@@ -9084,6 +9216,29 @@
         "api"
       ],
       "description": "ent#1202: agent_ownership.default_model (nullable, dual-track migration 0123) and the one resolver: explicit > public-channel override > the agent's own model when the catalog/alias allowlist passes it > platform default; non-Claude runtimes resolve to None; an unrunnable stored value is skipped by name; fail-open except the strict a2a pre-create. execute_task runs and stamps the own model, fills a pre-created row's blank model_used only, never restamps an explicit model. Portal ladder/label, a2a pre-create and the GET /model additive fields read the same resolver."
+    },
+    {
+      "file": "unit/test_1220_ws_roster_share_refresh.py",
+      "feature": "trinity-enterprise#1220",
+      "added": "2026-11-11",
+      "categories": [
+        "backend",
+        "unit",
+        "websocket"
+      ],
+      "description": "A Workspace-only /ws slot that gains a share mid-connection: an allowed event about the agent is withheld until agent_shared is read and delivered (cut to the Workspace fields) right after; an access change observed while the slot's roster refresh is in flight sets refresh_again and the dispatcher reads once more instead of swallowing it; a quiet refresh reads once."
+    },
+    {
+      "file": "unit/test_4442_wake_model.py",
+      "feature": "#4442",
+      "added": "2026-11-11",
+      "categories": [
+        "backend",
+        "execution",
+        "database",
+        "api"
+      ],
+      "description": "#4442: platform-started turns (wakes, ask endings, events, unpinned reminders/schedules/loops) run on the agent's own model. PUT /model stores what the agent accepted (500 model_not_saved on a failed save, audited, nothing on refusal or a non-Claude agent); create seeds default_model from runtime.model or a top-level model: on the local and github paths (fill-blank, catalog-gated); a boot pass fills NULL columns from AGENT_RUNTIME_MODEL then the live template.yaml (conditional write, one per agent across workers, env never logged); push /chat resolves and stamps the model; per-kind execute_task resolution; pinned models win; AST guard that wake producers pass no model."
     }
   ]
 }

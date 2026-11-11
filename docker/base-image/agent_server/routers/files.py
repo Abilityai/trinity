@@ -385,10 +385,11 @@ PROTECTED_PATHS = list(_policy.AGENT_SERVER_DELETE_PROTECTED_NAMES)
 # The sanctioned path (#2008 — this comment previously named
 # `/api/credentials/update`, which had no callers anywhere and was removed):
 #   * `POST /api/agents/{name}/credentials/inject`, gated by
-#     `validate_mcp_config` — Layer 2 of the #590 closure (#598). Real today.
-#
-# PLANNED, not yet available: rendering `.mcp.json.template` into `.mcp.json`
-# at container startup — #2007 / PR #2013.
+#     `validate_mcp_config` — Layer 2 of the #590 closure (#598).
+#   * `.mcp.json.template` from the agent's repo, rendered from `.env` into
+#     `.mcp.json` at every container start by `agent_server.mcp_template`
+#     (#2007; run from `startup.sh`). It merges servers in and validates each
+#     one; it is never written through this endpoint.
 #
 # CLAUDE.md is editable here: who may edit it is a TIER the backend decides
 # (owner tier through the Files tab, ent#820); this server cannot tell callers
