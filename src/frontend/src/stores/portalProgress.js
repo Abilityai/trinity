@@ -17,6 +17,10 @@ import { assistantStarting } from '../components/portal/portalUtils'
 
 const EMPTY = Object.freeze({ loading: false, steps: [], all_done: false, active: false, error: null })
 
+// ent#1220: the read in flight per agent. A caller that must act on a fresh
+// card (a held send's re-read) awaits it instead of an early return.
+const inFlight = new Map()
+
 export const usePortalProgressStore = defineStore('portalProgress', {
   state: () => ({
     // keyed by agent_name → { steps, all_done, active, loading, error }
@@ -27,13 +31,13 @@ export const usePortalProgressStore = defineStore('portalProgress', {
     async fetchProgress(agentName, { force = false } = {}) {
       if (!agentName) return
       const existing = this.byAgent[agentName]
-      if (existing?.loading) return
+      if (existing?.loading) return inFlight.get(agentName)
       // A good read is reused on remount; a failed one (error set) is retried.
       if (!force && existing?.loaded && !existing.error) return
 
       // Keep showing the previous card while re-reading — no layout jump.
       this.byAgent[agentName] = { ...(existing || EMPTY), loading: true }
-      try {
+      const read = (async () => { try {
         const { data } = await portalHttp.get(
           `/api/enterprise/client-portal/agents/${encodeURIComponent(agentName)}/progress`,
           { headers: useClientPortalStore().authHeader },
@@ -50,7 +54,11 @@ export const usePortalProgressStore = defineStore('portalProgress', {
         // Soft fail — keep whatever card was shown, mark the error so the
         // next trigger retries rather than serving a cached failure.
         this.byAgent[agentName] = { ...(existing || EMPTY), loading: false, error: err?.message || 'failed' }
-      }
+      } finally {
+        inFlight.delete(agentName)
+      } })()
+      inFlight.set(agentName, read)
+      return read
     },
 
     handleWebSocketEvent(event) {
