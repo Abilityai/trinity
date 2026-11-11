@@ -142,6 +142,19 @@ class TestWebLandsInTheWorkspace:
         _send(pms, agent, execution_id=exe, dedup_label="b")
         assert len(_rows(agent)) == 2
 
+    def test_auto_then_web_in_one_turn_are_two_rows(self, svc):
+        """`auto` and `web` are two effects to the guard (the requested channel
+        is in its identity), so they must be two rows: a shared row id would
+        let the second send report success while writing nothing."""
+        pms, _, _ = svc
+        agent = _uniq("agent")
+        exe = _uniq("exe")
+        first = _send(pms, agent, execution_id=exe, channel="auto")
+        second = _send(pms, agent, execution_id=exe, channel="web")
+        assert first.success is True and second.success is True
+        assert first.message_id != second.message_id
+        assert len(_rows(agent)) == 2
+
     def test_a_suppressed_repeat_writes_no_second_row_and_no_note(self, svc):
         """An intent-key repeat (ent#665) of a web send is suppressed. The web
         result records no public_chat session, so no "Not sent" note is written

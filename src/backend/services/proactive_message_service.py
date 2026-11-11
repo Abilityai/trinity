@@ -109,18 +109,20 @@ WEB_DELIVERY_WORKSPACE_INBOX = "workspace_inbox"
 
 
 def _web_message_id(agent_name: str, execution_id: Optional[str], recipient_email: str,
-                    dedup_label: str, idempotency_key: Optional[str]) -> str:
+                    channel: str, dedup_label: str, idempotency_key: Optional[str]) -> str:
     """The Workspace row id for one send (trinity-enterprise#1221).
 
     Derived from the effect identity, so a retry after a post-commit failure (the
     effect guard releases its claim when the audit or rate-limit bump raises)
     writes nothing: ``add_portal_message_once`` decides the duplicate in SQL.
     Keyless sends get a fresh id, matching the effect guard's own keyless rule.
+    The requested ``channel`` is in the material because it is in the guard's
+    identity: ``auto`` and ``web`` are two effects, so they must be two rows.
     """
     if not execution_id:
         return f"proactive-{uuid.uuid4().hex}"
     material = "\x1f".join([agent_name, execution_id, recipient_email.lower(), "web",
-                            dedup_label or "", idempotency_key or ""])
+                            channel, dedup_label or "", idempotency_key or ""])
     return f"proactive-{hashlib.sha256(material.encode()).hexdigest()[:32]}"
 
 
@@ -416,7 +418,7 @@ class ProactiveMessageService:
                     allowed=as_agent_key,
                     execution_id=execution_id,
                     message_id=_web_message_id(agent_name, execution_id, recipient_email,
-                                               dedup_label, idempotency_key),
+                                               channel, dedup_label, idempotency_key),
                 ),
             )
             guard.snapshot = {
