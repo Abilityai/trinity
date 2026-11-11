@@ -49,14 +49,25 @@ export function rosterSummary(clients, now = Date.now()) {
 /**
  * The pane's header line. Each part is null until it's known, and a part that
  * failed or hasn't arrived is left out rather than guessed.
- * `reachable` is the names of connected surfaces; null means still checking.
+ *
+ * `surfaces` maps each surface the pane shows to its check: `true` connected,
+ * `false` not connected, `null` the check FAILED, `undefined` still checking.
+ * Reachability is said only once every surface has answered: "Not reachable
+ * anywhere yet" needs every one of them to have said "not connected". A failed
+ * check is named ("Couldn't check Slack"), never read as not connected
+ * (trinity-enterprise#340; #4310 review).
  */
-export function paneSummary({ mode = null, pending = null, reachable = null } = {}) {
+export function paneSummary({ mode = null, pending = null, surfaces = null } = {}) {
   const parts = []
   if (mode) parts.push(mode === 'open' ? 'Open' : 'Restricted')
   if (pending !== null) parts.push(pending > 0 ? `${pending} waiting` : 'No one waiting')
-  if (reachable !== null) {
-    parts.push(reachable.length ? `Reachable on ${reachable.join(', ')}` : 'Not reachable anywhere yet')
+  const names = Object.keys(surfaces || {})
+  if (names.length && names.every((n) => surfaces[n] !== undefined)) {
+    const on = names.filter((n) => surfaces[n] === true)
+    const failed = names.filter((n) => surfaces[n] === null)
+    if (on.length) parts.push(`Reachable on ${on.join(', ')}`)
+    if (failed.length) parts.push(`Couldn't check ${failed.join(', ')}`)
+    if (!on.length && !failed.length) parts.push('Not reachable anywhere yet')
   }
   return parts.join(' · ')
 }

@@ -45,7 +45,7 @@ from models import (
     User,
 )
 from database import db, SystemSetting, SystemSettingUpdate
-from dependencies import get_current_user, assert_admin
+from dependencies import get_current_user, assert_admin, is_interactive_principal
 from services.platform_audit_service import platform_audit_service, AuditEventType
 from services import operator_intake_service, telemetry_sharing_service
 
@@ -146,9 +146,15 @@ async def get_all_settings(
 
         # #3825: the admin env fingerprint is boot's own record, not a setting.
         from utils.admin_identity import ADMIN_ENV_FINGERPRINT_KEY
-        return [st for st in settings if st.key != ADMIN_ENV_FINGERPRINT_KEY]
+        # trinity-enterprise#1174: a module-reserved key is listed to a signed-in admin only.
+        from services import reserved_settings
+        interactive = is_interactive_principal(current_user)
+        return [st for st in settings if st.key != ADMIN_ENV_FINGERPRINT_KEY
+                and (interactive or reserved_settings.managed_by(st.key) is None)]
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get settings: {str(e)}")
+        # #4284: the exception text goes to the log, never the body.
+        logger.exception("Failed to get settings")
+        raise HTTPException(status_code=500, detail=f"Failed to get settings ({e.__class__.__name__} — details in backend logs)")
 
 
 @router.get("/{key}")
@@ -169,6 +175,10 @@ async def get_setting(
         # #3825: reads as absent — the row holds a crackable hash of ADMIN_PASSWORD.
         from utils.admin_identity import ADMIN_ENV_FINGERPRINT_KEY
         setting = None if key == ADMIN_ENV_FINGERPRINT_KEY else db.get_setting(key)
+        # trinity-enterprise#1174: a module-reserved key reads as absent to a key caller.
+        from services import reserved_settings
+        if reserved_settings.managed_by(key) is not None and not is_interactive_principal(current_user):
+            setting = None
 
         if not setting:
             raise HTTPException(status_code=404, detail=f"Setting '{key}' not found")
@@ -177,7 +187,8 @@ async def get_setting(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get setting: {str(e)}")
+        logger.exception("Failed to get setting %s", key)
+        raise HTTPException(status_code=500, detail=f"Failed to get setting ({e.__class__.__name__} — details in backend logs)")
 
 
 @router.put("/{key}", response_model=SystemSetting)
@@ -193,6 +204,16 @@ async def update_setting(
     Admin-only endpoint. Creates the setting if it doesn't exist.
     """
     assert_admin(current_user)
+
+    # trinity-enterprise#1174: a key a registered module owns is written only
+    # through that module's own route (which enforces who may write it).
+    from services import reserved_settings
+
+    if reserved_settings.managed_by(key) is not None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{key} is set via {reserved_settings.managed_by(key)}",
+        )
 
     # #2380: install provenance is a RECORDED FACT, not a setting. It is written
     # once at boot from TRINITY_INSTALL_SOURCE and gates a surface that is meant
@@ -383,6 +404,13 @@ async def update_setting(
                 "(HTTPS + SSRF validated, admin + human-only, audit-logged)"
             ),
         )
+    # trinity-enterprise#591: validated per entry, interactive-admin only.
+    from services.template_source_policy import SETTING_KEY as ALLOWLIST_KEY
+
+    if key == ALLOWLIST_KEY:
+        raise HTTPException(status_code=422, detail=(
+            f"{key} must be set via PUT /api/settings/agent-creation-allowlist "
+            "(validated, admin + interactive-only, audit-logged)"))
 
     from config import OPS_SETTINGS_VALIDATION
     from services.settings_service import RETENTION_OPS_KEYS
@@ -672,7 +700,8 @@ async def update_setting(
         # rather than a 500 that reads like a platform fault.
         raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to update setting: {str(e)}")
+        logger.exception("Failed to update setting %s", key)
+        raise HTTPException(status_code=500, detail=f"Failed to update setting ({e.__class__.__name__} — details in backend logs)")
 
 
 async def _backfill_telegram_webhooks(public_url: str) -> None:
@@ -711,6 +740,15 @@ async def delete_setting(
     Admin-only endpoint. Returns success even if setting didn't exist.
     """
     assert_admin(current_user)
+
+    # trinity-enterprise#1174: see update_setting.
+    from services import reserved_settings
+
+    if reserved_settings.managed_by(key) is not None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{key} is set via {reserved_settings.managed_by(key)} and cannot be cleared here",
+        )
 
     # #2380: blocked here as well as on PUT, and for a sharper reason than
     # ent#14's below. Provenance is write-once by design — `_record_install_source`
@@ -791,6 +829,12 @@ async def delete_setting(
                 "(admin + human-only, audit-logged)"
             ),
         )
+    from services.template_source_policy import SETTING_KEY as ALLOWLIST_KEY
+
+    if key == ALLOWLIST_KEY:  # trinity-enterprise#591, as on PUT
+        raise HTTPException(status_code=422, detail=(
+            f"{key} must be cleared via PUT /api/settings/agent-creation-allowlist "
+            "with an empty list (admin + interactive-only, audit-logged)"))
 
     try:
         deleted = db.delete_setting(key)
@@ -825,4 +869,5 @@ async def delete_setting(
 
         return {"success": True, "deleted": deleted}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to delete setting: {str(e)}")
+        logger.exception("Failed to delete setting %s", key)
+        raise HTTPException(status_code=500, detail=f"Failed to delete setting ({e.__class__.__name__} — details in backend logs)")

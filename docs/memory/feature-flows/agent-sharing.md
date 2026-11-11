@@ -153,6 +153,7 @@ All endpoints are gated by `OwnedAgentByName` (owner or admin).
 |------|----------|--------|---------|
 | 53-94 | `/api/agents/{agent_name}/share` | POST | Share agent with email |
 | 97-119 | `/api/agents/{agent_name}/share/{email}` | DELETE | Remove share |
+| | `/api/agents/{agent_name}/access/candidates` | GET | Accounts to suggest in the Access tab's add field, by `?q=` (trinity-enterprise#450) |
 | | `/api/agents/{agent_name}/share/{email}/invite` | POST | Email a pending person their invitation again (trinity-enterprise#459) |
 | 122-133 | `/api/agents/{agent_name}/shares` | GET | List shares |
 | 140-146 | `/api/agents/{agent_name}/access-policy` | GET | Get `{require_email, open_access}` (Issue #311) |
@@ -392,6 +393,17 @@ def delete_agent_ownership(self, agent_name: str) -> bool:
 |-------|---------|
 | `agent_shared` | `{name, shared_with}` |
 | `agent_unshared` | `{name, removed_user}` |
+
+### Suggesting people when adding one (trinity-enterprise#450)
+
+`AccessPanel.vue` → `stores/agents.js::getAccessCandidates` → `GET /api/agents/{agent_name}/access/candidates?q=` → `services/access_candidate_service.py::suggest` → `services/people_search_service.py::search` (the one people search, trinity-enterprise#1153) over the scope `db.people_scope_share_candidates` → `db.search_people`.
+
+- **Gate:** `OwnedAgentByName` and `require_interactive`, so a key can't read it. A non-admin owner can, which is why this isn't `GET /api/users`, an admin-only list of every account.
+- **Bounds:** 2 to 64 characters, 8 rows, 60 lookups a minute per person. `rate_limited` is a 429. A query under the minimum costs nothing and returns nobody.
+- **Who's offered:** accounts matching a prefix of the email or username, or a word of the name. Not the roster, the owner, the person typing, suspended accounts, or accounts with no email.
+- **What a row carries:** `email`, `label`, and `role` for an admin only.
+- **The field:** `PortalTypeahead` opens below it after a 200 ms pause. Only the newest answer can open it. Arrows choose a row, Enter takes the chosen row, and Enter with none chosen submits the text. Esc or leaving the field closes it. A failed lookup leaves the plain input.
+- **Known limit:** the people offered aren't on the agent yet, so an owner can still find accounts by trying prefixes.
 
 ### Telling a pending person (trinity-enterprise#459)
 

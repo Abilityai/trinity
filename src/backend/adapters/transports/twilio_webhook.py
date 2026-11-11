@@ -160,6 +160,12 @@ class TwilioWebhookTransport(ChannelTransport):
             body = (raw_event.get("Body") or "").strip()
             if body.startswith("/"):
                 normalized = self.adapter.parse_message(raw_event)
+                # trinity-enterprise#21: commands bypass the router and its
+                # block check (a blocked sender's `/login` sent a code email).
+                if (normalized and normalized.sender_id
+                        and db.is_channel_client_blocked(binding["agent_name"], "whatsapp", normalized.sender_id)):
+                    logger.info("[WHATSAPP] Command from a blocked sender dropped")
+                    return
                 if normalized and self.adapter.is_command(normalized):
                     command_response = await self.adapter.handle_command(normalized)
                     if command_response:

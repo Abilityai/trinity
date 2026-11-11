@@ -18,7 +18,7 @@ from typing import Optional, Literal
 from database import db
 from services import channel_history, idempotency_service
 from services.platform_audit_service import platform_audit_service, AuditEventType
-from services.runtime_secret_scrub import get_staged_values, scrub_text
+from services.runtime_secret_scrub import scrub_staged
 from services.settings_service import get_proactive_rate_limit  # #1609
 
 logger = logging.getLogger(__name__)
@@ -75,6 +75,15 @@ class DeliveryResult:
     suppressed_by: Optional[str] = None
     first_sent_at: Optional[str] = None
     first_execution_id: Optional[str] = None
+
+
+def _refuse_blocked(agent_name: str, channel: str, client_id: str) -> None:
+    """trinity-enterprise#21: a client the owner blocked on this agent's channel
+    gets nothing from the agent on it — no proactive message, no notification.
+    A ChannelDeliveryError, so `auto` still tries the next channel (the block is
+    per channel) and an explicit channel fails with this reason."""
+    if db.is_channel_client_blocked(agent_name, channel, client_id):
+        raise ChannelDeliveryError(f"recipient_blocked: this client is blocked on the agent's {channel} channel")
 
 
 class ProactiveMessageService:
@@ -230,9 +239,7 @@ class ProactiveMessageService:
         # already scrub-before-send transitively (the applier scrubs before result
         # construction); an agent pasting a fetched vault value into a proactive
         # message adds nothing the operator does not already hold in Settings.
-        _staged = get_staged_values()
-        if _staged:
-            text = scrub_text(_staged, text)
+        text = scrub_staged(text)
 
         # Effect-scoped dedup (#1084): guard at the entry, keyed on the resolved
         # recipient + channel (never the body). A chunked message is ONE effect —
@@ -561,6 +568,7 @@ class ProactiveMessageService:
             raise RecipientNotFoundError(
                 f"No Telegram user with verified email '{recipient_email}' for agent '{agent_name}'"
             )
+        _refuse_blocked(agent_name, "telegram", str(chat_link["telegram_user_id"]))
 
         # Get bot token (decrypted)
         bot_token = db.get_telegram_bot_token(agent_name)
@@ -707,6 +715,7 @@ class ProactiveMessageService:
             raise RecipientNotFoundError(
                 f"No WhatsApp user with verified email '{recipient_email}' for agent '{agent_name}'"
             )
+        _refuse_blocked(agent_name, "whatsapp", chat_link["wa_user_phone"])
 
         auth_token = db.get_whatsapp_auth_token(agent_name)
         if not auth_token:

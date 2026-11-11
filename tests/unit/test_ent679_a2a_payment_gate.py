@@ -369,6 +369,7 @@ def client(monkeypatch):
         create_task_execution=lambda **kw: (
             state.__setitem__("minted", kw), types.SimpleNamespace(id="exec-1"))[1],
         get_agent_subscription_id=lambda name: None,
+        get_default_model_raw=lambda name: None,  # ent#1202
     )
     monkeypatch.setattr(a2a, "db", fake_db)
 

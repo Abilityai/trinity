@@ -10,11 +10,15 @@ single-use Redis-backed exchange.
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 
 from dependencies import require_person, workspace_route
 from models import User
 from services.ws_ticket_service import mint_ticket
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/ws", tags=["websocket"])
 
@@ -37,6 +41,13 @@ async def create_ws_ticket(current_user: User = Depends(require_person)) -> dict
         ticket = mint_ticket(current_user.username, scope="user")
     except RuntimeError as exc:
         # Redis down — fail closed. Surface as 503 so the client retries.
-        raise HTTPException(status_code=503, detail=str(exc))
+        # #4284: fixed words, the text TicketStoreUnavailable already carries.
+        # Class name only in the log, like the ticket service: a store error's
+        # text can carry the store URL.
+        logger.warning("WebSocket ticket mint failed (%s)", type(exc).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail="Redis unavailable — cannot mint WebSocket ticket",
+        )
 
     return {"ticket": ticket, "expires_in": 30}

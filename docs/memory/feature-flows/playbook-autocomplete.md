@@ -126,7 +126,7 @@ Steps 2-5 live in `agent_skills_listing.fetch_live`. A live success also refresh
 | Container not running | 503 | "Agent is not running. Start the agent to view its skills." |
 | Agent-server timeout | 504 | "Agent is starting up, please try again" |
 | Connection refused | 503 | "Could not connect to agent" |
-| Other exception | 500 | "Failed to fetch playbooks: {error}" |
+| Other exception | 500 | "Failed to fetch playbooks ({ExceptionClass} — details in backend logs)"; the exception is logged |
 
 ## Agent Layer
 

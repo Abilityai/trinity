@@ -1,3 +1,4 @@
+# mcp: rooms.ts (create_room, list_rooms, read_room, post_to_room, close_room); POST /continue has no tool — person-only by ruling P6, agent keys get 403 not_a_person
 """FastAPI router for shared sessions / rooms (ent#169).
 
 Platform-wide prefix (Invariant #15): a room spans several agents, so it does
@@ -39,6 +40,7 @@ from .models import (
     RoomBudgetDefaults,
     RoomBudgetDefaultsUpdate,
     RoomCloseRequest,
+    RoomContinueRequest,
     RoomCreate,
     RoomMessageCreate,
     RoomParticipantAdd,
@@ -264,6 +266,55 @@ async def post_message(room_id: str, body: RoomMessageCreate,
     return result
 
 
+@router.post("/{room_id}/continue")
+async def continue_chain(room_id: str, body: RoomContinueRequest,
+                         idempotency_key: Optional[str] = Header(default=None,
+                                                                 alias="Idempotency-Key"),
+                         current_user=Depends(get_room_principal)):
+    """A person wakes the agents a paused mention chain left waiting, at a
+    fresh depth (trinity#4302). Persons only; the service names every refusal
+    (403 `not_a_person` / `agent_not_accessible`, 409 `room_moved_on` /
+    `no_one_to_wake`, 410 `room_closed` + `stop_reason`).
+
+    Once-per-stop is the `chain_continued` receipt the service inserts under
+    the offer predicate, not the key: the optional `Idempotency-Key`
+    (Invariant #18) lives under this route's OWN scope, so a key claimed on
+    `/messages` can neither replay here nor deny a Continue, and a crash can
+    wedge nothing the Workspace sends (it sends no key).
+    """
+    from services import idempotency_service
+
+    # Parity with `/messages` (trinity-enterprise#341); `_is_room_person`
+    # inside the service is the gate that refuses agents.
+    assert_tool_allowed(current_user, "post_to_room")
+    # Membership BEFORE the idempotency claim (trinity-enterprise#719): a
+    # non-member gets the uniform 404 on every answer and claims no key.
+    try:
+        service._require_membership(room_id, current_user)
+    except RoomError as e:
+        _raise(e)
+
+    decision = idempotency_service.begin(f"room-continue:{room_id}", idempotency_key)
+    if decision.in_flight:
+        raise HTTPException(status_code=409, detail={
+            "error": "request_in_progress",
+            "message": "A Continue with this Idempotency-Key is still being processed.",
+            "execution_id": decision.execution_id,
+        })
+    if decision.replay:
+        return {**(decision.snapshot or {}), "replayed": True}
+    try:
+        result = await service.continue_chain(current_user, room_id, body.seq)
+    except RoomError as e:
+        idempotency_service.fail(decision)
+        _raise(e)
+    except Exception:
+        idempotency_service.fail(decision)
+        raise
+    idempotency_service.complete(decision, None, result)
+    return result
+
+
 @router.get("/{room_id}/people", response_model=List[TaggablePerson])
 async def room_people(room_id: str,
                       q: str = Query(default="", max_length=64),
@@ -273,15 +324,16 @@ async def room_people(room_id: str,
 
     The ent#450 shape: membership-scoped (uniform 404 for a non-member), a query
     is required (an empty one lists no one), capped, and rate-limited per
-    caller — a picker, never a directory. Refused by name for a caller who may
+    caller by the one people search (ent#1153) — a picker, never a directory. Refused by name for a caller who may
     not tag (an agent key, an external Workspace client)."""
-    from services import rate_limiter
-    who = getattr(current_user, "email", None) or getattr(current_user, "username", "") or "?"
-    rate_limiter.enforce(f"room_people:{who}", 120, 60)
+    from services import people_search_service as pss
     try:
         return service.room_people(current_user, room_id, q)
     except RoomError as e:
         _raise(e)
+    except pss.PeopleSearchLimited as e:   # the seam's per-person budget (ent#1153)
+        raise HTTPException(status_code=429, detail=pss.RATE_LIMITED_DETAIL,
+                            headers={"Retry-After": str(e.retry_after)})
 
 
 @router.patch("/{room_id}")

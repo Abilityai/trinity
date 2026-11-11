@@ -375,7 +375,7 @@ class FanOutService:
             allowed_tools=allowed_tools,
             source_user_id=source_user_id,
             source_user_email=source_user_email,
-            source_agent_name=source_agent_name or agent_name,
+            source_agent_name=source_agent_name,
             source_mcp_key_id=source_mcp_key_id,
             source_mcp_key_name=source_mcp_key_name,
             chain_depth=chain_depth,

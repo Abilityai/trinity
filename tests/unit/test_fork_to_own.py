@@ -587,6 +587,7 @@ def _user():
     u = MagicMock()
     u.username = "eugene"
     u.role = "creator"
+    u.mcp_scope = None  # a person (ent#591: an unknown scope is bounded)
     return u
 
 

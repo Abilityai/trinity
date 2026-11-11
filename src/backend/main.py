@@ -21,12 +21,13 @@ from typing import Callable, Dict, List, Optional
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, Request, Query
+from starlette.websockets import WebSocketState
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 
 from config import CORS_ORIGINS, VOICE_ENABLED
 from models import User
-from dependencies import get_current_user, owner_is_suspended, owner_is_workspace_only, scope_may_open_event_stream, terms_route, workspace_route
+from dependencies import get_current_user, is_workspace_only_role, owner_is_suspended, owner_is_workspace_only, scope_may_open_event_stream, terms_route, workspace_route
 from services.docker_service import docker_client, list_all_agents_fast
 from utils.helpers import utc_now_iso
 
@@ -134,7 +135,8 @@ from routers.loops import (
 from services.loop_service import set_websocket_manager as set_loop_ws_manager
 from routers.webhooks import router as webhooks_router  # Webhook triggers (WEBHOOK-001, #291)
 from routers.ws_tickets import router as ws_tickets_router  # /ws ticket auth (#550)
-from services.ws_identity_service import accessible_agents_for, event_stream_identity, resolve_ws_identity  # ent#467, ent#872
+from services.ws_identity_service import accessible_agents_for, event_stream_identity, event_stream_roster_reader, resolve_ws_identity  # ent#467, ent#872, ent#863
+from services import live_connections  # ent#863
 # Workspace / client portal — OSS core since ent#356 (was an entitled
 # enterprise module). Its own package rather than routers/: it moved
 # wholesale from the submodule, and keeping the vertical slice intact
@@ -194,6 +196,7 @@ from services.event_bus import (
     event_bus,
     stream_dispatcher,
     SCOPE_ALL,
+    SCOPE_CONTROL,
     SCOPE_SCOPED,
 )
 
@@ -314,6 +317,19 @@ filtered_manager = FilteredWebSocketManager()
 # `config`, and reaching into `database` from the delivery layer would invert
 # the router → service → db direction (Invariant #1).
 stream_dispatcher.set_accessible_resolver(accessible_agents_for)
+
+
+# trinity-enterprise#863 — an account or key change re-checks the live
+# connections on every worker. The writer's worker publishes one control event
+# through the bus; each worker's dispatcher hands it to its own registry, which
+# re-checks locally and publishes nothing. Injected both ways, so neither
+# module imports the other.
+async def _publish_live_connection_control(control: dict) -> None:
+    await event_bus.publish(control, scope=SCOPE_CONTROL)
+
+
+stream_dispatcher.set_control_handler(live_connections.handle_control)
+live_connections.set_control_publisher(_publish_live_connection_control)
 
 # Inject WebSocket manager into routers that need it
 set_agents_ws_manager(manager)
@@ -452,7 +468,8 @@ async def _start_event_bus() -> None:
     """Redis Streams bus + dispatcher. MUST precede the WebSocket endpoints accepting clients.
 
     Startup phase 2 of 12 (#1028). Extracted VERBATIM from the
-    former 580-line `lifespan`; the body below is unchanged. Ordering between
+    former 580-line `lifespan`; trinity-enterprise#863 adds the live-connection
+    re-check loop after it. Ordering between
     phases is load-bearing and pinned by tests/unit/test_1028_lifespan_phases.py.
     """
     # Start Redis Streams event bus + dispatcher (RELIABILITY-003 / #306).
@@ -465,6 +482,9 @@ async def _start_event_bus() -> None:
                     int(os.getenv("REDIS_STREAM_MAXLEN", "10000")))
     except Exception as e:
         logger.error(f"Event bus startup failed (broadcasts will degrade): {e}")
+    # trinity-enterprise#863: the live-connection re-check does not use the bus,
+    # so it starts whatever the bus's own startup did.
+    await live_connections.start()
 
 
 async def _log_startup_environment() -> None:
@@ -526,6 +546,17 @@ async def _init_docker_and_system_agent() -> None:
                 logger.info(f"  - Agent: {agent.name} (status: {agent.status}, ssh_port: {agent.port})")
         except Exception as e:
             logger.error(f"Error checking agents: {e}")
+
+        # trinity-enterprise#1168: one pass over existing agent containers —
+        # log the resolved SSH bind address, name containers still publishing
+        # SSH on every interface, stop idle listeners where SSH access is off.
+        # Fail-open inside; inside THIS phase (not a new one) because
+        # test_1028 pins the phase list by name.
+        try:
+            from services.ssh_service import sweep_agent_ssh_posture
+            await sweep_agent_ssh_posture()
+        except Exception as e:
+            logger.warning(f"Agent SSH posture sweep skipped: {e}")
 
         # Auto-deploy system agent (Phase 11.1)
         try:
@@ -625,6 +656,14 @@ async def _start_maintenance_services() -> None:
         skill_gate_service.register_ending_observer()
     except Exception as e:
         logger.error(f"Error registering the skill gate ending observer: {e}")
+
+    # abilityai/trinity-enterprise#1135: an ask raised in a room shows in that
+    # room how it ended — every worker, for the same reason as the gate's.
+    try:
+        from shared_sessions import service as rooms_service
+        rooms_service.register_ask_observers()
+    except Exception as e:
+        logger.error(f"Error registering the rooms ask ending observer: {e}")
 
 
 async def _schedule_staggered_services() -> None:
@@ -1195,6 +1234,7 @@ async def _shutdown_audit_and_event_bus(app: FastAPI) -> None:
     # (e.g. "agent_stopped" emitted during service shutdown) still land on
     # the stream. 2s drain window per #306.
     try:
+        await live_connections.stop()  # trinity-enterprise#863
         await stream_dispatcher.stop()
         await event_bus.stop(drain_timeout=2.0)
         logger.info("Event bus and stream dispatcher stopped")
@@ -1278,6 +1318,14 @@ from services.secret_settings import SecretSettingValueError as _SecretSettingVa
 from error_handlers import secret_setting_value_error as _secret_setting_value_error
 
 app.add_exception_handler(_SecretSettingValueError, _secret_setting_value_error)
+
+# trinity-enterprise#719: a refused human-only attempt is recorded once, bounded,
+# then answered by the handler the app registers for HTTPException (FastAPI's
+# own, unless one replaces it), so the 403 is unchanged.
+from dependencies import HumanOnlyRefused as _HumanOnlyRefused
+from error_handlers import human_only_refused as _human_only_refused
+
+app.add_exception_handler(_HumanOnlyRefused, _human_only_refused)
 
 # Add CORS middleware
 app.add_middleware(
@@ -1572,6 +1620,28 @@ else:
         _report_enterprise_failure(e)
 
 
+async def _close_live_socket(websocket: WebSocket, code: int, reason: str) -> None:
+    """Close an accepted socket from the server side (trinity-enterprise#863).
+
+    One the client or the server already closed is left alone. The handler's
+    own task is never cancelled: its pending `receive` ends with the client's
+    close and the handler returns through its `finally`."""
+    if (websocket.application_state != WebSocketState.CONNECTED
+            or websocket.client_state != WebSocketState.CONNECTED):
+        return
+    await websocket.close(code=code, reason=reason)
+
+
+def _scope_matches_snapshot(identity: dict, access: "live_connections.AccessSnapshot") -> bool:
+    """Is the `/ws` scope resolved from one account read the one the snapshot
+    recorded from the read before it describes (trinity-enterprise#863)?
+    Compared on what sets the scope: admin or not, Workspace-only or not, and
+    the email the roster is read by."""
+    return (identity["is_admin"] == (access.role == "admin")
+            and (identity["allowed_types"] is not None) == is_workspace_only_role(access.role)
+            and identity["email"] == access.email)
+
+
 # WebSocket endpoint
 @app.websocket("/ws")
 async def websocket_endpoint(
@@ -1615,36 +1685,67 @@ async def websocket_endpoint(
         await websocket.close(code=4001, reason="Invalid or expired WebSocket ticket")
         return
 
-    # ent#467 — resolve WHO this is before accepting, because `/ws` events are
-    # now scoped to the agents this user may see. Fails CLOSED: a ticket whose
-    # subject is not a resolvable Trinity user is refused rather than
-    # registered with an empty roster, so an identity we cannot establish
-    # never becomes a silently-degraded connection nobody notices. (A ticket
-    # minted for another surface never reaches this point: the scope check in
-    # `consume_ticket` above refuses it.)
-    try:
-        identity = resolve_ws_identity(str(payload.get("sub")))
-    except Exception:
-        logger.warning("[/ws] identity resolution failed", exc_info=True)
-        identity = None
-    if identity is None:
-        await websocket.close(code=4001, reason="WebSocket ticket subject is not a known user")
-        return
+    username = str(payload.get("sub"))
 
-    # Ticket validated — now accept the connection
-    await manager.connect(
-        websocket,
-        last_event_id=validate_last_event_id(last_event_id),
-        email=identity["email"],
-        is_admin=identity["is_admin"],
-        accessible_agents=identity["accessible_agents"],
-        allowed_types=identity["allowed_types"],  # trinity-enterprise#837
-        allowed_fields=identity["allowed_fields"],
-    )
+    async def close_for_access_change(reason: live_connections.CloseReason) -> None:
+        # Unregister first, so the slot's consumer never sends after the close
+        # frame; the handler's `except` may never run for a server-side close.
+        manager.disconnect(websocket)
+        if reason is live_connections.CloseReason.ENDED:
+            await _close_live_socket(websocket, 4001, "Account access ended")
+        else:
+            await _close_live_socket(websocket, 4000, "scope changed")
 
+    # trinity-enterprise#863 — registered BEFORE the account is read, so a
+    # change that commits while this door opens either is seen by the reads
+    # below or reaches this entry. The snapshot is read before the identity, so
+    # it is never newer than the scope the socket is given.
+    live = live_connections.admit(live_connections.DOOR_WS, username, close_for_access_change)
     try:
+        # ent#467 — resolve WHO this is before accepting, because `/ws` events are
+        # now scoped to the agents this user may see. Fails CLOSED: a ticket whose
+        # subject is not a resolvable Trinity user is refused rather than
+        # registered with an empty roster, so an identity we cannot establish
+        # never becomes a silently-degraded connection nobody notices. (A ticket
+        # minted for another surface never reaches this point: the scope check in
+        # `consume_ticket` above refuses it.)
+        try:
+            access = live_connections.read_access(username)
+            identity = resolve_ws_identity(username)
+        except Exception:
+            logger.warning("[/ws] identity resolution failed", exc_info=True)
+            identity = None
+        if identity is None:
+            await websocket.close(code=4001, reason="WebSocket ticket subject is not a known user")
+            return
+        if access.exists and not _scope_matches_snapshot(identity, access):
+            # The account read differently for the scope than for the snapshot.
+            await websocket.close(code=4000, reason="scope changed")
+            return
+        if not live.activate(access):
+            # The account changed while this door was reading it.
+            await websocket.close(code=4000, reason="scope changed")
+            return
+
+        # Ticket validated — now accept the connection
+        await manager.connect(
+            websocket,
+            last_event_id=validate_last_event_id(last_event_id),
+            email=identity["email"],
+            is_admin=identity["is_admin"],
+            accessible_agents=identity["accessible_agents"],
+            allowed_types=identity["allowed_types"],  # trinity-enterprise#837
+            allowed_fields=identity["allowed_fields"],
+        )
+        if not live.go_live():
+            # The account changed while the socket was being connected.
+            await close_for_access_change(live.revoked)
+            return
+
         while True:
             data = await websocket.receive_text()
+            if live.revoked is not None:
+                break  # closed for an access change; nothing more is sent
 
             # Handle ping/pong for keepalive (prevents idle timeout)
             try:
@@ -1655,7 +1756,10 @@ async def websocket_endpoint(
             except (json.JSONDecodeError, TypeError):
                 pass
     except WebSocketDisconnect:
+        pass
+    finally:
         manager.disconnect(websocket)
+        live.release()
 
 
 # WebSocket endpoint for external listeners (Trinity Connect)
@@ -1717,65 +1821,99 @@ async def websocket_events_endpoint(
         return
 
     user_email = key_info.get("user_email")
-    # Determine if admin by checking user role
-    user_data = db.get_user_by_username(key_info.get("user_id"))  # user_id is actually username
-    # #995 — a suspended owner's key is refused here as on every other door
-    # (`get_current_user`, `/ws`). Same close as an inactive key: the holder
-    # learns nothing more than "this key does not work".
-    if owner_is_suspended(user_data):
-        await websocket.close(code=4001, reason="Invalid or inactive MCP API key")
-        return
-    # ent#837 — the event stream is an operator surface, and this handler never
-    # runs `get_current_user`, so the operator floor is applied here: a key whose
-    # owner is Workspace-only (including one minted before the upgrade) does not
-    # open it. An owner that cannot be resolved is refused the same way.
-    if owner_is_workspace_only(user_data):
-        await websocket.close(code=4003, reason="This account works in the Workspace")
-        return
-    # Get list of accessible agents for this key: its owner's, or — for an
-    # agent key — its reach (trinity-enterprise#872).
-    is_admin, accessible_agents = event_stream_identity(key_info, user_data)
 
-    await websocket.accept()
-    await websocket.send_json({
-        "type": "connected",
-        "user": user_email,
-        "accessible_agents": accessible_agents,
-        "message": "Listening for events. Events filtered to your accessible agents."
-    })
+    async def close_for_access_change(reason: live_connections.CloseReason) -> None:
+        # Unregister first, so the slot's consumer never sends after the close.
+        filtered_manager.disconnect(websocket)
+        if reason is live_connections.CloseReason.ENDED:
+            await _close_live_socket(websocket, 4001, "Invalid or inactive MCP API key")
+        else:
+            await _close_live_socket(websocket, 4000, "scope changed")
 
-    # An agent key's roster is its reach: re-read it (owner re-resolved) when an
-    # access-changing event arrives, so a spawned child appears without a
-    # reconnect (trinity-enterprise#872).
-    roster_resolver = None
-    if key_info.get("scope") == "agent" and not is_admin:
-        def roster_resolver() -> List[str]:
-            owner = db.get_user_by_username(key_info.get("user_id"))
-            return event_stream_identity(key_info, owner)[1]
-
-    # Add to filtered connections manager — enables reconnect replay via #306.
-    await filtered_manager.connect(
-        websocket, user_email, is_admin, accessible_agents,
-        last_event_id=validate_last_event_id(last_event_id),
-        roster_resolver=roster_resolver,
+    # trinity-enterprise#863 — registered BEFORE the owner is read, with the key
+    # it authenticated with: the socket closes when the owner's account changes
+    # or the key stops being active.
+    live = live_connections.admit(
+        live_connections.DOOR_EVENT_STREAM, key_info.get("user_id"), close_for_access_change,
+        key_id=key_info.get("key_id"),
     )
-
     try:
+        # Determine if admin by checking user role
+        user_data = db.get_user_by_username(key_info.get("user_id"))  # user_id is actually username
+        # #995 — a suspended owner's key is refused here as on every other door
+        # (`get_current_user`, `/ws`). Same close as an inactive key: the holder
+        # learns nothing more than "this key does not work".
+        if owner_is_suspended(user_data):
+            await websocket.close(code=4001, reason="Invalid or inactive MCP API key")
+            return
+        # ent#837 — the event stream is an operator surface, and this handler never
+        # runs `get_current_user`, so the operator floor is applied here: a key whose
+        # owner is Workspace-only (including one minted before the upgrade) does not
+        # open it. An owner that cannot be resolved is refused the same way.
+        if owner_is_workspace_only(user_data):
+            await websocket.close(code=4003, reason="This account works in the Workspace")
+            return
+        # trinity-enterprise#863 — the scope below is resolved with the email the
+        # key read returned, the snapshot with this owner read: both must
+        # describe the same account state.
+        if (user_data.get("email") or "") != (user_email or ""):
+            await websocket.close(code=4000, reason="scope changed")
+            return
+        if not live.activate(live_connections.access_snapshot(user_data)):
+            # The owner's account changed while this door was reading it.
+            await websocket.close(code=4000, reason="scope changed")
+            return
+        # Get list of accessible agents for this key: its owner's, or — for an
+        # agent key — its reach (trinity-enterprise#872).
+        is_admin, accessible_agents = event_stream_identity(key_info, user_data)
+
+        await websocket.accept()
+        await websocket.send_json({
+            "type": "connected",
+            "user": user_email,
+            "accessible_agents": accessible_agents,
+            "message": "Listening for events. Events filtered to your accessible agents."
+        })
+
+        # Every non-admin key's roster is re-read from its owner's current row on an
+        # access change and periodically, so it follows a share, an unshare or a
+        # spawned child without a reconnect (trinity-enterprise#872, #863). Admin
+        # slots are never filtered, so they get no re-read.
+        read_roster = event_stream_roster_reader(key_info)
+        roster_resolver = None if is_admin else read_roster
+
+        # Add to filtered connections manager — enables reconnect replay via #306.
+        await filtered_manager.connect(
+            websocket, user_email, is_admin, accessible_agents,
+            last_event_id=validate_last_event_id(last_event_id),
+            roster_resolver=roster_resolver,
+        )
+        if not live.go_live():
+            # The account or key changed while the socket was being connected.
+            await close_for_access_change(live.revoked)
+            return
+
         while True:
             # Keep connection alive, handle commands
             data = await websocket.receive_text()
+            if live.revoked is not None:
+                break  # closed for an access change; nothing more is sent
             if data == "ping":
                 await websocket.send_text("pong")
             elif data == "refresh":
-                # Refresh accessible agents list (e.g., after sharing changes)
-                _, accessible_agents = event_stream_identity(key_info, user_data)
+                # Re-read from the owner's current row, never the connect-time
+                # one (trinity-enterprise#863).
+                accessible_agents = read_roster()
                 filtered_manager.update_accessible_agents(websocket, accessible_agents)
                 await websocket.send_json({
                     "type": "refreshed",
                     "accessible_agents": accessible_agents
                 })
     except WebSocketDisconnect:
+        pass
+    finally:
         filtered_manager.disconnect(websocket)
+        live.release()
 
 
 # Health check endpoint

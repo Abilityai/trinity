@@ -248,7 +248,7 @@ _DOTENV = """ADMIN_PASSWORD=Adm1n!Passw0rd-873
 REDIS_PASSWORD=r1
 REDIS_BACKEND_PASSWORD=r2
 POSTGRES_PASSWORD=p1
-DATABASE_URL=
+DATABASE_URL=postgresql://trinity:p1@postgres:5432/trinity
 TRINITY_IMAGE_TAG=v1.0.0
 FRONTEND_PORT=8081
 TRINITY_INSTALL_SOURCE=do-marketplace
@@ -596,6 +596,6 @@ def test_the_lock_is_taken_before_any_env_or_compose_mutation_in_source_order():
     the first compose call."""
     body = _START.read_text()
     take = body.index('if [ "$HOSTED" = "1" ] && provision_managed_caddy; then')
-    for later in ("\nensure_admin_password\n", "\nensure_redis_passwords\n", "\nensure_hosted_database\n",
+    for later in ("\nensure_admin_password\n", "\nensure_redis_passwords\n", "\nensure_database\n",
                   'echo "Starting services..."'):
         assert take < body.index(later), later

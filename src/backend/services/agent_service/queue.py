@@ -44,7 +44,12 @@ async def get_agent_queue_status_logic(
         status = await capacity.get_status(agent_name, max_concurrent=1)
         data = status.model_dump()
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to get queue status: {str(e)}")
+        # #4284: the #1917 pattern — class name out, full exception to the log.
+        logger.error("Failed to get queue status for agent %s", agent_name, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get queue status ({e.__class__.__name__} — details in backend logs)",
+        )
     return _narrow_queue_status(data, agent_name, current_user)
 
 
@@ -100,7 +105,12 @@ async def clear_agent_queue_logic(
             "cleared_count": cleared_count
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to clear queue: {str(e)}")
+        # #4284: the #1917 pattern — class name out, full exception to the log.
+        logger.error("Failed to clear queue for agent %s", agent_name, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to clear queue ({e.__class__.__name__} — details in backend logs)",
+        )
 
 
 async def force_release_agent_logic(
@@ -132,4 +142,9 @@ async def force_release_agent_logic(
             "warning": "Agent queue state and capacity slots have been reset. Any in-progress execution may still be running."
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to release agent: {str(e)}")
+        # #4284: the #1917 pattern — class name out, full exception to the log.
+        logger.error("Failed to release agent for agent %s", agent_name, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to release agent ({e.__class__.__name__} — details in backend logs)",
+        )

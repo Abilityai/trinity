@@ -1484,6 +1484,18 @@ Example:
             <TermsPanel />
           </div>
 
+          <!-- A new member's first message (trinity-enterprise#1170); the panel
+               renders only where the member-agents entitlement is on. -->
+          <div v-if="activeTab === 'access'" class="mb-6">
+            <MemberWelcomePanel />
+          </div>
+
+          <!-- The models member agents run on (trinity-enterprise#1202); read-only,
+               renders only where the member-agents entitlement is on. -->
+          <div v-if="activeTab === 'access'" class="mb-6">
+            <MemberAgentModelPanel />
+          </div>
+
           <!-- Email Whitelist Section (Phase 12.4) -->
           <div v-if="activeTab === 'access'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
@@ -1967,6 +1979,10 @@ Example:
                so this view's raw-color count cannot move; the tag adds none. -->
           <TemplateRegistryPanel v-if="activeTab === 'agents'" />
 
+          <!-- Template sources for agent-created agents (trinity-enterprise#591):
+               beside the registry, because both decide where agents come FROM. -->
+          <AgentCreationAllowlistPanel v-if="activeTab === 'agents'" />
+
           <!-- SSH Access Section -->
           <div v-if="activeTab === 'access'" class="bg-white dark:bg-gray-800 shadow dark:shadow-gray-900 rounded-lg">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
@@ -2373,6 +2389,8 @@ import AutonomyDialPanel from '../components/settings/AutonomyDialPanel.vue'
 import BackupStatusPanel from '../components/settings/BackupStatusPanel.vue'
 import InvitesPanel from '../components/settings/InvitesPanel.vue'
 import TermsPanel from '../components/settings/TermsPanel.vue'
+import MemberWelcomePanel from '../components/settings/MemberWelcomePanel.vue'
+import MemberAgentModelPanel from '../components/settings/MemberAgentModelPanel.vue'
 import { SETTINGS_NUMBER_INPUT_CLASS, SETTINGS_TEXT_INPUT_CLASS } from '../components/settings/fieldStyles'
 // #2691: one home for what the Public URL buys, what must be true first, and
 // what saving it re-points — shared with the first-run step so the explanation
@@ -2384,6 +2402,7 @@ import {
 } from '../components/onboarding/hardeningGuide'
 import { MODEL_CATALOG } from '../constants/modelCatalog'
 import TemplateRegistryPanel from '../components/settings/TemplateRegistryPanel.vue'
+import AgentCreationAllowlistPanel from '../components/settings/AgentCreationAllowlistPanel.vue'
 import AAuthPanel from '../components/settings/AAuthPanel.vue'
 import A2AEndpointsPanel from '../components/settings/A2AEndpointsPanel.vue'
 import NeverminedOrganizationPanel from '../components/settings/NeverminedOrganizationPanel.vue'

@@ -67,6 +67,7 @@ from utils.credential_sanitizer import sanitize_dict, sanitize_execution_log, sa
 from services.runtime_secret_scrub import get_staged_values, scrub_obj, scrub_text
 from services.tool_call_summary import extract_tool_calls
 from utils.helpers import utc_now_iso
+from utils.log_masking import masked_text, masked_traceback
 # #2314 — the execution result vocabulary lives in its own module now (pure
 # dataclasses + enum, zero collaborators, so anything may import it without a
 # cycle). Re-exported here because ~80 call sites and 83 test files say
@@ -192,10 +193,15 @@ def _default_model_for(agent_name: str) -> Optional[str]:
     it. A Codex or Gemini agent gets ``None`` and runs on its own model
     (``AGENT_RUNTIME_MODEL`` from its template, or the CLI default): handed
     ``claude-sonnet-4-6``, Codex is refused by OpenAI with a 404.
+
+    ent#1202: a Claude Code agent's own ``default_model`` comes first when this
+    instance can run it — one resolver, ``agent_model_service``, for every rung.
     """
-    if _resolve_agent_runtime(agent_name) != "claude-code":
-        return None
-    return settings_service.get_platform_default_model()
+    from services.agent_model_service import resolve_default_model
+
+    return resolve_default_model(
+        agent_name, runtime=_resolve_agent_runtime(agent_name), db_ops=db, settings=settings_service,
+    ).model
 
 
 def _resolve_agent_runtime(agent_name: str) -> str:
@@ -1495,6 +1501,55 @@ def _with_switch(
 _TIMEOUT_ATTRIBUTION_GRACE_S = 30
 
 
+# The phrases the execution error's status readers match. The sync /task
+# mapper (`chat_execution_service._map_task_failure`) and the public and
+# inline-auth chats answer 429 on "at capacity" and 504 on "timed out", case
+# and all; the client portal does the same after lowercasing. The scheduler
+# lowercases and doubles its retry delay on "429", "rate limit" or "too many
+# requests". The chat panel's banner and the public chat's refusal check read
+# the error too, but on words this path does not pass on ("usage limit", the
+# refusal sentences), so they do not fire on it (#4360).
+_READER_PHRASES = ("timed out", "at capacity", "429", "rate limit", "too many requests")
+
+# "429" only as a number of its own: not the digits inside 14290, 1.429 or 429s,
+# which would read as a rate limit to the scheduler and to anyone reading the
+# error (#4352).
+_HTTP_429 = re.compile(r"(?<![\w.])429(?!\w|\.\d)")
+
+
+def _phrase_as_said(phrase: str, text: str) -> str | None:
+    """``phrase`` in a fixed spelling when ``text`` holds it, else None.
+
+    The lowercase spelling when the text holds it, so a reader that matches
+    case and all still matches. Otherwise the title-case spelling when the
+    lowercased text holds it, so a reader that lowercases first still matches
+    and one that does not still misses, as each did on the text. Neither
+    spelling comes from the text, so its own letters never reach the error
+    (#4284, #4352).
+    """
+    if phrase == "429":
+        return phrase if _HTTP_429.search(text) else None
+    if phrase in text:
+        return phrase
+    if phrase in text.lower():
+        return phrase.title()
+    return None
+
+
+def _exception_words(exc: BaseException) -> str:
+    """The class of ``exc``, plus each reader phrase its text holds.
+
+    The text itself stays in the log (abilityai/trinity#4284): this message is
+    the execution's error, which the sync routes answer at 5xx. A reader phrase
+    survives in a fixed spelling, so each status reader in `_READER_PHRASES`
+    answers the status it gave the exception's own text ("429" aside, which
+    counts only as a number of its own).
+    """
+    text = str(exc)
+    said = [w for w in (_phrase_as_said(p, text) for p in _READER_PHRASES) if w]
+    return type(exc).__name__ + (f": {', '.join(said)}" if said else "")
+
+
 def _classify_timeout_failure(
     elapsed_s: int,
     timeout_seconds: Optional[int],
@@ -1522,7 +1577,7 @@ def _classify_timeout_failure(
     limit_desc = (
         f"{timeout_seconds} seconds" if timeout_seconds is not None else "unset"
     )
-    detail = f" ({type(exc).__name__}: {exc})" if exc is not None else ""
+    detail = f" ({_exception_words(exc)})" if exc is not None else ""
     return (
         f"Task execution aborted after {elapsed_s}s of {limit_desc} allowed{detail}",
         TaskExecutionErrorCode.NETWORK,
@@ -1732,6 +1787,14 @@ class TaskExecutionService:
         # hardcode in base-image.
         if model is None:
             model = _default_model_for(agent_name)
+            # ent#1202: a row created elsewhere (the scheduler's reminder,
+            # schedule and loop rows) was stamped before this resolution, so
+            # record what the turn actually runs on. Fills a blank only.
+            if execution_id and model:
+                try:
+                    db.stamp_model_used_if_null(execution_id, model)
+                except Exception as e:  # noqa: BLE001 — never fail a turn over the stamp
+                    logger.warning(f"[ent#1202] model_used stamp failed for {execution_id}: {type(e).__name__}")
 
         # Dispatch circuit breaker (#526): combined global master-switch AND
         # per-agent opt-in. Drives the acquire() gate (this path), the
@@ -2064,8 +2127,11 @@ class TaskExecutionService:
             raise
 
         except Exception as e:
-            error_msg = str(e)
-            logger.error(f"[TaskExecService] Unexpected error executing task on {agent_name}: {error_msg}")
+            error_msg = f"Task execution failed ({_exception_words(e)} — details in backend logs)"
+            logger.error(
+                "[TaskExecService] Unexpected error executing task on %s: %s",
+                agent_name, masked_traceback(e),
+            )
             # #671/H4: CAS-gate the terminal write; complete the activity only
             # if we won.
             await _write_terminal_and_gate(
@@ -3089,7 +3155,8 @@ class TaskExecutionService:
         )
         logger.error(
             f"[TaskExecService] TIMEOUT on {agent_name} after {elapsed}s "
-            f"(limit={effective_limit}s, configured={timeout_seconds}s): {error_msg}"
+            f"(limit={effective_limit}s, configured={timeout_seconds}s): {error_msg}; "
+            f"{masked_text(str(exc)) if exc is not None else ''}"
         )
 
         # Issue #61: Terminate the execution on the agent to prevent orphaned

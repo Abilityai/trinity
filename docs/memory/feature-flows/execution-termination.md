@@ -539,7 +539,7 @@ For Stop-hook authoring guidance to avoid the orphan-killer slow path, see [`TRI
 | Already finished | 200 | status: "already_finished" |
 | Connection error | 502 | Failed to connect to agent |
 | Timeout | 504 | Timeout connecting to agent |
-| Termination error | 500 | Termination failed |
+| Termination error | 500 | Termination failed: {ErrorClass} (the exception text goes only to the agent log, credential-scrubbed; trinity#4284) |
 
 ---
 

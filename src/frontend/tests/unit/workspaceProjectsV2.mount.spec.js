@@ -95,6 +95,9 @@ describe("#867 — a task's owner is editable by contributors", () => {
     projects.tasks = { prj_1: { rows: [task], loaded: true, error: null } }
     projects.fetchTask = vi.fn().mockResolvedValueOnce(task).mockResolvedValueOnce(after || task)
     projects.updateTask = vi.fn().mockResolvedValue({})
+    // ent#1155: a new owner is picked from the project's own people.
+    projects.fetchProjectPeople = vi.fn(async (_id, q) =>
+      [{ email: 'b@example.com', label: 'Bee Bo' }].filter((p) => p.email.startsWith(q.trim())))
     mount(ProjectTasks, { props: { projectId: 'prj_1', canContribute: true, ...props }, attachTo: document.body })
     await flushPromises()
     byTestId('project-task-T-001').click()
@@ -104,6 +107,20 @@ describe("#867 — a task's owner is editable by contributors", () => {
     const input = byTestId('project-task-owner')
     input.value = value
     input.dispatchEvent(new Event('input'))
+    await flushPromises()
+  }
+  /** Type part of the owner and pick them from the list (ent#1155: the owner is must-pick). */
+  async function pickOwner(value) {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      await typeOwner(value)
+      vi.advanceTimersByTime(250)
+      await flushPromises()
+    } finally {
+      vi.useRealTimers()
+    }
+    const row = [...document.querySelectorAll('[role="option"]')].find((o) => o.textContent.includes('Bee Bo'))
+    row.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
     await flushPromises()
   }
   async function save() {
@@ -116,7 +133,7 @@ describe("#867 — a task's owner is editable by contributors", () => {
   it('T1: changing the owner sends exactly the new owner', async () => {
     await openDetail(OPEN, { after: { ...OPEN, owner: 'b@example.com' } })
     expect(byTestId('project-task-owner').value).toBe('a@example.com')
-    await typeOwner('  b@example.com ')
+    await pickOwner('  b@exa')
     await save()
     expect(projects.updateTask).toHaveBeenCalledWith('prj_1', 'T-001', { owner: 'b@example.com' })
     expect(byTestId('project-task-owner').value).toBe('b@example.com')
@@ -180,7 +197,7 @@ describe("#867 — a task's owner is editable by contributors", () => {
     const labels = [...document.querySelectorAll('[data-testid="project-task-detail"] form label')].map((l) => l.textContent.trim())
     expect(labels).toContain('Owner')
     expect(labels.some((l) => /agent/i.test(l))).toBe(false)
-    await typeOwner('b@example.com')
+    await pickOwner('b@exa')
     await save()
     expect(projects.updateTask.mock.calls[0][2]).not.toHaveProperty('agent')
   })
@@ -188,7 +205,7 @@ describe("#867 — a task's owner is editable by contributors", () => {
   it('T8: a server refusal shows its message and keeps the typed owner', async () => {
     await openDetail(OPEN)
     projects.updateTask = vi.fn().mockRejectedValue({ response: { status: 409, data: { detail: { code: 'archived', message: 'archived' } } } })
-    await typeOwner('b@example.com')
+    await pickOwner('b@exa')
     await save()
     expect(byTestId('inline-error').textContent).toContain('This project is archived. Restore it to add to it.')
     expect(byTestId('project-task-owner').value).toBe('b@example.com')

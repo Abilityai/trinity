@@ -191,13 +191,14 @@
           :rooms-available="store.multiAgentChatAvailable"
           :projects-active="projectsRoute"
           :loading-roster="store.loading && !store.rosterLoaded"
+          :setup-pending="store.agentSetupPending"
+          :setup-overdue="setupOverdue"
           :settled="sidebarReady"
           :threads-failed="store.sessionsFailed"
           v-model:search="search"
           :searching="searching"
           :search-results="searchResults"
           :rename="renameChat"
-          @new-chat="newChat"
           @new-room="newRoom"
           @new-chat-with-agent="newChatWithAgent"
           @open-agent="openAgentPage"
@@ -246,13 +247,14 @@
           :rooms-available="store.multiAgentChatAvailable"
             :projects-active="projectsRoute"
             :loading-roster="store.loading && !store.rosterLoaded"
+            :setup-pending="store.agentSetupPending"
+            :setup-overdue="setupOverdue"
             :settled="sidebarReady"
             :threads-failed="store.sessionsFailed"
             v-model:search="search"
             :searching="searching"
             :search-results="searchResults"
             :rename="renameChat"
-            @new-chat="() => { mobileNav = false; newChat() }"
             @new-room="() => { mobileNav = false; newRoom() }"
             @new-chat-with-agent="(n) => { mobileNav = false; newChatWithAgent(n) }"
             @open-agent="(n) => { mobileNav = false; openAgentPage(n) }"
@@ -655,6 +657,14 @@
             <p :class="STAGE_BODY">{{ store.error }}</p>
             <button :class="STAGE_ACTION" @click="store.fetchRoster()">Try again</button>
           </template>
+          <!-- ent#1201: accepted, and the agent is on its way. One line, no
+               agent name, in the place the conversation will mount — the
+               progress card's own in-progress dot, never a spinner. -->
+          <template v-else-if="store.agentSetupPending">
+            <p :class="STAGE_TITLE" class="inline-flex items-center gap-2" data-testid="portal-setup-pending">
+              <span class="w-1.5 h-1.5 rounded-full bg-current motion-safe:animate-pulse" aria-hidden="true"></span>{{ setupOverdue ? SETUP_OVERDUE_LINE : SETUP_PENDING_LINE }}
+            </p>
+          </template>
           <!-- ent#357: an empty roster needs a next step, not just a statement.
                The two audiences need different ones: a signed-in user can go
                make an agent, an external client can only ask the person who
@@ -987,6 +997,7 @@ import { loginLocation } from '@/utils/platformSession'
 import { closedInviteMessage, termsLocation } from '@/utils/termsGate'
 import { HELP_CLASS } from '@/components/base/fieldClasses'
 import { usePortalDraftsStore } from '@/stores/portalDrafts'
+import { usePortalProgressStore } from '@/stores/portalProgress'
 import { threadKey, shouldAutoFocusComposer } from '@/components/portal/portalDrafts'
 import { safeStorage } from '@/utils/safeStorage'
 import PortalSidebar from '@/components/portal/PortalSidebar.vue'
@@ -1061,7 +1072,7 @@ import {
   // disagree about the number.
   totalUnread,
   // trinity-enterprise#610 §3g S4: the read's optimistic zero and its rollback.
-  optimisticRead, rollbackRead, createWriteGuard, applyStarOverrides, agentChatTabs, tabOrderFrom,
+  optimisticRead, rollbackRead, createWriteGuard, applyStarOverrides, agentChatTabs, tabOrderFrom, promoteChatInOrder, unreadSnapshot, newlyUnreadIds,
   asksHomeRoute,
   // ent#836: the per-agent ask counts the sidebar's mark reads — handed to the
   // rail's Asks signal, so the tab's mark and the row's mark cannot disagree.
@@ -1072,6 +1083,8 @@ import {
   orderRosterAgents,
   // #3672: the sidebar's one first-load verdict.
   sidebarSettled,
+  // ent#1201: the set-up landing's bounded poll.
+  setupPollVerdict, SETUP_PENDING_LINE, SETUP_OVERDUE_LINE,
 } from '@/components/portal/portalUtils'
 // ent#621 — the Workspace key map. The rules are pure and live there; this view
 // owns the one listener and the dispatch table (T3).
@@ -1729,6 +1742,10 @@ const composerFocusMode = ref('always')
 // trinity-enterprise#701: which door opened the picker — 'chat' or 'room'.
 const pickerMode = ref('chat')
 
+// #4353: no sidebar button calls this any more — a roster row lands on a new
+// chat (ent#784) and the header carries New chat (ent#451). Its one caller is
+// ⌘J / Ctrl+J with nothing on stage (`newChatFromKey`), where a single-select
+// picker is the only way to say WHICH agent.
 function newChat() {
   if (guardLeaveCall(() => newChat())) return   // ent#551: ask, then leave
   pickerMode.value = 'chat'
@@ -1784,9 +1801,12 @@ function escapeStage() {
 
 async function onPickerConfirm(agentNames) {
   if (!agentNames.length) return
-  // ONE agent stays a portal thread: that path resumes, streams and reattaches
-  // (ent#358/#286). TWO OR MORE needs a room — the only substrate that models
-  // several agents and @mention-waking.
+  // A CHAT stays a portal thread: that path resumes, streams and reattaches
+  // (ent#358/#286). A ROOM is the only substrate that models several agents
+  // and @mention-waking. Since #4353 the picker's chat mode is single-select,
+  // so the mode alone decides; the length check stays as the belt to that
+  // brace — a two-name confirm in chat mode would otherwise file a room under
+  // the word "chat".
   if (agentNames.length === 1 && pickerMode.value !== 'room') {
     pickerOpen.value = false
     newChatWithAgent(agentNames[0])
@@ -2725,12 +2745,31 @@ watch([activeAgentName, pendingSession, startingNewChat], ([agent, sid, fresh]) 
 const stageAgent = computed(() => (!isInboxRoute.value && !activeRoomId.value && !activeRoomIdFromRoute.value
   && !unreachableAgent.value ? activeAgentName.value || null : null))
 const tabOrder = ref(null)   // { agent, ids } | null
+let unreadSeen = null        // per-chat unread at the last look; see the promote watcher below
 watch([stageAgent, () => threadListTrusted()], ([agent, trusted]) => {
   if (!agent) { tabOrder.value = null; return }
   const cur = tabOrder.value
   if (cur && cur.agent === agent && (cur.ids || !trusted)) return
   tabOrder.value = { agent, ids: trusted ? tabOrderFrom(threads.value, agent) : null }
+  unreadSeen = trusted ? unreadSnapshot(threads.value, agent) : null
 }, { immediate: true })
+
+// The one exception to the hold: a chat that goes from read to unread while you
+// are on the agent comes to the front of the strip (after Main), so a reply in a
+// chat under "N more" is never invisible. The open chat keeps its exact slot —
+// `promoteChatInOrder` owns that rule. `unreadSeen` is (re)taken with every
+// snapshot above, so arriving never counts as a transition.
+watch(threads, (list) => {
+  const order = tabOrder.value
+  if (!order?.ids || !unreadSeen) return
+  const activeId = activeSessionId.value || pendingSession.value || null
+  let next = order
+  for (const id of newlyUnreadIds(unreadSeen, list, order.agent, activeId)) {
+    next = promoteChatInOrder(next, list, id, activeId)
+  }
+  unreadSeen = unreadSnapshot(list, order.agent)
+  if (next !== order) tabOrder.value = next
+})
 
 // What assistive tech hears after a key move. The shell says it once; the band,
 // the tab strip and the browser-tab title say it visually.
@@ -3235,6 +3274,61 @@ onUnmounted(() => clearUnreadCount())
 // a human-latency decision, not a stream.
 const ASKS_POLL_MS = 20000
 let asksTimer = null
+
+// ---- ent#1201: the set-up landing --------------------------------------------
+// The roster says the viewer's own agent is being set up (seated or started):
+// the first read after accepting can be empty, or hold an agent whose start is
+// still running. Re-read it quietly — no skeleton, no error over the line —
+// every 3 s while the flag holds, for at most `SETUP_POLL_CEILING_MS`; past
+// that, stop and say it is taking longer. Only while pending, so an ordinary
+// Workspace pays nothing (#3058's landing cost is untouched).
+const SETUP_POLL_MS = 3000
+const setupOverdue = ref(false)
+let setupPollTimer = null
+let setupPollStartedAt = 0
+let setupRefreshing = false
+
+function stopSetupPoll() {
+  clearInterval(setupPollTimer)
+  setupPollTimer = null
+}
+
+function tickSetupPoll() {
+  const verdict = setupPollVerdict({ pending: store.agentSetupPending, elapsedMs: Date.now() - setupPollStartedAt })
+  if (verdict !== 'poll') {
+    stopSetupPoll()
+    setupOverdue.value = verdict === 'overdue'
+    return
+  }
+  // One read at a time: a slow roster must not stack a second one behind it.
+  if (setupRefreshing) return
+  setupRefreshing = true
+  Promise.resolve(store.refreshRoster()).finally(() => { setupRefreshing = false })
+}
+
+watch(() => store.agentSetupPending, (pending) => {
+  if (!pending) {
+    stopSetupPoll()
+    setupOverdue.value = false
+    return
+  }
+  if (setupPollTimer || setupOverdue.value) return
+  setupPollStartedAt = Date.now()
+  setupPollTimer = setInterval(tickSetupPoll, SETUP_POLL_MS)
+}, { immediate: true })
+onBeforeUnmount(stopSetupPoll)
+
+// A member's progress card flipping its assistant_ready step (the progress WS
+// trigger refetches the card) is the moment their agent became usable: re-read
+// the roster once, so availability on the row and the composer is current
+// without a reload.
+const progressStore = usePortalProgressStore()
+watch(
+  () => Object.keys(progressStore.byAgent).sort()
+    .map((name) => `${name}:${(progressStore.byAgent[name]?.steps || []).find((st) => st?.key === 'assistant_ready')?.state || ''}`)
+    .join('|'),
+  () => { void store.refreshRoster() },
+)
 
 function startAsksPoll() {
   stopAsksPoll()

@@ -42,6 +42,7 @@ from services.chat_title import (
     is_greeting,
     normalize_chat_title,
 )
+import config
 # #2157: the surface stamp written onto every portal execution — see
 # `config.PORTAL_SOURCE_CHANNEL` for why it exists and why it is not a channel.
 from config import PORTAL_SOURCE_CHANNEL
@@ -780,6 +781,15 @@ def _card_model_default(row: dict, ctx: ModelContext, runtime: str) -> Optional[
             return PortalModelDefault(
                 model=stored, label=catalog_label(stored), source="agent"
             )
+        # ent#1202: the agent's own model, through the same pure precedence the
+        # turn resolves with, so the label and the turn agree.
+        from services.agent_model_service import SOURCE_AGENT, choose
+
+        own = choose(row.get("default_model"), (runtime or _DEFAULT_RUNTIME).lower(), ctx.platform_default)
+        if own.source == SOURCE_AGENT:
+            return PortalModelDefault(
+                model=own.model, label=catalog_label(own.model), source="own"
+            )
         return PortalModelDefault(
             model=ctx.platform_default, label=ctx.platform_label, source="platform"
         )
@@ -832,11 +842,26 @@ async def _agent_runtime(agent_name: str) -> str:
         return _DEFAULT_RUNTIME
 
 
+def _member_agent_names() -> frozenset:
+    """Names of non-deleted member agents, fail-open (ent#1172).
+
+    OSS installs without the enterprise submodule get an empty frozenset — the
+    roster must never 500 over a missing capability (the same contract as
+    `_projects_available` and `_default_voice_id`).
+    """
+    try:
+        from enterprise.backend.member_agents.db import live_member_agent_names
+        return live_member_agent_names()
+    except Exception:  # noqa: BLE001 — fail open: OSS installs have no enterprise
+        return frozenset()
+
+
 def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
                  availability: str = "unknown", *,
                  is_platform: bool, runtime: str,
                  model_context: ModelContext,
                  stt_ready: bool | None,
+                 member_agent_names: frozenset = frozenset(),
                  can_manage_canvases: bool = False) -> PortalAgentCard:
     """One roster row → one card. Shared by the roster and the single-agent
     lookup (#2160) so the two cannot disagree about how a card is built.
@@ -865,6 +890,10 @@ def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
     from services import tts_service
     from services.pull_pilot import pull_owns_dispatch
     name = r["agent_name"]
+    # ent#1172: suppress the model picker for share-tier viewers of member agents.
+    # An owner viewing their own member agent keeps the control (AC 5 boundary).
+    is_member_agent = name in member_agent_names
+    _is_share_tier_member = is_member_agent and not bool(r.get("owned"))
     updated = r.get("avatar_updated_at")
     # Only agents with a generated (non-default) avatar get an image URL;
     # the UI renders an initials tile otherwise.
@@ -918,13 +947,16 @@ def _row_to_card(r: dict, tts_ready: bool, default_voice_id: str | None = None,
         # #3114: an env-var read, so cheap per card.
         pulls_turns=pull_owns_dispatch(name, "public"),
         # ent#403: `None` — no control at all — for every non-platform principal.
-        # The roster payload is the ONLY capability channel an external client
-        # has (#2128): a UI gate written against `GET /api/settings/feature-flags`
-        # is `get_current_user`-gated and returns empty for exactly that
-        # audience, so the gate has to be here.
+        # ent#1172: also `None` for share-tier viewers of member agents (taste
+        # decision 7: model_default=None server-side for that audience).
         model_default=(
-            _card_model_default(r, model_context, runtime) if is_platform else None
+            _card_model_default(r, model_context, runtime)
+            if is_platform and not _is_share_tier_member
+            else None
         ),
+        # ent#1172: carried to the frontend so it can suppress the briefing body
+        # (description, skill hints, suggestions, error line) for share-tier viewers.
+        is_member_agent=is_member_agent,
     )
 
 
@@ -1021,6 +1053,9 @@ async def get_agent_card(email: str | None, agent_name: str,
                         is_platform=include_owned,
                         runtime=runtime,
                         model_context=_model_context(),
+                        # ent#1172: same set the roster resolves once — the page
+                        # and sidebar cannot disagree about is_member_agent either.
+                        member_agent_names=_member_agent_names(),
                         # ent#553 (review): the roster resolves this per row and
                         # this path did not, so the SAME owner saw
                         # `can_manage_canvases: true` in the sidebar and `false`
@@ -1124,6 +1159,8 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
     # its label), resolved HERE beside `tts_ready` and `default_voice` and
     # threaded into every card — never re-read per card.
     model_context = _model_context()
+    # ent#1172: once per roster load, like `tts_ready` and `model_context`.
+    member_names = _member_agent_names()
     cards = [
         _row_to_card(r, tts_ready, default_voice,
                      availability=availability.get(r["agent_name"], "unknown"),
@@ -1131,6 +1168,7 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
                      runtime=runtimes.get(r["agent_name"], _DEFAULT_RUNTIME),
                      model_context=model_context,
                      stt_ready=stt_ready,
+                     member_agent_names=member_names,
                      # ent#553 — resolved through `may_manage_canvases`, the SAME
                      # predicate the write routes enforce with, rather than a
                      # faster per-row comparison against `r["owner"]`. That
@@ -1154,12 +1192,15 @@ async def get_roster(email: str | None, include_owned: bool = False) -> PortalRo
     # ent#534: the Workspace's real-time voice capability — instance-level and
     # principal-kind-level, resolved once here like `multi_agent_chat`. The
     # roster is THE capability channel for this surface (#2128).
+    from services import portal_capabilities
+
     from .voice import direct_voice_capability, realtime_voice_capability
     return PortalRoster(
         client_email=(email or None),
         agents=cards,
         multi_agent_chat_available=multi_agent_chat,
         projects_available=_projects_available(include_owned, email),
+        agent_setup_pending=portal_capabilities.has("agent_setup_pending", (email or "").strip().lower()),
         realtime_voice=realtime_voice_capability(include_owned),
         direct_voice=direct_voice_capability(include_owned),
         # ent#403: instance-level, so it rides the roster rather than every card.
@@ -1655,15 +1696,15 @@ async def synthesize_portal_tts(agent_name: str, email: str, text: str,
                                 include_owned: bool = False) -> bytes:
     """Text-to-speech for a portal reply (voice mode, #78). Roster-scoped (miss →
     404). Reuses the shared ElevenLabs `tts_service` with the agent's configured
-    voice. Raises ClientPortalError when voice isn't available (no key / no voice)
+    voice. Staged credential values are scrubbed from the text before synthesis
+    (#4359). Raises ClientPortalError when voice isn't available (no key / no voice)
     or synthesis fails / the text exceeds the shared cost cap — the client then
     just keeps the text reply. Returns MP3 bytes (played directly in the browser)."""
     from services import tts_service
 
     if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
-    body = (text or "").strip()
-    if not body:
+    if not (text or "").strip():
         raise ClientPortalError(400, "Nothing to speak")
     if not tts_service.is_available():
         raise ClientPortalError(404, "Voice is not available")
@@ -1674,6 +1715,21 @@ async def synthesize_portal_tts(agent_name: str, email: str, text: str,
     voice_id = tts_service.resolve_voice_id(agent_name)
     if not voice_id:
         raise ClientPortalError(404, "This agent has no voice configured")
+    # The cost cap judges the text as the client sent it. The client chooses this
+    # text and the staged store is shared by every agent, so an answer that changed
+    # with what is staged would let a client test a guessed value against it. The
+    # spoken placeholder below is never longer than a value it replaces, so text
+    # that fits here still fits the cap inside synthesize_mp3.
+    if len(text.strip()) > config.TTS_MAX_CHARS:
+        raise ClientPortalError(422, "Could not synthesize audio for this reply")
+    # #4359 (the ent#279 seam): remove staged credential values before the text
+    # reaches the TTS provider, after the refusals above so they never read the
+    # store. Scrub BEFORE the strip: a staged value can carry edge whitespace, and
+    # stripping first breaks the exact match at the text's edge. Fail-open: with
+    # the store down the text is spoken as given.
+    from services.runtime_secret_scrub import SPOKEN_PLACEHOLDER, scrub_staged
+
+    body = scrub_staged(text, marker=SPOKEN_PLACEHOLDER).strip()
 
     audio = await tts_service.synthesize_mp3(body, voice_id)
     if not audio:
@@ -2524,6 +2580,10 @@ def chat_for_execution(agent_name: str, email: str, execution_id: str) -> str | 
     person's conversation. Raises like any other portal call; the caller owns
     the fail-soft.
 
+    ent#1171 is a named exception: a reminder (a turn whose `triggered_by` is `reminder`) the
+    person's own agent set for that person's work tiles in their conversation —
+    handled upstream in `_workspace_attachment` via `wake_for_execution`.
+
     The turn must still be RUNNING (cso r1). The id arrives as a header the
     platform sets, but the agent process holds its own key and can send any of
     its executions' ids; only a live turn can be raising an ask. What remains
@@ -2532,6 +2592,22 @@ def chat_for_execution(agent_name: str, email: str, execution_id: str) -> str | 
     ARCHIVED chat is deliberately not excluded: a reset Main stays listed,
     readable and resumable (`reset_main_session`), Reset is refused mid-turn,
     so a running turn there is a person talking in a chat they can see.
+    """
+    hit = chat_of_turn(agent_name, execution_id)
+    if hit is None or hit[1] != (email or "").lower():
+        return None
+    return hit[0]
+
+
+def chat_of_turn(agent_name: str, execution_id: str) -> tuple[str, str] | None:
+    """`(chat_id, client)` for a RUNNING Workspace chat turn of `agent_name`,
+    whoever its client is — else None (trinity-enterprise#1134).
+
+    The rule `chat_for_execution` documents, without the addressee match: an
+    ask that fell to the operators has no addressee to match, and its chat
+    notice is read only by that chat's owner (`get_portal_session` again at
+    read time). The session must belong to the turn's own client, so a row can
+    never name another person's conversation.
     """
     from database import db as core_db
     from models import TaskExecutionStatus
@@ -2544,9 +2620,35 @@ def chat_for_execution(agent_name: str, email: str, execution_id: str) -> str | 
         return None
     chat_id = getattr(execution, "source_channel_chat_id", None)
     client = (getattr(execution, "source_channel_client", None) or "").lower()
-    if not chat_id or not client or client != (email or "").lower():
+    if not chat_id or not client:
         return None
-    return chat_id if db.get_portal_session(chat_id, agent_name, client) else None
+    return (chat_id, client) if db.get_portal_session(chat_id, agent_name, client) else None
+
+
+def wake_for_execution(agent_name: str, email: str, execution_id: str) -> str | None:
+    """The Workspace Main chat for an ask raised during a reminder (wake) of
+    this agent for this person — the ent#1171 exception to ent#610's rule.
+
+    A reminder carries the original work's author as `source_user_email`; the
+    guard `source_user_email == email` ensures cross-member delegation (a wake
+    addressing a different person) stays Inbox-only. The ask attaches to Main
+    rather than a specific chat because a wake has no live portal session of its
+    own. Raises like any other portal call; the caller owns the fail-soft.
+    """
+    from database import db as core_db
+    from models import TaskExecutionStatus
+    execution = core_db.get_execution(execution_id)
+    status = getattr(execution, "status", None)
+    if (execution is None
+            or execution.agent_name != agent_name
+            or getattr(status, "value", status) != TaskExecutionStatus.RUNNING.value
+            or execution.triggered_by != "reminder"):
+        return None
+    # Cross-member delegation stays Inbox-only (ent#1171).
+    source = (getattr(execution, "source_user_email", None) or "").lower()
+    if not source or source != (email or "").lower():
+        return None
+    return ensure_thread_for_ask(agent_name, email)
 
 
 def _one_line(content) -> str:
@@ -2710,7 +2812,8 @@ def resolve_turn_model(agent_name: str, requested: str | None) -> str | None:
     """The ONE model ladder for a portal turn (ent#403).
 
     ``requested`` (the user's explicit pick, already validated at the router)
-    → the agent's #894 ``public_channel_model`` → the PLATFORM DEFAULT. The
+    → the agent's #894 ``public_channel_model`` → the agent's own
+    ``default_model`` (ent#1202) → the PLATFORM DEFAULT. The
     ladder resolves to a concrete id and only degrades to ``None`` when the
     platform default itself is unreadable.
 
@@ -2764,17 +2867,12 @@ def resolve_turn_model(agent_name: str, requested: str | None) -> str | None:
         override = None
     if override:
         return override
-    # The platform default is a Claude model id: a Codex or Gemini agent runs on
-    # its own model instead (`task_execution_service._default_model_for`).
+    # ent#1202: the agent's own model, then the platform default — the same
+    # resolver `execute_task` uses, so the row and the turn agree. A Codex or
+    # Gemini agent resolves to None and runs on its own model.
     try:
-        from services.docker_service import get_agent_runtime
-        if get_agent_runtime(agent_name) != "claude-code":
-            return None
-    except Exception as e:  # noqa: BLE001 — an unknown runtime keeps the default
-        logger.warning("[ent#403] runtime read failed for %s: %s", agent_name, e)
-    try:
-        from services import settings_service
-        return settings_service.get_platform_default_model() or None
+        from services.agent_model_service import resolve_default_model
+        return resolve_default_model(agent_name).model
     except Exception as e:  # noqa: BLE001 — never fail a turn over the stamp
         # Degrading to None is the pre-ent#403 behaviour: the row goes back to
         # NULL and `execute_task` resolves the default itself. Worse than a

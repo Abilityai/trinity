@@ -421,6 +421,15 @@ def test_ambiguous_host_without_backend_container_is_refused(tmp_path):
     assert inst.mutating_calls() == []
 
 
+def test_stopped_prod_install_on_postgres_is_detected_from_its_data_dir(tmp_path):
+    """A prod install created on PostgreSQL has no trinity.db, but its bind mount holds data."""
+    inst = Instance(tmp_path, enterprise=False)
+    (inst.root / "trinity-data" / "trinity.db").unlink()
+    (inst.root / "trinity-data" / "backups").mkdir()
+    proc = inst.run("--check", env={"STUB_CONFIG_FILES": ""})
+    assert "Install shape: prod  (from the on-disk evidence" in proc.stdout, proc.stderr
+
+
 def test_shape_from_config_files_is_pure(tmp_path):
     cases = {
         "/srv/t/docker-compose.prod.yml,/srv/t/docker-compose.prod.enterprise.yml": "prod-enterprise",

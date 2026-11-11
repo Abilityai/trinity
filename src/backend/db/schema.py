@@ -94,6 +94,7 @@ TABLES = {
             voice_system_prompt TEXT,
             voice_name TEXT,
             public_channel_model TEXT,
+            default_model TEXT,
             public_channel_system_prompt TEXT,
             guardrails_config TEXT,
             file_sharing_enabled INTEGER DEFAULT 0,
@@ -789,7 +790,7 @@ TABLES = {
             seq INTEGER NOT NULL,                      -- monotonic per room
             sender_kind TEXT NOT NULL,                 -- agent | user | workspace_user | system
             sender_identity TEXT,
-            kind TEXT NOT NULL DEFAULT 'message',      -- message | system
+            kind TEXT NOT NULL DEFAULT 'message',      -- what the row is: message | system | chain_paused | chain_continued (#4302); sender_kind says who
             mentions TEXT,                             -- JSON array of agent names
             content TEXT NOT NULL,
             execution_id TEXT,                         -- schedule_executions.id (nullable)
@@ -2103,6 +2104,23 @@ TABLES = {
             requester_chat_id TEXT,
             requester_thread_id TEXT,
             UNIQUE(agent_name, email)
+        )
+    """,
+
+    # -------------------------------------------------------------------------
+    # Channel client blocks (trinity-enterprise#21)
+    # -------------------------------------------------------------------------
+    "channel_client_blocks": """
+        CREATE TABLE IF NOT EXISTS channel_client_blocks (
+            id TEXT PRIMARY KEY,
+            agent_name TEXT NOT NULL,
+            channel TEXT NOT NULL,
+            client_id TEXT NOT NULL,
+            blocked_at TEXT NOT NULL,
+            blocked_by_id INTEGER,
+            blocked_by_email TEXT,
+            reason TEXT,
+            UNIQUE(agent_name, channel, client_id)
         )
     """,
 

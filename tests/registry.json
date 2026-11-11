@@ -1,6 +1,223 @@
 {
   "test_files": [
     {
+      "file": "unit/test_ent863_socket_door_account_state.py",
+      "feature": "trinity-enterprise#863",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "auth",
+        "unit",
+        "security"
+      ],
+      "description": "Socket doors apply the #995 account-state check HTTP requests apply: the shared socket decoder dependencies.decode_token returns None for a deactivated account (users.suspended_at set; creator and admin) and the identity once the column is cleared (None or empty string); the real agent-terminal and system-agent-terminal handlers close 4001 before the container lookup for a deactivated account and reach it for a reactivated one. Stubs are patched through decode_token.__globals__ so the read row is the one asserted."
+    },
+    {
+      "file": "unit/test_ent863_live_connections.py",
+      "feature": "trinity-enterprise#863",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "websocket",
+        "unit",
+        "security"
+      ],
+      "description": "Live connections follow the account: services/live_connections.py compares the account snapshot a door recorded at connect with the current row; a changed role (raised or lowered), email or password closes with the reconnect reason (4000), a deactivated or removed account or an inactive or deleted key with the ended reason (4001). The real role route re-checks the account at once on its worker, only when the role changed; a self-change is refused and closes nothing. A second worker's tick closes what the first worker's write left stale; a tick with nothing open reads nothing; a failed tick read keeps everything open and the next tick retries; a failed read after a reported change closes that account's connections; a raising closer does not stop the others or the loop. notify_account_changed from a plain thread closes on the registry's loop. A change while a door connects refuses it, a door that opens after the change stays open, and a re-check before the door's read marks it dirty. The real /ws and /ws/events handlers close with their codes, unregister their dispatcher slot before the handler returns, log no error, and refuse a socket whose account changed while it opened. Shape: each event door registers before it reads and goes live after it connects, releases in a finally; the 15 s loop starts outside the bus's try and stops with it. The batched reads return only existing rows and active keys and skip the database for an empty set."
+    },
+    {
+      "file": "unit/test_ent863_control_events.py",
+      "feature": "trinity-enterprise#863",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "websocket",
+        "unit",
+        "security"
+      ],
+      "description": "An account or key change reaches every worker: notify_account_changed / notify_key_changed re-check on the serving worker and publish one control event (scope control) through an injected publisher; each worker's dispatcher hands it to its registry's handle_control, which re-checks locally and never publishes again. A control entry reaches no client: _fanout routes it to the handler and returns (no roster read, no queue), with or without a handler, no slot of any kind is visible to it, and a last-event-id replay neither delivers nor re-runs it. Two dispatchers fed one entry each close their own registry's matching connections; two workers over one fake stream close from the event alone and publish once. The publisher's own echo closes nothing that already matches; an unrecognised control event is logged and closes nothing; a failing publish or handler is contained. The real MCP key revoke and delete routes close only the streams opened with that key, on both workers and when an admin revokes another person's key, never by account; a refused revoke closes nothing. A password change closes the account's connections (a revoked key's stream as ended). main.py wires the handler into the dispatcher and publishes through the bus at the control scope. Mutation: 18 hunk mutations, each turns a named test red."
+    },
+    {
+      "file": "unit/test_ent863_event_stream_roster.py",
+      "feature": "trinity-enterprise#863",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "websocket",
+        "unit",
+        "security"
+      ],
+      "description": "An event-stream key's agent list follows access changes: the real /ws/events handler gives every non-admin key (user keys too, not only agent keys) a roster read that re-reads the key's owner, and refresh reads the owner's current row (a lowered role reads the smaller list, a deactivated owner none); after an unshare fan-out the slot no longer receives the unshared agent's events. ws_identity_service.event_stream_roster_reader re-reads on every call, reads a gone, deactivated or Workspace-only owner as an empty list, and uses the owner's current email. A change that lands while a roster read is in flight is followed by one more read (/ws and /ws/events slots, and the refresh command); a slot that disconnects is not read again. StreamDispatcher re-reads every non-admin roster about once a minute (ROSTER_REREAD_INTERVAL_S = 60) in a per-worker loop it starts and stops itself: reads run one at a time, nothing is read while no non-admin roster is held, admin slots are never read, and a failing read keeps the previous roster and the loop."
+    },
+    {
+      "file": "unit/test_ent863_terminal_close.py",
+      "feature": "trinity-enterprise#863",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "websocket",
+        "unit",
+        "security"
+      ],
+      "description": "Terminals follow the account: the real agent-terminal and system-agent-terminal handlers register with the worker's live-connection registry and close when the account's access changes (immediate re-check and periodic re-check): error frame plus 4003, the handler returns normally within 1 s without being cancelled and logs no error, the container socket is closed, the one-terminal slot and the registry entry are freed. The close cancels the session's own forwarder tasks (blocked in the browser read and the container read); input arriving during the close is not forwarded; a change while the shell starts refuses the session after the start returns. A session closed for an access change ends its shell with an exec as the terminal's user carrying the session's marker; an unchanged account and an ordinary close end nothing; a failed end is logged. The snapshot holds the role the door authorized on. Shape: each door registers in the step that authorizes it and goes live after the start, before auth_success. The end-of-shell script (Linux, /proc) ends the marked processes and their session and spares another session and a bystander."
+    },
+    {
+      "file": "unit/test_ent719_saved_token_fork_session_only.py",
+      "feature": "trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "github",
+        "unit"
+      ],
+      "description": "POST /api/agents through the real route (require_role creator, the agents.manage gate, create_agent_internal, _resolve_template, _apply_fork_to_own): the fork_to_own arm with no token in the body, which makes the creator's saved personal GitHub token the new agent's, is INTERACTIVE. The agent key, the system key, the person's own user key and a vouched loopback JWT get 400 FORK_PAT_REQUIRED with no fork attempted; a signed-in session forks with the saved token. A fork with a token in the body and a create with no fork are unchanged for every principal. GitHub, name, volume and quota checks are stubbed; the create stops at the step after the arm."
+    },
+    {
+      "file": "unit/test_ent719_no_agent_only_grant_guard.py",
+      "feature": "trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "guard",
+        "unit"
+      ],
+      "description": "The issue's acceptance scan (tests/unit/_grant_guard_scan.py, stdlib AST, never imports src/): every route the census walks is followed into the code it runs, across modules, its signature and decorator dependencies, Annotated aliases and inline Annotated parameters, and a dependency's own dependencies included. A route that reaches an agent-only check (reject_agent_principal, Depends(human_only), an `if <principal>.agent_name: raise` or `is not None` test, a scope test naming the agent scope, an early return for non-agents before a refusal) fails unless its census class is person / interactive / person_or_grant, it is admin-gated, or the check's own function refuses a non-person, each credit read only as a top-level statement before any return and refusing on every path; a reviewed exemption (NOT_GRANT_GUARDS, REVIEWED_CREDITS, DEFERRED) names both the check and the routes it covers, and a named route that no longer rests on it fails as stale. An agent-only check no route reaches is a table problem. Every census portal write must refuse a non-person first, be a reviewed Workspace use, or be listed in DEFERRED (stale once an arm refuses a non-person); outside portal routes the Workspace door is exempt only through a listed fallback. Every admitting exit of the room moderator check must carry a positive person term or follow a top-level person refusal; a person helper's truthy constant counts only on a branch PERSON_BRANCHES lists. Self-tests plant trees for each rule, and each rule's revert turns at least one red."
+    },
+    {
+      "file": "unit/test_ent719_human_only_refusal_audit.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-10-27",
+      "categories": [
+        "backend",
+        "auth",
+        "security",
+        "unit"
+      ],
+      "description": "A refused human-only attempt (require_person / assert_person / require_interactive / reject_non_interactive_principal / reject_non_person_principal now raise HumanOnlyRefused) is recorded once by the app handler in error_handlers.py, through the REAL app in a subprocess (helper tests/unit/_human_only_audit_app.py) on a fresh database: one authorization/human_only_refused row per Depends and imperative refusal, naming the agent, trinity-system or the person (never the owner for a key); every other machine scope filed as itself; the response byte-identical with the handler removed and answered by whatever handler the app registers for HTTPException; an audit failure still answers the same 403 and does not use the window (the same refusal a second later writes its row); the already-auditing owner-tier file read writes no second row; one row per principal, method and route (the template) per 60 s window, a full window recording nothing new rather than forgetting a key; principals naming no agent or key filed as the platform; an unrelated 403 writes none; the path, agent name and request id cut to 256 characters; no row carries a sentinel sent in the body, the query, User-Agent, a custom header or the forwarding headers (X-Forwarded-For, X-Real-IP, CF-Connecting-IP), the handler copying no header but the request id; the driver removes its temp dir."
+    },
+    {
+      "file": "unit/test_ent719_workspace_autonomy_person_only.py",
+      "feature": "abilityai/trinity-enterprise#719",
+      "added": "2026-11-04",
+      "categories": [
+        "unit",
+        "backend",
+        "auth",
+        "workspace"
+      ],
+      "description": "The autonomy dial's owner writes (release of a held class, the guard cap; trinity-enterprise#641) take a person: through the real Workspace router, door and keys, the system key is refused 403 person_required before the roster and the held/capped seed does not move; the owner on a session or a user key still releases and sets the guard."
+    },
+    {
+      "file": "unit/test_ent1148_delegation_tier.py",
+      "feature": "trinity-enterprise#1148",
+      "added": "2026-11-07",
+      "categories": [
+        "backend",
+        "security",
+        "turn-tier",
+        "agent-collaboration"
+      ],
+      "description": "trinity-enterprise#1148: turn_actor rule A (a delegated row for a person who cannot open the callee runs at the callee's tier, clamped to the caller owner's tier there; fail-closed lookups), rule B (registered person-tier provider rates a person the owner of one agent; last wins, strict True), the member/delegated kinds get shell + standing work, turn_origin_user_id/_email carry the acting person from an owner-by-rule turn (C1, re-rated per hop), the ledger readers rate delegated rows the same way and memoize per distinct attribution."
+    },
+    {
+      "file": "unit/test_ent1148_ledger_columns_guard.py",
+      "feature": "trinity-enterprise#1148",
+      "added": "2026-11-07",
+      "categories": [
+        "backend",
+        "security",
+        "turn-tier",
+        "static-guard"
+      ],
+      "description": "trinity-enterprise#1148: turn_tier_service.LEDGER_COLUMNS covers every _field(execution, ...) the rule reads (AST), get_running_turn_attribution selects each (source), and the real SQLite read returns them with source_agent_name round-tripped."
+    },
+    {
+      "file": "unit/test_ent1148_caller_reads_stay_person.py",
+      "feature": "trinity-enterprise#1148",
+      "added": "2026-11-07",
+      "categories": [
+        "backend",
+        "security",
+        "turn-tier",
+        "auth"
+      ],
+      "description": "trinity-enterprise#1148 AC3: viewer_row_scope shows an agent key acting for a shared person NO rows of an agent that person cannot open (fail-closed on an unreadable or non-True access answer, or a person with no account row); the person's own agent and an openable agent keep today's rule; no lookup for NO_ROWS or the full view."
+    },
+    {
+      "file": "unit/test_ent1148_fan_out_source.py",
+      "feature": "trinity-enterprise#1148",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "security",
+        "turn-tier",
+        "fan-out"
+      ],
+      "description": "trinity-enterprise#1148 F1: a fan-out row names the initiator's key agent (or the vouched X-Source-Agent), never its own target; a delegated turn fanning out to another agent without the header rates share, a person's own fan-out does not rise to owner after the share is revoked, and a self fan-out rates the person's own tier (share), never the delegated owner tier."
+    },
+    {
+      "file": "unit/test_ent1148_fleet_reads_stay_person.py",
+      "feature": "trinity-enterprise#1148",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "security",
+        "turn-tier",
+        "auth"
+      ],
+      "description": "trinity-enterprise#1148 F2: GET /api/executions and GET /api/activities/timeline, read by an agent key in a shared person's turn, omit every agent that person cannot open (fail-closed on an unreadable lookup); a key in no person's turn keeps its reach with no lookup."
+    },
+    {
+      "file": "unit/test_4357_wake_chain_depth.py",
+      "feature": "#4357",
+      "added": "2026-11-08",
+      "categories": [
+        "unit",
+        "backend",
+        "agent-collaboration",
+        "reliability"
+      ],
+      "description": "#4357: a caller wake stands at the delegator's own depth (max(callee - 1, MAX(running caller), 0)), so twenty delegate->wake rounds and a reminder fired while the last wake runs are all admitted through the real /task depth guard; a synchronous chain is still refused past the max and answered/ended asks stay roots. The per-pair hourly wake budget caller_wake_max_per_hour (default 120, <=0 unlimited) skips and audits skipped_budget past the cap with one notification per window, fails open without Redis, and a collapsed window spends nothing."
+    },
+    {
+      "file": "unit/test_4357_depth_resets_parity.py",
+      "feature": "#4357",
+      "added": "2026-11-08",
+      "categories": [
+        "unit",
+        "backend",
+        "mcp",
+        "agent-collaboration"
+      ],
+      "description": "#4357: the MCP server's fallback depth-reset sentence (client.ts DEPTH_RESETS, used when a refusal body carries no resets) equals the backend's InterAgentDepthExceeded.RESETS, and the backend's refusal body sends that sentence, so the two copies cannot drift."
+    },
+    {
+      "file": "unit/test_1168_agent_ssh_bind.py",
+      "feature": "trinity-enterprise#1168",
+      "added": "2026-11-07",
+      "categories": [
+        "agent",
+        "unit",
+        "security",
+        "docker"
+      ],
+      "description": "trinity-enterprise#1168: agent SSH listener posture. AGENT_SSH_BIND_ADDRESS resolver (loopback default, IP literal only, invalid → loopback + one ERROR, specific-IP WARNING); agent_ssh_port_binding tuple form; by-name AST guard that every container create with ports= uses the helper, rejects publish_all_ports/host_config/port_bindings and bans a bare '22/tcp' under services/** outside the leaf (planted-violation meta-tests); the grant endpoint's decision table over Docker's actual PortBindings (every interface → detected host + recreate warning; loopback → 127.0.0.1 + -J hint only for SSH_HOST/FRONTEND_URL sources; specific IP → that IP, disagreeing SSH_HOST named; no mapping → detected host), warnings[] always a list and repeated in instructions; on-demand sshd start before key injection (root exec, /var/run/sshd, zombie-safe pgrep --runstates) and a 500 when it fails; ENABLE_SSH=false at all three create sites; boot sweep names every-interface containers and stops idle sshd as root only when ssh_access_enabled is off, fail-open; four-file wiring (3 compose files with :- default, .env.example beside SSH_HOST, start.sh --provision, compose render); Dockerfile pins (passwd -l, drop-in COPY, sshd -t/-T build assertion before USER developer) and drop-in directives; MCP types carry bind_address/warnings."
+    },
+    {
+      "file": "unit/test_4331_trailing_newline_names.py",
+      "feature": "#4331",
+      "added": "2026-11-07",
+      "categories": [
+        "backend",
+        "unit",
+        "security"
+      ],
+      "description": "#4331: system names, manifest member keys and local template names reject a trailing newline (`\\Z` anchor instead of `$`)."
+    },
+    {
       "file": "unit/test_4156_agent_auto_memory_spawn.py",
       "feature": "#4156",
       "added": "2026-11-02",
@@ -21,6 +238,18 @@
         "security"
       ],
       "description": "#4156: which turns spawn with Claude Code's shared auto-memory off. `memory_subject.keeps_shared_auto_memory` keeps it on only for the agent's own scope (a headless run, or the owner's turn); a non-owner person, an anonymous visitor, a channel group, a seat run for someone else and any trigger off the allowlist get it off. The flag `disable_auto_memory` reaches the push /api/task payload, the /api/chat payload and the pull claim envelope for a non-owner turn and is absent for the owner's; an unreadable row fails closed (off)."
+    },
+    {
+      "file": "unit/test_ent21_channel_client_controls.py",
+      "feature": "trinity-enterprise#21",
+      "added": "2026-11-02",
+      "categories": [
+        "backend",
+        "unit",
+        "access-control",
+        "channels"
+      ],
+      "description": "Per-client controls on the Sharing-tab roster against a real DB: each row's client_id and access state (blocked/granted/pending with request id/none); block is per agent and channel, idempotent, keeps the share, unblock restores it; revoke removes the share (works on a blocked client, 409 with nothing to revoke); every control 404s on a client that never reached this agent; routes are owner + require_person and audited."
     },
     {
       "file": "unit/test_ent1108_wake_default.py",
@@ -1714,7 +1943,7 @@
         "compose",
         "settings"
       ],
-      "description": "Every config.ENV_BACKED_OPS_KEYS variable (METRICS_RETENTION_DAYS, METRICS_DAILY_POINT_CAP, INTER_AGENT_MAX_CHAIN_DEPTH) is forwarded exactly once by docker-compose.yml / .prod.yml / .hosted.yml with an EMPTY default (${VAR:-}), no other docker-compose*.yml supplies a default, and .env.example leaves each commented but documented - so `source: env` on GET /api/settings/retention means an operator set it and the Settings rows are not locked on every install."
+      "description": "Every config.ENV_BACKED_OPS_KEYS variable (METRICS_RETENTION_DAYS, METRICS_DAILY_POINT_CAP, INTER_AGENT_MAX_CHAIN_DEPTH, CALLER_WAKE_MAX_PER_HOUR) is forwarded exactly once by docker-compose.yml / .prod.yml / .hosted.yml with an EMPTY default (${VAR:-}), no other docker-compose*.yml supplies a default, and .env.example leaves each commented but documented - so `source: env` on GET /api/settings/retention means an operator set it and the Settings rows are not locked on every install."
     },
     {
       "file": "unit/test_ent671_retention_metric_rows.py",
@@ -7317,6 +7546,30 @@
       "description": "A peer may run what an agent declares; what an admin assigned needs a grant (ent#662). At the real seam (skill_gate_service.enforce over the per-process SQLite, no gates set): a peer invoking an individually assigned OR set-propagated library skill is refused 403 skill_not_granted naming caller, callee and only the ungranted names; declared skills, a #2914 conflict name, a granted skill, the agent itself, a person, a schedule, a connector and trinity-system pass; a grant is per caller x target x skill and revocable; a name hidden in the context text is read too. The execute_task backstop applies the rule on an agent with no gates. An unreadable assignment table refuses a peer (503 peer_surface_unavailable) and leaves a person alone. Every refusal is one audit row. The grant routes: admin on PUT/DELETE read off the real dependant graph, an admin's MCP key refused, 422 skill_not_assigned / self / system agent, idempotent with a consent line and audited, and the per-edge read filters targets by viewer access. Both migration tracks and both CASCADE AgentRefs. Mutations: removing the enforce hook turns 8 red; restoring the backstop early return turns the backstop test red. Follow-ups: a parent runs every skill on an agent it spawned with its current key, a child calling its parent still needs a grant, a stale spawn key is no parent (symmetric-exemption and no-exemption mutations each red); removing an edge or a full replace that drops it deletes its grants and only its grants (cascade mutation red); the drift report lists only (edge x library skill) pairs USED in the last 30 days and not granted, with uses + last_used_at, off the real execution ledger read; the drift route is admin-only; the per-edge view carries last_used_at."
     },
     {
+      "file": "unit/test_ent925_peer_skill_in_container.py",
+      "feature": "abilityai/trinity-enterprise#925",
+      "added": "2026-11-06",
+      "categories": [
+        "backend",
+        "security",
+        "skills",
+        "unit"
+      ],
+      "description": "Peer skill grants enforced in-container (ent#925), over the REAL POST /api/skill-gate/check route on the per-test database: a peer's run that LOADS an ungranted library skill it never named is refused with the exact model-facing text (one, several, subagent preload; no slash before a name); a grant, a declared skill and a #2914 conflict name pass; names match case-insensitively, grants by the exact library name. The requester is the agent of an agent-scoped key first (a fan-out sent without X-Source-Agent, an A2A call), then source_agent_name, at the hook AND at the gateway (enforce); a deactivated key still names its agent, a deleted one falls back. AC3: the agent itself, its schedule, a person, a caller wake, a room turn, trinity-system, no run / manual, and a parent on an agent it spawned are unaffected; a child on its parent is a peer. A finished own run keeps its requester; an unknown id and another agent's run answer alike at one row read. Every unreadable read fails open (a gated skill still gets the gate's answer); a programming error propagates; the peer refusal comes before a gate clearance. An unresolvable call on a peer run is refused, a named one gets its name. One audit row with via/subagent/requester key, throttled on its own per-(callee, caller) budget. The drift report lists in-container refusals and drops granted/unassigned/stale/gateway rows. Mutation battery: 14 load-bearing lines each turn a test red."
+    },
+    {
+      "file": "unit/test_ent925_peer_skill_enforcement_route.py",
+      "feature": "abilityai/trinity-enterprise#925",
+      "added": "2026-11-06",
+      "categories": [
+        "backend",
+        "security",
+        "skills",
+        "unit"
+      ],
+      "description": "The Permissions panel's 'not enforced in-container' read (ent#925), GET /api/agents/{name}/peer-skills/enforcement over the real route and access dependency: reachable when an inbound-edge caller or an event source the agent subscribes to lacks a grant for one of its library skills (not itself, trinity-system or its spawner); the hook is probed once and only when reachable; an agent key and a shared viewer get nulls with no probe; a user without access gets the uniform 404. Mutations: dropping the manager gate, probing when unreachable, or ignoring subscriptions each turn a test red."
+    },
+    {
       "file": "unit/test_ent820_files_tier_census.py",
       "feature": "trinity-enterprise#820",
       "added": "2026-10-16",
@@ -8396,6 +8649,44 @@
       "description": "trinity-enterprise#1109: a credential ask with a destination. Validated and stored at raise (URL gate, agent slug, key variable name), said in plain words on the receipt and the Workspace projection (never the key's name); the sink reads the asking agent's key by name, pins the connection and merge-injects one .env line into the agent on the other instance, writes nothing here, unstages after a 2xx and audits credential_delivered; every delivery failure is a named plain retry with the value in no log, audit row or message; the inject route's mode merge keeps every other byte; manifest credentials: names are parsed, validated and previewed while the legacy map form stays an unknown key."
     },
     {
+      "file": "unit/test_ent1158_instance_destination.py",
+      "feature": "trinity-enterprise#1158",
+      "added": "2026-11-09",
+      "categories": [
+        "backend",
+        "credentials",
+        "workspace",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1158: a credential destination naming a registered outbound instance ({instance, agent_name}). Shape union and named raise refusals read from the entry's metadata through a2a_outbound.resolve_endpoint; the answer path fails closed (409 destination_unreadable) on a destination it cannot read; raise/delivery parity over every entry state; delivery under the entry's stored key resolved by id at every delivery (rotation, instance_moved), the asking agent's .env never read; exactly one credential_instance_delivery audit row per delivery on success and on each refusal."
+    },
+    {
+      "file": "unit/test_ent1158_key_env_raise_check.py",
+      "feature": "trinity-enterprise#1158",
+      "added": "2026-11-09",
+      "categories": [
+        "backend",
+        "credentials",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1158 §2: a key_env destination is checked at raise. One classifier (classify_key) for raise and delivery; key_env_state returns only the label and None when it cannot tell (fail open, 5 s budget, off the loop); raise_ask applies the label after every earlier refusal and the replay; the route reads only a key_env destination."
+    },
+    {
+      "file": "unit/test_ent1158_credential_key_journey.py",
+      "feature": "trinity-enterprise#1158",
+      "added": "2026-11-09",
+      "categories": [
+        "backend",
+        "credentials",
+        "workspace",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1158 journey: an admin registers an instance with its key (real upsert_endpoint, real encrypted envelope), the asking agent raises over the real raise_my_ask route naming destination.instance (201), the person answers through provide_credential, the remote instance receives one merge inject under the entry key, the ask is provided, one audit row, the asking agent's .env byte-identical; variants: the key cleared before the answer (destination_instance_no_credential, nothing sent) and a key_env destination without the variable (destination_key_env_missing at raise)."
+    },
+    {
       "file": "journeys/test_j24_external_mcp_access_journey.py",
       "feature": "abilityai/trinity-enterprise#1101",
       "added": "2026-11-05",
@@ -8508,6 +8799,28 @@
       "description": "Assign keeps the injection's warnings (#3136): _deliver_assigned carries public codes (missing_binary / missing_env / packages_not_checked, ...) for injected / fallback / unchanged, dropping free-text details by the #2991 rule shared with public_skills_result (skill_packaging.public_warnings); the ent#672 deprecation stamp merges (one lifecycle code first) instead of overwriting; the whole chain through the real injection + dependency probe and the POST assign route body; regression guards: a clean skill's report is byte-identical, conflict / failed / unassigned_meanwhile / stopped carry no injection codes."
     },
     {
+      "file": "unit/test_ent1153_people_search_seam.py",
+      "feature": "trinity-enterprise#1153",
+      "added": "2026-11-06",
+      "categories": [
+        "backend",
+        "unit",
+        "access-control"
+      ],
+      "description": "The one people search behind every picker, over a real SQLite DB: the shared match and exclusions, the agent-reach and share-candidate scopes, the bounds (minimum query, cut query, 8 rows, per-person per-scope rate limit), the room / Workspace chat / Access tab pickers each reaching the seam with a named 429, and an AST guard that fails any route returning picker rows without it."
+    },
+    {
+      "file": "unit/test_ent450_access_candidates.py",
+      "feature": "trinity-enterprise#450",
+      "added": "2026-11-06",
+      "categories": [
+        "backend",
+        "unit",
+        "access-control"
+      ],
+      "description": "Account suggestions for the Access tab's add field, through the real sharing router over the unit DB: who may read (session only, owner or admin), who is offered, the bounds, and that a row carries role only for an admin."
+    },
+    {
       "file": "unit/test_ent459_operator_invite.py",
       "feature": "trinity-enterprise#459",
       "added": "2026-11-05",
@@ -8589,6 +8902,166 @@
         "unit"
       ],
       "description": "trinity-enterprise#1111 (T1): acceptance consumers that run BEFORE the response. register_acceptance_hook(fn, inline=True) keeps a separate list (registration idempotent, one clear drops both); run_inline_acceptance_hooks awaits them under ONE ceiling per acceptance (TERMS_INLINE_HOOK_BUDGET_S = 5). In time: the hook's work is done before the route's return value exists while the background hook is only scheduled, and through the real route inline precedes background; a sync hook is tolerated; a repeat acceptance (created=False) runs neither kind. Past the ceiling: the runner stops waiting, the route still answers 200, terms_hook_slow is audited, three slow hooks share one ceiling rather than three — and the hook is NEVER cancelled (shielded task), which is the property a wait_for over the work itself would break mid-mutation. It raises: logged, audited terms_hook_failed with the error type, the next hook still runs, the acceptance still succeeds."
+    },
+    {
+      "file": "unit/test_ent1117_s6a_git_add_option_injection.py",
+      "feature": "trinity-enterprise#1117",
+      "added": "2026-11-05",
+      "updated": "2026-11-06",
+      "categories": [
+        "agent-server",
+        "git",
+        "git-sync",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1117 (CodeQL py/command-line-injection): the agent server's Push stages `paths` with `git add -- <paths>`, so `-f`/`--force` in `paths` is a pathspec and a gitignored .env is never force-staged or pushed. Drives the real sync_to_github body against a scratch repo with a local bare origin and asserts on origin's tree. Also pins that ONLY the named paths are staged and pushed (an unrelated modified tracked file stays out of the push and dirty locally), that `./-name` stages a file whose name starts with '-', and that the no-paths branch still runs exactly `git add -A`. No Docker."
+    },
+    {
+      "file": "unit/test_ent1117_s6a_sync_paths_option_reject.py",
+      "feature": "trinity-enterprise#1117",
+      "added": "2026-11-05",
+      "updated": "2026-11-06",
+      "categories": [
+        "backend",
+        "git",
+        "git-sync",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1117: GitSyncRequest refuses a `paths` element starting with '-' with a 422 whose message leads with `paths[i] '<elem>'` (element capped at 200 chars), through the real routers.git router and the platform 422 handler, before the agent is called; a dash elsewhere is forwarded unchanged and an empty body still syncs everything. Decides every row of tests/fixtures/git-sync-path-cases.json the same way as the MCP git_sync schema (shared table)."
+    },
+    {
+      "file": "../src/mcp-server/src/tools/git.ent1117-s6a.test.ts",
+      "feature": "trinity-enterprise#1117",
+      "added": "2026-11-05",
+      "updated": "2026-11-06",
+      "categories": [
+        "mcp",
+        "mcp-server",
+        "typescript",
+        "git-sync",
+        "security"
+      ],
+      "description": "trinity-enterprise#1117: the git_sync tool schema refuses a `paths` element starting with '-' through the same ~standard.validate seam FastMCP calls; the issue sits at paths.<i> and its message leads with the element (capped at 200 chars). Decides every row of tests/fixtures/git-sync-path-cases.json the same way as the backend model (shared table). node:test."
+    },
+    {
+      "file": "unit/test_ent1093_claude_vendor_telemetry.py",
+      "feature": "trinity-enterprise#1093",
+      "added": "2026-11-07",
+      "categories": [
+        "agent-server",
+        "security",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1093: Claude Code vendor traffic off by default (CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC + DISABLE_TELEMETRY + DISABLE_ERROR_REPORTING) in a root-owned managed-settings.d drop-in, installed before every build-time claude run but the install's --version; no image ENV for the names (a recreate would freeze it); no other managed source declares them; every managed env name is one .env cannot set; a Claude agent's .env cannot blank the opt-out while a Gemini/Codex agent's may set the generic names, and no runtime's .env can detach managed env (real build_execution_env); /health vendor_telemetry_opt_out (ok/missing/not_root_owned/writable/altered/unsupported_runtime); CLI-pin gate incl. the OTLP cost-metric check."
+    },
+    {
+      "file": "unit/test_ent1135_ask_room_attachment.py",
+      "feature": "trinity-enterprise#1135",
+      "added": "2026-11-07",
+      "categories": [
+        "backend",
+        "unit",
+        "rooms",
+        "operator-queue"
+      ],
+      "description": "trinity-enterprise#1135: an ask raised in a running room turn records the room (platform key, stripped from agent input) and posts one raised line; fail-soft; never a gate or credential ask."
+    },
+    {
+      "file": "unit/test_ent1135_ask_room_return.py",
+      "feature": "trinity-enterprise#1135",
+      "added": "2026-11-07",
+      "categories": [
+        "backend",
+        "unit",
+        "rooms",
+        "operator-queue"
+      ],
+      "description": "trinity-enterprise#1135: the ending line for every disposition (coarse who, never the answer) and the room-engine return turn under a Waker, with declines falling back to today's wake."
+    },
+    {
+      "file": "unit/test_ent1135_wake_restart_survival.py",
+      "feature": "trinity-enterprise#1135",
+      "added": "2026-11-07",
+      "categories": [
+        "backend",
+        "unit",
+        "rooms",
+        "operator-queue"
+      ],
+      "description": "trinity-enterprise#1135 (T4): wake_state owed before the spawn, the ending lifecycle, the widened re-offer and the once-per-process boot re-offer after startup recovery."
+    },
+    {
+      "file": "../src/frontend/tests/unit/workspaceProjectsEnt1133.mount.spec.js",
+      "feature": "trinity-enterprise#1133",
+      "added": "2026-11-07",
+      "categories": [
+        "frontend",
+        "unit",
+        "ui",
+        "workspace"
+      ],
+      "description": "A task's title, objective and definition of done edited from the detail form, mounted: the three fields prefill from the task and only the changed ones are sent (a cleared long field as null); a blank or over-limit value is refused inline with nothing sent, counting code points so 150 emoji pass; a legacy over-limit stored value does not block a status change; the read-only objective / DoD blocks show only when the fields are not offered; a done task shows them disabled with the reopen reason and Reopen sends the status alone; a server 422 lands under the field it names, keeping what was typed; and the create dialog refuses the same lengths."
+    },
+    {
+      "file": "../src/frontend/tests/unit/workspaceProjectsTaskLimits.spec.js",
+      "feature": "trinity-enterprise#1133",
+      "added": "2026-11-07",
+      "categories": [
+        "frontend",
+        "unit",
+        "workspace"
+      ],
+      "description": "The task-field limits the client checks (title 200, objective / definition of done 4000 code points) are pinned to the server pair from the public side, so a drift goes red in public CI: validateTaskFields executed at and one past each boundary, emoji counted as one; the backend constants are compared too when that module is checked out."
+    },
+    {
+      "file": "unit/test_4302_room_chain_continue.py",
+      "feature": "trinity#4302",
+      "added": "2026-11-07",
+      "categories": [
+        "backend",
+        "rooms",
+        "idempotency",
+        "auth",
+        "api",
+        "unit"
+      ],
+      "description": "trinity#4302: a mention chain stopped at ROOM_MAX_CHAIN_DEPTH writes a typed `chain_paused` system row (mentions = who was next; plain words, no UI verb) and the room payload carries `paused_chain` {seq, next} while the offer stands (survives bookkeeping lines; ends on a conversational row, a later pause/continue row, a closed room, or every named agent having left; a collaborator seated above the row still gets it). POST /api/rooms/{id}/continue through the real router, service, db and idempotency layers over a temp SQLite DB: wakes `next` at depth 1 (a fresh count that may pause again), posts a `chain_continued` receipt that spends no message budget, hands the woken agent what it was owed; a seated collaborator, a person's user key and a Workspace client may continue, an agent key and the system key get 403 not_a_person, a non-member the uniform 404 with no key claimed, an unreachable `next` a 403 with nothing consumed, a departed `next` 409 no_one_to_wake; a closed room / a room at its message budget 410 with stop_reason and the budget named. Once per stop: a double click with an Idempotency-Key is 409 in-flight then a replay under scope room-continue:{room_id}; two workers without a key wake once (the second gets 409 room_moved_on); a stale offer_stands read is not the guard (the receipt insert is); two simultaneous receipt inserts land exactly one; a repeat after a restart (key rows gone) is 409 room_moved_on."
+    },
+    {
+      "file": "unit/test_ent1174_member_seat.py",
+      "feature": "trinity-enterprise#1174",
+      "added": "2026-11-09",
+      "categories": [
+        "unit",
+        "systems",
+        "security"
+      ],
+      "description": "trinity-enterprise#1174: person_seats holder: member (primary only, one per agent, email refused naming the fix); can_seat_member gate matrix (JWT/user-key admin only); reserved settings off the generic /api/settings routes; apply plans member_seat_set / seat_filled / member_seat_differs / member_not_recorded / held-back over the real db and a fake provider on the real seam; E4 owner rule; created members seated; audit with no address; agent seat and grants unchanged."
+    },
+    {
+      "file": "unit/test_ent1174_journey.py",
+      "feature": "trinity-enterprise#1174",
+      "added": "2026-11-09",
+      "categories": [
+        "unit",
+        "systems",
+        "workspace"
+      ],
+      "description": "trinity-enterprise#1174 AC4/AC2: apply with an admin-owned user-scoped key + the real enterprise assignments module seats and shares the recorded member; the Workspace roster lists the agent; the door mints a code and hands the platform account to /login; admin-role and user-role members keep their role (R31). Skips without the private submodule."
+    },
+    {
+      "file": "unit/test_ent1202_default_model_resolution.py",
+      "feature": "trinity-enterprise#1202",
+      "added": "2026-11-09",
+      "categories": [
+        "backend",
+        "execution",
+        "database",
+        "api"
+      ],
+      "description": "ent#1202: agent_ownership.default_model (nullable, dual-track migration 0123) and the one resolver: explicit > public-channel override > the agent's own model when the catalog/alias allowlist passes it > platform default; non-Claude runtimes resolve to None; an unrunnable stored value is skipped by name; fail-open except the strict a2a pre-create. execute_task runs and stamps the own model, fills a pre-created row's blank model_used only, never restamps an explicit model. Portal ladder/label, a2a pre-create and the GET /model additive fields read the same resolver."
     }
   ]
 }

@@ -130,3 +130,13 @@ describe('#2153 the late reconcile cannot re-create #2130', () => {
     expect(calls.length).toBe(2)
   })
 })
+
+// trinity-enterprise#340: the console is Settings › Channels. There is no tab
+// for it under either name it has had; both are aliases (asserted above).
+describe('the external-client tab', () => {
+  it('is gone: neither Sharing nor Channels is a tab', () => {
+    const tabs = buildTabs(OWNER)
+    expect(tabs.some((t) => t.id === 'channels' || t.id === 'sharing')).toBe(false)
+    expect(tabs.some((t) => t.label === 'Sharing' || t.label === 'Channels')).toBe(false)
+  })
+})

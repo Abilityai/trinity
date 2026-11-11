@@ -570,7 +570,7 @@ def test_the_event_stream_endpoint_scopes_an_agent_key(fleet, monkeypatch):
 
 def test_an_agent_key_slot_refreshes_its_reach_on_an_access_change():
     """A spawned child appears without a reconnect; a failed re-read keeps the
-    older, smaller roster; a non-access event reads nothing."""
+    previous roster; a non-access event reads nothing."""
     from services.event_bus import SCOPE_SCOPED, StreamDispatcher, _ClientSlot
 
     calls = []
@@ -776,10 +776,19 @@ _HELPER_ACCESSORS = {"get_accessible_agents", "accessible_agent_names", "visible
 #: (file, function) → why its principal is never an agent key, or why the admin
 #: branch selects no fleet. Shrink-only: `test_every_allowlist_entry_still_applies`.
 _ALLOW = {
+    ("main.py", "_scope_matches_snapshot"):
+        "compares the `/ws` scope a person's ticket resolved with that account's snapshot; selects no fleet "
+        "(trinity-enterprise#863)",
     ("routers/system_agent.py", "system_agent_terminal"):
         "the system-agent terminal authenticates a person (JWT) and checks the user row's role",
     ("services/settings_service.py", "get_agent_quota_for_role"):
         "maps a role to an agent-creation quota; selects no roster",
+    ("services/access_candidate_service.py", "suggest"):
+        "the role compare only decides whether a row SHOWS its role; selects no fleet, and the route is require_interactive (ent#450)",
+    ("services/template_source_policy.py", "in_use"):
+        "trinity-enterprise#591 impact view: reached only via describe() from the two "
+        "/api/settings/agent-creation-allowlist routes (assert_admin / assert_interactive_admin, "
+        "both reject agent principals); returns template sources and counts, no agent names",
     ("services/ask_service.py", "may_end"):
         "an ask's ending is person-only at every route (reject_non_person_principal)",
     ("services/person_mention_service.py", "_room_access_row"):
@@ -1016,6 +1025,9 @@ _DB_EXEMPT = {
     ("services/system_service.py", "_apply_created_schedules"):
         "apply executor: schedules of a member this same run created, as its creator; the apply "
         "route is require_person, so no agent key reaches it (trinity-enterprise#695)",
+    ("services/client_roster_service.py", "revoke_client"):
+        "unshares a channel client as the owner; its only caller, POST /{agent_name}/clients/revoke, "
+        "is require_person + OwnedAgentByName (trinity-enterprise#21)",
 }
 
 

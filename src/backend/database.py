@@ -162,6 +162,7 @@ from db.telegram_channels import TelegramChannelOperations
 from db.whatsapp_channels import WhatsAppChannelOperations
 from db.voip import VoipOperations
 from db.access_requests import AccessRequestOperations
+from db.channel_client_blocks import ChannelClientBlockOperations
 from db.audit import PlatformAuditOperations
 from db.canary import CanaryOperations
 from db.compatibility import CompatibilityOperations
@@ -212,6 +213,10 @@ def init_database():
         # it needs only `system_settings`; placed last so none is implied.
         _record_install_source_engine()
         return
+
+    # #4175: before mkdir and connect, so a refused boot creates nothing.
+    from db.engine import refuse_sqlite_backend
+    refuse_sqlite_backend()
 
     db_path = Path(DB_PATH)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -961,10 +966,11 @@ def _ensure_admin_user(cursor, conn):
             from utils.password_validation import validate_password_strength
             pw_errors = validate_password_strength(admin_password)
             if pw_errors:
-                print(f"WARNING: ADMIN_PASSWORD does not meet complexity requirements:")
-                for err in pw_errors:
-                    print(f"         - {err}")
-                print("         Recommended: 12+ chars with uppercase, lowercase, digits, and special characters")
+                # The rules, never which ones failed: the failures give away the
+                # password's length, its missing character classes and whether
+                # it is on the public common-password list (trinity-enterprise#1117).
+                print("WARNING: ADMIN_PASSWORD does not meet complexity requirements:")
+                print("         Rules: 12-128 characters; at least one uppercase, lowercase, digit and special character; not a common password")
         except ImportError:
             pass  # password_validation module not available during early init
 
@@ -1089,6 +1095,7 @@ class DatabaseManager:
         self._whatsapp_channel_ops = WhatsAppChannelOperations()
         self._voip_ops = VoipOperations()
         self._access_request_ops = AccessRequestOperations()
+        self._channel_client_block_ops = ChannelClientBlockOperations()
         self._audit_ops = PlatformAuditOperations()
         self._canary_ops = CanaryOperations()
         self._compatibility_ops = CompatibilityOperations()  # #668 agent compatibility
@@ -1133,16 +1140,29 @@ class DatabaseManager:
     def list_users(self):
         return self._user_ops.list_users()
 
-    # trinity-enterprise#631 — who may be tagged in a conversation with these agents
-    def list_taggable_people(self, agent_names, query, *, exclude_email=None, limit=8):
-        return self._user_ops.list_taggable_people(agent_names, query,
-                                                   exclude_email=exclude_email, limit=limit)
+    # trinity-enterprise#1153 — the one people search; only people_search_service calls it
+    def people_scope_agent_reach(self, agent_names):
+        return self._user_ops.people_scope_agent_reach(agent_names)
 
+    def people_scope_share_candidates(self, agent_name):
+        return self._user_ops.people_scope_share_candidates(agent_name)
+
+    def search_people(self, scope, query, *, exclude_email=None, limit=8):
+        return self._user_ops.search_people(scope, query, exclude_email=exclude_email, limit=limit)
+
+    # trinity-enterprise#631 — the send-time check: may this address be tagged here
     def get_taggable_person(self, agent_names, email):
         return self._user_ops.get_taggable_person(agent_names, email)
 
     def update_user_role(self, username: str, role: str):
         return self._user_ops.update_user_role(username, role)
+
+    # abilityai/trinity-enterprise#863 — the live-connection re-check's batched reads
+    def get_users_access_state(self, usernames):
+        return self._user_ops.get_users_access_state(usernames)
+
+    def get_keys_active(self, key_ids):
+        return self._mcp_key_ops.get_keys_active(key_ids)
 
     # --- Per-user GitHub PAT (ent#162) ---
 
@@ -1213,6 +1233,10 @@ class DatabaseManager:
     def list_agents_spawned_by_key(self, agent_name: str, key_id: str) -> List[str]:
         """ent#629: live agents spawned by `agent_name` with key `key_id`."""
         return self._agent_ops.list_agents_spawned_by_key(agent_name, key_id)
+
+    def list_agent_created_agent_names(self) -> List[str]:
+        """ent#591: live agents another agent created (the bound's impact read)."""
+        return self._agent_ops.list_agent_created_agent_names()
 
     def purge_agent_ownership(self, agent_name: str):
         return self._agent_ops.purge_agent_ownership(agent_name)
@@ -1357,6 +1381,18 @@ class DatabaseManager:
 
     def set_autonomy_enabled(self, agent_name: str, enabled: bool):
         return self._agent_ops.set_autonomy_enabled(agent_name, enabled)
+
+    def transfer_agent_ownership(self, agent_name: str, *, to_user_id: int, expect: dict,
+                                 clear_spawn_provenance: bool, clear_ephemeral: bool,
+                                 enable_autonomy: bool, restore_spawn_provenance=None):
+        """Re-own an agent and its owner-carrying rows under a CAS (ent#1147);
+        every side effect is a named, required option — see the mixin."""
+        return self._agent_ops.transfer_agent_ownership(
+            agent_name, to_user_id=to_user_id, expect=expect,
+            clear_spawn_provenance=clear_spawn_provenance,
+            clear_ephemeral=clear_ephemeral, enable_autonomy=enable_autonomy,
+            restore_spawn_provenance=restore_spawn_provenance,
+        )
 
     def get_all_agents_autonomy_status(self):
         return self._agent_ops.get_all_agents_autonomy_status()
@@ -1793,6 +1829,18 @@ class DatabaseManager:
     def set_public_channel_model(self, agent_name: str, model):
         return self._agent_ops.set_public_channel_model(agent_name, model)
 
+    def get_default_model_raw(self, agent_name: str):
+        return self._agent_ops.get_default_model_raw(agent_name)
+
+    def get_default_models_raw(self, agent_names):
+        return self._agent_ops.get_default_models_raw(agent_names)
+
+    def set_default_model(self, agent_name: str, model):
+        return self._agent_ops.set_default_model(agent_name, model)
+
+    def set_default_model_if(self, agent_name: str, expected, model):
+        return self._agent_ops.set_default_model_if(agent_name, expected, model)
+
     # =========================================================================
     # MCP API Key Management (delegated to db/mcp_keys.py)
     # =========================================================================
@@ -1827,6 +1875,9 @@ class DatabaseManager:
         returns the agents whose keys were revoked (#4259 skips keys still
         inside the start-up grace window)."""
         return self._mcp_key_ops.deactivate_orphaned_agent_keys()
+
+    def get_agent_name_for_agent_key(self, key_id: str):
+        return self._mcp_key_ops.get_agent_name_for_agent_key(key_id)
 
     def delete_agent_mcp_api_key(self, agent_name: str):
         return self._mcp_key_ops.delete_agent_mcp_api_key(agent_name)
@@ -1954,6 +2005,10 @@ class DatabaseManager:
         """Deepest chain_depth among the agent's running rows, 0 if none (#2806)."""
         return self._schedule_ops.get_max_running_chain_depth(agent_name)
 
+    def get_deepest_running_chain_row(self, agent_name: str):
+        """The running row that set that depth, for a refusal to name (#4357)."""
+        return self._schedule_ops.get_deepest_running_chain_row(agent_name)
+
     def get_running_turn_attribution(self, agent_name: str):
         """Who each of the agent's running turns is for (trinity-enterprise#926)."""
         return self._schedule_ops.get_running_turn_attribution(agent_name)
@@ -1981,6 +2036,9 @@ class DatabaseManager:
 
     def restamp_execution_dispatch(self, execution_id: str) -> bool:
         return self._schedule_ops.restamp_execution_dispatch(execution_id)
+
+    def stamp_model_used_if_null(self, execution_id: str, model) -> bool:
+        return self._schedule_ops.stamp_model_used_if_null(execution_id, model)
 
     def stamp_execution_channel_context(self, execution_id: str, **kwargs) -> bool:
         """ent#498 — attach a delivery destination to a pre-created row."""
@@ -2037,6 +2095,9 @@ class DatabaseManager:
 
     def get_execution_gate_state(self, execution_id: str):
         return self._schedule_ops.get_execution_gate_state(execution_id)
+
+    def get_execution_requester(self, execution_id: str):
+        return self._schedule_ops.get_execution_requester(execution_id)
 
     def get_execution_failure_stamp(self, execution_id: str):
         """`(status, error, completed_at)` or None — the #3245 liveness read."""
@@ -2993,6 +3054,9 @@ class DatabaseManager:
 
     def recent_peer_messages(self, caller_agent: str, target_agent: str, since: str, limit: int = 500):
         return self._peer_skill_grant_ops.recent_peer_messages(caller_agent, target_agent, since, limit)
+
+    def recent_in_container_peer_refusals(self, since: str, limit: int = 2000):
+        return self._peer_skill_grant_ops.recent_in_container_peer_refusals(since, limit)
 
     def delete_agent_peer_skill_grants(self, agent_name: str):
         return self._peer_skill_grant_ops.delete_agent_peer_skill_grants(agent_name)
@@ -4450,6 +4514,23 @@ class DatabaseManager:
 
     def delete_access_requests_for_agent(self, agent_name: str):
         return self._access_request_ops.delete_for_agent(agent_name)
+
+    # =========================================================================
+    # Channel client blocks (trinity-enterprise#21)
+    # =========================================================================
+
+    def block_channel_client(self, agent_name, channel, client_id, blocked_by_id, blocked_by_email, reason=None):
+        return self._channel_client_block_ops.block(
+            agent_name, channel, client_id, blocked_by_id, blocked_by_email, reason)
+
+    def unblock_channel_client(self, agent_name, channel, client_id):
+        return self._channel_client_block_ops.unblock(agent_name, channel, client_id)
+
+    def is_channel_client_blocked(self, agent_name, channel, client_id):
+        return self._channel_client_block_ops.is_blocked(agent_name, channel, client_id)
+
+    def list_channel_client_blocks(self, agent_name):
+        return self._channel_client_block_ops.list_for_agent(agent_name)
 
     # =========================================================================
     # Platform Audit Log (SEC-001 / Issue #20 — Phase 1)

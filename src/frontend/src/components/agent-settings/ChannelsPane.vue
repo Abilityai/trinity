@@ -6,11 +6,23 @@
   -->
   <div class="space-y-6">
     <p v-if="summaryLine" class="text-sm text-gray-600 dark:text-gray-300" data-testid="channels-summary">{{ summaryLine }}</p>
-    <WhoCanChat :agent-name="agentName" :shares="shares" @summary="access = $event" @agent-updated="$emit('agent-updated')" />
+    <WhoCanChat
+      :agent-name="agentName"
+      :shares="shares"
+      :refresh-key="requestsTick"
+      @summary="access = $event"
+      @agent-updated="$emit('agent-updated')"
+      @requests-changed="rosterTick++"
+    />
     <MessagingRows :agent-name="agentName" :open-channel="openChannel" @status="onStatus" @channel-closed="closeChannel" />
     <WebRows :agent-name="agentName" @status="onStatus" />
     <SpeaksOutside :agent-name="agentName" />
-    <ClientRoster :agent-name="agentName" />
+    <ClientRoster
+      :agent-name="agentName"
+      :refresh-key="rosterTick"
+      @agent-updated="$emit('agent-updated')"
+      @requests-changed="requestsTick++"
+    />
   </div>
 </template>
 
@@ -34,18 +46,21 @@ const route = useRoute()
 const router = useRouter()
 
 const access = ref({ mode: null, pending: null })
+// name → true | false | null (the check failed) | undefined (still checking).
 const surfaces = ref({})
+// The roster and the pending requests are two views of the same people: a
+// decision in one re-reads the other (trinity-enterprise#21).
+const rosterTick = ref(0)
+const requestsTick = ref(0)
 
 function onStatus({ name, connected }) {
+  // A re-check of a surface that already answered (after its dialog closes)
+  // keeps the last answer until the new one arrives, so the line doesn't blink.
+  if (connected === undefined && surfaces.value[name] !== undefined) return
   surfaces.value = { ...surfaces.value, [name]: connected }
 }
 
-// Only what's confirmed: a surface that failed its check (null) isn't listed.
-const reachable = computed(() => {
-  const names = Object.keys(surfaces.value)
-  return names.length ? names.filter((n) => surfaces.value[n] === true) : null
-})
-const summaryLine = computed(() => paneSummary({ ...access.value, reachable: reachable.value }))
+const summaryLine = computed(() => paneSummary({ ...access.value, surfaces: surfaces.value }))
 
 const openChannel = computed(() => deepLinkChannel(route.query.channel))
 function closeChannel() {

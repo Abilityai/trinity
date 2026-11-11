@@ -10,7 +10,9 @@
       link and who can see it. Only changed fields are sent.
 
   Opens pre-filled (principle 3). The steward is you, someone else at the
-  company (by email), or an agent you can use. Validation names the problem
+  company (by email), or an agent you can use — an agent steward is put on the
+  project and given the library's project-management skills when you may give
+  them (trinity-enterprise#1169); the line under Steward says which. Validation names the problem
   and gives an example (principle 17); a failed save keeps the form and says
   why next to the button (principle 18).
 -->
@@ -55,13 +57,22 @@
           <option value="company">Company</option>
         </BaseSelect>
       </div>
-      <BaseInput
+      <!-- ent#1169: what picking this steward does about the project-management
+           skills. Two lines are always reserved, so switching the steward (or
+           the read arriving) does not resize the dialog (principle 29). -->
+      <p class="-mt-2 min-h-[2.5rem] text-xs text-gray-600 dark:text-gray-300" data-testid="project-steward-skills-hint">{{ stewardHint }}</p>
+      <BasePeopleInput
         v-if="form.steward === 'person'"
         id="project-steward-email"
+        ref="stewardField"
         v-model="form.steward_email"
-        type="email"
-        label="Steward's email"
-        placeholder="name@your-company.com"
+        v-model:picked="stewardPicked"
+        mode="pick"
+        label="Steward"
+        placeholder="Type a name or email"
+        :fetch="stewardLookup"
+        :no-match="(t) => `No one at your company matches “${t}”.`"
+        :accept-text="isInitialSteward"
         :error="errors.steward"
       />
       <!-- Both texts sit in one grid cell, the other one invisible, so the line
@@ -101,15 +112,16 @@
 </template>
 
 <script setup>
-import { reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import BaseModal from '@/components/base/BaseModal.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
+import BasePeopleInput from '@/components/base/BasePeopleInput.vue'
 import BaseTextarea from '@/components/base/BaseTextarea.vue'
 import BaseSelect from '@/components/base/BaseSelect.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import InlineError from '@/components/InlineError.vue'
 import { useProjectsStore } from '@/stores/projects'
-import { projectErrorMessage, stewardFormValue, stewardPayload, validateProjectForm } from './projectsUtils'
+import { projectErrorMessage, stewardFormValue, stewardPayload, stewardSkillHint, validateProjectForm } from './projectsUtils'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -128,7 +140,24 @@ const form = reactive({ name: '', goal: '', steward: 'me', steward_email: '', vi
 const errors = ref({})
 const submitError = ref('')
 const saving = ref(false)
+const stewardField = ref(null)
+// trinity-enterprise#1165: on an existing project the steward is looked up
+// through the project-scoped read, behind the steward write's own gate; the
+// company-wide read is for a project that doesn't exist yet.
+const stewardLookup = (q) => (props.project?.id
+  ? store.fetchProjectPeople(props.project.id, q, 'steward')
+  : store.fetchCompanyPeople(q))
+const stewardPicked = ref(null)
 let initial = {}
+// ent#1169: the steward-options read, once per opening; null = loading, false = failed.
+const stewardOptions = ref(null)
+let optionsTicket = 0
+// In Edit, only a CHANGED steward is sent (and only then given the skills), so
+// an unchanged one gets no promise; the Steward card says what it holds.
+const stewardHint = computed(() => (props.project && form.steward === initial.steward
+  ? '' : stewardSkillHint(form.steward, stewardOptions.value)))
+// The steward already on the project stays valid without being picked again.
+const isInitialSteward = (t) => !!initial.steward_email && t.toLowerCase() === initial.steward_email.toLowerCase()
 
 watch(() => props.modelValue, (open) => {
   if (!open) return
@@ -143,13 +172,23 @@ watch(() => props.modelValue, (open) => {
         visibility: 'members', tracker_url: '',
       })
   initial = { ...form }
+  const held = form.steward_email && (p?.members || []).find((m) => m.email === form.steward_email)
+  stewardPicked.value = form.steward_email ? { email: form.steward_email, label: held?.label || form.steward_email } : null
   errors.value = {}
   submitError.value = ''
+  stewardOptions.value = null
+  const ticket = ++optionsTicket          // a reply for an earlier opening is dropped
+  if (props.agents.length) {
+    store.fetchStewardOptions()
+      .then((o) => { if (ticket === optionsTicket) stewardOptions.value = o })
+      .catch(() => { if (ticket === optionsTicket) stewardOptions.value = false })
+  }
 }, { immediate: true })
 
 async function submit() {
   errors.value = validateProjectForm(form)
-  if (Object.keys(errors.value).length) return
+  const stewardOk = form.steward !== 'person' || !!stewardField.value?.validate()
+  if (Object.keys(errors.value).length || !stewardOk) return
   const all = {
     name: form.name.trim(),
     goal: form.goal.trim(),

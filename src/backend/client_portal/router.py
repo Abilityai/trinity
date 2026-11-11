@@ -949,6 +949,30 @@ def portal_agent_autonomy(
     return autonomy.page(agent_name, email, is_platform=principal.is_platform)
 
 
+@router.get("/agents/{agent_name}/progress")
+def portal_agent_progress(
+    agent_name: str,
+    principal: PortalPrincipal = Depends(get_portal_principal),
+):
+    """Setup progress card for the member's onboarding (ent#1175).
+
+    Returns the five ordered steps, their state and notes, and an
+    ``all_done`` flag. Roster-gated — the member sees their own agent's
+    progress; platform admins see any. When the enterprise module is
+    absent (OSS-only build) the response is a benign empty payload so
+    the caller never needs to branch on edition.
+    """
+    _require_roster(agent_name, principal.email, principal.is_platform)
+    try:
+        from enterprise.backend.member_agents.progress import get_progress_by_agent
+        result = get_progress_by_agent(agent_name)
+        if result is None:
+            return {"steps": [], "all_done": False, "active": False}
+        return {**result, "active": True}
+    except ImportError:
+        return {"steps": [], "all_done": False, "active": False}
+
+
 @router.post("/agents/{agent_name}/autonomy/classes/{ask_class}",
              response_model=PortalAutonomyResult)
 def portal_agent_autonomy_act(
@@ -961,7 +985,10 @@ def portal_agent_autonomy_act(
 
     Asymmetric on purpose: **hold** is a refusal anyone may make for their own
     seat; **release** re-enables unprompted work and is the agent owner's alone
-    (a grant, Invariant #8). There is no promote — promotion is earned."""
+    (a grant, Invariant #8). There is no promote — promotion is earned.
+    Both directions take a person (trinity-enterprise#719): the door admits the
+    system key, which the owner check alone would let release a hold."""
+    _require_person(principal)
     email = principal.email
     _require_roster(agent_name, email, principal.is_platform)
     from services import rate_limiter
@@ -984,7 +1011,9 @@ def portal_agent_autonomy_guard(
     """Record canon's guard-metric cap for a class (owner only, ent#641): a
     class that moves another role's held metric can never graduate on rating
     history alone. The default is `not_assessed`, so an unreviewed class says
-    so rather than reading as cleared."""
+    so rather than reading as cleared. An owner's grant, so a person's
+    (trinity-enterprise#719)."""
+    _require_person(principal)
     email = principal.email
     _require_roster(agent_name, email, principal.is_platform)
     from services import rate_limiter
@@ -1863,16 +1892,19 @@ def portal_people(agent_name: str, q: str = Query("", max_length=64),
     accounts on this instance that can already reach it, matching `q`.
 
     The ent#450 shape: roster-scoped first (uniform 404), a query required,
-    capped, rate-limited — a picker, never a directory. A platform person only:
+    capped, rate-limited by the one people search (ent#1153) — a picker, never
+    a directory. A platform person only:
     an external client is refused by name (the colleagues it would list are the
     organisation's, an internal fact — #78)."""
-    from services import rate_limiter
+    from services import people_search_service as pss
     _require_roster(agent_name, principal.email, principal.is_platform)
-    rate_limiter.enforce(f"portal_people:{principal.email}", 120, 60)
     try:
         return service.chat_people(principal, agent_name, q)
     except service.ChatTagError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail)
+    except pss.PeopleSearchLimited as e:   # the seam's per-person budget (ent#1153)
+        raise HTTPException(status_code=429, detail=pss.RATE_LIMITED_DETAIL,
+                            headers={"Retry-After": str(e.retry_after)})
 
 
 @router.get("/agents/{agent_name}/history", response_model=PortalHistory)

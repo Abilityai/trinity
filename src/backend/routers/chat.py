@@ -1,3 +1,4 @@
+# mcp: chat.ts (chat_with_agent → /chat, /task, /executions/{id}/report-back; get_chat_history → /chat/history) + connector.ts (run_playbook, ask → /chat); the session, activity, model, running-executions, terminate and stream routes are UI-only — no tool calls them
 """
 Agent chat and activity routes for the Trinity backend.
 
@@ -28,6 +29,7 @@ from dependencies import (
 )
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
+from services.agent_model_service import resolve_default_model
 from services import sync_waiter
 from services.pull_pilot import is_pull_pilot_agent, pull_queue_allowance
 from services.model_catalog import InvalidModelError, validate_dispatch_model
@@ -794,7 +796,13 @@ async def get_agent_model(
     name: str = Depends(get_authorized_agent),
     current_user: User = Depends(get_current_user)
 ):
-    """Get agent's current model configuration."""
+    """Get agent's current model configuration.
+
+    ``model`` is the container's in-memory value (what its own ``/chat`` runs
+    on). ent#1202 adds what a backend-dispatched turn that names no model runs
+    on, from the one resolver: ``backend_turn_model`` and its source, plus the
+    agent's stored ``default_model`` and, when it cannot run here, why.
+    """
     container = get_agent_container(name)
     if not container:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -812,9 +820,18 @@ async def get_agent_model(
                 timeout=10.0
             )
             response.raise_for_status()
-            return response.json()
+            body = response.json()
     except httpx.HTTPError as e:
         _raise_model_route_error(name, e, "Failed to get model info", "get model info")
+    resolved = await asyncio.to_thread(resolve_default_model, name)
+    if isinstance(body, dict):
+        body.update({
+            "default_model": resolved.stored,
+            "default_model_source": resolved.source,
+            "default_model_refused": resolved.refused_reason,
+            "backend_turn_model": resolved.model,
+        })
+    return body
 
 
 @router.put("/{name}/model", dependencies=[Depends(capability_fence("agents.manage"))])
@@ -1271,8 +1288,10 @@ async def stream_execution_log(
             yield f"data: {json.dumps({'type': 'error', 'message': 'Agent connection timed out', 'retryable': True})}\n\n"
             yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
         except Exception as e:
-            logger.error(f"[Stream] Error streaming from agent {name}: {e}")
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            logger.error(f"[Stream] Error streaming from agent {name}: {e}", exc_info=True)
+            # py/stack-trace-exposure (ent#1117, the #1917 pattern).
+            message = f"Stream error ({e.__class__.__name__} — details in backend logs)"
+            yield f"data: {json.dumps({'type': 'error', 'message': message})}\n\n"
             yield f"data: {json.dumps({'type': 'stream_end'})}\n\n"
 
     return StreamingResponse(

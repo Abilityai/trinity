@@ -197,15 +197,33 @@ RUN npm install -g @google/gemini-cli@0.62.0
 # the linux-x64 build lands here. Bump deliberately after testing.
 RUN npm install -g @openai/codex@0.147.0
 
+# trinity-enterprise#1168: `developer` has NO password (`passwd -l`, a `!`-locked
+# hash). Key-based SSH is the only login method, and a locked account still logs
+# in by key under `UsePAM yes` (asserted below). The NOPASSWD sudo rule is what
+# startup.sh uses to launch sshd and is out of this change's scope.
 RUN useradd -m -s /bin/bash -u 1000 developer && \
-    echo "developer:developer" | chpasswd && \
+    passwd -l developer && \
     usermod -aG sudo developer && \
     echo "developer ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 
-RUN mkdir /var/run/sshd && \
-    sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin no/' /etc/ssh/sshd_config && \
-    sed -i 's/#PasswordAuthentication yes/PasswordAuthentication no/' /etc/ssh/sshd_config && \
-    sed -i 's/#PubkeyAuthentication yes/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+# sshd policy as a drop-in, not a `sed` over upstream's commented defaults — a
+# sed that no longer matches is a silent no-op; a drop-in applies through
+# Debian's `Include /etc/ssh/sshd_config.d/*.conf` (first value wins). The RUN
+# then asserts the EFFECTIVE configuration with `sshd -T`, so the image build
+# fails — rather than shipping an sshd that accepts passwords — if the Include
+# line disappears, the drop-in has a typo, or a directive stops applying.
+COPY --chown=root:root ./sshd_trinity.conf /etc/ssh/sshd_config.d/10-trinity.conf
+RUN mkdir -p /var/run/sshd && chmod 0644 /etc/ssh/sshd_config.d/10-trinity.conf && \
+    grep -q '^Include /etc/ssh/sshd_config.d/\*.conf' /etc/ssh/sshd_config && \
+    /usr/sbin/sshd -t && \
+    /usr/sbin/sshd -T > /tmp/sshd-effective.txt && \
+    grep -qx 'passwordauthentication no' /tmp/sshd-effective.txt && \
+    grep -qx 'kbdinteractiveauthentication no' /tmp/sshd-effective.txt && \
+    grep -qx 'permitemptypasswords no' /tmp/sshd-effective.txt && \
+    grep -qx 'permitrootlogin no' /tmp/sshd-effective.txt && \
+    grep -qx 'pubkeyauthentication yes' /tmp/sshd-effective.txt && \
+    grep -qx 'usepam yes' /tmp/sshd-effective.txt && \
+    rm -f /tmp/sshd-effective.txt
 
 RUN mkdir -p /home/developer/.ssh /home/developer/.config /home/developer/mcp-servers && \
     chown -R developer:developer /home/developer
@@ -296,10 +314,38 @@ RUN chown -R root:root /etc/claude-code && \
 RUN mkdir -p /etc/claude-code/managed-settings.d
 COPY ./hooks/managed-settings.d/50-skill-gate.json /etc/claude-code/managed-settings.d/50-skill-gate.json
 COPY ./hooks/managed-settings.d/60-turn-tier-guard.json /etc/claude-code/managed-settings.d/60-turn-tier-guard.json
+COPY ./hooks/managed-settings.d/70-vendor-telemetry.json /etc/claude-code/managed-settings.d/70-vendor-telemetry.json
 RUN chown -R root:root /etc/claude-code/managed-settings.d && \
     chmod 0755 /etc/claude-code/managed-settings.d && \
     chmod 0444 /etc/claude-code/managed-settings.d/50-skill-gate.json \
-                /etc/claude-code/managed-settings.d/60-turn-tier-guard.json
+                /etc/claude-code/managed-settings.d/60-turn-tier-guard.json \
+                /etc/claude-code/managed-settings.d/70-vendor-telemetry.json
+
+# trinity-enterprise#1093 — Claude Code's usage telemetry (including an event
+# that carries a SHA-256 of each small file the agent reads), error reports and
+# the update/feedback/release-notes checks are off. Nothing leaves the server
+# without an admin opt-in, and these had none. Still on: the model API, Claude
+# Code's own settings and policy-limits reads, the WebFetch domain check, and
+# the customer OTLP export the platform configures (CLAUDE_CODE_ENABLE_TELEMETRY,
+# /api/ops/costs), which the CLI gates on its own name only.
+#
+# The `70-vendor-telemetry.json` drop-in above is the only layer, on purpose:
+# - Claude Code applies `env` from the agent-writable `~/.claude/settings.json`
+#   and `.claude/settings.local.json` over the process env, and only policy
+#   `env` beats those. Its own file: a schema-invalid entry voids only the file
+#   it is in (a file that is not JSON fails the build at guard002-smoke below).
+#   The two names that could detach it (CLAUDE_CODE_MANAGED_SETTINGS_PATH,
+#   CLAUDE_CODE_DISABLE_ADMIN_ENV_UNION) are process-env-only: the CLI drops
+#   them from every settings file's `env`, and `.env` cannot set them.
+# - No image ENV: a recreate replays the old container's Config.Env, so an
+#   image ENV would be frozen into every agent and a later admin opt-in could
+#   not reach it. The drop-in alone holds (proven by a proxied capture).
+# The broad name alone is what gates the error sink on the pinned CLI; the two
+# narrow ones keep telemetry and error reports off if a later CLI narrows it.
+# `.env` cannot set any of them on Claude (execution_env.RUNTIME_OPT_OUT_KEYS).
+# The only `claude` run before this COPY is the install's `claude --version`,
+# which makes no request; everything after it, the plugin pre-install included,
+# runs with the opt-out on. tests/unit/test_ent1093_claude_vendor_telemetry.py.
 
 # trinity-enterprise#1001 — the routing env names (`ANTHROPIC_BASE_URL`, the
 # proxy and TLS-trust names) are pinned by their own policy drop-in, because

@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from models import SshAccessRequest, User
 from dependencies import require_admin
+from services.agent_ssh_binding import decide_ssh_connection
 from services.docker_service import get_agent_container
 from services.docker_utils import container_reload
 
@@ -37,7 +38,7 @@ async def create_ssh_access(
     Returns:
         SSH connection details (never includes private keys)
     """
-    from services.ssh_service import get_ssh_service, get_ssh_host, SSH_ACCESS_MAX_TTL_HOURS
+    from services.ssh_service import get_ssh_service, get_ssh_host_detail, SSH_ACCESS_MAX_TTL_HOURS
     from services.settings_service import get_ops_setting
 
     # Check if SSH access is enabled system-wide
@@ -79,8 +80,13 @@ async def create_ssh_access(
     labels = container.attrs.get("Config", {}).get("Labels", {})
     ssh_port = int(labels.get("trinity.ssh-port", "2222"))
 
-    # Get host for SSH connection
-    host = get_ssh_host()
+    # trinity-enterprise#1168: advertise the host the port is ACTUALLY published
+    # on (Docker's HostConfig.PortBindings, Invariant #11), not the detected
+    # host alone — a loopback-bound agent is unreachable at the public name.
+    # The detected host and its source are passed in; the table is pure.
+    detected_host, host_source = get_ssh_host_detail()
+    decision = decide_ssh_connection(container.attrs, ssh_port, detected_host, host_source)
+    host = decision.host
 
     ssh_service = get_ssh_service()
 
@@ -117,6 +123,15 @@ async def create_ssh_access(
         # Extract existing comment for tracking
         comment = public_key.split()[-1] if len(public_key.split()) > 2 else comment
 
+    # trinity-enterprise#1168: containers run no sshd until a grant asks for one
+    # (ENABLE_SSH=false at create). Start it first — a key injected into a
+    # container nothing listens in would be a connection that cannot work.
+    if not await ssh_service.ensure_sshd_running(agent_name):
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to start the SSH server in the agent container"
+        )
+
     # Inject client's public key into container (async to avoid blocking)
     if not await ssh_service.inject_ssh_key(agent_name, public_key_with_comment):
         raise HTTPException(
@@ -134,7 +149,7 @@ async def create_ssh_access(
     )
 
     # Build SSH command
-    ssh_command = f"ssh -p {ssh_port} developer@{host}"
+    ssh_command = decision.command
 
     return {
         "status": "success",
@@ -144,12 +159,20 @@ async def create_ssh_access(
             "command": ssh_command,
             "host": host,
             "port": ssh_port,
-            "user": "developer"
+            "user": "developer",
+            # The host interface Docker publishes this agent's SSH port on
+            # ("0.0.0.0" = every interface; None when unknown).
+            "bind_address": decision.bind_address,
         },
         "expires_at": expires_at.isoformat() + "Z",
         "expires_in_hours": ttl_hours,
+        # Always a list (possibly empty): a conditional key is easy to miss
+        # through the MCP passthrough. Repeated in `instructions` so a client
+        # that only prints those still sees them.
+        "warnings": list(decision.warnings),
         "instructions": [
             f"Connect: {ssh_command}",
-            f"Key expires in {ttl_hours} hours"
+            f"Key expires in {ttl_hours} hours",
+            *decision.warnings,
         ]
     }

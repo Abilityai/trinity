@@ -478,7 +478,7 @@ cursor.execute("""
 | Create fails | 400 | Alert: "Failed to create API key" |
 | Key not found | 404 | Toast: "MCP API key not found" |
 | Not authorized | 401 | Redirect to login |
-| Server error | 500 | Alert: "Failed to [action] MCP API key: {error}" |
+| Server error | 500 | Create: Alert "Failed to create API key: Failed to create MCP API key ({ExceptionClass} — details in backend logs)". List and ensure-default answer "Failed to list MCP API keys (…)" / "Failed to ensure default MCP API key (…)" in the same shape |
 
 ---
 

@@ -134,10 +134,33 @@ describe('the header line', () => {
     expect(testid(w, 'channels-summary').text()).toBe('Restricted · 1 waiting · Reachable on Slack, public links')
   })
 
-  it('leaves out a channel whose check failed, rather than saying it is off', async () => {
+  it('names a channel whose check failed, rather than saying it is off', async () => {
     responses[`${U}/slack/channel`] = fail(500)
     const { w } = await render()
-    expect(testid(w, 'channels-summary').text()).toBe('Restricted · No one waiting · Reachable on public links')
+    expect(testid(w, 'channels-summary').text()).toBe("Restricted · No one waiting · Reachable on public links · Couldn't check Slack")
+  })
+
+  // #4310 review: Slack's check failed and nothing else is connected. The
+  // header must not say "Not reachable anywhere yet" about a state it doesn't know.
+  it('never says "not reachable" while a check has failed', async () => {
+    responses[`${U}/slack/channel`] = fail(500)
+    responses[`${U}/public-links`] = []
+    const { w } = await render()
+    const line = testid(w, 'channels-summary').text()
+    expect(line).toBe("Restricted · No one waiting · Couldn't check Slack")
+    expect(line).not.toContain('Not reachable')
+  })
+
+  it('says nothing about reachability until every surface has answered', async () => {
+    let release
+    const pending = new Promise((resolve) => { release = () => resolve({ data: { bound: false } }) })
+    api.get.mockImplementation((url) => (url === `${U}/slack/channel` ? pending : answer(url)))
+    responses[`${U}/public-links`] = []
+    const { w } = await render()
+    expect(testid(w, 'channels-summary').text()).toBe('Restricted · No one waiting')
+    release()
+    await flushPromises()
+    expect(testid(w, 'channels-summary').text()).toBe('Restricted · No one waiting · Not reachable anywhere yet')
   })
 
   it('leaves out the policy and the count when they failed', async () => {
@@ -221,11 +244,11 @@ describe('who can chat', () => {
   })
 
   it('choosing a mode saves it', async () => {
-    ax.put.mockResolvedValue({ data: { require_email: true, open_access: true } })
+    api.put.mockResolvedValue({ data: { require_email: true, open_access: true } })
     const { w } = await render()
     await testid(w, 'channels-policy').findAll('button').find((b) => b.text() === 'Open').trigger('click')
     await flushPromises()
-    expect(ax.put.mock.calls[0].slice(0, 2)).toEqual([`${U}/access-policy`, { require_email: true, open_access: true }])
+    expect(api.put.mock.calls[0].slice(0, 2)).toEqual([`${U}/access-policy`, { require_email: true, open_access: true }])
     expect(testid(w, 'channels-summary').text()).toContain('Open')
   })
 })
@@ -248,7 +271,7 @@ describe('how it speaks outside', () => {
   })
 
   it('shows the platform default, changes the model in a dialog, and saves once', async () => {
-    ax.put.mockResolvedValue({ data: { public_channel_model: 'model-b', is_overridden: true } })
+    api.put.mockResolvedValue({ data: { public_channel_model: 'model-b', is_overridden: true } })
     const { w } = await render()
     expect(testid(w, 'channels-model-value').text()).toBe('Platform default (model-a)')
     await testid(w, 'channels-model-change').trigger('click')
@@ -256,13 +279,13 @@ describe('how it speaks outside', () => {
     await body().find('#channels-model-select').setValue('model-b')
     await body().find('[data-testid="channels-model-save"]').trigger('click')
     await flushPromises()
-    expect(ax.put.mock.calls[0].slice(0, 2)).toEqual([`${U}/public-channel-model`, { model: 'model-b' }])
+    expect(api.put.mock.calls[0].slice(0, 2)).toEqual([`${U}/public-channel-model`, { model: 'model-b' }])
     expect(testid(w, 'channels-model-value').text()).toBe('model-b')
     expect(document.body.querySelector('[role="dialog"]')).toBeNull()
   })
 
   it('a refused model save keeps the dialog and the old value', async () => {
-    ax.put.mockRejectedValue(Object.assign(fail(400), { response: { status: 400, data: { detail: 'No.' } } }))
+    api.put.mockRejectedValue(Object.assign(fail(400), { response: { status: 400, data: { detail: 'No.' } } }))
     const { w } = await render()
     await testid(w, 'channels-model-change').trigger('click')
     await flushPromises()
@@ -350,6 +373,10 @@ describe('the pure rules', () => {
 
   it('builds the header from what is known', () => {
     expect(paneSummary({})).toBe('')
-    expect(paneSummary({ mode: 'open', pending: 0, reachable: [] })).toBe('Open · No one waiting · Not reachable anywhere yet')
+    expect(paneSummary({ mode: 'open', pending: 0, surfaces: { Slack: false, Telegram: false } })).toBe('Open · No one waiting · Not reachable anywhere yet')
+    expect(paneSummary({ mode: 'open', pending: 0, surfaces: { Slack: null, Telegram: false } })).toBe("Open · No one waiting · Couldn't check Slack")
+    expect(paneSummary({ mode: 'open', pending: 0, surfaces: { Slack: undefined, Telegram: true } })).toBe('Open · No one waiting')
+    expect(paneSummary({ mode: 'open', pending: 0, surfaces: { Slack: true, Telegram: null } })).toBe("Open · No one waiting · Reachable on Slack · Couldn't check Telegram")
+    expect(paneSummary({ mode: 'open', pending: 0, surfaces: {} })).toBe('Open · No one waiting')
   })
 })

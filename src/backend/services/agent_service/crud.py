@@ -52,14 +52,17 @@ from services import git_service
 from services.settings_service import get_anthropic_api_key, resolve_github_pat, resolve_github_pat_candidates, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email, get_ephemeral_agent_quota, get_ephemeral_ttl_ceiling_seconds
 from services.entitlement_service import entitlement_service
 from services import rate_limiter
+from services import template_source_policy
 from . import ephemeral as ephemeral_service
-from services.github_service import GitHubService, GitHubError
+from services.github_service import GitHubService, GitHubError, github_error_words
 from services.agent_auth import derive_agent_token
 from utils.helpers import parse_iso_timestamp, sanitize_agent_name, to_utc_iso, utc_now_iso
 from utils.safe_yaml import HardenedYamlError, load_template_yaml
+from utils import avatar_paths
+from utils.log_masking import masked_traceback
 from .fork_to_own import (
     SAVED_TOKEN_TIERS, fork_pat_required, fork_template_to_own_repo, saved_token_message,
-    saved_token_not_for_agents,
+    saved_token_needs_a_session,
 )
 from . import snapshot_import
 from .helpers import validate_base_image, is_claude_runtime, validate_runtime
@@ -72,6 +75,11 @@ from .capabilities import (
     normalize_cpu,
     normalize_memory,
 )
+from services.agent_ssh_binding import (
+    AgentSshBindAddressError,
+    agent_ssh_port_binding,
+    raise_for_ssh_bind_failure,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +87,7 @@ logger = logging.getLogger(__name__)
 # block path traversal (`..`, `/`, `\`, leading dots) so the templates
 # directory join in `create_agent_internal` can't escape into arbitrary
 # filesystem reads (CodeQL py/path-injection on #950 PR).
-_LOCAL_TEMPLATE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
+_LOCAL_TEMPLATE_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*\Z")
 
 # Allowed chars in a template-declared credential-file path. Unlike
 # `_LOCAL_TEMPLATE_NAME_RE` this is a *relative path*, so `/` is permitted —
@@ -270,6 +278,52 @@ def _safe_cred_file_path(relative_path: str, root: Path) -> Path:
     return candidate
 
 
+#: Where `_stage_config_files` writes an agent's config, its credentials file
+#: and its template-generated credential files before they are bind-mounted.
+#: Read at call time, so a test can point it at a temporary directory.
+_STAGING_ROOT = "/tmp"
+
+
+def _staging_path(filename: str) -> Path:
+    """`_STAGING_ROOT/<filename>`, proven to stay inside the staging root.
+
+    Every staging file name embeds the agent name, which is caller input and is
+    only sanitized when the caller does not pass `skip_name_sanitization`. The
+    barrier is the shape CodeQL's `py/path-injection` query recognises: the base
+    is normalised and given a trailing separator (so a sibling sharing its
+    prefix is outside it), the joined path is normalised and must start with it.
+    A NUL byte survives both, so it is refused by name.
+
+    A staging name is one path component (`agent-<name>` plus a separator-free
+    suffix), so a separator in it is refused too: `agent-x/../agent-victim-creds`
+    normalises to agent `victim`'s own staging directory, which is inside the
+    root, so containment alone would let one agent's name overwrite another's
+    files. No legitimate agent name carries one: `sanitize_agent_name` maps it
+    away, and Docker refuses it in the `agent-<name>` container name.
+
+    Raises `HTTPException(400)` with code `INVALID_AGENT_NAME`.
+    """
+    refusal = HTTPException(
+        status_code=400,
+        detail={
+            "error": (
+                "The agent name is not a plain name: it must be a single path "
+                "component, with no path separator or NUL byte."
+            ),
+            "code": "INVALID_AGENT_NAME",
+        },
+    )
+    if "\x00" in filename:
+        raise refusal
+    if os.sep in filename or (os.altsep and os.altsep in filename):
+        raise refusal
+    base = os.path.join(os.path.normpath(str(_STAGING_ROOT)), "")
+    fullpath = os.path.normpath(os.path.join(base, filename))
+    if not fullpath.startswith(base):
+        raise refusal
+    return Path(fullpath)
+
+
 def _fork_destination_in_use_message(destination: str, bound_agent: str, username: str) -> str:
     """409 detail for a destination repo already bound to an agent (#93).
 
@@ -368,6 +422,10 @@ class _TemplateResolution:
     # "copy" import intent. When set, `github_repo_for_agent` stays None by
     # design — the container gets NO GitHub env, no git-config row, no PAT.
     copy_snapshot: Optional["snapshot_import.SnapshotStaging"] = None
+    # ent#1173 (AC-2): bytes of a GitHub template's bundled avatar file (avatar.webp
+    # or avatar.png). None when no such file exists or fetch failed. Installed
+    # after `_register_agent` via `_install_bundled_avatar_bytes`.
+    bundled_avatar_bytes: Optional[bytes] = None
 
 
 @dataclass
@@ -483,6 +541,68 @@ def _apply_ephemeral_pregates(config: AgentConfig, current_user: User) -> Option
     return ephemeral_expires_at
 
 
+def leftover_workspace_volume_detail(name: str) -> str:
+    """The #1667 refusal text, shared by create's 409 and apply's dry-run
+    blocker (trinity-enterprise#984), so both say the same thing."""
+    volume = f"agent-{name}-workspace"
+    return (
+        f"Data volume '{volume}' already exists and no agent "
+        f"claims it, so its contents would silently become this "
+        f"agent's home directory. Refusing to adopt another agent's "
+        f"leftover data. Remove it (docker volume rm "
+        f"{volume}) or choose a different name. Only volumes this "
+        f"install labelled as its own are reclaimed automatically; one "
+        f"created before that label existed stays until it is removed by "
+        f"hand."  # #3214: the sweep never reclaims an unlabelled volume
+    )
+
+
+async def workspace_volume_exists(name: str) -> bool:
+    """Does `agent-<name>-workspace` exist? (#1667, trinity-enterprise#984)
+
+    `False` on NotFound, `True` when the volume exists, and RAISES on any
+    other error (including no Docker client).
+    """
+    if not docker_client:
+        raise RuntimeError("Docker is not available")
+    try:
+        await volume_get(f"agent-{name}-workspace")
+    except docker.errors.NotFound:
+        return False
+    return True
+
+
+@dataclass(frozen=True)
+class CreateVolumeRefusal:
+    """A volume create refuses to adopt for a name (`create_volume_refusal`)."""
+
+    kind: str    # e.g. "workspace_volume_leftover"; apply's blocker is `member_<kind>`
+    volume: str  # the Docker volume to remove
+    detail: str  # create's 409 text, also apply's blocker detail
+
+
+async def create_volume_refusal(name: str) -> Optional[CreateVolumeRefusal]:
+    """Does create refuse `name` over a leftover volume? None -> it proceeds.
+
+    The one answer both callers use, so they agree by construction
+    (trinity-enterprise#984): create's guard raises it as a 409
+    (`_guard_leftover_workspace_volume`), and apply's snapshot
+    (`system_service.read_apply_snapshot`) refuses the member before its dry
+    run can say `create`. A new create-time volume refusal goes HERE.
+
+    RAISES when it cannot answer (including no Docker client); each caller
+    picks its own policy: create proceeds, apply refuses with a retryable
+    read failure.
+    """
+    if await workspace_volume_exists(name):
+        return CreateVolumeRefusal(
+            kind="workspace_volume_leftover",
+            volume=f"agent-{name}-workspace",
+            detail=leftover_workspace_volume_detail(name),
+        )
+    return None
+
+
 async def _guard_leftover_workspace_volume(
     config: AgentConfig, adopt_existing_workspace: bool
 ) -> None:
@@ -495,29 +615,17 @@ async def _guard_leftover_workspace_volume(
         and not adopt_existing_workspace
         and docker_client
     ):
-        _workspace_vol = f"agent-{config.name}-workspace"
         try:
-            await volume_get(_workspace_vol)
-        except docker.errors.NotFound:
-            pass  # the normal path: no leftover, create it below
+            refusal = await create_volume_refusal(config.name)
         except Exception as e:  # noqa: BLE001 — a probe failure must not block creation
             logger.warning(
                 "[#1667] could not probe workspace volume %s (%s); proceeding",
-                _workspace_vol,
+                f"agent-{config.name}-workspace",
                 e,
             )
-        else:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"Data volume '{_workspace_vol}' already exists and no agent "
-                    f"claims it, so its contents would silently become this "
-                    f"agent's home directory. Refusing to adopt another agent's "
-                    f"leftover data. Remove it (docker volume rm "
-                    f"{_workspace_vol}) or choose a different name — unclaimed "
-                    f"agent volumes are also reclaimed automatically."
-                ),
-            )
+            return
+        if refusal is not None:
+            raise HTTPException(status_code=409, detail=refusal.detail)
 
 
 # ent#123: owner/repo charset guard. The repo path is interpolated into
@@ -1118,10 +1226,18 @@ async def _apply_fork_to_own(
     if config.fork_to_own.github_pat is not None:
         user_pat, token_source = config.fork_to_own.github_pat.get_secret_value(), "form"
     elif github_pat_tier in SAVED_TOKEN_TIERS and github_pat_for_agent:
-        # An agent key carries its owner's identity; the owner's saved token
-        # is the owner's to spend, not the agent's.
-        if getattr(current_user, "agent_name", None):
-            raise saved_token_not_for_agents()
+        # This arm makes the creator's saved personal token the new agent's
+        # own, a credential bind, so it takes the INTERACTIVE rule
+        # (requirements/auth.md §2.8; trinity-enterprise#719): a signed-in
+        # session only, the predicate and loopback refusal of
+        # `require_interactive`. A key carries its owner's identity, and the
+        # saved token stays the owner's to spend.
+        from dependencies import is_interactive_principal
+
+        if not is_interactive_principal(current_user) or getattr(
+            current_user, "vouched_source_agent", None
+        ):
+            raise saved_token_needs_a_session()
         user_pat, token_source = github_pat_for_agent, "saved"
     else:
         raise fork_pat_required()
@@ -1349,12 +1465,18 @@ async def _validate_github_access(
                         ),
                     )
                 if outcome != "ok":
+                    logger.warning(
+                        "GitHub repository access check failed for %s (git "
+                        "transport: %s): %s", github_repo_for_agent, outcome,
+                        masked_traceback(e, github_pat_for_agent),
+                    )
                     raise HTTPException(
                         status_code=502,
                         detail=(
-                            f"Failed to validate GitHub repository access: {e} "
-                            f"(the git transport could not confirm read access "
-                            f"to '{github_repo_for_agent}' either)."
+                            f"Failed to validate GitHub repository access "
+                            f"({github_error_words(type(e), getattr(e, 'status', None))}); "
+                            f"the git transport could not confirm read access to "
+                            f"'{github_repo_for_agent}' either."
                         ),
                     )
                 logger.info(
@@ -1402,9 +1524,18 @@ async def _validate_github_access(
     except HTTPException:
         raise
     except GitHubError as e:
+        # abilityai/trinity#4284: a network error's text is httpx's, which
+        # echoes a header-unsafe token. The log keeps it, masked.
+        logger.warning(
+            "GitHub repository access check failed for %s: %s",
+            github_repo_for_agent, masked_traceback(e, github_pat_for_agent),
+        )
         raise HTTPException(
             status_code=502,
-            detail=f"Failed to validate GitHub repository access: {e}"
+            detail=(
+                f"Failed to validate GitHub repository access "
+                f"({github_error_words(type(e), getattr(e, 'status', None))})"
+            ),
         )
     except Exception as e:
         # Log but don't block creation for transient network errors
@@ -1953,6 +2084,24 @@ async def _resolve_template(
             tr.git_instance_id, tr.git_working_branch = await _reserve_git_instance(
                 config, current_user, tr.github_repo_for_agent
             )
+            # ent#1173 (AC-2): try to fetch a bundled avatar from the template
+            # repo. Best-effort — a missing file or fetch failure does not
+            # block creation; the agent gets an AI-generated avatar later.
+            if not config.ephemeral:
+                for _avatar_fname in _BUNDLED_AVATAR_NAMES:
+                    try:
+                        _avatar_bytes = await asyncio.to_thread(
+                            _fetch_github_file_bytes, tr.github_repo_for_agent,
+                            tr.github_pat_for_agent, url_branch, _avatar_fname,
+                            _BUNDLED_AVATAR_MAX_BYTES,
+                        )
+                    except Exception as _e:
+                        logger.debug("[AVATAR-003] could not fetch %s from %s: %s",
+                                     _avatar_fname, tr.github_repo_for_agent, _e)
+                        _avatar_bytes = None
+                    if _avatar_bytes:
+                        tr.bundled_avatar_bytes = _avatar_bytes
+                        break
         elif config.template.startswith("local:"):
             tr.template_data, tr.template_shared_folders = _resolve_local_template(config)
             # Same normalizer as the `github:` branch above — symmetric by
@@ -2013,7 +2162,10 @@ def _stage_config_files(
                 },
             )
 
-    cred_files_dir = Path(f"/tmp/agent-{config.name}-creds")
+    # All three are proven inside the staging root before the first write.
+    cred_files_dir = _staging_path(f"agent-{config.name}-creds")
+    config_path = _staging_path(f"agent-{config.name}.yaml")
+    credentials_path = _staging_path(f"agent-{config.name}-credentials.json")
     cred_files_dir.mkdir(exist_ok=True)
 
     # Write template-generated files (.env, .mcp.json, etc.)
@@ -2034,11 +2186,9 @@ def _stage_config_files(
         }
     }
 
-    config_path = Path(f"/tmp/agent-{config.name}.yaml")
     with open(config_path, "w") as f:
         yaml.dump(agent_config, f)
 
-    credentials_path = Path(f"/tmp/agent-{config.name}-credentials.json")
     with open(credentials_path, "w") as f:
         json.dump({}, f)  # CRED-002: Empty credentials, injected after creation
 
@@ -2109,7 +2259,9 @@ def _build_base_env(config: AgentConfig) -> dict:
         'AGENT_NAME': config.name,
         'CREDENTIALS_FILE': '/config/credentials.json',
         'ANTHROPIC_API_KEY': get_anthropic_api_key(),
-        'ENABLE_SSH': 'true',
+        # trinity-enterprise#1168: no sshd until an admin asks for one — the
+        # grant endpoint starts it on demand (ssh_service.ensure_sshd_running).
+        'ENABLE_SSH': 'false',
         'ENABLE_AGENT_UI': 'true',
         'AGENT_SERVER_PORT': '8000',
         'TEMPLATE_NAME': config.template if config.template else '',
@@ -2574,41 +2726,55 @@ async def _create_agent_container(
         # (durable or ephemeral), pairing with the DB columns.
         container_labels['trinity.spawned-by'] = current_user.agent_name
 
-    return await containers_run(
-        config.base_image,
-        detach=True,
-        name=f"agent-{config.name}",
-        ports={'22/tcp': config.port},
-        volumes=volumes,
-        environment=env_vars,
-        labels=container_labels,
-        # Always apply AppArmor for additional sandboxing
-        security_opt=['apparmor:docker-default'],
-        # Always drop ALL capabilities first (defense in depth)
-        cap_drop=['ALL'],
-        # Add back only the capabilities needed for the mode
-        cap_add=FULL_CAPABILITIES if full_capabilities else RESTRICTED_CAPABILITIES,
-        read_only=False,
-        # Always apply noexec,nosuid to /tmp for security (#1098: scratch
-        # is redirected off this tiny tmpfs via the TMPDIR env var).
-        tmpfs=AGENT_TMPFS_MOUNT,
-        # #1871: bound the container's json-file log. Docker's default is
-        # unbounded, so without this the log grows until the Docker data root
-        # fills and dockerd wedges. Creation-time — see AGENT_LOG_CONFIG.
-        log_config=AGENT_LOG_CONFIG,
-        # #2541: born `unless-stopped` so the agent survives a host reboot or a
-        # daemon restart. Docker's default is `no` — 8 of 19 agents stayed dead
-        # ~42h after the 2026-09-04 power-off. Creation-time, like log_config.
-        restart_policy=AGENT_RESTART_POLICY,
-        network='trinity-agent-network',
-        # #1197: cpu/memory normalized + validated above (raises 400 on
-        # a bad template value), so these are guaranteed Docker-valid.
-        mem_limit=config.resources['memory'],
-        # #1126: nano_cpus (Linux CFS quota), NOT cpu_count — the latter
-        # is Windows-only in docker-py and left NanoCpus=0, so newly
-        # created agents never got a CPU limit on Linux.
-        nano_cpus=int(config.resources['cpu']) * 1_000_000_000,
-    )
+    try:
+        return await containers_run(
+            config.base_image,
+            detach=True,
+            name=f"agent-{config.name}",
+            # trinity-enterprise#1168: published on AGENT_SSH_BIND_ADDRESS
+            # (loopback by default), never a bare int (= every interface).
+            ports=agent_ssh_port_binding(config.port),
+            volumes=volumes,
+            environment=env_vars,
+            labels=container_labels,
+            # Always apply AppArmor for additional sandboxing
+            security_opt=['apparmor:docker-default'],
+            # Always drop ALL capabilities first (defense in depth)
+            cap_drop=['ALL'],
+            # Add back only the capabilities needed for the mode
+            cap_add=FULL_CAPABILITIES if full_capabilities else RESTRICTED_CAPABILITIES,
+            read_only=False,
+            # Always apply noexec,nosuid to /tmp for security (#1098: scratch
+            # is redirected off this tiny tmpfs via the TMPDIR env var).
+            tmpfs=AGENT_TMPFS_MOUNT,
+            # #1871: bound the container's json-file log. Docker's default is
+            # unbounded, so without this the log grows until the Docker data root
+            # fills and dockerd wedges. Creation-time — see AGENT_LOG_CONFIG.
+            log_config=AGENT_LOG_CONFIG,
+            # #2541: born `unless-stopped` so the agent survives a host reboot or a
+            # daemon restart. Docker's default is `no` — 8 of 19 agents stayed dead
+            # ~42h after the 2026-09-04 power-off. Creation-time, like log_config.
+            restart_policy=AGENT_RESTART_POLICY,
+            network='trinity-agent-network',
+            # #1197: cpu/memory normalized + validated above (raises 400 on
+            # a bad template value), so these are guaranteed Docker-valid.
+            mem_limit=config.resources['memory'],
+            # #1126: nano_cpus (Linux CFS quota), NOT cpu_count — the latter
+            # is Windows-only in docker-py and left NanoCpus=0, so newly
+            # created agents never got a CPU limit on Linux.
+            nano_cpus=int(config.resources['cpu']) * 1_000_000_000,
+        )
+    except Exception as exc:  # noqa: BLE001 — classified, then re-raised unchanged
+        # trinity-enterprise#1168: Docker's "cannot assign requested address"
+        # never names the knob that caused it. Only that one text is wrapped
+        # (as a 400 naming AGENT_SSH_BIND_ADDRESS); everything else re-raises
+        # as-is so the bind-conflict / name-conflict classifiers downstream
+        # see the original exception.
+        try:
+            raise_for_ssh_bind_failure(exc)
+        except AgentSshBindAddressError as named:
+            raise HTTPException(status_code=400, detail=str(named)) from exc
+        raise
 
 
 async def _broadcast_agent_created(agent_status: AgentStatus, ws_manager) -> None:
@@ -2633,7 +2799,6 @@ async def _broadcast_agent_created(agent_status: AgentStatus, ws_manager) -> Non
 
 _BUNDLED_AVATAR_NAMES = ("avatar.webp", "avatar.png")
 _BUNDLED_AVATAR_MAX_BYTES = 2 * 1024 * 1024
-_AVATAR_DIR = Path("/data/avatars")  # routers/avatar.py AVATAR_DIR
 
 
 def _install_bundled_avatar(config: AgentConfig) -> None:
@@ -2649,13 +2814,13 @@ def _install_bundled_avatar(config: AgentConfig) -> None:
         return
     # Both paths come from request fields. `_resolve_local_template_dir` and
     # agent-name validation already contain them, but CodeQL's
-    # `py/path-injection` can't follow those callees — so each final path is
-    # normalized and prefix-checked right here (the `routers/avatar.py
-    # _avatar_path` barrier), as plain strings with no Path rebuild after it.
+    # `py/path-injection` can't follow those callees — so the destination goes
+    # through the avatar store's own barrier (`utils.avatar_paths`), and the
+    # source is normalized and prefix-checked right here, as a plain string
+    # with no Path rebuild after it.
     template_roots = tuple(os.path.join(str(r.resolve()), "") for r in _LOCAL_TEMPLATE_ROOTS)
-    avatar_root = os.path.join(str(_AVATAR_DIR), "")
-    dest = os.path.normpath(os.path.join(avatar_root, f"{config.name}.webp"))
-    if not dest.startswith(avatar_root):
+    dest = avatar_paths.avatar_path_or_none(config.name, ".webp")
+    if dest is None:
         return
     template_dir = str(_resolve_local_template_dir(config.template[6:]))
     for filename in _BUNDLED_AVATAR_NAMES:
@@ -2673,11 +2838,68 @@ def _install_bundled_avatar(config: AgentConfig) -> None:
         with Image.open(io.BytesIO(data)) as img:
             if img.width * img.height > 4096 * 4096:
                 raise ValueError(f"bundled avatar is {img.width}x{img.height}, max 4096x4096")
-        os.makedirs(avatar_root, exist_ok=True)
+        avatar_paths.ensure_avatar_store()
         with open(dest, "wb") as f:
             f.write(optimize_avatar(data))
         logger.info(f"[AVATAR-003] Installed bundled avatar from {config.template} for {config.name}")
         return
+
+
+def _fetch_github_file_bytes(
+    repo: str, pat: Optional[str], ref: Optional[str], filename: str, max_bytes: int
+) -> Optional[bytes]:
+    """ent#1173 (AC-2): Fetch raw bytes of a file from a GitHub repo via the
+    contents API.  Returns None on 404 or any error. Only a 200 with valid
+    base64 content returns bytes; everything else is None (best-effort caller).
+    """
+    import base64 as _base64
+    import httpx as _httpx
+    try:
+        headers = {"Accept": "application/vnd.github+json"}
+        if pat:
+            headers["Authorization"] = f"Bearer {pat}"
+        with _httpx.Client(timeout=10.0) as client:
+            resp = client.get(
+                f"https://api.github.com/repos/{repo}/contents/{filename}",
+                headers=headers,
+                params={"ref": ref} if ref else None,
+            )
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        raw = _base64.b64decode(data["content"])
+        if len(raw) > max_bytes:
+            logger.debug("[AVATAR-003] bundled avatar %s/%s is %d bytes (max %d); skipping",
+                         repo, filename, len(raw), max_bytes)
+            return None
+        return raw
+    except Exception as e:
+        logger.debug("[AVATAR-003] could not fetch %s from %s: %s", filename, repo, e)
+        return None
+
+
+def _install_bundled_avatar_bytes(agent_name: str, data: bytes) -> None:
+    """ent#1173 (AC-2): install a GitHub template's bundled avatar from raw bytes.
+
+    Unlike the `local:` path (which reads from a filesystem path), the GitHub
+    path delivers raw bytes fetched from the API. Same size/pixel caps as the
+    local version. Stored as a default avatar (is_default_avatar=1) so
+    Settings → Generate Default Avatars can still overwrite it.
+    """
+    import io as _io
+    from PIL import Image
+    from utils.image_optimize import optimize_avatar
+
+    dest = avatar_paths.avatar_path_or_none(agent_name, ".webp")
+    if dest is None:
+        return
+    with Image.open(_io.BytesIO(data)) as img:
+        if img.width * img.height > 4096 * 4096:
+            raise ValueError(f"bundled avatar is {img.width}x{img.height}, max 4096x4096")
+    avatar_paths.ensure_avatar_store()
+    with open(dest, "wb") as f:
+        f.write(optimize_avatar(data))
+    logger.info(f"[AVATAR-003] Installed GitHub bundled avatar for {agent_name}")
 
 
 def _register_agent(
@@ -3661,6 +3883,11 @@ async def create_agent_internal(
     if not config.name:
         raise HTTPException(status_code=400, detail="Invalid agent name - must contain at least one alphanumeric character")
 
+    # trinity-enterprise#591: the template-source bound — the choke point every
+    # creation path shares (fork, copy, clone, system-deploy members). Before the
+    # ghost pre-gates, which spend a per-parent spawn-rate token.
+    await template_source_policy.enforce(request, current_user, config)
+
     # trinity-enterprise#69: ephemeral "ghost" pre-gates. All BEFORE any side
     # effect (no partial state on refusal). Mutates config.name to the suffixed
     # ghost name; returns the stamped expiry (None for a durable agent).
@@ -3871,6 +4098,14 @@ async def create_agent_internal(
                 ephemeral_expires_at,
                 auto_assigned_subscription_id,
             )
+            # ent#1173 (AC-2): install a GitHub template's bundled avatar bytes
+            # (fetched during _resolve_template). Best-effort — the agent is
+            # already registered and fully functional without an avatar.
+            if tr.bundled_avatar_bytes and not config.ephemeral:
+                try:
+                    _install_bundled_avatar_bytes(config.name, tr.bundled_avatar_bytes)
+                except Exception as _e:
+                    logger.warning(f"[AVATAR-003] Failed to install GitHub avatar for {config.name}: {_e}")
             await _materialize_agent_files(
                 config,
                 tr.template_data,

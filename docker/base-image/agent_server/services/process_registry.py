@@ -12,6 +12,7 @@ import subprocess
 import asyncio
 import logging
 import time
+import traceback
 from datetime import datetime
 from typing import Dict, Optional, List, AsyncIterator
 from threading import Lock
@@ -20,6 +21,7 @@ from ..utils.subprocess_pgroup import (
     signal_process_tree as _signal_process_tree,
 )
 from ..utils.orphan_sweep import kill_cgroup_orphans
+from ..utils.credential_sanitizer import redact_url_userinfo, sanitize_text
 
 logger = logging.getLogger(__name__)
 
@@ -418,8 +420,14 @@ class ProcessRegistry:
             return {"success": True, "returncode": returncode}
 
         except Exception as e:
-            logger.error(f"[ProcessRegistry] Error terminating {execution_id}: {e}")
-            return {"success": False, "reason": "error", "error": str(e)}
+            # abilityai/trinity#4284: the terminate route answers this "error"
+            # as its 500 detail, so it names the class; the text is logged.
+            logger.error(
+                "[ProcessRegistry] Error terminating %s: %s", execution_id,
+                sanitize_text(redact_url_userinfo("".join(traceback.format_exception(e)))),
+            )
+            return {"success": False, "reason": "error",
+                    "error": f"Termination failed: {type(e).__name__}"}
 
     def get_status(self, execution_id: str) -> Optional[dict]:
         """

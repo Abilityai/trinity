@@ -48,7 +48,7 @@ It's a single per-agent switch under **Who can chat** in **Settings › Channels
 
 ## What's the difference between sharing an agent and creating a public link?
 
-Sharing grants a Trinity account holder interact access through the logged-in UI. A public link is a shareable URL that lets anyone chat with the agent without logging in. Whether it asks for a verified email comes from the agent's access policy, not the link; a link itself carries only an optional name and expiry. Public-link conversations persist across page refreshes, and logged-in Trinity users get a history dropdown to read their past sessions. Create links under **Sharing** → **Distribution** → **Public links** on the agent detail page. See [Public Links](../sharing-and-access/public-links.md).
+Sharing grants a Trinity account holder interact access through the logged-in UI. A public link is a shareable URL that lets anyone chat with the agent without logging in. Whether it asks for a verified email comes from the agent's access policy, not the link; a link itself carries only an optional name and expiry. Public-link conversations persist across page refreshes, and logged-in Trinity users get a history dropdown to read their past sessions. Create links under **Channels** → **Distribution** → **Public links** on the agent detail page. See [Public Links](../sharing-and-access/public-links.md).
 
 ## Can I connect a public link to Slack?
 
@@ -88,7 +88,7 @@ A date and time, or none. In the **Create Public Link** dialog the **Expiration 
 
 ## What's the difference between a public link, sharing, and the Workspace?
 
-Three ways to give someone access, for three audiences. A **public link** is a single anonymous chat URL for one agent — no sign-in, no saved history, one agent per link. **Sharing** gives another Trinity operator interact-level access to an agent through the logged-in admin UI. The **Workspace** is a signed-in app where a named external client verifies their email, picks among the agents shared with them, holds multiple saved conversations that keep their memory between turns, reads each agent's Info tab and the reports addressed to them, and exchanges files — a client workspace, not an anonymous URL and not the operator UI. Both it and the multi-agent rooms within it ship in every build. See [Workspace](../sharing-and-access/workspace.md).
+Three ways to give someone access, for three audiences. A **public link** is a single anonymous chat URL for one agent — no sign-in, no saved history, one agent per link. **Channels** gives another Trinity operator interact-level access to an agent through the logged-in admin UI. The **Workspace** is a signed-in app where a named external client verifies their email, picks among the agents shared with them, holds multiple saved conversations that keep their memory between turns, reads each agent's Info tab and the reports addressed to them, and exchanges files — a client workspace, not an anonymous URL and not the operator UI. Both it and the multi-agent rooms within it ship in every build. See [Workspace](../sharing-and-access/workspace.md).
 
 ## How long does a client stay signed in to the Workspace?
 

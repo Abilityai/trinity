@@ -530,6 +530,16 @@ export const useAgentsStore = defineStore('agents', {
 
     // #17 Access tab: operator (Trinity-user) roster — allow-list emails resolved
     // against `users` (active operator vs pending invite).
+    // trinity-enterprise#450: accounts to suggest in the Access tab's add field.
+    async getAccessCandidates(name, query) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/access/candidates`, {
+        params: { q: query },
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
     async getAgentAccess(name) {
       const authStore = useAuthStore()
       const response = await axios.get(`/api/agents/${name}/access`, {
@@ -592,6 +602,17 @@ export const useAgentsStore = defineStore('agents', {
     async getAgentPeerSkills(name) {
       const authStore = useAuthStore()
       const response = await axios.get(`/api/agents/${name}/peer-skills`, {
+        headers: authStore.authHeader
+      })
+      return response.data
+    },
+
+    // abilityai/trinity-enterprise#925: does the agent hold peer skill grants
+    // inside itself? `{ reachable, hook }` — both null unless the caller may
+    // manage the agent's skills.
+    async getAgentPeerSkillEnforcement(name) {
+      const authStore = useAuthStore()
+      const response = await axios.get(`/api/agents/${name}/peer-skills/enforcement`, {
         headers: authStore.authHeader
       })
       return response.data

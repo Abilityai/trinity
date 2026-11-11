@@ -159,6 +159,42 @@ one of these before putting an instance on a public address:
 Plain HTTP on a public IPv4 with none of the above is the one combination to
 avoid: credentials and JWTs cross the network in the clear.
 
+### Firewall: Docker publishes past ufw
+
+A host firewall does not cover ports Docker publishes. Docker inserts its own
+iptables rules ahead of ufw's `INPUT` chain, so `ufw default deny incoming`
+with `22`, `80` and `443` allowed still leaves every published container port
+— the backend's 8000, the MCP server's 8080, Vector's 8686 and each agent's SSH
+port in 2222–2262 — answering on the public interface. The hook Docker honours
+is the `DOCKER-USER` chain.
+
+On a hand-installed VM (anything that did not run `start.sh --provision`) do
+one of these:
+
+1. **Run the firewall script Trinity ships** (recommended; it is what
+   `--provision` installs):
+
+   ```bash
+   sudo ./scripts/deploy/docker-firewall.sh
+   ```
+
+   It fills `DOCKER-USER` with a `TRINITY-FW` chain that lets established
+   traffic and the Docker bridges through and drops everything else arriving at
+   a container from outside, with no per-port list to keep in step with the
+   compose files. Re-run it after a Docker reinstall.
+
+2. **Or keep the exposure off the interface in the first place.** Agent SSH
+   ports are published on `127.0.0.1` unless you set `AGENT_SSH_BIND_ADDRESS`
+   in `.env` (a VPN interface IP, or `0.0.0.0` for every interface); the MCP
+   server's 8080 follows `MCP_BIND_ADDRESS` the same way. This is defense in
+   depth, not a substitute for (1): Docker engines before the loopback-DNAT fix
+   could reach a loopback publication from off-box via `route_localnet`, and a
+   specific interface IP must be assigned on the host at every container start.
+
+Agents created before this release still publish SSH on every interface until
+they are recreated; the SSH grant response names them, and the one-shot steps
+are in [`docs/migrations/AGENT_SSH_BIND_2026-11.md`](migrations/AGENT_SSH_BIND_2026-11.md).
+
 The webhook URLs and the auto-detected MCP URL Trinity shows take their scheme
 from the proxy's `X-Forwarded-Proto`: a proxy that sends `https` gets
 `https://<host>/api/webhooks/…` and `https://<host>/mcp`. A proxy that sends no
@@ -267,13 +303,10 @@ setting. The AMI is published in us-east-1 only.
 
 ## Configuration
 
-> **Database backend:** a hosted install (`start.sh --hosted`, every one-click
-> image) runs on the PostgreSQL service bundled in `docker-compose.hosted.yml`;
-> `start.sh --hosted` generates `POSTGRES_PASSWORD` and `DATABASE_URL` on a new
-> install and keeps an existing `trinity.db` install on SQLite (#3159, see
-> [SQLITE_TO_POSTGRES.md](migrations/SQLITE_TO_POSTGRES.md#hosted-installs-one-click-images-and-startsh---hosted)).
-> The dev and prod compose files default to SQLite; to run them on
-> **PostgreSQL**, see [POSTGRESQL_SETUP.md](POSTGRESQL_SETUP.md) (`DATABASE_URL`, #300).
+> **Database backend:** every compose file runs a bundled PostgreSQL service, and `start.sh`
+> generates `POSTGRES_PASSWORD`. Running compose directly, set it yourself. SQLite is refused at
+> boot (#4175): see [SQLITE_TO_POSTGRES.md](migrations/SQLITE_TO_POSTGRES.md) and
+> [POSTGRESQL_SETUP.md](POSTGRESQL_SETUP.md).
 
 ### Required Environment Variables
 
@@ -348,7 +381,7 @@ ADMIN_PASSWORD=your-secure-password
 │  Frontend (Vue.js)  │  Backend (FastAPI)  │  MCP Server     │
 │      Port 80        │     Port 8000       │    Port 8080    │
 ├─────────────────────────────────────────────────────────────┤
-│  Redis (secrets)    │  SQLite (data)      │  Vector (logs)  │
+│  Redis (secrets)    │  PostgreSQL (data)  │  Vector (logs)  │
 │   Internal only     │   /data volume      │    Port 8686    │
 ├─────────────────────────────────────────────────────────────┤
 │                    Agent Containers                          │
@@ -363,7 +396,7 @@ ADMIN_PASSWORD=your-secure-password
 
 | Data | Location | Backup Strategy |
 |------|----------|-----------------|
-| SQLite (users, agents) | `~/trinity-data/trinity.db` | Regular file backup |
+| PostgreSQL (users, agents) | `postgres-data` volume | Automatic `pg_dump` under `trinity-data/backups/` |
 | Redis (credentials) | Docker volume | Redis RDB snapshots |
 | Agent workspaces | Docker volumes | Per-agent backup |
 
@@ -373,9 +406,11 @@ ADMIN_PASSWORD=your-secure-password
 # Backup database
 ./scripts/deploy/backup-database.sh ./backups/
 
-# Restore from backup
+# Restore from backup (SQLite installs only)
 ./scripts/deploy/restore-database.sh ./backups/trinity_backup.db
 ```
+
+`restore-database.sh` restores a SQLite file and does not read `DATABASE_URL`. On a PostgreSQL install it writes a file the backend never reads. Restore PostgreSQL from the `pg_dump` under `trinity-data/backups/` with `pg_restore`.
 
 ## Troubleshooting
 
@@ -554,8 +589,15 @@ See `docs/drafts/OTEL_INTEGRATION.md` for full collector configuration and Grafa
    [Hardening a Marketplace Install](user-docs/guides/deploying/hardening.md).
    The TLS choices themselves are summarised under
    [TLS on a bare VM](#tls-on-a-bare-vm) above.
-3. **Never expose Redis externally** - Keep it internal only
-4. **Use strong SECRET_KEY** - Generate with `openssl rand -hex 32`
-5. **Use email whitelist** - Restrict access to approved email addresses only
-6. **Regular backups** - Automate database backups
-7. **Keep Docker updated** - Regular security patches
+3. **Firewall the container ports with `DOCKER-USER`, not ufw alone.** Docker
+   publishes past the host firewall; on a hand-installed VM run
+   `sudo ./scripts/deploy/docker-firewall.sh` (what `--provision` does for you).
+   Agent SSH ports are published on `127.0.0.1` by default
+   (`AGENT_SSH_BIND_ADDRESS`); agents created before that default existed keep
+   publishing on every interface until recreated — see
+   [Firewall: Docker publishes past ufw](#firewall-docker-publishes-past-ufw).
+4. **Never expose Redis externally** - Keep it internal only
+5. **Use strong SECRET_KEY** - Generate with `openssl rand -hex 32`
+6. **Use email whitelist** - Restrict access to approved email addresses only
+7. **Regular backups** - Automate database backups
+8. **Keep Docker updated** - Regular security patches

@@ -112,7 +112,10 @@ async def _validate_twilio_credentials(account_sid: str, auth_token: str) -> dic
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.get(url, auth=(account_sid, auth_token))
     except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"Could not reach Twilio API: {e}")
+        # #4284: the transport error goes to the log, never the body. The
+        # AuthToken travels as basic auth, never in the URL, so it is not in it.
+        logger.warning("Twilio credential check could not reach the Twilio API", exc_info=True)
+        raise HTTPException(status_code=502, detail=f"Could not reach Twilio API ({e.__class__.__name__} — details in backend logs)")
 
     if resp.status_code == 401:
         raise HTTPException(status_code=400, detail="Invalid Twilio credentials (AccountSid or AuthToken)")

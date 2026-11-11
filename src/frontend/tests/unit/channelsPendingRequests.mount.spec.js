@@ -54,14 +54,13 @@ beforeEach(() => {
   setActivePinia(createPinia())
   Object.values(ax).forEach((f) => f.mockReset())
   Object.values(api).forEach((f) => f.mockReset())
-  ax.get.mockImplementation((url) => {
+  api.get.mockImplementation((url) => {
     if (url.endsWith('/access-requests')) return Promise.resolve({ data: [CAROL(), HANDLE_ONLY(), WEB(), OLD()] })
     if (url.endsWith('/access-policy')) return Promise.resolve({ data: { require_email: true, open_access: false, group_auth_mode: 'none' } })
     if (url.endsWith('/clients')) return Promise.resolve({ data: [] })
     return Promise.resolve({ data: {} })
   })
-  ax.post.mockResolvedValue({ data: {} })
-  api.get.mockResolvedValue({ data: {} })
+  api.post.mockResolvedValue({ data: {} })
 })
 
 async function render() {
@@ -112,6 +111,6 @@ describe('pending access requests name the person (ent#737)', () => {
     const w = await render()
     await row(w, 'r1').findAll('button').find((b) => b.text() === 'Approve').trigger('click')
     await flushPromises()
-    expect(ax.post).toHaveBeenCalledWith(`/api/agents/${AGENT}/access-requests/r1/decide`, { approve: true }, expect.anything())
+    expect(api.post).toHaveBeenCalledWith(`/api/agents/${AGENT}/access-requests/r1/decide`, { approve: true })
   })
 })

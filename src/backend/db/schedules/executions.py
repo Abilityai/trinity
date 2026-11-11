@@ -209,11 +209,37 @@ class ScheduleExecutionsMixin:
             ).scalar()
         return int(value or 0)
 
+    def get_deepest_running_chain_row(self, agent_name: str) -> Optional[Dict]:
+        """The RUNNING row of `agent_name` that `get_max_running_chain_depth` reads (#4357).
+
+        Read only when a hop is refused, so the refusal can name the execution
+        that exhausted the depth. Roots (NULL depth) are skipped — PostgreSQL
+        sorts NULLs first in DESC — and only the four columns the refusal
+        reports are read: never a person, a channel or message text. None when
+        no running row carries a depth.
+        """
+        c = schedule_executions.c
+        with get_engine().connect() as conn:
+            row = conn.execute(
+                select(c.id, c.chain_depth, c.triggered_by, c.source_agent_name)
+                .where(
+                    and_(
+                        c.agent_name == agent_name,
+                        c.status == TaskExecutionStatus.RUNNING,
+                        c.chain_depth.is_not(None),
+                    )
+                )
+                .order_by(c.chain_depth.desc().nulls_last())
+                .limit(1)
+            ).first()
+        return dict(row._mapping) if row is not None else None
+
     def get_running_turn_attribution(self, agent_name: str) -> List[Dict]:
         """Who each of `agent_name`'s RUNNING turns is for (trinity-enterprise#926).
 
-        The columns `turn_tier_service` rates a turn by, for every running
-        row — a Workspace turn by its channel and email. Like the chain-depth
+        The columns `turn_tier_service` rates a turn by (its `LEDGER_COLUMNS`),
+        for every running row — a Workspace turn by its channel and email, a
+        delegated turn by the agent that dispatched it. Like the chain-depth
         read, only `running` counts: every row is inserted RUNNING, so a turn
         whose process could be making a request is always here.
         """
@@ -226,6 +252,7 @@ class ScheduleExecutionsMixin:
                 schedule_executions.c.triggered_by,
                 schedule_executions.c.source_channel,
                 schedule_executions.c.source_user_email,
+                schedule_executions.c.source_agent_name,
             )
             .where(and_(
                 schedule_executions.c.agent_name == agent_name,
@@ -867,6 +894,21 @@ class ScheduleExecutionsMixin:
             row = conn.execute(stmt).first()
         return (row.agent_name, row.status) if row else None
 
+    def get_execution_requester(self, execution_id: str) -> Optional[tuple]:
+        """`(agent_name, status, source_agent_name, source_mcp_key_id)` of one
+        execution, or None — who a run is for, as the platform wrote it, for
+        the skill-gate hook's peer check (abilityai/trinity-enterprise#925).
+        Four columns, never the row's response or log."""
+        c = schedule_executions.c
+        stmt = select(c.agent_name, c.status, c.source_agent_name, c.source_mcp_key_id).where(
+            c.id == execution_id
+        )
+        with get_engine().connect() as conn:
+            row = conn.execute(stmt).first()
+        if not row:
+            return None
+        return (row.agent_name, row.status, row.source_agent_name, row.source_mcp_key_id)
+
     def get_execution_failure_stamp(self, execution_id: str) -> Optional[tuple]:
         """`(status, error, completed_at)` of one execution, or None (#3245).
 
@@ -1018,6 +1060,32 @@ class ScheduleExecutionsMixin:
                 select(schedule_executions.c.chat_session_id)
                 .where(schedule_executions.c.id == execution_id)
             ).scalar()
+
+    def stamp_model_used_if_null(self, execution_id: str, model: Optional[str]) -> bool:
+        """Record the resolved model on a row created elsewhere (ent#1202).
+
+        ``model_used`` is written at INSERT, and the standalone scheduler
+        pre-creates reminder, schedule and loop rows before it dispatches with
+        ``execution_id`` — so ``execute_task``'s own stamp (inside
+        ``if not execution_id:``) never runs for them and a turn that named no
+        model left the row NULL while it ran on the resolved one.
+
+        Guarded on ``model_used IS NULL``: it only ever FILLS a blank. A row
+        stamped at creation with an explicit model is never rewritten. Returns
+        whether the stamp landed.
+        """
+        if not execution_id or not model:
+            return False
+        stmt = (
+            update(schedule_executions)
+            .where(and_(
+                schedule_executions.c.id == execution_id,
+                schedule_executions.c.model_used.is_(None),
+            ))
+            .values(model_used=model)
+        )
+        with get_engine().begin() as conn:
+            return conn.execute(stmt).rowcount > 0
 
     def stamp_execution_channel_context(
         self,

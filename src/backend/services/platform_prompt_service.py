@@ -263,7 +263,7 @@ Your own memory directory is `memory/` at the repo root, committed with the repo
 
 `template.yaml` is not live: it is read when you are created, and after that only its metrics are re-read (on git pull, on start, or now with `mcp__trinity__refresh_metric_definitions`).
 
-__PATH_DENY_SENTENCE__
+__PATH_DENY_SENTENCE__ For a credential an agent on another Trinity needs, raise `ask_for_credential` with `destination.instance` (the platform uses that instance's stored key).
 
 ### Package Persistence
 

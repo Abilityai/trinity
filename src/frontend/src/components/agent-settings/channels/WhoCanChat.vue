@@ -98,8 +98,7 @@
 
 <script setup>
 import { computed, ref, watch } from 'vue'
-import axios from 'axios'
-import { useAuthStore } from '../../../stores/auth'
+import api from '../../../api'
 import { useNotification } from '../../../composables'
 import BaseBadge from '../../base/BaseBadge.vue'
 import BaseButton from '../../base/BaseButton.vue'
@@ -110,12 +109,15 @@ import SettingsSection from '../SettingsSection.vue'
 const props = defineProps({
   agentName: { type: String, required: true },
   shares: { type: Array, default: () => [] },
+  // Bumped by the pane when the roster approved a request (trinity-enterprise#21),
+  // so the pending list here follows without a reload.
+  refreshKey: { type: Number, default: 0 },
 })
-const emit = defineEmits(['agent-updated', 'summary'])
+// `requests-changed`: a pending request was decided here, so the roster re-reads.
+const emit = defineEmits(['agent-updated', 'summary', 'requests-changed'])
 
 const MODES = [{ id: 'restricted', label: 'Restricted' }, { id: 'open', label: 'Open' }]
 
-const authStore = useAuthStore()
 const { showNotification } = useNotification()
 
 const policy = ref({ require_email: false, open_access: false })
@@ -147,11 +149,14 @@ const report = () => emit('summary', {
 
 const loadPolicy = async () => {
   policyFailed.value = false
+  const name = props.agentName   // a late answer for the agent we left is dropped
   try {
-    const { data } = await axios.get(`/api/agents/${props.agentName}/access-policy`, { headers: authStore.authHeader })
+    const { data } = await api.get(`/api/agents/${name}/access-policy`)
+    if (name !== props.agentName) return
     policy.value = data
     policyLoaded.value = true
   } catch (err) {
+    if (name !== props.agentName) return
     console.error('Failed to load access policy:', err)
     policyLoaded.value = false
     policyFailed.value = true
@@ -164,7 +169,7 @@ const setAccessMode = async (mode) => {
   if (next.require_email === policy.value.require_email && next.open_access === policy.value.open_access) return
   policyLoading.value = true
   try {
-    const { data } = await axios.put(`/api/agents/${props.agentName}/access-policy`, next, { headers: authStore.authHeader })
+    const { data } = await api.put(`/api/agents/${props.agentName}/access-policy`, next)
     policy.value = data
     showNotification('Access policy updated', 'success')
   } catch (err) {
@@ -178,14 +183,14 @@ const setAccessMode = async (mode) => {
 
 const loadAccessRequests = async () => {
   requestsFailed.value = false
+  const name = props.agentName   // a late answer for the agent we left is dropped
   try {
-    const { data } = await axios.get(`/api/agents/${props.agentName}/access-requests`, {
-      headers: authStore.authHeader,
-      params: { status: 'pending' },
-    })
+    const { data } = await api.get(`/api/agents/${name}/access-requests`, { params: { status: 'pending' } })
+    if (name !== props.agentName) return
     pendingRequests.value = data
     requestsLoaded.value = true
   } catch (err) {
+    if (name !== props.agentName) return
     console.error('Failed to load access requests:', err)
     requestsLoaded.value = false
     requestsFailed.value = true
@@ -196,9 +201,10 @@ const loadAccessRequests = async () => {
 const decideRequest = async (req, approve) => {
   decisionLoading.value = req.id
   try {
-    await axios.post(`/api/agents/${props.agentName}/access-requests/${req.id}/decide`, { approve }, { headers: authStore.authHeader })
+    await api.post(`/api/agents/${props.agentName}/access-requests/${req.id}/decide`, { approve })
     showNotification(approve ? `Approved ${req.email}` : `Denied ${req.email}`, 'success')
     await loadAccessRequests()
+    emit('requests-changed')
     if (approve) emit('agent-updated')
   } catch (err) {
     console.error('Failed to decide request:', err)
@@ -230,9 +236,21 @@ const formatRequestedAt = (iso) => {
   }
 }
 
+// A different agent: the previous one's policy and requests must not stay on
+// screen or clickable while the new ones load — `setAccessMode`'s early return
+// would otherwise compare against the old agent's policy (#4310 review).
 watch(() => props.agentName, (name) => {
+  policy.value = { require_email: false, open_access: false }
+  policyLoaded.value = false
+  policyFailed.value = false
+  pendingRequests.value = []
+  requestsLoaded.value = false
+  requestsFailed.value = false
+  reviewOpen.value = false
+  report()
   if (!name) return
   loadPolicy()
   loadAccessRequests()
 }, { immediate: true })
+watch(() => props.refreshKey, () => { if (props.agentName) loadAccessRequests() })
 </script>

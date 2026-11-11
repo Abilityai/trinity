@@ -161,7 +161,9 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       name: "get_project",
       description:
         "Read one Workspace project you are working on, by id: its goal, status, steward, tracker " +
-        "link, members, the other agents on it, and how many chats and rooms are linked. Other " +
+        "link, members, the other agents on it, and how many chats and rooms are linked. `context` " +
+        "lists the briefs people prepared for agents (id, filename, size_bytes, task_id — a task's " +
+        "own brief carries its id); read one with read_project_context before working that task. Other " +
         "people's chats are private, so they appear only as a count. Use the id from the " +
         "'[Project]' line at the top of the conversation, or from list_projects.",
       parameters: z.object({
@@ -228,7 +230,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         objective: z.string().max(4000).optional(),
         done_definition: z.string().max(4000).optional().describe("Markdown checklist, e.g. '- [ ] Brief reviewed'."),
         context: z.string().max(4000).optional(),
-        owner: z.string().max(320).optional().describe("Who is accountable (a person's email or a name)."),
+        owner: z.string().max(320).optional().describe("Who is accountable: the work email of the project's creator or one of its members, or role:<id> on a project an agent stewards. Anyone else is refused (owner_not_on_project)."),
         assignee: z.string().max(320).optional().describe("The agent doing the work, if not you."),
         waiting_on: z.string().max(320).optional(),
       }),
@@ -257,7 +259,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         task_id: taskId,
         status: statusEnum.optional(),
         title: z.string().min(1).max(200).optional(),
-        owner: z.string().max(320).optional(),
+        owner: z.string().max(320).optional().describe("The project's creator or a member (work email), or role:<id>; anyone else is refused. Leaving it unchanged is always accepted."),
         assignee: z.string().max(320).optional().describe("The agent doing the work."),
         waiting_on: z.string().max(320).optional(),
         objective: z.string().max(4000).optional(),
@@ -284,6 +286,30 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       execute: async (p: { project_id: string; task_id: string; body: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
           return ok(await clientFor(context, p.agent_name).addProjectTaskNote(p.project_id, p.task_id, p.body, turnOf(context)));
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    },
+
+    // ========================================================================
+    read_project_context: {
+      name: "read_project_context",
+      description:
+        "Read a brief people prepared for this project's agents (a transcript, background, their " +
+        "view) — an item from the `context` list of get_project. Returns its text, at most 200 KB " +
+        "per call. When `truncated` is true the brief is longer: call again with offset = " +
+        "`next_offset` until `truncated` is false. Read a task's brief before working the task.",
+      parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
+        project_id: projectId,
+        item_id: z.string().min(1).max(64).describe("The context item's id, from get_project's `context`."),
+        offset: z.number().int().min(0).optional().describe("Byte offset to read from: 0, then `next_offset`."),
+      }),
+      execute: async (p: { project_id: string; item_id: string; offset?: number } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
+        try {
+          const part = await clientFor(context, p.agent_name).readProjectContext(p.project_id, p.item_id, p.offset ?? 0, turnOf(context));
+          return ok(part);
         } catch (e) {
           return fail(e);
         }
@@ -386,7 +412,9 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "and the agent on it, and only its members can see it — adding people or changing who can " +
         "see it stays your owner's. Needs the project-management permission an instance admin grants; " +
         "without it the call is refused with `project_management_not_permitted` and nothing is created. " +
-        "Returns the project; work on it with the task and log tools.",
+        "You are its steward; to hand that to another agent, ask with propose_project_changes " +
+        "(its `steward` field) — your primary contact approves it. Returns the project; work on it " +
+        "with the task and log tools.",
       parameters: z.object({
         agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         name: z.string().min(1).max(200).describe("Short project name, e.g. 'Q4 launch'."),
@@ -412,7 +440,9 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "Trinity): `project_files/<slug>` or `<canon>/projects/<slug>` with its project.md, task " +
         "files, log and decisions. Afterwards the platform is its home and nothing syncs back; a " +
         "second import of the same folder is refused. Needs the project-management permission; " +
-        "your owner becomes the project's creator, you its steward.",
+        "your owner becomes the project's creator. The steward is the agent its project.md names as " +
+        "`owner` when your owner can use it, else your owner; to hand it to another agent afterwards, " +
+        "ask with propose_project_changes — your primary contact approves it.",
       parameters: z.object({
         agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         path: z.string().min(1).max(300).describe("The project folder in your files, e.g. 'project_files/q4-launch'."),

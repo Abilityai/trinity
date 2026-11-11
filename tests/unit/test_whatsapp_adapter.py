@@ -1041,6 +1041,7 @@ class TestProactiveWhatsApp:
                 "id": 1, "agent_name": "my-agent", "account_sid": "AC_sid",
                 "from_number": "whatsapp:+14155238886", "messaging_service_sid": None,
             }
+            mock_db.is_channel_client_blocked.return_value = False  # ent#21
             mock_db.get_whatsapp_chat_link_by_verified_email.return_value = {
                 "id": 10, "binding_id": 1, "wa_user_phone": "whatsapp:+14155551234",
                 "verified_email": "user@example.com",
@@ -1071,6 +1072,7 @@ class TestProactiveWhatsApp:
                 "id": 1, "agent_name": "my-agent", "account_sid": "AC_sid",
                 "from_number": "whatsapp:+14155238886", "messaging_service_sid": None,
             }
+            mock_db.is_channel_client_blocked.return_value = False  # ent#21
             mock_db.get_whatsapp_chat_link_by_verified_email.return_value = {
                 "id": 10, "binding_id": 1, "wa_user_phone": "whatsapp:+14155551234",
                 "verified_email": "user@example.com",
@@ -1112,6 +1114,7 @@ class TestProactiveWhatsApp:
                 "id": 1, "agent_name": "my-agent", "account_sid": "AC_sid",
                 "from_number": "whatsapp:+14155238886", "messaging_service_sid": None,
             }
+            mock_db.is_channel_client_blocked.return_value = False  # ent#21
             mock_db.get_whatsapp_chat_link_by_verified_email.return_value = {
                 "id": 10, "binding_id": 1, "wa_user_phone": "whatsapp:+14155551234",
                 "verified_email": "user@example.com",

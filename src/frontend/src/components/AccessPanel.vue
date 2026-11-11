@@ -44,13 +44,21 @@
          "name@compan"); `min-w-0` lets it give way in the row layout, where its
          intrinsic width plus the button once pushed the page past 390px. -->
     <form @submit.prevent="addOperator" class="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
-      <input
+      <!-- trinity-enterprise#450: suggestions over the input, never a picker. Any
+           address can still be typed, and Enter submits it unless a row is chosen —
+           BasePeopleInput's suggest-and-allow mode (trinity-enterprise#1153). -->
+      <BasePeopleInput
+        ref="addField"
         v-model="newEmail"
+        class="w-full sm:w-auto sm:flex-1 min-w-0"
         type="email"
         required
         placeholder="name@company.com"
         :disabled="adding"
-        class="w-full sm:w-auto sm:flex-1 min-w-0 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+        :fetch="lookUpCandidates"
+        :no-match="noMatchMessage"
+        aria-label="Email of the person to add"
+        data-testid="access-add-email"
       />
       <button
         type="submit"
@@ -234,8 +242,10 @@ import { useUsersStore } from '../stores/users'
 import { viewState } from '../utils/loadingState'
 import { writeError } from '../utils/assignments'
 import { PLATFORM_ROLES, WORKSPACE_ONLY_ROLE_LABEL, platformRoleLabel } from '../utils/workspaceOnly'
+import { noMatchMessage } from '../utils/accessCandidates'
 import AgentAssignmentsSection from './AgentAssignmentsSection.vue'
 import BaseButton from './base/BaseButton.vue'
+import BasePeopleInput from './base/BasePeopleInput.vue'
 import BaseSelect from './base/BaseSelect.vue'
 import ConfirmDialog from './ConfirmDialog.vue'
 import InlineError from './InlineError.vue'
@@ -336,9 +346,14 @@ async function resendInvite(op) {
   }
 }
 
+// --- trinity-enterprise#450: suggestions over the add field (BasePeopleInput, #1153)
+const addField = ref(null)
+const lookUpCandidates = (q) => agentsStore.getAccessCandidates(props.agentName, q)
+
 async function addOperator() {
   const email = newEmail.value.trim()
   if (!email) return
+  addField.value?.close()
   adding.value = true
   message.value = null
   try {

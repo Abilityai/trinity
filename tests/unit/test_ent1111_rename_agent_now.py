@@ -83,7 +83,7 @@ def env(monkeypatch, tmp_path):
 
     avatars = tmp_path / "avatars"
     avatars.mkdir()
-    monkeypatch.setattr(rename_mod, "AVATAR_DIR", avatars)
+    monkeypatch.setattr(rename_mod.avatar_paths, "AVATAR_DIR", avatars)
 
     ws, filtered = AsyncMock(), AsyncMock()
 
@@ -181,7 +181,7 @@ class TestRenameAgentNow:
 
     async def test_every_cached_shape_follows_the_name(self, env):
         """All of them, not a sample: every path is built through the
-        containment barrier now (`_avatar_path_or_none`), so a shape whose move
+        avatar store's barrier now (`utils.avatar_paths.avatar_path_or_none`), so a shape whose move
         was lost to a refusal would otherwise show up only as one missing file
         on one agent."""
         avatars = env["avatars"]
@@ -201,7 +201,8 @@ class TestRenameAgentNow:
     async def test_a_name_that_would_leave_the_avatar_store_moves_nothing(
             self, env, tmp_path, bad_name):
         """The primitive takes `new_name` as FINAL — the sanitiser stayed with
-        the route — so containment is this module's own barrier to keep.
+        the route — so containment rests on the avatar store's barrier,
+        `utils.avatar_paths.avatar_path_or_none`.
 
         `../x` escapes the store: without the barrier the cached images are
         moved OUT of it, one directory up, under an attacker-chosen name. A NUL

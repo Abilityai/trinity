@@ -344,6 +344,7 @@ export function createSystemTools(
         "Agents are created with naming pattern '{system}-{agent}' (e.g., 'content-production-orchestrator'); " +
         "with `naming: bare` the agent key is the full agent name. " +
         "Supports permission presets: 'full-mesh', 'orchestrator-workers', 'none', or explicit rules. " +
+        "While the instance limits agent-created agents to a list of template sources, an agent key's manifest with a member outside it is refused as a whole (403 `template_source_not_allowed`, `members[]`), and a dry run lists those members in `failed[]`. " +
         "Deploy is best-effort: check `status` ('deployed' | 'partial' | 'failed') and `failed[]` " +
         "in the response — a partial deploy still creates the remaining agents. " +
         "`deploy: false` members are skipped and listed in `agents_declared_only[]`; a manifest whose every " +
@@ -715,7 +716,9 @@ export function createSystemTools(
             + "description, prompt, agents, permissions). Members are named '{name}-{agent}', or by "
             + "their agent key under `naming: bare`. Per member, optionally: skills, skill_sets, "
             + "gates ({skill: {approver, deadline_hours}}), grants, seat (a canon role id), "
-            + "person_seats ([{role, kind}], never a person or an email) and deploy: false (a "
+            + "person_seats ([{role, kind}], never a person or an email; add `holder: member` with "
+            + "kind primary to seat and share this instance's recorded member — written for an "
+            + "admin's own key or session, on a member it creates or owns) and deploy: false (a "
             + "declared-only member: verdict declared_only, never created or deleted)."
           ),
         dry_run: z

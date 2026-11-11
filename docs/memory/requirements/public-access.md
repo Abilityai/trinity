@@ -696,7 +696,8 @@
     → 200, `env_removed: false`, the file left exactly as it is and an
     `env_note` starting `env_unreadable` (trinity-enterprise#1073).
   - **MCP**: `get_agent_spending` (GET pass-through) and
-    `revoke_agent_delegation` (DELETE; advertised to `user`/`system` keys only).
+    `revoke_agent_delegation` (DELETE; advertised to `user` keys only, the one
+    key scope `require_person` admits — trinity-enterprise#719).
 - **FR-4 Errors** are `{"detail": {"code", "message"}}` so the panel (ent#967)
   branches on `code`. Secrets, the session token, the agent's `.env` and any
   upstream body never appear in a response or a log line.
@@ -835,8 +836,8 @@ Everything an owner sets about outsiders reaching an agent lives in **Settings �
 through a channel?" with a read-only **client roster** — external users (no
 Trinity account) who have messaged the agent via a channel. Activity is already
 collected per channel link (`verified_email`, `message_count`, `last_active`)
-but was never surfaced. This is the read surface; per-client controls
-(block/revoke/approve) are a separate follow-up (#21).
+but was never surfaced. This is the read surface; the per-client controls on it
+are §46.2 (#21).
 
 - **FR-1 — Aggregated roster endpoint**: `GET /api/agents/{name}/clients`
   (owner/admin via `OwnedAgentByName`) returns one entry per external client
@@ -850,12 +851,57 @@ but was never surfaced. This is the read surface; per-client controls
   (verifications carry email but no activity counters) and VoIP (call logs) are
   additive follow-ups; the response model is channel-extensible so they slot in
   without a contract change.
-- **FR-3 — Read-only**: no write actions in this slice. The roster renders even
+- **FR-3 — DB-sourced**: no write actions in this slice (§46.2 adds them). The roster renders even
   when the agent container is stopped (DB-sourced). Empty roster renders an
   explicit empty state, not an error.
 - **FR-4 — Tenant boundary**: the endpoint is scoped to the path agent; the DB
   join filters by `agent_name` through the channel binding, so a client of
   another agent never appears.
+
+### 46.2 Per-Client Access Controls — Block / Revoke / Approve (trinity-enterprise#21)
+
+**Description**: The owner acts on one external client from the roster, not only
+through the agent-wide access policy. OSS-core, like the portal-client controls
+(ent#281) and the roster itself.
+
+- **FR-1 — Access state on the roster**: each entry also carries `client_id`
+  (the channel-native sender id the controls key on: Telegram user id, WhatsApp
+  `whatsapp:+…` phone) and `access` — `blocked` (with `blocked_at`,
+  `blocked_by_email`, `block_reason`), `granted` (their verified email is shared
+  on this agent), `pending` (with the `access_request_id` approve needs), or
+  `none` (the policy decides). A block outranks the other states.
+- **FR-2 — Block / unblock**: `POST /api/agents/{name}/clients/block`
+  (`{channel, client_id, reason?}`) and `…/clients/unblock`. Per agent and per
+  channel, keyed on the sender id, so a client who never verified an email is
+  blockable. Idempotent (the first block's time, actor and reason are kept).
+  A block keeps the client's share and history; unblocking restores exactly what
+  they had. Unblocking an unblocked client is 409.
+- **FR-3 — Enforcement**: the channel router drops a blocked sender's message
+  right after resolving the agent — before rate limiting, typing indicators,
+  the access policy, auth prompts or access requests — with **no reply**, in DMs
+  and groups alike, whatever the policy (open access included). The same holds
+  on every other way in: an observed group message is not recorded, a transport
+  command (`/login`, `/reset@bot`) is dropped before it is answered, and the
+  agent cannot send them a proactive message on that channel.
+- **FR-3a — Reachable on the roster**: a blocked client whose chat links are gone
+  (a bot unbind) and a client held at the gate who filed an access request (by
+  its `requester_channel_id`, §46.3) are listed too, so a block can always be
+  lifted and a held client can be blocked or approved.
+- **FR-4 — Revoke**: `POST /api/agents/{name}/clients/revoke` removes the
+  client's share on this agent (409 when there is none). Under a restricted
+  policy their next message files a fresh access request; under open access the
+  policy still admits them, so block is the control that always holds. A
+  blocked client can be revoked too.
+- **FR-5 — Approve**: the row's `access_request_id` drives the existing
+  `POST /api/agents/{name}/access-requests/{id}/decide`; no new route.
+- **FR-6 — Authority and audit**: owner or admin of the agent
+  (`OwnedAgentByName`) and a person (`require_person`, ent#719) — the unshare
+  gate, since revoke is an unshare and the effect is this agent only. Each
+  control writes an `authorization` audit row (`channel_client_block` /
+  `_unblock` / `_revoke`) naming channel and client. A control on a client that
+  never reached this agent is 404.
+- **FR-7 — Lifecycle**: `channel_client_blocks` is registered in the agent
+  cleanup registry (CASCADE): re-keyed on rename, removed on delete.
 
 ### 46.3 An Access Request Names Who Asked (trinity-enterprise#737)
 

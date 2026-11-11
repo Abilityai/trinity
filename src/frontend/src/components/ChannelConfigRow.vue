@@ -62,6 +62,9 @@ const status = reactive({ connected: false, label: '', warn: false })
 async function fetchStatus() {
   loading.value = true
   failed.value = false
+  // The check has started and has no answer yet (`connected` undefined): the
+  // pane's header says nothing about this surface until it does (#4310 review).
+  emit('status', { connected: undefined })
   try {
     const { data } = await api.get(props.statusUrl)
     const s = props.deriveStatus(data) || {}

@@ -32,6 +32,7 @@ from services.docker_utils import (
     container_exec_run, api_exec_create, api_exec_start
 )
 from services.agent_service.helpers import check_base_image_state
+from services.agent_service.terminal import DOOR_SYSTEM_AGENT_TERMINAL, TerminalAccess
 from services.agent_service.lifecycle import public_skills_result, start_agent_internal
 from services.system_agent_service import BASE_IMAGE_STATE_LABELS, system_agent_service
 from db.agents import SYSTEM_AGENT_NAME
@@ -343,6 +344,7 @@ async def system_agent_terminal(
     exec_id = None
     docker_socket = None
     session_start = None
+    access = None
 
     try:
         # Step 1: Authenticate via first message
@@ -389,6 +391,10 @@ async def system_agent_terminal(
                 }))
                 await websocket.close(code=4003, reason="Admin access required")
                 return
+
+            # abilityai/trinity-enterprise#863 — the session follows the
+            # account; registered in the step that authorized it.
+            access = TerminalAccess(websocket, DOOR_SYSTEM_AGENT_TERMINAL, user)
 
             user_email = user.get("email") or user.get("sub") or "unknown"
 
@@ -476,7 +482,8 @@ async def system_agent_terminal(
             stderr=True,
             user="developer",
             workdir="/home/developer",
-            environment={"TERM": "xterm-256color", "COLORTERM": "truecolor"}
+            environment={"TERM": "xterm-256color", "COLORTERM": "truecolor",
+                         **access.shell_env(container.name)}
         )
         exec_id = exec_instance["Id"]
 
@@ -487,6 +494,11 @@ async def system_agent_terminal(
         # docker-py returns a SocketIO wrapper, we need the underlying socket
         docker_socket = exec_output._sock
         docker_socket.setblocking(False)
+
+        # #863 — closed while starting: refuse (the finally closes the socket).
+        if not access.go_live():
+            await access.close(access.revoked)
+            return
 
         # Send success message
         await websocket.send_text(json.dumps({"type": "auth_success"}))
@@ -516,7 +528,7 @@ async def system_agent_terminal(
                 while True:
                     message = await websocket.receive()
 
-                    if message["type"] == "websocket.disconnect":
+                    if message["type"] == "websocket.disconnect" or access.revoked is not None:
                         break
 
                     if "text" in message:
@@ -547,12 +559,8 @@ async def system_agent_terminal(
             except Exception as e:
                 logger.debug(f"WebSocket read error: {e}")
 
-        # Run both tasks concurrently
-        await asyncio.gather(
-            read_from_docker(),
-            read_from_websocket(),
-            return_exceptions=True
-        )
+        # Run both as tasks the session owns (#863: an access close cancels them)
+        await access.forward(read_from_docker(), read_from_websocket())
 
     except WebSocketDisconnect:
         logger.info(f"Terminal WebSocket disconnected for {user_email}")
@@ -588,3 +596,6 @@ async def system_agent_terminal(
                 session_duration = (datetime.utcnow() - session_start).total_seconds()
 
             logger.info(f"Terminal session ended for {user_email} (duration: {session_duration:.1f}s)" if session_duration else f"Terminal session ended for {user_email}")
+
+        if access is not None:
+            await access.finish()

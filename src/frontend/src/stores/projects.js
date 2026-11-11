@@ -24,6 +24,13 @@ export const useProjectsStore = defineStore('projects', () => {
   const listError = ref(null)
   const pages = ref({})     // id → { data, loaded, loading, error, notFound }
   const links = ref({})     // `${kind}:${id}` → project | null
+  // ent#1169: the last create/edit answer's `steward_skills` outcome, by project
+  // id — the Steward card says WHY the set wasn't assigned (awaiting_owner,
+  // not_permitted, failed, unavailable), which the page read alone can't.
+  const stewardOutcomes = ref({})
+  const _keepStewardOutcome = (id, data) => {
+    if (id && data?.steward_skills) stewardOutcomes.value = { ...stewardOutcomes.value, [id]: data.steward_skills }
+  }
 
   const headers = () => useClientPortalStore().authHeader
 
@@ -87,6 +94,7 @@ export const useProjectsStore = defineStore('projects', () => {
   // `projectErrorMessage(err)` next to itself (principle 18).
   async function create(body) {
     const { data } = await portalHttp.post(BASE, body, { headers: headers() })
+    _keepStewardOutcome(data?.id, data)
     if (body.link_thread_id) _dropLink('thread', body.link_thread_id)
     void fetchList()
     return data
@@ -102,7 +110,11 @@ export const useProjectsStore = defineStore('projects', () => {
   const url = (id, tail = '') => `${BASE}/${encodeURIComponent(id)}${tail}`
 
   const update = (id, body) =>
-    _write(id, () => portalHttp.patch(url(id), body, { headers: headers() }))
+    _write(id, async () => {
+      const out = await portalHttp.patch(url(id), body, { headers: headers() })
+      _keepStewardOutcome(id, out?.data)
+      return out
+    })
   const setArchived = (id, archived) =>
     _write(id, () => portalHttp.post(url(id, archived ? '/archive' : '/restore'), {}, { headers: headers() }))
   const addMember = (id, email) =>
@@ -232,9 +244,67 @@ export const useProjectsStore = defineStore('projects', () => {
     _write(id, () => portalHttp.delete(
       url(id, `/metrics/${encodeURIComponent(agentName)}/${encodeURIComponent(metric)}`), { headers: headers() }))
 
+  // --- ent#1132 part 2 / ent#1131 part 2: a person asks the project's creator --------
+  const requestToJoin = (id, note) =>
+    _write(id, () => portalHttp.post(url(id, '/join-request'), note ? { note } : {}, { headers: headers() }))
+  const requestAgent = (id, agentName) =>
+    _write(id, () => portalHttp.post(url(id, '/agent-requests'), { agent_name: agentName }, { headers: headers() }))
+
+  // --- ent#1161: the steward agent's seat, asked for and given on the project -------
+  const requestStewardAccess = (id) =>
+    _write(id, () => portalHttp.post(url(id, '/steward-access/request'), {}, { headers: headers() }))
+  const grantStewardAccess = (id, email) =>
+    _write(id, () => portalHttp.post(url(id, '/steward-access/grant'), { email }, { headers: headers() }))
+
+  // --- ent#1193: context — briefs prepared for the project's agents ------------------
+  // Writes go through `_write`, so the page read (its `context` list) refreshes.
+  const writeContext = (id, body) =>
+    _write(id, () => portalHttp.post(url(id, '/context'), body, { headers: headers() }))
+  async function readContext(id, itemId) {
+    const { data } = await portalHttp.get(url(id, `/context/${encodeURIComponent(itemId)}`), { headers: headers() })
+    return data
+  }
+  const updateContext = (id, itemId, body) =>
+    _write(id, () => portalHttp.patch(url(id, `/context/${encodeURIComponent(itemId)}`), body, { headers: headers() }))
+  const deleteContext = (id, itemId) =>
+    _write(id, () => portalHttp.delete(url(id, `/context/${encodeURIComponent(itemId)}`), { headers: headers() }))
+  const markItemForAgents = (id, kind, targetId, forAgents) =>
+    _write(id, () => portalHttp.put(url(id, `/items/${kind}/${encodeURIComponent(targetId)}/for-agents`),
+      { for_agents: forAgents }, { headers: headers() }))
+
+  // --- ent#1195: start a task's run from the project ------------------------------
+  async function startPreview(id, taskId, agent = null) {
+    const { data } = await portalHttp.get(url(id, `/tasks/${encodeURIComponent(taskId)}/start-preview`),
+      { headers: headers(), params: agent ? { agent } : {} })
+    return data
+  }
+  async function startTask(id, taskId, agentName, previewSha = null) {
+    const { data } = await portalHttp.post(url(id, `/tasks/${encodeURIComponent(taskId)}/start`),
+      { agent_name: agentName, ...(previewSha ? { preview_sha: previewSha } : {}) }, { headers: headers() })
+    return data
+  }
+
   async function metricOptions(id) {
     const { data } = await portalHttp.get(url(id, '/metric-options'), { headers: headers() })
     return data.agents || []
+  }
+
+  // trinity-enterprise#1155 — the person fields' scoped reads (one people search).
+  async function fetchProjectPeople(id, q, purpose) {
+    const { data } = await portalHttp.get(url(id, '/people'), { headers: headers(), params: { q, purpose } })
+    return data.people || []
+  }
+  async function fetchCompanyPeople(q) {
+    const { data } = await portalHttp.get(`${BASE}/people`, { headers: headers(), params: { q } })
+    return data.people || []
+  }
+
+  // ent#1169: whether the library offers the project-management set, and per
+  // agent I can use whether it holds it and whether I may give it. A read for
+  // the dialog's hint; a failure leaves the hint out, never blocks creating.
+  async function fetchStewardOptions() {
+    const { data } = await portalHttp.get(`${BASE}/steward-options`, { headers: headers() })
+    return data
   }
 
   const stewarding = ref({ rows: [], loaded: false, loading: false, error: null })
@@ -250,11 +320,15 @@ export const useProjectsStore = defineStore('projects', () => {
   }
 
   return {
-    list, listLoaded, listLoading, listError,
+    list, listLoaded, listLoading, listError, stewardOutcomes,
     fetchList, pageState, fetchProject, forLink, fetchForLink,
     create, update, setArchived, addMember, removeMember, addAgent, removeAgent, link, unlink,
     tasks, logs, fetchTasks, fetchTask, createTask, updateTask, addTaskNote, fetchLog, addLogEntry,
     addGuest, addItem, setItemAudience, removeItem, fetchReport, myItems, importCandidates, importProject,
     setHealth, linkMetric, unlinkMetric, metricOptions, stewarding, fetchStewarding,
+    requestStewardAccess, grantStewardAccess, requestToJoin, requestAgent,
+    startPreview, startTask,
+    writeContext, readContext, updateContext, deleteContext, markItemForAgents,
+    fetchProjectPeople, fetchCompanyPeople, fetchStewardOptions,
   }
 })

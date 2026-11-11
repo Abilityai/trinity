@@ -3,17 +3,14 @@
 # Identical to docker-compose.prod.yml in every respect except one: it carries
 # NO `build:` blocks. (Plus the ent#580 marketplace admin claim: this file
 # renders an explicitly blank ADMIN_PASSWORD and forwards ADMIN_PASSWORD_SOURCE;
-# prod refuses a blank one. Plus the bundled PostgreSQL of #3159: a `postgres`
-# service, its volume, and a DATABASE_URL that defaults to it. The parity test
-# allowlists exactly those lines.)
+# prod refuses a blank one. The parity test allowlists exactly those lines.)
 #
 # DATABASE: hosted installs run on the bundled PostgreSQL. POSTGRES_PASSWORD is
 # REQUIRED; the file does not render without it. `start.sh --hosted` generates
 # it. A compose-only install (a template or a managed host that runs this file
 # directly) sets it in its environment, e.g. `openssl rand -hex 24`, and leaves
-# DATABASE_URL unset. An install that already has /data/trinity.db sets
-# `DATABASE_URL=` (empty) to stay on SQLite; moving it to PostgreSQL is
-# docs/migrations/SQLITE_TO_POSTGRES.md.
+# DATABASE_URL unset. An install with data in /data/trinity.db does not boot
+# until it moves to PostgreSQL: docs/migrations/SQLITE_TO_POSTGRES.md.
 # Every service resolves a prebuilt image from GHCR, so a
 # fresh VM is serving in ~2 minutes instead of spending 5-10 of them compiling
 # the agent base image on first boot. That build time is what fails the
@@ -193,7 +190,7 @@ services:
       # Voice chat (VOICE-001) — mirrors docker-compose.yml so operators can
       # tune/disable voice in prod (code default is ON; without these lines the
       # knobs are inert — the #1039 packaging-gap class).
-      - VOICE_MODEL=${VOICE_MODEL:-models/gemini-3.1-flash-live-preview}  # Gemini Live model override (#1076: non-empty default so an unset var doesn't inject "")
+      - VOICE_MODEL=${VOICE_MODEL:-models/gemini-3.8-live}  # Gemini Live model override (#1076: non-empty default so an unset var doesn't inject "")
       - VOICE_ENABLED=${VOICE_ENABLED:-true}  # Voice mode (default on when GEMINI_API_KEY set)
       - DIRECT_VOICE_ENABLED=${DIRECT_VOICE_ENABLED:-}
       - GEMINI_STT_MODEL=${GEMINI_STT_MODEL:-gemini-3.5-transcribe}
@@ -255,8 +252,9 @@ services:
       - REPORT_RATE_LIMIT=${REPORT_RATE_LIMIT:-30}               # reports per agent per 60s
       # trinity-enterprise#478 — metric write path. The two policy values are a
       # bootstrap fallback; a Settings row wins over them.
-      # The three ENV-BACKED ops keys below (METRICS_RETENTION_DAYS,
-      # METRICS_DAILY_POINT_CAP, INTER_AGENT_MAX_CHAIN_DEPTH) are forwarded with
+      # The four ENV-BACKED ops keys below (METRICS_RETENTION_DAYS,
+      # METRICS_DAILY_POINT_CAP, INTER_AGENT_MAX_CHAIN_DEPTH,
+      # CALLER_WAKE_MAX_PER_HOUR) are forwarded with
       # an EMPTY default (ent#671): an unset variable must reach the container
       # unset, or GET /api/settings/retention reports `source: env` for a value
       # nobody chose and the Settings rows lock read-only. The code default is
@@ -265,6 +263,7 @@ services:
       - METRICS_RETENTION_DAYS=${METRICS_RETENTION_DAYS:-}    # recorded point retention (0 = forever)
       - METRICS_DAILY_POINT_CAP=${METRICS_DAILY_POINT_CAP:-}  # points per agent per UTC day (0 = unlimited)
       - INTER_AGENT_MAX_CHAIN_DEPTH=${INTER_AGENT_MAX_CHAIN_DEPTH:-}  # max agent-to-agent hops per call chain (#2806)
+      - CALLER_WAKE_MAX_PER_HOUR=${CALLER_WAKE_MAX_PER_HOUR:-}  # wakes per callee→delegator pair per hour, 0 = unlimited (#4357)
       - METRICS_READ_RATE_LIMIT=${METRICS_READ_RATE_LIMIT:-240}   # GET /metrics reads per agent per 60s (tiles, dashboard binds, get_metrics)
       - OBJECTIVES_READ_RATE_LIMIT=${OBJECTIVES_READ_RATE_LIMIT:-60}  # GET /objectives reads per agent per 60s (fans out into the agent container)
       # Agent canvases (ent#438/ent#553) — per-agent ceiling on the canvas pile.
@@ -475,12 +474,13 @@ services:
       - INTERNAL_API_SECRET=${INTERNAL_API_SECRET}
       # Database backend (#3159, HOST-022). Hosted installs default to the
       # bundled `postgres` service below. `-` with no colon is load-bearing:
-      # UNSET resolves to the bundled PostgreSQL; set-but-EMPTY (`DATABASE_URL=`,
-      # which start.sh --hosted writes for an install that already has
-      # /data/trinity.db) keeps SQLite, so an update never boots an empty
-      # PostgreSQL beside a populated SQLite file. Any other postgresql:// URL
-      # points at an operator-managed server (docs/POSTGRESQL_SETUP.md).
+      # UNSET resolves to the bundled PostgreSQL. Set-but-EMPTY (`DATABASE_URL=`)
+      # selects SQLite, which the image refuses unless TRINITY_ALLOW_SQLITE=1
+      # (#4175). Any other postgresql:// URL points at an operator-managed server
+      # (docs/POSTGRESQL_SETUP.md).
       - DATABASE_URL=${DATABASE_URL-postgresql://trinity:${POSTGRES_PASSWORD}@postgres:5432/trinity}
+      # #4175: time-boxed. With DATABASE_URL= (empty), keeps this release on SQLite.
+      - TRINITY_ALLOW_SQLITE=${TRINITY_ALLOW_SQLITE:-}
       - DB_POOL_SIZE=${DB_POOL_SIZE:-10}
       - DB_MAX_OVERFLOW=${DB_MAX_OVERFLOW:-20}
       # Fire-and-forget dispatch (#1083). When true, eligible autonomous turns
@@ -540,6 +540,11 @@ services:
       # docker-compose.yml; without this line the .env value is inert in prod (the
       # #1039 packaging-gap class) and SSH host detection falls back to localhost.
       - SSH_HOST=${SSH_HOST:-}
+      # trinity-enterprise#1168: host interface the backend publishes each agent's
+      # SSH port on. Unset/blank = 127.0.0.1 (loopback); an IP literal, or
+      # 0.0.0.0 for every interface. Creation-time — existing agents adopt on
+      # recreate. Without this line the .env value is inert (the #1039 class).
+      - AGENT_SSH_BIND_ADDRESS=${AGENT_SSH_BIND_ADDRESS:-}
       # NOTE (#1799): a duplicate LOG_ARCHIVE_ENABLED / LOG_RETENTION_DAYS /
       # LOG_CLEANUP_HOUR trio lived here. Two separate #1039-class "mirror
       # docker-compose.yml" fixes each appended the same three vars, which broke
@@ -788,7 +793,7 @@ services:
     environment:
       - POSTGRES_DB=trinity
       - POSTGRES_USER=trinity
-      - "POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env (generate openssl rand -hex 24; start.sh --hosted does this)}"
+      - "POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env (generate with openssl rand -hex 24; start.sh does this). Existing SQLite install: see docs/migrations/SQLITE_TO_POSTGRES.md}"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     networks:
@@ -816,6 +821,8 @@ services:
       # #300/#3159: the same database the backend uses — see the backend's
       # DATABASE_URL comment for why the default uses `-` with no colon.
       - DATABASE_URL=${DATABASE_URL-postgresql://trinity:${POSTGRES_PASSWORD}@postgres:5432/trinity}
+      # #4175: time-boxed. With DATABASE_URL= (empty), keeps this release on SQLite.
+      - TRINITY_ALLOW_SQLITE=${TRINITY_ALLOW_SQLITE:-}
       # Scheduler uses the same `backend` ACL user (identical access patterns).
       - "REDIS_URL=redis://backend:${REDIS_BACKEND_PASSWORD:?REDIS_BACKEND_PASSWORD must be set in .env}@redis:6379"
       - HEALTH_PORT=8001
@@ -1063,6 +1070,8 @@ volumes:
   agent-configs:
   redis-data:
   postgres-data:  # PostgreSQL data (#3159)
+    # TRINITY_POSTGRES_VOLUME adopts an existing volume with no data copy.
+    name: ${TRINITY_POSTGRES_VOLUME:-${COMPOSE_PROJECT_NAME}_postgres-data}
   trinity-logs:  # Vector log storage
   # trinity-data: using bind mount via TRINITY_DATA_PATH env var
 

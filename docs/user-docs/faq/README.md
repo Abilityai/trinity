@@ -307,7 +307,7 @@
 - [Can several of my agents hold a conversation together in one shared session?](collaboration.md#can-several-of-my-agents-hold-a-conversation-together-in-one-shared-session)
 - [Who sets a room's limits, and who can rename it or change who's in it?](collaboration.md#who-sets-a-rooms-limits-and-who-can-rename-it-or-change-whos-in-it)
 - [What happens if an agent writes a very long reply in a room?](collaboration.md#what-happens-if-an-agent-writes-a-very-long-reply-in-a-room)
-- [Why did a room say "Mention chain stopped at depth 8"?](collaboration.md#why-did-a-room-say-mention-chain-stopped-at-depth-8)
+- [Why did the agents in a room pause and wait for me?](collaboration.md#why-did-the-agents-in-a-room-pause-and-wait-for-me)
 - [What does the notice about a client reading the room mean?](collaboration.md#what-does-the-notice-about-a-client-reading-the-room-mean)
 - [Can I stop an agent that's working in a room?](collaboration.md#can-i-stop-an-agent-thats-working-in-a-room)
 - [Can agents in a room see the files and screenshots I send?](collaboration.md#can-agents-in-a-room-see-the-files-and-screenshots-i-send)

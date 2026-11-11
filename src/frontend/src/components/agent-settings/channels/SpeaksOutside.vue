@@ -67,9 +67,8 @@
 
 <script setup>
 import { computed, ref, watch } from 'vue'
-import axios from 'axios'
+import api from '../../../api'
 import { useAgentsStore } from '../../../stores/agents'
-import { useAuthStore } from '../../../stores/auth'
 import { useNotification } from '../../../composables'
 import BaseButton from '../../base/BaseButton.vue'
 import BaseSelect from '../../base/BaseSelect.vue'
@@ -84,7 +83,6 @@ const props = defineProps({ agentName: { type: String, required: true } })
 const PUBLIC_PROMPT_MAX = 4000
 
 const agentsStore = useAgentsStore()
-const authStore = useAuthStore()
 const { showNotification } = useNotification()
 
 // --- Public chat model (#894): '' inherits the platform default ---------------
@@ -101,7 +99,7 @@ const modelLabel = computed(() => model.value || `Platform default${modelDefault
 const loadModel = async () => {
   modelFailed.value = false
   try {
-    const { data } = await axios.get(`/api/agents/${props.agentName}/public-channel-model`, { headers: authStore.authHeader })
+    const { data } = await api.get(`/api/agents/${props.agentName}/public-channel-model`)
     model.value = data.public_channel_model || ''
     modelOptions.value = data.available_models || []
     modelDefault.value = data.platform_default || ''
@@ -121,11 +119,7 @@ const openModel = () => {
 const saveModel = async () => {
   modelSaving.value = true
   try {
-    const { data } = await axios.put(
-      `/api/agents/${props.agentName}/public-channel-model`,
-      { model: modelDraft.value || null },
-      { headers: authStore.authHeader },
-    )
+    const { data } = await api.put(`/api/agents/${props.agentName}/public-channel-model`, { model: modelDraft.value || null })
     model.value = data.public_channel_model || ''
     showNotification(data.is_overridden ? `Public chat model set to ${data.public_channel_model}` : 'Public chat model reset to the platform default', 'success')
     modelOpen.value = false
@@ -177,7 +171,19 @@ const savePrompt = async () => {
   }
 }
 
+// A different agent: the previous one's model and instructions must not stay
+// on screen, or open in an editor, while the new ones load (#4310 review).
 watch(() => props.agentName, (name) => {
+  model.value = ''
+  modelOptions.value = []
+  modelDefault.value = ''
+  modelLoaded.value = false
+  modelFailed.value = false
+  modelOpen.value = false
+  prompt.value = ''
+  promptLoaded.value = false
+  promptFailed.value = false
+  promptOpen.value = false
   if (!name) return
   loadModel()
   loadPrompt()

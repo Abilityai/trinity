@@ -137,7 +137,7 @@ permissions:
 ## Entry Points
 
 ### API Endpoints
-- **Deployment**: `POST /api/systems/deploy` - Deploy system from YAML
+- **Deployment**: `POST /api/systems/deploy` - Deploy system from YAML. With an agent key and the template-source allowlist set (trinity-enterprise#591), a member outside the list refuses the whole deploy (403 `template_source_not_allowed`, `members[]`) before any create, and the dry run lists the same members in `failed[]` — one validator (`template_source_policy.manifest_refusals`)
 - **Apply** (trinity-enterprise#695): `POST /api/systems/apply` - Reconcile a live system to
   its manifest (create the absent, update the declared fields of the present, report the
   undeclared as drift; never suffix, remove or restart). `dry_run` defaults to `true`;
@@ -642,7 +642,7 @@ functions in this file, so the dry run and the real run share one plan (P-D):
 
 | Function | Kind | What it does |
 |---|---|---|
-| `read_apply_snapshot(manifest, user)` | reads only | Roster = the live ownership rows the caller may manage (a live owner + `db.can_user_share_agent` + `agent_may_reach(manage=True)`: an agent merely shared with the caller, or a container nobody owns, is outside it), with `docker_service.agent_container_states()` still read (tri-state; `None` → `roster_unreadable`); `system_membership` over it (`tags_readable == False` → `membership_tags_unreadable`; any `prefix`-evidence member → `membership_evidence_prefix_only`). Each declared name: taken (`name in states` / `crud.agent_name_is_taken` / `db.is_volume_base_reserved`) and manageable (`can_user_share_agent` + `agent_may_reach(manage=True)`) → system / ephemeral / no-container / claimed gates, then the member's tags, edges, schedules, folder config, resource override and one container label read (`_member_container`; `None` → `member_reads_unavailable`), and `restart_pending` from `check_resource_limits_match` + `check_shared_folder_mounts_match`; taken but not manageable → `member_name_unavailable` (one text for every case); free → create |
+| `read_apply_snapshot(manifest, user)` | reads only | Roster = the live ownership rows the caller may manage (a live owner + `db.can_user_share_agent` + `agent_may_reach(manage=True)`: an agent merely shared with the caller, or a container nobody owns, is outside it), with `docker_service.agent_container_states()` still read (tri-state; `None` → `roster_unreadable`); `system_membership` over it (`tags_readable == False` → `membership_tags_unreadable`; any `prefix`-evidence member → `membership_evidence_prefix_only`). Each declared name: taken (`name in states` / `crud.agent_name_is_taken` / `db.is_volume_base_reserved`) and manageable (`can_user_share_agent` + `agent_may_reach(manage=True)`) → system / ephemeral / no-container / claimed gates, then the member's tags, edges, schedules, folder config, resource override and one container label read (`_member_container`; `None` → `member_reads_unavailable`), and `restart_pending` from `check_resource_limits_match` + `check_shared_folder_mounts_match`; taken but not manageable → `member_name_unavailable` (one text for every case); free → the leftover-volume probe (`crud.create_volume_refusal`) and one template read (`_preflight_template` → `ApplyMemberState.template_failure` + `template_schedules`), then create |
 | `resolve_apply_plan(manifest, snapshot)` | pure | Per-member `verdict` + `changes[]` + the ordered write-set (`ApplyOp`s); drift (tagged, undeclared; a `<declared>_<N>` is noted as a suffixed copy); every blocker; prompt and view verdicts. Field rules below |
 | `resolve_declared_schedule_actions(declared, live, *, match=schedule_match_policy)` | pure | `create` / `update` (declared fields only) / `in_sync` / `enabled_differs` (report) / `undeclared` (report) / `unlinked` (report) / `ambiguous` + `declared_twice` (blockers). `schedule_match_policy` is the ent#694 / #1198 seam: exact name, unique on both sides, by default |
 | `execute_apply_plan(plan, …, lease)` | writes only | Creates absent members (the `AgentConfig` create builds) and tags each with the system tag at once; filters every other write to members that exist; then tags, edges, folders, resource overrides, schedules, prompt, view, phase by phase; then starts the created members one at a time. Every write's outcome comes from the writer's return value; nothing raises after the first write |
@@ -660,8 +660,43 @@ other schedule field, and exported only when set (#4151 — it was silently drop
 caller's own or shared views by `SYSTEM_VIEW_AUTO_DESCRIPTION` + the system tag. Members apply
 creates get create's semantics; their template-dependent fields (a same-named template schedule,
 a template resource that overrides a declared one) are resolved after the create, against a fresh
-read. `APPLY_FIELD_CLASSIFICATION` classifies every `SystemManifest` / `SystemAgentConfig` field
+read. For a `local:` template the dry run predicts the schedule half of that read (below). `APPLY_FIELD_CLASSIFICATION` classifies every `SystemManifest` / `SystemAgentConfig` field
 and schedule key (reconciled / report-only / create-only / inert), pinned by a census test.
+
+**Dry-run fidelity (trinity-enterprise#984)**: two places where the preview and the run disagreed.
+- *A leftover workspace volume.* For a free, deployable name (Docker readable), the snapshot asks
+  `crud.create_volume_refusal(name)`, the one function create's `_guard_leftover_workspace_volume`
+  (#1667) raises its 409 from, so a volume refusal added there reaches both. A refusal → the
+  non-retryable blocker `member_<kind>` (today `member_workspace_volume_leftover`), whose detail is
+  create's 409 text (`crud.leftover_workspace_volume_detail`), so the dry run is `invalid` and the
+  real run is `refused` (409) before any write or lock key. A probe error →
+  `member_reads_unavailable` (503); create itself still proceeds on a probe error. A taken name, a
+  `deploy: false` member and an unreadable Docker are never probed.
+- *A `local:` template's schedules.* `_preflight_template` returns them with its verdict, read as
+  create does (`crud._resolve_local_template` on a throwaway config + `normalize_declared_schedules`;
+  no template → `[]`, `github:` → `None`, not probed), so `template.yaml` is read once per member
+  per preview. `_plan_created_member` builds stand-in rows
+  (`_template_schedule_rows`, the fields `reconcile_declared_schedules` stores) and maps the actions
+  through `_created_schedule_changes`, the function `_apply_created_schedules` runs over its
+  post-create read: `schedule_create`, `schedule_update` (validated over the merged cron/timezone;
+  an error is a blocker in the dry run), `enabled_differs` (the template row keeps its state) and
+  `schedule_undeclared`, over the rows sorted by name so both runs list them in one order.
+  `github:` keeps `pending_template_resolution`, plus one `schedules` line (the template's own rows
+  are known only after create). The `created_schedules` op
+  is emitted, with `entries: []`, whenever the template's rows are non-empty or unknown, so the
+  real run re-reads and reports template-only rows too. With no manifest entry nothing is written,
+  so a failed re-read is a `warnings[]` line (the member stays applied) and a failed create skips
+  it silently; with entries, a failed re-read is a `failed[]` line per entry. `_apply_report` drops
+  every plan-side schedule change of a created member: the executor's own lines replace them when
+  it read the schedules back (`ApplyOutcome.schedules_reported`); otherwise the pending form
+  (`_pending_schedule_changes`, from the op's `entries`) is shown, never the prediction, and the
+  `schedules` line only when the member exists.
+  Residual: materialization is non-fatal, so an expected template row can be missing and the run
+  then reports `schedule_create` where the preview said `schedule_update`.
+- *Create mode.* `deploy_manifest`'s dry run adds one `warnings[]` line per `local:` member whose
+  manifest schedule shares a name with a template schedule and differs from it in a field deploy
+  would have written (`_template_schedule_collision_warnings`, over the preflight's read): deploy
+  keeps the template's row and its `enabled`. `schedules_preview` is unchanged.
 
 **Bare adoption (trinity-enterprise#1030)**: `read_apply_snapshot` marks a bare, managed, tag-less member `ApplyMemberState.untagged` instead of gating it `member_claimed_by_another_system`; `_plan_existing_member` turns that into a `member_adopted` change plus a `tag` op for the system tag; `resolve_apply_plan` collects `ApplyPlan.adopted` and the restart/teardown warning (`ApplyPlan.adoption_warning`, built by `_adoption_line`); `_apply_report` copies it to `SystemApplyResponse.adopted` on a dry run (valid or invalid), empties it and drops the line on a refused run, and on a real run keeps only members whose system tag landed (`ApplyOutcome.tags_landed`, per (name, tag)) with the line in the past tense (#4130).
 
@@ -735,6 +770,8 @@ method that does not exist, so no export carried `folders`.)
 
 **Seats (trinity-enterprise#1030 CP4)**: `services/system_apply/seats.py` owns `seat:` and `person_seats:` — `parse_seat` / `parse_person_seats` (called from `parse_manifest`; shapes and email-shaped values refused by name, never echoed), `read_member` (into `ApplyMemberState.seat` / `.person_seats`; a provider error raises, so the snapshot blocks the member retryably), `plan` (via `_plan_seats(mp, state, snapshot)`; `seat_missing` / `seat_differs` writes only when `assignment_provider.seat_writer_installed()` AND the caller passes the grant gate (`seat_writer=snapshot.grant_writer`, i.e. `dependencies.is_interactive_admin`) — a writer but any other caller is the report `seat_requires_interactive_admin` — else `seat_unobserved`; person seats `seat_filled` / `seat_vacant` / `seat_unobserved` reports only — `seat_unobserved` with a "does not exist yet" note on a member apply will create, since nothing was read), `summarize` (`summary.roles.held_back` and its one warning line, appended in `resolve_apply_plan` beside the grants one), `run` (`_run_op` kind `seat_set`, last in `_APPLY_OP_PHASES`; `assignment_provider.write_seat`), `export_member` (`seat:` from `resolve_seat` when it says `holds`; with no provider, or one without `seat_for`, it raises `SeatUnobserved` and the export names `seat of <member>` in its `# unobserved:` line, as a failed read does), `deploy` / `deploy_hold_back_warning` (deploy step 10d and the dry-run preview; behind the grant phase's gate, `dependencies.is_interactive_admin` — any other caller, an agent key included, is held back with `seats_require_interactive_admin` and nothing is written). The core judges the principal before `write_seat`; the `created_by` it passes is the username, attribution only, and a provider never re-judges from it. The provider hooks are `set_seat` and `person_seat_status` on `services/assignment_provider.py`, read through `getattr` (`seat_writer_installed`, `person_seat_reader_installed`, `write_seat`, `resolve_person_seat`).
 
+**The instance member's seat (trinity-enterprise#1174)**: `parse_person_seats` accepts `holder: member` (primary only, one per agent). `member_entry(cfg)` returns that entry only when `assignment_provider.member_seat_writer_installed()`; `read_member` skips it and `read_member_seat` fills `ApplyMemberState.member_seat` — in `read_apply_snapshot` for a managed member and for one apply will create (Docker readable); a provider error is the retryable `member_reads_unavailable`. `_plan_seats` passes `member=` and `member_writer=_member_writer(state, snapshot)` (`snapshot.grant_writer`, or `snapshot.member_writer` = `dependencies.can_seat_member` on a member being created or owned by the caller); `_plan_member_seat` emits the `member_seat_set` op or one report (`seat_filled` / `member_seat_differs` / `member_not_recorded` / `entitlement_missing` — the note names the provider's entitlement, passed through `resolve_member_seat` as `entitlement_missing:<name>`; OSS names none / `seat_requires_interactive_admin` / `seat_unobserved`). `_run_op` → `seats.run_member` → `assignment_provider.write_member_seat`; a landed change is audited by `_audit_member_seat`, and a new share broadcasts the share route's `agent_shared` event through `routers.sharing.manager` with identifiers only (`{name}`, #918) so rosters refresh. Create mode (`seats.deploy`) never reads or writes `holder: member` (pinned). Tests: `tests/unit/test_ent1174_member_seat.py`, `tests/unit/test_ent1174_journey.py` (skips without the private submodule).
+
 **Declared-only members (trinity-enterprise#1030 CP5)**: `SystemAgentConfig.deploy` (`parse_manifest` refuses a non-boolean). `validate_manifest` refuses explicit edges and `folders:` naming one, warns for presets, and adds one warning per declared-only member naming every other key it carries (`_DECLARED_ONLY_IGNORED_KEYS`) — parsed, never applied or reported. `read_apply_snapshot` classifies a `deploy: false` member before any gate: `ApplyMemberState.declared_only`, `.live` (the same global `taken` predicate) and `.template_in_catalog` (`_template_in_catalog`), then nothing else. `resolve_apply_plan` → `_plan_declared_only` (verdict `declared_only`, reports only, no op) and `_desired_edges` over deployed members only; the executor's `exists` set leaves declared-only members out. `deploy_manifest` resolves names over deployed members only and adds one `warnings` line listing the skipped names, plus `SystemDeployResponse.agents_declared_only` on every branch; when every member is declared-only it raises the named 400 `nothing_to_deploy` (dry run and real) after name resolution (#4130). The executor's step 5 (`restart_required` re-read) skips declared-only members, and `_apply_report` gives them `applied: None` (#4130). `export_manifest` always prepends `DECLARED_ONLY_EXPORT_HEADER`.
 
 **Summary and `unobserved` (trinity-enterprise#1030 CP6)**: `services/system_apply/summary.py` — `GROUP_FIELDS` (group → change fields), `member_unobserved(mp)` (into `ApplyMemberPlan.unobserved` → `SystemApplyMember.unobserved`) and `build(members, extras=…, landed=…)` (into `ApplyPlan.summary`, called at the end of `resolve_apply_plan`; `_apply_report` rebuilds it on a real run with `landed=ApplyOutcome.landed` — `(member, step, key)` of each write `attempt()` saw land, `key` being what the write wrote (the skill, set, gate's skill, capability, seat, edge target, tag) — so `write` counts a change only when a write of its own key landed (two sets on one member with one held count 1); the same key names the write in `failed[].key`, and with `landed=set()` on a refused run; `report` / `unobserved` stay plan counts (#4130); `grants.held_back` comes from `apply_grants.summarize`, which still owns the held-back warning line). Deploy's dry run adds `_configured_preview(cfg)` counts to each `agents_to_create` entry that declares a group; `src/frontend/src/components/systems/ManifestPreview.vue` → `configuredLine` renders them as one line (`data-testid="manifest-configured-line"`), pinned by `src/frontend/tests/unit/manifestPreviewConfiguredLine.mount.spec.js`.
@@ -796,6 +833,11 @@ async def deploy_system(
         credential-sanitize + URL-userinfo redact + 500-char truncate — learnings
         2026-07-14: git errors embed PAT-bearing remote URLs) and appends a
         SystemDeployFailure {name, short_name, template, reason, status_code}.
+        Only an HTTPException's detail, a ValueError's validation text and an
+        apply step's `_Refused` keep their words; any other exception is
+        reported as `<Class> — details in backend logs`, its text logged masked,
+        because the report is the body of the 500 when every member fails
+        (abilityai/trinity#4284).
         Each failed create self-cleans via crud.py's own rollback (#1484).
      e. strict=True → abort on first failure instead, re-raising with the
         ORIGINAL status code (4xx no longer flattened to 500) and detail
@@ -884,7 +926,7 @@ Callers must check `status`/`failed[]`, not just the HTTP code.
   "name": "my-system-worker2",
   "short_name": "worker2",
   "template": "github:invalid/repo",
-  "reason": "Failed to validate GitHub repository access: repository not found",
+  "reason": "Failed to validate GitHub repository access (GitHubError, HTTP 503 — details in backend logs)",
   "status_code": 502
 }
 ```
@@ -1831,7 +1873,7 @@ logger.info(f"Started {agents_started}/{len(created_agents)} agents for system '
 
 # Errors
 logger.error(f"Failed to create agent '{final_name}': {e.detail}")
-logger.exception(f"System deployment failed: {e}")
+logger.error("System deployment failed: %s", masked_traceback(e))  # scrubbed traceback, not exc_info (#4284)
 ```
 
 **Note**: Audit logging could be re-added if required for compliance. The infrastructure exists via `log_audit_event()` in the codebase but is not currently used in systems.py.
@@ -1978,9 +2020,11 @@ system lists under its own name, and `content-writer` alone does not make a `con
 #### Generic Deployment Error
 ```json
 {
-  "detail": "Deployment failed: Database connection lost"
+  "detail": "Deployment failed (OperationalError — details in backend logs)"
 }
 ```
+
+The body names the exception class only; the full exception and traceback go to the backend log, scrubbed of URL userinfo and credential shapes first (#4284). The apply catch-all answers the same way: `Apply failed (<Class> — details in backend logs)`.
 
 ### Not Found Errors (HTTP 404)
 

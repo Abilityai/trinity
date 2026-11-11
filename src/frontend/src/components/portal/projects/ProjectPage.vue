@@ -71,7 +71,24 @@
           <p v-if="guest" class="text-xs text-gray-500 dark:text-gray-400" data-testid="project-guest-note">
             You've been invited to this project. You see your own chats and what's been shared with you.
           </p>
-          <p v-else class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
+          <!-- trinity-enterprise#1132: my role on this project, and what it lets me do. -->
+          <p v-if="!guest" class="max-w-3xl text-sm text-gray-600 dark:text-gray-300" data-testid="project-my-role">{{ roleLine(p, myEmail) }}</p>
+          <!-- trinity-enterprise#1132 part 2: a company viewer asks the creator to join. -->
+          <div v-if="!guest && join" class="flex flex-wrap items-center gap-2 text-sm" data-testid="project-join">
+            <template v-if="join.kind === 'pending'">
+              <span class="text-gray-700 dark:text-gray-300" data-testid="project-join-pending">Asked to join. Waiting on {{ join.waitingOn === myEmail ? 'you' : join.waitingOn }}.</span>
+            </template>
+            <template v-else>
+              <span v-if="join.kind === 'declined'" class="text-gray-700 dark:text-gray-300" data-testid="project-join-declined">
+                {{ p.created_by }} declined your request{{ join.reason ? `: ${join.reason}` : '.' }}
+              </span>
+              <BaseButton size="sm" variant="secondary" :loading="joining" loading-label="Asking…" data-testid="project-join-ask" @click="askToJoin">
+                {{ join.kind === 'declined' ? 'Ask again' : 'Ask to join' }}
+              </BaseButton>
+            </template>
+            <span v-if="joinError" class="text-xs text-status-danger-700 dark:text-status-danger-400" role="alert">{{ joinError }}</span>
+          </div>
+          <p v-if="!guest" class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
             <span>Created by {{ p.created_by === myEmail ? 'you' : p.created_by }}</span>
             <a v-if="p.tracker_url" :href="p.tracker_url" target="_blank" rel="noopener noreferrer" class="text-action-primary-600 dark:text-action-primary-400 hover:underline">Tracker</a>
             <span :title="absolute(p.updated_at)">Updated {{ relative(p.updated_at) }}</span>
@@ -108,8 +125,8 @@
         <OverflowTabs :tabs="TABS" :model-value="tab" data-testid="project-tabs" @update:model-value="tab = $event" />
       </div>
 
-      <ProjectTasks v-if="!guest && tab === 'tasks'" :project-id="p.id" :can-contribute="p.can?.contribute === true" :archived="Boolean(p.archived_at)" :my-email="myEmail" />
-      <ProjectLog v-if="!guest && tab === 'log'" :project-id="p.id" :can-contribute="p.can?.contribute === true" :archived="Boolean(p.archived_at)" :my-email="myEmail" />
+      <ProjectTasks v-if="!guest && tab === 'tasks'" :project="p" :project-id="p.id" @open-thread="(t) => $emit('open-thread', t)" :can-contribute="p.can?.contribute === true" :archived="Boolean(p.archived_at)" :my-email="myEmail" :members="p.members || []" :is-creator="p.my_role === 'creator'" />
+      <ProjectLog v-if="!guest && tab === 'log'" :project="p" :project-id="p.id" :can-contribute="p.can?.contribute === true" :archived="Boolean(p.archived_at)" :my-email="myEmail" />
       <ProjectMaterial v-if="!guest && tab === 'material'" :project="p" :my-email="myEmail" :agents="usableAgents" />
 
       <div v-show="guest || tab === 'overview'" class="grid grid-cols-1 gap-4 lg:grid-cols-3 lg:items-start" data-testid="project-overview">
@@ -214,7 +231,7 @@
 
         <!-- ===================== side stack ===================== -->
         <div class="min-w-0 space-y-4" data-testid="project-overview-side">
-          <ProjectStewardCard v-if="!guest" :project="p" :my-email="myEmail" @open-stewarding="$emit('open-stewarding')" />
+          <ProjectStewardCard v-if="!guest" :project="p" :my-email="myEmail" :steward-outcome="store.stewardOutcomes[p.id] || null" @open-stewarding="$emit('open-stewarding')" />
           <ProjectHealthCard v-if="!guest" :project="p" :my-email="myEmail" />
           <ProjectNeedsYouCard v-if="!guest" :project="p" @open-thread="(t) => $emit('open-thread', t)" />
 
@@ -308,7 +325,7 @@ import { viewState } from '@/utils/loadingState'
 import { formatRelativeTime, formatLocalDateTime } from '@/utils/timestamps'
 import {
   STATUS_BADGE, statusLabel, visibilityLabel, agentStateLabel, workOnItOptions, continueChoice,
-  projectErrorMessage, HOW_IT_MOVES_KEY,
+  projectErrorMessage, HOW_IT_MOVES_KEY, roleLine, joinRequestState,
 } from './projectsUtils'
 
 const AGENT_BADGE = { active: 'success', pending: 'warning', declined: 'neutral' }
@@ -341,6 +358,21 @@ const view = computed(() => viewState({
 const p = computed(() => page.value.data || { members: [], agents: [], my_chats: [], rooms: [] })
 const rosterAgents = computed(() => portal.agents.map((a) => a.name))
 const guest = computed(() => p.value.guest === true)
+// trinity-enterprise#1132 part 2: Ask to join.
+const join = computed(() => joinRequestState(p.value))
+const joining = ref(false)
+const joinError = ref('')
+async function askToJoin() {
+  joining.value = true
+  joinError.value = ''
+  try {
+    await store.requestToJoin(p.value.id)
+  } catch (err) {
+    joinError.value = projectErrorMessage(err)
+  } finally {
+    joining.value = false
+  }
+}
 // The project's active agents this person can use — where "Add from…" looks.
 const usableAgents = computed(() => (p.value.agents || [])
   .filter((a) => a.state === 'active' && rosterAgents.value.includes(a.agent_name)).map((a) => a.agent_name))
