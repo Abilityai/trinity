@@ -353,10 +353,6 @@ def build_chat_payload(
     to run the turn fresh and not keep it as its chat session; an older agent
     image ignores the field."""
     payload = {"message": request.message, "stream": False}
-    if request.model:
-        payload["model"] = request.model
-    if isolated_session:
-        payload["isolated_session"] = True
     # Resolve the agent runtime (best-effort, never raises) so the MCP-tool
     # naming in the platform prompt matches the harness (#1187 F-MCP). Lazy +
     # guarded so a re-import under a stubbed services.docker_service can't break
@@ -367,6 +363,23 @@ def build_chat_payload(
         agent_runtime = get_agent_runtime(name)
     except Exception:
         agent_runtime = "claude-code"
+    # #4442: a turn that names no model runs on the agent's own model, resolved
+    # here as on every other backend path, so a restarted agent (back on its env
+    # model) and the turns the platform starts agree, and the row records it.
+    # On a failure the model is left to the agent, as before.
+    model = request.model
+    if not model:
+        try:
+            from services.agent_model_service import resolve_default_model
+
+            model = resolve_default_model(name, runtime=agent_runtime).model
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[Chat] model resolution failed for {name}: {type(e).__name__}")
+            model = None
+    if model:
+        payload["model"] = model
+    if isolated_session:
+        payload["isolated_session"] = True
     try:
         exec_ctx = ExecutionContext(
             agent_name=name,
@@ -375,7 +388,7 @@ def build_chat_payload(
             source_user_email=current_user.email or current_user.username,
             source_agent_name=x_source_agent,
             source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
-            model=request.model,
+            model=model,
         )
         payload["system_prompt"] = compose_system_prompt(
             execution_context=exec_ctx,
@@ -387,7 +400,7 @@ def build_chat_payload(
         # ent#243: pass the model here too — a context-build failure must not
         # silently swap the prompt tier as well as the context block.
         payload["system_prompt"] = get_platform_system_prompt(
-            runtime=agent_runtime, model=request.model
+            runtime=agent_runtime, model=model
         )
     # Pass execution ID so agent registers process under the same ID (enables termination)
     if task_execution_id:
@@ -407,6 +420,11 @@ def build_chat_payload(
             db.mark_execution_dispatched(task_execution_id)
         except Exception as e:
             logger.warning(f"[Chat] Failed to mark execution dispatched: {e}")
+        if model:
+            try:
+                db.stamp_model_used_if_null(task_execution_id, model)  # #4442
+            except Exception as e:
+                logger.warning(f"[Chat] Failed to stamp the model: {type(e).__name__}")
     return payload
 
 
