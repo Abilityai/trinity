@@ -82,7 +82,7 @@ RUN pip install --no-cache-dir \
     psycopg2-binary==2.9.10 \
     docker==7.1.0 \
     aiofiles==24.1.0 \
-    apscheduler==3.11.0 \
+    apscheduler==3.11.3 \
     croniter==5.0.1 \
     pytz==2024.2 \
     # #1823 portability floor for the tz database. `zoneinfo` reads the SYSTEM

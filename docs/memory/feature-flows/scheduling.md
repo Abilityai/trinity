@@ -725,7 +725,7 @@ stored-invalid rows — the backend 400 is no longer the first feedback (design-
 ## Dependencies
 
 **Python packages** (docker/backend/Dockerfile):
-- `apscheduler==3.11.0` - Async job scheduler. `docker/scheduler/requirements.txt` pins the SAME version (#1823): the backend validates by constructing the `CronTrigger` the scheduler will register, so a floor on one side lets validator and executor resolve different parsers
+- `apscheduler==3.11.3` - Async job scheduler (3.11.1+ fixes the DST fall-back bug, #3940). `docker/scheduler/requirements.txt` pins the SAME version (#1823): the backend validates by constructing the `CronTrigger` the scheduler will register, so a floor on one side lets validator and executor resolve different parsers
 - `croniter==5.0.1` - Cron expression parsing
 - `pytz==2024.2` - Timezone support. **Not the authoritative resolver** — pytz bundles its own complete tz database, while APScheduler's `astimezone()` re-resolves the zone through the stdlib `zoneinfo` (#1823)
 - `tzdata==2026.3` (+ the `tzdata-legacy` apt package) - The IANA database `zoneinfo` reads. `tzdata-legacy` carries the *backward-compatibility links* (`Europe/Kiev` → `Europe/Kyiv`), split out of `tzdata` in Debian trixie; without it every schedule stored under a legacy alias fails to register (#1823). Guarded by `tests/unit/test_1823_tz_capability_parity.py`
