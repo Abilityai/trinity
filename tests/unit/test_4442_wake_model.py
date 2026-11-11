@@ -188,11 +188,19 @@ ENV = {"env-only": OWN, "stopped": None}
 TEMPLATES = {"template-only": {"name": "scout", "model": PINNED}, "stopped": {"model": OWN}}
 
 
-def _fill(ops, *, env=None, templates=None, agents=None):
+def _fill(ops, *, env=None, templates=None, agents=None, live=None):
     from services.agent_model_seed import fill_blank_default_models
     env = ENV if env is None else env
     templates = TEMPLATES if templates is None else templates
+    live = {} if live is None else live
     reads = []
+
+    async def read_live(name):
+        reads.append(("live", name))
+        value = live.get(name)
+        if isinstance(value, Exception):
+            raise value
+        return value
 
     def read_env(name):
         reads.append(("env", name))
@@ -207,8 +215,64 @@ def _fill(ops, *, env=None, templates=None, agents=None):
 
     counts = asyncio.run(fill_blank_default_models(
         db_ops=ops, list_agents=lambda: agents or AGENTS,
-        read_env_model=read_env, read_template=read_template))
+        read_env_model=read_env, read_template=read_template, read_live_model=read_live))
     return counts, reads
+
+
+def test_boot_fill_takes_the_running_agents_live_model_over_its_env(ops):
+    """A Settings pick made before #4442 lived only in the agent's memory; the
+    env still holds the template's model. The live value wins."""
+    counts, reads = _fill(ops, live={"env-only": "claude-fable-5-1", "template-only": OWN})
+    assert ops.get_default_model_raw("env-only") == "claude-fable-5-1"
+    assert ops.get_default_model_raw("template-only") == OWN
+    assert ("env", "env-only") not in reads and ("template", "template-only") not in reads
+    assert ("live", "stopped") not in reads   # a stopped agent is not asked
+    assert counts["filled"] == 2
+
+
+def test_boot_fill_falls_back_to_env_then_template_when_the_agent_does_not_answer(ops):
+    """`_read_live_model` answers None for an unreachable agent; the env, then
+    the template, still fill the column."""
+    counts, reads = _fill(ops, live={"env-only": None, "template-only": None})
+    assert ops.get_default_model_raw("env-only") == OWN
+    assert ops.get_default_model_raw("template-only") == PINNED
+    assert reads.index(("live", "env-only")) < reads.index(("env", "env-only"))
+    assert ("env", "template-only") in reads and ("template", "template-only") in reads
+    assert counts["filled"] == 2
+
+
+def test_boot_fill_keeps_the_allowlist_and_fill_blank_guards_on_the_live_model(ops):
+    ops.set_default_model("preset", "claude-fable-5-1")
+    counts, reads = _fill(ops, live={"env-only": "claude-opus-9; rm -rf /", "preset": OWN})
+    assert ops.get_default_model_raw("env-only") is None and counts["refused"] == 1
+    assert ops.get_default_model_raw("preset") == "claude-fable-5-1"
+    assert ("live", "preset") not in reads
+
+
+def test_read_live_model_asks_the_agents_own_model_route(monkeypatch):
+    from services import agent_model_seed
+    import services.agent_client as agent_client
+    asked = []
+
+    class Client:
+        def __init__(self, answer):
+            self.answer = answer
+
+        async def get(self, path, timeout=None):
+            asked.append(path)
+            if isinstance(self.answer, Exception):
+                raise self.answer
+            return self.answer
+
+    for answer, expected in [
+        (httpx.Response(200, json={"model": f" {OWN} "}), OWN),
+        (httpx.Response(200, json={"model": None}), None),
+        (httpx.Response(503, json={"model": OWN}), None),
+        (httpx.ConnectError("refused"), None),
+    ]:
+        monkeypatch.setattr(agent_client, "get_agent_client", lambda n, a=answer: Client(a))
+        assert asyncio.run(agent_model_seed._read_live_model("agent-a")) == expected
+    assert set(asked) == {"/api/model"}
 
 
 def test_boot_fill_writes_env_then_template_models_into_blank_columns(ops):
@@ -374,6 +438,65 @@ def test_put_names_a_failed_save(kw):
     assert isinstance(result, HTTPException) and result.status_code == 500
     assert result.detail["error"] == "model_not_saved"
     audit.log.assert_not_called()
+
+
+def _stateful_agent(model):
+    """An agent that holds its model in memory, as the agent server does."""
+    state = {"model": model, "puts": []}
+
+    def handler(request):
+        if request.method == "GET":
+            return httpx.Response(200, json={"model": state["model"]})
+        import json
+        state["model"] = json.loads(request.content)["model"]
+        state["puts"].append(state["model"])
+        return httpx.Response(200, json={"model": state["model"]})
+    return state, handler
+
+
+def test_a_failed_save_puts_the_agents_previous_model_back(ops):
+    """The agent accepts the new model, the store fails: the agent is put back
+    on its previous model and the stored value is unchanged, so nothing is
+    left half-set and the message names the model it keeps running."""
+    import routers.chat as chat
+    from models import ModelChangeRequest
+    ops.set_default_model("preset", PINNED)
+    state, handler = _stateful_agent(PINNED)
+
+    def failing_store(name, model):
+        raise RuntimeError("db locked")
+
+    container = SimpleNamespace(status="running", labels={})
+    with patch.object(chat, "agent_httpx_client", _agent(handler)), \
+            patch.object(chat, "get_agent_container", lambda name: container), \
+            patch.object(chat, "db", SimpleNamespace(set_default_model=failing_store)), \
+            patch.object(chat, "platform_audit_service", MagicMock(log=AsyncMock())):
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(chat.set_agent_model(ModelChangeRequest(model=OWN), name="preset",
+                                             current_user=SimpleNamespace(id=1, username="o")))
+    assert exc.value.status_code == 500 and exc.value.detail["error"] == "model_not_saved"
+    assert exc.value.detail["restored"] is True
+    assert state["puts"] == [OWN, PINNED] and state["model"] == PINNED
+    assert ops.get_default_model_raw("preset") == PINNED
+    assert f"keeps running {PINNED}" in exc.value.detail["message"]
+    assert f"now runs {OWN}" not in exc.value.detail["message"]
+
+
+def test_a_failed_save_that_cannot_be_put_back_says_so():
+    calls = []
+
+    def handler(request):
+        calls.append(request.method)
+        if request.method == "GET":
+            return httpx.Response(200, json={"model": PINNED})
+        if len(calls) > 2:  # the put-back
+            return httpx.Response(500, json={"detail": "boom"})
+        return httpx.Response(200, json={"model": OWN})
+
+    result, _, _ = _put(handler, saved=False)
+    assert isinstance(result, HTTPException) and result.detail["restored"] is False
+    assert "could not be put back" in result.detail["message"]
+    assert calls == ["GET", "PUT", "PUT"]
 
 
 def test_put_on_a_non_claude_agent_stores_nothing():

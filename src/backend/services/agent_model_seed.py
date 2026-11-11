@@ -9,7 +9,9 @@ writers are:
 * ``PUT /api/agents/{name}/model`` (Settings → Model), which stores what the
   agent accepted (``routers/chat.py``);
 * the create seed, ``seed_default_model``, from the template's declared model;
-* the boot fill, ``fill_blank_default_models``, for agents created before this.
+* the boot fill, ``fill_blank_default_models``, for agents created before this:
+  the running agent's own ``GET /api/model`` first, then its env, then its
+  template.yaml.
 
 The seed and the fill write only into a NULL column (``set_default_model_if``
 with ``expected=None``), so they never overwrite a value another writer set,
@@ -84,6 +86,23 @@ async def _read_live_template(agent_name: str) -> Optional[dict]:
     return data if isinstance(data, dict) else None
 
 
+async def _read_live_model(agent_name: str) -> Optional[str]:
+    """The model the running agent runs now (its ``GET /api/model``): the
+    Settings pick it holds in memory, which starts from ``AGENT_RUNTIME_MODEL``.
+    None on any failure."""
+    from services.agent_client import get_agent_client
+
+    try:
+        response = await get_agent_client(agent_name).get("/api/model", timeout=10.0)
+        if getattr(response, "status_code", 0) != 200:
+            return None
+        value = response.json().get("model")
+    except Exception as e:  # noqa: BLE001
+        logger.info("[#4442] %s's live model not read: %s", agent_name, type(e).__name__)
+        return None
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 def _live_agents() -> Iterable[tuple]:
     from services.docker_service import list_all_agents_fast
 
@@ -96,11 +115,15 @@ async def fill_blank_default_models(
     list_agents: Callable[[], Iterable[tuple]] = None,
     read_env_model: Callable[[str], Optional[str]] = None,
     read_template: Callable[[str], Awaitable[Optional[dict]]] = None,
+    read_live_model: Callable[[str], Awaitable[Optional[str]]] = None,
 ) -> Dict[str, int]:
     """The boot pass: give every Claude Code agent whose column is NULL the
-    model its container runs (``AGENT_RUNTIME_MODEL``), else the model its own
-    ``template.yaml`` declares (running agents only). Idempotent, unclaimed:
-    every worker may run it. Returns counts only (no names, no values)."""
+    model it runs now. A running agent is asked first (``GET /api/model``: a
+    Settings pick made before #4442 lived only there); then its container env
+    (``AGENT_RUNTIME_MODEL``), the source for a stopped or unreachable agent;
+    then the model its own ``template.yaml`` declares (running agents only).
+    Idempotent, unclaimed: every worker may run it. Returns counts only (no
+    names, no values)."""
     if db_ops is None:
         from database import db as db_ops
     if list_agents is None:
@@ -109,6 +132,8 @@ async def fill_blank_default_models(
         from services.docker_service import read_runtime_model as read_env_model
     if read_template is None:
         read_template = _read_live_template
+    if read_live_model is None:
+        read_live_model = _read_live_model
 
     counts = {"blank": 0, "filled": 0, "nothing_declared": 0, "refused": 0, "failed": 0}
     agents = [a for a in await asyncio.to_thread(lambda: list(list_agents())) if _claude(a[1])]
@@ -118,7 +143,9 @@ async def fill_blank_default_models(
             continue
         counts["blank"] += 1
         try:
-            candidate = await asyncio.to_thread(read_env_model, name)
+            candidate = await read_live_model(name) if status == "running" else None
+            if not candidate:
+                candidate = await asyncio.to_thread(read_env_model, name)
             if not candidate and status == "running":
                 candidate = declared_model(await read_template(name))
             if not candidate:

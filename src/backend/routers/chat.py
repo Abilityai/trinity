@@ -862,6 +862,14 @@ async def set_agent_model(
         )
 
     try:
+        runtime = (container.labels or {}).get("trinity.agent-runtime") or "claude-code"
+    except Exception:  # noqa: BLE001
+        runtime = "claude-code"
+    # #4442: the model the agent runs now, read before the change, so a failed
+    # save can put it back and leave the agent and the stored value agreeing.
+    previous = await _read_agent_model(name) if runtime == "claude-code" else None
+
+    try:
         async with agent_httpx_client(name) as client:
             response = await client.put(
                 f"http://agent-{name}:8000/api/model",
@@ -873,10 +881,6 @@ async def set_agent_model(
     except httpx.HTTPError as e:
         _raise_model_route_error(name, e, "Failed to set model", "set model")
 
-    try:
-        runtime = (container.labels or {}).get("trinity.agent-runtime") or "claude-code"
-    except Exception:  # noqa: BLE001
-        runtime = "claude-code"
     if runtime != "claude-code":
         return body  # a non-Claude agent runs on its own model (ent#1202)
     model = (request.model or "").strip() or None
@@ -887,11 +891,19 @@ async def set_agent_model(
             f"Model of {name} set on the agent but not saved: {type(e).__name__}")
         saved = False
     if not saved:
+        restored = previous is not None and await _put_agent_model(name, previous)
+        if restored:
+            message = (f"The model was not saved, so the agent keeps running {previous}. "
+                       "Set it again.")
+        else:
+            message = ("The model was not saved, and the agent's previous model could not "
+                       f"be put back: chat started from Settings may run {model} until the "
+                       "agent restarts, while the turns the platform starts keep the stored "
+                       "model. Set it again.")
         raise HTTPException(status_code=500, detail={
             "error": "model_not_saved",
-            "message": (f"The agent now runs {model} for chat, but it was not saved, so "
-                        "the turns the platform starts still run on the previous model "
-                        "and a restart loses it. Set it again."),
+            "restored": bool(restored),
+            "message": message,
         })
     await platform_audit_service.log(
         event_type=AuditEventType.CONFIGURATION,
@@ -907,6 +919,34 @@ async def set_agent_model(
         details={"default_model": model},
     )
     return body
+
+
+async def _read_agent_model(name: str) -> Optional[str]:
+    """The model the agent runs now (its ``GET /api/model``); None on any failure.
+    Best effort and quiet: the PUT that follows reports an unreachable agent."""
+    try:
+        async with agent_httpx_client(name) as client:
+            response = await client.get(f"http://agent-{name}:8000/api/model", timeout=5.0)
+            response.raise_for_status()
+            value = response.json().get("model")
+    except Exception as e:  # noqa: BLE001
+        logger.debug(f"[#4442] model of {name} not read before the change: {type(e).__name__}")
+        return None
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+async def _put_agent_model(name: str, model: str) -> bool:
+    """Put ``model`` back on the agent. True when the agent accepted it."""
+    try:
+        async with agent_httpx_client(name) as client:
+            response = await client.put(f"http://agent-{name}:8000/api/model",
+                                        json={"model": model}, timeout=10.0)
+            response.raise_for_status()
+    except Exception as e:  # noqa: BLE001
+        logging.getLogger("trinity.errors").error(
+            f"Model of {name} not put back after a failed save: {type(e).__name__}")
+        return False
+    return True
 
 
 def _raise_model_route_error(name: str, e: httpx.HTTPError, unavailable: str, action: str):
