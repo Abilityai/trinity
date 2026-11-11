@@ -745,9 +745,14 @@ def decode_token(token: str) -> Optional[dict]:
     Returns the token payload with user info if valid, None if invalid.
     Useful for WebSocket authentication where Depends() doesn't work.
 
+    It is the shared socket-door decoder, so it applies the same account-state
+    checks as `get_current_user`: a deactivated account is refused here too
+    (abilityai/trinity-enterprise#863).
+
     Returns:
         dict with keys: sub, email, role, exp, mode (if valid)
-        None if token is invalid or expired
+        None if token is invalid or expired, or the account is missing or
+        deactivated
     """
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -774,6 +779,11 @@ def decode_token(token: str) -> Optional[dict]:
         # Get full user record from database
         user = db.get_user_by_username(username)
         if not user:
+            return None
+
+        # #995 — a deactivated account is refused at the socket doors as at
+        # get_current_user (abilityai/trinity-enterprise#863).
+        if user.get("suspended_at"):
             return None
 
         return {
