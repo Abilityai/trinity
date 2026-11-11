@@ -48,6 +48,7 @@ from services.template_service import (
 from services.template_schedules import normalize_declared_schedules
 from services.template_plugins import normalize_declared_plugins
 from services import metric_registry
+from services import agent_model_seed
 from services import git_service
 from services.settings_service import get_anthropic_api_key, resolve_github_pat, resolve_github_pat_candidates, get_agent_full_capabilities, get_agent_quota_for_role, get_agent_default_resources, get_agent_default_require_email, get_ephemeral_agent_quota, get_ephemeral_ttl_ceiling_seconds
 from services.entitlement_service import entitlement_service
@@ -418,6 +419,11 @@ class _TemplateResolution:
     # reconcile, not a no-op: a template that DROPPED its block retires the
     # rows it used to declare.
     declared_metrics: list = field(default_factory=list)
+    # #4442: the model the template declares (`runtime.model`, else a top-level
+    # `model:`), fed by both resolver branches. Seeds the agent's own model
+    # (`default_model`) at registration; the `github:` path never set
+    # `config.runtime_model`, so its agents' wakes ran on the platform default.
+    declared_model: Optional[str] = None
     # trinity-enterprise#15: staged backend-materialized snapshot for the
     # "copy" import intent. When set, `github_repo_for_agent` stays None by
     # design — the container gets NO GitHub env, no git-config row, no PAT.
@@ -1970,6 +1976,7 @@ async def _resolve_template(
             tr.declared_metrics = metric_registry.declared_metrics_from_template(
                 source_metadata
             )
+            tr.declared_model = agent_model_seed.declared_model(source_metadata)
             (
                 tr.github_repo_for_agent,
                 tr.github_pat_for_agent,
@@ -2057,6 +2064,7 @@ async def _resolve_template(
             tr.declared_metrics = metric_registry.declared_metrics_from_template(
                 tr.template_data
             )
+            tr.declared_model = agent_model_seed.declared_model(tr.template_data)
     return tr
 
 
@@ -2850,10 +2858,12 @@ def _register_agent(
     template_data: dict,
     ephemeral_expires_at: Optional[str],
     auto_assigned_subscription_id: Optional[str],
+    declared_model: Optional[str] = None,
 ) -> None:
     """DB registration: ownership row (require_email #1129 + ephemeral fields +
     provenance), the ent#69 parent→child spawn edge, the auto-assigned
-    subscription (#74), the AVATAR-003 avatar seed, and default permissions.
+    subscription (#74), the AVATAR-003 avatar seed, the agent's own model
+    (#4442), and default permissions.
     Each post-registration grant is log-and-continue (non-fatal)."""
     # #1129: seed require_email from the fleet-wide default
     # (secure-by-default ON) at creation; owners can override per agent.
@@ -2892,6 +2902,16 @@ def _register_agent(
             db.set_display_label(config.name, config.display_label)
         except Exception as e:
             logger.warning(f"Could not set display label for {config.name}: {e}")
+
+    # #4442: seed the agent's own model, the one its wakes and other
+    # platform-started turns run on, from the request's runtime model or the
+    # template's declared one. Fill-blank only, so another writer's value stays.
+    _own_model = config.runtime_model or declared_model
+    if _own_model:
+        try:
+            agent_model_seed.seed_default_model(config.name, _own_model, config.runtime, db_ops=db)
+        except Exception as e:
+            logger.warning(f"Could not seed the model of {config.name}: {type(e).__name__}")
 
     # trinity-enterprise#69 Part 2: auto-grant the parent→child
     # permission edge so the spawning agent can immediately
@@ -4039,6 +4059,7 @@ async def create_agent_internal(
                 tr.template_data,
                 ephemeral_expires_at,
                 auto_assigned_subscription_id,
+                declared_model=tr.declared_model,
             )
             # ent#1173 (AC-2): install a GitHub template's bundled avatar bytes
             # (fetched during _resolve_template). Best-effort — the agent is
