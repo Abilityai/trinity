@@ -1440,39 +1440,87 @@ onMounted(() => { if (isMainChat.value || memberTier.value) progressStore.fetchP
 // Text, reply and tags are held; a send carrying files is not held — it goes out
 // as ever, because a held file chip would have to outlive the composer.
 const HELD_SEND_CEILING_MS = 3 * 60 * 1000
+// ent#1220: one lost progress event must not cost the member the whole ceiling.
+// While a send is held the card is re-read every 30 s, and once more before the
+// words are handed back; a flip a re-read caught is logged, because it means
+// the event that should have flipped it never arrived.
+const HELD_SEND_REREAD_MS = 30 * 1000
 const assistantIsStarting = computed(() => memberTier.value && assistantStarting(progressData.value))
 const heldSend = ref(null)
 let heldSendTimer = null
+let heldSendPoll = null
+let heldSendReread = false
+let conversationUnmounted = false
 
 function holdSend(text, reply, tags) {
   heldSend.value = { text, reply, tags }
   clearTimeout(heldSendTimer)
+  clearInterval(heldSendPoll)
+  // The ceiling first: at the instant both are due, the hand-back's own re-read runs.
   heldSendTimer = setTimeout(handBackHeldSend, HELD_SEND_CEILING_MS)
+  heldSendPoll = setInterval(() => { void rereadHeldSendProgress() }, HELD_SEND_REREAD_MS)
 }
 
+// The one consumer: whichever path takes the held send first sends or hands it back.
 function takeHeldSend() {
   clearTimeout(heldSendTimer)
+  clearInterval(heldSendPoll)
   heldSendTimer = null
+  heldSendPoll = null
   const h = heldSend.value
   heldSend.value = null
   return h
 }
 
-function handBackHeldSend() {
+function giveBackHeldSend() {
   const h = takeHeldSend()
   if (!h) return
   input.value = restoreDraft(h.text, input.value)
   autoGrowAfterUpdate()
 }
 
-watch(assistantIsStarting, (isStarting) => {
-  if (isStarting || !heldSend.value) return
-  const failed = (progressData.value?.steps || [])
-    .some((s) => s?.key === 'assistant_ready' && s.state === 'failed')
-  if (failed) return handBackHeldSend()
+function sendHeld() {
   const h = takeHeldSend()
+  if (!h) return
   void submitUserText(h.text, { replyId: h.reply?.messageId || null, replyExcerpt: h.reply?.excerpt || '',
                                 tags: h.tags })
+}
+
+function assistantReadyState() {
+  return (progressData.value?.steps || []).find((s) => s?.key === 'assistant_ready')?.state
+}
+
+// A forced read of the card. A flip it brings sends through the watch below.
+async function rereadHeldSendProgress() {
+  if (!heldSend.value) return
+  heldSendReread = true
+  try {
+    await progressStore.fetchProgress(props.agent.name, { force: true })
+  } finally {
+    heldSendReread = false
+  }
+}
+
+// The ceiling: read the card once more, then send only on a read that says
+// ready. Starting, failed, a failed read or a missing step all hand back.
+async function handBackHeldSend() {
+  if (!heldSend.value) return
+  clearInterval(heldSendPoll)
+  heldSendPoll = null
+  await rereadHeldSendProgress()
+  if (conversationUnmounted || !heldSend.value) return   // left the chat, or the watch sent it
+  if (!progressData.value?.error && assistantReadyState() === 'done') return sendHeld()
+  giveBackHeldSend()
+}
+
+watch(assistantIsStarting, (isStarting) => {
+  if (isStarting || !heldSend.value) return
+  if (assistantReadyState() !== 'done') return giveBackHeldSend()
+  if (heldSendReread) {
+    console.warn('[portal] the assistant read ready on a re-read of its progress, not on its '
+      + 'progress event — the event did not arrive (ent#1220)')
+  }
+  sendHeld()
 })
 
 // While a send is held its words ARE this chat's draft, ahead of anything typed
@@ -1487,7 +1535,9 @@ watch([input, heldSend], ([text, h], [, wasHeld]) => {
 
 // Leaving the chat with a send still held keeps the words as this chat's draft.
 onBeforeUnmount(() => {
+  conversationUnmounted = true
   clearTimeout(heldSendTimer)
+  clearInterval(heldSendPoll)
   const h = heldSend.value
   if (h && draftKey.value) drafts.set(draftKey.value, restoreDraft(h.text, input.value))
 })
