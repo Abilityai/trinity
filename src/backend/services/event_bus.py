@@ -92,6 +92,9 @@ class _ClientSlot:
     # ...and the fields each delivered event is cut to (None = the whole payload).
     allowed_fields: Optional[FrozenSet[str]] = None
     refreshing: bool = False
+    # An access change seen while ``refreshing``: the in-flight read may
+    # predate it, so ``_refresh_slots`` reads once more before it finishes.
+    refresh_again: bool = False
     # trinity-enterprise#872: an agent key's /ws/events slot re-reads its reach
     # through this zero-arg callable on an access-changing event (injected by
     # main.py, like the email resolver). None = no per-slot refresh.
@@ -564,7 +567,10 @@ class StreamDispatcher:
         # An agent key's slot (trinity-enterprise#872): its roster is its reach,
         # which a create (spawn) or delete changes; each slot re-reads its own.
         for slot in list(self._clients.values()):
-            if slot.roster_resolver is None or slot.is_admin or slot.refreshing:
+            if slot.roster_resolver is None or slot.is_admin:
+                continue
+            if slot.refreshing:
+                slot.refresh_again = True
                 continue
             slot.refreshing = True
             task = asyncio.create_task(self._refresh_slots(
@@ -583,6 +589,9 @@ class StreamDispatcher:
             if slot.scope != SCOPE_ALL or slot.is_admin or not slot.email:
                 continue
             if slot.refreshing:
+                # The in-flight read may predate this change; skipping the
+                # slot outright lost the invalidation (refresh_again re-reads).
+                slot.refresh_again = True
                 continue
             by_email.setdefault(slot.email, []).append(slot)
         for email, slots in by_email.items():
@@ -600,20 +609,31 @@ class StreamDispatcher:
         ``resolver`` is the synchronous SQLAlchemy read
         ``db.get_accessible_agent_names``; calling it inline would block the
         single reader loop for every connected client. A failure leaves the
-        previous roster in place — again the smaller, safer set."""
+        previous roster in place — again the smaller, safer set.
+
+        An access change observed while this read is in flight marks the
+        slot ``refresh_again`` (the read may predate the change), and the read
+        repeats until no mark is left — so that change is never swallowed."""
         try:
-            names = await asyncio.to_thread(resolver, email)
-            if isinstance(names, (list, tuple, set)):
-                resolved = set(names)
+            while True:
                 for slot in slots:
-                    slot.accessible_agents = resolved
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:  # noqa: BLE001 — a refresh must never kill delivery
-            logger.warning("stream_dispatcher: roster refresh failed for a client: %s", e)
+                    slot.refresh_again = False
+                try:
+                    names = await asyncio.to_thread(resolver, email)
+                    if isinstance(names, (list, tuple, set)):
+                        resolved = set(names)
+                        for slot in slots:
+                            slot.accessible_agents = resolved
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:  # noqa: BLE001 — a refresh must never kill delivery
+                    logger.warning("stream_dispatcher: roster refresh failed for a client: %s", e)
+                if not any(slot.refresh_again for slot in slots):
+                    break
         finally:
             for slot in slots:
                 slot.refreshing = False
+                slot.refresh_again = False
 
     def client_count(self) -> int:
         return len(self._clients)
