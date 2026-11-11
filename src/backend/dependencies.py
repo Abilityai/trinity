@@ -2779,7 +2779,8 @@ async def _audit_capability(
     target: Optional[str], **details,
 ) -> None:
     """One AUTHORIZATION row about a capability. Best-effort: an audit failure
-    never changes what the caller gets."""
+    never changes what the caller gets. Safe with `request=None`, for a fence
+    applied off the request path (agent creation from a system deploy, #4387)."""
     try:
         from services.platform_audit_service import (
             platform_audit_service, AuditEventType, principal_actor,
@@ -2793,12 +2794,12 @@ async def _audit_capability(
             event_action=action,
             source="api",
             **actor,
-            actor_ip=request.client.host if request.client else None,
+            actor_ip=getattr(getattr(request, "client", None), "host", None),
             target_type="agent",
             target_id=target,
-            endpoint=request.scope["path"],
-            request_id=getattr(request.state, "request_id", None),
-            details={"capability": capability, "method": request.method, **details},
+            endpoint=(getattr(request, "scope", None) or {}).get("path"),
+            request_id=getattr(getattr(request, "state", None), "request_id", None),
+            details={"capability": capability, "method": getattr(request, "method", None), **details},
         )
     except Exception:  # noqa: BLE001
         logger.warning("capability audit failed for %s (%s)", capability, action)

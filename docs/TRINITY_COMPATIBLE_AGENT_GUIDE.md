@@ -693,7 +693,7 @@ skills:
 # library does not have are skipped. They are delivered once the agent is up,
 # then managed on its Skills tab like any other assignment.
 library_skills:
-  - plan-interview-research
+  - research-planning
   - user-research
 
 # Supported platforms (if applicable)

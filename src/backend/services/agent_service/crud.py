@@ -2989,15 +2989,18 @@ def reconcile_declared_schedules(
 
 # Creation starts the container directly (not via `start_agent_internal`), so
 # nothing else delivers assigned skills until the agent's next start. Startup can
-# install plugins and clone repos, so the readiness wait is generous.
-LIBRARY_SKILLS_READY_TIMEOUT_S = int(os.getenv("LIBRARY_SKILLS_READY_TIMEOUT_S", "900"))
+# install plugins and clone repos, so the readiness wait is generous. A constant,
+# not a setting: a missed delivery is repaired by the next start anyway.
+LIBRARY_SKILLS_READY_TIMEOUT_S = 900
 
 # Strong refs for the fire-and-forget deliveries (the asyncio `create_task`
 # garbage-collection footgun; same pattern as `spawn_gitignore_merge_after_clone`).
 _inflight_library_skill_deliveries: set = set()
 
 
-def _permitted_library_skills(current_user, declared: list) -> list:
+async def _permitted_library_skills(
+    request: Optional[Request], current_user, declared: list, agent_name: str,
+) -> list:
     """The declared names this creator may have assigned — all or none.
 
     The §21.3.1 fence, applied at creation: assigning skills is the
@@ -3006,27 +3009,39 @@ def _permitted_library_skills(current_user, declared: list) -> list:
     and a principal with no scope at all, is refused. Without this, any agent
     key could obtain library skills by creating an agent from a template that
     names them. A refusal costs the skills, never the creation.
+
+    Audited like the route fence: a refusal leaves a `capability_refused` row
+    and an agent key the grant admits leaves a `capability_used` row. Both
+    writers are best-effort and safe with `request=None`.
     """
     if not declared:
         return []
     try:
         from db.capability_grants import CAPABILITY_SKILLS_MANAGE
-        from dependencies import capability_refusal
+        from dependencies import (
+            _audit_capability, capability_refusal, record_capability_use,
+        )
 
         refusal = capability_refusal(current_user, CAPABILITY_SKILLS_MANAGE)
+        if refusal is None:
+            await record_capability_use(
+                request, current_user, CAPABILITY_SKILLS_MANAGE, target=agent_name,
+            )
+            return list(declared)
+        logger.warning(
+            "[§21.3.4] Not assigning template library_skills %s: the creating key "
+            "lacks skills.manage (%s). The agent is created without them.",
+            declared, refusal[0],
+        )
+        await _audit_capability(
+            request, current_user, "capability_refused", CAPABILITY_SKILLS_MANAGE,
+            agent_name, code=refusal[0], library_skills=list(declared),
+        )
     except Exception as e:  # noqa: BLE001 — runs inside the creation fence
         logger.warning(
             "[§21.3.4] Could not check skills.manage for template library_skills "
             "(%s); the agent is created without them.", e,
         )
-        return []
-    if refusal is None:
-        return list(declared)
-    logger.warning(
-        "[§21.3.4] Not assigning template library_skills %s: the creating key "
-        "lacks skills.manage (%s). The agent is created without them.",
-        declared, refusal[0],
-    )
     return []
 
 
@@ -4151,6 +4166,9 @@ async def create_agent_internal(
                 ephemeral_expires_at,
                 auto_assigned_subscription_id,
             )
+            permitted_library_skills = await _permitted_library_skills(
+                request, current_user, tr.declared_library_skills, config.name,
+            )
             await _materialize_agent_files(
                 config,
                 tr.template_data,
@@ -4161,9 +4179,7 @@ async def create_agent_internal(
                 current_user.username,
                 tr.declared_plugins,
                 tr.declared_metrics,
-                declared_library_skills=_permitted_library_skills(
-                    current_user, tr.declared_library_skills
-                ),
+                declared_library_skills=permitted_library_skills,
                 library_skills_assigned_by_agent=_library_skills_attribution(current_user),
             )
             return agent_status

@@ -25,7 +25,7 @@ A default install therefore shows starter templates plus whatever the registry o
 
 | File | Purpose |
 |------|---------|
-| `template.yaml` | Agent metadata: `display_name`, `description`, `resources`, `credentials`, `credential_setup`, `schedules`, `runtime` |
+| `template.yaml` | Agent metadata: `display_name`, `description`, `resources`, `credentials`, `credential_setup`, `schedules`, `library_skills`, `runtime` |
 | `CLAUDE.md` | Agent instructions and system prompt |
 | `.mcp.json.template` | MCP config template with `${VAR}` placeholders for credential injection |
 | `.env.example` | Example credentials file listing required environment variables |
@@ -124,6 +124,29 @@ Rules worth knowing:
 - The `enabledPlugins:` mapping shape from Claude Code's own `settings.json` (`trinity@abilityai: true`) is accepted as an alternative to `installed:`.
 
 The manifest is agent-writable, so it is parsed defensively: names and marketplace sources are validated (no embedded credentials, no path traversal), a malformed block is reported rather than acted on, and every install runs with a timeout and never prompts.
+
+### Declared Library Skills
+
+A template can name skills from the platform skills library that its agent should hold, in a `library_skills:` list in `template.yaml`:
+
+```yaml
+library_skills:
+  - user-research
+  - research-planning
+```
+
+When an agent is created from the template, Trinity assigns each named skill the library has to the new agent, with the agent's owner as the assigner, and delivers them as soon as the agent is up. They are ordinary assignments from then on: they show on the agent's **Skills** tab, you can unassign them there, and they follow library updates like any other assigned skill. This is the alternative to copying the skills into the template's own `.claude/skills/`, which freezes them at the copied version.
+
+Rules worth knowing:
+
+- Names only, up to 50. Skill sets (`set:<name>`) are not accepted here and are reported as an error in the template catalogue.
+- A name the library doesn't have is skipped and logged; the agent is still created. Make sure the skills source that provides them is added in **Settings → Agents → Skills Library** first.
+- When an agent creates the agent, it needs the **Skill managers** permission (the same permission it needs to assign skills directly; see [Skills and Playbooks](../automation/skills-and-playbooks.md)). Without it, the agent is created with none of the declared skills, and the refusal is recorded in the audit log.
+- Ephemeral agents don't get library skills.
+- The list is read at creation only. Adding or removing names in `template.yaml` later doesn't change agents that already exist; assign or unassign on their Skills tab instead.
+- If the agent takes longer than 15 minutes to come up, the skills stay assigned and are delivered on its next start.
+
+See [Skills and Playbooks](../automation/skills-and-playbooks.md).
 
 ### Deploy a bare repository, then onboard it in place
 

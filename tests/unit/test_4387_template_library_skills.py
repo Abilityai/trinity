@@ -48,7 +48,7 @@ pytestmark = pytest.mark.unit
 
 OWNER = "owner"
 AGENT = "agent-1"
-LIBRARY = {"user-research", "deutero-setup", "plan-interview-research"}
+LIBRARY = {"user-research", "survey-setup", "research-planning"}
 
 
 # ---------------------------------------------------------------------------
@@ -70,8 +70,8 @@ def test_non_list_is_a_named_error(block):
 
 
 def test_valid_names_kept_in_order_and_deduplicated():
-    block = ["user-research", "deutero-setup", "user-research", " deutero-setup "]
-    assert normalize_declared_library_skills(block) == ["user-research", "deutero-setup"]
+    block = ["user-research", "survey-setup", "user-research", " survey-setup "]
+    assert normalize_declared_library_skills(block) == ["user-research", "survey-setup"]
     assert library_skill_errors(block) == []
 
 
@@ -86,7 +86,7 @@ def test_invalid_entries_are_dropped_with_a_named_error(bad):
 
 
 def test_skill_sets_are_refused_by_name_not_silently_dropped():
-    block = ["set:deutero"]
+    block = ["set:research"]
     assert normalize_declared_library_skills(block) == []
     errors = library_skill_errors(block)
     assert len(errors) == 1 and "set" in errors[0].lower()
@@ -110,7 +110,7 @@ def test_error_echo_is_bounded():
 _TEMPLATE_YAML = {
     "name": "demo",
     "description": "d",
-    "library_skills": ["user-research", "deutero-setup"],
+    "library_skills": ["user-research", "survey-setup"],
 }
 
 
@@ -121,7 +121,7 @@ def test_local_builder_surfaces_library_skills(tmp_path):
     template_dir.mkdir()
     (template_dir / "template.yaml").write_text(yaml.safe_dump(_TEMPLATE_YAML))
     entry = template_service._build_local_template(template_dir, is_bundled=True)
-    assert entry["library_skills"] == ["user-research", "deutero-setup"]
+    assert entry["library_skills"] == ["user-research", "survey-setup"]
     assert entry["library_skill_errors"] == []
 
 
@@ -129,7 +129,7 @@ def test_github_builder_surfaces_library_skills_and_errors_without_raising():
     from services import template_service
 
     entry = template_service._build_template("owner/repo", _TEMPLATE_YAML)
-    assert entry["library_skills"] == ["user-research", "deutero-setup"]
+    assert entry["library_skills"] == ["user-research", "survey-setup"]
 
     bad = template_service._build_template("owner/repo", {"name": "d", "library_skills": "nope"})
     assert bad["library_skills"] == []
@@ -165,7 +165,7 @@ def test_local_branch_populates_declared_library_skills(db_backend, monkeypatch,
 
     config = AgentConfig(name=AGENT, agent_type="assistant", template="local:demo")
     tr = asyncio.run(crud._resolve_template(config, _user()))
-    assert tr.declared_library_skills == ["user-research", "deutero-setup"]
+    assert tr.declared_library_skills == ["user-research", "survey-setup"]
 
 
 def test_github_branch_populates_declared_library_skills(db_backend, monkeypatch):
@@ -195,7 +195,7 @@ def test_github_branch_populates_declared_library_skills(db_backend, monkeypatch
     )
     config = AgentConfig(name=AGENT, agent_type="assistant", template="github:owner/repo")
     tr = asyncio.run(crud._resolve_template(config, _user()))
-    assert tr.declared_library_skills == ["user-research", "deutero-setup"]
+    assert tr.declared_library_skills == ["user-research", "survey-setup"]
 
 
 def test_snapshot_reader_reads_the_staged_tree(tmp_path):
@@ -203,10 +203,39 @@ def test_snapshot_reader_reads_the_staged_tree(tmp_path):
     (tmp_path / "template.yaml").write_text(yaml.safe_dump(_TEMPLATE_YAML))
     snap = SimpleNamespace(staging_dir=str(tmp_path), source_repo="owner/repo")
     assert crud._declared_library_skills_for_snapshot(snap) == [
-        "user-research", "deutero-setup",
+        "user-research", "survey-setup",
     ]
     empty = SimpleNamespace(staging_dir=str(tmp_path / "missing"), source_repo="o/r")
     assert crud._declared_library_skills_for_snapshot(empty) == []
+
+
+def test_copy_snapshot_branch_populates_declared_library_skills(db_backend, monkeypatch, tmp_path):
+    """The copy-intent branch returns early with its own reads from the STAGED
+    tree, so it needs its own pin: dropping its assignment leaves the other
+    branches' tests green."""
+    from models import AgentConfig
+    from services.agent_service import snapshot_import
+
+    crud = _crud()
+    (tmp_path / "template.yaml").write_text(yaml.safe_dump(_TEMPLATE_YAML))
+    staged = snapshot_import.SnapshotStaging(
+        staging_dir=str(tmp_path), source_repo="owner/repo",
+        source_branch="main", head_sha="s", file_count=1,
+    )
+
+    async def _stage(repo, branch, pat):
+        return staged
+
+    monkeypatch.setattr(crud, "get_github_template", lambda lookup: None)
+    monkeypatch.setattr(crud, "resolve_github_pat", lambda owner_id=None: ("", "none"))
+    monkeypatch.setattr(crud.snapshot_import, "stage_github_snapshot", _stage)
+    config = AgentConfig(
+        name=AGENT, agent_type="assistant", template="github:owner/repo",
+        import_intent="copy",
+    )
+    tr = asyncio.run(crud._resolve_template(config, _user()))
+    assert tr.copy_snapshot is staged
+    assert tr.declared_library_skills == ["user-research", "survey-setup"]
 
 
 def test_templateless_creation_declares_no_library_skills(db_backend):
@@ -222,45 +251,101 @@ def test_templateless_creation_declares_no_library_skills(db_backend):
 # ---------------------------------------------------------------------------
 # The §21.3.1 fence at creation
 # ---------------------------------------------------------------------------
+# The call site in `create_agent_internal` is pinned separately, by driving a
+# whole creation: tests/unit/test_1484_create_agent_characterization.py
+# (`test_4387_*`).
 
 
-def test_people_and_system_may_assign_declared_skills(db_backend):
+def _permitted(crud, user, declared):
+    return asyncio.run(crud._permitted_library_skills(None, user, declared, AGENT))
+
+
+@pytest.fixture
+def audit_rows(monkeypatch):
+    """Capture the capability audit rows at their one sink, so the real fence
+    and the real `record_capability_use` both run."""
+    import dependencies
+
+    rows = []
+
+    async def _audit(request, user, action, capability, target, **details):
+        rows.append({"action": action, "capability": capability,
+                     "target": target, **details})
+
+    monkeypatch.setattr(dependencies, "_audit_capability", _audit)
+    return rows
+
+
+def test_people_and_system_may_assign_declared_skills(db_backend, audit_rows):
     crud = _crud()
     declared = ["user-research"]
-    assert crud._permitted_library_skills(_user(mcp_scope=None), declared) == declared
-    assert crud._permitted_library_skills(_user(mcp_scope="user"), declared) == declared
-    assert crud._permitted_library_skills(_user(mcp_scope="system"), declared) == declared
+    assert _permitted(crud, _user(mcp_scope=None), declared) == declared
+    assert _permitted(crud, _user(mcp_scope="user"), declared) == declared
+    assert _permitted(crud, _user(mcp_scope="system"), declared) == declared
+    assert audit_rows == []  # no grant decided these calls, so no use row
 
 
-def test_agent_key_without_skills_manage_assigns_nothing(db_backend, caplog):
+def test_agent_key_without_skills_manage_assigns_nothing(db_backend, caplog, audit_rows):
     crud = _crud()
     seed_user(1, OWNER, "creator")
     seed_agent("orchestrator", owner_id=1)
     creator = _user(mcp_scope="agent", agent_name="orchestrator")
     with caplog.at_level(logging.WARNING):
-        assert crud._permitted_library_skills(creator, ["user-research"]) == []
+        assert _permitted(crud, creator, ["user-research"]) == []
     assert any("skills.manage" in r.message for r in caplog.records)
+    (row,) = audit_rows
+    assert row["action"] == "capability_refused"
+    assert row["capability"] == "skills.manage"
+    assert row["target"] == AGENT
+    assert row["library_skills"] == ["user-research"]
+    assert row["code"]
 
 
-def test_agent_key_holding_skills_manage_may_assign(db_backend, monkeypatch):
+def test_agent_key_holding_skills_manage_may_assign(db_backend, monkeypatch, audit_rows):
     crud = _crud()
     from database import db
 
     monkeypatch.setattr(db, "agent_has_capability", lambda agent, cap: True)
     creator = _user(mcp_scope="agent", agent_name="orchestrator")
-    assert crud._permitted_library_skills(creator, ["user-research"]) == ["user-research"]
+    assert _permitted(crud, creator, ["user-research"]) == ["user-research"]
+    (row,) = audit_rows
+    assert (row["action"], row["capability"], row["target"]) == (
+        "capability_used", "skills.manage", AGENT,
+    )
 
 
-def test_connector_and_absent_scope_assign_nothing(db_backend):
+def test_connector_and_absent_scope_assign_nothing(db_backend, audit_rows):
     crud = _crud()
-    assert crud._permitted_library_skills(_user(mcp_scope="connector"), ["user-research"]) == []
+    assert _permitted(crud, _user(mcp_scope="connector"), ["user-research"]) == []
     no_scope = SimpleNamespace(username=OWNER)  # no mcp_scope attribute at all
-    assert crud._permitted_library_skills(no_scope, ["user-research"]) == []
+    assert _permitted(crud, no_scope, ["user-research"]) == []
+    assert [r["action"] for r in audit_rows] == ["capability_refused"] * 2
 
 
-def test_empty_declaration_short_circuits(db_backend):
+def test_empty_declaration_short_circuits(db_backend, audit_rows):
     crud = _crud()
-    assert crud._permitted_library_skills(_user(mcp_scope="agent", agent_name="x"), []) == []
+    assert _permitted(crud, _user(mcp_scope="agent", agent_name="x"), []) == []
+    assert audit_rows == []
+
+
+def test_refusal_audit_is_safe_without_a_request(db_backend, monkeypatch):
+    """A system deploy creates with `request=None`; the real audit writer must
+    still record the row rather than fail on the missing request."""
+    crud = _crud()
+    from services.platform_audit_service import platform_audit_service
+
+    logged = []
+
+    async def _log(**kw):
+        logged.append(kw)
+
+    monkeypatch.setattr(platform_audit_service, "log", _log)
+    creator = _user(mcp_scope="agent", agent_name="orchestrator")
+    assert _permitted(crud, creator, ["user-research"]) == []
+    (row,) = logged
+    assert row["event_action"] == "capability_refused"
+    assert row["target_id"] == AGENT
+    assert row["endpoint"] is None and row["actor_ip"] is None
 
 
 # ---------------------------------------------------------------------------
@@ -316,8 +401,8 @@ def test_assigns_declared_skills_as_the_owner(db_backend, monkeypatch, library, 
 
     seed_user(1, OWNER, "creator")
     seed_agent(AGENT, owner_id=1)
-    _materialize(crud, monkeypatch, _config(), ["user-research", "deutero-setup"])
-    assert sorted(db.get_agent_skill_names(AGENT)) == ["deutero-setup", "user-research"]
+    _materialize(crud, monkeypatch, _config(), ["user-research", "survey-setup"])
+    assert sorted(db.get_agent_skill_names(AGENT)) == ["survey-setup", "user-research"]
     rows = {s.skill_name: s for s in db.get_agent_skills(AGENT)}
     assert rows["user-research"].assigned_by == OWNER
     assert spawned == [AGENT]

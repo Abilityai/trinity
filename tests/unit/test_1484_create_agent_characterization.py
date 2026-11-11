@@ -1715,3 +1715,104 @@ async def test_ent704_git_mode_pushes_for_fork_to_own(crud_env, monkeypatch):
     assert result.git_mode["source_mode"] is True
     assert result.git_mode["pushes"] is True
     assert result.git_mode["reason"] == "fork-to-own: the agent owns its fork"
+
+
+# ===========================================================================
+# #4387 — template `library_skills:` reach `_materialize_agent_files` only
+# through the §21.3.1 `skills.manage` fence. Drives a whole creation so the
+# CALL SITE is pinned: handing `tr.declared_library_skills` straight through
+# would let an agent key without the grant obtain library skills by creating
+# an agent from a template that names them, and the unit tests of the fence
+# helper alone would stay green.
+# ===========================================================================
+
+
+_LIBRARY_SKILLS = ["user-research", "survey-setup"]
+
+
+@pytest.fixture
+def library_skills_env(crud_env, monkeypatch, tmp_path):
+    crud, ctx = crud_env
+    tpl = tmp_path / "libtpl"
+    tpl.mkdir()
+    (tpl / "template.yaml").write_text(
+        "type: business-assistant\nlibrary_skills:\n"
+        + "".join(f"  - {n}\n" for n in _LIBRARY_SKILLS)
+    )
+    monkeypatch.setattr(crud, "_LOCAL_TEMPLATE_ROOTS", (tmp_path, tmp_path))
+    # The ent#591 template-source bound is its own suite's subject; held open
+    # here so an agent-key creator reaches the library-skills fence.
+    monkeypatch.setattr(crud.template_source_policy, "enforce", AsyncMock())
+
+    # The fence reads the grant through `dependencies.db`: point it at this
+    # harness's mocked db, whichever db that module was imported against.
+    import dependencies
+    monkeypatch.setattr(dependencies, "db", ctx["db"])
+    ctx["db"].agent_has_capability.return_value = False
+    audit = []
+
+    async def _audit(request, user, action, capability, target, **details):
+        audit.append({"action": action, "capability": capability,
+                      "target": target, **details})
+    monkeypatch.setattr(dependencies, "_audit_capability", _audit)
+
+    materialized = []
+
+    async def _spy(*args, **kwargs):
+        materialized.append(kwargs)
+    monkeypatch.setattr(crud, "_materialize_agent_files", _spy)
+    return crud, ctx, audit, materialized
+
+
+def _agent_key_user(agent="orchestrator"):
+    u = _user(agent_name=agent)
+    u.mcp_scope = "agent"
+    return u
+
+
+@pytest.mark.asyncio
+async def test_4387_a_person_creating_from_the_template_gets_its_library_skills(
+    library_skills_env,
+):
+    crud, ctx, audit, materialized = library_skills_env
+    await crud.create_agent_internal(
+        AgentConfig(name="lib-person", template="local:libtpl"), _user(), None)
+
+    (kw,) = materialized
+    assert kw["declared_library_skills"] == _LIBRARY_SKILLS
+    assert kw["library_skills_assigned_by_agent"] is None
+    assert audit == []
+
+
+@pytest.mark.asyncio
+async def test_4387_an_agent_key_without_skills_manage_gets_none(library_skills_env):
+    crud, ctx, audit, materialized = library_skills_env
+    status = await crud.create_agent_internal(
+        AgentConfig(name="lib-nogrant", template="local:libtpl"),
+        _agent_key_user(), None)
+
+    assert status is not None  # the refusal costs the skills, never the creation
+    (kw,) = materialized
+    assert kw["declared_library_skills"] == []
+    (row,) = audit
+    assert row["action"] == "capability_refused"
+    assert row["capability"] == "skills.manage"
+    assert row["target"] == "lib-nogrant"
+    assert row["library_skills"] == _LIBRARY_SKILLS
+
+
+@pytest.mark.asyncio
+async def test_4387_an_agent_key_holding_skills_manage_gets_them_attributed(
+    library_skills_env,
+):
+    crud, ctx, audit, materialized = library_skills_env
+    ctx["db"].agent_has_capability.return_value = True
+    await crud.create_agent_internal(
+        AgentConfig(name="lib-grant", template="local:libtpl"),
+        _agent_key_user(), None)
+
+    (kw,) = materialized
+    assert kw["declared_library_skills"] == _LIBRARY_SKILLS
+    assert kw["library_skills_assigned_by_agent"] == "orchestrator"
+    ctx["db"].agent_has_capability.assert_any_call("orchestrator", "skills.manage")
+    assert [r["action"] for r in audit] == ["capability_used"]
