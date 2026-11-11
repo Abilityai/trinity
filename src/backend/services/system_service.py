@@ -19,6 +19,7 @@ import re
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Set, Tuple, Optional
 
 from fastapi import HTTPException, Request
@@ -749,13 +750,13 @@ def resolve_schedule_previews(
     now materializes the TEMPLATE's own declared `schedules:`, and the writer
     skips any manifest schedule whose name already exists on the agent. This
     resolver is pure over the manifest and never reads a template, so a manifest
-    schedule colliding with a template-declared one is previewed as "will be
-    created" and is then skipped at deploy. The **armed** end state is still what
-    the preview showed — the template created a schedule of that name — so what
-    diverges is provenance and the report's `schedules_created` count, not
-    whether the fleet ends up running that schedule. Closing it properly means
-    resolving templates inside the preview, which is deferred rather than
-    half-fixed here.
+    schedule colliding with a template-declared one is still previewed here as
+    "will be created" and is then skipped at deploy. The dry run names the
+    collision instead in `warnings[]` (`_template_schedule_collision_warnings`,
+    trinity-enterprise#984, `local:` templates only): the template's row is
+    kept, with the template's `enabled`, which is NOT necessarily what this
+    entry shows. These entries stay as they are so a preview without a
+    collision is byte-identical.
 
     Pinned by `tests/unit/test_ent126_schedule_characterization.py`; both the
     caught and the uncaught case are pinned in `test_ent126_dry_run_preview.py`.
@@ -1978,7 +1979,7 @@ def _assess_manifest(yaml_text: str) -> Tuple[Optional[SystemManifest], bool, Op
                 short,
                 _preflight_template(
                     member_name(manifest, short), short, cfg.template, cfg.resources
-                ),
+                )[0],
             )
             for short, cfg in manifest.agents.items()
         )
@@ -2111,8 +2112,14 @@ def _preflight_template(
     short_name: str,
     template: Optional[str],
     resources: Optional[dict] = None,
-) -> Optional[SystemDeployFailure]:
+) -> Tuple[Optional[SystemDeployFailure], Optional[List[dict]]]:
     """Can this agent's template resolve, with usable resources? (failure or None)
+
+    Also returns the schedules the template declares, the rows create will
+    materialize (create's own normalizer, `normalize_declared_schedules`):
+    a list for ``local:`` or no template, None for ``github:`` (not probed)
+    or a failure. One resolve serves every consumer of a preview
+    (trinity-enterprise#984), so `template.yaml` is read once per member.
 
     Reuses the CREATE path's own resolver and its own validators rather than
     re-deriving "does this template exist" / "is this cpu usable", so the preview
@@ -2158,6 +2165,7 @@ def _preflight_template(
     from models import AgentConfig
     from services.agent_service.capabilities import normalize_cpu, normalize_memory
     from services.agent_service.crud import _get_default_resource, _resolve_local_template
+    from services.template_schedules import normalize_declared_schedules
 
     # A throwaway config: `_resolve_local_template` mutates the object it is
     # given (resources/tools/runtime from template.yaml). The manifest's
@@ -2168,9 +2176,11 @@ def _preflight_template(
         name=final_name, template=template, resources=dict(resources or {})
     )
 
+    schedules: Optional[List[dict]] = None if template else []
     try:
         if template and template.startswith("local:"):
-            _resolve_local_template(config)
+            template_data, _folders = _resolve_local_template(config)
+            schedules = normalize_declared_schedules(template_data.get("schedules"))
 
         # Same validators, same defaults, same actionable messages as create.
         normalize_cpu(config.resources.get("cpu"), _get_default_resource("cpu"))
@@ -2183,8 +2193,8 @@ def _preflight_template(
             template=template or "",
             reason=reason,
             status_code=status_code,
-        )
-    return None
+        ), None
+    return None, schedules
 
 
 def _platform_worded() -> Tuple[type, ...]:
@@ -2298,6 +2308,54 @@ def _caller_passes_admin_gate(current_user: User) -> bool:
     return True
 
 
+def _template_row_equals_entry(row: dict, entry: dict) -> bool:
+    """Is the row create materializes from the template (`row`, as
+    `reconcile_declared_schedules` stores it: no `model`) the row deploy would
+    have written for this manifest `entry` (`_build_schedule_create`)?"""
+    try:
+        wanted = _build_schedule_create(entry)
+    except Exception:  # noqa: BLE001 — the preview already failed on this entry
+        return True
+    return (wanted.cron_expression, wanted.message, wanted.enabled, wanted.timezone,
+            wanted.description, wanted.model) == (
+        row["cron"], row["message"], row["enabled"], row["timezone"], row["description"], None)
+
+
+def _template_schedule_collision_warnings(
+    agent_names: Dict[str, str], agents_config: Dict[str, SystemAgentConfig],
+    template_schedules: Dict[str, Optional[List[dict]]],
+) -> List[str]:
+    """trinity-enterprise#984: create's dry run names what `create_schedules`
+    will skip. The writer skips a manifest schedule whose name the template
+    already materialized (ent#89), so the template's row (and its `enabled`)
+    is what runs. One line per member whose entry differs from the template's
+    row of that name; none otherwise, so a preview without one is
+    byte-identical. `template_schedules` is the preflight's read, per short
+    name: None (`github:`, not probed, or a template already in `failed[]`)
+    adds nothing."""
+    warnings: List[str] = []
+    for short_name, final_name in agent_names.items():
+        config = agents_config[short_name]
+        template_rows = template_schedules.get(short_name)
+        if not config.schedules or not template_rows:
+            continue
+        by_name = {row["name"]: row for row in template_rows}
+        kept = []
+        for entry in config.schedules:
+            entry_name = entry.get("name") if isinstance(entry, dict) else None
+            if (isinstance(entry_name, str) and entry_name in by_name and entry_name not in kept
+                    and not _template_row_equals_entry(by_name[entry_name], entry)):
+                kept.append(entry_name)
+        if kept:
+            listed = ", ".join(
+                f"'{n}' (enabled: {str(by_name[n]['enabled']).lower()})" for n in kept)
+            warnings.append(
+                f"'{final_name}': template '{config.template}' declares schedule(s) {listed}, so "
+                f"deploy keeps the template's row and skips the manifest's fields for "
+                f"{'it' if len(kept) == 1 else 'them'}.")
+    return warnings
+
+
 async def deploy_manifest(
     manifest_yaml: str,
     current_user: User,
@@ -2407,16 +2465,17 @@ async def deploy_manifest(
             # undo, because re-running the same manifest creates suffixed
             # duplicates of whatever already succeeded, so recovery is manual
             # and per-agent.
+            preflights = {
+                short_name: _preflight_template(
+                    final_name,
+                    short_name,
+                    manifest.agents[short_name].template,
+                    manifest.agents[short_name].resources,
+                )
+                for short_name, final_name in agent_names.items()
+            }
             preview_failed = [
-                failure for failure in (
-                    _preflight_template(
-                        final_name,
-                        short_name,
-                        manifest.agents[short_name].template,
-                        manifest.agents[short_name].resources,
-                    )
-                    for short_name, final_name in agent_names.items()
-                ) if failure is not None
+                failure for failure, _schedules in preflights.values() if failure is not None
             ]
             # trinity-enterprise#591: exactly the members the write refuses.
             preview_failed.extend(
@@ -2459,6 +2518,12 @@ async def deploy_manifest(
                     reason=f"Invalid schedule definition: {reason}",
                     status_code=status_code,
                 ))
+
+            # trinity-enterprise#984: a manifest schedule the template already
+            # declares is skipped at deploy; say so before it runs.
+            all_warnings.extend(_template_schedule_collision_warnings(
+                agent_names, manifest.agents,
+                {short: schedules for short, (_f, schedules) in preflights.items()}))
 
             # trinity-enterprise#1030 CP2: the preview already says which grants
             # this caller's credential cannot write.
@@ -2976,6 +3041,12 @@ class ApplyMemberState:
     # #4131: an untagged roster agent holding the name is a member by the
     # `<system>-` prefix alone (prefixed mode), so restart reaches it by name.
     prefixed_by_system: bool = False
+    # trinity-enterprise#984: an `absent` member's template, read once
+    # (`_preflight_template`): why it cannot resolve, and the schedules create
+    # will materialize (a list for `local:` or no template, None when not
+    # probed: `github:`).
+    template_failure: Optional[SystemDeployFailure] = None
+    template_schedules: Optional[List[dict]] = None
 
 
 @dataclass
@@ -3111,6 +3182,7 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
     from dependencies import agent_may_reach, can_seat_member, is_interactive_admin
 
     from services import docker_service
+    from services.agent_service import crud
     from services.agent_service.crud import agent_name_is_taken
 
     system = manifest.name
@@ -3220,6 +3292,26 @@ async def read_apply_snapshot(manifest: SystemManifest, current_user: User) -> A
                 # reads as free; its verdict is unknown, never `create`.
                 state.blocked = True
                 continue
+            # trinity-enterprise#984: create refuses a leftover volume (#1667)
+            # through this same function, so the plan refuses it first instead
+            # of planning a `create` that fails with 409.
+            try:
+                refusal = await crud.create_volume_refusal(name)
+            except Exception as e:  # noqa: BLE001 — never "free" (P-B)
+                blockers.append(_read_failed(name, f"whether '{name}' has a leftover data volume", e))
+                state.blocked = True
+                continue
+            if refusal is not None:
+                blockers.append(_apply_blocker(
+                    f"member_{refusal.kind}", name, refusal.detail,
+                    f"Remove the volume (docker volume rm {refusal.volume}) or rename "
+                    "this member in the manifest. Apply never adopts leftover data."))
+                state.blocked = True
+                continue
+            # trinity-enterprise#984: the template, read once for the plan's
+            # preflight and its schedule prediction.
+            state.template_failure, state.template_schedules = _preflight_template(
+                name, short, manifest.agents[short].template, None)
             try:  # trinity-enterprise#1174: the dry run says whether a member is recorded
                 from services.system_apply import seats as apply_seats
                 state.member_seat = apply_seats.read_member_seat(name, manifest.agents[short])
@@ -3818,6 +3910,62 @@ def _schedule_view(entry_or_row) -> Dict:
     }
 
 
+def _template_schedule_rows(declared: List[dict]) -> List[SimpleNamespace]:
+    """trinity-enterprise#984: stand-ins for the rows create will store for a
+    template's declared schedules, field for field what
+    `crud.reconcile_declared_schedules` writes (no `model`: it passes none)."""
+    return [SimpleNamespace(name=e["name"], cron_expression=e["cron"], message=e["message"],
+                            enabled=e["enabled"], timezone=e["timezone"],
+                            description=e["description"], model=None)
+            for e in declared]
+
+
+def _created_schedule_changes(entries, rows) -> List[Tuple[ScheduleAction, Optional["SystemApplyChange"],
+                                                           Optional[Tuple[str, str]]]]:
+    """A created member's schedule actions, as the changes apply reports.
+
+    One mapping, two consumers (P-D, trinity-enterprise#984): the executor
+    runs it over its post-create read, the planner over the template's
+    stand-in rows (`_template_schedule_rows`), so the dry run and the real run
+    name the same changes. Each item is `(action, change, error)`: `error` is
+    the `_schedule_entry_error` of a row apply would create or update (an
+    update over the merged cron/timezone). `in_sync`, `ambiguous`,
+    `declared_twice` and `unlinked` carry no change; each caller decides what
+    refusing one means.
+    """
+    out = []
+    # A fixed order: the post-create read is newest first, the stand-ins are
+    # in template order, and the undeclared rows are listed in row order.
+    rows = sorted(rows, key=lambda r: r.name)
+    for action in resolve_declared_schedule_actions(entries, rows):
+        field_name = f"schedule:{action.name}"
+        change = error = None
+        if action.kind == "create":
+            error = _schedule_entry_error(action.entry)
+            change = _apply_change(field_name, "write", "schedule_create",
+                                   desired=_schedule_view(action.entry))
+        elif action.kind == "update":
+            error = _schedule_entry_error(
+                action.entry,
+                cron=action.fields.get("cron_expression", action.row.cron_expression),
+                timezone=action.fields.get("timezone", action.row.timezone) or "UTC")
+            change = _apply_change(
+                field_name, "write", "schedule_update", current=action.current,
+                desired=action.fields,
+                note="the template's same-named schedule, updated to the manifest's fields")
+        elif action.kind == "enabled_differs":
+            change = _apply_change(
+                field_name, "report", "enabled_differs",
+                current=action.current["enabled"], desired=action.fields["enabled"],
+                note="the template's schedule keeps its own enabled state")
+        elif action.kind == "undeclared":
+            change = _apply_change(field_name, "report", "schedule_undeclared",
+                                   current=_schedule_view(action.row),
+                                   note="declared by the template, not the manifest")
+        out.append((action, change, error))
+    return out
+
+
 def _plan_existing_member(mp: ApplyMemberPlan, state: ApplyMemberState, manifest: SystemManifest,
                           snapshot: ApplySnapshot, desired_edges: Dict[str, List[str]],
                           declared_final: set, normalized_resources: Dict[str, str],
@@ -3981,7 +4129,7 @@ def _plan_existing_member(mp: ApplyMemberPlan, state: ApplyMemberState, manifest
     mp.restart_required = bool(state.restart_pending or label_mismatch or folder_write)
 
 
-def _plan_created_member(mp: ApplyMemberPlan, manifest: SystemManifest,
+def _plan_created_member(mp: ApplyMemberPlan, state: ApplyMemberState, manifest: SystemManifest,
                          desired_edges: Dict[str, List[str]],
                          normalized_resources: Dict[str, str], blockers: List) -> None:
     """Changes and writes for a member apply will create.
@@ -3990,11 +4138,14 @@ def _plan_created_member(mp: ApplyMemberPlan, manifest: SystemManifest,
     install comes out as create mode would build it, but for the two stated
     differences, which need the post-create state and so are resolved by the
     executor: a template's same-named schedule, and a template resource that
-    overrides a declared one.
+    overrides a declared one. The schedules are also PREDICTED here from the
+    template's rows when the snapshot read them (`state.template_schedules`,
+    a list for `local:` or no template; None = not probed), through the
+    mapping the executor uses (trinity-enterprise#984).
     """
     cfg, name, short = mp.config, mp.name, mp.short_name
+    failure, template_schedules = state.template_failure, state.template_schedules
 
-    failure = _preflight_template(name, short, cfg.template, None)
     if failure is not None:
         blockers.append(_apply_blocker(
             "template_unresolvable", name, f"Template '{cfg.template}': {failure.reason}",
@@ -4030,25 +4181,45 @@ def _plan_created_member(mp: ApplyMemberPlan, manifest: SystemManifest,
                               {"declared": dict(normalized_resources)}))
 
     entries = _well_formed_schedule_entries(cfg, name, blockers)
-    for action in resolve_declared_schedule_actions(entries, []):
+    rows = _template_schedule_rows(template_schedules or [])
+    for action, change, error in _created_schedule_changes(entries, rows):
         if action.kind == "declared_twice":
             blockers.append(_apply_blocker(
                 "schedule_declared_twice", name,
                 f"The manifest declares schedule '{action.name}' twice for '{short}'.",
                 "Keep one entry per schedule name."))
-            continue
-        error = _schedule_entry_error(action.entry)
-        if error:
+        elif error:
             blockers.append(_apply_blocker(error[0], name, f"Schedule '{action.name}': {error[1]}",
                                            "Fix the schedule in the manifest."))
-            continue
-        mp.changes.append(_apply_change(
-            f"schedule:{action.name}", "write", "pending_template_resolution",
-            desired=_schedule_view(action.entry),
-            note="created, or a same-named schedule from the template updated to these "
-                 "fields, after the member is created"))
-    if entries:
-        mp.ops.append(ApplyOp("created_schedules", name, short, {"entries": entries}))
+        elif change is not None and template_schedules is not None:
+            mp.changes.append(change)
+    # The stand-in rows come from the template normalizer, one per name, so
+    # `ambiguous` cannot occur here; the executor refuses it over a real read.
+    # The executor re-reads whenever the template brings rows (or may), so
+    # a template-only row is reported by both runs even with no manifest entry.
+    re_read = template_schedules is None or bool(template_schedules)
+    if entries or re_read:
+        mp.ops.append(ApplyOp("created_schedules", name, short,
+                              {"entries": entries, "re_read": re_read}))
+    if template_schedules is None:  # not probed (`github:`): pending is the preview
+        mp.changes.extend(_pending_schedule_changes(entries, re_read))
+
+
+def _pending_schedule_changes(entries: List[dict], re_read: bool) -> List["SystemApplyChange"]:
+    """A created member's schedule lines while they are unresolved
+    (trinity-enterprise#984): the dry run's for an unprobed (`github:`)
+    template, and the real run's when the executor never read them back
+    (`_apply_report`). Pending, never a prediction presented as done."""
+    lines = [_apply_change(
+        f"schedule:{entry['name']}", "write", "pending_template_resolution",
+        desired=_schedule_view(entry),
+        note="created, or a same-named schedule from the template updated to these "
+             "fields, after the member is created") for entry in entries]
+    if re_read:
+        lines.append(_apply_change(
+            "schedules", "report", "pending_template_resolution",
+            note="the template's own schedules are known once the member is created"))
+    return lines
 
 
 def _plan_skills(mp: ApplyMemberPlan, state: Optional[ApplyMemberState],
@@ -4203,7 +4374,8 @@ def resolve_apply_plan(manifest: SystemManifest, snapshot: ApplySnapshot) -> App
 
         if state.status == "absent" and not state.blocked:
             mp.creating = True
-            _plan_created_member(mp, manifest, desired_edges, normalized_resources, blockers)
+            _plan_created_member(mp, state, manifest, desired_edges, normalized_resources,
+                                 blockers)
             _plan_gates(mp, None, blockers)
             _plan_skills(mp, None, snapshot, blockers)
             _plan_grants(mp, None, snapshot, blockers)
@@ -4478,6 +4650,9 @@ class ApplyOutcome:
     # with all of them, so a skipped or lost write holds its skill back too.
     gates_unlanded: set = field(default_factory=set)
     extra_changes: Dict[str, List] = field(default_factory=dict)
+    # trinity-enterprise#984: created members whose schedules were read back
+    # after create, so `extra_changes` carries their schedule changes.
+    schedules_reported: set = field(default_factory=set)
     restart_required: Dict[str, bool] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
 
@@ -4597,6 +4772,8 @@ async def execute_apply_plan(
         for op in (o for o in ops if o.kind == phase):
             step = _APPLY_OP_STEP[op.kind]
             if op.member not in exists:
+                if op.kind == "created_schedules" and not op.args["entries"]:
+                    continue  # a re-read only: no write was planned, none skipped
                 fail(op.member, op.short_name, step,
                      "skipped_member_not_created: the member was not created")
                 continue
@@ -4763,48 +4940,54 @@ async def _apply_created_schedules(op: ApplyOp, current_user: User, out: ApplyOu
             out.failed.append(SystemApplyFailure(
                 name=name, short_name=short, step="schedules",
                 reason=f"schedule '{entry.get('name')}': the post-create read failed ({reason})"))
+        if not op.args["entries"]:
+            # A re-read only: apply planned no schedule write, so the member
+            # is applied; only the report's lines are lost (shown pending).
+            out.warnings.append(
+                f"'{name}': the template's schedules could not be read back after create "
+                f"({reason}); they are listed as pending.")
+            return
         out.member_failed.add(name)
         return
+    out.schedules_reported.add(name)
     changes = out.extra_changes.setdefault(name, [])
-    for action in resolve_declared_schedule_actions(op.args["entries"], rows):
-        field_name = f"schedule:{action.name}"
-        if action.kind == "create":
-            changes.append(_apply_change(field_name, "write", "schedule_create",
-                                         desired=_schedule_view(action.entry)))
-            await attempt(name, short, "schedules", lambda a=action: db.create_schedule(
-                agent_name=name, username=current_user.username,
-                schedule_data=_build_schedule_create(a.entry)))
-        elif action.kind == "update":
-            error = _schedule_entry_error(
-                action.entry,
-                cron=action.fields.get("cron_expression", action.row.cron_expression),
-                timezone=action.fields.get("timezone", action.row.timezone) or "UTC")
-            if error:
-                out.failed.append(SystemApplyFailure(
-                    name=name, short_name=short, step="schedules",
-                    reason=f"{error[0]}: schedule '{action.name}': {error[1]}"))
-                out.member_failed.add(name)
-                continue
-            changes.append(_apply_change(
-                field_name, "write", "schedule_update", current=action.current,
-                desired=action.fields,
-                note="the template's same-named schedule, updated to the manifest's fields"))
-            await attempt(name, short, "schedules", lambda a=action: db.update_schedule(
-                a.row.id, current_user.username, dict(a.fields)))
-        elif action.kind == "enabled_differs":
-            changes.append(_apply_change(
-                field_name, "report", "enabled_differs",
-                current=action.current["enabled"], desired=action.fields["enabled"],
-                note="the template's schedule keeps its own enabled state"))
-        elif action.kind == "undeclared":
-            changes.append(_apply_change(field_name, "report", "schedule_undeclared",
-                                         current=_schedule_view(action.row),
-                                         note="declared by the template, not the manifest"))
-        elif action.kind == "ambiguous":
+    for action, change, error in _created_schedule_changes(op.args["entries"], rows):
+        if error:
+            out.failed.append(SystemApplyFailure(
+                name=name, short_name=short, step="schedules",
+                reason=f"{error[0]}: schedule '{action.name}': {error[1]}"))
+            out.member_failed.add(name)
+            continue
+        if action.kind == "ambiguous":
             out.failed.append(SystemApplyFailure(
                 name=name, short_name=short, step="schedules",
                 reason=f"schedule_name_ambiguous: more than one schedule named '{action.name}'"))
             out.member_failed.add(name)
+            continue
+        if change is None:
+            continue
+        changes.append(change)
+        if action.kind == "create":
+            await attempt(name, short, "schedules", lambda a=action: db.create_schedule(
+                agent_name=name, username=current_user.username,
+                schedule_data=_build_schedule_create(a.entry)))
+        elif action.kind == "update":
+            await attempt(name, short, "schedules", lambda a=action: db.update_schedule(
+                a.row.id, current_user.username, dict(a.fields)))
+
+
+def _is_schedule_field(field_name: str) -> bool:
+    return field_name == "schedules" or field_name.startswith("schedule:")
+
+
+def _unread_schedule_changes(mp: ApplyMemberPlan, *, created: bool) -> List["SystemApplyChange"]:
+    """A created member's schedules the executor never read back: its
+    manifest entries, pending; and, only if the member exists, the line for
+    the template's own (a member never created has none)."""
+    op = next((o for o in mp.ops if o.kind == "created_schedules"), None)
+    if op is None:
+        return []
+    return _pending_schedule_changes(op.args["entries"], op.args["re_read"] and created)
 
 
 def _apply_report(plan: ApplyPlan, warnings: List[str], *, dry_run: bool, status: str,
@@ -4816,11 +4999,18 @@ def _apply_report(plan: ApplyPlan, warnings: List[str], *, dry_run: bool, status
         restart = mp.restart_required
         applied = None
         if outcome is not None:
-            if mp.name in outcome.extra_changes:
-                # The real run reports what it actually did for a created
-                # member's template-resolved fields (P-D).
-                changes = [c for c in changes if c.code != "pending_template_resolution"]
-                changes.extend(outcome.extra_changes[mp.name])
+            # The real run reports what it actually did (P-D). The executor's
+            # lines replace the plan's pending ones, and a created member's
+            # schedule lines, which the plan only predicted
+            # (trinity-enterprise#984); schedules it never read back are
+            # listed pending instead.
+            executed = outcome.extra_changes.get(mp.name)
+            changes = [c for c in changes
+                       if not (mp.creating and _is_schedule_field(c.field))
+                       and not (executed is not None and c.code == "pending_template_resolution")]
+            if mp.creating and mp.name not in outcome.schedules_reported:
+                changes.extend(_unread_schedule_changes(mp, created=mp.name in outcome.created))
+            changes.extend(executed or [])
             restart = outcome.restart_required.get(mp.name, restart)
             # #4130: nothing is planned or attempted for a declared-only member.
             applied = None if mp.verdict == "declared_only" else mp.name not in outcome.member_failed

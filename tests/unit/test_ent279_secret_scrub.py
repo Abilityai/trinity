@@ -757,7 +757,8 @@ class TestProactiveChokepoint:
 
         svc = pms.ProactiveMessageService()
         with (
-            patch.object(pms, "get_staged_values", lambda: [PLAIN]),
+            # send_message reads the store through scrub_staged (#4228 review).
+            patch("services.runtime_secret_scrub.get_staged_values", lambda: [PLAIN]),
             patch.object(
                 pms.idempotency_service, "effect_guard", lambda *a, **k: _CM()
             ),

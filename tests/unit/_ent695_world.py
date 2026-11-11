@@ -1,10 +1,12 @@
 """The apply-mode test world (trinity-enterprise#695). Not a test module.
 
 The REAL `db` over a full schema (`tests/db_harness.py::db_backend`), seeded
-through the real writers. Docker is patched at its two read seams only —
-`docker_service.agent_container_states` (the tri-state roster) and
-`system_service._member_container` (the one per-member label read) — plus the
-Docker leg inside `crud.agent_name_is_taken`, which reads the same fake.
+through the real writers. Docker is patched at its three read seams only —
+`docker_service.agent_container_states` (the tri-state roster),
+`system_service._member_container` (the one per-member label read) and
+`crud.workspace_volume_exists` (the #1667 leftover-volume probe, trinity-
+enterprise#984) — plus the Docker leg inside `crud.agent_name_is_taken`,
+which reads the same fake.
 `list_all_agents_fast` RAISES: apply must never depend on it.
 """
 from __future__ import annotations
@@ -53,12 +55,23 @@ class FakeDocker:
         self.readable = True
         self.unreadable_labels: set = set()
         self.events: List[tuple] = []
+        # Workspace volumes no container claims (#1667), the names the probe
+        # was asked about, and an error the probe raises instead of answering.
+        self.volumes: set = set()
+        self.volume_probes: List[str] = []
+        self.volume_probe_error: Optional[Exception] = None
 
     def states(self):
         if not self.readable:
             return None
         return {n: ("running" if c.status == "running" else "stopped")
                 for n, c in self.containers.items()}
+
+    async def workspace_volume_exists(self, name: str) -> bool:
+        self.volume_probes.append(name)
+        if self.volume_probe_error is not None:
+            raise self.volume_probe_error
+        return f"agent-{name}-workspace" in self.volumes
 
     def get(self, name: str):
         if name in self.unreadable_labels:
@@ -166,6 +179,7 @@ def make_world(monkeypatch, tmp_path=None) -> World:
                                      email=row.get("email"))
     monkeypatch.setattr(docker_service, "agent_container_states", docker.states)
     monkeypatch.setattr(system_service, "_member_container", docker.get)
+    monkeypatch.setattr(crud, "workspace_volume_exists", docker.workspace_volume_exists)
     monkeypatch.setattr(crud, "get_agent_by_name",
                         lambda n: SimpleNamespace(name=n) if n in docker.containers else None)
     monkeypatch.setattr(docker_service, "list_all_agents_fast", _raise_fast)

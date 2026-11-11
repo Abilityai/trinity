@@ -483,6 +483,18 @@ class UserOperations:
             row = conn.execute(stmt).mappings().first()
         return dict(row) if row else None
 
+    def get_users_access_state(self, usernames) -> Dict[str, Dict]:
+        """Current user rows for ``usernames``, keyed by username, in one query
+        (abilityai/trinity-enterprise#863: the live-connection re-check). A
+        username with no row is absent from the result."""
+        names = sorted({u for u in usernames if u})
+        if not names:
+            return {}
+        stmt = select(*self._USER_COLUMNS).where(users.c.username.in_(names))
+        with get_engine().connect() as conn:
+            rows = conn.execute(stmt).mappings().all()
+        return {row["username"]: self._row_to_user_dict(row) for row in rows}
+
     def update_user_role(self, username: str, role: str) -> Optional[Dict]:
         """Update a user's role. Returns updated user or None if not found."""
         valid_roles = {"admin", "creator", "operator", "user"}

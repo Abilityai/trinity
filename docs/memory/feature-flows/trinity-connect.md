@@ -64,6 +64,7 @@ Dedicated WebSocket endpoint for external listeners with:
 - Server-side event filtering based on user's accessible agents
 - Ping/pong keepalive support
 - Agent list refresh command
+- A non-admin key's agent list follows access changes: it is re-read from the key owner's current account on an access change, about once a minute, and on `refresh` (trinity-enterprise#863; see [websocket-event-bus.md](websocket-event-bus.md))
 
 **Protocol**:
 ```

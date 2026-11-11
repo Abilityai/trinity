@@ -42,6 +42,7 @@ from services.chat_title import (
     is_greeting,
     normalize_chat_title,
 )
+import config
 # #2157: the surface stamp written onto every portal execution — see
 # `config.PORTAL_SOURCE_CHANNEL` for why it exists and why it is not a channel.
 from config import PORTAL_SOURCE_CHANNEL
@@ -1695,15 +1696,15 @@ async def synthesize_portal_tts(agent_name: str, email: str, text: str,
                                 include_owned: bool = False) -> bytes:
     """Text-to-speech for a portal reply (voice mode, #78). Roster-scoped (miss →
     404). Reuses the shared ElevenLabs `tts_service` with the agent's configured
-    voice. Raises ClientPortalError when voice isn't available (no key / no voice)
+    voice. Staged credential values are scrubbed from the text before synthesis
+    (#4359). Raises ClientPortalError when voice isn't available (no key / no voice)
     or synthesis fails / the text exceeds the shared cost cap — the client then
     just keeps the text reply. Returns MP3 bytes (played directly in the browser)."""
     from services import tts_service
 
     if not agent_on_roster(agent_name, email, include_owned):
         raise ClientPortalError(404, "Agent not found")
-    body = (text or "").strip()
-    if not body:
+    if not (text or "").strip():
         raise ClientPortalError(400, "Nothing to speak")
     if not tts_service.is_available():
         raise ClientPortalError(404, "Voice is not available")
@@ -1714,6 +1715,21 @@ async def synthesize_portal_tts(agent_name: str, email: str, text: str,
     voice_id = tts_service.resolve_voice_id(agent_name)
     if not voice_id:
         raise ClientPortalError(404, "This agent has no voice configured")
+    # The cost cap judges the text as the client sent it. The client chooses this
+    # text and the staged store is shared by every agent, so an answer that changed
+    # with what is staged would let a client test a guessed value against it. The
+    # spoken placeholder below is never longer than a value it replaces, so text
+    # that fits here still fits the cap inside synthesize_mp3.
+    if len(text.strip()) > config.TTS_MAX_CHARS:
+        raise ClientPortalError(422, "Could not synthesize audio for this reply")
+    # #4359 (the ent#279 seam): remove staged credential values before the text
+    # reaches the TTS provider, after the refusals above so they never read the
+    # store. Scrub BEFORE the strip: a staged value can carry edge whitespace, and
+    # stripping first breaks the exact match at the text's edge. Fail-open: with
+    # the store down the text is spoken as given.
+    from services.runtime_secret_scrub import SPOKEN_PLACEHOLDER, scrub_staged
+
+    body = scrub_staged(text, marker=SPOKEN_PLACEHOLDER).strip()
 
     audio = await tts_service.synthesize_mp3(body, voice_id)
     if not audio:
