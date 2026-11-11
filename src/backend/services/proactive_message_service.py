@@ -177,6 +177,8 @@ def reachable_channels(agent_name: str, recipient_email: str) -> set:
     Slack counts as reachable when any workspace is connected (membership needs
     a network lookup): the answer can under-claim "impossible", never
     over-claim. Staleness is the caller's cache (the assignment provider's 60 s).
+    Only channels ``send_message`` accepts are probed: WhatsApp is not one, and
+    ``auto`` never tries it, so a WhatsApp link alone reaches nobody here.
     """
     from services.schedule_workspace_delivery import (
         WorkspaceDeliveryRefused, check_workspace_reachable,
@@ -184,12 +186,11 @@ def reachable_channels(agent_name: str, recipient_email: str) -> set:
 
     email = (recipient_email or "").lower()
     out: set = set()
-    for ch, probe in (("telegram", _telegram_target), ("whatsapp", _whatsapp_target)):
-        try:
-            probe(agent_name, email)
-            out.add(ch)
-        except ProactiveMessageError:
-            pass
+    try:
+        _telegram_target(agent_name, email)
+        out.add("telegram")
+    except ProactiveMessageError:
+        pass
     try:
         if any(w.get("bot_token") for w in _slack_workspaces()):
             out.add("slack")

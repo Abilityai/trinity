@@ -254,15 +254,19 @@ class TestReachability:
     with the gates `send_message` applies — checked by sending, not by
     restating the rule (learnings 2026-09-07)."""
 
-    @pytest.mark.parametrize("on_roster,blocked,linked,slack", [
-        (True, False, False, False),
-        (False, False, False, False),
-        (True, True, False, False),
-        (False, False, True, False),
-        (False, False, False, True),
+    @pytest.mark.parametrize("on_roster,blocked,linked,slack,whatsapp", [
+        (True, False, False, False, False),
+        (False, False, False, False, False),
+        (True, True, False, False, False),
+        (False, False, True, False, False),
+        (False, False, False, True, False),
+        # WhatsApp-only: `send_message` accepts no `whatsapp` channel and `auto`
+        # never tries it, so a WhatsApp link alone reaches nobody.
+        (False, False, False, False, True),
     ])
     def test_reachable_channels_agrees_with_the_send(self, svc, monkeypatch,
-                                                     on_roster, blocked, linked, slack):
+                                                     on_roster, blocked, linked, slack,
+                                                     whatsapp):
         from client_portal import db as portal_db
 
         pms, svc_db, roster = svc
@@ -273,9 +277,14 @@ class TestReachability:
             svc_db.get_telegram_bot_token.return_value = None  # delivery fails after the gate
         if slack:
             svc_db.get_all_slack_workspaces.return_value = [{"bot_token": "x"}]
+        if whatsapp:
+            svc_db.get_whatsapp_binding.return_value = {"id": 2}
+            svc_db.get_whatsapp_chat_link_by_verified_email.return_value = {
+                "wa_user_phone": "+10000000000"}
 
         agent = _uniq("agent")
         reachable = pms.reachable_channels(agent, EMAIL)
+        assert reachable <= {"telegram", "slack", "web"}  # what `send_message` accepts
         assert ("web" in reachable) == (on_roster and not blocked)
         assert ("telegram" in reachable) == linked
         assert ("slack" in reachable) == slack
