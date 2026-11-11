@@ -192,7 +192,7 @@ The inject, export, import, checklist, and drift routes are owner-only **and hum
 - `list_available_credentials()` / `fetch_credential(name)` -- Read a granted vault credential at runtime (see [Credential Vault](#credential-vault)).
 - `ask_for_credential(name, why)` -- The calling agent asks the person it is chatting with for a secret by name; they fill a masked field in their Workspace (see [A credential an agent asks for in the chat](#a-credential-an-agent-asks-for-in-the-chat)).
 
-`export_credentials`, `import_credentials` and `get_credential_encryption_key` are human-only: an agent-scoped key can never call them, so they are not listed in an agent's MCP session at all. If one of them is refused, the tool returns `{"success": false, "error": "…"}` with `human_only`, `admin_only` or `not_authorized` set, rather than an error string.
+The credential tools are human-only, and each is listed only to the key scopes its route admits: `inject_credentials` and `export_credentials` to your own user-scoped key, `get_credential_encryption_key` to a user-scoped or system-scoped key (the backend then admits an administrator only), and `import_credentials` to no key, because it takes a signed-in session. An agent-scoped key is shown none of them. If one of them is refused, the tool returns `{"success": false, "error": "…"}` with `human_only`, `admin_only` or `not_authorized` set, rather than an error string.
 
 ## See Also
 
