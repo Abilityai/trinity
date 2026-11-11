@@ -371,8 +371,10 @@ class DirectBridge:
             await self._speak_sentence(generation, sentence)
 
     async def _speak_sentence(self, generation: int, sentence: str) -> None:
-        from services.runtime_secret_scrub import get_staged_values, scrub_text
-        text = scrub_text(get_staged_values(), sentence)
+        # The floor for every line spoken here, the fixed lines and ask lines
+        # included. The reply's own text is scrubbed earlier, in speak_execution.
+        from services.runtime_secret_scrub import SPOKEN_PLACEHOLDER, scrub_staged
+        text = scrub_staged(sentence, marker=SPOKEN_PLACEHOLDER)
         slot = _tts_slots.setdefault(self.provider.name, asyncio.Semaphore(MAX_CONCURRENT_TTS))
         try:
             async with slot:
@@ -506,6 +508,14 @@ class DirectBridge:
         self._turn = self._spawn(self.speak_execution(execution_id))
 
     async def speak_execution(self, execution_id: str) -> None:
+        # ent#279 / #4359: staged credential values come out of the reply's text
+        # BEFORE sentences() runs speakable(), which rewrites the text (it drops
+        # `**`, `__` and `~~` anywhere), so a value scrubbed after it may no longer
+        # match. The persisted reply already carries the stored marker for a value
+        # staged before it was saved; it is said as the spoken placeholder too.
+        from services.runtime_secret_scrub import SPOKEN_PLACEHOLDER, scrub_staged
+        from utils.credential_sanitizer import REDACTION_PLACEHOLDER
+
         started = self.clock()
         loop = asyncio.get_running_loop()
         self._turn_first_audio = loop.create_future()
@@ -533,7 +543,7 @@ class DirectBridge:
                 for item in normalize_stream_entry(self.runtime, entry):
                     if item.tool:
                         await self._on_tool(item.tool)
-                    for sentence in sentences(item.text):
+                    for sentence in sentences(scrub_staged(item.text, marker=SPOKEN_PLACEHOLDER)):
                         say(sentence)
         except asyncio.CancelledError:
             raise
@@ -552,7 +562,9 @@ class DirectBridge:
             # The hold notice is the platform's text. The browser reads the ask card.
             pass
         elif row and (row.get("content") or "").strip():
-            for sentence in unspoken_tail(row["content"], queued):
+            reply = scrub_staged(row["content"], marker=SPOKEN_PLACEHOLDER).replace(
+                REDACTION_PLACEHOLDER, SPOKEN_PLACEHOLDER)
+            for sentence in unspoken_tail(reply, queued):
                 say(sentence)
             if not queued:
                 self.enqueue(LINE_REPLY_IN_CHAT)

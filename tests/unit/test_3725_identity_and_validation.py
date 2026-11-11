@@ -212,8 +212,11 @@ def chain(monkeypatch):
                 name="public-tpl", kind=None, ephemeral=None,
                 model_fields_set=fields,
             )
+            # A signed-in session (`mcp_scope=None`, `models.User`'s default):
+            # the saved token's fork arm is session-only (trinity-enterprise#719).
             user = types.SimpleNamespace(id=7, username="owner",
-                                         email="o@example.com", agent_name=None)
+                                         email="o@example.com", agent_name=None,
+                                         mcp_scope=None)
             return asyncio.run(crud._resolve_template(config, user))
 
     yield Chain()

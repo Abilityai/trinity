@@ -52,6 +52,25 @@ import type { McpAuthContext } from "../types.js";
 import { accessDenied } from "../access.js";
 import type { DenyCallContext } from "../access.js";
 
+/**
+ * trinity-enterprise#719: the PERSON gate (#2996) refuses a machine principal
+ * with `403 {detail: {code: "person_required", message}}`. Both mappers below
+ * set `human_only` on that code, or, as before, on the words "human-only" in
+ * the error text, so the flag no longer rests on the message's wording alone.
+ * And `fail()` never reads a person_required refusal as "not licensed", even
+ * when its message names a2a (ent#443: a served module authors `detail: {code,
+ * …}`). Any other refusal, a served one with another code included, maps as
+ * before.
+ */
+function isPersonRequiredRefusal(error: unknown): boolean {
+  if (!(error instanceof ApiError) || error.status !== 403) return false;
+  try {
+    return JSON.parse(error.body)?.detail?.code === "person_required";
+  } catch {
+    return false;
+  }
+}
+
 export function createA2ATools(client: TrinityClient, requireApiKey: boolean) {
   const getClient = (authContext?: McpAuthContext): TrinityClient => {
     if (requireApiKey) {
@@ -69,12 +88,13 @@ export function createA2ATools(client: TrinityClient, requireApiKey: boolean) {
   const fail = (error: unknown): string => {
     const message = error instanceof Error ? error.message : String(error);
     const flags: Record<string, boolean> = {};
+    const personRequired = isPersonRequiredRefusal(error);
     // Unentitled build (403 "not licensed") or OSS-only build (404, route absent).
-    if (/not licensed/i.test(message) || /\ba2a\b/i.test(message) && /\b403\b/.test(message)) {
+    if (!personRequired && (/not licensed/i.test(message) || /\ba2a\b/i.test(message) && /\b403\b/.test(message))) {
       flags.not_entitled = true;
     }
     if (/\b404\b/.test(message) && !flags.not_entitled) flags.not_found = true;
-    if (/human-only/i.test(message)) flags.human_only = true;
+    if (personRequired || /human-only/i.test(message)) flags.human_only = true;
     if (/\b403\b/.test(message) && !flags.not_entitled && !flags.human_only) flags.not_authorized = true;
     if (/\b422\b/.test(message)) flags.invalid = true;
     return JSON.stringify({ success: false, error: message, ...flags }, null, 2);
@@ -100,7 +120,7 @@ export function createA2ATools(client: TrinityClient, requireApiKey: boolean) {
     const status = error instanceof ApiError ? error.status : undefined;
     const flags: Record<string, boolean> = {};
     if (status === 403) {
-      if (/human-only/i.test(message)) flags.human_only = true;
+      if (isPersonRequiredRefusal(error) || /human-only/i.test(message)) flags.human_only = true;
       else flags.not_authorized = true;
     }
     if (status === 404) {
