@@ -36,6 +36,27 @@ from utils.helpers import utc_now_iso
 logger = logging.getLogger(__name__)
 
 
+# JSON response contract the parser relies on; shared by the default prompt and
+# the custom-instructions frame so an operator prompt cannot drop it.
+_RESPONSE_FORMAT = """## Response Format
+Respond with a JSON object (and nothing else):
+```json
+{
+  "status": "pass" | "fail" | "partial",
+  "summary": "One sentence summary of validation result",
+  "items": [
+    {
+      "check": "What was verified",
+      "result": "pass" | "fail",
+      "evidence": "What was found or not found"
+    }
+  ],
+  "recommendation": "Action to take if failed (optional)"
+}
+```"""
+_RESPONSE_FORMAT_ESCAPED = _RESPONSE_FORMAT.replace("{", "{{").replace("}", "}}")
+
+
 # ---------------------------------------------------------------------------
 # Default validation prompt template
 # ---------------------------------------------------------------------------
@@ -66,22 +87,7 @@ The execution produced this response:
 3. Check for completeness — were all parts of the task addressed?
 4. Look for errors, partial completions, or hallucinated success claims
 
-## Response Format
-Respond with a JSON object (and nothing else):
-```json
-{{
-  "status": "pass" | "fail" | "partial",
-  "summary": "One sentence summary of validation result",
-  "items": [
-    {{
-      "check": "What was verified",
-      "result": "pass" | "fail",
-      "evidence": "What was found or not found"
-    }}
-  ],
-  "recommendation": "Action to take if failed (optional)"
-}}
-```
+""" + _RESPONSE_FORMAT_ESCAPED + """
 
 Begin your validation now. Remember: you are AUDITING, not executing."""
 
@@ -130,7 +136,9 @@ _CUSTOM_INSTRUCTIONS_FRAME = """You are an AUDITOR, not an executor. You are rev
 ```
 
 ## Validation Instructions
-{custom_instructions}"""
+{custom_instructions}
+
+""" + _RESPONSE_FORMAT
 
 
 def _substitute(template: str, values: dict) -> str:
