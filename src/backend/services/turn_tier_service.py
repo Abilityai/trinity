@@ -92,6 +92,9 @@ LEDGER_COLUMNS = (
 # (a visitor's turn dispatching one) must not read as the owner's.
 OWNER_CONFIGURED_TRIGGERS = frozenset({
     "schedule", "system", "reminder", "loop", "validation", "webhook", "manual", "event",
+    # trinity-enterprise#1236: the project steward wake runs only on an agent
+    # whose owner consented to it stewarding the project and turned autonomy on.
+    "project_steward",
 })
 
 # The `schedule_id` of a run that belongs to no schedule (reminders, replays):
