@@ -198,4 +198,19 @@ describe('BaseModal (mounted)', () => {
     expect(bodyScrollLock.holders).toBe(0)
     expect(document.body.style.overflow).toBe('')
   })
+
+  // #3571: a centred flex child taller than its scroll container overflows at
+  // the top too, where no scroll can reach. jsdom has no layout, so this pins
+  // the shape; e2e/dialog-scroll-3571.spec.js measures it in a real browser.
+  it('centres the panel with auto margins, not the overlay, so a tall panel starts at the top', async () => {
+    const { open } = harness({ panelClass: 'w-full max-w-lg tall-panel' })
+    open.value = true
+    await nextTick()
+    await nextTick()
+    expect(overlay().className).not.toMatch(/\bitems-center\b/)
+    const panel = overlay().firstElementChild
+    expect(panel.classList.contains('my-auto')).toBe(true)
+    // A consumer's panelClass is kept alongside it.
+    expect(panel.classList.contains('tall-panel')).toBe(true)
+  })
 })
