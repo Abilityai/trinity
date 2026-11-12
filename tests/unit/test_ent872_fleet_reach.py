@@ -491,7 +491,7 @@ def test_the_slots_and_container_stats_are_scoped(fleet, monkeypatch):
               "containers": [{"name": n, "cpu": 1.0, "memory_mb": 10.0} for n in ALL if n != D],
               "timestamp": "2026-10-19T00:00:00Z"}
     payload = {**public, "_running_names": list(ALL)}
-    monkeypatch.setattr(rt, "docker_client", object())
+    monkeypatch.setattr("services.docker_service.get_docker_client", lambda _c=object(): _c)
     monkeypatch.setitem(rt._stats_cache, "data", payload)
     import time
     monkeypatch.setitem(rt._stats_cache, "timestamp", time.monotonic())

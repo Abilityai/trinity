@@ -21,7 +21,7 @@ import httpx
 from models import User
 from database import db
 from dependencies import get_current_user, assert_admin, reject_agent_principal
-from services.docker_service import get_agent_container, docker_client, list_all_agents_fast
+from services.docker_service import get_agent_container, list_all_agents_fast
 from services.docker_utils import container_stop
 from services.agent_client import get_agent_client
 from services.agent_service.lifecycle import restart_agent_internal

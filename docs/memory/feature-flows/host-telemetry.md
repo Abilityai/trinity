@@ -247,8 +247,12 @@ default and can never crash the router at import.
 
 Uses `services/docker_service.py`:
 ```python
-# Line 16: Import
-from services.docker_service import docker_client, list_all_agents_fast
+from services import docker_service
+from services.docker_service import list_all_agents_fast
+
+# The client is read at use time (#4406), so a backend that booted before
+# Docker was reachable picks it up once Docker answers.
+client = docker_service.get_docker_client()
 ```
 
 **list_all_agents_fast()** (docker_service.py:101-159):

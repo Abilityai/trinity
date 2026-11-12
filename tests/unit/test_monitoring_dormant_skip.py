@@ -53,7 +53,7 @@ def monitoring_service(monkeypatch):
 
     # Stub services.docker_service / docker_utils referenced inside health checks.
     fake_docker_service = _stub_module("services.docker_service")
-    fake_docker_service.docker_client = None
+    fake_docker_service.get_docker_client = lambda: None
     fake_docker_service.get_agent_container = MagicMock(return_value=None)
     fake_docker_service.list_all_agents_fast = MagicMock(return_value=[])
     monkeypatch.setitem(sys.modules, "services.docker_service", fake_docker_service)

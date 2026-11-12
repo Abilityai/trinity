@@ -752,7 +752,7 @@ def test_cleanup_copy_artifacts_removes_staging_and_volume(monkeypatch):
         _crud.snapshot_import, "cleanup_staging",
         lambda d: cleanup_calls.append(d),
     )
-    monkeypatch.setattr(_crud, "docker_client", _Client())
+    monkeypatch.setattr("services.docker_service.get_docker_client", lambda _c=_Client(): _c)
 
     handles = _crud._RollbackHandles(
         copy_staging_dir="/data/agent-import-tmp/import-abc",
@@ -773,7 +773,7 @@ def test_cleanup_copy_artifacts_tolerates_missing_volume(monkeypatch):
         volumes = _Volumes()
 
     monkeypatch.setattr(_crud.snapshot_import, "cleanup_staging", lambda d: None)
-    monkeypatch.setattr(_crud, "docker_client", _Client())
+    monkeypatch.setattr("services.docker_service.get_docker_client", lambda _c=_Client(): _c)
 
     handles = _crud._RollbackHandles(copy_volume_name="agent-x-workspace")
     _crud._cleanup_copy_artifacts(handles)  # must not raise

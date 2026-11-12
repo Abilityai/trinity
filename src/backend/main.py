@@ -28,7 +28,8 @@ import httpx
 from config import ASK_TRINITY_ENABLED, BUG_REPORTING_ENABLED, CORS_ORIGINS, VOICE_ENABLED
 from models import User
 from dependencies import get_current_user, is_workspace_only_role, owner_is_suspended, owner_is_workspace_only, scope_may_open_event_stream, terms_route, workspace_route
-from services.docker_service import docker_client, list_all_agents_fast
+from services import docker_service
+from services.docker_service import list_all_agents_fast
 from utils.helpers import utc_now_iso
 
 # OpenTelemetry imports for distributed tracing (RELIABILITY-002)
@@ -538,7 +539,7 @@ async def _init_docker_and_system_agent() -> None:
     # dead transport, not a failed boot.
     from database import db as _db
 
-    if docker_client:
+    if docker_service.get_docker_client():
         try:
             agents = list_all_agents_fast()  # Fast startup - no slow Docker API calls
             logger.info(f"Found {len(agents)} existing Trinity agent containers")

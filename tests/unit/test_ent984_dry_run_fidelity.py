@@ -377,7 +377,7 @@ class TestLeftoverWorkspaceVolume:
             "member_config_volume_leftover", "acme-a", "Config volume left over.", False)
         assert "docker volume rm agent-acme-a-config" in blocker.remedy
 
-        monkeypatch.setattr(crud, "docker_client", object())
+        monkeypatch.setattr("services.docker_service.get_docker_client", lambda _c=object(): _c)
         with pytest.raises(HTTPException) as exc:
             asyncio.run(crud._guard_leftover_workspace_volume(
                 AgentConfig(name="acme-a", template="local:plain"), False))
@@ -428,7 +428,7 @@ class TestTheCreatePathKeepsItsPolicy:
 
     @pytest.fixture
     def probe(self, monkeypatch):
-        monkeypatch.setattr(crud, "docker_client", object())
+        monkeypatch.setattr("services.docker_service.get_docker_client", lambda _c=object(): _c)
         state = {}
 
         async def volume_get(name):
@@ -470,7 +470,7 @@ class TestTheCreatePathKeepsItsPolicy:
         probe["outcome"] = RuntimeError("docker timed out")
         with pytest.raises(RuntimeError):
             asyncio.run(crud.workspace_volume_exists("acme-a"))
-        monkeypatch.setattr(crud, "docker_client", None)
+        monkeypatch.setattr("services.docker_service.get_docker_client", lambda _c=None: _c)
         with pytest.raises(RuntimeError):
             asyncio.run(crud.workspace_volume_exists("acme-a"))
 

@@ -653,7 +653,7 @@ def fake_docker(monkeypatch):
     client = _FakeDockerClient()
 
     fake_module = types.ModuleType("services.docker_service")
-    fake_module.docker_client = client
+    fake_module.get_docker_client = lambda: client
     # Stubs for the names services/__init__.py re-exports; canary doesn't
     # call these, but the canary_service tests transitively import
     # services/__init__.py and would fail with AttributeError otherwise.
@@ -2764,9 +2764,9 @@ class TestInvariantR01:
 
     def test_silent_when_docker_unavailable(self, canary_db, reload_canary, monkeypatch):
         """All-or-nothing docker failure — R-01 produces no violations."""
-        # Override the existing docker stub so docker_client is None.
+        # Override the existing docker stub so get_docker_client() returns None.
         fake_module = types.ModuleType("services.docker_service")
-        fake_module.docker_client = None
+        fake_module.get_docker_client = lambda: None
         fake_module.get_agent_container = lambda *a, **kw: None
         fake_module.get_agent_status_from_container = lambda *a, **kw: None
         fake_module.list_all_agents = lambda *a, **kw: []
