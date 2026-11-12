@@ -170,6 +170,21 @@ class TestListSubIssues:
         with pytest.raises(GitHubError):
             go()
 
+    @pytest.mark.parametrize("method", ["get_issue", "list_sub_issues"])
+    def test_a_non_json_200_is_a_github_error_with_status_200(self, method):
+        """A proxy's HTML page answering 200 is a named GitHubError, never a
+        bare ValueError the caller can't map (review I2)."""
+        html = lambda r: httpx.Response(200, text="<html>gateway</html>")  # noqa: E731
+
+        async def go():
+            async with GitHubService.issue_client(transport=httpx.MockTransport(html)) as client:
+                return await getattr(GitHubService(TOKEN), method)("octo", "hello", 7, client=client)
+
+        with pytest.raises(GitHubError) as exc:
+            asyncio.run(go())
+        assert exc.value.status == 200 and exc.value.rate_limited is False
+        assert TOKEN not in str(exc.value)
+
     @pytest.mark.parametrize("number,limit", [(0, 100), (True, 100), (7, 0)])
     def test_bad_arguments(self, number, limit):
         with pytest.raises(ValueError):

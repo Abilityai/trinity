@@ -179,8 +179,17 @@ class GitHubService:
             if own:
                 await client.aclose()
         if response.status_code == 200:
-            return response.json()
+            return self._issue_json(response)
         raise self._issue_error(response)
+
+    @staticmethod
+    def _issue_json(response: httpx.Response):
+        """The body of a 200 issue read; a non-JSON one (a proxy's HTML page)
+        is a ``GitHubError`` with ``status=200``, never a bare ``ValueError``."""
+        try:
+            return response.json()
+        except ValueError:
+            raise GitHubError("GitHub API error: unexpected body", status=200) from None
 
     @staticmethod
     def _issue_error(response: httpx.Response) -> GitHubError:
@@ -234,7 +243,7 @@ class GitHubService:
                     raise GitHubError(f"Network error: {type(e).__name__}") from None
                 if response.status_code != 200:
                     raise self._issue_error(response)
-                items = response.json()
+                items = self._issue_json(response)
                 if not isinstance(items, list):
                     raise GitHubError("GitHub API error: unexpected sub-issues body", status=200)
                 out.extend(i for i in items if isinstance(i, dict))
