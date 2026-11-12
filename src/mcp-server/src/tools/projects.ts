@@ -128,7 +128,10 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
 
   const projectId = z.string().min(1).max(64).describe("The project id, e.g. prj_0123456789abcdef.");
   const taskId = z.string().min(1).max(16).describe("The task id, e.g. T-003.");
-  const statusEnum = z.enum(["active", "blocked", "needs-decision", "paused", "pending-verification", "done"]);
+  const statusEnum = z.enum(["todo", "active", "blocked", "needs-decision", "paused", "pending-verification", "done"]);
+  /** trinity-enterprise#1232: a task id on the same project, as the backend reads it. */
+  const linkedTaskId = z.string().regex(/^T-\d{1,6}$/, "A task id, like T-004.");
+  const blockerIds = z.array(linkedTaskId).max(20);
 
   return {
     // ========================================================================
@@ -200,15 +203,24 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       description:
         "List a project's tasks. By default only open ones (not done, not awaiting verification); " +
         "pass status 'all', 'done' or a single status to see others. Each task has an id like T-003, " +
-        "a title, status, owner, the executing agent, priority, and when its owner was last reached.",
+        "a title, status, owner, the executing agent, priority, and when its owner was last reached. " +
+        "It also shows `creator` (who made it: a person or an agent), `assigned_to` (the person who " +
+        "owns it and the agent doing it), `for_person` (a person does it, never an agent), `parent` " +
+        "(the task it is a subtask of), `subtasks` (done and total), `blocked_by` (the tasks it waits " +
+        "on), `waiting_for` (those not done yet) and `unblocked` (true when every task it waits on is " +
+        "done). Waiting is not the `blocked` status: `blocked` is set by hand for an outside blocker. " +
+        "Pass view 'next' for what can be worked now: open (`todo` or `active`), unblocked, and not a " +
+        "parent with open subtasks, by priority. Tasks for a person never appear in your next view.",
       parameters: z.object({
         agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         project_id: projectId,
         status: z.string().max(32).optional().describe("open (default), all, or one task status."),
+        view: z.enum(["next"]).optional().describe("'next': the tasks that can be worked now. Ignores status."),
       }),
-      execute: async (p: { project_id: string; status?: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
+      execute: async (p: { project_id: string; status?: string; view?: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         try {
-          const tasks = await clientFor(context, p.agent_name).listProjectTasks(p.project_id, p.status || "open", turnOf(context));
+          const tasks = await clientFor(context, p.agent_name).listProjectTasks(
+            p.project_id, p.status || "open", turnOf(context), p.view);
           return ok({ count: tasks.length, tasks });
         } catch (e) {
           return fail(e);
@@ -221,8 +233,18 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
       name: "create_project_task",
       description:
         "Add a task to a project you are working on. Give it a short title, and where you can an " +
-        "objective and a definition of done (a checklist). It gets the next id (T-NNN). Priority is " +
-        "set by people only; your tasks start at p2.",
+        "objective and a definition of done (a checklist). It gets the next id (T-NNN) and starts as " +
+        "`todo` unless you give a status. Priority is set by people only; your tasks start at p2. " +
+        "`parent` makes it a subtask of another task on the project; subtasks go one level deep " +
+        "(refused: parent_not_found, parent_is_subtask). `blocked_by` lists the tasks it waits on; " +
+        "a link that would make a circle is refused as blocker_cycle with its path, e.g. " +
+        "T-004 → T-007 → T-004 (also blocker_not_found, blocker_is_self, blocker_is_parent: a task " +
+        "and its own subtasks don't wait on each other, too_many_blockers above 20). `for_person` " +
+        "makes it a person's task: it needs an owner who is on the project and no agent " +
+        "(person_task_has_agent, person_task_needs_owner), it is never started as an agent run, and " +
+        "only a person marks it done. Only the project's steward may give a task to a person " +
+        "(only_the_steward_assigns_people); otherwise ask with propose_project_changes. When every " +
+        "task it waits on is done, its owner is told once.",
       parameters: z.object({
         agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         project_id: projectId,
@@ -233,8 +255,12 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         owner: z.string().max(320).optional().describe("Who is accountable: the work email of the project's creator or one of its members, or role:<id> on a project an agent stewards. Anyone else is refused (owner_not_on_project)."),
         assignee: z.string().max(320).optional().describe("The agent doing the work, if not you."),
         waiting_on: z.string().max(320).optional(),
+        status: statusEnum.exclude(["done"]).optional().describe("Defaults to todo."),
+        parent: linkedTaskId.optional().describe("The task this is a subtask of, e.g. T-001. One level deep."),
+        blocked_by: blockerIds.optional().describe("Tasks on this project it waits on, e.g. ['T-003']. At most 20."),
+        for_person: z.boolean().optional().describe("true: a person on the project does it (set owner, no assignee)."),
       }),
-      execute: async (p: Record<string, string> & { project_id: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
+      execute: async (p: Record<string, unknown> & { project_id: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         const { project_id, assignee, agent_name: _actAs, ...rest } = p;
         const body = assignee ? { ...rest, agent: assignee } : rest;
         try {
@@ -252,7 +278,12 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "Update a project task. To claim a task is finished, set status 'pending-verification' and put " +
         "your evidence in 'note' (it is logged as your done claim); a person or the project's steward " +
         "then verifies it and sets 'done'. A done task can only be reopened by a person. You cannot " +
-        "change priority. Any 'note' is appended to the task's log.",
+        "change priority. Any 'note' is appended to the task's log. A task for a person is marked " +
+        "done by a person only (person_marks_done). `parent` moves it under another task (one level " +
+        "deep); null makes it a top-level task again. Finishing every subtask does not finish the " +
+        "parent: close the parent yourself. `blocked_by_add` and `blocked_by_remove` change the tasks " +
+        "it waits on; a link that would make a circle is refused as blocker_cycle with its path. " +
+        "Waiting is derived, so you never set a status for it.",
       parameters: z.object({
         agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         project_id: projectId,
@@ -266,8 +297,12 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         done_definition: z.string().max(4000).optional(),
         context: z.string().max(4000).optional(),
         note: z.string().max(4000).optional().describe("Appended to the task log; your done claim when moving to pending-verification."),
+        parent: linkedTaskId.nullable().optional().describe("Make it a subtask of this task; null clears it."),
+        blocked_by_add: blockerIds.optional().describe("Tasks to add to what it waits on."),
+        blocked_by_remove: blockerIds.optional().describe("Tasks to remove from what it waits on."),
+        for_person: z.boolean().optional().describe("true: a person does it (steward only); false: back to agent work."),
       }),
-      execute: async (p: Record<string, string> & { project_id: string; task_id: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
+      execute: async (p: Record<string, unknown> & { project_id: string; task_id: string } & { agent_name?: string }, context?: { session?: McpAuthContext }) => {
         const { project_id, task_id, assignee, agent_name: _actAs, ...rest } = p;
         const body = assignee ? { ...rest, agent: assignee } : rest;
         try {
