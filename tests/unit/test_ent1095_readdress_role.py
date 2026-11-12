@@ -180,6 +180,12 @@ def sink(monkeypatch, real_db, provider, audit, ws):
     # ent#881 reachability: everyone the role names can open the agent unless
     # a test says otherwise.
     monkeypatch.setattr(sgs, "_can_open", lambda agent_name, email: True)
+    # #4501: an agent's ask to the `approver` kind applies the same reach rule
+    # through `role_addressing.can_open_agent`; these people have no platform
+    # account, so its door is the Workspace roster.
+    import client_portal.service as portal_service
+    monkeypatch.setattr(portal_service, "agent_on_roster",
+                        lambda agent_name, email, include_owned=True: True)
     yield
 
 
@@ -481,8 +487,9 @@ class TestFences:
     def test_a_gate_approval_applies_the_gates_reachability_rule(
             self, real_db, agent, people, provider, monkeypatch):
         """ent#881: the moved approval reaches exactly who a fresh raise would
-        — the seated people who can OPEN the agent. An agent's own ask keeps
-        the plain resolution."""
+        — the seated people who can OPEN the agent. An agent's own ask to
+        `primary` keeps the plain resolution (only its `approver` asks are
+        filtered, #4501)."""
         from services import skill_gate_service as sgs
         provider.roles["primary"] = [people["alice"]]
         ask = _agent_ask(agent)

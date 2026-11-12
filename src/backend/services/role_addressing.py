@@ -98,8 +98,9 @@ class RoleRefused(Exception):
     ``invalid_to`` (not a role) or ``role_unassigned`` (nobody fills it); an
     ask to a canon role id (:func:`resolve_role_id_for_ask`) also names
     ``role_unavailable`` (no provider can answer) and ``role_cannot_open_agent``
-    (nobody seated can open the agent). ``message`` names the role's label,
-    never a person."""
+    (nobody seated can open the agent); an ask to the ``approver`` kind
+    (:func:`resolve_approver_for_ask`) names ``role_cannot_open_agent`` too.
+    ``message`` names the role's label, never a person."""
 
     def __init__(self, code: str, role: str, message: str):
         super().__init__(code)
@@ -321,7 +322,8 @@ def can_open_agent(agent_name: str, email: str) -> bool:
     the Workspace, so the agent must be shared with it. Fails closed: an
     unreadable lookup is "cannot open", which refuses by name rather than waits
     silently. The one rule for a gate's approver (``skill_gate_service._can_open``
-    delegates here) and for an ask to a canon role (trinity-enterprise#1007).
+    delegates here), for an ask to a canon role (trinity-enterprise#1007) and
+    for an ask to the ``approver`` kind (#4501).
     """
     try:
         user = db.get_user_by_email(email)
@@ -333,6 +335,44 @@ def can_open_agent(agent_name: str, email: str) -> bool:
         logger.warning("[role_addressing] could not tell whether a person can open %s",
                        agent_name, exc_info=True)
         return False
+
+
+def reachable_people(agent_name: str, people: List[str]) -> List[str]:
+    """The people among ``people`` who can open ``agent_name``
+    (:func:`can_open_agent`), in order: the audience an ask whose answer is
+    fenced to its addressees may record."""
+    return [p for p in people if can_open_agent(agent_name, p)]
+
+
+def resolve_approver_for_ask(agent_name: str) -> Resolution:
+    """Resolve the ``approver`` kind for an ASK raised by ``agent_name``
+    (#4501): the people seated as approver who can open the agent. Raises
+    ``RoleRefused``:
+
+    * ``role_unassigned`` — nobody fills the seat (:func:`resolve`'s own arm);
+    * ``role_cannot_open_agent`` — everyone seated is outside the agent
+      (:func:`can_open_agent`), so they would never see the ask.
+
+    The answer to an ``approver`` ask is fenced to the people recorded at the
+    raise (trinity-enterprise#1053), so a seated approver who cannot open the
+    agent must not be recorded: nobody else may decide the ask, and that
+    person never sees it. The same rule as a canon role
+    (:func:`resolve_role_id_for_ask`) and a gate's approver
+    (``skill_gate_service._approvers``). The other kinds are not fenced and
+    keep :func:`resolve_addressee`. Several reachable people are all recorded;
+    ``single`` only when exactly one. The message names the role, never a
+    person, and its remedy is to share the agent — not to address someone
+    else, which would hand a separate approval to the owner.
+    """
+    r = resolve(agent_name, "approver")
+    reachable = reachable_people(agent_name, r.people)
+    if not reachable:
+        raise RoleRefused(
+            "role_cannot_open_agent", "approver",
+            f"The approver for {agent_name} cannot open {agent_name}, so they would "
+            f"never see this ask. Ask the agent's owner to share {agent_name} with them.",
+        )
+    return Resolution("approver", reachable, reachable[0] if len(reachable) == 1 else None, True)
 
 
 def resolve_role_id_for_ask(agent_name: str, role_id: str) -> Resolution:
@@ -372,7 +412,7 @@ def resolve_role_id_for_ask(agent_name: str, role_id: str) -> Resolution:
             f"Nobody fills the {label} role for this agent yet. Ask the agent's owner "
             "to seat someone, or address the ask to primary or operator.",
         )
-    reachable = [p for p in people if can_open_agent(agent_name, p)]
+    reachable = reachable_people(agent_name, people)
     if not reachable:
         raise RoleRefused(
             "role_cannot_open_agent", role,

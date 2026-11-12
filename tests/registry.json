@@ -9119,6 +9119,19 @@
         "security"
       ],
       "description": "ent#1216: a caller_wake turn carries the delegation's person when that person is owner tier on the delegator, so the agent's key keeps its execution reads while the wake runs. Real /task admission -> real maybe_wake_caller -> real ledger and acting_turn_user_id / viewer_row_scope on a real DB. A shared person's, a visitor's, a deleted user's and a cannot-open person's wake carry nobody, as before; the audit names the standing; auto-memory follows the owner rule."
+    },
+    {
+      "file": "unit/test_4501_approver_reach.py",
+      "feature": "#4501",
+      "added": "2026-11-12",
+      "categories": [
+        "unit",
+        "operator-queue",
+        "asks",
+        "role-addressing",
+        "security"
+      ],
+      "description": "#4501: an ask addressed to: approver records only the seated approvers who can open the agent and is refused 422 role_cannot_open_agent when none can, so the answer fence never names a person who cannot see the ask. Real sink and real route on a real DB: nothing is written on the refusal (with a positive control), the refusal names the role and is logged, an admin approver and a replay are unaffected, primary and viewer are not filtered, and re-addressing to an unreachable approver leaves the row as it was."
     }
   ]
 }
