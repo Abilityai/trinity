@@ -180,6 +180,12 @@ class GitHubService:
                 await client.aclose()
         if response.status_code == 200:
             return response.json()
+        raise self._issue_error(response)
+
+    @staticmethod
+    def _issue_error(response: httpx.Response) -> GitHubError:
+        """The ``GitHubError`` for a non-200 issue read: ``status``, and
+        ``reset`` / ``rate_limited`` when the budget is exhausted."""
         status = response.status_code
         remaining = response.headers.get("x-ratelimit-remaining")
         limited = status == 429 or (
@@ -187,10 +193,58 @@ class GitHubService:
         )
         reset_raw = response.headers.get("x-ratelimit-reset")
         reset = int(reset_raw) if reset_raw and reset_raw.isdigit() else None
-        raise GitHubError(
+        return GitHubError(
             f"GitHub API error: {status}",
             status=status, reset=reset if limited else None, rate_limited=limited,
         )
+
+    async def list_sub_issues(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        client: Optional[httpx.AsyncClient] = None,
+        limit: int = 100,
+    ) -> list:
+        """List one issue's native sub-issues, in GitHub's order:
+        ``GET /repos/{owner}/{repo}/issues/{n}/sub_issues`` (ent#1163).
+
+        100 per page; the next page is requested by number, and only while
+        GitHub sends ``Link: rel="next"`` — no URL from a response is ever
+        requested. Stops at ``limit`` items (pass one more than you keep to
+        learn whether there were more). GET only, on the same bounded client
+        and with the same errors as ``get_issue``.
+        """
+        if not isinstance(number, int) or isinstance(number, bool) or number < 1:
+            raise ValueError("number must be a positive integer")
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+        url = f"{self.API_BASE}/repos/{owner}/{repo}/issues/{number}/sub_issues"
+        own = client is None
+        if own:
+            client = self.issue_client()
+        out: list = []
+        page = 1
+        try:
+            while len(out) < limit:
+                try:
+                    response = await client.get(
+                        url, headers=self._headers, params={"per_page": 100, "page": page})
+                except httpx.RequestError as e:
+                    raise GitHubError(f"Network error: {type(e).__name__}") from None
+                if response.status_code != 200:
+                    raise self._issue_error(response)
+                items = response.json()
+                if not isinstance(items, list):
+                    raise GitHubError("GitHub API error: unexpected sub-issues body", status=200)
+                out.extend(i for i in items if isinstance(i, dict))
+                if not items or 'rel="next"' not in response.headers.get("link", ""):
+                    break
+                page += 1
+        finally:
+            if own:
+                await client.aclose()
+        return out[:limit]
 
     async def validate_token(self) -> Tuple[bool, Optional[str]]:
         """
