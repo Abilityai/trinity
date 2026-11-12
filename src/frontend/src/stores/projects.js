@@ -115,6 +115,10 @@ export const useProjectsStore = defineStore('projects', () => {
       _keepStewardOutcome(id, out?.data)
       return out
     })
+  // ent#1235: a person starts and stops the project (P11); the mode is a PATCH.
+  const startProject = (id) => _write(id, () => portalHttp.post(url(id, '/start'), {}, { headers: headers() }))
+  const stopProject = (id) => _write(id, () => portalHttp.post(url(id, '/stop'), {}, { headers: headers() }))
+  const setMode = (id, mode) => update(id, { mode })
   const setArchived = (id, archived) =>
     _write(id, () => portalHttp.post(url(id, archived ? '/archive' : '/restore'), {}, { headers: headers() }))
   const addMember = (id, email) =>
@@ -284,6 +288,19 @@ export const useProjectsStore = defineStore('projects', () => {
     return data
   }
 
+  // ent#1235: the proposed runs waiting for a person's go, and the batch decision.
+  // Each id is decided on its own; the answer is one outcome per id.
+  async function fetchRunsWaiting(id) {
+    const { data } = await portalHttp.get(url(id, '/runs/waiting'), { headers: headers() })
+    return data.runs || []
+  }
+  async function decideRuns(id, verb, ids, note = null) {
+    const { data } = await portalHttp.post(url(id, `/runs/${verb === 'decline' ? 'decline' : 'approve'}`),
+      { ids, ...(note ? { note } : {}) }, { headers: headers() })
+    void fetchTasks(id)
+    return data.results || []
+  }
+
   async function metricOptions(id) {
     const { data } = await portalHttp.get(url(id, '/metric-options'), { headers: headers() })
     return data.agents || []
@@ -322,7 +339,7 @@ export const useProjectsStore = defineStore('projects', () => {
   return {
     list, listLoaded, listLoading, listError, stewardOutcomes,
     fetchList, pageState, fetchProject, forLink, fetchForLink,
-    create, update, setArchived, addMember, removeMember, addAgent, removeAgent, link, unlink,
+    create, update, setArchived, startProject, stopProject, setMode, fetchRunsWaiting, decideRuns, addMember, removeMember, addAgent, removeAgent, link, unlink,
     tasks, logs, fetchTasks, fetchTask, createTask, updateTask, addTaskNote, fetchLog, addLogEntry,
     addGuest, addItem, setItemAudience, removeItem, fetchReport, myItems, importCandidates, importProject,
     setHealth, linkMetric, unlinkMetric, metricOptions, stewarding, fetchStewarding,

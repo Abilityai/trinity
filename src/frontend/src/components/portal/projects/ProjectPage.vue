@@ -27,6 +27,14 @@
   moves, and the Steward card replaces the bare header label. The goal, like
   every other agent-written text in the Workspace, renders as markdown through
   `PortalMarkdown` (#3692).
+
+  trinity-enterprise#1235: a person starts and stops the project (P11). The
+  header carries the state (Not started / Running / Stopped / Done / Archived)
+  with who changed it and when, Start project / Stop project for edit rights,
+  and the mode (Track / Propose / Auto) — a selector for edit rights, read-only
+  for everyone else. Stopping asks first and names the runs still finishing;
+  a stopped project says so above the tabs. In Propose and Auto the runs the
+  steward proposed wait on the Overview, after "Where it stands".
 -->
 <template>
   <div class="mx-auto w-full max-w-5xl px-4 sm:px-8 py-6" data-testid="project-page">
@@ -58,11 +66,15 @@
         <div class="min-w-0 flex-1 space-y-2">
           <div class="flex flex-wrap items-center gap-2">
             <h1 class="text-2xl font-bold text-gray-900 dark:text-gray-100 break-words">{{ p.name }}</h1>
-            <BaseBadge :variant="STATUS_BADGE[p.status] || 'neutral'" dot>{{ statusLabel(p.status) }}</BaseBadge>
+            <BaseBadge :variant="STATE_BADGE[state] || 'neutral'" dot data-testid="project-state">{{ stateLabel(state) }}</BaseBadge>
             <BaseBadge v-if="!guest">{{ visibilityLabel(p.visibility) }}</BaseBadge>
             <BaseBadge v-else variant="info">Guest</BaseBadge>
-            <BaseBadge v-if="p.archived_at" variant="locked">Archived</BaseBadge>
+            <BaseBadge v-if="!guest && !canSetMode" data-testid="project-mode">Mode: {{ modeLabel(mode) }}</BaseBadge>
           </div>
+          <p v-if="!guest && (stateByWho || modeLine)" class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
+            <span v-if="stateByWho" data-testid="project-state-by">{{ stateByWho }}<template v-if="p.status_at">, <span :title="absolute(p.status_at)">{{ relative(p.status_at) }}</span></template></span>
+            <span v-if="modeLine" data-testid="project-mode-hint">{{ modeLine }}</span>
+          </p>
           <!-- #3692: the goal is markdown (people and agents write it so);
                the shared renderer sanitizes it the way chat content is. -->
           <div class="max-w-3xl text-sm text-gray-700 dark:text-gray-300" data-testid="project-goal">
@@ -95,17 +107,26 @@
           </p>
         </div>
         <div class="flex flex-wrap items-center gap-2">
+          <BaseButton
+            v-if="lifecycle.primary"
+            :variant="lifecycle.primary.verb === 'stop' ? 'secondary' : 'primary'"
+            :loading="lifecycleBusy"
+            :loading-label="lifecycle.primary.verb === 'stop' ? 'Stopping…' : 'Starting…'"
+            :data-testid="`project-${lifecycle.primary.verb}`"
+            @click="lifecycle.primary.verb === 'stop' ? (stopConfirm = true) : startProject()"
+          >{{ lifecycle.primary.label }}</BaseButton>
+          <BaseButton v-if="lifecycle.markDone" variant="ghost" data-testid="project-mark-done" @click="markDone">Mark done</BaseButton>
           <BaseSelect
-            v-if="p.can?.edit && !p.archived_at"
-            id="project-status"
-            :model-value="p.status"
+            v-if="canSetMode"
+            id="project-mode"
+            :model-value="mode"
             variant="ghost"
-            aria-label="Status"
-            @update:model-value="setStatus"
+            aria-label="Mode"
+            data-testid="project-mode-select"
+            @update:model-value="setMode"
           >
-            <option value="active">Active</option>
-            <option value="paused">Paused</option>
-            <option value="done">Done</option>
+            <option v-if="!PROJECT_MODES.includes(mode)" :value="mode" disabled>Mode: Unknown</option>
+            <option v-for="m in PROJECT_MODES" :key="m" :value="m">Mode: {{ modeLabel(m) }}</option>
           </BaseSelect>
           <BaseButton v-if="p.can?.edit && !p.archived_at" variant="ghost" data-testid="project-edit" @click="editOpen = true">Edit</BaseButton>
           <BaseButton v-if="!guest" variant="secondary" data-testid="project-members-open" @click="membersOpen = true">Members &amp; access</BaseButton>
@@ -119,6 +140,17 @@
       </header>
 
       <InlineError v-if="actionError" :message="actionError" @dismiss="actionError = ''" />
+
+      <!-- ent#1235: one line, only on a stopped project (T8: a message in an
+           existing task chat still reaches its agent — said, not hidden). -->
+      <div
+        v-if="!guest && state === 'stopped'"
+        class="rounded-lg bg-status-warning-100 px-4 py-3 text-sm text-status-warning-700 dark:bg-status-warning-500/16 dark:text-status-warning-300"
+        role="status"
+        data-testid="project-stopped-banner"
+      >
+        This project is stopped. Nothing new starts — no task run, and the steward isn't woken for it — until someone with edit rights starts it again. Runs already under way finish, and a message in an existing task chat still reaches its agent.
+      </div>
 
       <!-- A bounded box: OverflowTabs sizes its "More" menu from its own width. -->
       <div v-if="!guest" class="w-full min-w-0">
@@ -180,6 +212,14 @@
           </BaseCard>
 
           <ProjectRollupCard v-if="!guest" :project="p" @open-tasks="tab = 'tasks'" />
+
+          <ProjectRunsWaiting
+            v-if="!guest && mode !== 'track'"
+            :project-id="p.id"
+            :can-contribute="p.can?.contribute === true"
+            :archived="Boolean(p.archived_at)"
+            :my-email="myEmail"
+          />
 
           <BaseCard data-testid="project-work-on-it">
             <h2 class="text-[11px] font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400">Work on it</h2>
@@ -293,6 +333,15 @@
       variant="warning"
       @confirm="archive"
     />
+    <ConfirmDialog
+      v-model:visible="stopConfirm"
+      title="Stop this project?"
+      :message="stopMessage(p)"
+      confirm-text="Stop project"
+      cancel-text="Keep it running"
+      variant="warning"
+      @confirm="stopProject"
+    />
   </div>
 </template>
 
@@ -318,14 +367,17 @@ import ProjectRollupCard from './ProjectRollupCard.vue'
 import ProjectMetricsCard from './ProjectMetricsCard.vue'
 import ProjectNeedsYouCard from './ProjectNeedsYouCard.vue'
 import ProjectStewardCard from './ProjectStewardCard.vue'
+import ProjectRunsWaiting from './ProjectRunsWaiting.vue'
 import OverflowTabs from '@/components/OverflowTabs.vue'
 import { useProjectsStore } from '@/stores/projects'
 import { useClientPortalStore } from '@/stores/clientPortal'
 import { viewState } from '@/utils/loadingState'
 import { formatRelativeTime, formatLocalDateTime } from '@/utils/timestamps'
 import {
-  STATUS_BADGE, statusLabel, visibilityLabel, agentStateLabel, workOnItOptions, continueChoice,
+  visibilityLabel, agentStateLabel, workOnItOptions, continueChoice,
   projectErrorMessage, HOW_IT_MOVES_KEY, roleLine, joinRequestState,
+  STATE_BADGE, PROJECT_MODES, projectState, stateLabel, stateBy, lifecycleActions, stopMessage,
+  projectMode, modeLabel, modeHint,
 } from './projectsUtils'
 
 const AGENT_BADGE = { active: 'success', pending: 'warning', declined: 'neutral' }
@@ -348,6 +400,8 @@ const TABS = [
 ]
 const tab = ref('overview')
 const archiveConfirm = ref(false)
+const stopConfirm = ref(false)
+const lifecycleBusy = ref(false)
 const actionError = ref('')
 const starting = ref('')
 
@@ -358,6 +412,13 @@ const view = computed(() => viewState({
 const p = computed(() => page.value.data || { members: [], agents: [], my_chats: [], rooms: [] })
 const rosterAgents = computed(() => portal.agents.map((a) => a.name))
 const guest = computed(() => p.value.guest === true)
+// ent#1235: the lifecycle and the mode, read tolerantly (an unknown value offers nothing).
+const state = computed(() => projectState(p.value))
+const stateByWho = computed(() => stateBy(p.value, props.myEmail))
+const lifecycle = computed(() => lifecycleActions(p.value))
+const mode = computed(() => projectMode(p.value))
+const canSetMode = computed(() => !guest.value && p.value.can?.edit === true && !p.value.archived_at)
+const modeLine = computed(() => modeHint(mode.value))
 // trinity-enterprise#1132 part 2: Ask to join.
 const join = computed(() => joinRequestState(p.value))
 const joining = ref(false)
@@ -427,7 +488,14 @@ async function guarded(fn) {
   actionError.value = ''
   try { await fn() } catch (err) { actionError.value = projectErrorMessage(err) }
 }
-const setStatus = (status) => guarded(() => store.update(props.projectId, { status }))
+async function lifecycleVerb(fn) {
+  lifecycleBusy.value = true
+  try { await guarded(fn) } finally { lifecycleBusy.value = false }
+}
+const startProject = () => lifecycleVerb(() => store.startProject(props.projectId))
+const stopProject = () => lifecycleVerb(() => store.stopProject(props.projectId))
+const markDone = () => guarded(() => store.update(props.projectId, { status: 'done' }))
+const setMode = (m) => guarded(() => store.setMode(props.projectId, m))
 const archive = () => guarded(() => store.setArchived(props.projectId, true))
 const restore = () => guarded(() => store.setArchived(props.projectId, false))
 </script>
