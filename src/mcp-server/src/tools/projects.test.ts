@@ -444,3 +444,56 @@ describe("ent#1193 read_project_context", () => {
     assert.deepEqual(seen, [["GET", "/api/enterprise/projects/agent/projects/prj_1/context/ctx%201?offset=204800"]]);
   });
 });
+
+describe("ent#1240 — GitHub refs on create_/update_project_task", () => {
+  it("create_project_task forwards refs and drops keys it does not declare", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      createProjectTask: async (pid: string, body: Record<string, unknown>) => {
+        calls.push([pid, body]);
+        return { id: "T-002", refs: [] };
+      },
+    } as Partial<TrinityClient>);
+    const out = JSON.parse(await tools.create_project_task.execute(
+      { project_id: "prj_1", title: "Ship", refs: ["octo/hello#7"], status: "done", stray: "x" } as never,
+      {},
+    ));
+    assert.equal(out.success, true);
+    assert.deepEqual(calls[0], ["prj_1", { title: "Ship", refs: ["octo/hello#7"] }]);
+  });
+
+  it("update_project_task forwards refs_add / refs_remove and nothing undeclared", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      updateProjectTask: async (pid: string, tid: string, body: Record<string, unknown>) => {
+        calls.push([pid, tid, body]);
+        return { id: tid };
+      },
+    } as Partial<TrinityClient>);
+    await tools.update_project_task.execute(
+      { project_id: "prj_1", task_id: "T-001", refs_add: ["https://github.com/octo/hello/pull/9"], refs_remove: ["ref_abc"], priority: "p0", stray: 1 } as never,
+      {},
+    );
+    assert.deepEqual(calls[0], ["prj_1", "T-001", { refs_add: ["https://github.com/octo/hello/pull/9"], refs_remove: ["ref_abc"] }]);
+  });
+
+  it("the schemas cap refs at 10 items of 300 characters", () => {
+    const tools = makeTools();
+    const create = tools.create_project_task.parameters;
+    assert.equal(create.safeParse({ project_id: "p", title: "t", refs: Array(10).fill("o/r#1") }).success, true);
+    assert.equal(create.safeParse({ project_id: "p", title: "t", refs: Array(11).fill("o/r#1") }).success, false);
+    assert.equal(create.safeParse({ project_id: "p", title: "t", refs: ["x".repeat(301)] }).success, false);
+    const update = tools.update_project_task.parameters;
+    assert.equal(update.safeParse({ project_id: "p", task_id: "T-1", refs_add: Array(11).fill("o/r#1") }).success, false);
+    assert.equal(update.safeParse({ project_id: "p", task_id: "T-1", refs_remove: Array(11).fill("ref_x") }).success, false);
+  });
+
+  it("both descriptions say refs are read-only and are not a done", () => {
+    const tools = makeTools();
+    for (const t of [tools.create_project_task, tools.update_project_task]) {
+      assert.match(t.description, /never writes to GitHub/);
+      assert.match(t.description, /does not finish the task/);
+      assert.ok(t.description.length <= 2048, `${t.name} is ${t.description.length} characters`);
+    }
+  });
+});
