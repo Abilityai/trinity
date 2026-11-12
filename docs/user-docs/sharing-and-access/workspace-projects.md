@@ -11,7 +11,7 @@ Projects appear on instances licensed for them. On an instance without the entit
 - **Agent on the project** — An agent that may work on it. Adding an agent you do not own asks its owner first; until they approve, the agent is listed as *Waiting for owner* and is not offered.
 - **Linked chat** — A Workspace chat (or room) that belongs to the project. Every turn in it tells the agent which project it is in.
 - **Log** — The project's shared, append-only record: decisions, deliverables, task changes, blockers, hand-offs and notes, written by members and by agents.
-- **Task** — A unit of work with an owner or an agent, a priority, an objective and a definition of done. The owner is the project's creator or one of its members (or, on a project an agent stewards, a canon role written `role:<id>`); Trinity refuses anyone else when an owner is set or changed, from the page, the API or an agent. Owners written before this rule, or by a folder **Import**, are kept as they are, and the project page warns when one reaches nobody. Its status moves through *active*, *blocked*, *needs a decision*, *paused*, *awaiting verification* and *done*.
+- **Task** — A unit of work with an owner or an agent, a priority, an objective and a definition of done. The owner is the project's creator or one of its members (or, on a project an agent stewards, a canon role written `role:<id>`); Trinity refuses anyone else when an owner is set or changed, from the page, the API or an agent. Owners written before this rule, or by a folder **Import**, are kept as they are, and the project page warns when one reaches nobody. A new task starts as *to do*; its status moves through *to do*, *active*, *blocked*, *needs a decision*, *paused*, *awaiting verification* and *done*. A task can be a **subtask** of another, can **wait on** other tasks, and can be **for a person** (see [Subtasks, waiting and tasks for people](#subtasks-waiting-and-tasks-for-people)).
 - **Steward** — The person or agent who owns the project's health, verifies finished tasks and gets the digest of what needs attention. The creator stewards a project unless they name someone else.
 - **Health** — The steward's read of the project — **On track**, **At risk** or **Off track** — with a line of explanation, and a note when it is overdue.
 - **Guest** — An outside client invited to the project. They see their own chats and what was shared with them, nothing else.
@@ -65,6 +65,15 @@ Tasks are grouped **Open**, **Awaiting verification** and **Done**. Members add 
 
 An agent cannot mark a task done. When it finishes, it moves the task to **Awaiting verification** and leaves its evidence in the task's log. A person — or the steward, when the steward is an agent — confirms it: open the task to read the evidence, then **Confirm** on its row or set the status to **Done**. A done task can only be reopened, and only by a person. Task **priority** is set by people only.
 
+Every row and every open task names **who created it** (a person, or an agent marked *(agent)*) and **who it is for**: the person who owns it and the agent doing it.
+
+### Subtasks, waiting and tasks for people
+
+- **Subtasks.** Set **Subtask of** to another task's id (like `T-001`) to put a task under it. Subtasks go one level deep: a subtask can't have subtasks, and a task that has subtasks can't become one. The parent's row shows its progress, e.g. *2/5 subtasks*. **Finishing every subtask does not finish the parent** — mark the parent done yourself. Clear **Subtask of** to make it a top-level task again.
+- **Waiting on other tasks.** **Waits on** lists the tasks that must be done first, by id (`T-002, T-004`). While any of them is open, the row says *Waiting on T-002*. Waiting is worked out from those tasks; it is not the **Blocked** status, which you set by hand for something outside the project. A link that would make a circle is refused, naming it — for example *That link would make a circle: T-004 → T-007 → T-004.* A task and its own subtasks don't wait on each other, and a task can wait on at most 20 tasks.
+- **What's next.** Agents can ask for the tasks that can be worked now: *to do* or *active*, waiting on nothing open, and not a parent with open subtasks, by priority.
+- **Tasks for people.** Turn on **A person does this task** to make a task a person's: it needs an owner on the project and no agent. It is never started as an agent run — the task offers no **Run this task** — and only a person marks it done. When the last task it waits on is done, its owner is told, once each time it becomes ready. As an agent, only the project's steward can give a task to a person; any other agent asks with `propose_project_changes`.
+
 ### The steward
 
 The steward owns the project's health and the verification of finished work, and is the one place a project's "what needs attention" is collected:
@@ -96,7 +105,7 @@ Open a task and use **Run this task** to start its work from the project itself:
 - **Preview what it gets.** This is the exact first message the agent will receive: the task's objective and definition of done, the context marked for agents (it reads each item itself), and the last few log entries.
 - **Start** opens a chat with that agent, tied to the task. The first message is sent once, even if you press Start twice. Starting again with the same agent reopens the same chat, and the task lists **Chat for this task** so you can get back to it. The run uses the agent's own Claude subscription or API key, and its cost shows on the turn when it's done.
 
-Only members and the creator can start a run. Picking the agent also sets the task's **Agent**.
+Only members and the creator can start a run. Picking the agent also sets the task's **Agent**, and a *to do* task moves to *active*. A task for a person can't be started.
 
 ### Files, reports and decisions
 
@@ -125,7 +134,7 @@ A brief often needs more room than a task's fields: a call transcript, your view
 
 ## For Agents
 
-Agents reach a project through the MCP tools the platform exposes to them — `list_projects`, `get_project`, `list_project_tasks`, `get_project_log`, `read_project_context` (a brief people marked for agents, 200 KB a call), `create_project_task`, `update_project_task`, `add_project_task_note`, `add_project_log_entry`, `link_to_project`, `propose_project_changes` (any agent on the project, with the project-management permission), and for a steward agent `get_steward_digest` and `set_project_health`. An agent sees only the projects it is active on, and only in a turn whose audience is internal: a chat or room with no outside client in it. The agent-dev plugin's `project-*` skills wrap these tools; see the [agent-dev plugin page](../abilities/agent-dev-plugin.md).
+Agents reach a project through the MCP tools the platform exposes to them — `list_projects`, `get_project`, `list_project_tasks`, `get_project_log`, `read_project_context` (a brief people marked for agents, 200 KB a call), `create_project_task` (with `parent`, `blocked_by` and `for_person`), `update_project_task` (`parent` — `null` clears it — `blocked_by_add`, `blocked_by_remove`, `for_person`), `add_project_task_note`, `add_project_log_entry`, `link_to_project`, `propose_project_changes` (any agent on the project, with the project-management permission), and for a steward agent `get_steward_digest` and `set_project_health`. `list_project_tasks` with `view: "next"` returns the tasks that can be worked now; an agent never sees a task for a person there. Each task carries `creator`, `assigned_to`, `for_person`, `parent`, `subtasks`, `blocked_by`, `waiting_for` and `unblocked`. An agent sees only the projects it is active on, and only in a turn whose audience is internal: a chat or room with no outside client in it. The agent-dev plugin's `project-*` skills wrap these tools; see the [agent-dev plugin page](../abilities/agent-dev-plugin.md).
 
 ## Limitations
 

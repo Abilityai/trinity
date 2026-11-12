@@ -30,6 +30,11 @@ export const TASK_TEXT_MAX = 4000
 const TASK_FIELD_LABEL = { title: 'title', objective: 'objective', done_definition: 'definition of done' }
 export const TASK_FIELD_ERROR_CODES = Object.freeze({
   invalid_title: 'title', invalid_objective: 'objective', invalid_done_definition: 'done_definition',
+  // ent#1232: a task's shape — its parent and the tasks it waits on.
+  invalid_parent: 'parent', parent_not_found: 'parent', parent_is_self: 'parent', parent_is_subtask: 'parent',
+  has_subtasks: 'parent', invalid_blocked_by_add: 'blocked_by', invalid_blocked_by_remove: 'blocked_by',
+  invalid_blocked_by: 'blocked_by', blocker_not_found: 'blocked_by', blocker_is_self: 'blocked_by',
+  blocker_is_parent: 'blocked_by', blocker_cycle: 'blocked_by', too_many_blockers: 'blocked_by',
 })
 
 /** Length in CODE POINTS, which is what Python's `len` counts — `.length`
@@ -288,13 +293,13 @@ export function stewardPayload(form, myEmail) {
 
 // --- v2: tasks and the log ------------------------------------------------------
 
-export const TASK_STATUSES = ['active', 'blocked', 'needs-decision', 'paused', 'pending-verification', 'done']
+export const TASK_STATUSES = ['todo', 'active', 'blocked', 'needs-decision', 'paused', 'pending-verification', 'done']
 const TASK_STATUS_LABEL = {
-  active: 'Active', blocked: 'Blocked', 'needs-decision': 'Needs a decision', paused: 'Paused',
+  todo: 'To do', active: 'Active', blocked: 'Blocked', 'needs-decision': 'Needs a decision', paused: 'Paused',
   'pending-verification': 'Awaiting verification', done: 'Done',
 }
 export const TASK_STATUS_BADGE = Object.freeze({
-  active: 'info', blocked: 'danger', 'needs-decision': 'warning', paused: 'neutral',
+  todo: 'neutral', active: 'info', blocked: 'danger', 'needs-decision': 'warning', paused: 'neutral',
   'pending-verification': 'autonomous', done: 'success',
 })
 
@@ -313,13 +318,63 @@ export function taskStatusOptions(task) {
 }
 
 export function groupTasks(tasks) {
-  const byId = (a, b) => String(a.id).localeCompare(String(b.id), undefined, { numeric: true })
+  // ent#1232: a subtask sorts straight after its parent (one level deep).
+  const num = (id) => String(id || '')
+  const cmp = (a, b) => num(a).localeCompare(num(b), undefined, { numeric: true })
+  const byId = (a, b) => cmp(a.parent || a.id, b.parent || b.id) || (a.parent ? 1 : 0) - (b.parent ? 1 : 0) || cmp(a.id, b.id)
   const list = [...(tasks || [])].sort(byId)
   return {
     open: list.filter(isOpenTask),
     verifying: list.filter((t) => t.status === 'pending-verification'),
     done: list.filter((t) => t.status === 'done'),
   }
+}
+
+// --- ent#1232: a task's shape, who made it and who it is for ---------------------
+
+const TASK_ID = /^T-(\d{1,6})$/
+
+/** Task ids typed with commas or spaces, normalised to T-NNN; the rest named. */
+export function parseTaskIds(text) {
+  const ids = []
+  const bad = []
+  for (const raw of String(text || '').split(/[\s,]+/).filter(Boolean)) {
+    const m = raw.toUpperCase().match(TASK_ID)
+    if (!m) bad.push(raw)
+    else {
+      const id = `T-${m[1].padStart(3, '0')}`
+      if (!ids.includes(id)) ids.push(id)
+    }
+  }
+  return { ids, bad }
+}
+
+/** "You", "scout (agent)", or the person's name. */
+export function creatorLabel(creator, myEmail, labelOf = (e) => e) {
+  if (!creator || !creator.name) return ''
+  if (creator.kind === 'agent') return `${creator.name} (agent)`
+  if (sameEmail(creator.name, myEmail)) return 'You'
+  return labelOf(creator.name) || creator.name
+}
+
+/** Who a task is for: the person who owns it and the agent doing it. */
+export function assignedLabel(task, labelOf = (e) => e) {
+  const parts = []
+  if (task?.owner) parts.push(labelOf(task.owner) || task.owner)
+  if (task?.agent) parts.push(`${task.agent} (agent)`)
+  return parts.join(' · ')
+}
+
+/** "2/5 subtasks" on a parent. Finishing them does not finish the parent. */
+export function subtaskLabel(task) {
+  const s = task?.subtasks
+  return s && s.total ? `${s.done}/${s.total} subtasks` : ''
+}
+
+/** Waiting on other tasks — derived, and never the Blocked status. */
+export function waitingLabel(task) {
+  const w = task?.waiting_for || []
+  return w.length ? `Waiting on ${w.join(', ')}` : ''
 }
 
 export const LOG_KINDS = ['decision', 'deliverable', 'task', 'blocker', 'handoff', 'note']
