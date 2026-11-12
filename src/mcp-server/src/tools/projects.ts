@@ -210,7 +210,10 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "on), `waiting_for` (those not done yet) and `unblocked` (true when every task it waits on is " +
         "done). Waiting is not the `blocked` status: `blocked` is set by hand for an outside blocker. " +
         "Pass view 'next' for what can be worked now: open (`todo` or `active`), unblocked, and not a " +
-        "parent with open subtasks, by priority. Tasks for a person never appear in your next view.",
+        "parent with open subtasks, by priority. Tasks for a person never appear in your next view. " +
+        "`closed_without_claim` true means the task was set done without its agent's done claim: its " +
+        "output may not exist; read the note on its log. A task waiting on such a task still unblocks, " +
+        "and lists those tasks in `blockers_closed_without_claim`.",
       parameters: z.object({
         agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         project_id: projectId,
@@ -283,7 +286,10 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         "deep); null makes it a top-level task again. Finishing every subtask does not finish the " +
         "parent: close the parent yourself. `blocked_by_add` and `blocked_by_remove` change the tasks " +
         "it waits on; a link that would make a circle is refused as blocker_cycle with its path. " +
-        "Waiting is derived, so you never set a status for it.",
+        "Waiting is derived, so you never set a status for it. Setting 'done' on a task with an agent " +
+        "on it from any status but 'pending-verification' needs a 'note' saying how it was finished " +
+        "(done_without_claim_needs_note); the task is then flagged `closed_without_claim`: its output " +
+        "may not exist; read the note.",
       parameters: z.object({
         agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
         project_id: projectId,
@@ -296,7 +302,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         objective: z.string().max(4000).optional(),
         done_definition: z.string().max(4000).optional(),
         context: z.string().max(4000).optional(),
-        note: z.string().max(4000).optional().describe("Appended to the task log; your done claim when moving to pending-verification."),
+        note: z.string().max(4000).optional().describe("Appended to the task log; your done claim when moving to pending-verification. Required when setting done without a done claim."),
         parent: linkedTaskId.nullable().optional().describe("Make it a subtask of this task; null clears it."),
         blocked_by_add: blockerIds.optional().describe("Tasks to add to what it waits on."),
         blocked_by_remove: blockerIds.optional().describe("Tasks to remove from what it waits on."),

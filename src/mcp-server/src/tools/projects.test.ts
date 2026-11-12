@@ -567,6 +567,39 @@ describe("ent#1232 — task shape: todo, subtasks, blocked-by, tasks for people"
     assert.match(out.error, /T-004 → T-007 → T-004/);
   });
 
+  it("done without a done claim: the note is sent, and a missing one is refused by name", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      updateProjectTask: async (pid: string, tid: string, body: Record<string, unknown>) => {
+        calls.push([pid, tid, body]);
+        if (!body.note) {
+          throw apiError(422, { code: "done_without_claim_needs_note", message: "Add a note saying how it was finished." });
+        }
+        return { id: tid, status: "done", closed_without_claim: true };
+      },
+    } as Partial<TrinityClient>);
+    const refused = JSON.parse(await tools.update_project_task.execute(
+      { project_id: "prj_1", task_id: "T-005", status: "done" } as never, {}));
+    assert.equal(refused.success, false);
+    assert.equal(refused.code, "done_without_claim_needs_note");
+    const out = JSON.parse(await tools.update_project_task.execute(
+      { project_id: "prj_1", task_id: "T-005", status: "done", note: "Shipped by hand." } as never, {}));
+    assert.deepEqual(calls[1], ["prj_1", "T-005", { status: "done", note: "Shipped by hand." }]);
+    assert.equal(out.closed_without_claim, true);
+  });
+
+  it("the descriptions say what done without a done claim means", () => {
+    const tools = makeTools({} as Partial<TrinityClient>);
+    for (const name of ["update_project_task", "list_project_tasks"] as const) {
+      const d = tools[name].description;
+      assert.ok(d.includes("its output may not exist; read the note"), `${name}: missing the meaning`);
+      assert.ok(d.length < 2048, `${name}: ${d.length} chars`);
+    }
+    assert.ok(tools.update_project_task.description.includes("done_without_claim_needs_note"));
+    assert.ok(tools.update_project_task.description.includes("closed_without_claim"));
+    assert.ok(tools.list_project_tasks.description.includes("blockers_closed_without_claim"));
+  });
+
   it("the descriptions name the new rules and their refusals", () => {
     const tools = makeTools({} as Partial<TrinityClient>);
     const create = tools.create_project_task.description;

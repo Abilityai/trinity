@@ -76,6 +76,7 @@
               <BaseBadge v-if="t.priority === 'p1'" variant="urgent">P1</BaseBadge>
               <BaseBadge v-if="subtaskLabel(t)" size="sm" variant="neutral">{{ subtaskLabel(t) }}</BaseBadge>
               <BaseBadge v-if="waitingLabel(t)" size="sm" variant="neutral">{{ waitingLabel(t) }}</BaseBadge>
+              <BaseBadge v-if="t.closed_without_claim" size="sm" variant="warning">Done without a done claim</BaseBadge>
               <span v-if="assignedLabel(t)" class="hidden sm:inline max-w-[10rem] truncate text-xs text-gray-500 dark:text-gray-400">{{ assignedLabel(t, ownerLabel) }}</span>
               <span v-if="creatorOf(t)" class="hidden md:inline max-w-[10rem] truncate text-xs text-gray-500 dark:text-gray-400">by {{ creatorOf(t) }}</span>
               <BaseBadge :variant="TASK_STATUS_BADGE[t.status] || 'neutral'">{{ taskStatusLabel(t.status) }}</BaseBadge>
@@ -158,6 +159,12 @@
         </dl>
         <p v-if="waitingLabel(task)" class="text-sm text-gray-600 dark:text-gray-300" data-testid="project-task-waiting">
           {{ waitingLabel(task) }} — it is ready once {{ task.waiting_for.length === 1 ? 'that task is' : 'those tasks are' }} done.
+        </p>
+        <p v-if="task.closed_without_claim" class="text-sm text-gray-600 dark:text-gray-300" data-testid="project-task-closed-without-claim">
+          Done without its agent's done claim: {{ UNCLAIMED_MEANING }}
+        </p>
+        <p v-if="(task.blockers_closed_without_claim || []).length" class="text-sm text-gray-600 dark:text-gray-300" data-testid="project-task-blockers-unclaimed">
+          {{ task.blockers_closed_without_claim.join(', ') }} {{ task.blockers_closed_without_claim.length === 1 ? 'was' : 'were' }} done without a done claim: {{ UNCLAIMED_MEANING }}
         </p>
         <p v-if="subtaskLabel(task)" class="text-xs text-gray-600 dark:text-gray-300">Finishing every subtask does not finish this task: mark it done yourself.</p>
         <div v-if="task.objective && showRead">
@@ -269,7 +276,13 @@
               data-testid="project-task-blocked-by-edit"
             />
           </div>
-          <BaseTextarea id="task-note" v-model="edit.note" label="Note (optional — added to the task's log)" :rows="2" />
+          <BaseTextarea
+            id="task-note"
+            v-model="edit.note"
+            :label="needsNote ? 'Note (required — its agent never claimed it done; say how it was finished)' : 'Note (optional — added to the task\'s log)'"
+            :rows="2"
+            :error="editError.note"
+          />
           <InlineError v-if="actionError" :message="actionError" @dismiss="actionError = ''" />
           <div class="flex justify-end">
             <BaseButton type="submit" size="sm" :loading="busy" loading-label="Saving…" :disabled="!dirty" data-testid="project-task-save">Save</BaseButton>
@@ -317,7 +330,7 @@ import { formatRelativeTime, formatLocalDateTime } from '@/utils/timestamps'
 import {
   TASK_FIELD_ERROR_CODES, TASK_STATUS_BADGE, assignedLabel, authorLabel, creatorLabel, groupTasks, parseTaskIds,
   projectErrorMessage, subtaskLabel, taskLogKindLabel, taskStatusLabel, taskStatusOptions, validateTaskFields,
-  verificationRule, waitingLabel, withheldLine } from './projectsUtils'
+  verificationRule, waitingLabel, withheldLine, doneWithoutClaim, UNCLAIMED_MEANING } from './projectsUtils'
 
 const props = defineProps({
   // trinity-enterprise#1132: the page read, for the withheld line and the rule.
@@ -382,6 +395,7 @@ const confirmError = ref('')
 // A done task is frozen until it is reopened — the server refuses every other
 // key with 409 `task_done`, so the form says so rather than letting a save fail.
 const locked = computed(() => task.value?.status === 'done')
+const needsNote = computed(() => doneWithoutClaim(task.value, edit.status))
 // The rendered objective / DoD show only when the editable fields do not.
 const showRead = computed(() => !(props.canContribute && !props.archived) || locked.value)
 
@@ -521,6 +535,9 @@ async function saveTask() {
   const text = changedText()
   const shape = changedShape()
   editError.value = { ...validateTaskFields(edit, Object.keys(text)), ...shape.errors }
+  if (needsNote.value && !edit.note.trim()) {
+    editError.value.note = "Add a note: its agent never claimed this task done, so say how it was finished."
+  }
   if (Object.keys(editError.value).length) return
   const body = {}
   if (edit.status !== task.value.status) body.status = edit.status

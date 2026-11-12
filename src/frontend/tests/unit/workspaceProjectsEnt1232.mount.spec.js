@@ -220,3 +220,73 @@ describe('ent#1232 — a new task', () => {
     })
   })
 })
+
+// Ruling 2026-11-12: a task with an agent on it set done from anything but
+// pending-verification closed without its agent's done claim. The page asks for
+// a note on exactly that transition, and shows the flag the server stores.
+describe('ent#1232 — done without a done claim', () => {
+  const AGENT_TASK = base({ id: 'T-004', title: 'Write the brief', status: 'active', agent: 'scout' })
+
+  async function pick(status) {
+    const el = document.getElementById('task-status')
+    el.value = status
+    el.dispatchEvent(new Event('change'))
+    await flushPromises()
+  }
+
+  it('asks for a note on that transition and sends nothing without one', async () => {
+    await openDetail(AGENT_TASK)
+    await pick('done')
+    expect(document.querySelector('label[for="task-note"]').textContent).toMatch(/required/i)
+    await save()
+    expect(projects.updateTask).not.toHaveBeenCalled()
+    expect(errorOf('task-note')).toMatch(/note/i)
+    await type('task-note', 'Finished by hand; the brief is in the drive.')
+    await save()
+    expect(projects.updateTask).toHaveBeenCalledWith('prj_1', 'T-004', {
+      status: 'done', note: 'Finished by hand; the brief is in the drive.',
+    })
+  })
+
+  it('a claimed task, a person task and an agentless task need no note', async () => {
+    for (const t of [
+      base({ id: 'T-005', status: 'pending-verification', agent: 'scout' }),
+      base({ id: 'T-006', status: 'active', for_person: true, owner: 'alex@example.com' }),
+      base({ id: 'T-007', status: 'active' }),
+    ]) {
+      document.body.innerHTML = ''
+      await openDetail(t)
+      await pick('done')
+      expect(document.querySelector('label[for="task-note"]').textContent).not.toMatch(/required/i)
+      await save()
+      expect(projects.updateTask).toHaveBeenCalledWith('prj_1', t.id, { status: 'done' })
+    }
+  })
+
+  it("the server's refusal shows under the note", async () => {
+    await openDetail(AGENT_TASK)
+    projects.updateTask = vi.fn().mockRejectedValue({ response: { status: 422, data: { detail: {
+      code: 'done_without_claim_needs_note', message: 'Add a note saying how it was finished.' } } } })
+    await pick('done')
+    await type('task-note', 'x')
+    await save()
+    expect(errorOf('task-note')).toContain('Add a note')
+  })
+
+  it('shows the flag on the task and names the blocker on a dependent', async () => {
+    const closed = base({ id: 'T-008', title: 'Data pull', status: 'done', agent: 'scout', closed_without_claim: true })
+    const dep = base({ id: 'T-009', title: 'Report', blocked_by: ['T-008'], blockers_closed_without_claim: ['T-008'] })
+    mountTasks([closed, dep], { detail: closed })
+    await flushPromises()
+    expect(byTestId('project-task-T-008').textContent).toMatch(/without a done claim/i)
+    byTestId('project-task-T-008').click()
+    await flushPromises()
+    expect(byTestId('project-task-closed-without-claim').textContent).toMatch(/may not exist/)
+    document.body.innerHTML = ''
+    await openDetail(dep)
+    const line = byTestId('project-task-blockers-unclaimed').textContent
+    expect(line).toContain('T-008')
+    expect(line).toMatch(/may not exist/)
+    expect(byTestId('project-task-closed-without-claim')).toBeNull()
+  })
+})

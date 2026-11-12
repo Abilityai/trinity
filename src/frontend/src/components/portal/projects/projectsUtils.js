@@ -35,6 +35,7 @@ export const TASK_FIELD_ERROR_CODES = Object.freeze({
   has_subtasks: 'parent', invalid_blocked_by_add: 'blocked_by', invalid_blocked_by_remove: 'blocked_by',
   invalid_blocked_by: 'blocked_by', blocker_not_found: 'blocked_by', blocker_is_self: 'blocked_by',
   blocker_is_parent: 'blocked_by', blocker_cycle: 'blocked_by', too_many_blockers: 'blocked_by',
+  done_without_claim_needs_note: 'note',
 })
 
 /** Length in CODE POINTS, which is what Python's `len` counts — `.length`
@@ -376,6 +377,16 @@ export function waitingLabel(task) {
   const w = task?.waiting_for || []
   return w.length ? `Waiting on ${w.join(', ')}` : ''
 }
+
+// Ruling 2026-11-12: a task with an agent on it set done from anything but
+// pending-verification closes without its agent's done claim. The server
+// requires a note on that write; the page asks for it on the same condition.
+export function doneWithoutClaim(task, nextStatus) {
+  return !!task && nextStatus === 'done' && !['done', 'pending-verification'].includes(task.status)
+    && !task.for_person && !!task.agent
+}
+
+export const UNCLAIMED_MEANING = 'its output may not exist; read the note on its log.'
 
 export const LOG_KINDS = ['decision', 'deliverable', 'task', 'blocker', 'handoff', 'note']
 // `status` is written by a health update (v3.3), never offered in the add form.

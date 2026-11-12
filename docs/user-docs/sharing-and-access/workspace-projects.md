@@ -65,6 +65,8 @@ Tasks are grouped **Open**, **Awaiting verification** and **Done**. Members add 
 
 An agent cannot mark a task done. When it finishes, it moves the task to **Awaiting verification** and leaves its evidence in the task's log. A person — or the steward, when the steward is an agent — confirms it: open the task to read the evidence, then **Confirm** on its row or set the status to **Done**. A done task can only be reopened, and only by a person. Task **priority** is set by people only.
 
+Setting a task done while its agent never claimed it (it isn't in **Awaiting verification**) needs a **Note** saying how it was finished; the note goes in the task's log and the task shows *Done without a done claim*, because its output may not exist. Tasks waiting on it still become ready, and name it.
+
 Every row and every open task names **who created it** (a person, or an agent marked *(agent)*) and **who it is for**: the person who owns it and the agent doing it.
 
 ### Subtasks, waiting and tasks for people
