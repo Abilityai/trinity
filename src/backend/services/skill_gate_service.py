@@ -1505,6 +1505,36 @@ REPLAY_SYSTEM_PROMPT = "replay_system_prompt"
 REQUESTER_CHAT = "requester_chat"
 
 
+# abilityai/trinity-enterprise#1105: the project the request was attributed to,
+# resolved NOW, while the requesting turn runs (lineage needs it live), and
+# kept in the record's `dispatch` beside the frozen fields. The approved run is
+# recorded with it (`_dispatch_approved`); `project_requested` marks a project
+# the request named itself (checked before the hold), so the replay is
+# recorded as that explicit claim rather than as an inherited one.
+FROZEN_PROJECT = "project_id"
+FROZEN_PROJECT_REQUESTED = "project_requested"
+
+
+def frozen_project(project_id: Optional[str] = None, *, agent_name: Optional[str] = None,
+                   principal: Any = None, requested_project_id: Optional[str] = None,
+                   triggered_by: Optional[str] = None) -> Dict[str, Any]:
+    """`dispatch` keys carrying the request's project; empty when there is none.
+
+    Pass a project already resolved (a fan-out batch's), or the request's facts
+    to resolve it through the attribution seam (inert in OSS → empty). Never
+    raises: the seam's resolve fails open to None."""
+    if project_id is None and agent_name:
+        project_id = execution_attribution.resolve(
+            agent_name=agent_name, principal=principal,
+            requested_project_id=requested_project_id, triggered_by=triggered_by)
+    if not project_id:
+        return {}
+    out: Dict[str, Any] = {FROZEN_PROJECT: project_id}
+    if requested_project_id and project_id == requested_project_id:
+        out[FROZEN_PROJECT_REQUESTED] = True
+    return out
+
+
 def _requester_chat(requester: Requester) -> Dict[str, Dict[str, str]]:
     """The chat an agent requester's turn is answering, as `execute_task`
     keywords under `REQUESTER_CHAT`; empty when there is none to trust.
@@ -1792,9 +1822,14 @@ async def _dispatch_approved(record: Dict[str, Any], execution_id: str) -> str:
         ),
         execution_id=execution_id,
     )
-    # ent#1105: an edition may attribute the replayed run; a project frozen
-    # into the gate record is carried (none is frozen yet, so the row decides).
-    execution_attribution.record_row(row, inherited_project_id=frozen.get("project_id"))
+    # ent#1105: an edition may attribute the replayed run. The project frozen at
+    # hold time (`frozen_project`) is carried — as the request's own explicit
+    # claim when it named it, else inherited; with none frozen the row decides.
+    frozen_project_id = frozen.get(FROZEN_PROJECT)
+    requested = frozen_project_id if frozen.get(FROZEN_PROJECT_REQUESTED) else None
+    execution_attribution.record_row(
+        row, requested_project_id=requested,
+        inherited_project_id=None if requested else frozen_project_id)
     if row is None:
         raise RuntimeError("could not create the execution record")
 

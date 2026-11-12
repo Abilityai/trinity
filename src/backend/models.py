@@ -3722,6 +3722,9 @@ class FanOutResponse(BaseModel):
     results: List[FanOutTaskResponse]
     # trinity-enterprise#751: subtasks held by the skill gate (neither run nor failed).
     pending_approval: int = 0
+    # ent#1105: "failed" when a named project_id passed the check but the batch
+    # (or, on a sync batch, one of its subtasks) was not attributed to it.
+    project_attribution: Optional[str] = None
 
 
 # --- #2670: the batch's read surface ----------------------------------------

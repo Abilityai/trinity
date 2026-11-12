@@ -3143,6 +3143,11 @@ async def dispatch_parallel_task(
                     max_turns=request.max_turns,
                 ),
                 **skill_gate_service.frozen_replay(request.message, request.system_prompt),
+                # ent#1105: a held request keeps the project it would have run for.
+                **skill_gate_service.frozen_project(
+                    agent_name=name, principal=current_user,
+                    requested_project_id=getattr(request, "project_id", None),
+                    triggered_by=derivation.triggered_by),
             },
         )
     except SkillApprovalRequired as held:

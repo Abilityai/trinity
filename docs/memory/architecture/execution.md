@@ -130,7 +130,7 @@ Every sync `/chat` / `/task` failure the backend classifies carries an **additiv
 
 ### Execution Attribution Seam (trinity-enterprise#1105)
 
-`services/execution_attribution.py` lets an edition attribute an execution to a project: every `create_task_execution(` site calls `record_row` right after the row exists (or is allowlisted with a reason — census `tests/unit/test_1105_execution_attribution.py`), a request naming `project_id` (`/chat`, `/task`, `/fan-out`) is checked via `dependencies.check_requested_project` before any claim or row (OSS: 422 `project_attribution_unavailable`), and `GET …/executions/{id}` reads `project_id` from `annotate`; record and annotate fail open.
+`services/execution_attribution.py` lets an edition attribute an execution to a project: every `create_task_execution(` site calls `record_row` right after the row exists (or is allowlisted with a reason — census `tests/unit/test_1105_execution_attribution.py`), a request naming `project_id` (`/chat`, `/task`, `/fan-out`) is checked via `dependencies.check_requested_project` before any claim or row (OSS: 422 `project_attribution_unavailable`), and `GET …/executions/{id}` reads `project_id` from `annotate`; record and annotate fail open. A named project that passed the check but was not recorded answers `project_attribution: "failed"` (`report`; `/chat`/`/task` carry the outcome in a per-request ContextVar, fan-out on `FanOutResponse`). A skill-gate hold freezes the resolved project into the record's `dispatch` (`skill_gate_service.frozen_project`) and the approved replay records it. Loop iterations record from their own row only, because the loop record has no project column.
 
 ### Skill Gate — approval before dispatch (trinity-enterprise#751)
 

@@ -385,3 +385,351 @@ def test_get_execution_without_attribution_has_no_project_id(monkeypatch):
     out = asyncio.run(sched.get_execution(name="alpha", execution_id="exec-1",
                                           current_user=_HUMAN))
     assert out.project_id is None
+
+
+# ---------------------------------------------------------------------------
+# Honest status: a named project that was checked and then not recorded is
+# answered `project_attribution: "failed"` on /chat, /task and /fan-out
+# (plan §2.2 rule 3, review I1 (c))
+# ---------------------------------------------------------------------------
+
+class _PassesCheck(_Raising):
+    """check passes; record raises (the default) unless told to record."""
+
+    def __init__(self, records=False, resolves=None):
+        self.records, self.resolves, self.seen = records, resolves, []
+
+    def resolve(self, created):
+        if self.resolves is None:
+            raise RuntimeError("db down")
+        return self.resolves
+
+    def record(self, created):
+        self.seen.append(created)
+        if self.records:
+            return ea.RECORDED
+        raise RuntimeError("db down")
+
+
+_AGENT_KEY = SimpleNamespace(id=1, username="owner", email="o@example.com", role="admin",
+                             agent_name="caller", mcp_scope="agent",
+                             _acting_execution_id="turn-1")
+
+
+def test_an_explicit_request_that_was_not_recorded_is_failed():
+    class _Declines(_PassesCheck):
+        def record(self, created):
+            return None          # e.g. the record-time re-assert no longer holds
+
+    ea.register_attributor(_Declines())
+    ea.check("p1", principal=_AGENT_KEY, agent_name="alpha")
+    assert ea.record_row(ROW, requested_project_id="p1") == ea.FAILED
+    assert ea.explicit_status() == ea.FAILED
+
+
+def test_check_starts_the_requests_status_afresh_and_success_is_recorded():
+    ea.register_attributor(_PassesCheck(records=True))
+    ea.check("p1", principal=_AGENT_KEY, agent_name="alpha")
+    assert ea.record_row(ROW, requested_project_id="p1") == ea.RECORDED
+    assert ea.explicit_status() == ea.RECORDED
+    ea.check(None, principal=_AGENT_KEY, agent_name="alpha")
+    assert ea.explicit_status() is None
+    # an inherited project never sets the request's explicit status
+    ea.record_row(ROW, inherited_project_id="p1")
+    assert ea.explicit_status() is None
+
+
+def test_report_names_only_a_failure_on_a_dict():
+    assert ea.report({"a": 1}, ea.FAILED) == {"a": 1, "project_attribution": "failed"}
+    assert ea.report({"a": 1}, ea.RECORDED) == {"a": 1}
+    assert ea.report({"a": 1}, None) == {"a": 1}
+    sentinel = object()
+    assert ea.report(sentinel, ea.FAILED) is sentinel
+
+
+def _recording_row(principal, request):
+    """What the service does with the row it just created."""
+    ea.record_row(ROW, principal=principal, requested_project_id=request.project_id)
+
+
+@pytest.mark.parametrize("records", [False, True])
+def test_task_route_answers_failed_when_the_named_project_was_not_recorded(monkeypatch, records):
+    import routers.chat as chat_router
+    from models import ParallelTaskRequest
+    ea.register_attributor(_PassesCheck(records=records))
+    monkeypatch.setattr(chat_router, "get_agent_container",
+                        lambda name: SimpleNamespace(status="running"))
+
+    async def _dispatch(*, request, current_user, **_):
+        _recording_row(current_user, request)
+        return {"status": "accepted", "task_execution_id": "exec-1"}
+
+    monkeypatch.setattr(chat_router.chat_execution_service, "dispatch_parallel_task", _dispatch)
+    out = asyncio.run(chat_router.execute_parallel_task(
+        request=ParallelTaskRequest(message="hi", project_id="p1"),
+        name="alpha", current_user=_AGENT_KEY, x_source_agent=None, x_via_mcp=None,
+        idempotency_key=None, x_event_trigger=None, x_internal_secret=None,
+        x_trinity_execution_id=None))
+    if records:
+        assert "project_attribution" not in out
+    else:
+        assert out["project_attribution"] == "failed"
+
+
+@pytest.mark.parametrize("records", [False, True])
+def test_chat_route_answers_failed_when_the_named_project_was_not_recorded(monkeypatch, records):
+    import routers.chat as chat_router
+    from models import ChatMessageRequest
+    from services.chat_signals import ChatExecutionContext
+    ea.register_attributor(_PassesCheck(records=records))
+    monkeypatch.setattr(chat_router, "get_agent_container",
+                        lambda name: SimpleNamespace(status="running"))
+
+    async def _admit(**_):
+        return SimpleNamespace(idem=None, execution_id="exec-1", capacity_result=None,
+                               capacity=None, queue_result="admitted", chat_timeout=60,
+                               chain_depth=None, gate=None)
+
+    async def _prepare(*, request, current_user, **_):
+        _recording_row(current_user, request)
+        return ChatExecutionContext(
+            execution=SimpleNamespace(id="exec-1"), task_execution_id="exec-1",
+            triggered_by="agent", subscription_id=None, collaboration_activity_id=None,
+            chat_activity_id=None, session=None, is_queued=False)
+
+    async def _run(**_):
+        return {"response": "ok", "execution": {"task_execution_id": "exec-1"}}
+
+    monkeypatch.setattr(chat_router.dispatch_admission_service, "admit_chat_request", _admit)
+    monkeypatch.setattr(chat_router.chat_execution_service, "prepare_chat_execution", _prepare)
+    monkeypatch.setattr(chat_router.chat_execution_service, "run_chat_turn", _run)
+    out = asyncio.run(chat_router.chat_with_agent(
+        request=ChatMessageRequest(message="hi", project_id="p1"),
+        name="alpha", current_user=_AGENT_KEY, x_source_agent=None, x_via_mcp=None,
+        idempotency_key=None, x_trinity_execution_id=None))
+    if records:
+        assert "project_attribution" not in out
+    else:
+        assert out["project_attribution"] == "failed"
+
+
+def _fan_out_world(monkeypatch, result_attribution=None):
+    import routers.fan_out as fan_out_router
+    from services.fan_out_service import FanOutResult
+    seen = {}
+
+    async def _depth(**_):
+        return None
+
+    class _Service:
+        async def execute(self, **kw):
+            seen.update(kw)
+            return FanOutResult(fan_out_id="fo_1", status="accepted", total=1,
+                                completed=0, failed=0, results=[],
+                                project_attribution=result_attribution)
+
+    monkeypatch.setattr(fan_out_router.dispatch_admission_service,
+                        "enforce_inter_agent_depth", _depth)
+    monkeypatch.setattr(fan_out_router.idempotency_service, "begin",
+                        lambda *a, **k: SimpleNamespace(enabled=False, replay=False, in_flight=False,
+                                                        snapshot=None))
+    monkeypatch.setattr(fan_out_router.idempotency_service, "complete", lambda *a, **k: None)
+    monkeypatch.setattr(fan_out_router.turn_tier_service, "turn_origin_user_id", lambda *a: 1)
+    monkeypatch.setattr(fan_out_router.turn_tier_service, "turn_origin_email", lambda *a: "o@example.com")
+    monkeypatch.setattr(fan_out_router, "get_fan_out_service", lambda: _Service())
+    return fan_out_router, seen
+
+
+def _call_fan_out(router_mod, project_id="p1"):
+    from models import FanOutRequest
+    return asyncio.run(router_mod.fan_out(
+        request=FanOutRequest(tasks=[{"id": "t1", "message": "go"}], project_id=project_id,
+                              async_mode=True),
+        name="alpha", current_user=_AGENT_KEY, x_source_agent=None, x_via_mcp=None,
+        idempotency_key=None))
+
+
+def test_fan_out_answers_failed_when_the_named_project_did_not_resolve(monkeypatch):
+    router_mod, seen = _fan_out_world(monkeypatch)
+    ea.register_attributor(_PassesCheck(resolves=None))   # resolve raises → None
+    out = _call_fan_out(router_mod)
+    assert seen["project_id"] is None
+    assert out.project_attribution == "failed"
+
+
+def test_fan_out_carries_the_resolved_project_and_says_nothing_on_success(monkeypatch):
+    router_mod, seen = _fan_out_world(monkeypatch)
+    ea.register_attributor(_PassesCheck(resolves="p1"))
+    out = _call_fan_out(router_mod)
+    assert seen["project_id"] == "p1"
+    assert out.project_attribution is None
+
+
+def test_fan_out_answers_failed_when_a_subtask_was_not_recorded(monkeypatch):
+    router_mod, _ = _fan_out_world(monkeypatch, result_attribution=ea.FAILED)
+    ea.register_attributor(_PassesCheck(resolves="p1"))
+    assert _call_fan_out(router_mod).project_attribution == "failed"
+
+
+def test_a_fan_out_subtask_whose_record_failed_marks_the_batch(monkeypatch):
+    """The service half: a child whose inherited project failed to record is
+    named on the batch, so a sync caller hears it."""
+    import services.fan_out_service as fos
+    ea.register_attributor(_PassesCheck())       # record raises
+    monkeypatch.setattr(fos.db, "get_agent_subscription_id", lambda name: None)
+    monkeypatch.setattr(fos.db, "create_task_execution",
+                        lambda **kw: SimpleNamespace(id="exec-c1", agent_name="alpha",
+                                                     triggered_by="fan_out"))
+
+    class _Tasks:
+        async def execute_task(self, **kw):
+            return SimpleNamespace(error_code=None, status="success")
+
+    async def _join(_eid):
+        return None
+
+    monkeypatch.setattr(fos, "get_task_execution_service", lambda: _Tasks())
+    monkeypatch.setattr(fos, "join_fan_out_on_terminal", _join)
+    failed = []
+    asyncio.run(fos.FanOutService()._dispatch_all(
+        fan_out_id="fo_1", agent_name="alpha",
+        tasks=[fos.FanOutTaskInput(id="t1", message="go")], error_codes={},
+        max_concurrency=1, model=None, system_prompt=None, allowed_tools=None,
+        source_user_id=None, source_user_email=None, source_agent_name="caller",
+        source_mcp_key_id=None, source_mcp_key_name=None, project_id="p1",
+        attribution_failed=failed))
+    assert failed == ["t1"]
+
+
+# ---------------------------------------------------------------------------
+# Skill-gate replay: the project resolved at hold time is frozen into the gate
+# record's `dispatch` and recorded at replay (plan §2.2 rule 2, review I1 (b))
+# ---------------------------------------------------------------------------
+
+class _Stop(Exception):
+    """Raised by a stub to end the code under test at the point of interest."""
+
+
+def test_frozen_project_resolves_now_and_marks_a_named_project():
+    from services import skill_gate_service as sgs
+    assert sgs.frozen_project(agent_name="alpha", principal=_AGENT_KEY) == {}   # OSS
+    ea.register_attributor(_PassesCheck(resolves="p1"))
+    assert sgs.frozen_project(agent_name="alpha", principal=_AGENT_KEY) == {"project_id": "p1"}
+    assert sgs.frozen_project(agent_name="alpha", principal=_AGENT_KEY,
+                              requested_project_id="p1") == {"project_id": "p1",
+                                                             "project_requested": True}
+    assert sgs.frozen_project("p2") == {"project_id": "p2"}
+
+
+def _capture_enforce(monkeypatch, sgs):
+    captured = {}
+
+    async def _enforce(agent, **kw):
+        captured.update(kw)
+        raise _Stop
+
+    monkeypatch.setattr(sgs, "enforce", _enforce)
+    return captured
+
+
+def test_a_held_chat_freezes_the_resolved_project(monkeypatch):
+    from models import ChatMessageRequest
+    from services import dispatch_admission_service as das
+    from services import skill_gate_service as sgs
+    ea.register_attributor(_PassesCheck(resolves="p1"))
+
+    async def _depth(**_):
+        return None
+
+    monkeypatch.setattr(das, "enforce_inter_agent_depth", _depth)
+    monkeypatch.setattr(das.turn_tier_service, "turn_origin_user_id", lambda *a: 1)
+    monkeypatch.setattr(das.turn_tier_service, "turn_origin_email", lambda *a: "o@example.com")
+    captured = _capture_enforce(monkeypatch, sgs)
+    with pytest.raises(_Stop):
+        asyncio.run(das.admit_chat_request(
+            name="alpha", request=ChatMessageRequest(message="/pay", project_id="p1"),
+            current_user=_AGENT_KEY, x_source_agent="caller", x_via_mcp="1",
+            idempotency_key=None, x_trinity_execution_id="turn-1"))
+    assert captured["dispatch"]["project_id"] == "p1"
+    assert captured["dispatch"]["project_requested"] is True
+
+
+def test_a_held_task_freezes_the_resolved_project(monkeypatch):
+    from models import ParallelTaskRequest
+    from services import chat_execution_service as ces
+    from services import skill_gate_service as sgs
+    ea.register_attributor(_PassesCheck(resolves="p-lineage"))
+
+    async def _depth(**_):
+        return None
+
+    monkeypatch.setattr(ces.dispatch_admission_service, "enforce_inter_agent_depth", _depth)
+    monkeypatch.setattr(ces.turn_tier_service, "turn_origin_user_id", lambda *a: 1)
+    monkeypatch.setattr(ces.turn_tier_service, "turn_origin_email", lambda *a: "o@example.com")
+    captured = _capture_enforce(monkeypatch, sgs)
+    with pytest.raises(_Stop):
+        asyncio.run(ces.dispatch_parallel_task(
+            request=ParallelTaskRequest(message="/pay"), name="alpha",
+            current_user=_AGENT_KEY, container=SimpleNamespace(status="running"),
+            x_source_agent="caller", x_via_mcp="1", idempotency_key=None,
+            x_event_trigger=None, x_internal_secret=None, x_trinity_execution_id="turn-1"))
+    assert captured["dispatch"]["project_id"] == "p-lineage"
+    assert "project_requested" not in captured["dispatch"]
+
+
+def test_a_fan_out_subtask_hands_its_project_to_the_gate(monkeypatch):
+    import services.fan_out_service as fos
+    ea.register_attributor(_PassesCheck(records=True))
+    monkeypatch.setattr(fos.db, "get_agent_subscription_id", lambda name: None)
+    monkeypatch.setattr(fos.db, "create_task_execution",
+                        lambda **kw: SimpleNamespace(id="exec-c1", agent_name="alpha",
+                                                     triggered_by="fan_out"))
+    seen = {}
+
+    class _Tasks:
+        async def execute_task(self, **kw):
+            seen.update(kw)
+            return SimpleNamespace(error_code=None, status="success")
+
+    async def _join(_eid):
+        return None
+
+    monkeypatch.setattr(fos, "get_task_execution_service", lambda: _Tasks())
+    monkeypatch.setattr(fos, "join_fan_out_on_terminal", _join)
+    asyncio.run(fos.FanOutService()._dispatch_all(
+        fan_out_id="fo_1", agent_name="alpha",
+        tasks=[fos.FanOutTaskInput(id="t1", message="go")], error_codes={},
+        max_concurrency=1, model=None, system_prompt=None, allowed_tools=None,
+        source_user_id=None, source_user_email=None, source_agent_name="caller",
+        source_mcp_key_id=None, source_mcp_key_name=None, project_id="p1"))
+    assert seen["gate_replay"]["project_id"] == "p1"
+
+
+@pytest.mark.parametrize("frozen, expect", [
+    ({"project_id": "p1"}, (None, "p1")),
+    ({"project_id": "p1", "project_requested": True}, ("p1", None)),
+    ({}, (None, None)),
+])
+def test_the_approved_replay_records_the_frozen_project(monkeypatch, frozen, expect):
+    from services import capacity_manager
+    from services import skill_gate_service as sgs
+    attributor = _PassesCheck(records=True)
+    ea.register_attributor(attributor)
+    monkeypatch.setattr(sgs.db, "create_task_execution",
+                        lambda **kw: SimpleNamespace(id=kw["execution_id"],
+                                                     agent_name=kw["agent_name"],
+                                                     triggered_by=kw["triggered_by"]))
+    monkeypatch.setattr(sgs.db, "get_execution_timeout", lambda agent: 60)
+
+    def _stop():
+        raise _Stop
+
+    monkeypatch.setattr(capacity_manager, "get_capacity_manager", _stop)
+    record = {"request_id": "gate-1", "agent_name": "alpha", "request_text": "/pay",
+              "triggered_by": "agent",
+              "dispatch": {"triggered_by": "agent", "source_agent_name": "caller", **frozen}}
+    with pytest.raises(_Stop):
+        asyncio.run(sgs._dispatch_approved(record, "exec-approved-1"))
+    (created,) = attributor.seen
+    assert created.execution_id == "exec-approved-1"
+    assert (created.requested_project_id, created.inherited_project_id) == expect

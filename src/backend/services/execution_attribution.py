@@ -23,10 +23,18 @@ Rules every attributor relies on:
 Fail-open (Trinity's availability bias): ``resolve``/``record``/``annotate``
 that raise are logged and treated as "no attribution"; they never fail the
 dispatch or the read. Only ``check`` can refuse, and only before anything ran.
+
+Honest status: a request that named a ``project_id``, passed :func:`check`
+and then was not recorded answers ``project_attribution: "failed"``
+(:func:`report`), never a silent success. ``/chat`` and ``/task`` record their
+row inline in the request, so the outcome rides a per-request context
+variable from :func:`record_row` to the router (:func:`explicit_status`);
+fan-out reports its own (its children are created later).
 """
 from __future__ import annotations
 
 import logging
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Protocol, Tuple
 
@@ -37,6 +45,15 @@ UNAVAILABLE_CODE = "project_attribution_unavailable"
 # What record_row reports back to a caller that asked for a project explicitly.
 RECORDED = "recorded"
 FAILED = "failed"
+
+# The response field an explicit request's failed attribution is reported in.
+RESPONSE_FIELD = "project_attribution"
+
+# The outcome of this request's explicit attribution (RECORDED / FAILED), set by
+# record_row and read by the router that answers the request. Reset by check(),
+# which every route that accepts project_id calls first.
+_explicit_status: ContextVar[Optional[str]] = ContextVar(
+    "execution_attribution_explicit_status", default=None)
 
 
 class AttributionRefused(Exception):
@@ -106,7 +123,9 @@ def check(requested_project_id: Optional[str], *, principal: Any, agent_name: st
     """Refuse a requested ``project_id`` before the execution is created.
 
     No ``project_id`` → nothing to check. Raises :class:`AttributionRefused`.
+    Starts the request's explicit status afresh.
     """
+    _explicit_status.set(None)
     if not requested_project_id:
         return
     if _attributor is None:
@@ -182,10 +201,26 @@ def record_row(row: Any, *, principal: Any = None,
     """Attribute a just-created execution. Never raises.
 
     Returns None when nothing was attributed (always, in OSS), ``RECORDED`` when
-    it was, and ``FAILED`` when it should have been and the write failed — a
-    caller that asked explicitly reports that, never a success.
+    it was, and ``FAILED`` when it should have been and was not: the write
+    raised, or a request that named a project (and so passed :func:`check`) was
+    not recorded. A caller that asked explicitly reports that, never a success.
     """
-    if _attributor is None or row is None:
+    if _attributor is None:
+        return None
+    status = _record(row, principal=principal, requested_project_id=requested_project_id,
+                     inherited_project_id=inherited_project_id)
+    if requested_project_id:
+        if status != RECORDED:
+            status = FAILED
+            logger.warning("[execution_attribution] explicit project %s not recorded for "
+                           "execution %s", requested_project_id, getattr(row, "id", None))
+        _explicit_status.set(status)
+    return status
+
+
+def _record(row: Any, *, principal: Any, requested_project_id: Optional[str],
+            inherited_project_id: Optional[str]) -> Optional[str]:
+    if row is None:
         return None
     created = created_from_row(row, principal=principal,
                                requested_project_id=requested_project_id,
@@ -198,6 +233,20 @@ def record_row(row: Any, *, principal: Any = None,
         logger.warning("[execution_attribution] record failed for execution %s; untagged",
                        created.execution_id, exc_info=True)
         return FAILED if (requested_project_id or inherited_project_id) else None
+
+
+def explicit_status() -> Optional[str]:
+    """This request's explicit attribution outcome: RECORDED, FAILED or None
+    (nothing was named, or no row was offered yet)."""
+    return _explicit_status.get()
+
+
+def report(response: Any, status: Optional[str]) -> Any:
+    """Name a failed explicit attribution on a response dict; anything else is
+    returned unchanged. Success adds nothing (the run is simply attributed)."""
+    if status == FAILED and isinstance(response, dict):
+        response[RESPONSE_FIELD] = FAILED
+    return response
 
 
 def annotate(execution: Any, principal: Any) -> Dict[str, Any]:

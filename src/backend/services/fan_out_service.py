@@ -161,6 +161,8 @@ class FanOutResult:
     results: List[FanOutTaskResult]
     # trinity-enterprise#751: subtasks held by the skill gate — neither run nor failed.
     pending_approval: int = 0
+    # ent#1105: FAILED when a subtask's carried project was not recorded (sync only).
+    project_attribution: Optional[str] = None
 
 
 # Row statuses that mean the subtask has not finished. Mirrors
@@ -369,11 +371,13 @@ class FanOutService:
         )
 
         error_codes: Dict[str, str] = {}
+        attribution_failed: List[str] = []
         dispatch = _spawn(self._dispatch_all(
             fan_out_id=fan_out_id,
             agent_name=agent_name,
             tasks=tasks,
             error_codes=error_codes,
+            attribution_failed=attribution_failed,
             max_concurrency=max_concurrency,
             model=model,
             system_prompt=system_prompt,
@@ -424,6 +428,8 @@ class FanOutService:
             dispatch_finished=dispatch is None or dispatch.done(),
             error_codes=error_codes,
         )
+        if attribution_failed:
+            result.project_attribution = execution_attribution.FAILED
         logger.info(
             f"[FanOut] {fan_out_id} finished: {result.completed}/{result.total} completed, "
             f"{result.failed} failed"
@@ -479,10 +485,12 @@ class FanOutService:
         source_mcp_key_name: Optional[str],
         chain_depth: Optional[int] = None,
         project_id: Optional[str] = None,
+        attribution_failed: Optional[List[str]] = None,
     ) -> None:
         """Dispatch every subtask, paced by the semaphore. The batch's outcome
         is read from the rows, not from here — this only records the
-        `error_code`s the rows cannot hold."""
+        `error_code`s the rows cannot hold, and (ent#1105) into
+        `attribution_failed` the subtasks whose carried project was not recorded."""
         task_service = get_task_execution_service()
         semaphore = asyncio.Semaphore(max_concurrency)
         # SUB-004: `execute_task` snapshots the subscription only on rows it
@@ -514,8 +522,9 @@ class FanOutService:
                     ),
                 )
                 # ent#1105: the request-time project, carried to the child.
-                execution_attribution.record_row(
-                    execution, inherited_project_id=project_id)
+                if (execution_attribution.record_row(execution, inherited_project_id=project_id)
+                        == execution_attribution.FAILED and attribution_failed is not None):
+                    attribution_failed.append(task.id)
                 if execution is None:
                     logger.error(
                         "[FanOut] %s could not create the execution row for subtask '%s'",
@@ -535,8 +544,12 @@ class FanOutService:
                         # system_prompt reaches this subtask's executor too, so
                         # the skill gate reads it with the subtask's message.
                         request_text="\n".join(t for t in (task.message, system_prompt) if t),
-                        # trinity#3274: an approved subtask is sent the two apart.
-                        gate_replay=skill_gate_service.frozen_replay(task.message, system_prompt),
+                        # trinity#3274: an approved subtask is sent the two apart;
+                        # ent#1105: and keeps the batch's project.
+                        gate_replay={
+                            **skill_gate_service.frozen_replay(task.message, system_prompt),
+                            **skill_gate_service.frozen_project(project_id),
+                        },
                         triggered_by="fan_out",
                         source_user_id=source_user_id,
                         source_user_email=source_user_email,

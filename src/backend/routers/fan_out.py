@@ -165,6 +165,13 @@ async def fan_out(
     # (trinity-enterprise#1148).
     source_agent = getattr(current_user, "agent_name", None) or x_source_agent
 
+    # ent#1105: resolved ONCE here; children are created when slots free. A
+    # named project that passed the check but did not resolve is reported.
+    project_id = execution_attribution.resolve(
+        agent_name=name, principal=current_user,
+        requested_project_id=request.project_id, triggered_by="fan_out")
+    attribution_failed = bool(request.project_id) and project_id != request.project_id
+
     try:
         result = await service.execute(
             async_mode=bool(request.async_mode),
@@ -182,10 +189,7 @@ async def fan_out(
             source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
             source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
             chain_depth=chain_depth,
-            # ent#1105: resolved ONCE here; children are created when slots free.
-            project_id=execution_attribution.resolve(
-                agent_name=name, principal=current_user,
-                requested_project_id=request.project_id, triggered_by="fan_out"),
+            project_id=project_id,
             # #2670: record the batch id on the idempotency claim as soon as it
             # exists rather than only at `complete()`. A fan-out runs longer
             # than any single task by construction, so the window in which a
@@ -220,6 +224,8 @@ async def fan_out(
             )
             for r in result.results
         ],
+        project_attribution=(execution_attribution.FAILED if attribution_failed
+                             else result.project_attribution),
     )
 
     # Store the aggregated batch result so a duplicate replays it (#525). On the
