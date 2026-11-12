@@ -1034,6 +1034,10 @@
                   </p>
                 </div>
 
+                <!-- trinity-enterprise#1240: which GitHub owners' private repos
+                     Projects may read with the platform token above. -->
+                <ProjectsGithubReadOwnersSetting v-if="enterpriseStore.isEntitled('projects')" />
+
                 <!-- ent#582: the email-provider and Gemini keys — the same field
                      the first-run flow uses, so a key set there is managed here. -->
                 <PlatformKeyField provider="resend" class="mt-6" />
@@ -2407,6 +2411,7 @@ import AAuthPanel from '../components/settings/AAuthPanel.vue'
 import A2AEndpointsPanel from '../components/settings/A2AEndpointsPanel.vue'
 import NeverminedOrganizationPanel from '../components/settings/NeverminedOrganizationPanel.vue'
 import PlatformKeyField from '../components/settings/PlatformKeyField.vue'
+import ProjectsGithubReadOwnersSetting from '../components/settings/ProjectsGithubReadOwnersSetting.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import BaseBadge from '../components/base/BaseBadge.vue'
 import BaseButton from '../components/base/BaseButton.vue'

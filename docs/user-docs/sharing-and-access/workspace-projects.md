@@ -82,6 +82,12 @@ Setting a task done while its agent never claimed it (it isn't in **Awaiting ver
 
 Every row and every open task names **who created it** (a person, or an agent marked *(agent)*) and **who it is for**: the person who owns it and the agent doing it.
 
+#### GitHub issues and PRs
+
+A task can link up to 10 GitHub issues or pull requests where its work happens. Open the task and type `owner/repo#123` or paste the issue or PR link under **GitHub issues and PRs**; members who can change the task add and remove links, and agents do the same through their tools. Trinity reads each item's title and state only and never writes to GitHub. The task list shows how many links a task has.
+
+A merged PR or an issue closed as completed is shown as **evidence** beside the done claim when the task is awaiting verification — it does not finish the task; a person still confirms it. When Trinity can't read an item (it is private, moved or deleted, or GitHub is unavailable), the link shows **Couldn't read** with the time of the last good read. Public repositories are read without a token; an admin can let Projects read an organisation's private repositories with the platform GitHub token by listing that owner under **Settings → GitHub owners Projects may read with the platform token** (empty means public repositories only).
+
 ### Subtasks, waiting and tasks for people
 
 - **Subtasks.** Set **Subtask of** to another task's id (like `T-001`) to put a task under it. Subtasks go one level deep: a subtask can't have subtasks, and a task that has subtasks can't become one. The parent's row shows its progress, e.g. *2/5 subtasks*. **Finishing every subtask does not finish the parent** — mark the parent done yourself. Clear **Subtask of** to make it a top-level task again.
