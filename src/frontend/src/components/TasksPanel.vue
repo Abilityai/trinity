@@ -3,8 +3,11 @@
        the short-viewport fallback scroller (overflow-y-auto is load-bearing:
        without it, fixed chrome + the list's min-height would hard-clip the
        composer — the page itself cannot scroll in fullscreen mode). Degrades to
-       natural height outside a flex parent (flex-1 inert). -->
-  <div class="p-6 flex-1 flex flex-col gap-6 overflow-y-auto">
+       natural height outside a flex parent (flex-1 inert).
+       `relative` (#4140): the list skeleton's `sr-only` labels are absolute; with
+       no positioned ancestor they escaped every overflow-hidden box and grew the
+       locked page while the list loaded. -->
+  <div class="relative p-6 flex-1 flex flex-col gap-6 overflow-y-auto">
     <!-- Header with Queue Status -->
     <div class="flex justify-between items-center">
       <div>
