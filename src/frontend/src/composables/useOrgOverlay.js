@@ -204,7 +204,8 @@ export function useOrgOverlay({ agents, layout, canvasEl, vz, vtx, vty, dragging
 
   // The live line follows the same rule as a committed one (#2066): it
   // leaves the port downward and reaches the cursor from above, even when the
-  // cursor is above the port (the curve loops round, as the committed line will).
+  // cursor is above the port (the curve loops round; the committed line makes
+  // the same turn with an orthogonal detour up a lane).
   const connectDraft = computed(() => {
     const c = connecting.value
     if (!c) return null

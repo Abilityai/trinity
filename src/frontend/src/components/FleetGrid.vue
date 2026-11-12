@@ -57,8 +57,9 @@
               <path class="gv-wire-ah" :d="e.ah"></path>
             </g>
           </g>
-          <!-- Hit targets on each line's own final drop only, so a click on a
-               shared trunk can never remove an arbitrary sibling. -->
+          <!-- Hit targets cover only the part of a line no sibling shares
+               (`computeEdges` → `hit`), so a click on a shared trunk or bus
+               can never remove an arbitrary sibling. -->
           <path
             v-for="e in wireLayer.edges"
             :key="'hit:' + e.id"

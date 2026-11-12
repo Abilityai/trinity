@@ -326,16 +326,66 @@ function routePoints(m, r, bx, occupied) {
  * `ah`). Every edge leaves the manager's bottom-centre and enters the
  * report's top-centre (#2066); see `routePoints` for the three shapes.
  *
- * `d` is the full line. `hit` is only the part no other edge of the same
- * manager shares (the final drop into the report), so a hover or a
- * click-to-remove on a shared trunk or bus can never pick an arbitrary
- * sibling. `mid` sits on that same final drop, for the hover chip.
+ * `d` is the full line. `hit` is the hover/click target: the line's tail
+ * back to the last point where it runs along any other line (`ownTail`). An
+ * only report gets its whole line; siblings that share a trunk, a bus or a
+ * lane get everything after it. A hover or a click-to-remove therefore always
+ * names one line, never an arbitrary sibling. `mid` sits on the final drop,
+ * for the hover chip.
+ *
+ * Known limit: two managers on the same row whose reports sit in the gap
+ * between them draw their buses at the same height, so those buses can
+ * overlap for part of their run. Each line stays readable by its own trunk
+ * and drop, and `hit` excludes the overlap.
+ *
+ * Obstacles are the placed agents and widget tiles only: a layout key left
+ * behind by a deleted agent never forces a detour.
  * Edges whose endpoint isn't placed (dangling tag, filtered roster) are skipped.
  */
+const segKey = (a, b) => (a.x === b.x ? `v${a.x}` : `h${a.y}`)
+
+/**
+ * The part of `pts` (a polyline ending at its report) that no other line
+ * runs along: walk back from the end and stop at the first collinear overlap.
+ * `lines` maps segKey → [{ lo, hi, id }] for every edge's segments.
+ */
+function ownTail(pts, id, lines) {
+  const out = [pts[pts.length - 1]]
+  for (let i = pts.length - 1; i > 0; i--) {
+    const q = pts[i]
+    const p = pts[i - 1]
+    if (p.x === q.x && p.y === q.y) continue
+    const along = p.x === q.x ? 'y' : 'x'
+    const dir = Math.sign(p[along] - q[along])
+    const segLo = Math.min(p[along], q[along])
+    const segHi = Math.max(p[along], q[along])
+    let stop = null
+    for (const o of lines.get(segKey(p, q)) || []) {
+      if (o.id === id) continue
+      const lo = Math.max(o.lo, segLo)
+      const hi = Math.min(o.hi, segHi)
+      if (hi - lo < 1) continue // disjoint, or touching at a corner
+      const near = dir > 0 ? lo : hi
+      if (stop === null || (dir > 0 ? near < stop : near > stop)) stop = near
+    }
+    if (stop !== null) {
+      if (stop !== q[along]) out.unshift(along === 'y' ? { x: q.x, y: stop } : { x: stop, y: q.y })
+      return out
+    }
+    out.unshift(p)
+  }
+  return out
+}
+
 export function computeEdges(layout, agents) {
-  const placed = new Set(Object.keys(layout))
-  const occupied = new Set(Object.values(layout).map((p) => `${p.c},${p.r}`))
+  const placed = new Set(agents.filter((a) => layout[a.name]).map((a) => a.name))
+  const occupied = new Set(
+    [...[...placed].map((n) => layout[n]), ...Object.values(nonAgentEntries(layout, agents))]
+      .map((p) => `${p.c},${p.r}`)
+  )
   const edges = []
+  const routes = []
+  const lines = new Map()
   for (const a of agents) {
     if (!placed.has(a.name)) continue
     const managers = managersOf(a).filter((m) => m !== a.name && placed.has(m))
@@ -345,19 +395,31 @@ export function computeEdges(layout, agents) {
       const bx = rx0 + CELL_W / 2 + (i - (managers.length - 1) / 2) * ARRIVAL_SPREAD
       const by = ry0
       const pts = routePoints(layout[manager], rp, bx, occupied)
+      const id = `${a.name}→${manager}`
+      for (let k = 1; k < pts.length; k++) {
+        const [p, q] = [pts[k - 1], pts[k]]
+        if (p.x === q.x && p.y === q.y) continue
+        const along = p.x === q.x ? 'y' : 'x'
+        const key = segKey(p, q)
+        if (!lines.has(key)) lines.set(key, [])
+        lines.get(key).push({ lo: Math.min(p[along], q[along]), hi: Math.max(p[along], q[along]), id })
+      }
       // The final drop: from the last turn into the report's top edge.
       const turn = pts[pts.length - 2]
-      edges.push({
-        id: `${a.name}→${manager}`,
+      const edge = {
+        id,
         manager,
         report: a.name,
         d: orthogonalPath(pts),
-        hit: `M ${turn.x} ${turn.y} L ${bx} ${by}`,
+        hit: '',
         ah: arrowheadPath(bx, by, true, 1),
         mid: { x: bx, y: (turn.y + by) / 2 },
-      })
+      }
+      edges.push(edge)
+      routes.push([edge, pts])
     })
   }
+  for (const [edge, pts] of routes) edge.hit = orthogonalPath(ownTail(pts, edge.id, lines))
   return edges
 }
 

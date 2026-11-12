@@ -125,7 +125,8 @@ async function anchorError(page) {
   return out
 }
 
-const SETTLED = Object.fromEntries(REPORTS.map((r) => [r, expect.any(Number)]))
+// One entry per report: `expectAnchored` alone would pass with no lines drawn.
+const EVERY_LINE_DRAWN = Object.fromEntries(REPORTS.map((r) => [r, expect.any(Number)]))
 // 2px slack: the canvas is zoomed to fit, so world px are not screen px.
 async function expectAnchored(page) {
   await expect
@@ -147,6 +148,32 @@ test.describe('grid org lines are drawn top-down (#2066)', () => {
   }) => {
     await gotoGridWithLayout(page)
     await expectAnchored(page)
-    expect(await anchorError(page)).toEqual(SETTLED)
+    expect(await anchorError(page)).toEqual(EVERY_LINE_DRAWN)
+  })
+
+  test('hovering the part of a line its siblings do not share names that line', async ({ page }) => {
+    await gotoGridWithLayout(page)
+    await expectAnchored(page)
+    for (const report of REPORTS) {
+      const id = `${report}→e2e-boss`
+      // Midpoint of the hit path, in screen px, mapped the way `lineEnds`
+      // maps the drawn line. Polled: the view may still be gliding to fit,
+      // so each try re-measures before it moves the pointer.
+      await expect
+        .poll(async () => {
+          const pt = await page.evaluate((edge) => {
+            const hit = [...document.querySelectorAll('.gv-wire-hit')].find((el) => el.dataset.edge === edge)
+            const p = hit.getPointAtLength(hit.getTotalLength() / 2)
+            const m = hit.getScreenCTM()
+            return { x: m.a * p.x + m.c * p.y + m.e, y: m.b * p.x + m.d * p.y + m.f }
+          }, id)
+          await page.mouse.move(pt.x, pt.y)
+          const chip = page.locator('.gv-edgechip')
+          return (await chip.count()) ? chip.textContent() : ''
+        }, { message: id, timeout: 10000 })
+        .toMatch(new RegExp(`^e2e-boss → ${report} `))
+      await page.mouse.move(0, 0)
+      await expect(page.locator('.gv-edgechip')).toHaveCount(0)
+    }
   })
 })
