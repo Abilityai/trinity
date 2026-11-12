@@ -134,6 +134,9 @@ describe('ent#1235 — state, mode and run words', () => {
     expect(stateLabel('unknown')).toBe('Unknown')
     expect(lifecycleActions({ status: 'frozen', can: { edit: true } }).primary).toBeNull()
     expect(modeLabel('turbo')).toBe('Unknown')
+    // An unknown MODE offers nothing either, even on a known state.
+    expect(lifecycleActions({ status: 'active', mode: 'turbo', can: { edit: true } })).toEqual({ primary: null, markDone: false })
+    expect(lifecycleActions({ status: 'active', can: { edit: true } }).primary.verb).toBe('stop')   // no mode reads Track
     expect(runLabel({ state: 'teleported' })).toBe('Unknown')
     expect(runOutcomeLabel('some_new_code')).toBe('Not done (some_new_code)')
   })
@@ -237,6 +240,14 @@ describe('ent#1235 — the project page', () => {
     expect(byTestId('project-state').textContent).toContain('Unknown')
     expect(byTestId('project-start')).toBeNull()
     expect(byTestId('project-stop')).toBeNull()
+  })
+
+  it('an unknown mode on a running project offers no Start, Stop or Mark done', async () => {
+    await page(project({ status: 'active', state: 'running', mode: 'turbo' }))
+    expect(byTestId('project-page')).not.toBeNull()
+    expect(byTestId('project-start')).toBeNull()
+    expect(byTestId('project-stop')).toBeNull()
+    expect(byTestId('project-mark-done')).toBeNull()
   })
 
   it('the runs waiting card shows in Propose and Auto, not in Track', async () => {

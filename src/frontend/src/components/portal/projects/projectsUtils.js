@@ -659,9 +659,11 @@ export function stateBy(project, myEmail) {
   return `${verb} by ${who}`
 }
 
-/** What the header offers a person with edit rights: Start or Stop, and Mark done. */
+/** What the header offers a person with edit rights: Start or Stop, and Mark done.
+ *  An unknown state OR mode offers nothing — never a guess that lets work start. */
 export function lifecycleActions(project) {
   if (!project?.can?.edit || project.archived_at) return { primary: null, markDone: false }
+  if (!PROJECT_MODES.includes(projectMode(project))) return { primary: null, markDone: false }
   const state = projectState(project)
   const primary = {
     not_started: { verb: 'start', label: 'Start project' },
