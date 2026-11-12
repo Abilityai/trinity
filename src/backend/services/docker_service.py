@@ -51,13 +51,50 @@ except Exception as e:
     print(f"Warning: Could not connect to Docker: {e}")
     docker_client = None
 
+# #4406: a backend that boots before the Docker socket is reachable used to keep
+# `docker_client = None` until restart, so the roster stayed empty. The readers in
+# this module go through get_docker_client(), which retries with backoff. Modules
+# that `from services.docker_service import docker_client` still hold the value
+# from import time; they move to the accessor in follow-up slices.
+_DOCKER_RETRY_INITIAL_S = 1.0
+_DOCKER_RETRY_MAX_S = 60.0
+_docker_retry_delay_s = _DOCKER_RETRY_INITIAL_S
+_next_docker_attempt_monotonic: Optional[float] = None
+
+
+def get_docker_client():
+    """The Docker client, reconnecting with backoff if Docker was unreachable.
+
+    Returns None while Docker stays unreachable. Attempts are spaced from
+    `_DOCKER_RETRY_INITIAL_S`, doubling up to `_DOCKER_RETRY_MAX_S`, so the 5s
+    poll loops do not hammer a dead socket.
+    """
+    global docker_client, _docker_retry_delay_s, _next_docker_attempt_monotonic
+    if docker_client is not None:
+        return docker_client
+    now = time.monotonic()
+    if _next_docker_attempt_monotonic is not None and now < _next_docker_attempt_monotonic:
+        return None
+    try:
+        docker_client = docker.from_env()
+    except Exception as e:
+        _next_docker_attempt_monotonic = now + _docker_retry_delay_s
+        _docker_retry_delay_s = min(_docker_retry_delay_s * 2, _DOCKER_RETRY_MAX_S)
+        _warn_throttled("docker_connect", "Docker still unreachable: %s", e)
+        return None
+    _docker_retry_delay_s = _DOCKER_RETRY_INITIAL_S
+    _next_docker_attempt_monotonic = None
+    logger.info("Connected to Docker after it was unreachable")
+    return docker_client
+
 
 def get_agent_container(name: str):
     """Get agent container directly from Docker by name."""
-    if not docker_client:
+    client = get_docker_client()
+    if not client:
         return None
     try:
-        container = docker_client.containers.get(f"agent-{name}")
+        container = client.containers.get(f"agent-{name}")
         return container
     except docker.errors.NotFound:
         return None
@@ -183,10 +220,11 @@ def get_agent_status_from_container(container) -> AgentStatus:
 
 def list_all_agents() -> List[AgentStatus]:
     """List all Trinity agent containers from Docker."""
-    if not docker_client:
+    client = get_docker_client()
+    if not client:
         return []
     try:
-        containers = docker_client.containers.list(
+        containers = client.containers.list(
             all=True,
             filters={"label": "trinity.platform=agent"}
         )
@@ -206,10 +244,11 @@ def list_ephemeral_agent_containers() -> list:
     objects — callers read ``.labels`` (``trinity.agent-name``,
     ``trinity.created``) for the grace-window check.
     """
-    if not docker_client:
+    client = get_docker_client()
+    if not client:
         return []
     try:
-        return docker_client.containers.list(
+        return client.containers.list(
             all=True,
             filters={"label": "trinity.ephemeral=true"},
         )
@@ -233,10 +272,11 @@ def list_all_agents_fast() -> List[AgentStatus]:
 
     Performance: ~50ms for 10 agents vs ~2-3s with full metadata.
     """
-    if not docker_client:
+    client = get_docker_client()
+    if not client:
         return []
     try:
-        containers = docker_client.containers.list(
+        containers = client.containers.list(
             all=True,
             filters={"label": "trinity.platform=agent"}
         )
@@ -355,10 +395,11 @@ def agent_container_states() -> Optional[Dict[str, str]]:
     was in that list until #2541 folded it into the stopped tuple on both
     normalizers, so all three mappings now agree on it — see RESTART-005.)
     """
-    if not docker_client:
+    client = get_docker_client()
+    if not client:
         return None
     try:
-        containers = docker_client.containers.list(
+        containers = client.containers.list(
             all=True,
             filters={"label": "trinity.platform=agent"},   # server-side; unaffected by sparse
             sparse=True,
@@ -407,10 +448,11 @@ def agent_container_runtimes() -> Optional[Dict[str, str]]:
     documents. Denying a working affordance on every Claude agent because one
     Docker read hiccuped is the #2196 inversion.
     """
-    if not docker_client:
+    client = get_docker_client()
+    if not client:
         return None
     try:
-        containers = docker_client.containers.list(
+        containers = client.containers.list(
             all=True,
             filters={"label": "trinity.platform=agent"},   # server-side; unaffected by sparse
             sparse=True,
@@ -455,10 +497,11 @@ def agent_container_runtime_labels() -> Optional[Dict[str, Optional[str]]]:
     A name absent from the mapping means *this agent has no container*, which
     is again distinct from both.
     """
-    if not docker_client:
+    client = get_docker_client()
+    if not client:
         return None
     try:
-        containers = docker_client.containers.list(
+        containers = client.containers.list(
             all=True,
             filters={"label": "trinity.platform=agent"},   # server-side; unaffected by sparse
             sparse=True,
@@ -494,10 +537,11 @@ def agent_container_state(name: str) -> Optional[str]:
     without this check a container merely *named* ``agent-x`` would read as
     absent on the roster and present on the page.
     """
-    if not docker_client:
+    client = get_docker_client()
+    if not client:
         return None
     try:
-        container = docker_client.containers.get(f"agent-{name}")
+        container = client.containers.get(f"agent-{name}")
     except docker.errors.NotFound:
         # The distinction `get_agent_container` cannot make: Docker answered,
         # and the answer is "there is no such container".
@@ -587,10 +631,11 @@ def _existing_agent_ports_strict() -> Set[int]:
     mode) still returns the empty set — crud's own 503 fires later, preserving
     demo behaviour. A malformed per-container label skips that container only.
     """
-    if not docker_client:
+    client = get_docker_client()
+    if not client:
         return set()
     try:
-        containers = docker_client.containers.list(
+        containers = client.containers.list(
             all=True,
             filters={"label": "trinity.platform=agent"},
         )
