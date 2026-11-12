@@ -709,6 +709,7 @@ READ_SITES = {
     ("routers/internal.py", "internal_task_result"): "internal shared-secret router (agent -> backend)",
     ("routers/internal.py", "_fail_execution_row"): "internal shared-secret router (agent -> backend)",
     ("routers/internal.py", "_execute_task_internal_background"): "internal shared-secret router (agent -> backend)",
+    ("routers/internal.py", "execute_task_internal"): "internal shared-secret router (scheduler -> backend); reads the scheduler-created row only to offer it to the attribution seam, returns none of it",
     ("routers/public.py", "public_stream_execution"): "public link token binds the session",
     ("routers/public.py", "public_execution_status"): "public link token binds the session",
     ("routers/public.py", "public_terminate_execution"): "public link token binds the session",
