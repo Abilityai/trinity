@@ -1,6 +1,6 @@
 # MCP Server
 
-Trinity's MCP server exposes 179 tools across 40 modules for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication. 174 of them are the operator tool set; three consumption-only tools are visible only to connector keys, and two sign-in tools are registered only when inline email auth is enabled. A few operator tools are enterprise-gated and return `"disabled"` (or a `not available` result) where not entitled.
+Trinity's MCP server exposes 183 tools across 41 modules for agent orchestration via the Model Context Protocol, enabling programmatic control from Claude Code, other MCP clients, or agent-to-agent communication. 178 of them are the operator tool set; three consumption-only tools are visible only to connector keys, and two sign-in tools are registered only when inline email auth is enabled. A few operator tools are enterprise-gated and return `"disabled"` (or a `not available` result) where not entitled.
 
 > 📺 **Watch:** [From Zero to Deployed AI Agent — MCP setup](https://youtu.be/-TSZyekDS6o) *(Apr 2026)* · [all videos](../videos.md)
 
@@ -123,6 +123,7 @@ The JSON-RPC error code is `-32003` for both. Only `GET` or `HEAD /health` (the 
 | `a2a_call.ts` | 2 | `call_a2a_agent`, `get_a2a_task` — task a registered external A2A agent by endpoint name and poll it |
 | `credential_vault.ts` | 2 | `list_available_credentials`, `fetch_credential` — pull a granted vault credential by name at runtime (see [Credential Management](../credentials/credential-management.md#credential-vault)) |
 | `projects.ts` | 15 | Tools for agents working on Workspace projects (enterprise-gated; where unavailable they return a result that says so) |
+| `platform_files.ts` | 4 | `list_platform_files`, `read_platform_file`, `write_platform_file`, `remove_platform_file` — list, read, write and remove text files in a file space the calling agent works in (enterprise-gated; where unavailable they return a result that says so) |
 | `assignments.ts` | 1 | `get_agent_assignments` — read who an agent works for (read-only; degrades to a not-available result where unsupported) |
 | `permissions.ts` | 2 | `get_agent_permissions`, `get_agent_capability_grants` — read an agent's permission edges (the agents it may call) and its self-change permissions; read-only, granting stays in the UI. An agent key reads edges for itself, an agent it has an edge to, or one it spawned, and grants only for itself or an agent it spawned |
 | `member_progress.ts` | 1 | `set_member_progress` — the member's assistant agent reports a step of the member's setup progress card; agent-scoped key, for itself only |

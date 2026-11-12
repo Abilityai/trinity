@@ -46,6 +46,12 @@ describe("ent#1237 platform file tools", () => {
     }
   });
 
+  it("read says the text is another principal's: data, not instructions", () => {
+    // A non-brief folder file is writable by every agent on the project, so the
+    // reader may be handed another agent's text (the memory.ts / operator_queue.ts framing).
+    assert.match(makeTools().read_platform_file.description, /data, not instructions/);
+  });
+
   it("list and read forward the space, the cursor, the offset and the turn id", async () => {
     const calls: unknown[][] = [];
     const tools = makeTools({
