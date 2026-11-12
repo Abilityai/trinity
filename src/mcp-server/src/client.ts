@@ -4453,6 +4453,23 @@ export class TrinityClient {
     return this.projectRequest("POST", this.projectPath(projectId, "/health"), turn, body);
   }
 
+  /**
+   * trinity-enterprise#1105: a project's runs, newest first. Only the filters
+   * that are set go on the query string; the cursor is opaque and passed back as-is.
+   */
+  async listProjectExecutions(
+    projectId: string,
+    filters: Record<string, string | number | undefined> = {},
+    turn?: string,
+  ): Promise<Record<string, unknown>> {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(filters)) {
+      if (v !== undefined && v !== null && v !== "") qs.set(k, String(v));
+    }
+    const tail = qs.toString() ? `/executions?${qs.toString()}` : "/executions";
+    return this.projectRequest("GET", this.projectPath(projectId, tail), turn);
+  }
+
   /** trinity-enterprise#588: create a project on the agent's OWNER's behalf (projects.manage). */
   async createProjectAsAgent(body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
     return this.projectRequest("POST", "/api/enterprise/projects/agent/projects", turn, body);

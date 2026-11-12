@@ -564,6 +564,7 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   add_project_log_entry: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
   link_to_project: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
   get_steward_digest: { kind: "in-tool", how: ACT_AS + " — the calling agent's own stewarded projects (ent#661 v3)" },
+  list_project_executions: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on, in its own live turn, and fences rows it may not open (ent#1105)" },
   set_project_health: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only when the calling agent is its active steward (ent#661 v3)" },
   create_project: { kind: "in-tool", how: ACT_AS + " — creates on the calling agent's OWN owner's behalf; the backend gates it on projects.manage (ent#588)" },
   import_project: { kind: "in-tool", how: ACT_AS + " — a path in the calling agent's OWN files; the backend gates it on projects.manage (ent#588)" },

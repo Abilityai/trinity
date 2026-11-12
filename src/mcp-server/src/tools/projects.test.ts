@@ -444,3 +444,62 @@ describe("ent#1193 read_project_context", () => {
     assert.deepEqual(seen, [["GET", "/api/enterprise/projects/agent/projects/prj_1/context/ctx%201?offset=204800"]]);
   });
 });
+
+describe("ent#1105 — list_project_executions", () => {
+  const session = { session: { executionId: "exec-9" } } as never;
+
+  it("the description fits the cap and carries the pinned sentence", () => {
+    const d = makeTools().list_project_executions.description;
+    assert.ok(d.length < 2048, `description is ${d.length} chars`);
+    assert.ok(d.includes("Rows you cannot open show only the agent and status; open a run with get_execution_result."));
+    assert.match(d, /"ended" = completed_at/);
+  });
+
+  it("forwards the id, the set filters and the turn; returns the page", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      listProjectExecutions: (async (id: string, filters: unknown, turn?: string) => {
+        calls.push([id, filters, turn]);
+        return { project_id: id, rows: [{ agent_name: "a1", status: "success", fenced: true }], next_cursor: null };
+      }) as never,
+    });
+    const out = JSON.parse(await tools.list_project_executions.execute(
+      { project_id: PROJECT.id, status: "failed", limit: 10, cursor: "c1" }, session));
+    assert.equal(out.success, true);
+    assert.equal(out.rows[0].fenced, true);
+    assert.deepEqual(calls[0], [PROJECT.id, { status: "failed", limit: 10, cursor: "c1" }, "exec-9"]);
+  });
+
+  it("the client builds the agent route with an encoded id and only the set params", async () => {
+    const client = new RealClient("http://localhost:8000");
+    const seen: unknown[][] = [];
+    (client as unknown as { request: unknown }).request = async (...args: unknown[]) => {
+      seen.push([args[0], args[1], args[5]]);
+      return { rows: [] };
+    };
+    await client.listProjectExecutions("prj/a b", { since: "2026-11-01T00:00:00Z", agent: "a 1", status: undefined, limit: 5 }, "exec-9");
+    await client.listProjectExecutions("prj_1");
+    const [method, path, headers] = seen[0] as [string, string, unknown];
+    assert.equal(method, "GET");
+    const [base, query] = path.split("?");
+    assert.equal(base, "/api/enterprise/projects/agent/projects/prj%2Fa%20b/executions");
+    const q = new URLSearchParams(query);
+    assert.equal(q.get("since"), "2026-11-01T00:00:00Z");
+    assert.equal(q.get("agent"), "a 1");
+    assert.equal(q.get("limit"), "5");
+    assert.equal(q.has("status"), false);
+    assert.deepEqual(headers, { "X-Trinity-Execution-Id": "exec-9" });
+    assert.equal(seen[1][1], "/api/enterprise/projects/agent/projects/prj_1/executions");
+  });
+
+  it("a live-turn refusal is structured, never a throw", async () => {
+    const tools = makeTools({
+      listProjectExecutions: (async () => {
+        throw apiError(403, { code: "turn_not_live", message: "Runs are listed only inside your own live turn." });
+      }) as never,
+    });
+    const out = JSON.parse(await tools.list_project_executions.execute({ project_id: PROJECT.id }, session));
+    assert.equal(out.success, false);
+    assert.equal(out.code, "turn_not_live");
+  });
+});

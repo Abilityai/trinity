@@ -128,6 +128,7 @@
       <ProjectTasks v-if="!guest && tab === 'tasks'" :project="p" :project-id="p.id" @open-thread="(t) => $emit('open-thread', t)" :can-contribute="p.can?.contribute === true" :archived="Boolean(p.archived_at)" :my-email="myEmail" :members="p.members || []" :is-creator="p.my_role === 'creator'" />
       <ProjectLog v-if="!guest && tab === 'log'" :project="p" :project-id="p.id" :can-contribute="p.can?.contribute === true" :archived="Boolean(p.archived_at)" :my-email="myEmail" />
       <ProjectMaterial v-if="!guest && tab === 'material'" :project="p" :my-email="myEmail" :agents="usableAgents" />
+      <ProjectRuns v-if="!guest && tab === 'runs'" :project-id="p.id" :agents="p.agents || []" />
 
       <div v-show="guest || tab === 'overview'" class="grid grid-cols-1 gap-4 lg:grid-cols-3 lg:items-start" data-testid="project-overview">
         <!-- ===================== main stack ===================== -->
@@ -313,6 +314,7 @@ import ProjectCreateModal from './ProjectCreateModal.vue'
 import ProjectTasks from './ProjectTasks.vue'
 import ProjectLog from './ProjectLog.vue'
 import ProjectMaterial from './ProjectMaterial.vue'
+import ProjectRuns from './ProjectRuns.vue'
 import ProjectHealthCard from './ProjectHealthCard.vue'
 import ProjectRollupCard from './ProjectRollupCard.vue'
 import ProjectMetricsCard from './ProjectMetricsCard.vue'
@@ -345,6 +347,7 @@ const TABS = [
   { id: 'tasks', label: 'Tasks' },
   { id: 'log', label: 'Log' },
   { id: 'material', label: 'Files & reports' },
+  { id: 'runs', label: 'Runs' },
 ]
 const tab = ref('overview')
 const archiveConfirm = ref(false)

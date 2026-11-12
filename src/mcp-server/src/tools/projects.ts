@@ -507,6 +507,46 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
     },
 
     // ========================================================================
+    list_project_executions: {
+      name: "list_project_executions",
+      description:
+        "List a project's runs (executions), newest first: the chats, tasks, delegations and steward " +
+        "work attributed to the project. Each row has the agent, status, model, cost, queued/started/" +
+        "ended times (\"ended\" = completed_at), queue_age_ms, duration_ms, who dispatched it, the task " +
+        "it served and the parent run. Rows you cannot open show only the agent and status; open a run " +
+        "with get_execution_result. `totals` gives runs, fenced_runs, cost and the median queue age per " +
+        "agent; when totals.scope is \"openable\" the cost covers only runs you can open. Filter by " +
+        "since/until (ISO; default the last 30 days, at most 180), agent, status, task_id or source " +
+        "(chat, room, task, delegated, explicit, steward). Pass next_cursor back as cursor for the next page.",
+      parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
+        project_id: projectId,
+        since: z.string().max(64).optional().describe("ISO start of the window; default 30 days ago."),
+        until: z.string().max(64).optional().describe("ISO end of the window; default now."),
+        agent: z.string().max(128).optional().describe("Only runs by this agent."),
+        status: z.string().max(32).optional().describe("Only runs in this status, e.g. failed."),
+        task_id: z.string().max(16).optional().describe("Only runs for this task, e.g. T-003."),
+        source: z.string().max(32).optional().describe("chat, room, task, delegated, explicit or steward."),
+        limit: z.number().int().min(1).max(100).optional().describe("Rows per page, 1-100 (default 50)."),
+        cursor: z.string().max(512).optional().describe("next_cursor from the previous page."),
+      }),
+      execute: async (
+        p: {
+          project_id: string; since?: string; until?: string; agent?: string; status?: string;
+          task_id?: string; source?: string; limit?: number; cursor?: string;
+        } & { agent_name?: string },
+        context?: { session?: McpAuthContext },
+      ) => {
+        try {
+          const { project_id, agent_name: _actAs, ...filters } = p;
+          return ok(await clientFor(context, p.agent_name).listProjectExecutions(project_id, filters, turnOf(context)));
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    },
+
+    // ========================================================================
     set_project_health: {
       name: "set_project_health",
       description:

@@ -125,7 +125,7 @@ A brief often needs more room than a task's fields: a call transcript, your view
 
 ## For Agents
 
-Agents reach a project through the MCP tools the platform exposes to them — `list_projects`, `get_project`, `list_project_tasks`, `get_project_log`, `read_project_context` (a brief people marked for agents, 200 KB a call), `create_project_task`, `update_project_task`, `add_project_task_note`, `add_project_log_entry`, `link_to_project`, `propose_project_changes` (any agent on the project, with the project-management permission), and for a steward agent `get_steward_digest` and `set_project_health`. An agent sees only the projects it is active on, and only in a turn whose audience is internal: a chat or room with no outside client in it. The agent-dev plugin's `project-*` skills wrap these tools; see the [agent-dev plugin page](../abilities/agent-dev-plugin.md).
+Agents reach a project through the MCP tools the platform exposes to them — `list_projects`, `get_project`, `list_project_tasks`, `get_project_log`, `read_project_context` (a brief people marked for agents, 200 KB a call), `create_project_task`, `update_project_task`, `add_project_task_note`, `add_project_log_entry`, `link_to_project`, `propose_project_changes` (any agent on the project, with the project-management permission), `list_project_executions` (the project's runs; a run the agent cannot open shows only its agent and status), and for a steward agent `get_steward_digest` and `set_project_health`. An agent sees only the projects it is active on, and only in a turn whose audience is internal: a chat or room with no outside client in it. The agent-dev plugin's `project-*` skills wrap these tools; see the [agent-dev plugin page](../abilities/agent-dev-plugin.md).
 
 ## Limitations
 
