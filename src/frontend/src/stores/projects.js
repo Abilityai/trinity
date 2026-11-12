@@ -175,6 +175,27 @@ export const useProjectsStore = defineStore('projects', () => {
     await portalHttp.post(url(id, `/tasks/${encodeURIComponent(taskId)}/log`), { body }, { headers: headers() })
   }
 
+  // trinity-enterprise#1240: the GitHub issues and PRs a task's work happens in.
+  // The answer is the task's full ref list; the row in the list follows it.
+  function _setTaskRefs(id, taskId, refs) {
+    const st = tasks.value[id]
+    if (!st) return
+    const rows = st.rows.map((t) => (t.id === taskId ? { ...t, refs } : t))
+    tasks.value = { ...tasks.value, [id]: { ...st, rows } }
+  }
+
+  async function addTaskRefs(id, taskId, refs) {
+    const { data } = await portalHttp.post(url(id, `/tasks/${encodeURIComponent(taskId)}/refs`), { refs }, { headers: headers() })
+    _setTaskRefs(id, taskId, data.refs || [])
+    return data
+  }
+
+  async function removeTaskRef(id, taskId, refId) {
+    await portalHttp.delete(url(id, `/tasks/${encodeURIComponent(taskId)}/refs/${encodeURIComponent(refId)}`), { headers: headers() })
+    const row = (tasks.value[id]?.rows || []).find((t) => t.id === taskId)
+    if (row) _setTaskRefs(id, taskId, (row.refs || []).filter((r) => r.id !== refId))
+  }
+
   async function fetchLog(id) {
     const prev = logs.value[id] || { rows: [], loaded: false, error: null }
     try {
@@ -324,6 +345,7 @@ export const useProjectsStore = defineStore('projects', () => {
     fetchList, pageState, fetchProject, forLink, fetchForLink,
     create, update, setArchived, addMember, removeMember, addAgent, removeAgent, link, unlink,
     tasks, logs, fetchTasks, fetchTask, createTask, updateTask, addTaskNote, fetchLog, addLogEntry,
+    addTaskRefs, removeTaskRef,
     addGuest, addItem, setItemAudience, removeItem, fetchReport, myItems, importCandidates, importProject,
     setHealth, linkMetric, unlinkMetric, metricOptions, stewarding, fetchStewarding,
     requestStewardAccess, grantStewardAccess, requestToJoin, requestAgent,

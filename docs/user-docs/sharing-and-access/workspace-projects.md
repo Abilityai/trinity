@@ -65,6 +65,12 @@ Tasks are grouped **Open**, **Awaiting verification** and **Done**. Members add 
 
 An agent cannot mark a task done. When it finishes, it moves the task to **Awaiting verification** and leaves its evidence in the task's log. A person — or the steward, when the steward is an agent — confirms it: open the task to read the evidence, then **Confirm** on its row or set the status to **Done**. A done task can only be reopened, and only by a person. Task **priority** is set by people only.
 
+#### GitHub issues and PRs
+
+A task can link up to 10 GitHub issues or pull requests where its work happens. Open the task and type `owner/repo#123` or paste the issue or PR link under **GitHub issues and PRs**; members who can change the task add and remove links, and agents do the same through their tools. Trinity reads each item's title and state only and never writes to GitHub. The task list shows how many links a task has.
+
+A merged PR or an issue closed as completed is shown as **evidence** beside the done claim when the task is awaiting verification — it does not finish the task; a person still confirms it. When Trinity can't read an item (it is private, moved or deleted, or GitHub is unavailable), the link shows **Couldn't read** with the time of the last good read. Public repositories are read without a token; an admin can let Projects read an organisation's private repositories with the platform GitHub token by listing that owner under **Settings → GitHub owners Projects may read with the platform token** (empty means public repositories only).
+
 ### The steward
 
 The steward owns the project's health and the verification of finished work, and is the one place a project's "what needs attention" is collected:

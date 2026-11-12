@@ -19,6 +19,8 @@
   or a done task), so a contributor never reads the same text twice.
 
   #867: contributors change a task's owner here — blank clears it.
+  trinity-enterprise#1240: the GitHub issues and PRs the work happens in sit
+  under the objective (ProjectTaskRefs); a row shows a ref count only.
   trinity-enterprise#1155: the owner is picked from the project's own people
   (must-pick, over `GET /projects/{id}/people?purpose=owner`); a `role:<id>`
   owner and the owner already on the task are still taken as typed. Rows and
@@ -64,6 +66,12 @@
             >
               <span class="font-mono text-xs text-gray-500 dark:text-gray-400 tabular-nums">{{ t.id }}</span>
               <span class="min-w-0 flex-1 truncate text-sm text-gray-900 dark:text-gray-100">{{ t.title }}</span>
+              <span
+                v-if="t.refs && t.refs.length"
+                class="inline-flex items-center gap-0.5 text-xs text-gray-500 dark:text-gray-400 tabular-nums"
+                :title="`${t.refs.length} GitHub ${t.refs.length === 1 ? 'issue or PR' : 'issues and PRs'}`"
+                :data-testid="`project-task-refs-${t.id}`"
+              ><svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M8.5 11.5a3 3 0 0 0 4.2 0l2.6-2.6a3 3 0 0 0-4.2-4.2l-.9.9M11.5 8.5a3 3 0 0 0-4.2 0l-2.6 2.6a3 3 0 0 0 4.2 4.2l.9-.9" stroke-linecap="round" /></svg>{{ t.refs.length }}</span>
               <BaseBadge v-if="t.priority === 'p1'" variant="urgent">P1</BaseBadge>
               <span v-if="t.owner || t.agent" class="hidden sm:inline max-w-[10rem] truncate text-xs text-gray-500 dark:text-gray-400">{{ t.agent || ownerLabel(t.owner) }}</span>
               <BaseBadge :variant="TASK_STATUS_BADGE[t.status] || 'neutral'">{{ taskStatusLabel(t.status) }}</BaseBadge>
@@ -140,6 +148,17 @@
           <div class="mt-1 text-sm text-gray-800 dark:text-gray-200" data-testid="project-task-objective"><PortalMarkdown :content="task.objective" /></div>
         </div>
         <div v-if="task.done_definition && showRead"><h3 class="text-xs font-semibold text-gray-500 dark:text-gray-400">Definition of done</h3><p class="mt-1 whitespace-pre-line font-mono text-xs text-gray-800 dark:text-gray-200">{{ task.done_definition }}</p></div>
+
+        <!-- trinity-enterprise#1240: the GitHub issues and PRs this work happens in. -->
+        <ProjectTaskRefs
+          :project-id="projectId"
+          :task-id="task.id"
+          :refs="task.refs || []"
+          :evidence="task.evidence || []"
+          :can-edit="canContribute && !archived && !locked"
+          :verifying="task.status === 'pending-verification'"
+          @changed="onRefsChanged"
+        />
 
         <!-- trinity-enterprise#1193: this task's briefs, for the agent working it. -->
         <ProjectContext
@@ -261,6 +280,7 @@ import PortalMarkdown from '@/components/portal/PortalMarkdown.vue'
 import { useProjectsStore } from '@/stores/projects'
 import ProjectContext from './ProjectContext.vue'
 import ProjectTaskStart from './ProjectTaskStart.vue'
+import ProjectTaskRefs from './ProjectTaskRefs.vue'
 import { viewState } from '@/utils/loadingState'
 import { formatRelativeTime, formatLocalDateTime } from '@/utils/timestamps'
 import {
@@ -398,6 +418,13 @@ async function refreshTask() {
   } catch (err) {
     actionError.value = projectErrorMessage(err)
   }
+}
+
+// ent#1240: the refs answer is the full list; evidence is re-read with the task.
+function onRefsChanged(refs) {
+  if (!task.value) return
+  task.value = { ...task.value, refs }
+  refreshTask()
 }
 
 // ent#1195: the task's chat opens in the Workspace; the task dialog closes first.
