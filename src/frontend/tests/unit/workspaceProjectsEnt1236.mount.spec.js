@@ -49,6 +49,7 @@ describe('ent#1236 — the card names the wake state', () => {
     await tid(w, 'project-steward-wake-start').trigger('click')
     expect(start).toHaveBeenCalledWith('prj_1')
     expect(tid(w, 'project-steward-wake-pause').exists()).toBe(false)
+    expect(tid(w, 'project-steward-wake-start-hint').text()).toContain('one catch-up turn')
   })
 
   it('while it is woken: the next wake, the last run, a Pause, and never "No sweep scheduled"', async () => {
@@ -64,6 +65,7 @@ describe('ent#1236 — the card names the wake state', () => {
     expect(w.text()).not.toContain('No sweep scheduled')
     expect(w.text()).not.toContain("Trinity doesn't run it")
     expect(tid(w, 'project-steward-schedule').text()).toBe('')
+    expect(tid(w, 'project-steward-wake-start-hint').exists()).toBe(false)
     await tid(w, 'project-steward-wake-pause').trigger('click')
     expect(pause).toHaveBeenCalledWith('prj_1')
   })

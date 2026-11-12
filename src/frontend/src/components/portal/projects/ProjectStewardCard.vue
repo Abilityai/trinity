@@ -148,6 +148,9 @@
           :data-testid="`project-steward-wake-${wakeVerb}`"
           @click="changeWake"
         >{{ changingWake ? (wakeVerb === 'start' ? 'Starting…' : 'Pausing…') : (wakeVerb === 'start' ? 'Start waking the steward' : 'Pause') }}</BaseButton>
+        <p v-if="wake.can_change && wakeVerb === 'start'" class="mt-1 text-xs text-gray-600 dark:text-gray-300" data-testid="project-steward-wake-start-hint">
+          Changes made before you start get one catch-up turn when you do, within the hourly limit.
+        </p>
         <p v-if="wakeError" class="mt-1 text-xs text-status-danger-700 dark:text-status-danger-400" role="alert">{{ wakeError }}</p>
       </div>
       <p class="mt-3 text-xs text-gray-500 dark:text-gray-400" data-testid="project-steward-how">
