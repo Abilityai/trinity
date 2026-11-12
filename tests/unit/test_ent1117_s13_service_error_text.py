@@ -599,7 +599,17 @@ def test_rendered_domain_errors_only_carry_constant_text(class_name, expected_mi
     sites = _constructions(class_name)
     assert len(sites) >= expected_min, f"expected raise sites for {class_name}: {sites}"
     for path, call in sites:
-        assert not call.keywords, f"{path}:{call.lineno}"
+        # ent#1221: the one keyword allowed is ``reason``, a machine code that
+        # can reach a response body through the 404's ``channels`` map — so it
+        # is held to the same rule as the sentence: a constant, or a listed
+        # platform-parameter interpolation.
+        for kw in call.keywords:
+            assert kw.arg == "reason", f"{path}:{call.lineno}: unexpected keyword {kw.arg!r}"
+            if (path, ast.unparse(kw.value)) in _PLATFORM_PARAM_TEXT:
+                continue
+            assert isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str), (
+                f"{path}:{call.lineno}: reason built from non-constant text: {ast.unparse(kw.value)}"
+            )
         assert len(call.args) == 1, f"{path}:{call.lineno}"
         arg = call.args[0]
         if (path, ast.unparse(arg)) in _PLATFORM_PARAM_TEXT:
@@ -616,6 +626,10 @@ _PLATFORM_PARAM_TEXT = {
     (
         Path("src/backend/services/proactive_message_service.py"),
         "f\"recipient_blocked: this client is blocked on the agent's {channel} channel\"",
+    ),
+    (
+        Path("src/backend/services/proactive_message_service.py"),
+        "f'{channel}_blocked'",
     ),
 }
 _PLATFORM_PARAM_CALLERS = {
@@ -644,7 +658,12 @@ def test_platform_param_text_is_only_given_literals():
                 f"{rel}:{call.lineno}: {fn_name} given a non-literal channel: {ast.unparse(arg)}"
             )
     for rel, arg_text in _PLATFORM_PARAM_TEXT:
-        assert arg_text in {ast.unparse(c.args[0]) for p, c in _constructions("ChannelDeliveryError") if p == rel}, (
+        built = set()
+        for p, c in _constructions("ChannelDeliveryError"):
+            if p == rel:
+                built.add(ast.unparse(c.args[0]))
+                built.update(ast.unparse(k.value) for k in c.keywords)
+        assert arg_text in built, (
             f"stale exemption: {rel} no longer builds {arg_text}"
         )
 

@@ -52,28 +52,21 @@ class WorkspaceDeliveryRefused(Exception):
         self.detail = detail
 
 
-def resolve_and_stamp(execution_id: str, agent_name: str, email: str) -> str:
-    """Point ``execution_id`` at ``email``'s Main chat with ``agent_name``.
+def check_workspace_reachable(agent_name: str, email: str) -> str:
+    """Whether ``email`` can receive a message from ``agent_name`` in the Workspace.
 
-    Returns the resolved session id. Raises `WorkspaceDeliveryRefused` when the
-    address cannot receive the brief — the caller turns that into a **visible
-    failure on the execution row**, never a silent no-op (AC 5). Refusing before
-    the turn runs is both cheaper and louder than running it and dropping the
-    answer somewhere nobody can read.
+    Returns the normalised address; raises `WorkspaceDeliveryRefused` otherwise.
+    **Writes nothing** — the Execution Context asks this on prompt composition
+    (trinity-enterprise#1221), so it must not mint a Main as a side effect.
 
     Access is checked against **where the message will land**:
     `agent_on_roster(..., include_owned=True)` is the Workspace's own roster
     (shared ∪ owned). `email_has_agent_access` was rejected for this: it admits
     any admin, and an admin who neither owns the agent nor is shared it cannot
-    open that thread, so a brief delivered there would be invisible.
-
-    The destination is **Main** (ruled 2026-09-06), through the same
-    `ensure_main_session` an agent-initiated message and an ask outside a chat
-    already use — a brief is not a fourth thing that decides where to land.
+    open that thread, so a message delivered there would be invisible.
     """
     from client_portal import db as portal_db
-    from client_portal.service import agent_on_roster, ensure_main_session
-    from database import db
+    from client_portal.service import agent_on_roster
 
     address = (email or "").strip().lower()
     if not address:
@@ -116,15 +109,45 @@ def resolve_and_stamp(execution_id: str, agent_name: str, email: str) -> str:
             f"neither shared with them nor owned by them, so there is nowhere to "
             f"deliver this run's output.",
         )
+    return address
 
+
+def resolve_main_destination(agent_name: str, email: str) -> str:
+    """`check_workspace_reachable`, then ``email``'s Main chat with ``agent_name``.
+
+    The destination is **Main** (ruled 2026-09-06), through the same
+    `ensure_main_session` an agent-initiated message and an ask outside a chat
+    already use — a brief is not a fourth thing that decides where to land.
+    Shared by the scheduled delivery below and a proactive `web` send
+    (trinity-enterprise#1221), so the two cannot disagree about who is reachable.
+    """
+    from client_portal.service import ensure_main_session
+
+    address = check_workspace_reachable(agent_name, email)
     try:
-        session_id = ensure_main_session(agent_name, address)
+        return ensure_main_session(agent_name, address)
     except Exception as e:  # noqa: BLE001
         raise WorkspaceDeliveryRefused(
             "workspace_delivery_session_unavailable",
             f"Could not open {address}'s main conversation with {agent_name} "
             f"({type(e).__name__}).",
         ) from e
+
+
+def resolve_and_stamp(execution_id: str, agent_name: str, email: str) -> str:
+    """Point ``execution_id`` at ``email``'s Main chat with ``agent_name``.
+
+    Returns the resolved session id. Raises `WorkspaceDeliveryRefused` when the
+    address cannot receive the brief — the caller turns that into a **visible
+    failure on the execution row**, never a silent no-op (AC 5). Refusing before
+    the turn runs is both cheaper and louder than running it and dropping the
+    answer somewhere nobody can read. Who is reachable and where it lands:
+    `resolve_main_destination`.
+    """
+    from database import db
+
+    address = (email or "").strip().lower()
+    session_id = resolve_main_destination(agent_name, address)
 
     stamped = db.stamp_execution_channel_context(
         execution_id,
