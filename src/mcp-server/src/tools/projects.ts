@@ -25,6 +25,7 @@ import { z } from "zod";
 import { TrinityClient, ApiError } from "../client.js";
 import type { McpAuthContext } from "../types.js";
 import { ACT_AS_PARAM_DESCRIPTION, resolveActingAgent } from "../access.js";
+import { deriveMcpIdempotencyKey } from "./chat.js";
 
 /** trinity-enterprise#1024: the tool refused to act for the named agent itself. */
 class ActAsRefusal extends Error {}
@@ -535,6 +536,45 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
           const { project_id, agent_name: _actAs, ...rest } = p;
           const body = Object.fromEntries(Object.entries(rest).filter(([, v]) => v !== undefined));
           return ok(await clientFor(context, p.agent_name).proposeProjectChanges(project_id, body, turnOf(context)));
+        } catch (e) {
+          return fail(e);
+        }
+      },
+    },
+
+    // ========================================================================
+    start_project_task: {
+      name: "start_project_task",
+      description:
+        "As a project's steward, start one task's run on an agent you name (trinity-enterprise#1235). " +
+        "The platform never picks the task or the agent. What happens depends on the project's mode, " +
+        "which only a person sets: in Track a person starts every run, so this is refused (mode_track); " +
+        "in Propose, and on a task held for a person's go in any mode, it becomes a proposal the task's " +
+        "person approves (state 'proposed'); in Auto the run starts (state 'started'). The run is the " +
+        "person's: the one in this conversation, or, in a turn with no person, the person who turned " +
+        "Auto on (refused as auto_origin_unavailable when they can no longer start that agent here). " +
+        "Other refusals: the project is not running (project_not_started, project_stopped, " +
+        "project_done); only_the_steward_starts; the task is done, awaiting its check, for a person " +
+        "(task_is_for_a_person), needs a decision, blocked or waiting on another task; the agent is not " +
+        "on the project; agent_consent_predates_runs; a run is already live (task_run_live) or proposed. " +
+        "A refusal never asks you to widen a permission. A run ends one of two ways: the worker moves " +
+        "the task to pending-verification with its evidence, or raises an ask with context.run_id. In a " +
+        "turn with no person, an agent may move a task to active or pending-verification only as that " +
+        "task's run.",
+      parameters: z.object({
+        agent_name: z.string().optional().describe(ACT_AS_PARAM_DESCRIPTION),
+        project_id: projectId,
+        task_id: taskId,
+        agent: z.string().min(1).max(128).describe("The agent on the project that runs the task."),
+      }),
+      execute: async (p: { project_id: string; task_id: string; agent: string } & { agent_name?: string },
+                      context?: { session?: McpAuthContext }) => {
+        try {
+          const key = deriveMcpIdempotencyKey(["start_project_task", context?.session?.agentName,
+            p.agent_name, p.project_id, p.task_id, p.agent, turnOf(context)]);
+          const out = await clientFor(context, p.agent_name).startProjectTask(
+            p.project_id, p.task_id, p.agent, turnOf(context), key);
+          return ok(out);
         } catch (e) {
           return fail(e);
         }
