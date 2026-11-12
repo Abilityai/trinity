@@ -48,17 +48,27 @@
         :viewBox="`0 0 ${wireLayer.w} ${wireLayer.h}`"
       >
         <g :transform="`translate(${-wireLayer.x},${-wireLayer.y})`">
-          <g v-for="e in wireLayer.edges" :key="e.id" class="gv-wire" :class="edgeClass(e)">
-            <path
-              class="gv-wire-hit"
-              :d="e.d"
-              @click.stop="removeEdge(e)"
-              @pointerenter="onEdgeEnter(e)"
-              @pointerleave="onEdgeLeave(e)"
-            ></path>
-            <path class="gv-wire-line" :d="e.d"></path>
-            <path class="gv-wire-ah" :d="e.ah"></path>
+          <!-- One translucent group per tier (dim → base → hot): a trunk or bus
+               shared by several lines keeps one tone, and a highlighted line
+               paints over its siblings (#2066). -->
+          <g v-for="t in wireTiers" :key="t.cls" class="gv-wire-tier" :class="t.cls">
+            <g v-for="e in t.edges" :key="e.id" class="gv-wire" :data-edge="e.id">
+              <path class="gv-wire-line" :d="e.d"></path>
+              <path class="gv-wire-ah" :d="e.ah"></path>
+            </g>
           </g>
+          <!-- Hit targets on each line's own final drop only, so a click on a
+               shared trunk can never remove an arbitrary sibling. -->
+          <path
+            v-for="e in wireLayer.edges"
+            :key="'hit:' + e.id"
+            class="gv-wire-hit"
+            :data-edge="e.id"
+            :d="e.hit"
+            @click.stop="removeEdge(e)"
+            @pointerenter="onEdgeEnter(e)"
+            @pointerleave="onEdgeLeave(e)"
+          ></path>
           <template v-if="connectDraft">
             <path class="gv-wire-line adding" :d="connectDraft.d"></path>
             <path class="gv-wire-ah adding" :d="connectDraft.ah"></path>
@@ -569,6 +579,7 @@ const {
   deptByAgent,
   zones,
   wireLayer,
+  wireTiers,
   connectDraft,
   zoneSockets,
   hoverAgent,
@@ -581,7 +592,6 @@ const {
   onTileLeave,
   onEdgeEnter,
   onEdgeLeave,
-  edgeClass,
   startConnect,
   removeEdge,
   trackDropZone,
@@ -1465,14 +1475,26 @@ onBeforeUnmount(() => {
   fill: none;
   stroke: var(--gv-wire);
   stroke-width: 1.5;
-  opacity: 0.55;
-  transition: opacity 0.15s ease;
+  stroke-linejoin: round;
+  stroke-linecap: round;
 }
 .gv-wire-ah {
   fill: var(--gv-wire);
   stroke: none;
+}
+/* Opacity lives on the tier group, not on each path, so overlapping segments
+   of one tier composite once (gridOrg.paintTiers). */
+.gv-wire-tier {
   opacity: 0.55;
-  transition: opacity 0.15s ease;
+}
+.gv-wire-tier.hot {
+  opacity: 0.95;
+}
+.gv-wire-tier.hot .gv-wire-line {
+  stroke-width: 2;
+}
+.gv-wire-tier.dim {
+  opacity: 0.12;
 }
 .gv-wire-hit {
   fill: none;
@@ -1480,17 +1502,6 @@ onBeforeUnmount(() => {
   stroke-width: 14;
   pointer-events: stroke;
   cursor: pointer;
-}
-.gv-wire.hot .gv-wire-line,
-.gv-wire.hot .gv-wire-ah {
-  opacity: 0.95;
-}
-.gv-wire.hot .gv-wire-line {
-  stroke-width: 2;
-}
-.gv-wire.dim .gv-wire-line,
-.gv-wire.dim .gv-wire-ah {
-  opacity: 0.12;
 }
 .gv-wire-line.adding {
   stroke: var(--gv-blue);

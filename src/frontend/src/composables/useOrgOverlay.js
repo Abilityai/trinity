@@ -24,6 +24,7 @@ import {
   newcomerOrigin,
   orgTagFits,
   arrowheadPath,
+  paintTiers,
 } from '@/utils/gridOrg'
 
 /**
@@ -131,6 +132,10 @@ export function useOrgOverlay({ agents, layout, canvasEl, vz, vtx, vty, dragging
     if (!hoverAgent.value) return ''
     return e.manager === hoverAgent.value || e.report === hoverAgent.value ? 'hot' : 'dim'
   }
+  // Paint order + per-tier opacity for the wire layer (see paintTiers).
+  const wireTiers = computed(() =>
+    wireLayer.value ? paintTiers(wireLayer.value.edges, edgeClass) : []
+  )
 
   // --- connect drag (bottom port: manager → drop target becomes the report) ---
   const connecting = ref(null) // { source, sx, sy, x, y }
@@ -197,14 +202,16 @@ export function useOrgOverlay({ agents, layout, canvasEl, vz, vtx, vty, dragging
     }
   }
 
+  // The live line follows the same rule as a committed one (#2066): it
+  // leaves the port downward and reaches the cursor from above, even when the
+  // cursor is above the port (the curve loops round, as the committed line will).
   const connectDraft = computed(() => {
     const c = connecting.value
     if (!c) return null
-    const s = c.y >= c.sy ? 1 : -1
     const k = Math.min(120, Math.max(30, Math.abs(c.y - c.sy) * 0.4))
     return {
-      d: `M ${c.sx} ${c.sy} C ${c.sx} ${c.sy + s * k}, ${c.x} ${c.y - s * k}, ${c.x} ${c.y}`,
-      ah: arrowheadPath(c.x, c.y, true, s),
+      d: `M ${c.sx} ${c.sy} C ${c.sx} ${c.sy + k}, ${c.x} ${c.y - k}, ${c.x} ${c.y}`,
+      ah: arrowheadPath(c.x, c.y, true, 1),
     }
   })
 
@@ -479,6 +486,7 @@ export function useOrgOverlay({ agents, layout, canvasEl, vz, vtx, vty, dragging
     deptByAgent,
     zones,
     wireLayer,
+    wireTiers,
     connectDraft,
     zoneSockets,
     // hover / drag state
