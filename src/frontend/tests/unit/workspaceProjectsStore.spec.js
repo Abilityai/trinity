@@ -150,3 +150,95 @@ describe('the people reads', () => {
     expect(await useProjectsStore().fetchCompanyPeople('zz')).toEqual([])
   })
 })
+
+// --- trinity-enterprise#957: the tasks are polled, and a board move is one write ----
+
+describe('ent#957 — task reads and writes', () => {
+  const later = () => {
+    let resolve, reject
+    const promise = new Promise((res, rej) => { resolve = res; reject = rej })
+    return { promise, resolve, reject }
+  }
+  const row = (id, status) => ({ id, title: id, status })
+
+  it('only the newest read of a project writes — an older answer landing late is dropped', async () => {
+    const store = useProjectsStore()
+    const slow = later()
+    const fast = later()
+    axios.get.mockReturnValueOnce(slow.promise).mockReturnValueOnce(fast.promise)
+    const first = store.fetchTasks('prj_1')
+    const second = store.fetchTasks('prj_1')
+    fast.resolve({ data: { tasks: [row('T-1', 'done')] } })
+    await second
+    slow.resolve({ data: { tasks: [row('T-1', 'active')] } })
+    await first
+    expect(store.tasks.prj_1.rows).toEqual([row('T-1', 'done')])
+  })
+
+  it('an older read FAILING late does not put an error over fresh rows', async () => {
+    const store = useProjectsStore()
+    const slow = later()
+    axios.get.mockReturnValueOnce(slow.promise).mockResolvedValueOnce({ data: { tasks: [row('T-1', 'done')] } })
+    const first = store.fetchTasks('prj_1')
+    await store.fetchTasks('prj_1')
+    slow.reject({ response: { status: 500, data: {} } })
+    await first
+    expect(store.tasks.prj_1).toMatchObject({ rows: [row('T-1', 'done')], error: null })
+  })
+
+  it('reads of two projects do not cancel each other', async () => {
+    const store = useProjectsStore()
+    const a = later()
+    axios.get.mockReturnValueOnce(a.promise).mockResolvedValueOnce({ data: { tasks: [row('T-9', 'active')] } })
+    const first = store.fetchTasks('prj_a')
+    await store.fetchTasks('prj_b')
+    a.resolve({ data: { tasks: [row('T-1', 'active')] } })
+    await first
+    expect(store.tasks.prj_a.rows).toEqual([row('T-1', 'active')])
+    expect(store.tasks.prj_b.rows).toEqual([row('T-9', 'active')])
+  })
+
+  it('a failed read keeps the rows and records the status a retry cannot change', async () => {
+    const store = useProjectsStore()
+    axios.get.mockResolvedValueOnce({ data: { tasks: [row('T-1', 'active')] } })
+    await store.fetchTasks('prj_1')
+    axios.get.mockRejectedValueOnce({ response: { status: 404, data: { detail: { code: 'project_not_found' } } } })
+    await store.fetchTasks('prj_1')
+    expect(store.tasks.prj_1).toMatchObject({ rows: [row('T-1', 'active')], loaded: true, errorStatus: 404 })
+    expect(store.tasks.prj_1.error).toBeTruthy()
+  })
+
+  it('a board move sends the status only, and the answer is the row at once — even when the re-read fails', async () => {
+    const store = useProjectsStore()
+    axios.get.mockResolvedValueOnce({ data: { tasks: [row('T-1', 'active'), row('T-2', 'active')] } })
+    await store.fetchTasks('prj_1')
+    axios.patch.mockResolvedValueOnce({ data: row('T-1', 'pending-verification') })
+    axios.get.mockRejectedValue({ response: { status: 502, data: {} } })
+    await store.moveTask('prj_1', 'T-1', 'pending-verification')
+    expect(axios.patch.mock.calls[0][0]).toContain('/prj_1/tasks/T-1')
+    expect(axios.patch.mock.calls[0][1]).toEqual({ status: 'pending-verification' })
+    expect(store.tasks.prj_1.rows.map((r) => r.status)).toEqual(['pending-verification', 'active'])
+    await new Promise((r) => setTimeout(r, 0))
+    expect(store.tasks.prj_1.rows.map((r) => r.status)).toEqual(['pending-verification', 'active'])
+    expect(store.tasks.prj_1.error).toBeTruthy()
+    axios.get.mockReset()
+  })
+
+  it('a move that carries its reason sends the note beside the status', async () => {
+    const store = useProjectsStore()
+    axios.get.mockResolvedValue({ data: { tasks: [], entries: [] } })
+    axios.patch.mockResolvedValueOnce({ data: row('T-1', 'done') })
+    await store.moveTask('prj_1', 'T-1', 'done', 'Published at docs/launch.md')
+    expect(axios.patch.mock.calls[0][1]).toEqual({ status: 'done', note: 'Published at docs/launch.md' })
+    axios.get.mockReset()
+  })
+
+  it('a refused move throws and leaves the rows alone', async () => {
+    const store = useProjectsStore()
+    axios.get.mockResolvedValueOnce({ data: { tasks: [row('T-1', 'done')] } })
+    await store.fetchTasks('prj_1')
+    axios.patch.mockRejectedValueOnce({ response: { status: 409, data: { detail: { code: 'task_done' } } } })
+    await expect(store.moveTask('prj_1', 'T-1', 'blocked')).rejects.toBeTruthy()
+    expect(store.tasks.prj_1.rows).toEqual([row('T-1', 'done')])
+  })
+})
