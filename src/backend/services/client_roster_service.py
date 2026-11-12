@@ -2,7 +2,7 @@
 
 Surfaces the external channel users (no Trinity account) who have messaged an
 agent, aggregated across channels into one roster. This is the read surface for
-the Channels tab. Each row also carries its access state, and this
+Settings › Channels. Each row also carries its access state, and this
 module owns the per-client controls that act on it (trinity-enterprise#21):
 block / unblock (``channel_client_blocks``, enforced by the channel access gate)
 and revoke (the client's share on this agent). Approve is the existing

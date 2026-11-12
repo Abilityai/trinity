@@ -4,7 +4,7 @@
 
 ## How do I connect my Trinity instance to Slack?
 
-Connection happens in two stages. First, a platform admin sets up the Slack app under **Settings → Integrations → Slack Integration**, following the checklist shown inline: under **OAuth Credentials**, enter the app's Client ID, Client Secret and Signing Secret and click **Save Credentials**; under **Transport Connection**, paste the app-level token (`xapp-...`) and click **Connect** to start Socket Mode (the badge reads **Socket Mode**, **Webhook** or **Disconnected**); then click **Install to Workspace** (**Reinstall to Workspace** once a workspace is connected) to complete OAuth and obtain the bot token. The client secret, signing secret and app token are stored encrypted at rest. Second, each agent is bound to Slack from its own detail page: open the **Channels** tab, click **Configure** on the Slack row, and click **Create Channel** to create a dedicated channel bound to that agent — a public link's **Connect Slack** button is a shortcut into the same binding (see [Sharing, Access & Monetization](sharing-access-and-monetization.md#can-i-connect-a-public-link-to-slack)). Only one Slack workspace can be connected per Trinity instance. See [Slack Integration](../integrations/slack-integration.md).
+Connection happens in two stages. First, a platform admin sets up the Slack app under **Settings → Integrations → Slack Integration**, following the checklist shown inline: under **OAuth Credentials**, enter the app's Client ID, Client Secret and Signing Secret and click **Save Credentials**; under **Transport Connection**, paste the app-level token (`xapp-...`) and click **Connect** to start Socket Mode (the badge reads **Socket Mode**, **Webhook** or **Disconnected**); then click **Install to Workspace** (**Reinstall to Workspace** once a workspace is connected) to complete OAuth and obtain the bot token. The client secret, signing secret and app token are stored encrypted at rest. Second, each agent is bound to Slack from its own detail page: open **Settings › Channels**, click **Configure** on the Slack row, and click **Create Channel** to create a dedicated channel bound to that agent — a public link's **Connect Slack** button is a shortcut into the same binding (see [Sharing, Access & Monetization](sharing-access-and-monetization.md#can-i-connect-a-public-link-to-slack)). Only one Slack workspace can be connected per Trinity instance. See [Slack Integration](../integrations/slack-integration.md).
 
 ## What is the difference between Socket Mode and webhook mode for Slack?
 
@@ -12,11 +12,11 @@ Socket Mode is the default transport: Trinity opens an outbound WebSocket connec
 
 ## Can multiple agents share one Slack workspace?
 
-Yes. Each agent gets its own dedicated Slack channel via **Create Channel** in the agent's Channels tab, and @mentions in that channel route to the bound agent. Direct messages to the bot go to a single workspace-wide DM-default agent instead. Replies post with each agent's own name and avatar, so multiple agents in one workspace stay visually distinct. See [Slack Integration](../integrations/slack-integration.md).
+Yes. Each agent gets its own dedicated Slack channel via **Create Channel** in the agent's **Settings › Channels**, and @mentions in that channel route to the bound agent. Direct messages to the bot go to a single workspace-wide DM-default agent instead. Replies post with each agent's own name and avatar, so multiple agents in one workspace stay visually distinct. See [Slack Integration](../integrations/slack-integration.md).
 
 ## Can each agent have its own Slack bot identity instead of sharing one?
 
-By default all agents share one workspace bot and are told apart by their per-message name and avatar. Giving an agent its **own dedicated Slack bot** — one people can DM directly and `@mention` by name, alongside other agents in the same channel — is an enterprise-tier capability, configured from the agent's Channels tab. See [Slack Integration](../integrations/slack-integration.md#per-agent-dedicated-bots-enterprise).
+By default all agents share one workspace bot and are told apart by their per-message name and avatar. Giving an agent its **own dedicated Slack bot** — one people can DM directly and `@mention` by name, alongside other agents in the same channel — is an enterprise-tier capability, configured from the agent's **Settings › Channels**. See [Slack Integration](../integrations/slack-integration.md#per-agent-dedicated-bots-enterprise).
 
 ## Can I control whether an agent posts to a Slack channel on its own?
 
@@ -24,7 +24,7 @@ Yes. Proactively posting to a Slack channel requires a per-channel consent toggl
 
 ## Which agent answers when someone DMs the Slack bot?
 
-DMs are routed to the workspace's DM-default agent. The first agent bound to the workspace becomes the DM default automatically, but you can reassign it anytime: open the target agent's **Channels** tab → Slack section and click **Set as DM Default** — the change takes effect immediately, no restart needed. Only one agent per workspace can be the DM default, and you cannot unbind the current DM-default agent while other agents are still bound; reassign the default first. See [Slack Integration](../integrations/slack-integration.md).
+DMs are routed to the workspace's DM-default agent. The first agent bound to the workspace becomes the DM default automatically, but you can reassign it anytime: open the target agent's **Settings › Channels** → Slack section and click **Set as DM Default** — the change takes effect immediately, no restart needed. Only one agent per workspace can be the DM default, and you cannot unbind the current DM-default agent while other agents are still bound; reassign the default first. See [Slack Integration](../integrations/slack-integration.md).
 
 ## Why does my agent keep replying in a Slack thread without being @mentioned?
 
@@ -36,7 +36,7 @@ Trinity posts each reply with the agent's name and its Trinity avatar as the per
 
 ## How do I connect an agent to Telegram?
 
-Create a bot first: message @BotFather on Telegram, send `/newbot`, choose a name and a username ending in `bot`, and copy the bot token. Then open the agent's **Channels** tab, click **Configure** on the Telegram row, paste the token, and click **Connect Bot** — Trinity validates the token and registers the webhook. Each agent needs its own dedicated bot; bots cannot be shared across agents. If the status shows the yellow "Bot connected but webhook not registered", set **Public URL** under **Settings → General** to your instance's public address — the webhook registers automatically once saved. See [Telegram Integration](../integrations/telegram-integration.md).
+Create a bot first: message @BotFather on Telegram, send `/newbot`, choose a name and a username ending in `bot`, and copy the bot token. Then open the agent's **Settings › Channels**, click **Configure** on the Telegram row, paste the token, and click **Connect Bot** — Trinity validates the token and registers the webhook. Each agent needs its own dedicated bot; bots cannot be shared across agents. If the status shows the yellow "Bot connected but webhook not registered", set **Public URL** under **Settings → General** to your instance's public address — the webhook registers automatically once saved. See [Telegram Integration](../integrations/telegram-integration.md).
 
 ## Why doesn't my Telegram bot see every message in a group?
 
@@ -44,7 +44,7 @@ Two settings control this. In Trinity, each group has a trigger mode: **Mention 
 
 ## Does my Telegram agent know what the group said before it was tagged?
 
-Yes, when the bot can see the group's messages. The agent remembers who said what — the last 40 messages within 24 hours by default — and answers a tagged message in that context, so "@agent summarise what we decided" works without re-pasting the thread. Un-tagged messages are only remembered: the agent still speaks only per the group's trigger mode, and remembering costs no agent turn. With Privacy Mode on, the bot sees only tagged messages and replies; the group's status in the Channels tab says which case applies and what to do. Turn **Group context** off for a group that should not be remembered, and what was already stored is deleted. See [Telegram Integration](../integrations/telegram-integration.md#group-context).
+Yes, when the bot can see the group's messages. The agent remembers who said what — the last 40 messages within 24 hours by default — and answers a tagged message in that context, so "@agent summarise what we decided" works without re-pasting the thread. Un-tagged messages are only remembered: the agent still speaks only per the group's trigger mode, and remembering costs no agent turn. With Privacy Mode on, the bot sees only tagged messages and replies; the group's status in **Settings › Channels** says which case applies and what to do. Turn **Group context** off for a group that should not be remembered, and what was already stored is deleted. See [Telegram Integration](../integrations/telegram-integration.md#group-context).
 
 ## Can users send voice messages to my Telegram bot?
 
@@ -64,7 +64,7 @@ Because Telegram caps a message at 4,096 characters and the reply was longer. Tr
 
 ## How do I connect an agent to WhatsApp?
 
-Trinity connects to WhatsApp through Twilio — you bring your own Twilio account. Open the agent's **Channels** tab, click **Configure** on the WhatsApp row, and enter your Twilio Account SID, Auth Token (stored encrypted), and WhatsApp sender number in the form `whatsapp:+15551234567`. After connecting, copy the generated webhook URL into your Twilio console so inbound messages reach Trinity. You also need **Settings → General → Public URL** set to your public domain, and if you route traffic through a Cloudflare Tunnel, an ingress rule sending `/api/whatsapp/webhook/*` to the backend service (not the frontend). See [WhatsApp Integration](../integrations/whatsapp-integration.md).
+Trinity connects to WhatsApp through Twilio — you bring your own Twilio account. Open the agent's **Settings › Channels**, click **Configure** on the WhatsApp row, and enter your Twilio Account SID, Auth Token (stored encrypted), and WhatsApp sender number in the form `whatsapp:+15551234567`. After connecting, copy the generated webhook URL into your Twilio console so inbound messages reach Trinity. You also need **Settings → General → Public URL** set to your public domain, and if you route traffic through a Cloudflare Tunnel, an ingress rule sending `/api/whatsapp/webhook/*` to the backend service (not the frontend). See [WhatsApp Integration](../integrations/whatsapp-integration.md).
 
 ## Should I use the Twilio sandbox or a production WhatsApp sender?
 
@@ -84,7 +84,7 @@ Users send `/login user@example.com` to the bot, receive a 6-digit code at that 
 
 ## How do I let people chat with my agent without a Trinity account?
 
-Create a public link: open the agent's **Channels** tab, go to **Distribution → Public links**, and click **Create Public Link**. You can configure email verification on or off, rate limits, and a custom welcome message, then share the generated URL. Recipients open it and chat immediately — no login required. See [Public Links](../sharing-and-access/public-links.md).
+Create a public link: open the agent's **Settings › Channels**, find **Public links** under **Web**, and click **Create Public Link**. You can configure email verification on or off, rate limits, and a custom welcome message, then share the generated URL. Recipients open it and chat immediately — no login required. See [Public Links](../sharing-and-access/public-links.md).
 
 ## Does a public chat link remember returning users?
 
@@ -92,15 +92,15 @@ Yes, if email verification is enabled on the link. Verified sessions persist acr
 
 ## Can I use a different model for public and channel conversations?
 
-Yes. The **Public chat model** setting on the agent's Channels tab overrides the model for public-facing surfaces only: public links, Slack/Telegram/WhatsApp channels, and paid chat. Your own authenticated chats and scheduled runs are unaffected, and the default option inherits the platform-wide model. This is useful for putting a cheaper or faster model in front of outside audiences. See [Agent Sharing & Access](../sharing-and-access/agent-sharing.md#public-chat-model).
+Yes. The **Public chat model** setting on the agent's **Settings › Channels** overrides the model for public-facing surfaces only: public links, Slack/Telegram/WhatsApp channels, and paid chat. Your own authenticated chats and scheduled runs are unaffected, and the default option inherits the platform-wide model. This is useful for putting a cheaper or faster model in front of outside audiences. See [Agent Sharing & Access](../sharing-and-access/agent-sharing.md#public-chat-model).
 
 ## Can I give my agent extra instructions that only apply to strangers?
 
-Yes. The **Additional instructions — public & channel chats only** field on the Channels tab (up to 4,000 characters) is injected into the agent's system prompt for outside audiences only: public links, Slack/Telegram/WhatsApp, and paid chat. It never affects your own authenticated chats, scheduled runs, loops, or agent-to-agent calls, so you can set tone, disclosure rules, or scope limits for strangers without touching the agent's core instructions. Leave it empty to disable. See [Agent Sharing & Access](../sharing-and-access/agent-sharing.md).
+Yes. The **Additional instructions — public & channel chats only** field in **Settings › Channels** (up to 4,000 characters) is injected into the agent's system prompt for outside audiences only: public links, Slack/Telegram/WhatsApp, and paid chat. It never affects your own authenticated chats, scheduled runs, loops, or agent-to-agent calls, so you can set tone, disclosure rules, or scope limits for strangers without touching the agent's core instructions. Leave it empty to disable. See [Agent Sharing & Access](../sharing-and-access/agent-sharing.md).
 
 ## Can my agent speak its replies as voice notes?
 
-Yes, one reply at a time. Voice is a per-message choice the agent makes during a channel turn by calling the `send_voice_reply` tool — replies stay text unless it asks, and there is no always-on voice mode. Delivery uses each channel's native format: an OGG/Opus voice note on Telegram, an inline MP3 clip in the Slack thread, and an OGG voice note via Twilio media on WhatsApp. Setup is one platform key plus one per-agent configuration: an admin stores the ElevenLabs key under **Settings → General → Voice (ElevenLabs)** (encrypted, never echoed back, with an optional platform default voice), then the owner turns **Voice replies** on for the agent on its Settings tab and picks a voice (or relies on the platform default), and allows it per channel with the **Voice replies** toggle inside each channel's dialog on the Channels tab — a channel left off stays text-only. Voice replies do not cover the web chat or public links. See [Voice Replies](../advanced/voice-replies.md).
+Yes, one reply at a time. Voice is a per-message choice the agent makes during a channel turn by calling the `send_voice_reply` tool — replies stay text unless it asks, and there is no always-on voice mode. Delivery uses each channel's native format: an OGG/Opus voice note on Telegram, an inline MP3 clip in the Slack thread, and an OGG voice note via Twilio media on WhatsApp. Setup is one platform key plus one per-agent configuration: an admin stores the ElevenLabs key under **Settings → General → Voice (ElevenLabs)** (encrypted, never echoed back, with an optional platform default voice), then the owner turns **Voice replies** on for the agent on its Settings tab and picks a voice (or relies on the platform default), and allows it per channel with the **Voice replies** toggle inside each channel's dialog in **Settings › Channels** — a channel left off stays text-only. Voice replies do not cover the web chat or public links. See [Voice Replies](../advanced/voice-replies.md).
 
 ## Why did my agent's voice reply arrive as plain text?
 
@@ -108,7 +108,7 @@ Because voice is opt-in per message and fails soft — a voice problem never los
 
 ## Can my agent place real phone calls?
 
-Yes — agents can dial a number through Twilio and hold a live, interruptible spoken conversation powered by Gemini Live. VoIP is off by default: the platform needs `VOIP_ENABLED=true` plus a Gemini key, the **Public URL** set in Settings, and a publicly reachable deployment (Twilio must open a WebSocket to your instance). The agent owner then configures a per-agent Twilio voice binding in the Channels tab's **Voice calls** row, and calls are placed via the `call_user` MCP tool or the API. This release is outbound only — agents do not answer incoming calls. See [VoIP Telephony](../advanced/voip-telephony.md).
+Yes — agents can dial a number through Twilio and hold a live, interruptible spoken conversation powered by Gemini Live. VoIP is off by default: the platform needs `VOIP_ENABLED=true` plus a Gemini key, the **Public URL** set in Settings, and a publicly reachable deployment (Twilio must open a WebSocket to your instance). The agent owner then configures a per-agent Twilio voice binding in **Settings › Channels**'s **Voice calls** row, and calls are placed via the `call_user` MCP tool or the API. This release is outbound only — agents do not answer incoming calls. See [VoIP Telephony](../advanced/voip-telephony.md).
 
 ## What limits apply to agent phone calls, and what happens after a call?
 
@@ -116,7 +116,7 @@ Calls are rate-limited to 5 per owner and destination number per 60 seconds, cap
 
 ## How does Trinity know who is messaging my agent from a channel?
 
-The verified email is the identity across every channel: a user verified on Telegram, WhatsApp, or a public link, or identified via Slack workspace OAuth, is the same person to Trinity everywhere. That email is checked against the agent's access policy — open access lets anyone chat, while restricted agents admit only the owner, admins, and emails on the shared-access list, with everyone else generating a pending access request. Approving a user once admits them on all channels. The Channels tab also shows a client roster of external channel users who have messaged the agent. For the approval flow and policy details, see [Access Control](../sharing-and-access/access-control.md).
+The verified email is the identity across every channel: a user verified on Telegram, WhatsApp, or a public link, or identified via Slack workspace OAuth, is the same person to Trinity everywhere. That email is checked against the agent's access policy — open access lets anyone chat, while restricted agents admit only the owner, admins, and emails on the shared-access list, with everyone else generating a pending access request. Approving a user once admits them on all channels. The **Settings › Channels** also shows a client roster of external channel users who have messaged the agent. For the approval flow and policy details, see [Access Control](../sharing-and-access/access-control.md).
 
 ## Can I change how many proactive messages my agent can send?
 
@@ -126,7 +126,7 @@ Note: these caps apply only to messages the agent *starts*. **Replies to inbound
 
 ## Does Telegram show anything while a long task is running?
 
-Yes, three layers, all fail-soft and on by default per bot binding. A 👀 reaction lands on your message the moment the agent picks it up (and is cleared when the turn ends), the standard typing indicator fires, and past 30 seconds the bot posts a quiet "⏳ Working on it — N min elapsed" note (sent without a notification) that it edits about once a minute and deletes when the turn finishes. Turn it off in the Telegram dialog on the agent's Channels tab. In groups it only fires on @mentions and replies — a bot in `observe` mode stays silent, since a visible reaction would reveal that it is listening. See [Telegram Integration](../integrations/telegram-integration.md).
+Yes, three layers, all fail-soft and on by default per bot binding. A 👀 reaction lands on your message the moment the agent picks it up (and is cleared when the turn ends), the standard typing indicator fires, and past 30 seconds the bot posts a quiet "⏳ Working on it — N min elapsed" note (sent without a notification) that it edits about once a minute and deletes when the turn finishes. Turn it off in the Telegram dialog on the agent's **Settings › Channels**. In groups it only fires on @mentions and replies — a bot in `observe` mode stays silent, since a visible reaction would reveal that it is listening. See [Telegram Integration](../integrations/telegram-integration.md).
 
 ## An agent delegated my Telegram request to another agent — will I hear back?
 
@@ -138,7 +138,7 @@ Because channel replies run with a restricted tool set: by default only **WebSea
 
 ## Why won't my agent post to a Telegram group on its own?
 
-Most likely the group's proactive consent is off. Every connected group carries an `allow_proactive` flag — on by default — that governs whether the bot may post there without being asked: agent-initiated messages via `send_group_message(channel_type: "telegram")` and the completion report-back for delegated work. Turn it back on with `PUT /api/agents/{name}/telegram/groups/{id}` (a human-only route). If the flag is on, check that the group hasn't been removed (deactivated) in the Channels tab's Telegram Groups section and that the agent's proactive caps under **Settings → General → Proactive message limits** haven't been hit. Direct messages never need consent — the user started the conversation. See [Telegram Integration](../integrations/telegram-integration.md#completion-report-back).
+Most likely the group's proactive consent is off. Every connected group carries an `allow_proactive` flag — on by default — that governs whether the bot may post there without being asked: agent-initiated messages via `send_group_message(channel_type: "telegram")` and the completion report-back for delegated work. Turn it back on with `PUT /api/agents/{name}/telegram/groups/{id}` (a human-only route). If the flag is on, check that the group hasn't been removed (deactivated) in **Settings › Channels**'s Telegram Groups section and that the agent's proactive caps under **Settings → General → Proactive message limits** haven't been hit. Direct messages never need consent — the user started the conversation. See [Telegram Integration](../integrations/telegram-integration.md#completion-report-back).
 
 ## A file someone sent my agent in Slack never arrived. Why?
 

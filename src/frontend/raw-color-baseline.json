@@ -112,12 +112,7 @@
     },
     "src/frontend/src/components/ChannelConfigRow.vue": {
       "raw_nongray": 0,
-      "raw_gray": 22,
-      "hardcoded_colors": 0
-    },
-    "src/frontend/src/components/ChannelDisclosure.vue": {
-      "raw_nongray": 0,
-      "raw_gray": 14,
+      "raw_gray": 6,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/ChatPanel.vue": {
@@ -363,11 +358,6 @@
     "src/frontend/src/components/SchedulesPanel.vue": {
       "raw_nongray": 21,
       "raw_gray": 302,
-      "hardcoded_colors": 0
-    },
-    "src/frontend/src/components/SharingPanel.vue": {
-      "raw_nongray": 0,
-      "raw_gray": 120,
       "hardcoded_colors": 0
     },
     "src/frontend/src/components/SkeletonLoader.vue": {

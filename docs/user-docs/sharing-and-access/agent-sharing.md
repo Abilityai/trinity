@@ -1,6 +1,6 @@
 # Agent Sharing & Access
 
-Two owner-only surfaces on the Agent Detail page control who can reach an agent: **Settings › People** (the former Access tab) manages the *people the agent is shared with* (they use it in the Workspace), and the **Channels** tab manages *external clients* (outside users reaching the agent through Slack, Telegram, WhatsApp, voice calls, or public links).
+Two owner-only surfaces on the Agent Detail page control who can reach an agent: **Settings › People** (the former Access tab) manages the *people the agent is shared with* (they use it in the Workspace), and the **Settings › Channels** manages *external clients* (outside users reaching the agent through Slack, Telegram, WhatsApp, voice calls, or public links).
 
 ## Concepts
 
@@ -49,11 +49,11 @@ Enforcement notes:
 - Shared users see only their own chat messages. Admins see all messages.
 - Deleting an agent cascades to remove all associated sharing records.
 
-## Channels Tab — External Clients
+## **Settings › Channels** — External Clients
 
-The **Channels** tab is organized around "who outside the team can reach this agent, and through what." Sections, top to bottom:
+The **Settings › Channels** is organized around "who outside the team can reach this agent, and through what." Sections, top to bottom:
 
-### Who can chat with this agent?
+### Who can chat
 
 A single **Restricted ↔ Open** control:
 
@@ -102,9 +102,7 @@ Each row has its own controls:
 
 Each action affects this agent only, is available to the agent's owner (and admins), and is recorded in the audit log.
 
-### Distribution
-
-One collapsible panel for distributing the agent's output rather than granting access:
+### Web
 
 - **Public links** — shareable chat URLs; see [Public Links](public-links.md).
 

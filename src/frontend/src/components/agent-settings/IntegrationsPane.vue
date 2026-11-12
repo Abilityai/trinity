@@ -23,6 +23,21 @@
         </p>
         <AgentMcpKeyPanel :agent-name="agentName" :notify="notify" embedded />
       </div>
+      <!-- trinity-enterprise#340: a desktop client over MCP is programmatic access,
+           not a messaging channel. The system agent never had this surface. -->
+      <SettingRow
+        v-if="!isSystem"
+        label="MCP connector"
+        hint="Add this agent to an AI client. Its skills become tools."
+        testid="integrations-connector"
+      >
+        <template #action>
+          <BaseButton variant="secondary" size="sm" @click="connectorOpen = true">Manage</BaseButton>
+        </template>
+      </SettingRow>
+      <ChannelConfigDialog v-if="connectorOpen" title="MCP connector" @close="connectorOpen = false">
+        <ConnectorChannelPanel :agent-name="agentName" />
+      </ChannelConfigDialog>
     </SettingsSection>
 
     <SettingsSection v-if="links.length" title="Still on their own tabs">
@@ -36,12 +51,14 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import SettingsSection from './SettingsSection.vue'
 import SettingRow from './SettingRow.vue'
 import BaseButton from '../base/BaseButton.vue'
 import McpExposedPanel from '../McpExposedPanel.vue'
 import AgentMcpKeyPanel from '../AgentMcpKeyPanel.vue'
+import ChannelConfigDialog from '../ChannelConfigDialog.vue'
+import ConnectorChannelPanel from '../ConnectorChannelPanel.vue'
 
 const props = defineProps({
   agentName: { type: String, required: true },
@@ -49,8 +66,11 @@ const props = defineProps({
   // is not there (the system agent has no Permissions tab, an OSS build no A2A).
   visibleTabIds: { type: Array, default: () => [] },
   notify: { type: Function, default: null },
+  isSystem: { type: Boolean, default: false },
 })
 defineEmits(['navigate-tab'])
+
+const connectorOpen = ref(false)
 
 const LINKS = [
   { tab: 'permissions', label: 'Agent to agent', open: 'Permissions', hint: 'Which agents may call this one.' },

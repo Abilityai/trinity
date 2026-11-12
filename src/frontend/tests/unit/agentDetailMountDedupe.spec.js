@@ -113,7 +113,7 @@ describe('#2198 first-activation sentinel', () => {
 
     // Below the guard: consumes state, or needs loaded agent data.
     // reconcileDeepLinkVisibility reads `deepLinkedTab`, acts, and CLEARS it —
-    // running it before the agent loads would judge ?tab=channels / ?tab=brain
+    // running it before the agent loads would judge ?tab=permissions / ?tab=brain
     // invisible against a null agent, fall back to Overview, and clear the flag
     // so onMounted's own later call becomes a no-op. That regresses #2130 and
     // #2153 and no request-count assertion would see it.
