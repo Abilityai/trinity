@@ -684,3 +684,36 @@ export function joinRequestState(project) {
   if (last && last.state === 'declined') return { kind: 'declined', reason: last.reason || null }
   return { kind: 'ask' }
 }
+
+// --- trinity-enterprise#1240: a task's GitHub issues and PRs ---------------------
+// Read-only: Trinity reads title and state. A merged PR or a closed issue is
+// evidence for a done claim, never a done. "Couldn't read" is the warning tone,
+// never the closed one — a failed read must not look like finished work.
+
+export const REF_STATE_BADGE = Object.freeze({
+  open: Object.freeze({ label: 'Open', variant: 'success' }),
+  merged: Object.freeze({ label: 'Merged', variant: 'purple' }),
+  closed: Object.freeze({ label: 'Closed', variant: 'neutral' }),
+  not_planned: Object.freeze({ label: 'Not planned', variant: 'neutral' }),
+  unreadable: Object.freeze({ label: "Couldn't read", variant: 'warning' }),
+})
+
+/** The badge for one ref: unreadable whenever the latest read did not succeed. */
+export function refBadge(ref) {
+  if (!ref || ref.readable === false) return REF_STATE_BADGE.unreadable
+  return REF_STATE_BADGE[ref.state] || REF_STATE_BADGE.unreadable
+}
+
+/** The link target, only for an https:// url; anything else renders as text. */
+export function refHref(ref) {
+  const url = ref && ref.url
+  return typeof url === 'string' && url.startsWith('https://') ? url : null
+}
+
+/** `owner/repo#N`. */
+export function refLabel(ref) {
+  return `${ref?.repo || ''}#${ref?.number ?? ''}`
+}
+
+export const REFS_MAX = 10
+export const REF_TEXT_MAX = 300
