@@ -65,6 +65,24 @@ skipped, audited ``skipped_budget``, and the delegator gets one notification
 per window; the ending stays readable through ``get_execution_result``. Redis
 trouble fails open: the budget must not cost an agent the wake it was promised.
 
+**Whose turn the wake is (trinity-enterprise#1216).** The wake carried nobody,
+so ``turn_tier_service.turn_actor`` rated it a visitor's turn, and the ledger
+rule (``dependencies.acting_turn_user_id``, ent#926) then hid every execution
+row from the delegator's own key for as long as the wake ran — the wake turn
+could not read the result it was woken for. The callee row records who the
+delegation was for (``turn_origin_user_id`` at dispatch), so the wake carries
+that person when they are owner tier on the delegator, and nobody otherwise:
+
+* the owner's own work (the agent's owner, an admin, a provider-rated member)
+  wakes as an owner turn and reads at the full view;
+* a person the delegator is only shared with, a person who cannot open it at
+  all (a hub's member, whose delegating turn ran ``delegated``), and a visitor
+  wake as the no-person turn they always were. No column records the
+  delegating turn, so its exact standing cannot be rebuilt here, and a
+  non-owner's wake is left unchanged rather than re-rated on a guess.
+
+``source_user_email`` stays off the row either way (ent#886).
+
 Never raises: this runs on the path of an already-billed terminal.
 """
 
@@ -72,7 +90,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
 from utils.credential_sanitizer import sanitize_text
 
@@ -221,6 +239,31 @@ def _standing_depth(caller: str, callee_depth: Any) -> int:
     return max(from_callee, running, 0)
 
 
+def _standing_person(caller: str, row) -> Optional[int]:
+    """The person the wake carries (ent#1216): the callee row's, and only when
+    that person is owner tier on ``caller``; None for everyone else.
+
+    Rated with the real ``turn_actor`` over the row the wake will be — the
+    delegator, that person, no source agent — so the delegation rule cannot
+    lift it and the member provider counts. Anything that cannot be read
+    carries nobody: the wake is still owed, and this never guesses upward.
+    """
+    person = getattr(row, "source_user_id", None)
+    if person is None:
+        return None
+    try:
+        from database import db
+        from services import turn_tier_service
+
+        tier = turn_tier_service.turn_actor(
+            db, caller, execution={"agent_name": caller, "source_user_id": person}
+        )[0]
+    except Exception:  # noqa: BLE001 — never raise on the billed terminal path
+        logger.debug("ent#1216: standing unreadable for %s", caller)
+        return None
+    return person if tier == turn_tier_service.OWNER else None
+
+
 def _wake_budget_limit() -> int:
     """The configured cap; ``0`` or less is unlimited. The code default on any read error."""
     from config import OPS_SETTINGS_DEFAULTS, OPS_SETTINGS_VALIDATION
@@ -318,14 +361,19 @@ async def _audit(**details) -> None:
 
 # --- the frame -------------------------------------------------------------
 
-def _summary_of(row) -> str:
+def _summary_of(row) -> Tuple[str, Optional[int]]:
+    """The callee's words, redacted and capped — and, only when the cap cut
+    them, the length of the full text (ent#1216), so the frame can say so."""
     raw = getattr(row, "error", None) or getattr(row, "response", None) or ""
     if not raw:
-        return ""
+        return "", None
+    text = str(raw)
     # Redact credentials at this single chokepoint, then cap — the #1578 order:
     # sanitize a bounded slice, then truncate, so a secret cannot survive by
     # sitting past the cap.
-    return sanitize_text(str(raw)[: SUMMARY_MAX * 2])[:SUMMARY_MAX]
+    clean = sanitize_text(text[: SUMMARY_MAX * 2])
+    cut = len(text) > SUMMARY_MAX * 2 or len(clean) > SUMMARY_MAX
+    return clean[:SUMMARY_MAX], (len(text) if cut else None)
 
 
 def _framed_wake(row, ask_ids: List[str]) -> str:
@@ -333,7 +381,7 @@ def _framed_wake(row, ask_ids: List[str]) -> str:
     execution_id = getattr(row, "id", "?")
     status = getattr(row, "status", "?")
     status = status.value if hasattr(status, "value") else str(status)
-    summary = _summary_of(row)
+    summary, full_length = _summary_of(row)
 
     lines = [
         f"A run you delegated to `{callee}` has ended: `{execution_id}` → **{status}**.",
@@ -351,6 +399,9 @@ def _framed_wake(row, ask_ids: List[str]) -> str:
         ]
     if summary:
         lines += ["", "Its own words on how it ended:", "", summary]
+        if full_length is not None:
+            # ent#1216: a silent cut read as the run's own answer stopping there.
+            lines += ["", f"[cut here: the first {len(summary):,} of {full_length:,} characters]"]
     lines += [
         "",
         f"Read the full result with `get_execution_result('{callee}', '{execution_id}')`. "
@@ -448,6 +499,11 @@ async def maybe_wake_caller(execution_id: Optional[str]) -> Optional[str]:
     ask_ids = _pending_ask_ids(execution_id)
     callee_depth = getattr(row, "chain_depth", None)
     chain_depth = _standing_depth(caller, callee_depth)
+    # ent#1216: an owner's delegation wakes as the owner's turn; every other
+    # wake carries nobody, as before.
+    person = _standing_person(caller, row)
+    standing = "owner" if person is not None else "none"
+    attribution = {"source_user_id": person} if person is not None else {}
 
     try:
         result = await _dispatch_wake(
@@ -458,6 +514,7 @@ async def maybe_wake_caller(execution_id: Optional[str]) -> Optional[str]:
             request_text="",
             triggered_by=TRIGGERED_BY_CALLER_WAKE,
             chain_depth=chain_depth,
+            **attribution,
         )
     except Exception as exc:  # noqa: BLE001
         if idem is not None:
@@ -468,7 +525,7 @@ async def maybe_wake_caller(execution_id: Optional[str]) -> Optional[str]:
         logger.exception("ent#1102: wake raised for caller=%s callee=%s", caller, execution_id)
         await _audit(caller=caller, callee=callee, callee_execution_id=execution_id,
                      execution_id=None, status="dispatch_error", error=type(exc).__name__,
-                     policy_source=verdict.source)
+                     policy_source=verdict.source, standing=standing)
         return None
 
     if idem is not None:
@@ -481,5 +538,5 @@ async def maybe_wake_caller(execution_id: Optional[str]) -> Optional[str]:
                  execution_id=result.execution_id, status=result.status,
                  error=result.error, policy_source=verdict.source,
                  ask_ids=ask_ids, chain_depth=chain_depth,
-                 callee_chain_depth=callee_depth)
+                 callee_chain_depth=callee_depth, standing=standing)
     return result.execution_id

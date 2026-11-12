@@ -9107,6 +9107,18 @@
         "git"
       ],
       "description": "trinity#4470: a manual Pull (POST /api/git/pull) on an agent cloned -b <tag> or detached at a commit is refused 400 for clean, stash_reapply and force_reset, before any fetch; HEAD, edited files, untracked files and the stash are untouched. An agent on a branch still pulls; a detached HEAD from a stopped rebase, or a symbolic-ref error, is not answered as pinned."
+    },
+    {
+      "file": "unit/test_ent1216_wake_turn_reads.py",
+      "feature": "trinity-enterprise#1216",
+      "added": "2026-11-11",
+      "categories": [
+        "unit",
+        "backend",
+        "agent-collaboration",
+        "security"
+      ],
+      "description": "ent#1216: a caller_wake turn carries the delegation's person when that person is owner tier on the delegator, so the agent's key keeps its execution reads while the wake runs. Real /task admission -> real maybe_wake_caller -> real ledger and acting_turn_user_id / viewer_row_scope on a real DB. A shared person's, a visitor's, a deleted user's and a cannot-open person's wake carry nobody, as before; the audit names the standing; auto-memory follows the owner rule."
     }
   ]
 }
