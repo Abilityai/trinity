@@ -11,7 +11,7 @@
       id="projects-github-read-owners"
       v-model="draft"
       label="GitHub owners Projects may read with the platform token"
-      help="Comma-separated GitHub users or organisations. Empty means Projects read public repos only."
+      help="Comma-separated GitHub users or organisations. Empty means Projects read public repos only. Removing an owner stops new reads; titles already read stay as last read."
       placeholder="your-org, another-org"
       :error="error"
       :disabled="saving || !loaded"

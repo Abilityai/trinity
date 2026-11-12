@@ -9,6 +9,7 @@ These tests drive the real method over an `httpx.MockTransport`:
 
 - the only method sent is GET, to the fixed API base;
 - a renamed repo's 301 is followed exactly once, a second hop is an error;
+- a redirect off the API origin (scheme, host, port) is refused unsent;
 - a non-200 raises `GitHubError` with `status`, `reset` and `rate_limited`;
 - an empty PAT sends no `Authorization` (public repos only);
 - the token never appears in the error text, even on a network error.
@@ -88,6 +89,35 @@ class TestGetIssue:
             _run(go())
         assert exc.value.status is None
         assert len(seen) == 2
+
+    def test_redirect_to_another_origin_is_refused_before_it_is_sent(self):
+        """C1: a 301 off the API origin is an error and the second hop is never sent."""
+        def handler(r):
+            if r.url.host == "api.github.com":
+                return httpx.Response(301, headers={"Location": "https://evil.example/repos/octo/hello/issues/7"})
+            return httpx.Response(200, json={"title": "leak"})
+
+        seen, go = _read(handler)
+        with pytest.raises(GitHubError) as exc:
+            _run(go())
+        assert exc.value.status is None
+        assert [str(r.url) for r in seen] == [f"{BASE}/repos/octo/hello/issues/7"]
+        assert TOKEN not in str(exc.value)
+
+    @pytest.mark.parametrize("location", [
+        "http://api.github.com/repos/octo/hello/issues/7",
+        "https://api.github.com:8443/repos/octo/hello/issues/7",
+    ])
+    def test_redirect_changing_scheme_or_port_is_refused(self, location):
+        def handler(r):
+            if str(r.url).startswith(BASE + "/"):
+                return httpx.Response(301, headers={"Location": location})
+            return httpx.Response(200, json={})
+
+        seen, go = _read(handler)
+        with pytest.raises(GitHubError):
+            _run(go())
+        assert len(seen) == 1
 
     def test_404_raises_with_status(self):
         _, go = _read(lambda r: httpx.Response(404, json={"message": "Not Found"}))

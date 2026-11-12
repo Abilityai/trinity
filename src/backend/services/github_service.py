@@ -133,11 +133,21 @@ class GitHubService:
         """The bounded client ``get_issue`` reads with: 5 s, one redirect.
 
         One redirect lets a renamed or transferred repo answer from its new
-        home; a second hop is an error. A caller reading many items shares
+        home; a second hop is an error, and so is a hop off ``API_BASE``'s
+        origin (scheme, host, port) — refused before it is sent, so the
+        token never leaves the API host. A caller reading many items shares
         one of these across the batch (ent#1240).
         """
+        base = httpx.URL(GitHubService.API_BASE)
+        origin = (base.scheme, base.host, base.port)
+
+        async def same_origin(request: httpx.Request) -> None:
+            if (request.url.scheme, request.url.host, request.url.port) != origin:
+                raise GitHubError("Redirect off the GitHub API refused")
+
         return httpx.AsyncClient(
             timeout=5.0, follow_redirects=True, max_redirects=1, transport=transport,
+            event_hooks={"request": [same_origin]},
         )
 
     async def get_issue(
