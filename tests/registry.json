@@ -9096,6 +9096,17 @@
         "api"
       ],
       "description": "#4442: platform-started turns (wakes, ask endings, events, unpinned reminders/schedules/loops) run on the agent's own model. PUT /model stores what the agent accepted (500 model_not_saved on a failed save, audited, nothing on refusal or a non-Claude agent); create seeds default_model from runtime.model or a top-level model: on the local and github paths (fill-blank, catalog-gated); a boot pass fills NULL columns from AGENT_RUNTIME_MODEL then the live template.yaml (conditional write, one per agent across workers, env never logged); push /chat resolves and stamps the model; per-kind execute_task resolution; pinned models win; AST guard that wake producers pass no model."
+    },
+    {
+      "file": "unit/test_4470_manual_pull_pinned_tag.py",
+      "feature": "trinity#4470",
+      "added": "2026-11-11",
+      "categories": [
+        "unit",
+        "agent-server",
+        "git"
+      ],
+      "description": "trinity#4470: a manual Pull (POST /api/git/pull) on an agent cloned -b <tag> or detached at a commit is refused 400 for clean, stash_reapply and force_reset, before any fetch; HEAD, edited files, untracked files and the stash are untouched. An agent on a branch still pulls; a detached HEAD from a stopped rebase, or a symbolic-ref error, is not answered as pinned."
     }
   ]
 }
