@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_1105_execution_attribution.py",
+      "feature": "trinity-enterprise#1105",
+      "added": "2026-11-12",
+      "categories": [
+        "backend",
+        "executions",
+        "census"
+      ],
+      "description": "trinity-enterprise#1105: AST census — every create_task_execution( site in the platform backend calls execution_attribution.record_row or is allowlisted with a reason (stale entries fail; removing a record call turns it red); the internal execute-task route records the scheduler's row; OSS refuses a named project_id with 422 project_attribution_unavailable on /chat, /task and /fan-out before admission; record/annotate fail open; GET executions/{id} carries project_id from annotate."
+    },
+    {
       "file": "unit/test_ent1221_web_delivery.py",
       "feature": "trinity-enterprise#1221",
       "added": "2026-11-11",

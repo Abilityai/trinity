@@ -43,6 +43,7 @@ from database import db
 from db.skill_gates import ORIGIN_CLEARED
 from models import TaskExecutionStatus
 from services import peer_skill_policy, rate_limiter, role_addressing
+from services import execution_attribution  # ent#1105
 from services.skill_gate_errors import (  # noqa: F401 — re-exported for entries and tests
     APPROVAL_PENDING_CODE,
     OUTCOME_DELIVERY_AGENT_TASK,
@@ -1791,6 +1792,9 @@ async def _dispatch_approved(record: Dict[str, Any], execution_id: str) -> str:
         ),
         execution_id=execution_id,
     )
+    # ent#1105: an edition may attribute the replayed run; a project frozen
+    # into the gate record is carried (none is frozen yet, so the row decides).
+    execution_attribution.record_row(row, inherited_project_id=frozen.get("project_id"))
     if row is None:
         raise RuntimeError("could not create the execution record")
 

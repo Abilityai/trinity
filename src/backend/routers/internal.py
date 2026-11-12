@@ -25,6 +25,7 @@ from models import (
     TaskExecutionStatus,
     ValidateExecutionRequest,
 )
+from services import execution_attribution  # ent#1105
 from services.activity_service import activity_service
 from services.task_execution_service import get_task_execution_service
 from services.skill_gate_errors import SkillGateError
@@ -514,6 +515,16 @@ async def execute_task_internal(
                 request.agent_name, request.deliver_to_workspace_email, **seat_kwargs,
             )
         )
+
+    # ent#1105: the scheduler created this row in its own process, so it is
+    # offered to the attribution seam here — once, after the ent#498 stamp (the
+    # row's channel fields are final) and before dispatch. Inert in OSS.
+    if request.execution_id:
+        try:
+            created_row = db.get_execution(request.execution_id)
+        except Exception:  # noqa: BLE001 — attribution never blocks a scheduled run
+            created_row = None
+        execution_attribution.record_row(created_row)
 
     if request.async_mode:
         # Fire-and-forget: spawn background task, return immediately

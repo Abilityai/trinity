@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Header
 from fastapi.responses import JSONResponse
 
 from dependencies import get_current_user, get_authorized_agent, resolve_source_agent, viewer_row_scope
+from dependencies import check_requested_project  # ent#1105
 from database import db
 from services import turn_tier_service  # ent#926: a dispatched turn is no higher than its parent
 from models import (
@@ -37,6 +38,7 @@ from services.fan_out_service import (
     get_fan_out_service,
 )
 from services import dispatch_admission_service, idempotency_service
+from services import execution_attribution  # ent#1105
 from services.chat_execution_service import ERROR_CODE_HEADER
 from services.chat_signals import InterAgentDepthExceeded
 from services.platform_audit_service import platform_audit_service, AuditEventType
@@ -78,6 +80,10 @@ async def fan_out(
             status_code=400,
             detail=f"Fan-out target must be 'self' or '{name}'. Cross-agent fan-out is not yet supported.",
         )
+
+    # ent#1105: a named project_id is checked before anything is claimed or
+    # dispatched (422 project_attribution_unavailable when no edition attributes).
+    check_requested_project(request, current_user, name)
 
     # #2806: chain-depth guard, after target access (the path dependency's
     # uniform 404) and before the idempotency claim — a refused batch burns no
@@ -176,6 +182,10 @@ async def fan_out(
             source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
             source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
             chain_depth=chain_depth,
+            # ent#1105: resolved ONCE here; children are created when slots free.
+            project_id=execution_attribution.resolve(
+                agent_name=name, principal=current_user,
+                requested_project_id=request.project_id, triggered_by="fan_out"),
             # #2670: record the batch id on the idempotency claim as soon as it
             # exists rather than only at `complete()`. A fan-out runs longer
             # than any single task by construction, so the window in which a

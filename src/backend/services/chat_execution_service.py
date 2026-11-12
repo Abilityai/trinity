@@ -48,6 +48,7 @@ from models import (
 )
 from database import db
 from services import turn_tier_service  # ent#926: a dispatched turn is no higher than its parent
+from services import execution_attribution  # ent#1105: an edition may attribute executions to a project
 from services.activity_service import activity_service
 from services.agent_auth import agent_httpx_client
 from services.docker_service import get_agent_container
@@ -235,6 +236,10 @@ async def prepare_chat_execution(
         execution_id=chat_execution_id,
     )
     task_execution_id = task_execution.id if task_execution else None
+    # ent#1105: an edition may attribute this execution to a project (inert in OSS).
+    execution_attribution.record_row(
+        task_execution, principal=current_user,
+        requested_project_id=getattr(request, "project_id", None))
     idempotency_service.attach_execution(idem, task_execution_id)
     logger.info(
         f"[Chat] Created task execution {task_execution_id} for {triggered_by} call on agent '{name}'"
@@ -2290,6 +2295,10 @@ async def create_task_execution_and_activities(
         ),
     )
     execution_id = execution.id if execution else None
+    # ent#1105: an edition may attribute this execution to a project (inert in OSS).
+    execution_attribution.record_row(
+        execution, principal=current_user,
+        requested_project_id=getattr(request, "project_id", None))
     idempotency_service.attach_execution(idem, execution_id)
 
     collaboration_activity_id = None
