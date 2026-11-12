@@ -217,6 +217,27 @@ export function projectErrorMessage(err) {
   return 'Something went wrong on the server. Try again in a moment.'
 }
 
+// ent#1163 — the epic field: `owner/repo#N` or the issue's github.com link.
+const EPIC_SHORT = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{1,100}#[1-9]\d{0,8}$/
+const EPIC_URL = /^https?:\/\/github\.com\/[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9_.-]{1,100}\/issues\/[1-9]\d{0,8}\/?$/
+const EPIC_EXAMPLE = 'e.g. your-org/repo#12 or https://github.com/your-org/repo/issues/12'
+
+/** A named error for the epic field before it is sent (principle 17), else ''. */
+export function validateEpicRef(text) {
+  const t = String(text || '').trim()
+  if (!t) return `Paste the epic's GitHub issue, ${EPIC_EXAMPLE}.`
+  if (!EPIC_SHORT.test(t) && !EPIC_URL.test(t)) return `That isn't a GitHub issue. Use ${EPIC_EXAMPLE}.`
+  return ''
+}
+
+/** The epic import's refusal in the dialog's words; other codes as everywhere. */
+export function epicImportErrorMessage(err) {
+  const detail = err && err.response && err.response.data && err.response.data.detail
+  const code = detail && typeof detail === 'object' ? detail.code : null
+  if (code === 'invalid_ref') return `That isn't a GitHub issue. Use ${EPIC_EXAMPLE}.`
+  return projectErrorMessage(err)
+}
+
 /** The list tabs: all I can see / I'm a member / company, plus a name search. */
 export function filterProjects(list, filter, query) {
   const q = String(query || '').trim().toLowerCase()
