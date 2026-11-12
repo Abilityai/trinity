@@ -233,6 +233,7 @@ _OPERATOR_SIDE_TRIGGERS = frozenset({
     "operator_ending",  # trinity-enterprise#611: the wake for a cancelled/expired ask
     "skill_gate",       # trinity-enterprise#751: the notice that a gated request was decided
     "caller_wake",      # trinity-enterprise#1102: the wake for a delegated run that ended
+    "project_steward",  # trinity-enterprise#1236: the platform waking a project's steward
 })
 
 
