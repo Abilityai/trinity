@@ -322,6 +322,133 @@ export function groupTasks(tasks) {
   }
 }
 
+// --- the board (trinity-enterprise#957) ------------------------------------------
+//
+// A second VIEW over the same tasks: one column per step of the path a task
+// walks, a card per task. A task that is blocked, waiting on a decision or
+// paused stays in its column and says so with a badge. The columns are data, so
+// a new step of the path is one more entry here, and the server stays the
+// authority for every move — these only decide what to offer and what to send.
+
+export const BOARD_COLUMNS = Object.freeze([
+  Object.freeze({ key: 'active', label: 'Active', badge: 'info', statuses: Object.freeze(['active', 'blocked', 'needs-decision', 'paused']), drop: 'active' }),
+  Object.freeze({ key: 'pending-verification', label: 'Awaiting verification', badge: 'autonomous', statuses: Object.freeze(['pending-verification']), drop: 'pending-verification' }),
+  Object.freeze({ key: 'done', label: 'Done', badge: 'success', statuses: Object.freeze(['done']), drop: 'done' }),
+])
+
+/** The statuses that hold a task where it is: shown as a badge, set from the card. */
+export const BOARD_HELD = Object.freeze(['blocked', 'needs-decision', 'paused'])
+
+const BOARD_COLUMN_MIN = 232
+const BOARD_GAP = 12
+
+/** The narrowest container the board fits; under it the list renders instead. */
+export function boardMinWidth(columns = BOARD_COLUMNS) {
+  return columns.length * BOARD_COLUMN_MIN + Math.max(0, columns.length - 1) * BOARD_GAP
+}
+
+/**
+ * The column a task sits in. A status no column names (one a newer server
+ * added) lands in the FIRST column, so a task is never missing from the board.
+ */
+export function columnOf(task, columns = BOARD_COLUMNS) {
+  const hit = columns.find((c) => c.statuses.includes(task?.status))
+  return (hit || columns[0]).key
+}
+
+/**
+ * What dropping `task` on column `toKey` means:
+ *   { kind: 'noop' }                       — its own column, or no such column
+ *   { kind: 'refused', reason }            — nothing is sent
+ *   { kind: 'move', status, confirm }      — send `{ status }`; `confirm` asks first
+ * A done task can only be reopened (to Active). Marking a task done that never
+ * waited for verification skips the evidence step, so it asks first.
+ */
+export function boardMove(task, toKey, columns = BOARD_COLUMNS) {
+  const to = columns.find((c) => c.key === toKey)
+  if (!task || !to || columnOf(task, columns) === to.key) return { kind: 'noop' }
+  if (task.status === 'done' && to.drop !== 'active') {
+    return { kind: 'refused', reason: `${task.id} is done. A done task can only be reopened: move it to Active.` }
+  }
+  return { kind: 'move', status: to.drop, confirm: to.drop === 'done' && task.status !== 'pending-verification' }
+}
+
+/** What a card's own menu offers: hold it, or let it run again. Never a path step. */
+export function boardStateActions(task) {
+  const status = task?.status
+  if (status === 'pending-verification' || status === 'done') return []
+  const out = []
+  if (BOARD_HELD.includes(status)) out.push({ status: 'active', label: 'Resume' })
+  if (status !== 'blocked') out.push({ status: 'blocked', label: 'Mark blocked' })
+  if (status !== 'needs-decision') out.push({ status: 'needs-decision', label: 'Needs a decision' })
+  if (status !== 'paused') out.push({ status: 'paused', label: 'Pause' })
+  return out
+}
+
+/**
+ * The board's columns with their cards. `inflight` maps a task id to the status
+ * a move in flight is sending: the card is drawn where it is going, marked as
+ * saving, until the server answers. Done reads newest first; the rest by id.
+ */
+export function boardColumns(tasks, { inflight = {}, members = [], myEmail = '', columns = BOARD_COLUMNS } = {}) {
+  const label = (email) => {
+    const m = (members || []).find((x) => x.email === String(email || '').toLowerCase())
+    return (m && m.label) || email || ''
+  }
+  const byId = (a, b) => String(a.id).localeCompare(String(b.id), undefined, { numeric: true })
+  const cards = [...(tasks || [])].sort(byId).map((t) => {
+    const saving = Object.prototype.hasOwnProperty.call(inflight, t.id)
+    const status = saving && inflight[t.id] ? inflight[t.id] : t.status
+    const known = TASK_STATUSES.includes(status)
+    return {
+      id: t.id,
+      title: t.title,
+      status,
+      saving,
+      p1: t.priority === 'p1',
+      // The column says the path step; a badge says anything else.
+      flag: BOARD_HELD.includes(status) ? { label: taskStatusLabel(status), variant: TASK_STATUS_BADGE[status] }
+        : known ? null : { label: String(status || 'No status'), variant: 'neutral' },
+      owner: t.owner ? label(t.owner) : '',
+      agent: t.agent || '',
+      creator: t.created_by ? authorLabel(t.created_by, myEmail) : '',
+      waitingOn: status === 'blocked' ? (t.waiting_on || '') : '',
+      updatedAt: t.updated_at || null,
+      pendingSince: status === 'pending-verification' ? (t.pending_since || null) : null,
+      task: t,
+    }
+  })
+  return columns.map((c, i) => {
+    const mine = cards.filter((k) => columnOf(k, columns) === c.key)
+    if (c.drop === 'done') mine.sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
+    const held = BOARD_HELD
+      .map((st) => ({ status: st, label: taskStatusLabel(st).toLowerCase(), count: mine.filter((k) => k.status === st).length }))
+      .filter((h) => h.count)
+    return { key: c.key, label: c.label, badge: c.badge, first: i === 0, cards: mine, held }
+  })
+}
+
+/** "T-104 · Blocked → Awaiting verification" — the line a finished move says. */
+export function boardMoveLine(taskId, from, to) {
+  return `${taskId} · ${taskStatusLabel(from)} → ${taskStatusLabel(to)}`
+}
+
+// The Tasks view a person used last, per browser and per person.
+export const TASKS_VIEWS = Object.freeze(['list', 'board'])
+export const tasksViewKey = (email) => `trinity.workspace.projects.tasksView:${String(email || '').toLowerCase() || 'anon'}`
+
+export function readTasksView(email, storage = globalThis.localStorage) {
+  try {
+    const v = storage.getItem(tasksViewKey(email))
+    return TASKS_VIEWS.includes(v) ? v : 'list'
+  } catch { return 'list' }
+}
+
+export function writeTasksView(email, view, storage = globalThis.localStorage) {
+  if (!TASKS_VIEWS.includes(view)) return
+  try { storage.setItem(tasksViewKey(email), view) } catch { /* private window: asked again next time */ }
+}
+
 export const LOG_KINDS = ['decision', 'deliverable', 'task', 'blocker', 'handoff', 'note']
 // `status` is written by a health update (v3.3), never offered in the add form.
 const LOG_KIND_LABEL = {
