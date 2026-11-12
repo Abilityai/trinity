@@ -397,9 +397,12 @@ describe('the chassis replaced the card ladder (structure)', () => {
     )
     // The checklist itself opens expanded on first start; a saved collapse wins.
     expect(CHECKLIST).toMatch(/getItem\(EXPANDED_KEY\) !== 'false'/)
-    // Expanded by default: an unlabelled rail hides both the systems it lists
-    // and the checklist. A saved preference still wins.
-    expect(SIDEBAR).toMatch(/savedCollapsed === 'true' : false/)
+    // Expanded by default from `sm` up: an unlabelled rail hides both the
+    // systems it lists and the checklist. Below `sm` it starts collapsed, as
+    // the open rail is 60% of a phone; one tap opens it. A saved preference
+    // still wins either way.
+    expect(SIDEBAR).toMatch(/savedCollapsed === 'true' : onPhone/)
+    expect(SIDEBAR).toMatch(/matchMedia\('\(max-width: 639px\)'\)/)
     expect(DASHBOARD.match(/<FirstRunOverlay\b/g)).toHaveLength(1)
     // The Dashboard's hotkeys stand down while setup is open.
     expect(DASHBOARD).toMatch(/firstRunOpen\.value \|\| isEditorOpen\.value/)
