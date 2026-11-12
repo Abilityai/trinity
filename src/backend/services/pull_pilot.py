@@ -160,7 +160,10 @@ def pull_queue_allowance(agent_name: str) -> int:
 PULL_REACHABLE_TRIGGERS = frozenset(
     {"agent", "event", "schedule", "webhook", "reminder", "loop", "fan_out",
      "a2a", "operator_response", "operator_ending", "retry", "self_task",
-     "skill_gate", "caller_wake"}
+     "skill_gate", "caller_wake",
+     # trinity-enterprise#1236: the project steward wake is dispatched through
+     # `execute_task` like a loop iteration, so it reaches a pull pilot.
+     "project_steward"}
 )
 
 

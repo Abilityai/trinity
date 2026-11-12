@@ -310,6 +310,12 @@ export const useProjectsStore = defineStore('projects', () => {
     _write(id, () => portalHttp.post(url(id, '/steward-access/request'), {}, { headers: headers() }))
   const grantStewardAccess = (id, email) =>
     _write(id, () => portalHttp.post(url(id, '/steward-access/grant'), { email }, { headers: headers() }))
+  // trinity-enterprise#1236: a person starts or pauses Trinity waking the agent
+  // steward. Through `_write`, so the card re-reads its `wake` block.
+  const startStewardWake = (id) =>
+    _write(id, () => portalHttp.post(url(id, '/steward/resume'), {}, { headers: headers() }))
+  const pauseStewardWake = (id) =>
+    _write(id, () => portalHttp.post(url(id, '/steward/pause'), {}, { headers: headers() }))
 
   // --- ent#1193: context — briefs prepared for the project's agents ------------------
   // Writes go through `_write`, so the page read (its `context` list) refreshes.
@@ -382,7 +388,7 @@ export const useProjectsStore = defineStore('projects', () => {
     addTaskRefs, removeTaskRef,
     addGuest, addItem, setItemAudience, removeItem, fetchReport, myItems, importCandidates, importProject,
     setHealth, linkMetric, unlinkMetric, metricOptions, stewarding, fetchStewarding,
-    requestStewardAccess, grantStewardAccess, requestToJoin, requestAgent,
+    requestStewardAccess, grantStewardAccess, startStewardWake, pauseStewardWake, requestToJoin, requestAgent,
     startPreview, startTask,
     writeContext, readContext, updateContext, deleteContext, markItemForAgents,
     fetchProjectPeople, fetchCompanyPeople, fetchStewardOptions,
