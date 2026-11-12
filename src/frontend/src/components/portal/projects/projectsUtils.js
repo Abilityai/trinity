@@ -32,7 +32,7 @@ const TASK_FIELD_LABEL = { title: 'title', objective: 'objective', done_definiti
 export const TASK_FIELD_ERROR_CODES = Object.freeze({
   invalid_title: 'title', invalid_objective: 'objective', invalid_done_definition: 'done_definition',
   // ent#1232: a task's shape — its parent and the tasks it waits on.
-  invalid_parent: 'parent', parent_not_found: 'parent', parent_is_self: 'parent', parent_is_subtask: 'parent',
+  parent_not_found: 'parent', parent_is_self: 'parent', parent_is_subtask: 'parent',
   has_subtasks: 'parent', invalid_blocked_by_add: 'blocked_by', invalid_blocked_by_remove: 'blocked_by',
   invalid_blocked_by: 'blocked_by', blocker_not_found: 'blocked_by', blocker_is_self: 'blocked_by',
   blocker_is_parent: 'blocked_by', blocker_cycle: 'blocked_by', too_many_blockers: 'blocked_by',
