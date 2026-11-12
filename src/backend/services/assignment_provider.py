@@ -28,7 +28,13 @@ with the answer shaped as::
         "role_id":              str | None,
         "stakeholders":         list[str] | None,
         "proactive_consent":    bool | None,
+        "proactive_reachable":  bool | None,   # trinity-enterprise#1221
     }
+
+``proactive_reachable`` answers a different question from consent: whether any
+channel could deliver to the primary at all. ``False`` makes the line say so
+instead of "permitted"; ``None`` (unknown, or a provider that predates the key)
+renders exactly as before.
 
 **The provider owns "never an email", not this module.** The validation below
 checks *types*, not contents — a display name that happens to be an address is a
@@ -66,7 +72,10 @@ MAX_APPROVER_ROLES = 100
 
 # The keys a provider answer may carry. Anything else is dropped — a provider
 # cannot smuggle an unrendered field into the prompt path by adding a key.
-_ANSWER_KEYS = ("primary_user_display", "role_id", "stakeholders", "proactive_consent")
+_ANSWER_KEYS = ("primary_user_display", "role_id", "stakeholders", "proactive_consent",
+                "proactive_reachable")
+#: Keys whose only valid value is a real bool (``bool("false")`` is True).
+_BOOL_KEYS = frozenset({"proactive_consent", "proactive_reachable"})
 
 
 class AssignmentProvider(Protocol):
@@ -236,16 +245,18 @@ def _validated(answer: Any, agent_name: str) -> Optional[Dict[str, Any]]:
                 )
                 continue
             out[key] = [str(v) for v in value]
-        elif key == "proactive_consent":
-            # A permission statement: only a real bool counts. ``bool("false")``
-            # is True, so coercion turned "not permitted" into "permitted".
-            # Anything else is unresolved, and the renderer fails closed on it.
+        elif key in _BOOL_KEYS:
+            # A permission (or reachability) statement: only a real bool counts.
+            # ``bool("false")`` is True, so coercion turned "not permitted" into
+            # "permitted". Anything else is unresolved, and the renderer fails
+            # closed on consent and renders reachability as unknown.
             if not isinstance(value, bool):
                 logger.warning(
                     "[assignment_provider] provider returned %s for "
-                    "'proactive_consent' (expected bool/None); treating as "
+                    "%r (expected bool/None); treating as "
                     "unresolved for %s",
                     type(value).__name__,
+                    key,
                     agent_name,
                 )
                 continue

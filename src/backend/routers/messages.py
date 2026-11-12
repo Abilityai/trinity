@@ -1,3 +1,4 @@
+# mcp: messages.ts (send_message → POST /api/agents/{name}/messages); the proactive-shares consent toggle (person-only, ent#872) and its read are owner UI, not exposed
 """
 Proactive Messaging Router (Issue #321).
 
@@ -59,6 +60,8 @@ async def send_proactive_message(
     # trinity-enterprise#341: refused when this agent's tool access removes send_message.
     assert_tool_allowed(current_user, "send_message", as_agent=agent_name)
     recipient = _recipient(agent_name, request, current_user)
+    # ent#1221: only the agent's own key writes into a person's Workspace.
+    caller_agent = getattr(current_user, "agent_name", None)
     try:
         result = await proactive_message_service.send_message(
             agent_name=agent_name,
@@ -70,14 +73,16 @@ async def send_proactive_message(
             dedup_label=request.dedup_label,
             idempotency_key=request.idempotency_key,
             idempotency_ttl=request.idempotency_ttl,
+            as_agent_key=bool(caller_agent) and caller_agent == agent_name,
         )
 
-        # ent#665 fields are set only when a key was supplied, so with
-        # exclude_unset a keyless response is unchanged.
+        # ent#665 fields are set only when a key was supplied, and ent#1221's
+        # `delivery` only for a Workspace delivery, so with exclude_unset every
+        # other response is unchanged.
         intent_fields = {
-            k: getattr(result, k)
-            for k in ("sent", "suppressed_by", "first_sent_at", "first_execution_id")
-            if getattr(result, k) is not None
+            k: getattr(result, k, None)
+            for k in ("sent", "suppressed_by", "first_sent_at", "first_execution_id", "delivery")
+            if getattr(result, k, None) is not None
         }
         return SendMessageResponse(
             success=result.success,
@@ -106,9 +111,16 @@ async def send_proactive_message(
         raise HTTPException(status_code=429, detail=str(e))
 
     except RecipientNotFoundError as e:
-        raise HTTPException(status_code=404, detail=_role_only(
+        # ent#1221: say why, per channel — codes only, never an address.
+        channels = getattr(e, "channels", None) or (
+            {request.channel: e.reason} if getattr(e, "reason", None) else {})
+        role = _role_only(
             request, "role_no_channel",
-            "No delivery channel reaches the person in the {role} role.") or str(e))
+            "No delivery channel reaches the person in the {role} role.")
+        if role is not None:
+            raise HTTPException(status_code=404, detail={**role, "channels": channels})
+        raise HTTPException(status_code=404, detail={
+            "code": "no_channel", "message": str(e), "channels": channels})
 
     except ChannelDeliveryError as e:
         raise HTTPException(status_code=502, detail=str(e))
