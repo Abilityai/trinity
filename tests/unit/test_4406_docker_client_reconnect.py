@@ -97,3 +97,29 @@ def test_connected_client_is_reused_without_reconnecting(docker_down):
     clock.now += ds._DOCKER_RETRY_MAX_S
     assert ds.get_docker_client() is first
     assert state["calls"] == 1
+
+
+def test_a_slow_failure_still_waits_out_the_delay(docker_down, monkeypatch):
+    clock, state = docker_down
+
+    def slow_from_env():
+        state["calls"] += 1
+        clock.now += 5 * ds._DOCKER_RETRY_INITIAL_S  # e.g. a TCP DOCKER_HOST timing out
+        raise docker.errors.DockerException("timed out")
+
+    monkeypatch.setattr(ds.docker, "from_env", slow_from_env)
+
+    assert ds.get_docker_client() is None
+    assert ds.get_docker_client() is None
+    assert state["calls"] == 1
+
+
+def test_a_second_caller_does_not_wait_on_a_connect_in_progress(docker_down):
+    clock, state = docker_down
+    state["up"] = True
+
+    with ds._docker_connect_lock:
+        assert ds.get_docker_client() is None
+    assert state["calls"] == 0
+
+    assert ds.get_docker_client() is state["client"]

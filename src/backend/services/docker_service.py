@@ -2,6 +2,7 @@
 Docker service for managing agent containers.
 """
 import logging
+import threading
 import time
 from typing import Dict, List, Optional, Set, Union
 import docker
@@ -60,6 +61,7 @@ _DOCKER_RETRY_INITIAL_S = 1.0
 _DOCKER_RETRY_MAX_S = 60.0
 _docker_retry_delay_s = _DOCKER_RETRY_INITIAL_S
 _next_docker_attempt_monotonic: Optional[float] = None
+_docker_connect_lock = threading.Lock()
 
 
 def get_docker_client():
@@ -67,25 +69,35 @@ def get_docker_client():
 
     Returns None while Docker stays unreachable. Attempts are spaced from
     `_DOCKER_RETRY_INITIAL_S`, doubling up to `_DOCKER_RETRY_MAX_S`, so the 5s
-    poll loops do not hammer a dead socket.
+    poll loops do not hammer a dead socket. One thread connects at a time; the
+    others get None instead of waiting on it.
     """
     global docker_client, _docker_retry_delay_s, _next_docker_attempt_monotonic
     if docker_client is not None:
         return docker_client
-    now = time.monotonic()
-    if _next_docker_attempt_monotonic is not None and now < _next_docker_attempt_monotonic:
+    if not _docker_connect_lock.acquire(blocking=False):
         return None
     try:
-        docker_client = docker.from_env()
-    except Exception as e:
-        _next_docker_attempt_monotonic = now + _docker_retry_delay_s
-        _docker_retry_delay_s = min(_docker_retry_delay_s * 2, _DOCKER_RETRY_MAX_S)
-        _warn_throttled("docker_connect", "Docker still unreachable: %s", e)
-        return None
-    _docker_retry_delay_s = _DOCKER_RETRY_INITIAL_S
-    _next_docker_attempt_monotonic = None
-    logger.info("Connected to Docker after it was unreachable")
-    return docker_client
+        if docker_client is not None:
+            return docker_client
+        if (_next_docker_attempt_monotonic is not None
+                and time.monotonic() < _next_docker_attempt_monotonic):
+            return None
+        try:
+            client = docker.from_env()
+        except Exception as e:
+            # From when the attempt failed, so a slow failure still waits out the delay.
+            _next_docker_attempt_monotonic = time.monotonic() + _docker_retry_delay_s
+            _docker_retry_delay_s = min(_docker_retry_delay_s * 2, _DOCKER_RETRY_MAX_S)
+            _warn_throttled("docker_connect", "Docker still unreachable: %s", e)
+            return None
+        docker_client = client
+        _docker_retry_delay_s = _DOCKER_RETRY_INITIAL_S
+        _next_docker_attempt_monotonic = None
+        logger.info("Connected to Docker after it was unreachable")
+        return docker_client
+    finally:
+        _docker_connect_lock.release()
 
 
 def get_agent_container(name: str):
