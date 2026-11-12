@@ -77,6 +77,17 @@ describe('MemberAgentModelPanel', () => {
     expect(rows[1].text()).toContain('default')
   })
 
+  it('badges each agent with the source its own-turn model came from', async () => {
+    api.get.mockResolvedValue(settings([
+      agent('member-1', 'claude-opus-5', 'stored'),
+      agent('member-2', 'claude-opus-5', 'template'),
+      agent('member-3', 'claude-sonnet-4-6', 'default'),
+    ]))
+    const w = await mountPanel()
+    const badges = w.findAll('[data-testid="member-model-row"]').map((r) => r.findAll('td')[2].text())
+    expect(badges).toEqual(['stored', 'template', 'default'])
+  })
+
   it('shares one GET with the welcome panel, and a welcome save keeps the view', async () => {
     api.get.mockResolvedValue(settings([agent('member-1', 'claude-opus-5', 'template')]))
     setActivePinia(createPinia())
