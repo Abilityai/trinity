@@ -492,6 +492,14 @@ describe("ent#1105 — list_project_executions", () => {
     assert.equal(seen[1][1], "/api/enterprise/projects/agent/projects/prj_1/executions");
   });
 
+  it("task_id takes up to 64 characters, the backend route's bound", () => {
+    const params = makeTools().list_project_executions.parameters as unknown as {
+      safeParse: (v: unknown) => { success: boolean };
+    };
+    assert.equal(params.safeParse({ project_id: PROJECT.id, task_id: "t".repeat(64) }).success, true);
+    assert.equal(params.safeParse({ project_id: PROJECT.id, task_id: "t".repeat(65) }).success, false);
+  });
+
   it("a live-turn refusal is structured, never a throw", async () => {
     const tools = makeTools({
       listProjectExecutions: (async () => {

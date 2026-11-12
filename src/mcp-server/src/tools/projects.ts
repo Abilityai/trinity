@@ -525,7 +525,7 @@ export function createProjectTools(client: TrinityClient, requireApiKey: boolean
         until: z.string().max(64).optional().describe("ISO end of the window; default now."),
         agent: z.string().max(128).optional().describe("Only runs by this agent."),
         status: z.string().max(32).optional().describe("Only runs in this status, e.g. failed."),
-        task_id: z.string().max(16).optional().describe("Only runs for this task, e.g. T-003."),
+        task_id: z.string().max(64).optional().describe("Only runs for this task, e.g. T-003."),
         source: z.string().max(32).optional().describe("chat, room, task, delegated, explicit or steward."),
         limit: z.number().int().min(1).max(100).optional().describe("Rows per page, 1-100 (default 50)."),
         cursor: z.string().max(512).optional().describe("next_cursor from the previous page."),
