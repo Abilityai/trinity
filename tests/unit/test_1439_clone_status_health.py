@@ -74,8 +74,16 @@ def _load_monitoring_service():
     fake_auth.agent_httpx_client = MagicMock()
     sys.modules["services.agent_auth"] = fake_auth
 
-    sys.modules["services.docker_service"] = types.ModuleType("services.docker_service")
+    _docker_service_stub = types.ModuleType("services.docker_service")
+    sys.modules["services.docker_service"] = _docker_service_stub
     sys.modules["services.docker_utils"] = types.ModuleType("services.docker_utils")
+    # `from services import docker_service` reads the package attribute first,
+    # so the stub must be set there too (and put back below) (#4406).
+    _pkg = sys.modules.get("services")
+    _missing = object()
+    _saved_attr = getattr(_pkg, "docker_service", _missing) if _pkg is not None else _missing
+    if _pkg is not None:
+        _pkg.docker_service = _docker_service_stub
 
     try:
         spec = importlib.util.spec_from_file_location(
@@ -86,6 +94,11 @@ def _load_monitoring_service():
         spec.loader.exec_module(mod)
         return mod
     finally:
+        if _pkg is not None:
+            if _saved_attr is _missing:
+                _pkg.__dict__.pop("docker_service", None)
+            else:
+                _pkg.docker_service = _saved_attr
         for k, v in saved.items():
             if v is None:
                 sys.modules.pop(k, None)

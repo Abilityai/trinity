@@ -159,6 +159,8 @@ def _restore_sys_modules(monkeypatch):
     recognizes the snapshot/restore helper (`tests/lint_sys_modules.py`)."""
     for _name in _STUBBED_MODULE_NAMES:
         monkeypatch.setitem(sys.modules, _name, _REAL_MODULES[_name])
+    # `from services import docker_service` reads the package attribute first (#4406).
+    monkeypatch.setattr(_REAL_SERVICES_PKG, "docker_service", _REAL_DOCKER_SERVICE, raising=False)
 
 
 @pytest.fixture

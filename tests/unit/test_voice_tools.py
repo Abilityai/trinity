@@ -137,6 +137,9 @@ def _stub_services_package():
     docker_svc.get_agent_by_name = MagicMock(return_value=None)
     docker_svc.get_next_available_port = MagicMock(return_value=2222)
     sys.modules["services.docker_service"] = docker_svc
+    # `from services import docker_service` reads the package attribute first (#4406).
+    if "services" in sys.modules:
+        sys.modules["services"].docker_service = docker_svc
 
     tmpl_svc = types.ModuleType("services.template_service")
     tmpl_svc.get_github_template = MagicMock()
@@ -164,6 +167,12 @@ _voice_tools_pre_stub = {
         "services.template_service",
     )
 }
+_voice_tools_pkg = sys.modules.get("services")
+_voice_tools_missing = object()
+_voice_tools_pre_attr = (
+    getattr(_voice_tools_pkg, "docker_service", _voice_tools_missing)
+    if _voice_tools_pkg is not None else _voice_tools_missing
+)
 _stub_config()
 _stub_services_package()
 
@@ -186,6 +195,12 @@ for _name, _orig in _voice_tools_pre_stub.items():
         sys.modules[_name] = _orig
     else:
         sys.modules.pop(_name, None)
+_voice_tools_pkg_now = sys.modules.get("services")
+if _voice_tools_pkg_now is not None:
+    if _voice_tools_pre_attr is _voice_tools_missing or _voice_tools_pkg_now is not _voice_tools_pkg:
+        _voice_tools_pkg_now.__dict__.pop("docker_service", None)
+    else:
+        _voice_tools_pkg_now.docker_service = _voice_tools_pre_attr
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────

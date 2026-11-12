@@ -146,3 +146,37 @@ def test_an_importer_reaches_the_reconnected_client(docker_down):
         got = e
     assert got is container
     state["client"].containers.get.assert_called_once_with("agent-alpha")
+
+
+def test_a_reconnect_attempt_does_not_run_on_the_event_loop(docker_down, monkeypatch):
+    """The async helpers must acquire the client inside the executor. A reconnect
+    (`docker.from_env`) can block for a TCP timeout; on the loop it would stall
+    every request. `from_env` here waits for a coroutine on the loop to run: if the
+    attempt is on the loop thread the coroutine cannot run and the wait times out."""
+    import threading
+
+    import services.docker_utils as du
+
+    _clock, state = docker_down
+    container = MagicMock(name="agent-alpha")
+    state["client"].containers.get.return_value = container
+    ticked = threading.Event()
+    seen = {}
+
+    def blocking_from_env():
+        state["calls"] += 1
+        seen["loop_ran_meanwhile"] = ticked.wait(timeout=5)
+        return state["client"]
+
+    monkeypatch.setattr(ds.docker, "from_env", blocking_from_env)
+
+    async def tick():
+        ticked.set()
+
+    async def main():
+        return await asyncio.gather(du.container_get("agent-alpha"), tick())
+
+    got, _ = asyncio.run(main())
+
+    assert seen["loop_ran_meanwhile"] is True
+    assert got is container

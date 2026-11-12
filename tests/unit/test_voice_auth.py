@@ -147,6 +147,9 @@ def _stub_docker_service():
     mod.get_agent_by_name = MagicMock(return_value=None)
     mod.get_next_available_port = MagicMock(return_value=2222)
     sys.modules["services.docker_service"] = mod
+    # `from services import docker_service` reads the package attribute first (#4406).
+    if "services" in sys.modules:
+        sys.modules["services"].docker_service = mod
 
 
 def _stub_template_service():
@@ -190,6 +193,12 @@ _STUBBED_MODULE_NAMES = [
     "services.platform_audit_service",
 ]
 _voice_auth_pre_stub = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+_voice_auth_pkg = sys.modules.get("services")
+_voice_auth_missing = object()
+_voice_auth_pre_attr = (
+    getattr(_voice_auth_pkg, "docker_service", _voice_auth_missing)
+    if _voice_auth_pkg is not None else _voice_auth_missing
+)
 
 _voice_service, _FakeVoiceSession = _stub_voice_service()
 _stub_docker_service()
@@ -219,6 +228,12 @@ for _name, _orig in _voice_auth_pre_stub.items():
         sys.modules[_name] = _orig
     else:
         sys.modules.pop(_name, None)
+_voice_auth_pkg_now = sys.modules.get("services")
+if _voice_auth_pkg_now is not None:
+    if _voice_auth_pre_attr is _voice_auth_missing or _voice_auth_pkg_now is not _voice_auth_pkg:
+        _voice_auth_pkg_now.__dict__.pop("docker_service", None)
+    else:
+        _voice_auth_pkg_now.docker_service = _voice_auth_pre_attr
 
 
 @pytest.fixture(autouse=True)
