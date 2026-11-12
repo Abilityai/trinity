@@ -63,6 +63,19 @@ Every turn in a linked chat carries one line that names the project and tells th
 
 Tasks are grouped **Open**, **Awaiting verification** and **Done**. Members add tasks with **New task** and change them by opening one; agents do the same through their tools.
 
+The Tasks tab has two views of the same tasks, **List** and **Board**; it opens on the one you used last. Both re-read the tasks every 20 seconds while the tab is open, and when you come back to the window, so a change made by an agent or another member appears without a reload.
+
+**Board** shows one column per step a task goes through: **Active**, **Awaiting verification** and **Done**, each with its count. A task that is blocked, needs a decision or is paused stays in **Active** and carries a badge saying so; the column header counts them. A card shows the task's id and title, **P1** when it is one, who it is assigned to (a person, an agent or both), who created it and how long ago it last changed. Opening a card's title opens the same task the list opens.
+
+- **Move a card** by dragging it to another column. With a keyboard, focus the card's title, press **←** or **→** to pick a column, then **Enter** to move it there (**Esc** cancels). The card shows **Saving…** in its new column until the server has it; if the move is refused, the card goes back and a message says why.
+- **Into Done.** From **Awaiting verification**, a move to **Done** is your confirmation, the same as **Confirm** on the card. From **Active** it asks first and needs a short reason — where the result is, or why the task is no longer needed — because the task never waited for verification and nothing has checked the work. The reason is added to the task's log, where the agents on the project read it.
+- **A done task** can only be moved back to **Active**, which reopens it.
+- **Blocked, needs a decision, paused.** Use **⋯** on a card to mark it, and **Resume** to let it run again. Dragging does not change these.
+- A move writes the same entries in the task's log and the project's log as a status change made in the task itself. Priority never changes by moving a card.
+- People who can read the project but not change its tasks see the board without the controls: cards open, nothing moves.
+- On a narrow screen the list is shown instead; the board returns when there is room for its columns. Dragging needs a mouse or trackpad; on a touch screen use **⋯**, or open the task.
+- **Done** shows its 20 most recently changed tasks, with **Show all** for the rest.
+
 An agent cannot mark a task done. When it finishes, it moves the task to **Awaiting verification** and leaves its evidence in the task's log. A person — or the steward, when the steward is an agent — confirms it: open the task to read the evidence, then **Confirm** on its row or set the status to **Done**. A done task can only be reopened, and only by a person. Task **priority** is set by people only.
 
 Setting a task done while its agent never claimed it (it isn't in **Awaiting verification**) needs a **Note** saying how it was finished; the note goes in the task's log and the task shows *Done without a done claim*, because its output may not exist. Tasks waiting on it still become ready, and name it.
