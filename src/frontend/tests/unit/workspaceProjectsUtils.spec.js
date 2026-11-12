@@ -95,3 +95,41 @@ describe('ent#661 projects — errors, filters, validation', () => {
     expect(validateProjectForm({ name: 'x'.repeat(121), goal: 'G' }).name).toMatch(/120/)
   })
 })
+
+// trinity-enterprise#1240: a task's GitHub issues and PRs.
+import { REF_STATE_BADGE, refBadge, refHref, refLabel } from '@/components/portal/projects/projectsUtils'
+
+describe('ent#1240 projects — GitHub ref badges', () => {
+  it('names every state with a semantic badge variant', () => {
+    expect(REF_STATE_BADGE.open).toEqual({ label: 'Open', variant: 'success' })
+    expect(REF_STATE_BADGE.merged).toEqual({ label: 'Merged', variant: 'purple' })
+    expect(REF_STATE_BADGE.closed).toEqual({ label: 'Closed', variant: 'neutral' })
+    expect(REF_STATE_BADGE.not_planned).toEqual({ label: 'Not planned', variant: 'neutral' })
+    expect(REF_STATE_BADGE.unreadable).toEqual({ label: "Couldn't read", variant: 'warning' })
+  })
+
+  it("an unreadable ref is 'couldn't read' in the warning tone, never closed", () => {
+    const b = refBadge({ readable: false, state: 'closed' })
+    expect(b).toBe(REF_STATE_BADGE.unreadable)
+    expect(b.variant).not.toBe(REF_STATE_BADGE.closed.variant)
+    expect(refBadge({ readable: true, state: 'merged' })).toBe(REF_STATE_BADGE.merged)
+  })
+
+  it('a readable ref with no state yet reads as unreadable, not as a guessed state', () => {
+    expect(refBadge({ readable: true, state: null })).toBe(REF_STATE_BADGE.unreadable)
+    expect(refBadge(null)).toBe(REF_STATE_BADGE.unreadable)
+  })
+
+  it('links only an https:// url', () => {
+    expect(refHref({ url: 'https://github.com/o/r/pull/3' })).toBe('https://github.com/o/r/pull/3')
+    expect(refHref({ url: 'http://github.com/o/r/pull/3' })).toBeNull()
+    expect(refHref({ url: 'javascript:alert(1)' })).toBeNull()
+    expect(refHref({ url: ' https://x' })).toBeNull()
+    expect(refHref({})).toBeNull()
+    expect(refHref(null)).toBeNull()
+  })
+
+  it('labels a ref owner/repo#N', () => {
+    expect(refLabel({ repo: 'acme/web', number: 42 })).toBe('acme/web#42')
+  })
+})

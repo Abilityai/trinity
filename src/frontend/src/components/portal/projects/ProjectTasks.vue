@@ -18,7 +18,16 @@
   show only when those fields are not offered (a viewer, an archived project,
   or a done task), so a contributor never reads the same text twice.
 
+  trinity-enterprise#957: the same tasks as a board — List | Board, remembered
+  per person. The board is a second VIEW: it opens the same task dialog, sends
+  the same status change and obeys the same rules; a move is one gesture. Under
+  the width the columns need, the list renders and the choice is kept. The
+  tasks are re-read while the tab is looked at (every 20 s, and when the window
+  comes back), in both views, without a re-draw.
+
   #867: contributors change a task's owner here — blank clears it.
+  trinity-enterprise#1240: the GitHub issues and PRs the work happens in sit
+  under the objective (ProjectTaskRefs); a row shows a ref count only.
   trinity-enterprise#1155: the owner is picked from the project's own people
   (must-pick, over `GET /projects/{id}/people?purpose=owner`); a `role:<id>`
   owner and the owner already on the task are still taken as typed. Rows and
@@ -38,9 +47,18 @@
   why it is not offered on a project that isn't running.
 -->
 <template>
-  <div class="space-y-4" data-testid="project-tasks">
-    <div class="flex items-center gap-2">
+  <div ref="rootEl" class="space-y-4" data-testid="project-tasks">
+    <div class="flex items-center gap-3">
       <h2 class="text-base font-semibold text-gray-900 dark:text-gray-100">Tasks</h2>
+      <!-- Kept in the row when the board does not fit, so nothing beside it moves. -->
+      <BaseSegmented
+        :model-value="tasksView"
+        :options="VIEW_OPTIONS"
+        aria-label="Tasks view"
+        :class="fits ? '' : 'invisible'"
+        data-testid="project-tasks-view"
+        @update:model-value="setView"
+      />
       <span class="flex-1"></span>
       <BaseButton v-if="canContribute && !archived" size="sm" data-testid="project-task-new" @click="openCreate">New task</BaseButton>
     </div>
@@ -56,7 +74,31 @@
       @retry="load"
     />
     <template v-else>
-      <InlineError v-if="view.stale" :message="state.error" @dismiss="load" />
+      <InlineError v-if="view.stale && !quietMiss" :message="state.error" @dismiss="load" />
+      <template v-if="showBoard">
+        <ProjectTaskBoard
+          :columns="columns"
+          :can-move="canConfirm"
+          :can-confirm="canConfirm"
+          :can-create="canConfirm"
+          :hints="boardHints"
+          @open="openTask"
+          @move="onBoardMove"
+          @set-status="onSetStatus"
+          @confirm="onBoardConfirm"
+          @new="openCreate"
+          @busy="boardBusy = $event"
+        />
+        <!-- One reserved line: what the last move wrote. Failures are below, and stay. -->
+        <p class="flex min-h-[1.75rem] items-center gap-2 text-xs text-gray-600 dark:text-gray-300" role="status" data-testid="project-board-status">
+          <template v-if="moveNotice">
+            <span>{{ moveNotice.text }}</span>
+            <BaseButton v-if="moveNotice.evidence" size="sm" variant="ghost" data-testid="project-board-evidence" @click="openTask(moveNotice.taskId)">Add evidence</BaseButton>
+          </template>
+          <template v-else-if="canConfirm">Drag a card to a column, or focus its title and press ← → then Enter.</template>
+        </p>
+      </template>
+      <template v-else>
       <p v-if="view.state === 'empty'" class="rounded-lg border border-dashed border-gray-300 dark:border-gray-700 p-6 text-center text-sm text-gray-600 dark:text-gray-300" data-testid="project-tasks-empty">
         No tasks yet. Add the first one, or ask an agent on the project to break the goal into tasks.
       </p>
@@ -79,11 +121,18 @@
               <span class="font-mono text-xs text-gray-500 dark:text-gray-400 tabular-nums">{{ t.id }}</span>
               <span v-if="t.parent" class="sr-only">Subtask of {{ t.parent }}</span>
               <span class="min-w-0 flex-1 truncate text-sm text-gray-900 dark:text-gray-100">{{ t.title }}</span>
+              <span
+                v-if="t.refs && t.refs.length"
+                class="inline-flex items-center gap-0.5 text-xs text-gray-500 dark:text-gray-400 tabular-nums"
+                :title="`${t.refs.length} GitHub ${t.refs.length === 1 ? 'issue or PR' : 'issues and PRs'}`"
+                :data-testid="`project-task-refs-${t.id}`"
+              ><svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M8.5 11.5a3 3 0 0 0 4.2 0l2.6-2.6a3 3 0 0 0-4.2-4.2l-.9.9M11.5 8.5a3 3 0 0 0-4.2 0l-2.6 2.6a3 3 0 0 0 4.2 4.2l.9-.9" stroke-linecap="round" /></svg>{{ t.refs.length }}</span>
               <BaseBadge v-if="t.priority === 'p1'" variant="urgent">P1</BaseBadge>
               <BaseBadge v-if="subtaskLabel(t)" size="sm" variant="neutral">{{ subtaskLabel(t) }}</BaseBadge>
               <BaseBadge v-if="waitingLabel(t)" size="sm" variant="neutral">{{ waitingLabel(t) }}</BaseBadge>
               <BaseBadge v-if="t.needs_go" size="sm" variant="warning" :data-testid="`project-task-needs-go-${t.id}`">Needs a go</BaseBadge>
               <BaseBadge v-if="liveRun(t)" size="sm" :variant="RUN_BADGE[liveRun(t).state] || 'neutral'" :data-testid="`project-task-run-${t.id}`">{{ runLabel(liveRun(t)) }}</BaseBadge>
+              <BaseBadge v-if="t.closed_without_claim" size="sm" variant="warning">Done without a done claim</BaseBadge>
               <span v-if="assignedLabel(t)" class="hidden sm:inline max-w-[10rem] truncate text-xs text-gray-500 dark:text-gray-400">{{ assignedLabel(t, ownerLabel) }}</span>
               <span v-if="creatorOf(t)" class="hidden md:inline max-w-[10rem] truncate text-xs text-gray-500 dark:text-gray-400">by {{ creatorOf(t) }}</span>
               <BaseBadge :variant="TASK_STATUS_BADGE[t.status] || 'neutral'">{{ taskStatusLabel(t.status) }}</BaseBadge>
@@ -92,7 +141,7 @@
               v-if="g.key === 'verifying' && canConfirm"
               size="sm"
               variant="secondary"
-              :loading="confirming === t.id"
+              :loading="t.id in inflight"
               loading-label="Confirming…"
               :data-testid="`project-task-confirm-${t.id}`"
               @click="confirmDone(t)"
@@ -100,8 +149,36 @@
           </li>
         </ul>
       </section>
-      <InlineError v-if="confirmError" :message="confirmError" @dismiss="confirmError = ''" />
+      </template>
+      <InlineError v-if="moveError" :message="moveError" data-testid="project-task-move-error" @dismiss="moveError = ''" />
     </template>
+
+    <!-- Done without a wait for verification: asked first, by mouse and keyboard
+         alike, and the reason is required. Nothing checked this work, and an
+         agent reading the project sees only the log — so the log must say why. -->
+    <BaseModal :model-value="Boolean(askDone)" labelledby="task-done-title" :close-on-backdrop="false" @update:model-value="(v) => { if (!v) askDone = null }">
+      <form v-if="askDone" class="space-y-4" data-testid="project-task-done-ask" @submit.prevent="confirmAskDone">
+        <h2 id="task-done-title" class="text-lg font-semibold text-gray-900 dark:text-gray-100">Mark {{ askDone.id }} done?</h2>
+        <p class="text-sm text-gray-600 dark:text-gray-300">
+          “{{ askDone.title }}” has not waited for verification, so nothing has checked the work.
+          {{ askDone.agent ? `It is assigned to the agent ${askDone.agent}, which will treat it as finished.` : 'Agents on the project will treat it as finished.' }}
+        </p>
+        <BaseTextarea
+          id="task-done-note"
+          v-model="doneNote"
+          label="Why is it done?"
+          :rows="3"
+          :error="doneNoteError"
+          placeholder="Where the result is, or why the task is no longer needed"
+          help="Added to the task's log with the change, where the agents on the project read it."
+          data-testid="project-task-done-note"
+        />
+        <div class="flex justify-end gap-2">
+          <BaseButton variant="secondary" data-testid="project-task-done-cancel" @click="askDone = null">Cancel</BaseButton>
+          <BaseButton type="submit" data-testid="project-task-done-confirm">Mark done</BaseButton>
+        </div>
+      </form>
+    </BaseModal>
 
     <!-- New task -->
     <BaseModal v-model="createOpen" labelledby="task-create-title" :close-on-backdrop="false">
@@ -184,12 +261,29 @@
           />
           <p class="text-xs text-gray-500 dark:text-gray-400">When the steward starts this task, the run waits for a person's go first.</p>
         </div>
+        <p v-if="task.closed_without_claim" class="text-sm text-gray-600 dark:text-gray-300" data-testid="project-task-closed-without-claim">
+          Done without its agent's done claim: {{ UNCLAIMED_MEANING }}
+        </p>
+        <p v-if="(task.blockers_closed_without_claim || []).length" class="text-sm text-gray-600 dark:text-gray-300" data-testid="project-task-blockers-unclaimed">
+          {{ task.blockers_closed_without_claim.join(', ') }} {{ task.blockers_closed_without_claim.length === 1 ? 'was' : 'were' }} done without a done claim: {{ UNCLAIMED_MEANING }}
+        </p>
         <p v-if="subtaskLabel(task)" class="text-xs text-gray-600 dark:text-gray-300">Finishing every subtask does not finish this task: mark it done yourself.</p>
         <div v-if="task.objective && showRead">
           <h3 class="text-xs font-semibold text-gray-500 dark:text-gray-400">Objective</h3>
           <div class="mt-1 text-sm text-gray-800 dark:text-gray-200" data-testid="project-task-objective"><PortalMarkdown :content="task.objective" /></div>
         </div>
         <div v-if="task.done_definition && showRead"><h3 class="text-xs font-semibold text-gray-500 dark:text-gray-400">Definition of done</h3><p class="mt-1 whitespace-pre-line font-mono text-xs text-gray-800 dark:text-gray-200">{{ task.done_definition }}</p></div>
+
+        <!-- trinity-enterprise#1240: the GitHub issues and PRs this work happens in. -->
+        <ProjectTaskRefs
+          :project-id="projectId"
+          :task-id="task.id"
+          :refs="task.refs || []"
+          :evidence="task.evidence || []"
+          :can-edit="canContribute && !archived && !locked"
+          :verifying="task.status === 'pending-verification'"
+          @changed="onRefsChanged"
+        />
 
         <!-- trinity-enterprise#1193: this task's briefs, for the agent working it. -->
         <ProjectContext
@@ -295,7 +389,13 @@
               data-testid="project-task-blocked-by-edit"
             />
           </div>
-          <BaseTextarea id="task-note" v-model="edit.note" label="Note (optional — added to the task's log)" :rows="2" />
+          <BaseTextarea
+            id="task-note"
+            v-model="edit.note"
+            :label="needsNote ? 'Note (required — its agent never claimed it done; say how it was finished)' : 'Note (optional — added to the task\'s log)'"
+            :rows="2"
+            :error="editError.note"
+          />
           <InlineError v-if="actionError" :message="actionError" @dismiss="actionError = ''" />
           <div class="flex justify-end">
             <BaseButton type="submit" size="sm" :loading="busy" loading-label="Saving…" :disabled="!dirty" data-testid="project-task-save">Save</BaseButton>
@@ -323,6 +423,11 @@
 
 <script setup>
 import { computed, reactive, ref, watch } from 'vue'
+import BaseSegmented from '@/components/base/BaseSegmented.vue'
+import ProjectTaskBoard from './ProjectTaskBoard.vue'
+import { useContainerWidth } from '@/composables/useContainerWidth'
+import { useTaskBoardMoves } from '@/composables/useTaskBoardMoves'
+import { useVisiblePolling } from '@/composables/useVisiblePolling'
 import BaseBadge from '@/components/base/BaseBadge.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
@@ -338,13 +443,16 @@ import PortalMarkdown from '@/components/portal/PortalMarkdown.vue'
 import { useProjectsStore } from '@/stores/projects'
 import ProjectContext from './ProjectContext.vue'
 import ProjectTaskStart from './ProjectTaskStart.vue'
+import ProjectTaskRefs from './ProjectTaskRefs.vue'
 import { viewState } from '@/utils/loadingState'
 import { formatRelativeTime, formatLocalDateTime } from '@/utils/timestamps'
 import {
   TASK_FIELD_ERROR_CODES, TASK_STATUS_BADGE, assignedLabel, authorLabel, creatorLabel, groupTasks, parseTaskIds,
   projectErrorMessage, subtaskLabel, taskLogKindLabel, taskStatusLabel, taskStatusOptions, validateTaskFields,
   verificationRule, waitingLabel, withheldLine,
-  RUN_BADGE, liveRun, needsDecisionReason, projectState, runLabel } from './projectsUtils'
+  RUN_BADGE, liveRun, needsDecisionReason, projectState, runLabel,
+  doneWithoutClaim, UNCLAIMED_MEANING,
+  boardColumns, boardMinWidth, boardMove, readTasksView, writeTasksView, TASK_TEXT_MAX } from './projectsUtils'
 
 const props = defineProps({
   // trinity-enterprise#1132: the page read, for the withheld line and the rule.
@@ -404,11 +512,72 @@ const groups = computed(() => {
 const canConfirm = computed(() => props.canContribute && !props.archived)
 const withheld = computed(() => withheldLine({ project: props.project, myEmail: props.myEmail, canContribute: props.canContribute, archived: props.archived }, 'tasks'))
 const rule = computed(() => verificationRule(props.project))
-const confirming = ref('')
-const confirmError = ref('')
+
+// --- ent#957: List | Board ---------------------------------------------------------
+const VIEW_OPTIONS = [{ value: 'list', label: 'List' }, { value: 'board', label: 'Board' }]
+const rootEl = ref(null)
+const width = useContainerWidth(rootEl)
+const tasksView = ref(readTasksView(props.myEmail))
+watch(() => props.myEmail, (email) => { tasksView.value = readTasksView(email) })
+function setView(v) {
+  tasksView.value = v
+  writeTasksView(props.myEmail, v)
+}
+// A drag or a keyboard pick in progress on the board. While it lasts the board
+// is not swapped for the list and fresh rows are held — they would otherwise
+// re-draw the card out from under the gesture.
+const boardBusy = ref(false)
+// Width 0 is "not measured" (no observer): the board is allowed.
+const fits = ref(true)
+watch([width, boardBusy], ([w, busy]) => { if (!busy) fits.value = !w || w >= boardMinWidth() }, { immediate: true })
+const showBoard = computed(() => tasksView.value === 'board' && fits.value)
+
+const { inflight, error: moveError, notice: moveNotice, move: sendMove, confirm: sendConfirm, refuse } =
+  useTaskBoardMoves(() => props.projectId, store)
+const boardRows = ref([])
+watch([() => state.value.rows, boardBusy], ([rows, busy]) => { if (!busy) boardRows.value = rows }, { immediate: true })
+const columns = computed(() => boardColumns(boardRows.value, { inflight: inflight.value, members: props.members, myEmail: props.myEmail }))
+const boardHints = computed(() => ({ 'pending-verification': rule.value }))
+const askDone = ref(null)
+const taskById = (id) => state.value.rows.find((t) => t.id === id)
+
+function onBoardMove({ id, to }) {
+  const t = taskById(id)
+  const verdict = boardMove(t, to)
+  if (verdict.kind === 'refused') return refuse(verdict.reason)
+  if (verdict.kind !== 'move') return
+  if (verdict.confirm) { askDone.value = t; return }
+  void sendMove(t, verdict.status)
+}
+const doneNote = ref('')
+const doneNoteError = ref('')
+watch(askDone, () => { doneNote.value = ''; doneNoteError.value = '' })
+function confirmAskDone() {
+  const t = askDone.value
+  const note = doneNote.value.trim()
+  if (!note) {
+    doneNoteError.value = 'Say why it is done, e.g. "Published at docs/launch.md" or "No longer needed: the launch moved".'
+    return
+  }
+  if (note.length > TASK_TEXT_MAX) {
+    doneNoteError.value = `Keep the note to ${TASK_TEXT_MAX} characters or fewer.`
+    return
+  }
+  askDone.value = null
+  if (t) void sendMove(t, 'done', note)
+}
+function onSetStatus({ id, status }) {
+  const t = taskById(id)
+  if (t) void sendMove(t, status)
+}
+function onBoardConfirm(id) {
+  const t = taskById(id)
+  if (t) void sendMove(t, 'done')
+}
 // A done task is frozen until it is reopened — the server refuses every other
 // key with 409 `task_done`, so the form says so rather than letting a save fail.
 const locked = computed(() => task.value?.status === 'done')
+const needsNote = computed(() => doneWithoutClaim(task.value, edit.status))
 // The rendered objective / DoD show only when the editable fields do not.
 const showRead = computed(() => !(props.canContribute && !props.archived) || locked.value)
 
@@ -449,8 +618,26 @@ const dirty = computed(() => task.value && (
   || Object.keys(changedText()).length > 0
   || edit.parent.trim() !== (task.value.parent || '') || edit.blocked_by.trim() !== (task.value.blocked_by || []).join(', ')))
 
-function load() { return store.fetchTasks(props.projectId) }
+// One missed background read is not worth a banner that shifts the page: the
+// rows on screen are at most one interval old. A second miss in a row, or a
+// read the person asked for, says so.
+const misses = ref(0)
+const quietMiss = computed(() => misses.value === 1)
+async function load() {
+  misses.value = 0
+  await store.fetchTasks(props.projectId)
+}
+async function poll() {
+  await store.fetchTasks(props.projectId)
+  misses.value = state.value.error ? misses.value + 1 : 0
+}
 watch(() => props.projectId, load, { immediate: true })
+// Not while a gesture or a write is in progress, and not into a refusal that a
+// retry cannot change (signed out, no longer a member, project gone).
+useVisiblePolling(poll, {
+  paused: () => boardBusy.value || Object.keys(inflight.value).length > 0
+    || [401, 403, 404].includes(state.value.errorStatus),
+})
 
 function openCreate() {
   Object.assign(form, EMPTY_FORM)
@@ -490,16 +677,8 @@ async function create() {
 
 // ent#896: a person's confirmation of an agent's claim — the one transition
 // the rule reserves for people (and the steward agent, through its tools).
-async function confirmDone(t) {
-  confirming.value = t.id
-  confirmError.value = ''
-  try {
-    await store.updateTask(props.projectId, t.id, { status: 'done' })
-  } catch (err) {
-    confirmError.value = projectErrorMessage(err)
-  } finally {
-    confirming.value = ''
-  }
+function confirmDone(t) {
+  return sendConfirm(t)
 }
 
 // ent#1235: hold or release the task for a person's go — saved at once.
@@ -526,6 +705,13 @@ async function refreshTask() {
   } catch (err) {
     actionError.value = projectErrorMessage(err)
   }
+}
+
+// ent#1240: the refs answer is the full list; evidence is re-read with the task.
+function onRefsChanged(refs) {
+  if (!task.value) return
+  task.value = { ...task.value, refs }
+  refreshTask()
 }
 
 // ent#1195: the task's chat opens in the Workspace; the task dialog closes first.
@@ -565,6 +751,9 @@ async function saveTask() {
   const text = changedText()
   const shape = changedShape()
   editError.value = { ...validateTaskFields(edit, Object.keys(text)), ...shape.errors }
+  if (needsNote.value && !edit.note.trim()) {
+    editError.value.note = "Add a note: its agent never claimed this task done, so say how it was finished."
+  }
   if (Object.keys(editError.value).length) return
   const body = {}
   if (edit.status !== task.value.status) body.status = edit.status

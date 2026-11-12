@@ -567,6 +567,39 @@ describe("ent#1232 — task shape: todo, subtasks, blocked-by, tasks for people"
     assert.match(out.error, /T-004 → T-007 → T-004/);
   });
 
+  it("done without a done claim: the note is sent, and a missing one is refused by name", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      updateProjectTask: async (pid: string, tid: string, body: Record<string, unknown>) => {
+        calls.push([pid, tid, body]);
+        if (!body.note) {
+          throw apiError(422, { code: "done_without_claim_needs_note", message: "Add a note saying how it was finished." });
+        }
+        return { id: tid, status: "done", closed_without_claim: true };
+      },
+    } as Partial<TrinityClient>);
+    const refused = JSON.parse(await tools.update_project_task.execute(
+      { project_id: "prj_1", task_id: "T-005", status: "done" } as never, {}));
+    assert.equal(refused.success, false);
+    assert.equal(refused.code, "done_without_claim_needs_note");
+    const out = JSON.parse(await tools.update_project_task.execute(
+      { project_id: "prj_1", task_id: "T-005", status: "done", note: "Shipped by hand." } as never, {}));
+    assert.deepEqual(calls[1], ["prj_1", "T-005", { status: "done", note: "Shipped by hand." }]);
+    assert.equal(out.closed_without_claim, true);
+  });
+
+  it("the descriptions say what done without a done claim means", () => {
+    const tools = makeTools({} as Partial<TrinityClient>);
+    for (const name of ["update_project_task", "list_project_tasks"] as const) {
+      const d = tools[name].description;
+      assert.ok(d.includes("its output may not exist; read the note"), `${name}: missing the meaning`);
+      assert.ok(d.length < 2048, `${name}: ${d.length} chars`);
+    }
+    assert.ok(tools.update_project_task.description.includes("done_without_claim_needs_note"));
+    assert.ok(tools.update_project_task.description.includes("closed_without_claim"));
+    assert.ok(tools.list_project_tasks.description.includes("blockers_closed_without_claim"));
+  });
+
   it("the descriptions name the new rules and their refusals", () => {
     const tools = makeTools({} as Partial<TrinityClient>);
     const create = tools.create_project_task.description;
@@ -640,6 +673,60 @@ describe("ent#1235 — start_project_task", () => {
     for (const word of ["Track", "Propose", "Auto", "mode_track", "project_stopped", "task_is_for_a_person",
                         "only_the_steward_starts", "auto_origin_unavailable", "context.run_id"]) {
       assert.ok(d.includes(word), word);
+    }
+    assert.ok(d.length <= 2048, `start_project_task is ${d.length} characters`);
+  });
+});
+
+describe("ent#1240 — GitHub refs on create_/update_project_task", () => {
+  it("create_project_task forwards refs and drops keys it does not declare", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      createProjectTask: async (pid: string, body: Record<string, unknown>) => {
+        calls.push([pid, body]);
+        return { id: "T-002", refs: [] };
+      },
+    } as Partial<TrinityClient>);
+    const out = JSON.parse(await tools.create_project_task.execute(
+      { project_id: "prj_1", title: "Ship", refs: ["octo/hello#7"], priority: "p0", stray: "x" } as never,
+      {},
+    ));
+    assert.equal(out.success, true);
+    assert.deepEqual(calls[0], ["prj_1", { title: "Ship", refs: ["octo/hello#7"] }]);
+  });
+
+  it("update_project_task forwards refs_add / refs_remove and nothing undeclared", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      updateProjectTask: async (pid: string, tid: string, body: Record<string, unknown>) => {
+        calls.push([pid, tid, body]);
+        return { id: tid };
+      },
+    } as Partial<TrinityClient>);
+    await tools.update_project_task.execute(
+      { project_id: "prj_1", task_id: "T-001", refs_add: ["https://github.com/octo/hello/pull/9"], refs_remove: ["ref_abc"], priority: "p0", stray: 1 } as never,
+      {},
+    );
+    assert.deepEqual(calls[0], ["prj_1", "T-001", { refs_add: ["https://github.com/octo/hello/pull/9"], refs_remove: ["ref_abc"] }]);
+  });
+
+  it("the schemas cap refs at 10 items of 300 characters", () => {
+    const tools = makeTools();
+    const create = tools.create_project_task.parameters;
+    assert.equal(create.safeParse({ project_id: "p", title: "t", refs: Array(10).fill("o/r#1") }).success, true);
+    assert.equal(create.safeParse({ project_id: "p", title: "t", refs: Array(11).fill("o/r#1") }).success, false);
+    assert.equal(create.safeParse({ project_id: "p", title: "t", refs: ["x".repeat(301)] }).success, false);
+    const update = tools.update_project_task.parameters;
+    assert.equal(update.safeParse({ project_id: "p", task_id: "T-1", refs_add: Array(11).fill("o/r#1") }).success, false);
+    assert.equal(update.safeParse({ project_id: "p", task_id: "T-1", refs_remove: Array(11).fill("ref_x") }).success, false);
+  });
+
+  it("both descriptions say refs are read-only and are not a done", () => {
+    const tools = makeTools();
+    for (const t of [tools.create_project_task, tools.update_project_task]) {
+      assert.match(t.description, /never writes to GitHub/);
+      assert.match(t.description, /does not finish the task/);
+      assert.ok(t.description.length <= 2048, `${t.name} is ${t.description.length} characters`);
     }
   });
 });
