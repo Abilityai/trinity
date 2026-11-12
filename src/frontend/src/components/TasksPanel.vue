@@ -5,13 +5,15 @@
        composer — the page itself cannot scroll in fullscreen mode). Degrades to
        natural height outside a flex parent (flex-1 inert). -->
   <div class="p-6 flex-1 flex flex-col gap-6 overflow-y-auto">
-    <!-- Header with Queue Status -->
-    <div class="flex justify-between items-center">
-      <div>
+    <!-- Header with Queue Status. #3602: both rows wrap, so at phone width the
+         controls drop under the title instead of pushing Refresh past the
+         panel edge. gap, not space-x, so a wrapped control has no stray margin. -->
+    <div class="flex flex-wrap justify-between items-center gap-3">
+      <div class="min-w-0">
         <h3 class="text-lg font-medium text-gray-900 dark:text-white">Tasks</h3>
         <p class="text-sm text-gray-500 dark:text-gray-400">All executions — chats, tasks, schedules, and agent-to-agent</p>
       </div>
-      <div class="flex items-center space-x-3">
+      <div class="flex flex-wrap items-center gap-3">
         <!-- Trigger Type Filter -->
         <select
           v-model="triggerFilter"
