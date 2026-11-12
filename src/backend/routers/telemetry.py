@@ -29,7 +29,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from dependencies import get_current_user
 from models import User
 from services.agent_service.helpers import visible_agent_names
-from services.docker_service import docker_client, list_all_agents_fast
+from services import docker_service
+from services.docker_service import list_all_agents_fast
 from utils.helpers import utc_now_iso
 
 logger = logging.getLogger(__name__)
@@ -144,7 +145,7 @@ def _get_single_container_stats_sync(agent_name: str) -> Dict[str, Any]:
     Runs in thread pool to avoid blocking the event loop.
     """
     try:
-        container = docker_client.containers.get(f"agent-{agent_name}")
+        container = docker_service.get_docker_client().containers.get(f"agent-{agent_name}")
 
         # Get stats (one-shot) - this is the blocking call (~1-2s per container)
         stats = container.stats(stream=False)
@@ -307,7 +308,7 @@ async def get_container_stats(current_user: User = Depends(get_current_user)):
     Scoped to the containers the caller may see (trinity-enterprise#872): an
     admin person gets the whole payload unchanged.
     """
-    if not docker_client:
+    if not docker_service.get_docker_client():
         raise HTTPException(status_code=503, detail="Docker not available")
     visible = visible_agent_names(current_user)
 

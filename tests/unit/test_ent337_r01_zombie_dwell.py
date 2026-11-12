@@ -455,7 +455,7 @@ def _collect_with(containers, monkeypatch):
         containers=types.SimpleNamespace(list=lambda **kw: list(containers))
     )
     module = types.ModuleType("services.docker_service")
-    module.docker_client = fake_client
+    module.get_docker_client = lambda: fake_client
     monkeypatch.setitem(sys.modules, "services.docker_service", module)
     return snapshot_module._collect_zombie_counts()
 

@@ -18,7 +18,6 @@ from database import db
 from dependencies import principal_reach
 from db.agents import SYSTEM_AGENT_NAME
 from services.docker_service import (
-    docker_client,
     list_all_agents,
     list_all_agents_fast,
     get_agent_container,

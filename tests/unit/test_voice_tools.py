@@ -130,7 +130,7 @@ def _stub_config():
 def _stub_services_package():
     """Pre-stub services sub-modules that services/__init__.py imports."""
     docker_svc = types.ModuleType("services.docker_service")
-    docker_svc.docker_client = None
+    docker_svc.get_docker_client = lambda: None
     docker_svc.get_agent_container = MagicMock(return_value=None)
     docker_svc.get_agent_status_from_container = MagicMock()
     docker_svc.list_all_agents = MagicMock(return_value=[])

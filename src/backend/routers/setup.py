@@ -152,10 +152,10 @@ async def _deploy_system_agent_after_setup() -> None:
     lazy to keep this router's import isolation (see the setup tests).
     """
     try:
-        from services.docker_service import docker_client
+        from services.docker_service import get_docker_client
         from services.system_agent_service import system_agent_service
 
-        if not docker_client:
+        if not get_docker_client():
             return
         result = await system_agent_service.ensure_deployed()
         logger.info(f"System agent after setup: {result['action']} - {result['message']}")

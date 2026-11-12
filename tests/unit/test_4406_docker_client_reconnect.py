@@ -7,6 +7,7 @@ which retries with backoff.
 """
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -123,3 +124,25 @@ def test_a_second_caller_does_not_wait_on_a_connect_in_progress(docker_down):
     assert state["calls"] == 0
 
     assert ds.get_docker_client() is state["client"]
+
+
+def test_an_importer_reaches_the_reconnected_client(docker_down):
+    """A module outside docker_service gets the new client too. docker_utils used
+    to bind `docker_client` at import, so it kept the boot-time None after Docker
+    came up even though docker_service itself had reconnected."""
+    import services.docker_utils as du
+
+    clock, state = docker_down
+    container = MagicMock(name="agent-alpha")
+    state["client"].containers.get.return_value = container
+
+    assert ds.get_docker_client() is None  # booted with Docker down
+    state["up"] = True
+    clock.now += ds._DOCKER_RETRY_MAX_S
+
+    try:
+        got = asyncio.run(du.container_get("agent-alpha"))
+    except Exception as e:  # noqa: BLE001 - a stale None client raises; report it as a mismatch
+        got = e
+    assert got is container
+    state["client"].containers.get.assert_called_once_with("agent-alpha")

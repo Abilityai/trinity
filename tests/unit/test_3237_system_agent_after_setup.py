@@ -91,7 +91,7 @@ def env(monkeypatch):
         )
         monkeypatch.setitem(
             sys.modules, "services.docker_service",
-            types.SimpleNamespace(docker_client=object() if docker else None),
+            types.SimpleNamespace(get_docker_client=lambda: object() if docker else None),
         )
         return db, svc
     return _apply

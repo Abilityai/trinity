@@ -137,9 +137,9 @@ def _stub_voice_service():
 
 def _stub_docker_service():
     mod = types.ModuleType("services.docker_service")
-    mod.docker_client = None
+    mod.get_docker_client = lambda: None
     mod.get_agent_container = MagicMock(return_value=None)
-    # services/__init__.py re-exports docker_client + several helpers; if the
+    # services/__init__.py re-exports get_docker_client + several helpers; if the
     # stub omits any of them, `from services import ...` chains downstream
     # of database migrations explode with ImportError.
     mod.get_agent_status_from_container = MagicMock(return_value=None)

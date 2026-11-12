@@ -54,9 +54,9 @@ except Exception as e:
 
 # #4406: a backend that boots before the Docker socket is reachable used to keep
 # `docker_client = None` until restart, so the roster stayed empty. The readers in
-# this module go through get_docker_client(), which retries with backoff. Modules
-# that `from services.docker_service import docker_client` still hold the value
-# from import time; they move to the accessor in follow-up slices.
+# this module, and every caller outside it, go through get_docker_client(), which
+# retries with backoff. Never `from services.docker_service import docker_client`:
+# that binds the value from import time and never sees a reconnect.
 _DOCKER_RETRY_INITIAL_S = 1.0
 _DOCKER_RETRY_MAX_S = 60.0
 _docker_retry_delay_s = _DOCKER_RETRY_INITIAL_S
@@ -872,7 +872,7 @@ async def execute_command_in_container(
             f"execute_command_in_container needs a positive timeout, got {timeout!r}"
         )
 
-    if not docker_client:
+    if not get_docker_client():
         return {"exit_code": 1, "output": "Docker client not available", "timed_out": False}
 
     loop = asyncio.get_running_loop()

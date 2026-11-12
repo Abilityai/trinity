@@ -89,7 +89,7 @@ _SYS_MOCKS = {
     "database": Mock(db=_mock_db),
     "docker": Mock(),
     "services.docker_service": Mock(
-        docker_client=Mock(),
+        get_docker_client=Mock(return_value=Mock()),
         get_agent_container=Mock(),
     ),
     "services.docker_utils": Mock(
@@ -173,7 +173,7 @@ def _load_lifecycle():
     #
     # Snapshot the real modules so we can restore them after the import.
     # Once lifecycle.py has captured the names it needs (HTTPException,
-    # docker_client, container_start, etc.) into its own module globals,
+    # container_start, etc.) into its own module globals,
     # the rest of the test session no longer needs sys.modules to point at
     # our Mocks — leaving them mocked would pollute downstream tests
     # (test_voice_auth needs real FastAPI; test_file_upload needs the real

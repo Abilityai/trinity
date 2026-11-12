@@ -66,7 +66,7 @@ def env(monkeypatch):
         cas.db, "get_user_by_username",
         lambda u: {"id": 1, "username": "admin", "email": "a@example.com", "role": "admin"},
     )
-    monkeypatch.setattr(cas, "docker_client", object())        # Docker available
+    monkeypatch.setattr("services.docker_service.get_docker_client", lambda _c=object(): _c)        # Docker available
     monkeypatch.setattr(cas, "get_breaker_redis", lambda: None)  # lock fail-open
     provision = AsyncMock()
     monkeypatch.setattr(svc, "_provision", provision)
@@ -114,7 +114,7 @@ def test_defer_when_no_admin_does_not_burn_flag(env):
 
 
 def test_skip_when_docker_unavailable(env):
-    env.monkeypatch.setattr(cas, "docker_client", None)
+    env.monkeypatch.setattr("services.docker_service.get_docker_client", lambda _c=None: _c)
     result = _run()
     env.provision.assert_not_awaited()
     assert env.settings.get("cornelius_seeded") is None

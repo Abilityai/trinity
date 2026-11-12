@@ -24,6 +24,7 @@ import httpx
 
 from database import db
 from redis_breaker_util import get_breaker_redis
+from services import docker_service
 from services.agent_auth import agent_httpx_client
 from services.model_context import DEFAULT_CONTEXT_WINDOW
 from db_models import (
@@ -110,12 +111,8 @@ def _dormant_health_detail(agent_name: str) -> "AgentHealthDetail":
         avg_latency_24h_ms=None,
     )
 
-# Initialize Docker client
-try:
-    docker_client = docker.from_env()
-except Exception as e:
-    print(f"Warning: Monitoring service could not connect to Docker: {e}")
-    docker_client = None
+# #4406: the client comes from docker_service.get_docker_client() at use time,
+# so a backend that booted before Docker was reachable recovers without a restart.
 
 
 # =========================================================================
@@ -135,6 +132,7 @@ def check_docker_health(agent_name: str) -> DockerHealthCheck:
     """
     now = utc_now_iso()
 
+    docker_client = docker_service.get_docker_client()
     if not docker_client:
         return DockerHealthCheck(
             agent_name=agent_name,

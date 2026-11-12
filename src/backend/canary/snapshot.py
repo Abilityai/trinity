@@ -779,7 +779,8 @@ def _collect_zombie_counts() -> Dict[str, Any]:
         "unavailable": [],
     }
     try:
-        from services.docker_service import docker_client
+        from services.docker_service import get_docker_client
+        docker_client = get_docker_client()
     except Exception as exc:
         out["unavailable"].append(f"docker.import: {exc}")
         return out
