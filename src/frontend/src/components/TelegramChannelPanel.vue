@@ -41,6 +41,14 @@
             </div>
           </div>
           <div class="flex items-center gap-2">
+            <!-- Verify result sits inline in this row so it never shifts the
+                 dialog's content; it stays until the next action. -->
+            <span
+              v-if="verifyResult"
+              data-testid="telegram-verify-result"
+              class="text-xs"
+              :class="verifyResult.ok ? 'text-status-success-700 dark:text-status-success-400' : 'text-status-danger-700 dark:text-status-danger-400'"
+            >{{ verifyResult.ok ? 'Operational' : verifyResult.short }}</span>
             <button
               @click="verifyBot"
               :disabled="verifying"
@@ -61,7 +69,11 @@
 
       <!-- Webhook Warning -->
       <div v-if="!binding.webhook_url" class="p-3 rounded-lg text-sm bg-status-warning-50 dark:bg-status-warning-900/30 text-status-warning-700 dark:text-status-warning-300">
-        Bot connected but webhook not registered. Set a <router-link to="/settings" class="underline font-medium hover:text-status-warning-800 dark:hover:text-status-warning-200">Public URL in Settings</router-link> for Telegram messages to reach this agent.
+        <p class="font-medium">Bot connected, but it can't receive messages yet.</p>
+        <p class="mt-1">Telegram delivers messages to Trinity over the internet, so Trinity needs a public HTTPS address. Set it under <router-link to="/settings?tab=general" class="underline font-medium hover:text-status-warning-800 dark:hover:text-status-warning-200">Settings → General → Public URL</router-link>. Once saved, this bot registers automatically; nothing to redo here.</p>
+        <p v-if="verifyResult?.reason" class="mt-2" data-testid="telegram-webhook-error">
+          Last attempt: {{ verifyResult.reason }}
+        </p>
       </div>
 
       <!-- In-progress indicator toggle (ent#264) -->
@@ -307,6 +319,7 @@ const binding = ref({ configured: false })
 const groups = ref([])
 const botToken = ref('')
 const message = ref(null)
+const verifyResult = ref(null)
 
 async function loadBinding() {
   loading.value = true
@@ -375,23 +388,26 @@ async function disconnectBot() {
 
 async function verifyBot() {
   verifying.value = true
+  verifyResult.value = null
   message.value = null
   try {
-    const response = await api.post(`/api/agents/${props.agentName}/telegram/test`, {
+    const { data } = await api.post(`/api/agents/${props.agentName}/telegram/test`, {
       message: 'Verification check'
     })
-    if (response.data.ok) {
-      message.value = { type: 'success', text: response.data.message }
-      // ent#600: Verify re-reads the bot's Privacy Mode — refresh the per-group
-      // context status in place so a BotFather change shows without a reload.
-      await loadGroups()
-    } else {
-      message.value = { type: 'error', text: response.data.message || 'Verification failed' }
-    }
-    setTimeout(() => { message.value = null }, 3000)
+    // Verify may have registered the webhook — refresh the binding in place
+    // (no loading state) so the webhook warning reflects it.
+    const fresh = await api.get(`/api/agents/${props.agentName}/telegram`)
+    binding.value = fresh.data
+    // ent#600: Verify re-reads the bot's Privacy Mode — refresh the per-group
+    // context status in place so a BotFather change shows without a reload.
+    await loadGroups()
+    verifyResult.value = data.ok
+      ? { ok: true }
+      : data.webhook_registered === false
+        ? { ok: false, short: 'Webhook not registered', reason: data.webhook_error }
+        : { ok: false, short: data.message || 'Verification failed' }
   } catch (e) {
-    const detail = e.response?.data?.detail || 'Failed to verify bot'
-    message.value = { type: 'error', text: detail }
+    verifyResult.value = { ok: false, short: e.response?.data?.detail || 'Failed to verify bot' }
   } finally {
     verifying.value = false
   }

@@ -226,17 +226,22 @@ async def register_webhook(agent_name: str, public_url: str) -> bool:
     Called on bot configuration and on backend startup (reconciliation).
     Requests message and member update types for group support.
     """
+    return await set_webhook(agent_name, public_url) is None
+
+
+async def set_webhook(agent_name: str, public_url: str) -> Optional[str]:
+    """Same as ``register_webhook``, but returns why it failed (None on success)."""
     import httpx
 
     binding = db.get_telegram_binding(agent_name)
     if not binding:
         logger.error(f"No Telegram binding for agent {agent_name}")
-        return False
+        return "no Telegram binding for this agent"
 
     bot_token = db.get_telegram_bot_token(agent_name)
     if not bot_token:
         logger.error(f"Could not decrypt bot token for agent {agent_name}")
-        return False
+        return "could not decrypt the bot token"
 
     webhook_url = f"{public_url}/api/telegram/webhook/{binding['webhook_secret']}"
     secret_token = binding.get("telegram_secret_token", "")
@@ -256,13 +261,15 @@ async def register_webhook(agent_name: str, public_url: str) -> bool:
             if result.get("ok"):
                 db.update_telegram_webhook_url(agent_name, webhook_url)
                 logger.info(f"Telegram webhook registered for agent={agent_name}")
-                return True
+                return None
             else:
                 logger.error(f"Telegram setWebhook failed: {result.get('description')}")
-                return False
+                return f"Telegram rejected {public_url}: {result.get('description') or 'unknown error'}"
     except Exception as e:
         logger.error(f"Telegram setWebhook error: {e}", exc_info=True)
-        return False
+        # Type name only: httpx error text can carry the request URL, which
+        # embeds the bot token, and this string is returned to the UI.
+        return f"could not reach Telegram ({type(e).__name__})"
 
 
 async def delete_webhook(agent_name: str) -> bool:

@@ -303,6 +303,21 @@ async def delete_telegram_binding(
     return {"ok": True, "message": f"Telegram bot removed from {agent_name}"}
 
 
+async def _ensure_webhook(agent_name: str) -> Optional[str]:
+    """None when the bot's webhook is registered, registering it first if the
+    binding has none and a public URL is set (e.g. the URL was saved after the
+    bot was connected and that registration failed). Otherwise the reason."""
+    binding = db.get_telegram_binding(agent_name)
+    if binding and binding.get("webhook_url"):
+        return None
+    from services.settings_service import settings_service
+    public_url = settings_service.get_setting("public_chat_url", "")
+    if not public_url:
+        return "no Public URL is set in Settings"
+    from adapters.transports.telegram_webhook import set_webhook
+    return await set_webhook(agent_name, public_url)
+
+
 @auth_router.post("/{agent_name}/telegram/test", dependencies=[Depends(require_person)])
 async def test_telegram_bot(
     agent_name: OwnedAgentByName,
@@ -326,9 +341,20 @@ async def test_telegram_bot(
                     db.set_telegram_can_read_all_group_messages(
                         agent_name, flag_from_bot_info(bot_info)
                     )
+                    username = bot_info.get("username")
+                    webhook_error = await _ensure_webhook(agent_name)
+                    if webhook_error is None:
+                        msg = f"Bot @{username} is operational"
+                    else:
+                        msg = (
+                            f"Bot @{username} is reachable, but the webhook is "
+                            f"not registered: {webhook_error}"
+                        )
                     return {
-                        "ok": True,
-                        "message": f"Bot @{bot_info.get('username')} is operational",
+                        "ok": webhook_error is None,
+                        "message": msg,
+                        "webhook_registered": webhook_error is None,
+                        "webhook_error": webhook_error,
                         "bot_info": bot_info,
                     }
                 else:
