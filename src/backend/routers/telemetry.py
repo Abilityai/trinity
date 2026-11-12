@@ -308,7 +308,7 @@ async def get_container_stats(current_user: User = Depends(get_current_user)):
     Scoped to the containers the caller may see (trinity-enterprise#872): an
     admin person gets the whole payload unchanged.
     """
-    if not docker_service.get_docker_client():
+    if not await asyncio.to_thread(docker_service.get_docker_client):
         raise HTTPException(status_code=503, detail="Docker not available")
     visible = visible_agent_names(current_user)
 
