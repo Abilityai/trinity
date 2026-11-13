@@ -521,9 +521,9 @@ class TestExecutionTerminate:
     ):
         """The agent answers `terminated` again for a turn it accepted but has
         not started (its pending entry is kept), so its answer cannot say which
-        call ended the turn; only the call that wins the CANCELLED CAS did. A
-        repeat by another credential must not write a second row crediting
-        itself."""
+        call ended the turn. The first call to answer `terminated` takes the
+        per-turn audit claim (#4475); a repeat by another credential must not
+        write a second row crediting itself."""
         eid = _seed("s2-3180-running-twice", "running")
         repeat_headers, repeat_key_id = _owner_user_key()
 
@@ -609,8 +609,8 @@ class TestExecutionTerminate:
         self, world
     ):
         """While the dispatcher stays parked, every terminate answers
-        `cancelled_while_parked`, but only the call that wins the CANCELLED CAS
-        ended anything. A repeat by another credential must not write a second
+        `cancelled_while_parked`. The first call takes the per-turn audit
+        claim (#4475); a repeat by another credential must not write a second
         row crediting itself."""
         eid = _seed("s2-3180-parked-twice", "running")
         limiter = chat_router.chat_execution_service.agent_call_limiter

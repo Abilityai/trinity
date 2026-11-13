@@ -14,7 +14,7 @@ None at or above the 8/10 gate.
 | Secrets in added lines (AKIA, sk-, ghp_, gho_, github_pat_, xox, re_) | no hits |
 | Concealed Unicode in changed files | no hits |
 | Audit suppression via the new Redis claim | claim keyed on an id the agent (proxy arm) or the call limiter (parked arm) verified for this agent; a foreign or unknown id 404s or falls through first |
-| Failure direction (A10) | stated: fail-open write on Redis error; claim released if the audit write raises |
+| Failure direction (A10) | stated: fail-open write on Redis error; claim released if the audit write fails or the hook raises |
 | Auth guards | `test_2996_human_only_routes`, `test_186_enumeration_uniformity`, `test_agent_auth_header_guard`: 124 passed. `test_1310_auth_wiring`, `test_ent875_exec_control_routes`, `test_3180_*`: passed |
 | Variant analysis | no other audit or `on_ended` hook gated on a CAS result |
 

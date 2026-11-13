@@ -482,7 +482,7 @@ The operator route (`POST /api/agents/{name}/executions/{execution_id}/terminate
 - the parked cancel finds the turn parked (`cancelled_while_parked`), or
 - the agent answers `terminated`.
 
-The parked and container arms do not wait on their CANCELLED CAS. The request that started the turn usually writes the terminal row first (the agent's terminate waits up to 7 s for the process to exit). `chat_execution_service._audit_terminate_once` deduplicates repeats with a Redis first-claim `terminate_audit:{agent}:{execution_id}` (`SET NX`, 24 h TTL) on the id the agent or the call limiter verified. It fails open: with Redis unreachable the row is written. If the audit write raises, the claim is released. `already_finished` and every error arm write no row. The public-link and Workspace terminate routes pass no hook and write none.
+The parked and container arms do not wait on their CANCELLED CAS. The request that started the turn usually writes the terminal row first (the agent's terminate waits up to 7 s for the process to exit). `chat_execution_service._audit_terminate_once` deduplicates repeats with a Redis first-claim `terminate_audit:{agent}:{execution_id}` (`SET NX`, 24 h TTL) on the id the agent or the call limiter verified. It fails open: with Redis unreachable the row is written. The hook returns the audit event id; when the write fails (`platform_audit_service.log` returns None) or the hook raises, the claim is released, so the next terminate records the turn. `already_finished` and every error arm write no row. The public-link and Workspace terminate routes pass no hook and write none.
 
 ### Queue State
 
@@ -574,6 +574,7 @@ For Stop-hook authoring guidance to avoid the orphan-killer slow path, see [`TRI
 
 | Date | Changes |
 |------|---------|
+| 2026-11-13 | **Audit Row decided on the arm's outcome** (#4475): the parked and container arms write `execution_terminate` when the turn is found parked or the agent answers `terminated`, whoever wins the CANCELLED CAS. A Redis first-claim per agent and execution id keeps it to one row; the claim is released when the audit write fails. |
 | 2026-10-16 | **Below the owner tier a caller ends only their own turn** (trinity-enterprise#875): `POST /api/agents/{name}/executions/{id}/terminate` resolves BOTH `execution_id` and `task_execution_id` before the service is called; for a share holder each must be a row of this agent whose `source_user_id` is theirs, and a missing row is a refusal, not a pass (uniform 404 `Execution not found in agent`). Owner, admin and agent keys are unchanged. See [security.md §5d](../architecture/security.md). |
 | 2026-03-22 | Fix: `/api/chat` path now passes `execution_id` to agent (was only `/api/task`). Added `execution_id` to `ChatRequest` model, `execute()` runtime interface, and backend chat payload. Terminate endpoint defaults `task_execution_id` to `execution_id` for DB update. |
 | 2026-01-13 | Added "Live" button entry point (lines 213-232) - green badge with pulsing dot for running tasks, navigates to Execution Detail page for real-time monitoring |

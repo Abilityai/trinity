@@ -9119,6 +9119,19 @@
         "security"
       ],
       "description": "ent#1216: a caller_wake turn carries the delegation's person when that person is owner tier on the delegator, so the agent's key keeps its execution reads while the wake runs. Real /task admission -> real maybe_wake_caller -> real ledger and acting_turn_user_id / viewer_row_scope on a real DB. A shared person's, a visitor's, a deleted user's and a cannot-open person's wake carry nobody, as before; the audit names the standing; auto-memory follows the owner rule."
+    },
+    {
+      "file": "unit/test_4475_terminate_audit_race.py",
+      "feature": "abilityai/trinity#4475",
+      "added": "2026-11-13",
+      "categories": [
+        "backend",
+        "api",
+        "security",
+        "audit",
+        "unit"
+      ],
+      "description": "A terminate that ended the turn writes one execution_terminate row when the in-flight /task or /chat caller (or the parked dispatcher) wins the CANCELLED CAS. A Redis first-claim per agent and execution id dedupes repeats; with Redis None or raising the row is still written; a failed audit write releases the claim so the next terminate records the turn."
     }
   ]
 }

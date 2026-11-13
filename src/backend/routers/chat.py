@@ -1185,8 +1185,8 @@ async def terminate_agent_execution(
     # that answered `terminated`; #4475); a repeat, `already_finished` and every
     # error arm write nothing. `log` derives the key fields from the
     # principal (#2389), so a key's terminate names the key.
-    async def _audit_terminate(outcome: str) -> None:
-        await platform_audit_service.log(
+    async def _audit_terminate(outcome: str):
+        return await platform_audit_service.log(
             event_type=AuditEventType.EXECUTION,
             event_action="execution_terminate",
             source="api",

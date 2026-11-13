@@ -3351,8 +3351,10 @@ async def _audit_terminate_once(name, execution_id, on_ended, outcome):
     turn. ``execution_id`` must be an id this arm verified belongs to ``name``.
 
     Fail-open: with Redis unreachable the row is written, because a duplicate
-    security record costs less than a missing one. If the write raises, the
-    claim is released so a later terminate can still record the turn.
+    security record costs less than a missing one. The hook returns the audit
+    event id; if it returns None (``platform_audit_service.log`` swallows a
+    failed insert) or raises, the claim is released so a later terminate can
+    still record the turn.
     """
     if on_ended is None:
         return
@@ -3369,15 +3371,20 @@ async def _audit_terminate_once(name, execution_id, on_ended, outcome):
     except Exception as e:  # noqa: BLE001
         client = None
         logger.warning(f"[Terminate] audit claim for {execution_id} failed ({e}); writing the row")
-    try:
-        await on_ended(outcome)
-    except BaseException:
+    def _release():
         if client is not None:
             try:
                 client.delete(key)
             except Exception:  # noqa: BLE001
                 pass
+
+    try:
+        event_id = await on_ended(outcome)
+    except BaseException:
+        _release()
         raise
+    if event_id is None:
+        _release()
 
 
 async def _close_dispatch_activity_cancelled(task_execution_id, cancel_won):

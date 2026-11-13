@@ -131,6 +131,23 @@ class TestTheInflightWriterWinsTheStatusRace:
         assert res.status_code == 200, res.text
         assert len(_rows(TERMINATE)) == 1
 
+    def test_with_the_redis_claim_raising_the_row_is_still_written(self, world, monkeypatch):
+        """After boot the client is cached, so an outage shows up as `.set`
+        raising rather than as a `None` client."""
+        eid = _seed("s2-4475-redis-raises", "running")
+        _inflight_writer_wins(monkeypatch, "cancelled", "Execution cancelled by user")
+
+        class _Down:
+            def set(self, *a, **k):
+                raise ConnectionError("redis unreachable")
+
+        monkeypatch.setattr(redis_breaker_util, "get_breaker_redis", lambda: _Down())
+
+        res = world.client.post(_terminate_path(eid), headers=_session(OWNER))
+
+        assert res.status_code == 200, res.text
+        assert len(_rows(TERMINATE)) == 1
+
 
 class TestOneRowPerEndedTurn:
     def test_a_second_task_execution_id_for_the_same_agent_process_writes_no_second_row(
@@ -159,6 +176,36 @@ class TestOneRowPerEndedTurn:
         assert len(_rows(TERMINATE)) == 2
 
 
+class TestAFailedAuditWrite:
+    def test_the_real_hook_gives_the_claim_back_so_a_repeat_records_the_turn(
+        self, world, monkeypatch
+    ):
+        """`platform_audit_service.log` swallows a failed insert and returns
+        None, so the hook never raises; the claim is released on that None."""
+        eid = _seed("s2-4475-audit-down", "running")
+        failing = {"left": 1}
+
+        def _wrap(real):
+            def _maybe_fail(*a, **k):
+                if failing["left"]:
+                    failing["left"] -= 1
+                    raise RuntimeError("audit store down")
+                return real(*a, **k)
+            return _maybe_fail
+
+        monkeypatch.setattr(db, "create_audit_entry", _wrap(db.create_audit_entry))
+        monkeypatch.setattr(db, "create_audit_entry_chained", _wrap(db.create_audit_entry_chained))
+
+        first = world.client.post(_terminate_path(eid), headers=_session(OWNER))
+        assert first.status_code == 200, first.text
+        assert _rows(TERMINATE) == []
+        assert world.redis.get(ce._terminate_audit_key(AGENT, eid)) is None
+
+        second = world.client.post(_terminate_path(eid), headers=_session(OWNER))
+        assert second.status_code == 200, second.text
+        assert len(_rows(TERMINATE)) == 1
+
+
 class TestTheClaimHelper:
     def test_a_failed_audit_write_gives_the_claim_back(self, world):
         calls: list = []
@@ -173,6 +220,7 @@ class TestTheClaimHelper:
 
         async def _ok(outcome):
             calls.append(outcome)
+            return "event-id"
 
         asyncio.run(ce._audit_terminate_once(AGENT, "s2-4475-boom", _ok, "terminated"))
         asyncio.run(ce._audit_terminate_once(AGENT, "s2-4475-boom", _ok, "terminated"))
