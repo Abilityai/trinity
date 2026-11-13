@@ -468,14 +468,16 @@ Every key in `.env.example`, with the compose files that forward it. **A key a c
 |---|---|---|
 | `OPERATOR_INTAKE_ENABLED` | dev · prod · hosted | `false` disables the once-per-install, opt-in operator contact submission. |
 | `OPERATOR_INTAKE_URL` | dev · prod · hosted | Endpoint for that submission (override to self-host). |
-| `DO_NOT_TRACK` | dev · prod · hosted | Any value other than `0`/empty/`false` disables the operator intake and telemetry sharing. |
+| `DO_NOT_TRACK` | dev · prod · hosted | Any value other than `0`/empty/`false` is the one setting after which the instance makes no request to a vendor-operated host: it disables the operator intake, telemetry sharing, the help widget's reports and the docs Q&A service (the widget's Ask tab and the `ask_trinity` tool), and removes both vendor hosts from the Content-Security-Policy. Read at run time by the backend, frontend and MCP server; recreate those containers after changing it. Your own model provider, GitHub, email and channel settings are not affected. |
+| `BUG_REPORTING_ENABLED` | dev · prod · hosted | `false` removes the help widget's Bug / Feature / Feedback tabs at run time, on the published images too. |
+| `ASK_TRINITY_ENABLED` | dev · prod · hosted | `false` removes the help widget's Ask tab and stops the `ask_trinity` MCP tool from being registered. With this and `BUG_REPORTING_ENABLED` both off, the help widget is not shown. |
 | `TELEMETRY_SHARING_ENABLED` | dev · prod · hosted | Hard kill switch for opt-in usage sharing (`false` → the Settings consent toggle refuses). |
 | `TELEMETRY_SHARING_URL` | dev · prod · hosted | Receiver endpoint (override to self-host). |
 | `TELEMETRY_SHARING_INTERVAL_HOURS` | dev · prod · hosted | Sharing heartbeat cadence (default 24). |
 | `TELEMETRY_SHARING_BACKFILL_DEFAULT_DAYS` | dev · prod · hosted | Default backfill window at consent (default 30). |
 | `TEMPLATE_REGISTRY_ENABLED` | dev · prod · hosted | `false` stops fetching the vendor template registry (air-gap). |
 | `TEMPLATE_REGISTRY_URL` | dev · prod · hosted | Registry document URL (HTTPS only, no redirects). |
-| `VITE_BUG_REPORTING_ENABLED` | prod build only | Baked into the production frontend image at build time; `false` removes the in-app bug/feedback widget. Published hosted images carry the default; the dev Vite server reads `src/frontend/.env` instead. |
+| `VITE_BUG_REPORTING_ENABLED` | prod build only | Baked into the production frontend image at build time; `false` removes the in-app report tabs from a frontend built on this machine. It cannot change a published image: use the run-time `BUG_REPORTING_ENABLED` for that. |
 | `VITE_BUG_INTAKE_URL` | prod build only | Bug-report endpoint baked into the production frontend (repointing also needs a CSP change in the frontend sources). |
 
 ### Email login
