@@ -22,18 +22,38 @@ import pytest
 _REPO = Path(__file__).resolve().parents[2]
 _BACKEND = _REPO / "src" / "backend"
 
-_STUBBED = (
+# Import-time stubs. lint_sys_modules.py (#762) exempts a file only when it
+# declares this list and an autouse ``_restore_sys_modules`` fixture.
+_STUBBED_MODULE_NAMES = [
     "database",
     "services.agent_auth",
     "services.docker_service",
     "services.docker_utils",
-)
+]
+
+
+@pytest.fixture(autouse=True)
+def _restore_sys_modules():
+    """Snapshot the stubbed names and put them back after each test.
+
+    The loader also restores immediately: it runs at collection, before any
+    fixture, and a leftover stub would leak into later files (#762).
+    """
+    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
+    try:
+        yield
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = value
 
 
 def _load_monitoring_service():
     """Load monitoring_service.py by path so a polluted ``services`` package
     cannot swap the module under test (#762, same loader as #1439)."""
-    saved = {name: sys.modules.get(name) for name in _STUBBED}
+    saved = {name: sys.modules.get(name) for name in _STUBBED_MODULE_NAMES}
     fake_db = types.ModuleType("database")
     fake_db.db = MagicMock()
     sys.modules["database"] = fake_db
