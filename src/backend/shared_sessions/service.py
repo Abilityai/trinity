@@ -2084,21 +2084,43 @@ def _room_gate_card(agent_name: str, shown: list[dict], ask_request_text: str,
         return [], None
     mine = [m for m in shown if (m.get("sender_kind"), m.get("sender_identity")) == requester]
     posts = [m for m in shown if m in gated or (mine and m is mine[-1])]
-    card = "\n".join([_format_delta(posts)] + ([ask_request_text] if ask_request_text else []))
+    card = "\n".join([_format_card(posts)] + ([ask_request_text] if ask_request_text else []))
     return posts, card
+
+
+# PR #4552 review: what starts each continuation line of a post on the card.
+CARD_CONTINUATION = "  | "
+
+
+def _format_card(posts: list[dict]) -> str:
+    """The gate card's posts: `_format_delta`'s sender lines, with every further
+    line of a post (on any line break a renderer honours) prefixed by
+    `CARD_CONTINUATION`, so a newline inside a post cannot start a line that
+    reads as another sender's. The agent transcript keeps `_format_delta`."""
+    lines = []
+    for m in posts:
+        first, *rest = _format_delta([m]).splitlines() or [""]
+        lines += [first] + [CARD_CONTINUATION + line for line in rest]
+    return "\n".join(lines)
 
 
 def _too_long_notice(posts: list[dict], requester_identity: str, exc: SkillGateError) -> str:
     """trinity#4505 AC3: a too-long refusal names text the requester can change.
-    When a gated post on the card is someone else's, say whose. Every gated post
+    When a gated post on the card is someone else's and the requester's own
+    post is not what overflows, say whose. Every gated post
     on the card is recorded as held (`_record_gate_hold`), so asking again
     leaves it out."""
-    others = sorted({m.get("sender_identity") for m in posts
-                     if m.get("sender_identity") and m.get("sender_identity") != requester_identity})
+    theirs = [m for m in posts
+              if m.get("sender_identity") and m.get("sender_identity") != requester_identity]
+    others = sorted({m["sender_identity"] for m in theirs})
     message = getattr(exc, "message", None) or str(exc)
     if not others:
         return message
-    from services.skill_gate_service import CARD_INPUT_MAX_BYTES
+    from services.skill_gate_service import CARD_INPUT_MAX_BYTES, _json_bytes
+    # The requester's own post is on the card too: when the others' posts fit
+    # by themselves, the requester's post is what to shorten.
+    if _json_bytes(_format_card(theirs)) <= CARD_INPUT_MAX_BYTES:
+        return message
     return (f"This request is too long for an approver to read in full (over "
             f"{CARD_INPUT_MAX_BYTES} bytes). It includes a post by {', '.join(others)} "
             f"that names a skill needing approval; that post is not passed on again. Ask again.")
