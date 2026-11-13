@@ -4394,9 +4394,10 @@ export class TrinityClient {
     return this.projectRequest("GET", this.projectPath(projectId), turn);
   }
 
-  async listProjectTasks(projectId: string, status = "open", turn?: string): Promise<Array<Record<string, unknown>>> {
+  async listProjectTasks(projectId: string, status = "open", turn?: string, view?: string): Promise<Array<Record<string, unknown>>> {
+    const viewQuery = view ? `&view=${encodeURIComponent(view)}` : "";
     const res = await this.projectRequest<{ tasks: Array<Record<string, unknown>> }>(
-      "GET", this.projectPath(projectId, `/tasks?status=${encodeURIComponent(status)}`), turn);
+      "GET", this.projectPath(projectId, `/tasks?status=${encodeURIComponent(status)}${viewQuery}`), turn);
     return res.tasks;
   }
 
