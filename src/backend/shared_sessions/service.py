@@ -2307,10 +2307,13 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
         # cold instead of failing the same way forever (Session-tab idiom).
         if cached:
             db.clear_cached_session(room_id, agent_name)
+        # Every room member reads this line, external Workspace clients
+        # included: the row error stays operator-only (#4482).
+        from services.channel_completion_report import person_safe_failure
         err = (getattr(result, "error", "") or "").strip()
         _post_system(room_id,
                      f"{agent_name} could not respond"
-                     + (f": {err[:200]}" if err else " (no response)."))
+                     + (f": {person_safe_failure(status, err)}" if err else " (no response)."))
         return result
 
     # POST FIRST, then advance the cursor (ent#220 item 1).

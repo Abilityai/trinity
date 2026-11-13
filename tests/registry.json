@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4482_person_safe_failure.py",
+      "feature": "#4482",
+      "added": "2026-11-13",
+      "categories": [
+        "backend",
+        "client-portal",
+        "channels"
+      ],
+      "description": "#4482: a failed background turn's completion report (Workspace, Slack, Telegram), the Work card and the own-turn switch message show a fixed person-safe sentence; the subscription walk trail, subscription names and operator guidance stay on the execution row. An agent refusal passes through unless it carries the trail."
+    },
+    {
       "file": "unit/test_ent1221_web_delivery.py",
       "feature": "trinity-enterprise#1221",
       "added": "2026-11-11",
@@ -9121,6 +9132,16 @@
       "description": "ent#1216: a caller_wake turn carries the delegation's person when that person is owner tier on the delegator, so the agent's key keeps its execution reads while the wake runs. Real /task admission -> real maybe_wake_caller -> real ledger and acting_turn_user_id / viewer_row_scope on a real DB. A shared person's, a visitor's, a deleted user's and a cannot-open person's wake carry nobody, as before; the audit names the standing; auto-memory follows the owner rule."
     },
     {
+      "file": "unit/test_4541_proxy_listener_wait.py",
+      "feature": "#4541",
+      "added": "2026-11-13",
+      "categories": [
+        "unit",
+        "deploy"
+      ],
+      "description": "A hosted upgrade waits up to 90 s for the web container's PROXY-protocol listener before re-rendering Caddy: provision_wait_for_proxy_listener run with probe, sleep and date stubbed (retry count, 90 s default), and the real start.sh --hosted run (ent#873 harness) with the listener published from the 10th check ends on the protected listener in one run; never published falls back to 8081 with the warning after the full wait."
+    },
+    {
       "file": "unit/test_ent1258_suspended_workspace_door.py",
       "feature": "trinity-enterprise#1258",
       "added": "2026-11-13",
@@ -9168,6 +9189,19 @@
         "unit"
       ],
       "description": "trinity-enterprise#1096 (OSS routes): POST /api/operator-queue/{id}/readdress {to: rule|admin, reason} — admin + person only (agent, connector, ops and non-admin principals refused, nothing written), body validated, a registered family moved by its resolver (audit: admin actor + has_reason, no address or reason text), the rule landing on the admin seat, unchanged → 409 naming who it waits for, a role-addressed ask follows its role, a named family → 422 unknown_family, a skill-gate approval refused the admin seat (T3), an admin-seat card then decided by the admin; cancel by an admin on someone else's card needs a reason (422 reason_required); bulk-cancel reports skipped_fenced; the 403 not_addressee carries waiting_on + seat on the Operations and Workspace doors (admin verbs on Operations only); an answer read before a re-address is a 409 readdressed (people named on Operations, never on the Workspace); route registration, the require_admin + require_person gates and the R14 `# mcp:` header pinned."
+    },
+    {
+      "file": "unit/test_4475_terminate_audit_race.py",
+      "feature": "abilityai/trinity#4475",
+      "added": "2026-11-13",
+      "categories": [
+        "backend",
+        "api",
+        "security",
+        "audit",
+        "unit"
+      ],
+      "description": "A terminate that ended the turn writes one execution_terminate row when the in-flight /task or /chat caller (or the parked dispatcher) wins the CANCELLED CAS. A Redis first-claim per agent and execution id dedupes repeats; with Redis None or raising the row is still written; a failed audit write releases the claim so the next terminate records the turn."
     }
   ]
 }

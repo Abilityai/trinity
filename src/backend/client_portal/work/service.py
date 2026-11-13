@@ -31,6 +31,7 @@ from typing import Dict, Iterable, List, Optional
 
 from config import PORTAL_SOURCE_CHANNEL, ROOM_SOURCE_CHANNEL
 from database import db as core_db
+from services.channel_completion_report import TIMEOUT_RE as _TIMEOUT_RE, person_safe_failure
 from utils.helpers import parse_iso_timestamp
 
 from .. import db as portal_db
@@ -56,7 +57,6 @@ STALE_FLOOR_SECONDS = 30 * 60
 
 IN_FLIGHT = frozenset({"running", "queued", "pending_retry"})
 _TERMINAL = frozenset({"success", "failed", "error", "cancelled", "skipped"})
-_TIMEOUT_RE = re.compile(r"timed?\s*-?\s*out|timeout", re.IGNORECASE)
 _WS_RE = re.compile(r"\s+")
 
 
@@ -140,15 +140,6 @@ def clean_title(message: Optional[str]) -> str:
     if not text:
         return "(no message)"
     return text if len(text) <= TITLE_MAX else text[: TITLE_MAX - 1].rstrip() + "…"
-
-
-def clean_error(error_summary: Optional[str]) -> Optional[str]:
-    """The failed row's one-liner, masked and bounded; None when there is none."""
-    from utils.credential_sanitizer import sanitize_text
-    text = _WS_RE.sub(" ", sanitize_text(str(error_summary or ""))).strip()
-    if not text:
-        return None
-    return text if len(text) <= ERROR_MAX else text[: ERROR_MAX - 1].rstrip() + "…"
 
 
 # ----------------------------------------------------------- activity (#620)
@@ -323,9 +314,16 @@ def _project(row: dict, *, email: str, roster: set, turn_timeout: int,
         can_stop=can_stop(kind, status, mine=mine, on_roster=on_roster, stale=stale),
         delegated_by=mask(row.get("source_agent_name"), roster),
         loop_id=row.get("loop_id") if kind == "loop" else None,
-        error=clean_error(row.get("error_summary") or row.get("error")) if status in ("failed", "error") else None,
+        # #4482: never the row's error — it carries the subscription walk trail.
+        error=_person_safe_error(row) if status in ("failed", "error") else None,
         steps=None,
     )
+
+
+def _person_safe_error(row: dict) -> str:
+    text = person_safe_failure("failed", row.get("error_summary") or row.get("error"))
+    # A passed-through refusal can be long; the card is a bounded layout.
+    return text if len(text) <= ERROR_MAX else text[: ERROR_MAX - 1].rstrip() + "…"
 
 
 def _resolve_timeout(agent_name: Optional[str]) -> int:
