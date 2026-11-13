@@ -98,6 +98,16 @@ that person when they are owner tier on the delegator, and nobody otherwise:
 
 ``source_user_email`` stays off the row either way (ent#886).
 
+**The wake stands as the turn that delegated (trinity-enterprise#1225).** The
+callee row records the caller's turn that dispatched it
+(``continues_execution_id``, written only while that turn ran). The wake
+carries that link and nobody on the row, and ``turn_tier_service.turn_actor``
+rates it exactly as the delegating turn: a shared person's delegation wakes as
+that person (reads narrowed to them, no shell), a ``delegated`` turn's keeps
+owner tier, a visitor's stays a visitor's. The person rule above is the
+fallback for a callee row with no link (one written before the column, or by
+a key that named no running turn).
+
 Never raises: this runs on the path of an already-billed terminal.
 """
 
@@ -658,11 +668,17 @@ async def _claimed_wake(row, caller, callee, execution_id, verdict, idem):
     ask_ids = _pending_ask_ids(execution_id)
     callee_depth = getattr(row, "chain_depth", None)
     chain_depth = _standing_depth(caller, callee_depth)
-    # ent#1216: an owner's delegation wakes as the owner's turn; every other
-    # wake carries nobody, as before.
-    person = _standing_person(caller, row)
-    standing = "owner" if person is not None else "none"
-    attribution = {"source_user_id": person} if person is not None else {}
+    # ent#1225: the wake continues the caller's turn that delegated, and is
+    # rated as it. ent#1216 is the fallback for a callee row with no link: an
+    # owner's delegation wakes as the owner's turn, every other one as nobody.
+    origin = getattr(row, "continues_execution_id", None)
+    if isinstance(origin, str) and origin:
+        standing = "origin"
+        attribution = {"continues_execution_id": origin}
+    else:
+        person = _standing_person(caller, row)
+        standing = "owner" if person is not None else "none"
+        attribution = {"source_user_id": person} if person is not None else {}
 
     try:
         result = await _dispatch_wake(

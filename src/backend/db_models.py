@@ -318,6 +318,9 @@ class ScheduleExecution(BaseModel):
     # ent#862 — verified AAuth peer identity of an inbound A2A caller
     # (`aauth:<local>@<host>`); None for bearer/non-A2A rows.
     a2a_caller_identity: Optional[str] = None
+    # ent#1225 — the platform-recorded turn this row continues (a wake, an ask
+    # resume or ending, a gate notice; a delegated callee's caller turn).
+    continues_execution_id: Optional[str] = None
 
 
 # =========================================================================

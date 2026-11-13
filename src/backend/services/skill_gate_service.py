@@ -287,7 +287,8 @@ async def enforce(
         requester_mcp_key_id=requester.mcp_key_id,
         origin_execution_id=origin_execution_id,
         triggered_by=triggered_by,
-        dispatch={**dict(dispatch or {}), **_requester_chat(requester)},
+        dispatch={**dict(dispatch or {}), **_requester_chat(requester),
+                  **_requester_continues(requester)},
     )
     if not created:   # a concurrent call for the same occurrence won
         raise _answer_for_record(record, role)
@@ -1447,6 +1448,10 @@ DISPATCH_FIELDS: Dict[str, str] = {
     # trinity#2328: the caller's per-task turn cap is a property of the task,
     # like its model and timeout — the approved run keeps it.
     "max_turns": FREEZE,
+    # trinity-enterprise#1225: the turn the request continues, recorded by the
+    # platform while it ran. The approved run is rated as that turn, as the
+    # request would have been.
+    "continues_execution_id": FREEZE,
     # trinity#3653: set on a requester's wake-up only; an approved run is the
     # requester's own request and never carries a binding agent of its own.
     "source_channel_agent": DROP,
@@ -1502,6 +1507,23 @@ REPLAY_SYSTEM_PROMPT = "replay_system_prompt"
 # in the record's `dispatch` beside the frozen fields and read only by the
 # requester's wake-up — never replayed to the approved run.
 REQUESTER_CHAT = "requester_chat"
+# trinity-enterprise#1225: the requesting AGENT's turn, recorded while it ran
+# (`turn_tier_service.continuation_origin`). The notice that wakes the
+# requester when the request is decided (`skill_gate`) continues that turn and
+# is rated as it. Never a dispatch field: the approved run is another agent's.
+REQUESTER_CONTINUES = "requester_continues"
+
+
+def _requester_continues(requester) -> Dict[str, str]:
+    """`{REQUESTER_CONTINUES: id}` for an agent requester whose named turn is
+    running on it now; empty otherwise (a person, `manual`, a finished or
+    foreign turn, an unreadable lookup)."""
+    agent = getattr(requester, "agent_name", None)
+    if not agent:
+        return {}
+    from services import turn_tier_service
+    origin = turn_tier_service.continuation_origin(db, agent, getattr(requester, "execution_id", None))
+    return {REQUESTER_CONTINUES: origin} if origin else {}
 
 
 def _requester_chat(requester: Requester) -> Dict[str, Dict[str, str]]:
@@ -1790,6 +1812,7 @@ async def _dispatch_approved(record: Dict[str, Any], execution_id: str) -> str:
             source_channel_chat_id=frozen.get("source_channel_chat_id"),
             source_channel_thread=frozen.get("source_channel_thread"),
             source_channel_client=frozen.get("source_channel_client"),
+            continues_execution_id=frozen.get("continues_execution_id"),
         ),
         execution_id=execution_id,
     )
@@ -2302,6 +2325,8 @@ async def _wake_requester_agent(record: Dict[str, Any], text: str, *,
                 message=text,
                 triggered_by=SKILL_GATE_TRIGGER,
                 chain_depth=frozen.get("chain_depth"),
+                # trinity-enterprise#1225: the notice stands as the requesting turn.
+                continues_execution_id=frozen.get(REQUESTER_CONTINUES),
                 **chat,
             )
         except Exception:  # noqa: BLE001 — a stopped requester misses it; the record stands

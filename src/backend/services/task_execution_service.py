@@ -1651,7 +1651,8 @@ def _log_retry_budget(
 # wrote on the row it pre-created. `/api/internal/execute-task` sends neither the
 # schedule id nor the person who pressed Run now — both live on the row.
 _ROW_ATTRIBUTION = ("source_user_id", "source_user_email", "source_agent_name",
-                    "source_mcp_key_id", "source_mcp_key_name", "schedule_id")
+                    "source_mcp_key_id", "source_mcp_key_name", "schedule_id",
+                    "continues_execution_id")
 
 
 def _with_row_attribution(fields: dict, execution_id: Optional[str]) -> dict:
@@ -1756,6 +1757,11 @@ class TaskExecutionService:
         # whether or not the agent is a pull pilot. Off, the #2391 pilot gate
         # alone decides. See `build_pull_queue_payload`.
         queue_on_capacity: bool = False,
+        # trinity-enterprise#1225: the turn this run continues, recorded by a
+        # platform producer through `turn_tier_service.continuation_origin`.
+        # A continuation trigger is rated as that turn. Ignored when
+        # `execution_id` is given (the producer wrote the row).
+        continues_execution_id: Optional[str] = None,
     ) -> TaskExecutionResult:
         """
         Execute a task on an agent container with full lifecycle management.
@@ -1856,6 +1862,7 @@ class TaskExecutionService:
                     source_channel_client=source_channel_client,
                     source_channel_agent=source_channel_agent,
                     chain_depth=chain_depth,
+                    continues_execution_id=continues_execution_id,
                 ),
             )
             execution_id = execution.id if execution else None
@@ -1935,6 +1942,7 @@ class TaskExecutionService:
                         source_channel_thread=source_channel_thread,
                         source_channel_client=source_channel_client,
                         max_turns=max_turns,
+                        continues_execution_id=continues_execution_id,
                     ),
                 )
 

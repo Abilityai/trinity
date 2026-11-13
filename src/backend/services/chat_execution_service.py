@@ -229,6 +229,8 @@ async def prepare_chat_execution(
             subscription_id=_exec_subscription_id,
             # #2806: from admission — None for a non-agent principal (a root).
             chain_depth=chain_depth,
+            # ent#1225: the caller's running turn, which this run's wake continues.
+            continues_execution_id=turn_tier_service.turn_origin_execution_id(db, current_user),
         ),
         # #3989: the row takes the admission id, which is also the capacity
         # slot member, so canary S-01 and the slot views resolve to this row.
@@ -2287,6 +2289,8 @@ async def create_task_execution_and_activities(
             source_channel_client=src_channel_client,
             # #2806: stamped once here; a backlog-queued row keeps it when drained.
             chain_depth=chain_depth,
+            # ent#1225: the caller's running turn, which this run's wake continues.
+            continues_execution_id=turn_tier_service.turn_origin_execution_id(db, current_user),
         ),
     )
     execution_id = execution.id if execution else None
@@ -3132,6 +3136,7 @@ async def dispatch_parallel_task(
                     source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
                     chain_depth=chain_depth,
                     max_turns=request.max_turns,
+                    continues_execution_id=turn_tier_service.turn_origin_execution_id(db, current_user),
                 ),
                 **skill_gate_service.frozen_replay(request.message, request.system_prompt),
             },
