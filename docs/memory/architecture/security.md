@@ -267,3 +267,12 @@ CRED-002 file-injection model (Invariant #12): `.env` (KEY=VALUE source of truth
 
 ---
 
+## Vendor-hosted requests and the one switch that stops them (#4499)
+
+Five requests can leave an instance for a vendor-operated host: the operator intake, telemetry sharing, the help widget's report tabs, the help widget's Ask tab, and the `ask_trinity` MCP tool (the last two reach the hosted docs service). Each has its own run-time switch (`OPERATOR_INTAKE_ENABLED`, `TELEMETRY_SHARING_ENABLED`, `BUG_REPORTING_ENABLED`, `ASK_TRINITY_ENABLED`), and `DO_NOT_TRACK` set to anything but `0` / empty / `false` turns all of them off. Three containers act on it, so all three receive it in every compose file: the backend (`config.py`; it also tells the SPA through `GET /api/version` → `help`), the MCP server (`tools/docs.ts::askTrinityEnabled`, which leaves the tool unregistered) and the nginx frontend (`render-nginx.sh`, which writes the served `security-headers.conf` without the host of a channel that is off).
+
+- **The widget fails closed.** It shows a channel only for a literal `true` under `help`; before the answer, on a failed read and on an older backend it shows nothing. The build-time `VITE_BUG_REPORTING_ENABLED` can still turn reporting off and can no longer turn it on.
+- **A switch a container never receives is the bug this closed.** The report switch was a frontend build argument (inert on the published images and never passed by `docker-compose.yml`), and `DO_NOT_TRACK` reached only the backend.
+- **`render-nginx.sh` removes two fixed strings and writes no environment value into the configuration**, so a setting cannot inject a directive.
+- **New vendor host → new row.** `tests/unit/test_4499_vendor_egress_switch.py` scans the shipped source for vendor-operated hosts and fails on one that is not listed with a switch `DO_NOT_TRACK` also turns off.
+
