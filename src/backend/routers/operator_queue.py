@@ -1,4 +1,4 @@
-# mcp: operator_queue.ts (list_operator_queue, get_operator_queue_item, respond_to_operator_queue — a person-scoped key only; ask_operator → agent_router's raise; get_my_ask → agent_router's self-readback; withdraw_ask → agent_router's self-withdraw, trinity-enterprise#901)
+# mcp: operator_queue.ts (list_operator_queue, get_operator_queue_item, respond_to_operator_queue — a person-scoped key only; ask_operator → agent_router's raise; get_my_ask → agent_router's self-readback; withdraw_ask → agent_router's self-withdraw, trinity-enterprise#901); readdress → none, a human-only admin verb (ent#1096)
 """
 Operator Queue API Router (OPS-001).
 
@@ -21,6 +21,7 @@ from models import (
     OperatorAskCreate,
     OperatorAskWithdraw,
     OperatorCancel,
+    OperatorReaddress,
     OperatorResponse,
 )
 
@@ -31,6 +32,8 @@ from dependencies import (
     is_person_principal,
     principal_reach,
     reject_non_person_principal,
+    require_admin,
+    require_person,
 )
 from db_models import User
 from services.platform_audit_service import platform_audit_service, AuditEventType
@@ -326,7 +329,10 @@ async def bulk_cancel_queue_items(
         cancellable, accessible, actor=_actor(current_user, request), reason=body.reason,
     )
     cancelled = len(ending.rows)
-    return {"cancelled": cancelled, "skipped": len(ids) - cancelled, "batch_id": ending.batch_id}
+    # trinity-enterprise#1096 (R6): of the skipped, the fenced cards the actor
+    # is not on — ended one at a time, with a reason.
+    return {"cancelled": cancelled, "skipped": len(ids) - cancelled, "batch_id": ending.batch_id,
+            "skipped_fenced": ending.skipped_fenced}
 
 
 @router.post("/clear-resolved")
@@ -501,15 +507,19 @@ async def respond_to_queue_item(
         # trinity-enterprise#751: a gated-skill approval is decided only by a
         # person it was addressed to; #1042: an ask to a canon role only by a
         # person seated in it — named by the role's label, never a person.
-        raise HTTPException(status_code=403, detail={
-            "code": "not_addressee",
-            "message": e.role_message()
-            or "This approval was addressed to someone else; only they can decide it.",
-        })
+        # trinity-enterprise#1096: `waiting_on` + `seat` on every refusal; a
+        # gate approval's message names the person, and an admin is told the
+        # two verbs (re-address, or end with a reason).
+        raise HTTPException(status_code=403, detail=e.detail(
+            admin_verbs=ask_service._gate_admin(current_user)))
     except ask_service.AskConflict as conflict:
         # The response was NOT recorded — surfaced instead of a silent 200
         # (#1017). `expired`: still pending but past its deadline (#611) — the
         # poller has not swept it yet, and an approval must not land after it.
+        if conflict.code == "readdressed":
+            # trinity-enterprise#1096 (R5): moved after this caller read it.
+            raise HTTPException(status_code=409,
+                                detail=ask_service.readdressed_detail(conflict.item))
         if conflict.code == "expired":
             raise HTTPException(
                 status_code=409,
@@ -564,18 +574,58 @@ async def cancel_queue_item(
         raise HTTPException(status_code=404, detail="Queue item not found")
     except ask_service.AskNotAddressee as e:
         # trinity-enterprise#751: only its addressee or an admin cancels a
-        # gated-skill approval (#1042: named by its role when it has one).
-        raise HTTPException(status_code=403, detail={
-            "code": "not_addressee",
-            "message": e.role_message(cancelling=True)
-            or "This approval was addressed to someone else; only they or an admin can cancel it.",
+        # gated-skill approval (#1042: named by its role when it has one;
+        # trinity-enterprise#1096: who it waits for, structured).
+        raise HTTPException(status_code=403, detail=e.detail(cancelling=True))
+    except ask_service.AskReasonRequired:
+        # trinity-enterprise#1096: an admin ending someone else's decision.
+        raise HTTPException(status_code=422, detail={
+            "code": "reason_required",
+            "message": "This card waits for someone else's decision; give a reason to end it.",
         })
     except ask_service.AskConflict as conflict:
+        if conflict.code == "readdressed":
+            raise HTTPException(status_code=409,
+                                detail=ask_service.readdressed_detail(conflict.item))
         raise HTTPException(
             status_code=409,
             detail=f"Item is no longer pending (now '{conflict.item['status']}') — it was not cancelled"
         )
     return ending.rows[0]
+
+
+@router.post("/{item_id}/readdress")
+async def readdress_queue_item(
+    item_id: str,
+    body: OperatorReaddress,
+    request: Request,
+    current_user: User = Depends(require_admin),
+    _person: User = Depends(require_person),
+):
+    """An instance admin moves one pending card (trinity-enterprise#1096):
+    `to: rule` re-runs the rule that raised it, `to: admin` takes a
+    registered family's card to the admin seat. No person picker; the reason
+    is required and only its presence is audited.
+
+    Human-only and admin-only (`require_admin` + `require_person`): changing
+    who decides is a grant, never an agent's call — the `# mcp:` header says
+    so. The row's visibility is the same as the read's: a row the admin cannot
+    see is the uniform 404.
+    """
+    existing = db.get_operator_queue_item(item_id)
+    if not existing or operator_queue_service.is_person_tag(existing):
+        raise HTTPException(status_code=404, detail="Queue item not found")
+    _assert_agent_accessible(existing["agent_name"], _accessible_set(current_user))
+    if _hidden_for(existing, current_user):
+        raise HTTPException(status_code=404, detail="Queue item not found")
+    try:
+        return ask_service.admin_readdress(
+            item_id, to=body.to, reason=body.reason, actor=_actor(current_user, request))
+    except ask_service.AskNotFound:
+        raise HTTPException(status_code=404, detail="Queue item not found")
+    except ask_service.ReaddressRefused as e:
+        raise HTTPException(status_code=e.status,
+                            detail={"code": e.code, "message": e.message, **e.data})
 
 
 @router.get("/agents/{agent_name}")

@@ -489,6 +489,9 @@ class TestNamedRefusal:
                                    seat="role:finance")
         assert "p@example.com" not in e.message()
         assert e.message() == e.role_message()
+        # the ent#1042 contract: no person anywhere in a role refusal's body
+        assert "@" not in repr(e.detail())
+        assert e.detail()["seat"] == "role:finance"
 
     def test_the_detail_carries_the_structured_fields(self, real_db, agent, people):
         row = _row(real_db, _consent(agent, [people["alice"]], seat="primary"))

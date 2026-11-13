@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
@@ -198,11 +199,15 @@ class AskNotAddressee(Exception):
 
     def detail(self, *, cancelling: bool = False, admin_verbs: bool = False) -> Dict[str, Any]:
         """The 403 body every door returns: the code, the message, and who the
-        card waits for."""
-        return {"code": "not_addressee",
-                "message": self.message(cancelling=cancelling, admin_verbs=admin_verbs),
-                "waiting_on": list(self.waiting_on),
-                "seat": self.seat}
+        card waits for — `seat` always; `waiting_on` (the people) on every
+        refusal except a role-addressed one, whose refusal names the role and
+        never a person (the ent#1042/#1053/#1134 contract stands)."""
+        out = {"code": "not_addressee",
+               "message": self.message(cancelling=cancelling, admin_verbs=admin_verbs),
+               "seat": self.seat}
+        if self.role is None:
+            out["waiting_on"] = list(self.waiting_on)
+        return out
 
     def role_message(self, *, cancelling: bool = False) -> Optional[str]:
         """The refusal for a role-addressed ask: the role's label and what to do
@@ -484,6 +489,29 @@ def not_addressee(row: Mapping[str, Any]) -> AskNotAddressee:
                            gate=_gate_approval(row))
 
 
+def readdressed_detail(row: Mapping[str, Any], *, name_people: bool = True) -> Dict[str, Any]:
+    """The 409 body for an ending that lost to a re-address
+    (trinity-enterprise#1096, R5): who the card waits for now. The Operations
+    door names the people (its caller reads them on the card anyway); the
+    Workspace door passes `name_people=False` — the person it moved away from
+    is no longer on it, and never learns who is."""
+    e = not_addressee(row)
+    if not name_people:
+        return {"code": "readdressed",
+                "message": "This ask was moved to someone else before your answer landed; "
+                           "it no longer waits for you. Nothing was recorded."}
+    if e.seat == ADMIN_SEAT and not e.waiting_on:
+        who = "an instance admin"
+    elif e.waiting_on:
+        who = (f"{_SEAT_LABELS.get(e.seat or '', 'the person it was addressed to')}: "
+               f"{', '.join(e.waiting_on)}")
+    else:
+        who = "nobody who can decide it"
+    return {"code": "readdressed",
+            "message": f"This card was re-addressed and now waits for {who}. Nothing was recorded.",
+            "waiting_on": e.waiting_on, "seat": e.seat}
+
+
 def _ledger_email(row: Mapping[str, Any], actor: "Actor") -> str:
     """The email an ending records. An admin with no email deciding through
     the admin arm (trinity-enterprise#1096, R9) is recorded `admin:<username>`
@@ -588,10 +616,16 @@ def decided_by_options(item: Dict[str, Any]) -> bool:
 
 def cancel(item_id: str, *, actor: Actor, reason: Optional[str] = None) -> Ending:
     """A person cancelled one ask. Raises `AskNotFound` / `AskConflict` /
-    `AskNotAddressee` (a gate approval the actor may not end, #751)."""
+    `AskNotAddressee` (a gate approval the actor may not end, #751), or
+    `AskReasonRequired` (trinity-enterprise#1096): an admin ending a
+    seat-fenced card they are not addressed on — someone else's decision, or
+    the admin seat's — gives a reason, recorded on the row like any cancel's."""
     current = db.get_operator_queue_item(item_id)
     if current and not may_end(current, actor, cancelling=True):
         raise not_addressee(current)
+    if (current and _seat_fenced(current, cancelling=True) and not _addressed(current, actor)
+            and not (reason or "").strip()):
+        raise AskReasonRequired(item_id)
     expect = _ending_expectation(current, actor, cancelling=True) if current else None
     updated = db.cancel_operator_queue_item(
         item_id, disposed_by_email=_ledger_email(current or {}, actor), reason=reason,
@@ -1111,6 +1145,150 @@ def _fresh_audience(agent_name: str, role: str, *, gate: bool) -> Optional[Tuple
             return None
     people = _people_list(people)
     return people, (people[0] if len(people) == 1 else None)
+
+
+# ---------------------------------------------------------------------------
+# An admin moves a stranded card (trinity-enterprise#1096)
+# ---------------------------------------------------------------------------
+
+# The skill gate's id shape (`skill_gate_service._request_id`) — the gate
+# approvals `readdress_role` moves (`db.list_pending_role_addressed`'s twin).
+_SKILL_GATE_ID = re.compile(r"gate-[0-9a-f]{40}")
+READDRESS_TARGETS = ("rule", "admin")
+
+
+class ReaddressRefused(Exception):
+    """An admin re-address that did not happen, named: `status` and `code`
+    for the route, `message` for the person, `data` the structured extras
+    (who the card waits for now, on `audience_unchanged`)."""
+
+    def __init__(self, status: int, code: str, message: str, **data: Any):
+        super().__init__(code)
+        self.status = status
+        self.code = code
+        self.message = message
+        self.data = data
+
+
+class AskReasonRequired(Exception):
+    """trinity-enterprise#1096: an admin ending a seat-fenced card they are
+    not addressed on — someone else's decision — must say why."""
+
+    def __init__(self, item_id: str):
+        super().__init__("reason_required")
+        self.item_id = item_id
+
+
+def _decider_value(decider: Any, key: str) -> Any:
+    if isinstance(decider, Mapping):
+        return decider.get(key)
+    return getattr(decider, key, None)
+
+
+def _role_family(row: Mapping[str, Any]) -> bool:
+    """A row addressed BY ROLE, whose rule `_fresh_audience` re-runs: the
+    agent's own raise to an `ASK_ROLES` role, or a skill-gate approval —
+    `readdress_role`'s allowlist."""
+    if row.get("to_role") not in ASK_ROLES:
+        return False
+    if row.get("raised_by") == "agent":
+        return True
+    return _gate_approval(row) and bool(_SKILL_GATE_ID.fullmatch(row.get("request_id") or ""))
+
+
+def admin_readdress(item_id: str, *, to: str, reason: str, actor: Actor) -> Dict[str, Any]:
+    """An instance admin re-addresses one pending card
+    (trinity-enterprise#1096, R2/T2) — never to a person they pick:
+
+    - `to="rule"` re-runs the rule that raised it: a platform family's
+      registered resolver (`register_readdress_resolver`; the decider and its
+      seat stamp), or, for a row addressed by role, the role as
+      `readdress_role` would resolve it now;
+    - `to="admin"` moves a registered family's gate approval to the admin seat
+      (no audience, the `admin` stamp), which an admin then decides. A skill
+      gate approval cannot go there (T3): its resume reads `resolved_to`, so an
+      admin's answer would be refused by the gate.
+
+    Written through `readdress_item` with `ADMIN_READDRESSED`, the admin on
+    the audit row and `has_reason` (the reason's text is never stored there).
+    Raises `AskNotFound`, or `ReaddressRefused`: 409 `not_pending`, 422
+    `unknown_family` (no rule to re-run), 422 `admin_seat_unsupported`, 409
+    `rule_refused` (the role refuses today), 409 `audience_unchanged` naming
+    who the card waits for. The caller (the route) has already applied the
+    admin + person gate and the row's visibility.
+    """
+    from services import operator_queue_service as oqs
+
+    if to not in READDRESS_TARGETS:
+        raise ValueError(f"admin_readdress: to must be one of {READDRESS_TARGETS}, got {to!r}")
+    row = db.read_operator_queue_address(item_id)
+    if not row:
+        raise AskNotFound(item_id)
+    if row.get("status") != "pending" or _past_deadline(row):
+        raise ReaddressRefused(409, "not_pending", "This card has already ended; there is nothing to move.")
+    resolver = readdress_resolver_for(row.get("request_id")) if _gate_approval(row) else None
+    agent_name = row["agent_name"]
+    stamps: Dict[str, Any] = {}
+    attach_chat = True
+    if resolver is not None:
+        attach_chat = False
+        if to == ADMIN_SEAT:
+            people, single, seat = [], None, ADMIN_SEAT
+            stamps = {oqs._WORKSPACE_DECIDER_SEAT_KEY: ADMIN_SEAT,
+                      oqs._WORKSPACE_OPERATORS_REASON_KEY: None}
+        else:
+            decider = resolver(agent_name)
+            seat = _decider_value(decider, "seat")
+            if seat not in DECIDER_SEATS:
+                raise ValueError(f"readdress resolver returned seat {seat!r}")
+            people = _people_list(_decider_value(decider, "people"))
+            single = (_decider_value(decider, "single") or "").strip().lower() or None
+            if single is None and len(people) == 1:
+                single = people[0]
+            reason_code = _decider_value(decider, "operators_reason") if seat == ADMIN_SEAT else None
+            stamps = {oqs._WORKSPACE_DECIDER_SEAT_KEY: seat,
+                      oqs._WORKSPACE_OPERATORS_REASON_KEY: reason_code}
+    elif to == ADMIN_SEAT:
+        if _role_family(row) or _gate_approval(row):
+            raise ReaddressRefused(
+                422, "admin_seat_unsupported",
+                "This card cannot be moved to the admin seat: who decides it is fixed by the rule "
+                "that raised it. Re-address it by its rule, or end it with a reason.")
+        raise ReaddressRefused(422, "unknown_family",
+                               "This card has no rule to re-address it by; end it with a reason instead.")
+    elif _role_family(row):
+        audience = _fresh_audience(agent_name, row["to_role"], gate=row.get("raised_by") == "gate")
+        if audience is None:
+            raise ReaddressRefused(409, "rule_refused",
+                                   f"Nobody can be found for the {row['to_role']} role on this agent "
+                                   "right now, so the card stays as it is; end it with a reason instead.")
+        people, single = audience
+        seat = row["to_role"]
+        if row.get("type") == "credential" and not single:
+            raise ReaddressRefused(409, "rule_refused",
+                                   "A credential ask must reach exactly one person, and its role "
+                                   "reaches more or fewer today; end it with a reason instead.")
+    else:
+        raise ReaddressRefused(422, "unknown_family",
+                               "This card has no rule to re-address it by; end it with a reason instead.")
+
+    changed = readdress_item(item_id, people, single, reason=ADMIN_READDRESSED,
+                             attach_chat=attach_chat, platform_context=stamps or None,
+                             actor=actor, has_reason=bool((reason or "").strip()))
+    if not changed:
+        fresh = db.read_operator_queue_address(item_id) or {}
+        if fresh.get("status") != "pending":
+            raise ReaddressRefused(409, "not_pending", "This card ended while it was being moved.")
+        waiting = _resolved_people(fresh)
+        now_seat = _decider_seat(fresh) or fresh.get("to_role")
+        who = (f"{_SEAT_LABELS.get(now_seat or '', 'the person it was addressed to')}: "
+               f"{', '.join(waiting)}" if waiting else "an instance admin")
+        raise ReaddressRefused(
+            409, "audience_unchanged",
+            f"This card already waits for {who}; re-addressing by its rule changes nothing. "
+            "Move it to the admin seat (to: admin) or end it with a reason.",
+            waiting_on=waiting, seat=now_seat)
+    return {"id": item_id, "waiting_on": people, "seat": seat}
 
 
 def _raising_room(agent_name: str, turn: Optional[str], ask_type: str) -> Optional[str]:

@@ -4384,6 +4384,27 @@ class OperatorCancel(BaseModel):
     _blank_is_none = field_validator("reason")(_blank_reason_is_none)
 
 
+class OperatorReaddress(BaseModel):
+    """Body for an admin re-addressing one pending card
+    (abilityai/trinity-enterprise#1096).
+
+    `to`: `rule` re-runs the rule that raised the card (a registered platform
+    family's resolver, or the role a role-addressed row went to); `admin`
+    moves a registered family's card to the admin seat. There is no person
+    picker. `reason` is required (1-500 chars after trimming); only whether one
+    was given reaches the audit row."""
+    to: Literal["rule", "admin"]
+    reason: str = Field(..., max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def _reason_present(cls, value: str) -> str:
+        value = (value or "").strip()
+        if not value:
+            raise ValueError("reason must be 1 to 500 characters after trimming")
+        return value
+
+
 class OperatorAskCreate(BaseModel):
     """Body for an agent raising an ask through the platform
     (trinity-enterprise#611): `POST /api/agents/{name}/operator-queue`.

@@ -1076,7 +1076,8 @@ class TestEndingRoutes:
 
     def test_bulk_cancel_that_ends_nothing_has_no_batch(self, routes):
         res = routes.client.post("/api/operator-queue/bulk-cancel", json={"ids": ["no-such-uuid"]})
-        assert res.json() == {"cancelled": 0, "skipped": 1, "batch_id": None}
+        # trinity-enterprise#1096 (R6): the fenced rows among the skipped
+        assert res.json() == {"cancelled": 0, "skipped": 1, "batch_id": None, "skipped_fenced": 0}
 
 
 class TestTheWakeGetsOnlyWhatEnded:
