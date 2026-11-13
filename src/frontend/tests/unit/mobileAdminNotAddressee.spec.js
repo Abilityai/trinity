@@ -60,6 +60,21 @@ describe('/m — an answer refused because it was not addressed to you', () => {
     expect(http.post).toHaveBeenCalledTimes(1)
     expect(card().exists()).toBe(true)
     const notice = card().find('[data-testid="queue-respond-error"] inline-error-stub')
+    // trinity-enterprise#1096: the server's named refusal, when it sends one
+    expect(notice.attributes('message')).toBe('addressed to someone else')
+  })
+
+  it('keeps the generic line when the server names nobody', async () => {
+    const w = await mountView()
+    http.post.mockRejectedValueOnce({
+      response: { status: 403, data: { detail: { code: 'not_addressee' } } },
+    })
+    const card = () => w.find('[data-item-id="g1"]')
+    await card().findAll('button').find(b => b.text() === 'Approve').trigger('click')
+    await card().find('[data-testid="queue-send"]').trigger('click')
+    await flushPromises()
+
+    const notice = card().find('[data-testid="queue-respond-error"] inline-error-stub')
     expect(notice.attributes('message')).toBe(QUEUE_RESPONSE_NOT_ADDRESSEE)
   })
 })
