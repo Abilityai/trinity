@@ -237,15 +237,21 @@ async def enforce(
     # trinity#4505: a room's card text (its gated posts) is narrower than the
     # scan, and must still name every skill the request matched — else the
     # approver reads a request that names none, and Approve runs it. The gate
-    # map can change between the room's read and this one. Fall back to the
-    # scanned text. Room only: `/task` scans `user_message`, which its executor
-    # never receives, so its replay stays as frozen (#3274).
+    # map can change between the room's read and this one. The scanned text has
+    # no sender labels, so a post's newline could forge a sender line on it: raise
+    # no card. `gate_unavailable` is transient, so the room delivers the post
+    # again and the next wake builds a labelled card. Room only: `/task` scans
+    # `user_message`, which its executor never receives (#3274).
     if triggered_by == "room" and dispatch and REPLAY_MESSAGE in dispatch:
         replayed = "\n".join(t for t in (dispatch[REPLAY_MESSAGE],
                                           dispatch.get(REPLAY_SYSTEM_PROMPT)) if t)
         if set(names) - set(beside) - set(find_gated_invocations(replayed, gates)):
-            dispatch = {k: v for k, v in dispatch.items()
-                        if k not in (REPLAY_MESSAGE, REPLAY_SYSTEM_PROMPT)}
+            logger.warning("[SkillGate] room card for %s misses %s — refusing",
+                           agent_name, names)
+            raise SkillGateRefused(
+                503, "gate_unavailable",
+                f"Could not check whether this request to {agent_name} needs approval; "
+                "nothing was run. Try again shortly.")
     clean_text = _card_text(request_text, dispatch)
     # The context lines go on the card only when a skill was named nowhere else
     # — otherwise the approver would read a request that names no gated skill.
