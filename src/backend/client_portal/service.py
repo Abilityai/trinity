@@ -3642,9 +3642,9 @@ async def portal_chat(agent_name: str, message: str, email: str,
                 isinstance(switch, dict) and switch.get("switched")
                 and not switch.get("retried") and not switch.get("exhausted")
             ):
-                where = switch.get("new_subscription")
+                # #4482: a subscription's name is operator data — never shown.
                 moved = (
-                    f"moved onto '{where}'" if where
+                    "moved onto another subscription" if switch.get("new_subscription")
                     else "moved onto the platform API key"
                 )
                 raise ClientPortalError(

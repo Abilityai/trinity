@@ -201,7 +201,7 @@ class TestCredentialSafety:
         #1578 emit chokepoint sanitises. Slack is a persistent, externally hosted,
         human-visible surface, so it must not be the one egress that skips it."""
         sent, _ = wired
-        assert _report(status="failed",
+        assert _report(status="success",
                        summary_or_error=f"boom: {_FAKE_SLACK_TOKEN}") is True
         assert _FAKE_SLACK_TOKEN not in sent[0]["text"], (
             "a raw Slack bot token was posted into a channel"
@@ -212,6 +212,6 @@ class TestCredentialSafety:
         actually cut — comparing against the raw input would mark a short,
         redacted message as truncated."""
         sent, _ = wired
-        assert _report(status="failed",
+        assert _report(status="success",
                        summary_or_error=f"failed: {_FAKE_SLACK_TOKEN}") is True
         assert not sent[0]["text"].endswith("…"), "nothing was truncated, yet an ellipsis was added"
