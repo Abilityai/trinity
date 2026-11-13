@@ -8,7 +8,8 @@
  * each carrying the portal bearer — and what it emits:
  *  - the title, version and rendered text are shown; the one accept action
  *    stays disabled until the box is ticked, and sends the version shown;
- *  - a successful accept emits `accepted` (the shell re-bootstraps);
+ *  - a successful accept emits `accepted` (the shell re-bootstraps) and leaves
+ *    the refusal for that reload to clear (#4515);
  *  - a stale version reloads the text, says so, and asks for a fresh tick;
  *  - a closed invitation offers no accept, only the way out;
  *  - declining emits `decline` — the shell signs the session out.
@@ -73,13 +74,16 @@ describe('PortalTerms — reading and accepting on the portal token', () => {
     expect(w.findAll('[data-testid="portal-terms-accept"]')).toHaveLength(1)
   })
 
-  it('accepts the version it showed on the portal bearer, clears the refusal and emits accepted', async () => {
+  it('accepts the version it showed on the portal bearer and emits accepted while still mounted', async () => {
     const w = await mountScreen({ 'post /api/terms/accept': { status: 200, data: { accepted: true, created: true, version: '2026-11', accepted_at: 'x' } } })
     await box(w).setValue(true)
     await acceptBtn(w).trigger('click')
     await flushPromises()
     expect(calls[1]).toMatchObject({ method: 'post', url: '/api/terms/accept', auth: 'Bearer portal-tok', data: { version: '2026-11' } })
-    expect(store.termsRefusal).toBe(null)
+    // #4515: the refusal stays set — it is what keeps this screen mounted in
+    // `Portal.vue`, so clearing it here would unmount the screen before the
+    // emit and drop it. The shell's re-bootstrap clears it with the roster.
+    expect(store.termsRefusal).toBe('terms_required')
     expect(w.emitted('accepted')).toHaveLength(1)
   })
 
