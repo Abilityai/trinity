@@ -100,6 +100,7 @@ Never raises: this runs on the path of an already-billed terminal.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any, List, Optional, Tuple
@@ -141,6 +142,10 @@ ASK_IDS_MAX = 10
 # so no wake turn outlives its marker.
 _MISSED_KEY_PREFIX = "trinity:wake_missed:"
 _MISSED_TTL_SECONDS = 86400
+# The claim time of the latest wake whose turn ran. An ending from before it is
+# in that turn's `list_recent_executions`, so a sweep still fanning out after
+# the wake returned stays one wake (#4536).
+_LAST_CLAIM_KEY_PREFIX = "trinity:wake_claimed:"
 
 # Strong references to follow-on wakes until they finish.
 _FOLLOW_ONS: set = set()
@@ -221,12 +226,6 @@ def _begin_idempotency(scope: str, key: str):
     from services import idempotency_service
 
     return idempotency_service.begin(scope, key)
-
-
-def _complete_idempotency(decision, execution_id) -> None:
-    from services import idempotency_service
-
-    idempotency_service.complete(decision, execution_id, None)
 
 
 def _fail_idempotency(decision) -> None:
@@ -382,12 +381,43 @@ def _as_utc(value):
         return None
 
 
-def _covered(row, idem) -> bool:
-    """The holder claimed its window after this run ended, so the wake's
-    ``list_recent_executions`` already shows it. Unknown either way: not covered."""
+def _ended_by(row, claimed_at) -> bool:
+    """This run ended at or before ``claimed_at``, so a wake claimed then shows
+    it in ``list_recent_executions``. Unknown either way: not covered."""
     ended = _as_utc(getattr(row, "completed_at", None))
-    claimed = _as_utc(getattr(idem, "claimed_at", None))
+    claimed = _as_utc(claimed_at)
     return ended is not None and claimed is not None and ended <= claimed
+
+
+def _covered(row, idem) -> bool:
+    return _ended_by(row, getattr(idem, "claimed_at", None))
+
+
+def _last_claim(caller: str):
+    try:
+        value = _wake_budget_redis().get(f"{_LAST_CLAIM_KEY_PREFIX}{caller}")
+    except Exception as e:  # noqa: BLE001 — unknown is "not covered": wake
+        logger.warning("#4536: last wake claim for %s unreadable: %s", caller, e)
+        return None
+    return value.decode() if isinstance(value, bytes) else value
+
+
+def _note_claim(caller: str, idem) -> None:
+    """Record the claim of a wake whose turn ran, if it is the latest (#4536)."""
+    claimed = _as_utc(getattr(idem, "claimed_at", None))
+    if claimed is None:
+        return
+    try:
+        client = _wake_budget_redis()
+        key = f"{_LAST_CLAIM_KEY_PREFIX}{caller}"
+        prev = client.get(key)
+        prev = _as_utc(prev.decode() if isinstance(prev, bytes) else prev)
+        # ponytail: read-then-write; two workers racing can keep the older
+        # claim, which costs one extra wake. A Lua max-set if that matters.
+        if prev is None or claimed > prev:
+            client.set(key, claimed.isoformat(), ex=_MISSED_TTL_SECONDS)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("#4536: could not record the wake claim for %s: %s", caller, e)
 
 
 async def _park(caller: str, callee: str, execution_id: str, scope: str, key: str,
@@ -600,6 +630,13 @@ async def maybe_wake_caller(
                      policy_source=verdict.source)
         return None
 
+    if _ended_by(row, _last_claim(caller)):
+        # #4536: a wake claimed after this run ended has already run and
+        # listed it. The storm bound once that wake has returned.
+        logger.info("ent#1102: %s already woken after %s ended — no second wake",
+                    caller, execution_id)
+        return None
+
     idem = None
     scope = _agent_scope(caller)
     key = _key or _idempotency_key(caller)
@@ -622,16 +659,21 @@ async def maybe_wake_caller(
 
     wake_id = None
     try:
-        wake_id = await _claimed_wake(row, caller, callee, execution_id, verdict, idem,
-                                      follow_on=_key is not None)
-        return wake_id
-    finally:
-        # #4536: on every exit after a fresh claim, deliver what was parked
-        # while this claim was held (the wake row's terminal drains it too).
-        await _drain_missed(caller, wake_id)
+        wake_id = await _claimed_wake(row, caller, callee, execution_id, verdict, idem)
+    except asyncio.CancelledError:
+        # #4536: a stopping loop would never run the follow-on, and GETDEL
+        # would lose the marker. Leave it for the wake row's terminal.
+        raise
+    except BaseException:
+        await _drain_missed(caller, None)
+        raise
+    # #4536: deliver what was parked while this claim was held (the wake
+    # row's terminal drains it too).
+    await _drain_missed(caller, wake_id)
+    return wake_id
 
 
-async def _claimed_wake(row, caller, callee, execution_id, verdict, idem, *, follow_on):
+async def _claimed_wake(row, caller, callee, execution_id, verdict, idem):
     capped_at = await _within_wake_budget(callee, caller)
     if capped_at is not None:
         # Released, not completed: no turn ran, so the window holds nothing to
@@ -679,15 +721,12 @@ async def _claimed_wake(row, caller, callee, execution_id, verdict, idem, *, fol
         return None
 
     if idem is not None:
+        _note_claim(caller, idem)
         try:
-            if follow_on:
-                # One follow-on per wake: kept, so a second drain of the
-                # same wake replays instead of waking again.
-                _complete_idempotency(idem, result.execution_id)
-            else:
-                # #4536: a finished wake covers nothing that ends after it, so
-                # the window is released and the next ending wakes at once.
-                _fail_idempotency(idem)
+            # #4536: a finished wake covers nothing that ends after it, so its
+            # key (window or follow-on) is released and the next ending wakes
+            # at once. GETDEL already gives one follow-on per parked ending.
+            _fail_idempotency(idem)
         except Exception:  # noqa: BLE001
             logger.exception("ent#1102: idempotency settle failed")
 

@@ -19,7 +19,12 @@ an in-memory Redis:
 * an ending from before the claim is covered by that wake's
   ``list_recent_executions`` and still collapses: a 300-row sweep is one wake;
 * the holder releasing between the collision and the park still delivers it;
-* Redis trouble on the park does not raise, and the drop is audited.
+* Redis trouble on the park does not raise, and the drop is audited;
+* a holder cancelled by a backend stop leaves the parked ending for the wake
+  row's terminal; a follow-on key is released, so a second ending parked on
+  the same wake is delivered; a sweep still fanning out after its wake
+  returned stays one wake; a drain wakes only the caller it parked for; a
+  holder that raises or fails still delivers.
 
 The only stubs are the dispatch (it writes the wake row a real dispatch would),
 the container probe, the policy, and the spawn of a follow-on wake (collected,
@@ -306,3 +311,154 @@ def test_redis_down_on_the_park_is_audited_not_raised(world, monkeypatch):
 
     asyncio.run(scenario())
     assert "skipped_window" in [a["status"] for a in world.audits]
+
+
+# --- review follow-ups on PR #4545 ------------------------------------------
+
+_REAL_SPAWN = _WAKE._spawn_followon
+
+
+async def _hold_first_wake(world):
+    """A delegated run ends and its wake claims the window and keeps running."""
+    world.gate["event"] = asyncio.Event()
+    first = _callee_run()
+    _end(first, datetime.now(timezone.utc) - timedelta(seconds=1))
+    holder = asyncio.create_task(_WAKE.maybe_wake_caller(first))
+    await asyncio.sleep(0)
+    assert len(world.wakes) == 1
+    return holder
+
+
+async def _park_one(world) -> str:
+    late = _callee_run()
+    _end(late)
+    assert await _WAKE.maybe_wake_caller(late) is None
+    assert world.redis.get(f"{MISSED}{BOSS}") == late
+    return late
+
+
+def test_a_cancelled_holder_leaves_the_parked_ending_for_the_wake_terminal(world):
+    """A clean backend stop cancels the holder mid-wake. A follow-on spawned
+    on the closing loop never runs, so the holder must leave the marker for
+    the wake row's terminal (written after the restart) to deliver."""
+    async def scenario():
+        holder = await _hold_first_wake(world)
+        late = await _park_one(world)
+        holder.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await holder
+        for coro in world.spawned:          # the loop closes: nothing spawned runs
+            coro.close()
+        world.spawned.clear()
+        assert world.redis.get(f"{MISSED}{BOSS}") == late, "the stop consumed the parked ending"
+
+        world.gate["event"] = None
+        await _wake_turn_ends(world, world.wakes[0]["id"])
+        return late
+
+    late = asyncio.run(scenario())
+    assert len(world.wakes) == 2
+    assert late in world.wakes[1]["message"]
+
+
+def test_a_second_ending_parked_after_the_follow_on_finished_is_delivered(world):
+    """X parks and is delivered from the wake row's terminal; that follow-on
+    finishes; Y parks on the window the holder still holds. The holder's own
+    drain must wake for Y."""
+    async def scenario():
+        holder = await _hold_first_wake(world)
+        world.gate["event"] = None                     # later wakes run straight through
+        await _park_one(world)
+        await _wake_turn_ends(world, world.wakes[0]["id"])
+        assert len(world.wakes) == 2                   # X delivered, its wake finished
+        y = await _park_one(world)
+        await _finish(world, holder)
+        while world.spawned:
+            await world.spawned.pop(0)
+        return y
+
+    y = asyncio.run(scenario())
+    assert len(world.wakes) == 3, "Y was dropped on the follow-on key"
+    assert y in world.wakes[2]["message"]
+
+
+def test_a_sweep_still_fanning_out_after_the_wake_returned_is_one_wake(world):
+    """Rows that ended before the wake claimed are in its
+    ``list_recent_executions`` whether or not the wake is still running."""
+    async def scenario():
+        rows = [_callee_run() for _ in range(50)]
+        earlier = datetime.now(timezone.utc) - timedelta(seconds=2)
+        for r in rows:
+            _end(r, earlier)
+        for r in rows:
+            woken = await _WAKE.maybe_wake_caller(r)
+            if woken:
+                await _wake_turn_ends(world, woken)
+
+    asyncio.run(scenario())
+    assert len(world.wakes) == 1
+
+
+def test_a_drain_wakes_only_the_caller_it_was_parked_for(world):
+    other = db.create_task_execution(
+        agent_name=WORKER, message="x", triggered_by="agent",
+        fields=TaskExecutionFields(source_agent_name="zq4536-other"),
+    ).id
+    _end(other)
+    woken = asyncio.run(_WAKE.maybe_wake_caller(
+        other, _key=_WAKE._follow_on_key(BOSS, "w"), _expect_caller=BOSS))
+    assert woken is None
+    assert world.wakes == []
+
+
+def test_the_real_spawn_runs_the_follow_on_to_delivery(world, monkeypatch):
+    monkeypatch.setattr(_WAKE, "_spawn_followon", _REAL_SPAWN)
+
+    async def scenario():
+        holder = await _hold_first_wake(world)
+        late = await _park_one(world)
+        world.gate["event"] = None
+        await _finish(world, holder)
+        assert _WAKE._FOLLOW_ONS, "the drain spawned no follow-on task"
+        await asyncio.gather(*list(_WAKE._FOLLOW_ONS))
+        await asyncio.sleep(0)
+        assert not _WAKE._FOLLOW_ONS, "a finished follow-on is still referenced"
+        return late
+
+    late = asyncio.run(scenario())
+    assert len(world.wakes) == 2
+    assert late in world.wakes[1]["message"]
+
+
+@pytest.mark.parametrize("outcome", ["raises", "failed"])
+def test_a_holder_that_fails_still_delivers_what_was_parked(world, monkeypatch, outcome):
+    fixture_dispatch = _WAKE._dispatch_wake
+    calls = []
+
+    async def _dispatch(**kwargs):
+        calls.append(1)
+        result = await fixture_dispatch(**kwargs)
+        if len(calls) == 1:
+            if outcome == "raises":
+                raise RuntimeError("dispatch blew up")
+            return SimpleNamespace(execution_id=result.execution_id, status="failed",
+                                   error="boom")
+        return result
+
+    monkeypatch.setattr(_WAKE, "_dispatch_wake", _dispatch)
+
+    async def scenario():
+        holder = await _hold_first_wake(world)
+        late = await _park_one(world)
+        world.gate["event"] = None
+        await _finish(world, holder)
+        while world.spawned:
+            await world.spawned.pop(0)
+        return late
+
+    late = asyncio.run(scenario())
+    assert len(world.wakes) == 2
+    assert late in world.wakes[1]["message"]
+    statuses = [a["status"] for a in world.audits]
+    assert statuses == ["parked", "dispatch_error" if outcome == "raises" else "failed",
+                        "completed"]

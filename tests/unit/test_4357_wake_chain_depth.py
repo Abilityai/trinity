@@ -130,7 +130,6 @@ def world(db_backend, monkeypatch):
         _WAKE, "_begin_idempotency",
         lambda scope, key: SimpleNamespace(replay=window["replay"], enabled=True, in_flight=False),
     )
-    monkeypatch.setattr(_WAKE, "_complete_idempotency", lambda *a, **k: None)
     monkeypatch.setattr(_WAKE, "_fail_idempotency", lambda *a, **k: None)
     # The hourly wake budget (A2) counts in Redis; a fresh in-memory one per test.
     redis = fakeredis.FakeRedis(decode_responses=True)
