@@ -104,10 +104,11 @@ describe('AgentDetail', () => {
     expect(wrapper.find('main').classes()).toContain('overflow-visible')
   })
 
-  it('Tasks keeps its fullscreen page', async () => {
+  it('Tasks keeps its fullscreen page from sm up, and scrolls below it (#4140)', async () => {
     await open(AgentDetail, '/agents/alpha?tab=tasks')
-    expect(wrapper.classes()).toContain('h-screen')
-    expect(wrapper.classes()).not.toContain('min-h-dvh')
+    expect(wrapper.classes()).toEqual(expect.arrayContaining(['sm:h-screen', 'sm:overflow-hidden', 'min-h-dvh']))
+    expect(wrapper.classes()).not.toContain('h-screen')
+    expect(wrapper.find('[data-testid="agent-tabs"]').classes()).toEqual(expect.arrayContaining(['h-[calc(100dvh-2rem)]', 'sm:flex-1']))
   })
 })
 

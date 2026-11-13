@@ -596,6 +596,7 @@ import {
 } from '../../utils/headroomAlertSettings'
 import { agentOptionLabel } from '../../utils/agentName'
 import { formatCost } from '../../composables/useFormatters'
+import { unitsAgo } from '../../utils/timestamps'
 import {
   headroomWindowLabel,
   usageSourceLabel,
@@ -725,7 +726,7 @@ function formatDate(dateString) {
   if (diffInDays === 0) return 'Today'
   if (diffInDays === 1) return 'Yesterday'
   if (diffInDays < 7) return `${diffInDays} days ago`
-  if (diffInDays < 30) return `${Math.floor(diffInDays / 7)} weeks ago`
+  if (diffInDays < 30) return unitsAgo(Math.floor(diffInDays / 7), 'week')
   return date.toLocaleDateString()
 }
 

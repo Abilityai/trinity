@@ -2420,6 +2420,7 @@ import DirectVoiceSettings from '../components/settings/DirectVoiceSettings.vue'
 import { WORKSPACE_ONLY_ROLE_LABEL, existingAccountNotice } from '../utils/workspaceOnly'
 import { HELP_CLASS } from '../components/base/fieldClasses'
 import InlineError from '../components/InlineError.vue'
+import { unitsAgo } from '../utils/timestamps'
 
 const router = useRouter()
 const route = useRoute()
@@ -3684,7 +3685,7 @@ function formatDate(dateString) {
   if (diffInDays === 0) return 'Today'
   if (diffInDays === 1) return 'Yesterday'
   if (diffInDays < 7) return `${diffInDays} days ago`
-  if (diffInDays < 30) return `${Math.floor(diffInDays / 7)} weeks ago`
+  if (diffInDays < 30) return unitsAgo(Math.floor(diffInDays / 7), 'week')
 
   return date.toLocaleDateString()
 }

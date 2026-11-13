@@ -1,7 +1,9 @@
 <template>
   <div class="flex flex-col h-full relative">
     <!-- Header with session selector -->
-    <div class="flex items-center justify-between px-6 py-3 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50">
+    <!-- #4140: the toolbar wraps at phone width; on one row the model picker
+         pushed New Chat past the card's right edge. -->
+    <div class="flex flex-wrap items-center justify-between gap-2 px-4 sm:px-6 py-3 border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50">
       <div class="flex items-center space-x-3">
         <!-- Session selector dropdown -->
         <div class="relative" ref="dropdownRef">
