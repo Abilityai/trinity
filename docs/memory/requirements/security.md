@@ -55,7 +55,7 @@
   - `credentials`: oauth_complete (`slack.py` OAuth callback)
 - **Event Categories** (actions tracked):
   - `AGENT_LIFECYCLE`: create, start, stop, delete, rename (recreate — no endpoint)
-  - `EXECUTION`: chat_started, task_triggered, schedule_triggered, execution_terminate (#3180: the operator terminate route, written only when this call ended the turn — a queued, parked or container cancel that won its CANCELLED CAS)
+  - `EXECUTION`: chat_started, task_triggered, schedule_triggered, execution_terminate (#3180: the operator terminate route, written once per ended turn — a queued cancel that won its CANCELLED CAS, a parked cancel, or an agent that answered `terminated`, deduplicated by a per-agent, per-execution first-claim in Redis that fails open; #4475)
   - `AUTHENTICATION`: login_success, login_failed (logout / token_refresh — no endpoints in Trinity)
   - `AUTHORIZATION`: share, unshare, permission_grant, permission_revoke, permissions_set, capability_used, capability_refused, capability_grant, capability_revoke (trinity-enterprise#871)
   - `CONFIGURATION`: settings_change, resource_limits, autonomy_toggle, circuit_breaker_reset (#3180: written once both reset calls return, whatever the breaker feature flags say; the resets are fail-open, so with Redis unreachable the row records the request, not a confirmed reset)

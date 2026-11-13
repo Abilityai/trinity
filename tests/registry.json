@@ -9166,6 +9166,19 @@
         "security"
       ],
       "description": "#4501: an ask addressed to: approver records only the seated approvers who can open the agent and is refused 422 role_cannot_open_agent when none can, so the answer fence never names a person who cannot see the ask. Real sink and real route on a real DB: nothing is written on the refusal (with a positive control), the refusal names the role and is logged, an admin approver and a replay are unaffected, primary and viewer are not filtered, and re-addressing to an unreachable approver leaves the row as it was."
+    },
+    {
+      "file": "unit/test_4475_terminate_audit_race.py",
+      "feature": "abilityai/trinity#4475",
+      "added": "2026-11-13",
+      "categories": [
+        "backend",
+        "api",
+        "security",
+        "audit",
+        "unit"
+      ],
+      "description": "A terminate that ended the turn writes one execution_terminate row when the in-flight /task or /chat caller (or the parked dispatcher) wins the CANCELLED CAS. A Redis first-claim per agent and execution id dedupes repeats; with Redis None or raising the row is still written; a failed audit write releases the claim so the next terminate records the turn."
     }
   ]
 }
