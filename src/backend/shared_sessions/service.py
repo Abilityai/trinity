@@ -2070,7 +2070,9 @@ def _room_gate_card(agent_name: str, shown: list[dict], ask_request_text: str,
     post (or this agent's own reply) never makes a short request refusable, and
     an agent's gated line never reads as the person's. The scan still reads the
     whole slice. ([], None) when the map is unreadable or empty, or nothing
-    names a gated skill: the gate then cards the scanned text, as before."""
+    names a gated skill. A gated name only in the ask answer still gets this
+    card (the answer under its label, plus the requester's latest post), so
+    every room card goes through `_format_card`."""
     from services import skill_gate_service
 
     try:
@@ -2080,7 +2082,7 @@ def _room_gate_card(agent_name: str, shown: list[dict], ask_request_text: str,
     if not gates:
         return [], None
     gated = _gated_posts(shown, gates)
-    if not gated:
+    if not gated and not find_gated_invocations(ask_request_text, gates):
         return [], None
     mine = [m for m in shown if (m.get("sender_kind"), m.get("sender_identity")) == requester]
     posts = [m for m in shown if m in gated or (mine and m is mine[-1])]
