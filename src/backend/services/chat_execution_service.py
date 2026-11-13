@@ -1390,8 +1390,8 @@ async def arm_chat_report_back(*, name, execution_id, request, current_user) -> 
     status = str(getattr(getattr(row, "status", None), "value", getattr(row, "status", None)) or "")
     if status in {s.value for s in _SYNC_BACKLOG_TERMINAL}:
         # The terminal landed before the stamp — nothing reported then. The row
-        # stores the sanitized response; an error goes through the reporter's
-        # own sanitize-then-truncate (`_sanitized_detail`).
+        # stores the sanitized response; a failure is reported as the
+        # person-safe sentence (`person_safe_failure`, #4482).
         channel_completion_report.spawn_completion_report(
             execution_id=execution_id,
             agent_name=name,

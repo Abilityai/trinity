@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4482_person_safe_failure.py",
+      "feature": "#4482",
+      "added": "2026-11-13",
+      "categories": [
+        "backend",
+        "client-portal",
+        "channels"
+      ],
+      "description": "#4482: a failed background turn's completion report (Workspace, Slack, Telegram), the Work card and the own-turn switch message show a fixed person-safe sentence; the subscription walk trail, subscription names and operator guidance stay on the execution row. An agent refusal passes through unless it carries the trail."
+    },
+    {
       "file": "unit/test_ent1221_web_delivery.py",
       "feature": "trinity-enterprise#1221",
       "added": "2026-11-11",
@@ -9121,17 +9132,14 @@
       "description": "ent#1216: a caller_wake turn carries the delegation's person when that person is owner tier on the delegator, so the agent's key keeps its execution reads while the wake runs. Real /task admission -> real maybe_wake_caller -> real ledger and acting_turn_user_id / viewer_row_scope on a real DB. A shared person's, a visitor's, a deleted user's and a cannot-open person's wake carry nobody, as before; the audit names the standing; auto-memory follows the owner rule."
     },
     {
-      "file": "unit/test_4475_terminate_audit_race.py",
-      "feature": "abilityai/trinity#4475",
+      "file": "unit/test_4541_proxy_listener_wait.py",
+      "feature": "#4541",
       "added": "2026-11-13",
       "categories": [
-        "backend",
-        "api",
-        "security",
-        "audit",
-        "unit"
+        "unit",
+        "deploy"
       ],
-      "description": "A terminate that ended the turn writes one execution_terminate row when the in-flight /task or /chat caller (or the parked dispatcher) wins the CANCELLED CAS. A Redis first-claim per agent and execution id dedupes repeats; with Redis None or raising the row is still written; a failed audit write releases the claim so the next terminate records the turn."
+      "description": "A hosted upgrade waits up to 90 s for the web container's PROXY-protocol listener before re-rendering Caddy: provision_wait_for_proxy_listener run with probe, sleep and date stubbed (retry count, 90 s default), and the real start.sh --hosted run (ent#873 harness) with the listener published from the 10th check ends on the protected listener in one run; never published falls back to 8081 with the warning after the full wait."
     },
     {
       "file": "unit/test_ent1258_suspended_workspace_door.py",
@@ -9158,6 +9166,19 @@
         "security"
       ],
       "description": "#4501: an ask addressed to: approver records only the seated approvers who can open the agent and is refused 422 role_cannot_open_agent when none can, so the answer fence never names a person who cannot see the ask. Real sink and real route on a real DB: nothing is written on the refusal (with a positive control), the refusal names the role and is logged, an admin approver and a replay are unaffected, primary and viewer are not filtered, and re-addressing to an unreachable approver leaves the row as it was."
+    },
+    {
+      "file": "unit/test_4475_terminate_audit_race.py",
+      "feature": "abilityai/trinity#4475",
+      "added": "2026-11-13",
+      "categories": [
+        "backend",
+        "api",
+        "security",
+        "audit",
+        "unit"
+      ],
+      "description": "A terminate that ended the turn writes one execution_terminate row when the in-flight /task or /chat caller (or the parked dispatcher) wins the CANCELLED CAS. A Redis first-claim per agent and execution id dedupes repeats; with Redis None or raising the row is still written; a failed audit write releases the claim so the next terminate records the turn."
     }
   ]
 }

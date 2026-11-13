@@ -51,6 +51,7 @@ pytestmark = pytest.mark.unit
 EMAIL = "bob@example.com"
 AGENT = "scout"
 ROOM = "room-1"
+_GENERIC = "The agent couldn't finish this."  # channel_completion_report.GENERIC_FAILURE (#4482)
 
 
 @pytest.fixture
@@ -280,8 +281,22 @@ def test_a_failed_turn_is_unchanged(monkeypatch, rooms):
     h = _WakeHarness(monkeypatch, rooms, _result("failed", error="boom"))
     asyncio.run(rooms._wake_agent(SimpleNamespace(email=EMAIL), ROOM, AGENT, 1))
 
-    assert h.system_lines == [f"{AGENT} could not respond: boom"]
+    assert h.system_lines == [f"{AGENT} could not respond: {_GENERIC}"]
     assert h.cleared_sessions == [(ROOM, AGENT)]
+
+
+def test_a_failed_turn_never_shows_the_subscription_walk(monkeypatch, rooms):
+    """#4482: a room line is read by every member, external Workspace clients
+    included. The row error's walk trail names subscriptions and carries
+    operator guidance, so the line is the person-safe sentence."""
+    err = ("Authentication failure: Failed to authenticate. API Error: 401 OAuth access "
+           "token is invalid.. Check subscription token or API key configuration. "
+           "Tried: alice-max-plan (auth); every candidate refused.")
+    h = _WakeHarness(monkeypatch, rooms, _result("failed", error=err))
+    asyncio.run(rooms._wake_agent(SimpleNamespace(email=EMAIL), ROOM, AGENT, 1))
+
+    from services.channel_completion_report import USAGE_LIMIT_FAILURE
+    assert h.system_lines == [f"{AGENT} could not respond: {USAGE_LIMIT_FAILURE}"]
 
 
 def test_a_success_with_no_reply_is_still_a_failure(monkeypatch, rooms):
@@ -335,7 +350,7 @@ def test_a_genuine_failure_is_still_a_failure(monkeypatch, rooms):
                      persisted_status="failed")
     asyncio.run(rooms._wake_agent(SimpleNamespace(email=EMAIL), ROOM, AGENT, 1))
 
-    assert h.system_lines == [f"{AGENT} could not respond: boom"]
+    assert h.system_lines == [f"{AGENT} could not respond: {_GENERIC}"]
     assert h.cleared_sessions == [(ROOM, AGENT)]
 
 
@@ -378,7 +393,7 @@ def test_an_unreadable_row_leaves_the_returned_status_in_force(monkeypatch, room
                      persisted_status=_UNREADABLE)
     asyncio.run(rooms._wake_agent(SimpleNamespace(email=EMAIL), ROOM, AGENT, 1))
 
-    assert h.system_lines == [f"{AGENT} could not respond: boom"]
+    assert h.system_lines == [f"{AGENT} could not respond: {_GENERIC}"]
 
 
 def test_a_missing_row_leaves_the_returned_status_in_force(monkeypatch, rooms):
@@ -386,4 +401,4 @@ def test_a_missing_row_leaves_the_returned_status_in_force(monkeypatch, rooms):
                      persisted_status=None)
     asyncio.run(rooms._wake_agent(SimpleNamespace(email=EMAIL), ROOM, AGENT, 1))
 
-    assert h.system_lines == [f"{AGENT} could not respond: boom"]
+    assert h.system_lines == [f"{AGENT} could not respond: {_GENERIC}"]
