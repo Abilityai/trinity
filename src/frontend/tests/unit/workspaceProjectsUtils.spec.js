@@ -6,8 +6,9 @@ import {
 
 describe('ent#661 projects — display', () => {
   it('maps each status to a badge variant and a label', () => {
-    expect(STATUS_BADGE).toEqual({ active: 'success', paused: 'warning', done: 'neutral' })
-    expect(statusLabel('paused')).toBe('Paused')
+    // ent#1235: Paused now means Stopped; a new project begins Not started.
+    expect(STATUS_BADGE).toEqual({ not_started: 'neutral', active: 'success', paused: 'warning', done: 'neutral' })
+    expect(statusLabel('paused')).toBe('Stopped')
     expect(statusLabel('bogus')).toBe('Unknown')
   })
 
