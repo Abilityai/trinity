@@ -422,6 +422,40 @@ class TestEndingLosesToReaddress:
         assert ending.rows[0]["disposition"] == "answered"
 
 
+class TestTheCompareAndSetHoldsTheAddress:
+    """The window the service pre-check cannot see: a re-address landing after
+    `_ending_expectation` read the address and before the ending's UPDATE.
+    Driven at the db layer with the expectation the service built, on a row
+    whose `resolved_to` moves while `addressed_to_email` stays the same (two
+    people, no single addressee) — so only the `resolved_to` clause can lose."""
+
+    def _moved_under(self, real_db, agent, people):
+        ask = _consent(agent, [people["alice"], people["bob"]], seat="primary")
+        expect = _svc()._ending_expectation(_row(real_db, ask),
+                                            _svc().Actor(email=people["alice"]))
+        assert expect is not None and expect["addressed_to_email"] is None
+        assert _svc().readdress_item(ask, [people["alice"], people["carol"]], None,
+                                     reason=_svc().ASSIGNMENT_CHANGED, attach_chat=False)
+        moved = real_db.read_operator_queue_address(ask)
+        assert moved["addressed_to_email"] is None
+        assert moved["resolved_to"] != expect["resolved_to"]
+        return ask, expect
+
+    def test_an_answer_read_before_the_move_does_not_land(self, real_db, agent, people):
+        ask, expect = self._moved_under(real_db, agent, people)
+        out = real_db.respond_to_operator_queue_item(
+            ask, "Approve", None, None, people["alice"], expect_address=expect)
+        assert out["_status_conflict"] is True
+        assert _row(real_db, ask)["status"] == "pending"
+
+    def test_a_cancel_read_before_the_move_does_not_land(self, real_db, agent, people):
+        ask, expect = self._moved_under(real_db, agent, people)
+        out = real_db.cancel_operator_queue_item(
+            ask, disposed_by_email=people["alice"], expect_address=expect)
+        assert out["_status_conflict"] is True
+        assert _row(real_db, ask)["status"] == "pending"
+
+
 # ===========================================================================
 # R6 — a bulk sweep skips fenced rows the actor is not on
 # ===========================================================================
