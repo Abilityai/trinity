@@ -124,15 +124,22 @@ async def get_telegram_binding(
 
     bot_username = binding.get("bot_username")
     groups = db.get_telegram_groups_for_agent(agent_name)
+    # The column is never cleared: it counts only under the current Public URL.
+    from services.settings_service import settings_service
+    public_url = settings_service.get_public_chat_url_setting()
+    webhook_url = binding.get("webhook_url")
+    if not public_url or not (webhook_url or "").startswith(public_url + "/"):
+        webhook_url = None
     return TelegramBindingResponse(
         agent_name=agent_name,
         bot_username=bot_username,
         bot_id=binding.get("bot_id"),
-        webhook_url=binding.get("webhook_url"),
+        webhook_url=webhook_url,
         bot_link=f"https://t.me/{bot_username}" if bot_username else None,
         configured=True,
         group_count=len(groups),
         progress_indicator_enabled=_progress_indicator_enabled(binding),
+        public_url_set=bool(public_url),
     )
 
 
@@ -280,6 +287,7 @@ async def configure_telegram_bot(
         progress_indicator_enabled=(
             _progress_indicator_enabled(binding) if binding else True
         ),
+        public_url_set=bool(public_url),
     )
 
 
@@ -301,6 +309,34 @@ async def delete_telegram_binding(
 
     logger.info(f"Telegram bot removed for agent={agent_name}")
     return {"ok": True, "message": f"Telegram bot removed from {agent_name}"}
+
+
+async def _ensure_webhook(agent_name: str, bot_token: str) -> Optional[str]:
+    """None when Telegram can deliver to this agent, else the reason.
+
+    Reads Telegram's own record (getWebhookInfo): the stored ``webhook_url``
+    column is never cleared, so it stays set after the Public URL changes or
+    is deleted. Registers the webhook when Telegram holds none, or one for
+    another URL (e.g. the Public URL was saved after the bot was connected
+    and that registration failed)."""
+    from services.settings_service import settings_service
+    from adapters.transports import telegram_webhook as tw
+    public_url = settings_service.get_public_chat_url_setting()
+    if not public_url:
+        return "no Public URL is set in Settings"
+    binding = db.get_telegram_binding(agent_name)
+    if not binding:
+        return "no Telegram binding for this agent"
+    info, error = await tw.get_webhook_info(bot_token)
+    if error:
+        return error
+    if info.get("url") != tw.webhook_url_for(public_url, binding["webhook_secret"]):
+        return await tw.set_webhook(agent_name, public_url)
+    # Telegram keeps the last error after delivery recovers; an update still
+    # waiting means delivery is failing now.
+    if info.get("last_error_message") and info.get("pending_update_count"):
+        return f"Telegram cannot deliver to {public_url}: {info['last_error_message']}"
+    return None
 
 
 @auth_router.post("/{agent_name}/telegram/test", dependencies=[Depends(require_person)])
@@ -326,9 +362,20 @@ async def test_telegram_bot(
                     db.set_telegram_can_read_all_group_messages(
                         agent_name, flag_from_bot_info(bot_info)
                     )
+                    username = bot_info.get("username")
+                    webhook_error = await _ensure_webhook(agent_name, bot_token)
+                    if webhook_error is None:
+                        msg = f"Bot @{username} is operational"
+                    else:
+                        msg = (
+                            f"Bot @{username} is reachable, but Telegram cannot "
+                            f"deliver messages to it: {webhook_error}"
+                        )
                     return {
-                        "ok": True,
-                        "message": f"Bot @{bot_info.get('username')} is operational",
+                        "ok": webhook_error is None,
+                        "message": msg,
+                        "webhook_registered": webhook_error is None,
+                        "webhook_error": webhook_error,
                         "bot_info": bot_info,
                     }
                 else:
