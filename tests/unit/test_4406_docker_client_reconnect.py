@@ -3,12 +3,13 @@
 `services/docker_service.py` used to call `docker.from_env()` once, at import. When
 that failed, `docker_client` stayed `None` and every reader reported an empty fleet
 until the backend restarted. The readers now go through `get_docker_client()`,
-which retries with backoff.
+which retries with backoff on a background thread.
 """
 from __future__ import annotations
 
 import asyncio
 import sys
+import threading
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -22,6 +23,9 @@ if str(_BACKEND) not in sys.path:
 import services.docker_service as ds  # noqa: E402
 
 
+_REAL_START = ds._start_docker_connect
+
+
 class _Clock:
     def __init__(self) -> None:
         self.now = 1000.0
@@ -32,7 +36,11 @@ class _Clock:
 
 @pytest.fixture
 def docker_down(monkeypatch):
-    """Boot state: the import-time connect failed and Docker is still unreachable."""
+    """Boot state: the import-time connect failed and Docker is still unreachable.
+
+    The connect attempt normally runs on its own thread. Here it runs inline, in
+    the call that starts it, so each test can check the state right after.
+    """
     clock = _Clock()
     state = {"up": False, "calls": 0, "client": MagicMock(name="docker_client")}
 
@@ -48,6 +56,7 @@ def docker_down(monkeypatch):
     monkeypatch.setattr(ds, "_last_warn_monotonic", {})
     monkeypatch.setattr(ds.docker, "from_env", from_env)
     monkeypatch.setattr(ds.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(ds, "_start_docker_connect", ds._attempt_docker_connect)
     return clock, state
 
 
@@ -61,9 +70,10 @@ def test_roster_recovers_once_docker_is_reachable(docker_down):
 
     state["up"] = True
     clock.now += ds._DOCKER_RETRY_MAX_S
-    ds.list_all_agents_fast()
-
+    ds.list_all_agents_fast()  # starts the attempt, which connects
     assert ds.docker_client is state["client"]
+
+    ds.list_all_agents_fast()
     state["client"].containers.list.assert_called()
 
 
@@ -94,8 +104,10 @@ def test_connected_client_is_reused_without_reconnecting(docker_down):
     clock, state = docker_down
     state["up"] = True
 
+    ds.get_docker_client()  # connects
     first = ds.get_docker_client()
     clock.now += ds._DOCKER_RETRY_MAX_S
+    assert first is state["client"]
     assert ds.get_docker_client() is first
     assert state["calls"] == 1
 
@@ -123,6 +135,7 @@ def test_a_second_caller_does_not_wait_on_a_connect_in_progress(docker_down):
         assert ds.get_docker_client() is None
     assert state["calls"] == 0
 
+    ds.get_docker_client()  # connects
     assert ds.get_docker_client() is state["client"]
 
 
@@ -139,6 +152,7 @@ def test_an_importer_reaches_the_reconnected_client(docker_down):
     assert ds.get_docker_client() is None  # booted with Docker down
     state["up"] = True
     clock.now += ds._DOCKER_RETRY_MAX_S
+    ds.get_docker_client()  # docker_service reconnects
 
     try:
         got = asyncio.run(du.container_get("agent-alpha"))
@@ -148,35 +162,41 @@ def test_an_importer_reaches_the_reconnected_client(docker_down):
     state["client"].containers.get.assert_called_once_with("agent-alpha")
 
 
-def test_a_reconnect_attempt_does_not_run_on_the_event_loop(docker_down, monkeypatch):
-    """The async helpers must acquire the client inside the executor. A reconnect
-    (`docker.from_env`) can block for a TCP timeout; on the loop it would stall
-    every request. `from_env` here waits for a coroutine on the loop to run: if the
-    attempt is on the loop thread the coroutine cannot run and the wait times out."""
-    import threading
-
-    import services.docker_utils as du
-
+def test_a_reconnect_attempt_never_blocks_the_caller(docker_down, monkeypatch):
+    """`docker.from_env` can block for a TCP timeout. Called on the event loop,
+    get_docker_client() must return at once and leave the attempt to its own
+    thread. `from_env` here waits for a coroutine on the loop to run: if the
+    attempt ran in the caller, the coroutine could not run and the wait would time
+    out."""
     _clock, state = docker_down
-    container = MagicMock(name="agent-alpha")
-    state["client"].containers.get.return_value = container
+    monkeypatch.setattr(ds, "_start_docker_connect", _REAL_START)
     ticked = threading.Event()
     seen = {}
 
     def blocking_from_env():
         state["calls"] += 1
+        seen["thread"] = threading.current_thread()
         seen["loop_ran_meanwhile"] = ticked.wait(timeout=5)
         return state["client"]
 
     monkeypatch.setattr(ds.docker, "from_env", blocking_from_env)
 
+    async def caller():
+        seen["caller"] = threading.current_thread()
+        return ds.get_docker_client()
+
     async def tick():
         ticked.set()
 
     async def main():
-        return await asyncio.gather(du.container_get("agent-alpha"), tick())
+        return await asyncio.gather(caller(), tick())
 
     got, _ = asyncio.run(main())
+    assert got is None
 
+    with ds._docker_connect_lock:  # the attempt releases it when done
+        pass
+    assert state["calls"] == 1, "no connect attempt was made"
     assert seen["loop_ran_meanwhile"] is True
-    assert got is container
+    assert seen["thread"] is not seen["caller"]
+    assert ds.get_docker_client() is state["client"]

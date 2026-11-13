@@ -65,24 +65,43 @@ _docker_connect_lock = threading.Lock()
 
 
 def get_docker_client():
-    """The Docker client, reconnecting with backoff if Docker was unreachable.
+    """The Docker client, or None while Docker is unreachable.
 
-    Returns None while Docker stays unreachable. Attempts are spaced from
+    When there is no client, this starts one connect attempt on a background
+    thread and returns None right away, so no caller (sync or on the event loop)
+    ever waits on `docker.from_env()`, which can block for a TCP timeout. The
+    attempt stores the client for the next call. Attempts are spaced from
     `_DOCKER_RETRY_INITIAL_S`, doubling up to `_DOCKER_RETRY_MAX_S`, so the 5s
-    poll loops do not hammer a dead socket. One thread connects at a time; the
-    others get None instead of waiting on it.
+    poll loops do not hammer a dead socket, and only one runs at a time.
     """
-    global docker_client, _docker_retry_delay_s, _next_docker_attempt_monotonic
     if docker_client is not None:
         return docker_client
     if not _docker_connect_lock.acquire(blocking=False):
-        return None
+        return None  # an attempt is already running
+    if docker_client is not None or (
+        _next_docker_attempt_monotonic is not None
+        and time.monotonic() < _next_docker_attempt_monotonic
+    ):
+        _docker_connect_lock.release()
+        return docker_client
     try:
-        if docker_client is not None:
-            return docker_client
-        if (_next_docker_attempt_monotonic is not None
-                and time.monotonic() < _next_docker_attempt_monotonic):
-            return None
+        _start_docker_connect()
+    except BaseException:
+        _docker_connect_lock.release()
+        raise
+    return None
+
+
+def _start_docker_connect() -> None:
+    threading.Thread(
+        target=_attempt_docker_connect, name="docker-reconnect", daemon=True
+    ).start()
+
+
+def _attempt_docker_connect() -> None:
+    """One connect attempt. The caller holds `_docker_connect_lock`; this releases it."""
+    global docker_client, _docker_retry_delay_s, _next_docker_attempt_monotonic
+    try:
         try:
             client = docker.from_env()
         except Exception as e:
@@ -90,12 +109,11 @@ def get_docker_client():
             _next_docker_attempt_monotonic = time.monotonic() + _docker_retry_delay_s
             _docker_retry_delay_s = min(_docker_retry_delay_s * 2, _DOCKER_RETRY_MAX_S)
             _warn_throttled("docker_connect", "Docker still unreachable: %s", e)
-            return None
+            return
         docker_client = client
         _docker_retry_delay_s = _DOCKER_RETRY_INITIAL_S
         _next_docker_attempt_monotonic = None
         logger.info("Connected to Docker after it was unreachable")
-        return docker_client
     finally:
         _docker_connect_lock.release()
 
