@@ -242,10 +242,18 @@ async def enforce(
     # no card. `gate_unavailable` is transient, so the room delivers the post
     # again and the next wake builds a labelled card. Room only: `/task` scans
     # `user_message`, which its executor never receives (#3274).
-    if triggered_by == "room" and dispatch and REPLAY_MESSAGE in dispatch:
-        replayed = "\n".join(t for t in (dispatch[REPLAY_MESSAGE],
-                                          dispatch.get(REPLAY_SYSTEM_PROMPT)) if t)
-        if set(names) - set(beside) - set(find_gated_invocations(replayed, gates)):
+    # PR #4552 review 3: the card is sanitised, the scan is not. A name the
+    # sanitizer redacts (`MY_TOKEN=/pay-invoice`) is carded as redacted, and
+    # Approve runs that; requiring it on the card refused every wake. And a
+    # room wake whose own map read failed sends no card text: refuse, so no
+    # card carries the raw, unlabelled slice.
+    if triggered_by == "room":
+        replayed = "\n".join(t for t in ((dispatch or {}).get(REPLAY_MESSAGE),
+                                          (dispatch or {}).get(REPLAY_SYSTEM_PROMPT)) if t)
+        required = set(find_gated_invocations(sanitize_text(request_text or ""), gates))
+        if (not replayed
+                or (set(names) - set(beside)) & required
+                - set(find_gated_invocations(replayed, gates))):
             logger.warning("[SkillGate] room card for %s misses %s — refusing",
                            agent_name, names)
             raise SkillGateRefused(
