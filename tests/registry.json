@@ -9119,6 +9119,18 @@
         "security"
       ],
       "description": "ent#1216: a caller_wake turn carries the delegation's person when that person is owner tier on the delegator, so the agent's key keeps its execution reads while the wake runs. Real /task admission -> real maybe_wake_caller -> real ledger and acting_turn_user_id / viewer_row_scope on a real DB. A shared person's, a visitor's, a deleted user's and a cannot-open person's wake carry nobody, as before; the audit names the standing; auto-memory follows the owner rule."
+    },
+    {
+      "file": "unit/test_ent1225_continuation_tier.py",
+      "feature": "trinity-enterprise#1225",
+      "added": "2026-11-13",
+      "categories": [
+        "unit",
+        "backend",
+        "agent-collaboration",
+        "security"
+      ],
+      "description": "ent#1225: caller_wake, operator_response, operator_ending and skill_gate rows name the turn they continue (continues_execution_id) and are rated exactly as it: owner, shared person, visitor, delegated. Only a running turn of the same agent is recorded; an agent-written context key is stripped; a link that cannot be followed, or one ending over asks from different turns, fails closed to (share, person, None). Real /task and /chat admission, real maybe_wake_caller, maybe_dispatch_resume/maybe_dispatch_ending, raise_ask, the gate notice, the ledger and acting_turn_user_id on a real DB."
     }
   ]
 }

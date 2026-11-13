@@ -176,6 +176,8 @@ async def fan_out(
             source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
             source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
             chain_depth=chain_depth,
+            # ent#1225: the caller's running turn, which each subtask's wake continues.
+            continues_execution_id=turn_tier_service.turn_origin_execution_id(db, current_user),
             # #2670: record the batch id on the idempotency claim as soon as it
             # exists rather than only at `complete()`. A fan-out runs longer
             # than any single task by construction, so the window in which a

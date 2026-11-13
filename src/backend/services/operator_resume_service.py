@@ -48,6 +48,7 @@ hands them only the rows its compare-and-set won.
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 from collections import OrderedDict
@@ -244,6 +245,33 @@ def _workspace_destination(item: Dict[str, Any], responded_by_email: Optional[st
         logger.warning("operator-resume: no Workspace destination for item=%s",
                        item.get("id"), exc_info=True)
     return {}
+
+
+def _continuation_of(items) -> Dict[str, str]:
+    """`{"continues_execution_id": …}` for the wake of `items`
+    (trinity-enterprise#1225): the turn that raised them, as the platform
+    recorded it at raise time (`_CONTINUES_TURN_KEY`). No item recorded one →
+    `{}`, the row is rated as before. Items that disagree (raised by different
+    turns, or some with no record) → `NO_SINGLE_ORIGIN`, which rates fail
+    closed: one wake cannot stand as two turns."""
+    from services.operator_queue_service import _CONTINUES_TURN_KEY
+    from services.turn_tier_service import NO_SINGLE_ORIGIN
+
+    seen = set()
+    for item in items:
+        context = item.get("context")
+        if isinstance(context, str):
+            try:
+                context = json.loads(context)
+            except ValueError:
+                context = None
+        value = context.get(_CONTINUES_TURN_KEY) if isinstance(context, dict) else None
+        seen.add(value if isinstance(value, str) and value else None)
+    if seen == {None} or not seen:
+        return {}
+    if len(seen) == 1:
+        return {"continues_execution_id": seen.pop()}
+    return {"continues_execution_id": NO_SINGLE_ORIGIN}
 
 
 def _return_room(item: Dict[str, Any]) -> Optional[str]:
@@ -457,6 +485,8 @@ async def maybe_dispatch_resume(
                 # a slot frees, and the adapter waits out the queue. A rejected wake
                 # was a FAILED row under a completed idempotency key: never retried.
                 queue_on_capacity=True,
+                # trinity-enterprise#1225: the resume stands as the asking turn.
+                **_continuation_of([item]),
                 **destination,
             )
     except Exception as exc:
@@ -989,6 +1019,8 @@ async def maybe_dispatch_ending(
                 # in `_audit_ending`, never in the agent's prompt (ent#715).
                 # ent#1108: the durable backlog at capacity, as for the answer wake.
                 queue_on_capacity=True,
+                # trinity-enterprise#1225: the ending stands as the asking turn.
+                **_continuation_of(items),
             )
     except Exception as exc:
         if idem is not None:

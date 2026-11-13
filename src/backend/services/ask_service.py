@@ -1101,6 +1101,13 @@ def raise_ask(
         context[oqs._WORKSPACE_PROJECT_ID_KEY] = project_id
         if seat in ("steward", "creator"):
             context[oqs._WORKSPACE_PROJECT_SEAT_KEY] = seat
+    if raised_by == "agent" and turn:
+        # trinity-enterprise#1225: the turn the answer and ending wakes
+        # continue, recorded only while it runs on this agent.
+        from services import turn_tier_service
+        origin = turn_tier_service.continuation_origin(db, agent_name, turn)
+        if origin:
+            context[oqs._CONTINUES_TURN_KEY] = origin
     room_id = _raising_room(agent_name, turn, norm["type"]) if raised_by == "agent" else None
     if room_id:
         context[oqs._WORKSPACE_ROOM_KEY] = room_id
