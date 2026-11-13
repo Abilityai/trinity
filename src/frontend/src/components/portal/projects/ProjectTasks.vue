@@ -39,6 +39,12 @@
   name who created the task and who it is for. A task for a person offers no
   Start. The form edits the parent (blank clears it) and the tasks it waits on;
   the server's refusal, a circle with its path included, lands under the field.
+
+  trinity-enterprise#1235: "Needs my go" holds a task, so the steward's start
+  becomes a proposal a person approves — any contributor sets or clears it.
+  A task the steward rejected twice says it needs a decision, and why. A run
+  under way on a task is named on its row and in its detail, and Start says
+  why it is not offered on a project that isn't running.
 -->
 <template>
   <div ref="rootEl" class="space-y-4" data-testid="project-tasks">
@@ -124,6 +130,8 @@
               <BaseBadge v-if="t.priority === 'p1'" variant="urgent">P1</BaseBadge>
               <BaseBadge v-if="subtaskLabel(t)" size="sm" variant="neutral">{{ subtaskLabel(t) }}</BaseBadge>
               <BaseBadge v-if="waitingLabel(t)" size="sm" variant="neutral">{{ waitingLabel(t) }}</BaseBadge>
+              <BaseBadge v-if="t.needs_go" size="sm" variant="warning" :data-testid="`project-task-needs-go-${t.id}`">Needs a go</BaseBadge>
+              <BaseBadge v-if="liveRun(t)" size="sm" :variant="RUN_BADGE[liveRun(t).state] || 'neutral'" :data-testid="`project-task-run-${t.id}`">{{ runLabel(liveRun(t)) }}</BaseBadge>
               <BaseBadge v-if="t.closed_without_claim" size="sm" variant="warning">Done without a done claim</BaseBadge>
               <span v-if="assignedLabel(t)" class="hidden sm:inline max-w-[10rem] truncate text-xs text-gray-500 dark:text-gray-400">{{ assignedLabel(t, ownerLabel) }}</span>
               <span v-if="creatorOf(t)" class="hidden md:inline max-w-[10rem] truncate text-xs text-gray-500 dark:text-gray-400">by {{ creatorOf(t) }}</span>
@@ -236,6 +244,23 @@
         <p v-if="waitingLabel(task)" class="text-sm text-gray-600 dark:text-gray-300" data-testid="project-task-waiting">
           {{ waitingLabel(task) }} — it is ready once {{ task.waiting_for.length === 1 ? 'that task is' : 'those tasks are' }} done.
         </p>
+        <!-- ent#1235: rejected twice — a person decides, and the page says why. -->
+        <p v-if="task.needs_decision" class="text-sm text-status-warning-700 dark:text-status-warning-400" data-testid="project-task-needs-decision">
+          Needs a decision. {{ needsDecisionReason(task) }}
+        </p>
+        <p v-if="task.run" class="text-sm text-gray-600 dark:text-gray-300" data-testid="project-task-live-run">
+          Run {{ task.run.id }}<template v-if="task.run.agent_name"> on {{ task.run.agent_name }}</template>: {{ runLabel(task.run) }}<template v-if="task.run.started_at">, started <span :title="formatLocalDateTime(task.run.started_at)">{{ formatRelativeTime(task.run.started_at) }}</span></template>.
+        </p>
+        <div v-if="canContribute && !archived && !task.for_person && task.status !== 'done'" class="space-y-1" data-testid="project-task-needs-go">
+          <BaseToggle
+            :model-value="Boolean(task.needs_go)"
+            :disabled="holding"
+            label="Needs my go"
+            aria-label="Needs my go before an agent starts this task"
+            @update:model-value="setNeedsGo"
+          />
+          <p class="text-xs text-gray-500 dark:text-gray-400">When the steward starts this task, the run waits for a person's go first.</p>
+        </div>
         <p v-if="task.closed_without_claim" class="text-sm text-gray-600 dark:text-gray-300" data-testid="project-task-closed-without-claim">
           Done without its agent's done claim: {{ UNCLAIMED_MEANING }}
         </p>
@@ -283,6 +308,7 @@
           :task-id="task.id"
           :can-contribute="canContribute"
           :archived="archived"
+          :project-state="project ? projectState(project) : ''"
           @open-thread="openThread"
         />
 
@@ -423,7 +449,9 @@ import { formatRelativeTime, formatLocalDateTime } from '@/utils/timestamps'
 import {
   TASK_FIELD_ERROR_CODES, TASK_STATUS_BADGE, assignedLabel, authorLabel, creatorLabel, groupTasks, parseTaskIds,
   projectErrorMessage, subtaskLabel, taskLogKindLabel, taskStatusLabel, taskStatusOptions, validateTaskFields,
-  verificationRule, waitingLabel, withheldLine, doneWithoutClaim, UNCLAIMED_MEANING,
+  verificationRule, waitingLabel, withheldLine,
+  RUN_BADGE, liveRun, needsDecisionReason, projectState, runLabel,
+  doneWithoutClaim, UNCLAIMED_MEANING,
   boardColumns, boardMinWidth, boardMove, readTasksView, writeTasksView, TASK_TEXT_MAX } from './projectsUtils'
 
 const props = defineProps({
@@ -651,6 +679,23 @@ async function create() {
 // the rule reserves for people (and the steward agent, through its tools).
 function confirmDone(t) {
   return sendConfirm(t)
+}
+
+// ent#1235: hold or release the task for a person's go — saved at once.
+const holding = ref(false)
+async function setNeedsGo(on) {
+  if (!task.value || holding.value) return
+  holding.value = true
+  actionError.value = ''
+  try {
+    await store.updateTask(props.projectId, task.value.id, { needs_go: on })
+    // The form keeps what is typed in it: only the task read is refreshed.
+    task.value = await store.fetchTask(props.projectId, task.value.id)
+  } catch (err) {
+    actionError.value = projectErrorMessage(err)
+  } finally {
+    holding.value = false
+  }
 }
 
 async function refreshTask() {
