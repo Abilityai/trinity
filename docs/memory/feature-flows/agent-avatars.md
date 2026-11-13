@@ -267,7 +267,7 @@ The avatar generation uses the shared image generation service (IMG-001).
 ### Image Optimization Pipeline
 
 **File**: `src/backend/utils/image_optimize.py`
-**Dependency**: `Pillow==11.1.0` (added to `docker/backend/Dockerfile`)
+**Dependency**: `Pillow==13.0.0` (added to `docker/backend/Dockerfile`)
 
 ```python
 optimize_avatar(image_bytes: bytes, max_size: int = 512) -> bytes
