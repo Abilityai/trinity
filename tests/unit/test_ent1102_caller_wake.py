@@ -85,7 +85,6 @@ def wake(monkeypatch):
             replay=calls.get("replay", False), enabled=True, in_flight=False
         ),
     )
-    monkeypatch.setattr(mod, "_complete_idempotency", lambda *a, **k: None)
     monkeypatch.setattr(mod, "_fail_idempotency", lambda *a, **k: None)
     monkeypatch.setattr(mod, "_pending_ask_ids", lambda execution_id: calls.get("ask_ids", []))
     monkeypatch.setattr(mod, "_caller_subscribes_to", lambda caller, callee, status: False)

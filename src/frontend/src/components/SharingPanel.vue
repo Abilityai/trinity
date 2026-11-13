@@ -287,8 +287,13 @@
                 title="Direct messages received from this client. Counting starts when this feature is deployed — earlier history is not backfilled."
               >Messages</th>
               <th class="px-4 py-2">Last active</th>
-              <th class="px-4 py-2">Access</th>
-              <th class="px-4 py-2"><span class="sr-only">Actions</span></th>
+              <!-- Fixed widths for the two columns whose content changes on a
+                   row action (badge label, button set, BaseButton's in-flight
+                   spinner). Sized for the widest state — Approve in flight +
+                   Block — so an auto-layout table never re-balances the other
+                   columns mid-action. -->
+              <th class="px-4 py-2 w-28">Access</th>
+              <th class="px-4 py-2 w-52"><span class="sr-only">Actions</span></th>
             </tr>
           </thead>
           <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
