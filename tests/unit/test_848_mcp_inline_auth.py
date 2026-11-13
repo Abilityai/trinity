@@ -664,5 +664,6 @@ class TestGlobalRequestRateLimit:
 
         # ent#1253: the shared per-address budget is charged too, also before
         # the known-check.
-        assert seen == ["mcp_inline_auth:request", f"login_code_email:{_UNKNOWN}"], \
+        from services.channel_login_limit import _address_key
+        assert seen == ["mcp_inline_auth:request", _address_key(_UNKNOWN)], \
             "the global limiter must run for an unknown address, not be skipped"

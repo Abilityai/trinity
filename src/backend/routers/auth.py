@@ -634,7 +634,7 @@ async def request_email_login_code(request: Request):
     # ent#1253: the per-address budget shared with the channels and MCP login.
     # Charged before the whitelist check, so every address spends it alike.
     if not channel_login_limit.address_allowed(email):
-        logger.warning("email-code suppressed: shared rate limit for %s", email)
+        logger.warning("email-code suppressed: shared rate limit for %r", email)
         return generic_response
 
     # Non-whitelisted: return the generic body without revealing membership.

@@ -122,7 +122,7 @@ def _resolve_and_create_code(email: str, session_id: Optional[str]) -> Optional[
     # ent#1253: the per-address budget shared with the web login and the
     # channels, charged before the known-address check like the web's.
     if not channel_login_limit.address_allowed(email):
-        logger.warning("[ent#1253] inline login code suppressed: shared rate limit for %s", email)
+        logger.warning("[ent#1253] inline login code suppressed: shared rate limit for %r", email)
         return None
 
     if not _email_is_known(email):

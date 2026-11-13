@@ -328,8 +328,20 @@ def test_inprocess_fallback_is_bounded(monkeypatch):
     from services import rate_limiter
     monkeypatch.setattr(rate_limiter, "_INPROCESS_MAX_KEYS", 3)
     for i in range(5):
-        rate_limiter.check(f"k{i}", 1, 600)
-    assert list(rate_limiter._inprocess_buckets) == ["k2", "k3", "k4"]
+        rate_limiter.check(f"k:{i}", 1, 600)
+    assert list(rate_limiter._inprocess_buckets) == ["k:2", "k:3", "k:4"]
+
+
+def test_login_address_flood_does_not_evict_other_buckets(monkeypatch):
+    """The anonymous web login can push many distinct addresses while Redis is
+    down; that must not drop a live bucket of another limiter on the worker."""
+    from services import channel_login_limit as m
+    from services import rate_limiter
+    monkeypatch.setattr(rate_limiter, "_INPROCESS_MAX_KEYS", 3)
+    assert rate_limiter.check("mcp_global:all", 1, 600).allowed
+    for i in range(10):
+        m.address_allowed(f"a{i}@x.com")
+    assert not rate_limiter.check("mcp_global:all", 1, 600).allowed
 
 
 def test_refund_returns_the_hit():
@@ -338,3 +350,63 @@ def test_refund_returns_the_hit():
     assert not rate_limiter.check("k", 1, 600).allowed
     rate_limiter.refund("k", r)
     assert rate_limiter.check("k", 1, 600).allowed
+
+
+def test_refund_returns_the_hit_through_redis(monkeypatch):
+    import fakeredis
+    from services import rate_limiter
+    fake = fakeredis.FakeRedis()
+    monkeypatch.setattr(rate_limiter, "_get_redis", lambda: fake)
+    r = rate_limiter.check("k", 1, 600)
+    assert r.allowed and isinstance(r.member, str)
+    assert not rate_limiter.check("k", 1, 600).allowed
+    rate_limiter.refund("k", r)
+    assert fake.zcard("ratelimit:k") == 0
+    assert rate_limiter.check("k", 1, 600).allowed
+    assert rate_limiter._inprocess_buckets == {}
+
+
+# ------------------------------------------------ bounded address key
+
+def _address_keys(monkeypatch):
+    """Spy on the limiter; return the list of login-address keys it is asked about."""
+    from services import rate_limiter
+    keys, real = [], rate_limiter.check
+
+    def spy(key, limit, window):
+        if key.startswith("login_code_email:"):
+            keys.append(key)
+        return real(key, limit, window)
+
+    monkeypatch.setattr(rate_limiter, "check", spy)
+    return keys
+
+
+class TestAddressKey:
+    def test_key_size_is_fixed_for_a_huge_input(self, monkeypatch):
+        from services import channel_login_limit as m
+        keys = _address_keys(monkeypatch)
+        m.address_allowed("a" * 5_000_000 + "@x.com")
+        m.address_allowed("v@x.com")
+        assert len(keys[0]) == len(keys[1]) <= 100
+
+    def test_web_mcp_and_channels_share_one_key(self, monkeypatch):
+        from services import channel_login_limit as m
+        from services import mcp_auth_service as svc
+        keys = _address_keys(monkeypatch)
+        _web_request(" V@X.com", whitelisted=False, monkeypatch=monkeypatch)
+        db = MagicMock()
+        db.count_recent_code_requests.return_value = 0
+        with patch.object(svc, "db", db), patch.object(svc, "_email_is_known", return_value=False):
+            svc._resolve_and_create_code("v@X.com ", "s1")
+        m.login_code_request_allowed("telegram", "bot1", "u1", "v@x.com")
+        assert len(keys) == 3 and len(set(keys)) == 1
+        assert "v@x.com" not in keys[0]
+
+    def test_web_refuses_an_overlong_email_and_charges_nothing(self, monkeypatch):
+        from fastapi.exceptions import RequestValidationError
+        keys = _address_keys(monkeypatch)
+        email = "a" * 250 + "@x.com"
+        with pytest.raises(RequestValidationError):
+            _web_request(email, whitelisted=True, monkeypatch=monkeypatch)
+        assert keys == []

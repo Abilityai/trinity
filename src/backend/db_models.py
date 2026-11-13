@@ -765,7 +765,8 @@ class EmailWhitelistAdd(BaseModel):
 
 class EmailLoginRequest(BaseModel):
     """Request a login code via email."""
-    email: str
+    # ent#1253: bounded before the per-address limiter is charged (RFC 5321 path limit).
+    email: str = Field(max_length=254)
 
 
 class EmailLoginVerify(BaseModel):

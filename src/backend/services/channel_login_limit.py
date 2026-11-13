@@ -14,6 +14,10 @@ asks ``login_code_request_allowed``. Three caps, each over 10 minutes:
 * per bot / WhatsApp binding / Slack workspace (20): new Telegram/WhatsApp
   accounts cost nothing, so the sender cap alone leaves volume unbounded.
 
+The address key holds a sha256 of the normalised address, so its size is
+fixed whatever the caller sends; the web route also refuses an address over
+254 characters before charging (MCP and the channels already do).
+
 Requests are counted with ``rate_limiter.check`` keyed on the input, never by
 counting code rows: rows exist only for some callers (whitelisted addresses on
 the web; outsiders while the ent#849 policy refuses members), and a cap derived
@@ -56,7 +60,10 @@ def _sender_tag(sender_id: str) -> str:
 
 
 def _address_key(email: str) -> str:
-    return f"login_code_email:{(email or '').strip().lower()}"
+    """One key per normalised address for every surface. Hashed, so the key
+    size is fixed whatever the caller sends."""
+    normalised = (email or "").strip().lower()
+    return f"login_code_email:{hashlib.sha256(normalised.encode()).hexdigest()}"
 
 
 def address_allowed(email: str) -> bool:
