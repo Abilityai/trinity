@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import html
 import logging
+import re
 from typing import Awaitable, Callable, Optional
 
 logger = logging.getLogger(__name__)
@@ -81,6 +82,9 @@ _TELEGRAM_MAX_MESSAGE_CHARS = 4096
 
 def _sanitized_detail(summary_or_error: Optional[str]) -> str:
     """Credential-sanitise, THEN truncate. The one rule every channel uses.
+
+    Success text and a passed-through turn refusal only: a failure's own error
+    never reaches a channel (#4482, `person_safe_failure`).
 
     Review finding: this was inline in `_summarize` (Slack/Telegram) and the
     portal leg did a bare `strip()` and slice — no sanitizer anywhere on its
@@ -115,6 +119,53 @@ def _sanitized_detail(summary_or_error: Optional[str]) -> str:
     return body
 
 
+# #4482: what a person reads when a background turn did not succeed. The row's
+# error is the operator's diagnosis: the subscription walk trail names
+# subscriptions ("Tried: <name> (auth); every candidate refused.") and the auth
+# message says "Check subscription token or API key configuration". A completion
+# report is read by a Workspace client or by every member of a Slack/Telegram
+# channel, so the raw text stays on the execution row and the operator alert.
+USAGE_LIMIT_FAILURE = "The agent reached its usage limit, so it couldn't finish this."
+TIMEOUT_FAILURE = "The agent ran out of time before it finished this."
+CANCELLED_FAILURE = "This was stopped before it finished."
+GENERIC_FAILURE = "The agent couldn't finish this."
+
+TIMEOUT_RE = re.compile(r"timed?\s*-?\s*out|timeout", re.IGNORECASE)
+# The subscription walk trail (`subscription_auto_switch` `trail_text`: " Tried:
+# A (auth) -> B (rate limit); <tail>") is the platform's own record that the
+# credential pool refused the turn, whatever the tail. Provider wordings are
+# deliberately NOT matched: an agent's own failed GitHub call ("API rate limit
+# exceeded", "403") is not the agent running out of usage, and a misread only
+# costs the generic sentence.
+_USAGE_LIMIT_RE = re.compile(r" Tried: [^;]+;")
+
+
+def person_safe_failure(status: str, error: Optional[str]) -> str:
+    """The sentence a non-operator reads for a turn that did not succeed.
+
+    Never the raw error. An agent's refusal of the turn (ent#926) is the one
+    text passed through: it is written for the person. A misclassification
+    only changes which fixed sentence is shown.
+    """
+    if status == "cancelled":
+        return CANCELLED_FAILURE    # a pull-pilot cancel keeps the failure body (#3603)
+    try:
+        from services import public_chat_service
+        from services.task_execution_service import _split_error_code
+
+        code, text = _split_error_code(error)
+        if public_chat_service.is_turn_refused(code, text or error):
+            return _sanitized_detail(text) or GENERIC_FAILURE
+    except Exception as e:  # noqa: BLE001 — a report must still post; never raw text
+        logger.warning("[#4482] refusal check failed, using the generic line: %s", e)
+    raw = error or ""
+    if _USAGE_LIMIT_RE.search(raw):
+        return USAGE_LIMIT_FAILURE
+    if TIMEOUT_RE.search(raw):
+        return TIMEOUT_FAILURE
+    return GENERIC_FAILURE
+
+
 def _summarize(
     status: str,
     summary_or_error: Optional[str],
@@ -129,10 +180,11 @@ def _summarize(
     agent, so delegated output arriving via A's bot is honestly attributed to
     the worker that produced it. Slack passes None — ``username=`` carries it.
     """
-    # Sanitise-then-truncate lives in `_sanitized_detail`, shared with the
-    # portal leg — a channel is a persistent, externally hosted, human-visible
-    # surface, so this is the last place to skip it.
-    body = _sanitized_detail(summary_or_error)
+    # Success text goes through `_sanitized_detail`, shared with the portal leg —
+    # a channel is a persistent, externally hosted, human-visible surface. A
+    # failure posts only `person_safe_failure` (#4482).
+    body = (_sanitized_detail(summary_or_error) if status == "success"
+            else person_safe_failure(status, summary_or_error))
     if status == "success":
         head = "✅ Task finished"
     else:
@@ -594,7 +646,8 @@ def _portal_body(*, executing_agent: str, session_agent: str, status: str,
     # The same sanitise-then-truncate rule the other channels use. A Workspace
     # thread is a persistent, client-visible surface — if anything, MORE exposed
     # than a Slack channel, since the reader is an external client.
-    detail = _sanitized_detail(summary_or_error)
+    detail = (_sanitized_detail(summary_or_error) if done
+              else person_safe_failure(status, summary_or_error))
     return f"{head}\n\n{detail}" if detail else head
 
 
