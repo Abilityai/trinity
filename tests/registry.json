@@ -1,6 +1,17 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4482_person_safe_failure.py",
+      "feature": "#4482",
+      "added": "2026-11-13",
+      "categories": [
+        "backend",
+        "client-portal",
+        "channels"
+      ],
+      "description": "#4482: a failed background turn's completion report (Workspace, Slack, Telegram), the Work card and the own-turn switch message show a fixed person-safe sentence; the subscription walk trail, subscription names and operator guidance stay on the execution row. An agent refusal passes through unless it carries the trail."
+    },
+    {
       "file": "unit/test_ent1221_web_delivery.py",
       "feature": "trinity-enterprise#1221",
       "added": "2026-11-11",

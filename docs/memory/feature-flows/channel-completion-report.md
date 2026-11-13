@@ -401,8 +401,13 @@ maps it to a fixed sentence — cancelled, usage limit (the walk trail
 ` Tried: …;` only; provider wordings such as "rate limit" or `403` also appear in an
 agent's own failed tool calls), timeout, or generic. A failed refusal check falls back
 to the generic sentence, never to the raw text. An agent's turn refusal (ent#926) is the one text
-passed through. The raw error stays on the execution row and the operator alert. The
-same sentence is what the agent sees when the report is replayed into its next turn.
+passed through; the trail is checked first, so a refusal carrying a trail reads as usage limit.
+The raw error stays on the execution row; the pool-exhausted operator alert also carries it.
+An owner's Slack or Telegram ops channel gets the fixed sentence too, and reads the detail
+on the execution row. The same sentence is what the agent sees when the report is replayed
+into its next turn. A room's "could not respond" system line uses the same helper
+(`shared_sessions/service.py::_wake_agent`). Messages posted before #4482 keep their
+original text.
 
 No new transport, and no history poll of its own — the open thread **rides the
 shell's 20s tick** (trinity#3439). Before #3439 this paragraph said, honestly,

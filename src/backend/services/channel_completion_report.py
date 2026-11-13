@@ -149,6 +149,9 @@ def person_safe_failure(status: str, error: Optional[str]) -> str:
     """
     if status == "cancelled":
         return CANCELLED_FAILURE    # a pull-pilot cancel keeps the failure body (#3603)
+    raw = error or ""
+    if _USAGE_LIMIT_RE.search(raw):  # before the refusal pass-through: it would carry the trail
+        return USAGE_LIMIT_FAILURE
     try:
         from services import public_chat_service
         from services.task_execution_service import _split_error_code
@@ -158,9 +161,6 @@ def person_safe_failure(status: str, error: Optional[str]) -> str:
             return _sanitized_detail(text) or GENERIC_FAILURE
     except Exception as e:  # noqa: BLE001 — a report must still post; never raw text
         logger.warning("[#4482] refusal check failed, using the generic line: %s", e)
-    raw = error or ""
-    if _USAGE_LIMIT_RE.search(raw):
-        return USAGE_LIMIT_FAILURE
     if TIMEOUT_RE.search(raw):
         return TIMEOUT_FAILURE
     return GENERIC_FAILURE

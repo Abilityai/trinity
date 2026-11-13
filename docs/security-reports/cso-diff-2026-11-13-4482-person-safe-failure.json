@@ -43,7 +43,7 @@
   "hypotheses": [
     {
       "title": "Refusal pass-through keys on marker substrings",
-      "detail": "person_safe_failure passes the sanitized error through when public_chat_service.is_turn_refused matches a marker substring anywhere in the text. An agent-server error containing a marker phrase would be shown in full (sanitized, capped). Same matcher public links already use; no path found where such an error also carries the subscription trail. Not counted.",
+      "detail": "person_safe_failure passes the sanitized error through when public_chat_service.is_turn_refused matches a marker substring anywhere in the text. An agent-server error containing a marker phrase would be shown in full (sanitized, capped). The matcher is shared with public links, which answer a refusal with a fixed line; this path passes the refusal text through, as the own-turn Workspace path does. The walk trail is checked before the refusal, so a trail never rides out on a refusal. Not counted.",
       "confidence": 4
     }
   ],

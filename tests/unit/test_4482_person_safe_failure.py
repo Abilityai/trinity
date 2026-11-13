@@ -82,6 +82,14 @@ def test_an_agent_refusal_is_passed_through():
     assert text == "I only take requests from the finance team."
 
 
+def test_a_refusal_carrying_the_walk_trail_never_shows_it():
+    """The trail is checked before the refusal pass-through, so a refusal text
+    with a trail appended cannot carry subscription names out."""
+    refusal = f"[turn_refused] I only take requests from the finance team. Tried: {SUB} (auth); every candidate refused."
+    text = ccr.person_safe_failure("failed", refusal)
+    assert _leaks(text) == []
+
+
 def test_anything_else_is_the_generic_line():
     assert ccr.person_safe_failure("failed", "Traceback: KeyError 'x'") == ccr.GENERIC_FAILURE
     assert ccr.person_safe_failure("failed", None) == ccr.GENERIC_FAILURE
