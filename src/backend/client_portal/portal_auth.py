@@ -15,6 +15,10 @@ are needed and they fail differently: session revocation is a Redis cutoff and
 is best-effort, so with Redis down a blocked client's live token would still
 decode. This check reads the durable block row, so the block holds regardless —
 it is the layer that makes "blocked" mean blocked.
+
+A deactivated platform account (`users.suspended_at`) is refused by the same
+check (trinity-enterprise#1258): its email may also hold a share, and a portal
+session knows the email only.
 """
 from __future__ import annotations
 
@@ -61,6 +65,16 @@ def _reject_if_blocked(email: str) -> None:
         logger.error("[#281] block lookup failed for %s; denying: %s", email, exc)
         raise HTTPException(status_code=403, detail="Access has been revoked.")
     if blocked:
+        raise HTTPException(status_code=403, detail="Access has been revoked.")
+    # trinity-enterprise#1258: the same refusal for a deactivated platform
+    # account (`users.suspended_at`, #995). A portal session carries an email
+    # and no account, so nothing else on this path reads the column, and a
+    # session minted before the suspension would outlive it. Here, because this
+    # is the one check every consumer of a portal session already makes (the
+    # two below and `routers/terms.py`). Fail-closed inside the helper.
+    from .service import email_account_suspended
+
+    if email_account_suspended(email):
         raise HTTPException(status_code=403, detail="Access has been revoked.")
 
 

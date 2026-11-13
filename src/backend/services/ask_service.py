@@ -1770,6 +1770,14 @@ def _address(agent_name: str, role: str) -> Tuple[List[str], Optional[str], bool
     (`role_unavailable`, `role_unassigned`, `role_cannot_open_agent`) maps 1:1
     to a 422 so the agent gets the remedy for the arm it hit, with the role's
     label and never a person in the text.
+
+    The `approver` kind goes through `role_addressing.resolve_approver_for_ask`
+    (#4501): its answer is fenced to the people recorded here
+    (trinity-enterprise#1053), so only seated approvers who can open the agent
+    are recorded, and none is `role_cannot_open_agent` — refused and logged,
+    never filed for a reader who cannot see it. A message or a report to the
+    approver keeps the plain resolution; `readdress_role` inherits this rule
+    through `_fresh_audience`.
     """
     from services import role_addressing
 
@@ -1781,8 +1789,15 @@ def _address(agent_name: str, role: str) -> Tuple[List[str], Optional[str], bool
             raise AskRejected(422, e.code, e.message, role=e.role)
         return r.people, r.single, r.resolved
     try:
-        r = role_addressing.resolve_addressee(agent_name, role, owner_lookup=_owner_email)
-    except role_addressing.RoleRefused:
+        r = (role_addressing.resolve_approver_for_ask(agent_name) if role == "approver"
+             else role_addressing.resolve_addressee(agent_name, role, owner_lookup=_owner_email))
+    except role_addressing.RoleRefused as e:
+        if e.code == "role_cannot_open_agent":
+            # A refusal files nothing, so the log is the only trace a stalled
+            # agent leaves. The role and the agent, never a person.
+            logger.warning("[AskService] an ask to the %s role from %s was refused: nobody "
+                           "seated in it can open the agent", role, agent_name)
+            raise AskRejected(422, e.code, e.message, role=e.role)
         raise AskRejected(422, "role_unassigned",
                           f"Nobody fills the {role} role for this agent yet; address the ask to "
                           "primary or operator.", role=role)

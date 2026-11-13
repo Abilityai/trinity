@@ -611,7 +611,10 @@ fence instead: the platform chose the addressee; the roster was never its fence.
   and `status='pending'`; the Workspace chat keys dropped on a single-addressee
   change and the new person's Main re-attached). Nobody filling `primary` →
   NULL audience (the operators, as a fresh raise); an unfilled `approver` /
-  `viewer` → rows untouched (ent#1053); a credential row moves only to one
+  `viewer` → rows untouched (ent#1053), and so is an `approver` seat nobody
+  in it can open (#4501: an agent's `approver` ask records only the seated
+  approvers who can open the agent, refused `role_cannot_open_agent` when none
+  can); a credential row moves only to one
   person (ent#1066). One audit row per changed row (`platform_readdressed`,
   ids and the reason), one agent-keyed `operator_queue_new` trigger per call.
   The Inbox has no WebSocket — the new addressee sees it on the next poll. The
