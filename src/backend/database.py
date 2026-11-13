@@ -4304,10 +4304,13 @@ class DatabaseManager:
 
     def respond_to_operator_queue_item(self, item_id, response, response_text,
                                         responded_by_id, responded_by_email,
-                                        divergence_acknowledged=False, terminal=False):
+                                        divergence_acknowledged=False, terminal=False,
+                                        expect_address=None):
+        # trinity-enterprise#1096: `expect_address` adds the address to the CAS.
         return self._operator_queue_ops.respond_to_item(
             item_id, response, response_text, responded_by_id, responded_by_email,
             divergence_acknowledged=divergence_acknowledged, terminal=terminal,
+            expect_address=expect_address,
         )
 
     def withdraw_operator_queue_item(self, agent_name, item_id, *, reason):
@@ -4315,12 +4318,12 @@ class DatabaseManager:
         return self._operator_queue_ops.withdraw_item(agent_name, item_id, reason=reason)
 
     def cancel_operator_queue_item(self, item_id, *, disposed_by_email, reason=None,
-                                   disposition="cancelled"):
+                                   disposition="cancelled", expect_address=None):
         # trinity-enterprise#611: CAS + endings ledger; a lost race carries
         # `_status_conflict` (the mirror of respond). ent#748: `dismissed`.
         return self._operator_queue_ops.cancel_item(
             item_id, disposed_by_email=disposed_by_email, reason=reason,
-            disposition=disposition,
+            disposition=disposition, expect_address=expect_address,
         )
 
     def drop_operator_queue_addressee(self, item_id, email):

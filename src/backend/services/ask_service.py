@@ -126,23 +126,91 @@ class AskConflict(Exception):
         self.item = item
 
 
+# abilityai/trinity-enterprise#1096: the decider order's three seats, as the
+# platform stamps them on a gate approval (`_WORKSPACE_DECIDER_SEAT_KEY`).
+PRIMARY_SEAT = "primary"
+OWNER_SEAT = "owner"
+ADMIN_SEAT = "admin"
+DECIDER_SEATS = (PRIMARY_SEAT, OWNER_SEAT, ADMIN_SEAT)
+_SEAT_LABELS = {PRIMARY_SEAT: "the agent's primary", OWNER_SEAT: "the agent's owner",
+                "approver": "the agent's approver"}
+# Why a card fell to the admins (`role_addressing.operators_reason`).
+_OPERATORS_REASON_TEXT = {"owner_no_email": "the agent's owner has no email",
+                          "no_owner": "the agent has no owner"}
+
+
 class AskNotAddressee(Exception):
     """trinity-enterprise#751: a gated-skill approval may be decided only by a
-    person it was addressed to (an admin may cancel it, never approve it).
+    person it was addressed to (an admin may cancel it; it may decide one only
+    on the admin seat, trinity-enterprise#1096).
     trinity-enterprise#1042: so may an ask addressed to a canon role id —
     `role` is that `role:<id>` (or `approver`, #1053; or `project`,
-    trinity-enterprise#1134), None for any other ask."""
+    trinity-enterprise#1134), None for any other ask.
 
-    def __init__(self, item_id: str, *, role: Optional[str] = None):
+    trinity-enterprise#1096: every refusal names who the card waits for —
+    `waiting_on` (the people) and `seat` (`primary` | `owner` | `admin`, or the
+    role the row was addressed to). Both reach the 403 `detail` on every door;
+    the caller who gets the refusal already reads `waiting_on` on the card
+    (`addressed_view`), so nothing new is disclosed. `gate` marks a gate
+    approval, the one kind whose MESSAGE names the person (R7)."""
+
+    def __init__(self, item_id: str, *, role: Optional[str] = None,
+                 waiting_on: Optional[List[str]] = None, seat: Optional[str] = None,
+                 operators_reason: Optional[str] = None, gate: bool = False):
         super().__init__("not_addressee")
         self.item_id = item_id
         self.role = role
+        self.waiting_on = list(waiting_on or [])
+        self.seat = seat
+        self.operators_reason = operators_reason
+        self.gate = gate
+
+    def message(self, *, cancelling: bool = False, admin_verbs: bool = False) -> str:
+        """The refusal's text: a role-addressed ask keeps `role_message` (no
+        person — the text reaches a model through MCP); a gate approval names
+        its seat and its people; anything else keeps the generic wording.
+        `admin_verbs` (the Operations door, for an admin) adds what an admin can
+        do instead — never on the Workspace door, which has no such verbs."""
+        role_text = self.role_message(cancelling=cancelling)
+        if role_text is not None:
+            return role_text
+        if not self.gate:
+            if cancelling:
+                return "This approval was addressed to someone else; only they or an admin can cancel it."
+            return "This approval was addressed to someone else; only they can decide it."
+        if self.seat == ADMIN_SEAT and not self.waiting_on:
+            why = _OPERATORS_REASON_TEXT.get(self.operators_reason or "")
+            text = ("This approval waits for an instance admin"
+                    + (f" ({why})." if why else ".")
+                    + (" Only an admin can cancel it." if cancelling
+                       else " Only an instance admin can decide it."))
+        elif self.waiting_on:
+            text = (f"This approval waits for {_SEAT_LABELS.get(self.seat or '', 'the person it was addressed to')}: "
+                    f"{', '.join(self.waiting_on)}."
+                    + (" Only they or an admin can cancel it." if cancelling
+                       else " Only they can decide it."))
+        else:
+            text = ("This approval waits for nobody who can decide it."
+                    + (" Only an admin can cancel it." if cancelling else ""))
+        if admin_verbs:
+            text += " An admin can re-address it or end it with a reason."
+        return text
+
+    def detail(self, *, cancelling: bool = False, admin_verbs: bool = False) -> Dict[str, Any]:
+        """The 403 body every door returns: the code, the message, and who the
+        card waits for."""
+        return {"code": "not_addressee",
+                "message": self.message(cancelling=cancelling, admin_verbs=admin_verbs),
+                "waiting_on": list(self.waiting_on),
+                "seat": self.seat}
 
     def role_message(self, *, cancelling: bool = False) -> Optional[str]:
         """The refusal for a role-addressed ask: the role's label and what to do
         next, never a person and never advice to widen a permission (the text
         reaches a model through the MCP tool). None when no role id applies —
-        the door keeps its own wording."""
+        the door keeps its own wording. A gate approval's refusal names its
+        people in `message` instead (trinity-enterprise#1096, R7); role,
+        approver and project refusals stay person-free."""
         if self.role is None:
             return None
         from services import role_addressing
@@ -202,6 +270,9 @@ class Ending:
     # resume only when this holds (ent#430 AC #5: never claim work that was
     # not set in motion).
     observers_ok: bool = True
+    # trinity-enterprise#1096 (R6): a bulk sweep's seat-fenced rows the actor
+    # was not addressed on — skipped, never ended; 0 for every other ending.
+    skipped_fenced: int = 0
 
 
 _observers: List[Callable[[EndingEvent], None]] = []
@@ -289,6 +360,65 @@ def _resolved_people(row: Mapping[str, Any]) -> List[str]:
     return list(dict.fromkeys(str(p).strip() for p in resolved if str(p).strip()))
 
 
+def _context_of(row: Mapping[str, Any]) -> Dict[str, Any]:
+    """The row's context as a dict (stored text or parsed); anything else is {}."""
+    ctx = row.get("context")
+    if isinstance(ctx, str):
+        try:
+            ctx = json.loads(ctx)
+        except ValueError:
+            return {}
+    return dict(ctx) if isinstance(ctx, dict) else {}
+
+
+def _decider_seat(row: Mapping[str, Any]) -> Optional[str]:
+    """The decider seat the PLATFORM stamped on the row
+    (trinity-enterprise#1096), or None. Platform-only: stripped from anything
+    an agent authored at both ingest boundaries."""
+    from services import operator_queue_service as oqs
+    seat = _context_of(row).get(oqs._WORKSPACE_DECIDER_SEAT_KEY)
+    return seat if seat in DECIDER_SEATS else None
+
+
+def _gate_approval(row: Mapping[str, Any]) -> bool:
+    return row.get("raised_by") == "gate" and row.get("type") == "approval"
+
+
+def _admin_seated(row: Mapping[str, Any]) -> bool:
+    """A gate approval the decider order left to an instance admin
+    (trinity-enterprise#1096, arm three): raised by the gate, an approval,
+    NOBODY in its snapshot, and the platform's `admin` seat stamp. The stamp is
+    never the only authority (R8) — an un-stamped empty gate approval stays
+    "nobody", exactly as before."""
+    return _gate_approval(row) and not _resolved_people(row) and _decider_seat(row) == ADMIN_SEAT
+
+
+def _gate_admin(user: Any) -> bool:
+    """Whether `user` would pass the admin gate AND is a person — the same
+    predicate `require_admin` + `require_person` apply at a route (#2323's
+    `ADMIN_GATE_SCOPES` allowlist; a principal without `mcp_scope` fails
+    closed). Repeated in the sink so the admin arm never rests on a raw
+    `role == "admin"` (R8)."""
+    if user is None:
+        return False
+    from fastapi import HTTPException
+    from dependencies import assert_admin, assert_person
+
+    try:
+        assert_admin(user)
+        assert_person(user)
+    except HTTPException:
+        return False
+    except Exception:  # noqa: BLE001 — a stand-in that does not look like a principal
+        return False
+    return True
+
+
+def _addressed(row: Mapping[str, Any], actor: "Actor") -> bool:
+    email = (getattr(actor, "email", None) or "").strip().casefold()
+    return bool(email) and email in {p.casefold() for p in _resolved_people(row)}
+
+
 def may_end(row: Mapping[str, Any], actor: "Actor", *, cancelling: bool = False) -> bool:
     """Who may end an ask — the one rule every ending door shares
     (trinity-enterprise#751; the operator routes, the Workspace answer and a
@@ -300,16 +430,20 @@ def may_end(row: Mapping[str, Any], actor: "Actor", *, cancelling: bool = False)
     a canon role id (trinity-enterprise#1042 — the role addresses the ask, the
     seat authorises the answer) or to the approver (#1053). An empty or
     unreadable snapshot is nobody — except on an `approver` row, which is then
-    not fenced at all (a legacy row, open as it was). An
-    admin may CANCEL a gate approval — the escalation — but never decide a
-    fenced ask. Every other ending keeps the rule it had: any person with access
-    to the agent, checked by the caller. Person-only endings stay the routes'
-    check (`dependencies.reject_non_person_principal`), since an agent key
-    carries its owner's email."""
+    not fenced at all (a legacy row, open as it was), and on a gate approval
+    the platform stamped with the `admin` decider seat
+    (trinity-enterprise#1096): an instance admin who is a person decides that
+    one (`_admin_seated` + `_gate_admin`). An admin may CANCEL a gate approval
+    — the escalation — but never decide any other fenced ask. Every other
+    ending keeps the rule it had: any person with access to the agent, checked
+    by the caller. Person-only endings stay the routes' check
+    (`dependencies.reject_non_person_principal`), since an agent key carries
+    its owner's email."""
     if not _seat_fenced(row, cancelling=cancelling):
         return True
-    email = (getattr(actor, "email", None) or "").strip().casefold()
-    if email and email in {p.casefold() for p in _resolved_people(row)}:
+    if _addressed(row, actor):
+        return True
+    if _admin_seated(row) and _gate_admin(getattr(actor, "user", None)):
         return True
     return cancelling and getattr(getattr(actor, "user", None), "role", None) == "admin"
 
@@ -324,10 +458,60 @@ def addressed_view(row: Mapping[str, Any], actor: "Actor") -> Optional[Dict[str,
     fenced ask belongs to the people it was addressed to; without this an admin
     saw Approve / Decline on someone else's decision and learned only from the
     refusal that it was not theirs. An empty snapshot waits on nobody and nobody
-    may decide it — the sink's answer, never None."""
+    may decide it — the sink's answer, never None. A row the platform stamped
+    with a decider seat (trinity-enterprise#1096) also says which seat it waits
+    on (`waiting_on_seat`; `admin` with nobody in `waiting_on` is the admin
+    seat); an un-stamped row keeps its shape."""
     if not _seat_fenced(row):
         return None
-    return {"waiting_on": _resolved_people(row), "can_decide": may_end(row, actor)}
+    view = {"waiting_on": _resolved_people(row), "can_decide": may_end(row, actor)}
+    seat = _decider_seat(row)
+    if seat is not None:
+        view["waiting_on_seat"] = seat
+    return view
+
+
+def not_addressee(row: Mapping[str, Any]) -> AskNotAddressee:
+    """The refusal for `row`, naming who it waits for (trinity-enterprise#1096):
+    the people, the seat (the decider stamp, else the role the row was
+    addressed to) and, on the admin seat, why it fell there."""
+    from services import operator_queue_service as oqs
+    seat = _decider_seat(row) or _fenced_role_of(row) or row.get("to_role")
+    reason = _context_of(row).get(oqs._WORKSPACE_OPERATORS_REASON_KEY)
+    return AskNotAddressee(row.get("id"), role=_fenced_role_of(row),
+                           waiting_on=_resolved_people(row), seat=seat,
+                           operators_reason=reason if isinstance(reason, str) else None,
+                           gate=_gate_approval(row))
+
+
+def _ledger_email(row: Mapping[str, Any], actor: "Actor") -> str:
+    """The email an ending records. An admin with no email deciding through
+    the admin arm (trinity-enterprise#1096, R9) is recorded `admin:<username>`
+    — never a bare username where every reader expects an email."""
+    email = actor.email or ""
+    if "@" in email or not _admin_seated(row):
+        return email
+    username = getattr(getattr(actor, "user", None), "username", None) or email
+    return f"admin:{username}" if username else email
+
+
+def _address_unchanged(row: Mapping[str, Any]) -> Optional[Dict[str, Any]]:
+    """trinity-enterprise#1096 (R5): the stored address of a seat-fenced row,
+    raw, when it still matches the caller's read of `row`; None when a
+    re-address moved it meanwhile (or the row is gone). The raw values feed the
+    ending's compare-and-set, so a re-address landing after this read is also
+    caught. A row that is not seat-fenced is never compared — its ending does
+    not depend on who it is addressed to."""
+    raw = db.read_operator_queue_address(row["id"])
+    if not raw:
+        return None
+    if (sorted(p.casefold() for p in _resolved_people(raw))
+            != sorted(p.casefold() for p in _resolved_people(row))
+            or (raw.get("addressed_to_email") or "").casefold()
+            != (row.get("addressed_to_email") or "").casefold()
+            or _decider_seat(raw) != _decider_seat(row)):
+        return None
+    return raw
 
 
 # ---------------------------------------------------------------------------
@@ -367,23 +551,26 @@ def answer(
         raise NotOffMenuError()
     validate_response_choice(item, response, response_text=response_text)
     if not may_end(item, actor):
-        raise AskNotAddressee(item["id"], role=_fenced_role_of(item))
+        raise not_addressee(item)
+    expect = _ending_expectation(item, actor)
     from services.operator_queue_service import is_platform_minted
     updated = db.respond_to_operator_queue_item(
         item_id=item["id"],
         response=response,
         response_text=response_text,
         responded_by_id=responded_by_id,
-        responded_by_email=actor.email,
+        responded_by_email=_ledger_email(item, actor),
         divergence_acknowledged=divergence_acknowledged,
         # #2372: a platform alert has no agent audience — nobody will ever
         # acknowledge it from a file, so the person's answer is its last event.
         terminal=is_platform_minted(item),
+        # trinity-enterprise#1096 (R5): only a seat-fenced row compares its address.
+        **({"expect_address": expect} if expect is not None else {}),
     )
     if not updated:
         raise AskNotFound(item["id"])
     if updated.pop("_status_conflict", False):
-        raise AskConflict(_conflict_code(updated), updated)
+        raise AskConflict(_conflict_code(updated, address_compared=expect is not None), updated)
     audit = [_audit_row("answered", updated, actor,
                         {"divergence_acknowledged": bool(divergence_acknowledged)})]
     trigger = _broadcast_payload({"type": "operator_queue_responded",
@@ -404,12 +591,17 @@ def cancel(item_id: str, *, actor: Actor, reason: Optional[str] = None) -> Endin
     `AskNotAddressee` (a gate approval the actor may not end, #751)."""
     current = db.get_operator_queue_item(item_id)
     if current and not may_end(current, actor, cancelling=True):
-        raise AskNotAddressee(item_id, role=_fenced_role_of(current))
-    updated = db.cancel_operator_queue_item(item_id, disposed_by_email=actor.email, reason=reason)
+        raise not_addressee(current)
+    expect = _ending_expectation(current, actor, cancelling=True) if current else None
+    updated = db.cancel_operator_queue_item(
+        item_id, disposed_by_email=_ledger_email(current or {}, actor), reason=reason,
+        **({"expect_address": expect} if expect is not None else {}))
     if not updated:
         raise AskNotFound(item_id)
     if updated.pop("_status_conflict", False):
-        raise AskConflict("not_pending", updated)
+        code = ("readdressed" if expect is not None and updated.get("status") == "pending"
+                else "not_pending")
+        raise AskConflict(code, updated)
     audit = [_audit_row("cancelled", updated, actor, {"has_reason": bool(reason)})]
     trigger = _broadcast_payload({"type": "operator_queue_cancelled",
                                   "data": {"id": updated["id"], "agent_name": updated["agent_name"]}})
@@ -452,15 +644,24 @@ def bulk_cancel(
     """
     ids = list(dict.fromkeys(ids))  # dedupe, keep order — an honest skipped count
     # trinity-enterprise#751: a gate approval the actor may not end is skipped,
-    # like any other row this sweep may not touch.
-    permitted = [i for i in ids
-                 if may_end(db.get_operator_queue_item(i) or {}, actor, cancelling=True)]
+    # like any other row this sweep may not touch. trinity-enterprise#1096
+    # (R6): so is a seat-fenced row the actor is not addressed on, an admin's
+    # included — a sweep carries no per-card reason, so an admin ends someone
+    # else's decision one card at a time, with a reason (`skipped_fenced`).
+    permitted: List[str] = []
+    skipped_fenced = 0
+    for i in ids:
+        row = db.get_operator_queue_item(i) or {}
+        if row and _seat_fenced(row, cancelling=True) and not _addressed(row, actor):
+            skipped_fenced += 1
+        elif may_end(row, actor, cancelling=True):
+            permitted.append(i)
     out = db.bulk_cancel_operator_queue_items(
         permitted, accessible_agent_names, disposed_by_email=actor.email, reason=reason,
     )
     rows, batch_id = out["rows"], out["batch_id"]
     if not rows:
-        return Ending(rows=[], batch_id=None)
+        return Ending(rows=[], batch_id=None, skipped_fenced=skipped_fenced)
     audit = [{
         "event_action": "bulk_cancel",
         "source": "api",
@@ -472,16 +673,19 @@ def bulk_cancel(
             "skipped": len(ids) - len(rows),
             "ids": [r["id"] for r in rows],
             "has_reason": bool(reason),
+            "skipped_fenced": skipped_fenced,
         },
     }]
     # Fleet-level: a sweep can span agents, so the trigger names none and
     # carries only a count; listeners refetch the access-controlled list.
     trigger = _broadcast_payload({"type": "operator_queue_cleared",
                                   "data": {"scope": "pending", "count": len(rows)}})
-    return _ended(
+    ending = _ended(
         EndingEvent(CANCELLED, tuple(rows), actor.email, reason=reason, batch_id=batch_id),
         audit, trigger, batch_id=batch_id,
     )
+    ending.skipped_fenced = skipped_fenced
+    return ending
 
 
 def expire() -> Ending:
@@ -663,7 +867,39 @@ ASSIGNMENT_CHANGED = "assignment_changed"
 # removed from the project — its pending `to: project` rows move (per row, by
 # the stamped project id; the enterprise projects module is the one caller).
 PROJECT_STEWARD_CHANGED = "project_steward_changed"
-PLATFORM_READDRESS_REASONS = (ASSIGNMENT_CHANGED, PROJECT_STEWARD_CHANGED)
+# trinity-enterprise#1096: an instance admin moved a stranded card — back to the
+# rule that raised it, or to the admin seat (`POST /api/operator-queue/{id}/
+# readdress`). The one reason that carries a person's actor on its audit row.
+ADMIN_READDRESSED = "admin_readdressed"
+PLATFORM_READDRESS_REASONS = (ASSIGNMENT_CHANGED, PROJECT_STEWARD_CHANGED, ADMIN_READDRESSED)
+
+# trinity-enterprise#1096: who a platform-family row is re-addressed to, by the
+# rule that raised it — registered by the module that raises the family (the
+# `role_addressing.register_target_resolver` shape), keyed on a literal
+# request-id prefix under the reserved `gate-` family. The resolver takes the
+# agent name and returns the decider: `people`, `single`, `seat` (one of
+# `DECIDER_SEATS`) and `operators_reason`, as attributes or keys. In-process
+# and registered at boot only; an unregistered family has no rule to re-run.
+_readdress_resolvers: Dict[str, Callable[[str], Any]] = {}
+
+
+def register_readdress_resolver(prefix: str, fn: Callable[[str], Any]) -> Callable[[str], Any]:
+    """Register the rule that re-addresses the platform family whose request
+    ids start with `prefix`. A prefix outside the reserved `gate-` family is a
+    programming error: only the platform mints those ids (R13)."""
+    from services import operator_queue_service as oqs
+    if not prefix or not prefix.startswith(oqs.GATE_ASK_ID_PREFIX) or prefix == oqs.GATE_ASK_ID_PREFIX:
+        raise ValueError(f"readdress resolver prefix must extend {oqs.GATE_ASK_ID_PREFIX!r}, got {prefix!r}")
+    _readdress_resolvers[prefix] = fn
+    return fn
+
+
+def readdress_resolver_for(request_id: Optional[str]) -> Optional[Callable[[str], Any]]:
+    """The registered rule for this row's family (longest prefix wins), or None."""
+    if not request_id:
+        return None
+    hits = [p for p in _readdress_resolvers if request_id.startswith(p)]
+    return _readdress_resolvers[max(hits, key=len)] if hits else None
 
 
 def _people_list(values: Optional[Iterable[Any]]) -> List[str]:
@@ -678,7 +914,8 @@ def _people_list(values: Optional[Iterable[Any]]) -> List[str]:
 
 def readdress_item(ask_id: str, people: Iterable[str], single: Optional[str], *,
                    reason: str, trigger: bool = True, attach_chat: bool = True,
-                   platform_context: Optional[Mapping[str, Any]] = None) -> bool:
+                   platform_context: Optional[Mapping[str, Any]] = None,
+                   actor: Optional[Actor] = None, has_reason: Optional[bool] = None) -> bool:
     """The PLATFORM rewrites ONE pending row's audience
     (trinity-enterprise#1095): `resolved_to` becomes `people`, the single
     Workspace addressee becomes `single`. The row is not ended and its
@@ -706,9 +943,17 @@ def readdress_item(ask_id: str, people: Iterable[str], single: Optional[str], *,
     (`_PLATFORM_CONTEXT_KEYS` only; anything else is ignored) in the same
     compare-and-set — a project row moved from its steward to its creator
     carries the seat that picked the new reader, never the old one's.
+    trinity-enterprise#1096 (R4): a stamp whose value is None REMOVES the key,
+    and a stamp that differs from the stored one counts as a change — so a
+    card moved off the admin seat (or to another seat with the same people)
+    never keeps a stale seat.
+
+    `actor` (trinity-enterprise#1096) is the admin who moved the row by hand
+    (`ADMIN_READDRESSED`): the audit row then carries that person and
+    `has_reason`, never the reason's text.
 
     `reason` is one of `PLATFORM_READDRESS_REASONS`. An unchanged audience
-    writes, audits and announces nothing. Per changed row: one audit row (ids
+    and unchanged stamps write, audit and announce nothing. Per changed row: one audit row (ids
     and enums only, never an address — ent#715) and, when `trigger`, the thin
     agent-keyed `/ws` trigger the Operations store refetches on. Returns
     whether the row changed; no row, or a row no longer pending, is False.
@@ -727,18 +972,16 @@ def readdress_item(ask_id: str, people: Iterable[str], single: Optional[str], *,
         return False
     old_people = _people_list(_resolved_people(row))
     old_single = (row.get("addressed_to_email") or "").strip().lower() or None
-    if set(old_people) == set(new_people) and old_single == new_single:
+    raw_context = row.get("context")
+    stamps = {k: v for k, v in (platform_context or {}).items() if k in oqs._PLATFORM_CONTEXT_KEYS}
+    stored = _context_of(row)
+    stamps_differ = any(stored.get(k) != v for k, v in stamps.items())
+    if set(old_people) == set(new_people) and old_single == new_single and not stamps_differ:
         return False
 
-    raw_context = row.get("context")
     context: Optional[Dict[str, Any]] = None
-    stamps = {k: v for k, v in (platform_context or {}).items() if k in oqs._PLATFORM_CONTEXT_KEYS}
-    if old_single != new_single or stamps:
-        try:
-            parsed = json.loads(raw_context) if raw_context else {}
-        except ValueError:
-            parsed = {}
-        context = dict(parsed) if isinstance(parsed, dict) else {}
+    if old_single != new_single or stamps_differ:
+        context = dict(stored)
     if old_single != new_single:
         for key in (oqs._WORKSPACE_THREAD_KEY, oqs._WORKSPACE_TURN_KEY, oqs._WORKSPACE_DISCUSSION_KEY):
             context.pop(key, None)
@@ -747,7 +990,11 @@ def readdress_item(ask_id: str, people: Iterable[str], single: Optional[str], *,
             if thread:
                 context[oqs._WORKSPACE_THREAD_KEY] = thread
     if context is not None:
-        context.update(stamps)
+        for key, value in stamps.items():
+            if value is None:
+                context.pop(key, None)
+            else:
+                context[key] = value
 
     changed = bool(db.readdress_operator_queue_item(
         ask_id, new_people, new_single,
@@ -762,6 +1009,9 @@ def readdress_item(ask_id: str, people: Iterable[str], single: Optional[str], *,
         "target_id": ask_id,
         "details": {"reason": reason, "to_role": row.get("to_role"), "agent_name": row["agent_name"]},
     }]
+    if actor is not None:
+        audit[0].update(source="api", **_actor_fields(actor))
+        audit[0]["details"]["has_reason"] = bool(has_reason)
     payload = _broadcast_payload({"type": "operator_queue_new",
                                   "data": {"id": ask_id, "agent_name": row["agent_name"]}})
     try:
@@ -777,7 +1027,10 @@ def readdress_role(agent_name: str, role: str, *, reason: str) -> Dict[str, int]
     (trinity-enterprise#1095) — the agent's own raises, and gated-skill
     approvals (`db.list_pending_role_addressed`'s allowlist). A row the
     platform addressed to a named person (a gate note, a project consent card,
-    a reach row — ent#661) is never moved: the role was never its fence.
+    a reach row — ent#661) is never moved HERE: the role was never its fence.
+    A project consent card is moved by the module that raised it, through
+    `readdress_item` with its own decider (trinity-enterprise#1096) — this
+    pass stays unaware of that family.
 
     The fresh audience is what a fresh raise would get: an agent's row through
     `_address` (the one resolution rule), a gate approval through the gate's
@@ -1009,7 +1262,7 @@ def raise_ask(
     if (raised_by == "gate") != (channel == "gate"):
         raise ValueError(f"raise_ask: channel {channel!r} does not go with raised_by {raised_by!r}")
     named = _named_addressee(addressee, raised_by)
-    pre = _named_addressees(addressees, to_role_override, raised_by, named)
+    pre = _named_addressees(addressees, to_role_override, raised_by, named, platform_context)
     if raised_by != "gate" and (attach_chat is not True or platform_context is not None):
         raise ValueError("raise_ask: only a gate raise may skip the chat or attach platform context")
     norm = _validated_ask(ask, oqs, raised_by=raised_by, agent_name=agent_name)
@@ -1034,7 +1287,7 @@ def raise_ask(
     if named:
         people, addressee, resolved = [named], named, True
     elif pre is not None:
-        people, addressee, resolved = pre, (pre[0] if len(pre) == 1 else None), True
+        people, addressee, resolved = pre, (pre[0] if len(pre) == 1 else None), bool(pre)
     elif norm["to"] in role_addressing.ASK_TARGETS:
         # trinity-enterprise#1134: the platform resolves the target from the
         # turn it knows — the agent supplied the word, nothing else.
@@ -1720,14 +1973,18 @@ def _named_addressee(addressee: Optional[str], raised_by: str) -> Optional[str]:
 
 
 def _named_addressees(addressees: Optional[List[str]], to_role_override: Optional[str],
-                      raised_by: str, named: Optional[str]) -> Optional[List[str]]:
+                      raised_by: str, named: Optional[str],
+                      platform_context: Optional[Mapping[str, Any]] = None) -> Optional[List[str]]:
     """The lower-cased, de-duplicated emails a gate raise pre-lists, or None
     when it lists none (trinity-enterprise#848).
 
     A programming error (`ValueError`), never a refusal: an agent's raise that
     passes either, an override without the list it stands for, an empty list
     (a gate never asks nobody — `enforce` refused `role_unassigned` first), a
-    non-email, or a list beside a single `addressee`.
+    non-email, or a list beside a single `addressee`. The one empty list
+    allowed (trinity-enterprise#1096, R1) is the decider order's third arm: a
+    raise stamped with the `admin` decider seat, which an instance admin
+    decides (`may_end`).
     """
     if addressees is None and to_role_override is None:
         return None
@@ -1745,7 +2002,9 @@ def _named_addressees(addressees: Optional[List[str]], to_role_override: Optiona
         if email not in out:
             out.append(email)
     if not out:
-        raise ValueError("raise_ask: a gate raise must address someone")
+        from services import operator_queue_service as oqs
+        if (platform_context or {}).get(oqs._WORKSPACE_DECIDER_SEAT_KEY) != ADMIN_SEAT:
+            raise ValueError("raise_ask: a gate raise must address someone")
     return out
 
 
@@ -2004,10 +2263,56 @@ def _broadcast_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     return payload
 
 
-def _conflict_code(row: Dict[str, Any]) -> str:
+def _conflict_code(row: Dict[str, Any], *, address_compared: bool = False) -> str:
     """Why an answer's compare-and-set lost. Still `pending` means the deadline
-    refused it (the respond predicate's only other clause)."""
-    return "expired" if row.get("status") == "pending" else "not_pending"
+    refused it (the respond predicate's only other clause) — or, when the
+    ending also compared the address (trinity-enterprise#1096, R5) and the
+    deadline has not passed, that a re-address moved the row: `readdressed`."""
+    if row.get("status") != "pending":
+        return "not_pending"
+    if address_compared and not _past_deadline(row):
+        return "readdressed"
+    return "expired"
+
+
+def _past_deadline(row: Mapping[str, Any]) -> bool:
+    deadline = row.get("expires_at")
+    if not deadline:
+        return False
+    try:
+        parsed = parse_iso_timestamp(deadline) if isinstance(deadline, str) else deadline
+    except Exception:  # noqa: BLE001 — unreadable reads as passed, the safe word
+        return True
+    if parsed is None:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed <= datetime.now(timezone.utc)
+
+
+def _ending_expectation(row: Mapping[str, Any], actor: "Actor", *,
+                        cancelling: bool = False) -> Optional[Dict[str, Any]]:
+    """What a seat-fenced ending's compare-and-set must still find
+    (trinity-enterprise#1096, R5): the stored address as the caller read it.
+    None for a row whose ending does not depend on its address. Raises
+    `AskConflict("readdressed")` when a re-address already moved it, and
+    `AskNotFound` when it is gone. On the admin seat the stored context (where
+    the seat stamp lives) is compared too."""
+    if not _seat_fenced(row, cancelling=cancelling):
+        return None
+    raw = _address_unchanged(row)
+    if raw is None:
+        fresh = db.get_operator_queue_item(row["id"])
+        if not fresh:
+            raise AskNotFound(row["id"])
+        if fresh.get("status") != "pending":
+            raise AskConflict("not_pending", fresh)
+        raise AskConflict("readdressed", fresh)
+    expect = {"addressed_to_email": raw.get("addressed_to_email"),
+              "resolved_to": raw.get("resolved_to")}
+    if _admin_seated(row):
+        expect["context"] = raw.get("context")
+    return expect
 
 
 def _acted_by(actor_user: Any) -> Dict[str, Any]:

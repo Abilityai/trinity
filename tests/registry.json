@@ -9145,6 +9145,17 @@
         "security"
       ],
       "description": "#4501: an ask addressed to: approver records only the seated approvers who can open the agent and is refused 422 role_cannot_open_agent when none can, so the answer fence never names a person who cannot see the ask. Real sink and real route on a real DB: nothing is written on the refusal (with a positive control), the refusal names the role and is logged, an admin approver and a replay are unaffected, primary and viewer are not filtered, and re-addressing to an unreachable approver leaves the row as it was."
+    },
+    {
+      "file": "unit/test_1096_admin_seat_fence.py",
+      "feature": "abilityai/trinity-enterprise#1096",
+      "added": "2026-11-13",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1096 (OSS sink): the admin decider seat on a gate approval — an empty audience raised only with the platform's admin stamp (R1); the admin arm admits an admin-gate person only, never an agent/connector/ops/system/loopback/stand-in principal (R8); addressed_view equals may_end; a re-address compares and clears stamps (R4) and an admin re-address is audited with its actor; an answer or cancel read before a re-address loses `readdressed` (R5); a bulk sweep skips fenced rows (R6); the refusal names seat and people for gate approvals only (R7); admin:<username> for an admin without email (R9); the per-family re-address resolver registry."
     }
   ]
 }

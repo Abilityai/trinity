@@ -947,6 +947,13 @@ _ROW_READERS = {
     (_ROUTER_FILE, "get_my_ask"): ("door", "§6: the predicate's 404"),
     (_ROUTER_FILE, "get_queue_item"): ("door", "§6: `_for_principal`"),
     (_ROUTER_FILE, "respond_to_queue_item"): ("door", "§6: person only"),
+    (_ASKS, "_address_unchanged"): (
+        "internal", "a fenced row's stored address, compared to the caller's read before an ending "
+                    "(trinity-enterprise#1096, R5); the raw columns feed the ending's compare-and-set, "
+                    "nothing leaves"),
+    (_ASKS, "_ending_expectation"): (
+        "person", "a fenced row re-read when a re-address moved it; the row returns only inside "
+                  "the `AskConflict` the person's own ending door already maps (trinity-enterprise#1096)"),
     (_ASKS, "_predecessor"): (
         "internal", "a re-ask's link: the agent's own expired ask, or one uniform refusal"),
     (_ASKS, "_refuse_unlinked_reask"): (

@@ -445,13 +445,20 @@ _WORKSPACE_OPERATORS_REASON_KEY = "workspace_operators_reason"
 # raising execution (`shared_sessions.service.room_for_execution`); read by the
 # room's ending observer and the answer wake, which return the ask to the room.
 _WORKSPACE_ROOM_KEY = "workspace_room_id"
+# abilityai/trinity-enterprise#1096: which arm of the decider order picked a
+# gate approval's people (`primary` | `owner` | `admin`). `admin` on a row with
+# no audience is what lets an instance admin DECIDE it (`ask_service.may_end`);
+# a gate raise may address nobody only with that value. Written only through
+# `platform_context` (raise and re-address), so an agent can never author it.
+# Distinct from `_WORKSPACE_PROJECT_SEAT_KEY`, the project seat a card renders.
+_WORKSPACE_DECIDER_SEAT_KEY = "workspace_decider_seat"
 # Every context key the platform writes and no agent may author: stripped at both
 # ingestion boundaries and ignored when comparing an agent's content.
 _PLATFORM_CONTEXT_KEYS = frozenset({
     _WORKSPACE_THREAD_KEY, _WORKSPACE_TURN_KEY, _WORKSPACE_DISCUSSION_KEY,
     _WORKSPACE_PROJECT_ID_KEY, _WORKSPACE_PROJECT_TASK_KEY, _WORKSPACE_PROJECT_EVENT_KEY,
     _WORKSPACE_PROJECT_SEAT_KEY, _WORKSPACE_OPERATORS_REASON_KEY,
-    _WORKSPACE_ROOM_KEY,
+    _WORKSPACE_ROOM_KEY, _WORKSPACE_DECIDER_SEAT_KEY,
 })
 
 
