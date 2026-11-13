@@ -445,6 +445,180 @@ describe("ent#1193 read_project_context", () => {
   });
 });
 
+describe("ent#1232 — task shape: todo, subtasks, blocked-by, tasks for people", () => {
+  const TOOL_NAMES = [
+    "list_projects", "get_project", "list_project_tasks", "create_project_task", "update_project_task",
+    "add_project_task_note", "read_project_context", "get_project_log", "add_project_log_entry",
+    "link_to_project", "get_steward_digest", "create_project", "import_project",
+    "propose_project_changes", "set_project_health",
+  ] as const;
+
+  it("every project tool description stays under 2048 characters", () => {
+    const tools = makeTools({} as Partial<TrinityClient>) as Record<string, { description: string }>;
+    for (const name of TOOL_NAMES) {
+      const d = tools[name].description;
+      assert.ok(d.length < 2048, `${name}: ${d.length} chars`);
+    }
+  });
+
+  it("list_project_tasks forwards view 'next' to the client, and only when asked", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      listProjectTasks: (async (pid: string, status: string, _turn?: string, view?: string) => {
+        calls.push([pid, status, view]);
+        return [{ id: "T-002", status: "todo", unblocked: true }];
+      }) as never,
+    });
+    const out = JSON.parse(await tools.list_project_tasks.execute({ project_id: "prj_1", view: "next" }, {}));
+    assert.equal(out.count, 1);
+    await tools.list_project_tasks.execute({ project_id: "prj_1" }, {});
+    assert.deepEqual(calls, [["prj_1", "open", "next"], ["prj_1", "open", undefined]]);
+    const shape = tools.list_project_tasks.parameters;
+    assert.equal(shape.safeParse({ project_id: "prj_1", view: "next" }).success, true);
+    assert.equal(shape.safeParse({ project_id: "prj_1", view: "soon" }).success, false);
+  });
+
+  it("the client sends view as its own query parameter, never as a status", async () => {
+    const client = new RealClient("http://localhost:8000");
+    const seen: unknown[] = [];
+    (client as unknown as { request: unknown }).request = async (...args: unknown[]) => {
+      seen.push(args[1]);
+      return { tasks: [] };
+    };
+    await client.listProjectTasks("prj_1", "open", undefined, "next");
+    await client.listProjectTasks("prj_1", "open");
+    assert.deepEqual(seen, [
+      "/api/enterprise/projects/agent/projects/prj_1/tasks?status=open&view=next",
+      "/api/enterprise/projects/agent/projects/prj_1/tasks?status=open",
+    ]);
+  });
+
+  it("create_project_task forwards parent, blocked_by and for_person", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      createProjectTask: async (pid: string, body: Record<string, unknown>) => {
+        calls.push([pid, body]);
+        return { id: "T-005" };
+      },
+    } as Partial<TrinityClient>);
+    await tools.create_project_task.execute({
+      project_id: "prj_1", title: "Sign the contract", parent: "T-001", blocked_by: ["T-003", "T-004"],
+      for_person: true, owner: "alex@example.com",
+    } as never, {});
+    const parsed = tools.create_project_task.parameters.parse({
+      project_id: "prj_1", title: "x", parent: "T-001", blocked_by: ["T-003"], for_person: true,
+    });
+    assert.deepEqual([parsed.parent, parsed.blocked_by, parsed.for_person], ["T-001", ["T-003"], true]);
+    assert.deepEqual(calls[0], ["prj_1", {
+      title: "Sign the contract", parent: "T-001", blocked_by: ["T-003", "T-004"],
+      for_person: true, owner: "alex@example.com",
+    }]);
+  });
+
+  it("todo is a status a task can be set to; next is not", () => {
+    const shape = makeTools({} as Partial<TrinityClient>).update_project_task.parameters;
+    assert.equal(shape.safeParse({ project_id: "prj_1", task_id: "T-001", status: "todo" }).success, true);
+    assert.equal(shape.safeParse({ project_id: "prj_1", task_id: "T-001", status: "next" }).success, false);
+  });
+
+  it("update_project_task: parent null clears it and is sent as null; links go by add and remove", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      updateProjectTask: async (pid: string, tid: string, body: Record<string, unknown>) => {
+        calls.push([pid, tid, body]);
+        return { id: tid };
+      },
+    } as Partial<TrinityClient>);
+    const shape = tools.update_project_task.parameters;
+    const parsed = shape.parse({ project_id: "prj_1", task_id: "T-002", parent: null, blocked_by_add: ["T-004"] });
+    assert.equal(parsed.parent, null);
+    assert.deepEqual(parsed.blocked_by_add, ["T-004"]);
+    await tools.update_project_task.execute({
+      project_id: "prj_1", task_id: "T-002", parent: null, blocked_by_add: ["T-004"], blocked_by_remove: ["T-003"],
+    } as never, {});
+    assert.deepEqual(calls[0], ["prj_1", "T-002", {
+      parent: null, blocked_by_add: ["T-004"], blocked_by_remove: ["T-003"],
+    }]);
+    assert.equal(JSON.stringify(calls[0][2]).includes('"parent":null'), true);
+  });
+
+  it("caps the blocker lists at 20 ids of the form T-NNN, as the backend does", () => {
+    const tools = makeTools({} as Partial<TrinityClient>);
+    const ids = (n: number) => Array.from({ length: n }, (_, i) => `T-${String(i + 1).padStart(3, "0")}`);
+    const create = tools.create_project_task.parameters;
+    assert.equal(create.safeParse({ project_id: "p", title: "x", blocked_by: ids(20) }).success, true);
+    assert.equal(create.safeParse({ project_id: "p", title: "x", blocked_by: ids(21) }).success, false);
+    assert.equal(create.safeParse({ project_id: "p", title: "x", blocked_by: ["T-1; DROP"] }).success, false);
+    const update = tools.update_project_task.parameters;
+    assert.equal(update.safeParse({ project_id: "p", task_id: "T-001", blocked_by_add: ids(21) }).success, false);
+    assert.equal(update.safeParse({ project_id: "p", task_id: "T-001", blocked_by_remove: ids(21) }).success, false);
+  });
+
+  it("a circle is refused by name with its path, never a throw", async () => {
+    const tools = makeTools({
+      updateProjectTask: async () => {
+        throw apiError(422, { code: "blocker_cycle", message: "That link would make a circle: T-004 → T-007 → T-004." });
+      },
+    } as Partial<TrinityClient>);
+    const out = JSON.parse(await tools.update_project_task.execute(
+      { project_id: "prj_1", task_id: "T-004", blocked_by_add: ["T-007"] } as never, {}));
+    assert.equal(out.success, false);
+    assert.equal(out.code, "blocker_cycle");
+    assert.match(out.error, /T-004 → T-007 → T-004/);
+  });
+
+  it("done without a done claim: the note is sent, and a missing one is refused by name", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      updateProjectTask: async (pid: string, tid: string, body: Record<string, unknown>) => {
+        calls.push([pid, tid, body]);
+        if (!body.note) {
+          throw apiError(422, { code: "done_without_claim_needs_note", message: "Add a note saying how it was finished." });
+        }
+        return { id: tid, status: "done", closed_without_claim: true };
+      },
+    } as Partial<TrinityClient>);
+    const refused = JSON.parse(await tools.update_project_task.execute(
+      { project_id: "prj_1", task_id: "T-005", status: "done" } as never, {}));
+    assert.equal(refused.success, false);
+    assert.equal(refused.code, "done_without_claim_needs_note");
+    const out = JSON.parse(await tools.update_project_task.execute(
+      { project_id: "prj_1", task_id: "T-005", status: "done", note: "Shipped by hand." } as never, {}));
+    assert.deepEqual(calls[1], ["prj_1", "T-005", { status: "done", note: "Shipped by hand." }]);
+    assert.equal(out.closed_without_claim, true);
+  });
+
+  it("the descriptions say what done without a done claim means", () => {
+    const tools = makeTools({} as Partial<TrinityClient>);
+    for (const name of ["update_project_task", "list_project_tasks"] as const) {
+      const d = tools[name].description;
+      assert.ok(d.includes("its output may not exist; read the note"), `${name}: missing the meaning`);
+      assert.ok(d.length < 2048, `${name}: ${d.length} chars`);
+    }
+    assert.ok(tools.update_project_task.description.includes("done_without_claim_needs_note"));
+    assert.ok(tools.update_project_task.description.includes("closed_without_claim"));
+    assert.ok(tools.list_project_tasks.description.includes("blockers_closed_without_claim"));
+  });
+
+  it("the descriptions name the new rules and their refusals", () => {
+    const tools = makeTools({} as Partial<TrinityClient>);
+    const create = tools.create_project_task.description;
+    for (const word of ["todo", "parent", "blocked_by", "for_person", "one level", "blocker_cycle",
+      "only_the_steward_assigns_people", "person_task_has_agent", "person_task_needs_owner"]) {
+      assert.ok(create.includes(word), `create_project_task: missing ${word}`);
+    }
+    const update = tools.update_project_task.description;
+    for (const word of ["blocked_by_add", "blocked_by_remove", "parent", "null", "person_marks_done",
+      "blocker_cycle", "Finishing every subtask does not finish the parent"]) {
+      assert.ok(update.includes(word), `update_project_task: missing ${word}`);
+    }
+    const list = tools.list_project_tasks.description;
+    for (const word of ["view", "next", "waiting_for", "unblocked", "subtasks", "creator", "assigned_to"]) {
+      assert.ok(list.includes(word), `list_project_tasks: missing ${word}`);
+    }
+  });
+});
+
 describe("ent#1240 — GitHub refs on create_/update_project_task", () => {
   it("create_project_task forwards refs and drops keys it does not declare", async () => {
     const calls: unknown[][] = [];
@@ -455,7 +629,7 @@ describe("ent#1240 — GitHub refs on create_/update_project_task", () => {
       },
     } as Partial<TrinityClient>);
     const out = JSON.parse(await tools.create_project_task.execute(
-      { project_id: "prj_1", title: "Ship", refs: ["octo/hello#7"], status: "done", stray: "x" } as never,
+      { project_id: "prj_1", title: "Ship", refs: ["octo/hello#7"], priority: "p0", stray: "x" } as never,
       {},
     ));
     assert.equal(out.success, true);

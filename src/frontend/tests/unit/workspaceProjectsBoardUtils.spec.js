@@ -17,8 +17,13 @@ describe('columnOf', () => {
   })
 
   it('a status no column names lands in the first column, never nowhere', () => {
-    expect(columnOf(t('T-1', 'todo'))).toBe(BOARD_COLUMNS[0].key)
+    expect(columnOf(t('T-1', 'triage'))).toBe(BOARD_COLUMNS[0].key)
     expect(columnOf(t('T-1', undefined))).toBe(BOARD_COLUMNS[0].key)
+  })
+
+  it('ent#1232: a todo task is named by the Active column, not dropped into it', () => {
+    expect(BOARD_COLUMNS[0].statuses).toContain('todo')
+    expect(columnOf(t('T-1', 'todo'))).toBe('active')
   })
 })
 
@@ -27,7 +32,7 @@ describe('boardColumns', () => {
     t('T-10', 'active'), t('T-2', 'blocked', { waiting_on: 'legal' }), t('T-3', 'paused'),
     t('T-4', 'pending-verification', { pending_since: '2026-11-10T10:00:00Z' }),
     t('T-5', 'done', { updated_at: '2026-11-01T00:00:00Z' }), t('T-6', 'done', { updated_at: '2026-11-09T00:00:00Z' }),
-    t('T-7', 'todo'),
+    t('T-7', 'triage'), t('T-8', 'todo'),
   ]
 
   it('every task lands in exactly one column, and empty columns stay', () => {
@@ -40,7 +45,7 @@ describe('boardColumns', () => {
 
   it('orders by id, Done newest first, and counts what is held', () => {
     const [active, , done] = boardColumns(rows)
-    expect(active.cards.map((k) => k.id)).toEqual(['T-2', 'T-3', 'T-7', 'T-10'])
+    expect(active.cards.map((k) => k.id)).toEqual(['T-2', 'T-3', 'T-7', 'T-8', 'T-10'])
     expect(done.cards.map((k) => k.id)).toEqual(['T-6', 'T-5'])
     expect(active.held).toEqual([
       { status: 'blocked', label: 'blocked', count: 1 }, { status: 'paused', label: 'paused', count: 1 },
@@ -50,7 +55,8 @@ describe('boardColumns', () => {
   it('a held or unknown status is a badge; a path status is not', () => {
     const cards = Object.fromEntries(boardColumns(rows).flatMap((c) => c.cards).map((k) => [k.id, k]))
     expect(cards['T-2'].flag).toEqual({ label: 'Blocked', variant: 'danger' })
-    expect(cards['T-7'].flag).toEqual({ label: 'todo', variant: 'neutral' })
+    expect(cards['T-7'].flag).toEqual({ label: 'triage', variant: 'neutral' })
+    expect(cards['T-8'].flag).toEqual({ label: 'To do', variant: 'neutral' })
     expect(cards['T-10'].flag).toBeNull()
     expect(cards['T-4'].flag).toBeNull()
     expect(cards['T-2'].waitingOn).toBe('legal')
@@ -59,6 +65,23 @@ describe('boardColumns', () => {
   it('waiting_on shows only while the task is blocked', () => {
     const [col] = boardColumns([t('T-1', 'active', { waiting_on: 'legal' })])
     expect(col.cards[0].waitingOn).toBe('')
+  })
+
+  it('ent#1232: a card carries derived waiting, subtasks and a done without a claim', () => {
+    const [active, , done] = boardColumns([
+      t('T-1', 'todo', { waiting_for: ['T-3'], subtasks: { ids: ['T-2'], total: 1, done: 0 } }),
+      t('T-3', 'done', { closed_without_claim: true, waiting_for: [] }),
+      t('T-4', 'done', { closed_without_claim: false }),
+    ])
+    const [one] = active.cards
+    expect(one.waitingFor).toBe('Waiting on T-3')
+    expect(one.subtasks).toBe('0/1 subtasks')
+    expect(one.unclaimed).toBe(false)
+    expect(one.status).toBe('todo')
+    const byId = Object.fromEntries(done.cards.map((k) => [k.id, k]))
+    expect(byId['T-3'].unclaimed).toBe(true)
+    expect(byId['T-4'].unclaimed).toBe(false)
+    expect(byId['T-3'].waitingFor).toBe('')
   })
 
   it('a move in flight draws the card where it is going, marked saving', () => {
