@@ -77,6 +77,7 @@
                 <span class="font-mono tabular-nums text-gray-500 dark:text-gray-400">{{ c.id }}</span>
                 <BaseBadge v-if="c.p1" size="sm" variant="urgent">P1</BaseBadge>
                 <BaseBadge v-if="c.flag" size="sm" :variant="c.flag.variant" :data-testid="`board-flag-${c.id}`">{{ c.flag.label }}</BaseBadge>
+                <BaseBadge v-if="c.unclaimed" size="sm" variant="warning" :data-testid="`board-unclaimed-${c.id}`">Done without a done claim</BaseBadge>
                 <span class="flex-1"></span>
                 <span v-if="c.saving" class="font-medium text-status-info-700 dark:text-status-info-400" :data-testid="`board-saving-${c.id}`">Saving…</span>
                 <span v-else-if="armed && armed.id === c.id" class="font-medium text-action-primary-700 dark:text-action-primary-300">→ {{ labelOf(armed.to) }} · Enter</span>
@@ -118,7 +119,7 @@
                 >{{ a.label }}</BaseButton>
               </div>
 
-              <p v-if="c.waitingOn" class="break-words text-xs text-gray-600 dark:text-gray-300">Waiting on: {{ c.waitingOn }}</p>
+              <p v-if="c.waitingOn || c.waitingFor || c.subtasks" class="break-words text-xs text-gray-600 dark:text-gray-300" :data-testid="`board-shape-${c.id}`">{{ [c.waitingOn && `Waiting on: ${c.waitingOn}`, c.waitingFor, c.subtasks].filter(Boolean).join(' · ') }}</p>
 
               <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-gray-600 dark:text-gray-300">
                 <span v-if="c.owner" class="inline-flex min-w-0 items-center gap-1" :title="`Assigned to ${c.owner}`">

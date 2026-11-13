@@ -32,6 +32,13 @@
   (must-pick, over `GET /projects/{id}/people?purpose=owner`); a `role:<id>`
   owner and the owner already on the task are still taken as typed. Rows and
   the detail name the owner.
+
+  trinity-enterprise#1232: a task's shape. A subtask sits under its parent, a
+  parent shows its done/total, and a task that waits on other tasks says
+  "Waiting on T-NNN" — derived, never the Blocked status. Rows and the detail
+  name who created the task and who it is for. A task for a person offers no
+  Start. The form edits the parent (blank clears it) and the tasks it waits on;
+  the server's refusal, a circle with its path included, lands under the field.
 -->
 <template>
   <div ref="rootEl" class="space-y-4" data-testid="project-tasks">
@@ -100,11 +107,13 @@
           <li v-for="t in g.rows" :key="t.id" class="flex items-center gap-2 pr-2">
             <button
               type="button"
-              class="flex min-w-0 flex-1 items-center gap-3 px-3 py-2.5 text-left hover:bg-gray-50 dark:hover:bg-gray-750 focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40"
+              class="flex min-w-0 flex-1 items-center gap-3 py-2.5 text-left hover:bg-gray-50 dark:hover:bg-gray-750 focus:outline-none focus-visible:ring-2 focus-visible:ring-action-primary-500/40"
+              :class="t.parent ? 'pl-8 pr-3' : 'px-3'"
               :data-testid="`project-task-${t.id}`"
               @click="openTask(t.id)"
             >
               <span class="font-mono text-xs text-gray-500 dark:text-gray-400 tabular-nums">{{ t.id }}</span>
+              <span v-if="t.parent" class="sr-only">Subtask of {{ t.parent }}</span>
               <span class="min-w-0 flex-1 truncate text-sm text-gray-900 dark:text-gray-100">{{ t.title }}</span>
               <span
                 v-if="t.refs && t.refs.length"
@@ -113,7 +122,11 @@
                 :data-testid="`project-task-refs-${t.id}`"
               ><svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M8.5 11.5a3 3 0 0 0 4.2 0l2.6-2.6a3 3 0 0 0-4.2-4.2l-.9.9M11.5 8.5a3 3 0 0 0-4.2 0l-2.6 2.6a3 3 0 0 0 4.2 4.2l.9-.9" stroke-linecap="round" /></svg>{{ t.refs.length }}</span>
               <BaseBadge v-if="t.priority === 'p1'" variant="urgent">P1</BaseBadge>
-              <span v-if="t.owner || t.agent" class="hidden sm:inline max-w-[10rem] truncate text-xs text-gray-500 dark:text-gray-400">{{ t.agent || ownerLabel(t.owner) }}</span>
+              <BaseBadge v-if="subtaskLabel(t)" size="sm" variant="neutral">{{ subtaskLabel(t) }}</BaseBadge>
+              <BaseBadge v-if="waitingLabel(t)" size="sm" variant="neutral">{{ waitingLabel(t) }}</BaseBadge>
+              <BaseBadge v-if="t.closed_without_claim" size="sm" variant="warning">Done without a done claim</BaseBadge>
+              <span v-if="assignedLabel(t)" class="hidden sm:inline max-w-[10rem] truncate text-xs text-gray-500 dark:text-gray-400">{{ assignedLabel(t, ownerLabel) }}</span>
+              <span v-if="creatorOf(t)" class="hidden md:inline max-w-[10rem] truncate text-xs text-gray-500 dark:text-gray-400">by {{ creatorOf(t) }}</span>
               <BaseBadge :variant="TASK_STATUS_BADGE[t.status] || 'neutral'">{{ taskStatusLabel(t.status) }}</BaseBadge>
             </button>
             <BaseButton
@@ -185,6 +198,11 @@
             <option value="p3">P3 — low</option>
           </BaseSelect>
         </div>
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <BaseInput id="task-parent-new" v-model="form.parent" label="Subtask of (optional)" placeholder="T-001" :error="formError.parent" help="One level deep." data-testid="project-task-parent-new" />
+          <BaseInput id="task-blocked-by-new" v-model="form.blocked_by" label="Waits on (optional)" placeholder="T-002, T-004" :error="formError.blocked_by" help="Tasks that must be done first." data-testid="project-task-blocked-by-new" />
+        </div>
+        <BaseToggle v-model="form.for_person" label="A person does this task, not an agent (pick its owner)" data-testid="project-task-for-person-new" />
         <InlineError v-if="actionError" :message="actionError" @dismiss="actionError = ''" />
         <div class="flex justify-end gap-2">
           <BaseButton variant="secondary" @click="createOpen = false">Cancel</BaseButton>
@@ -210,7 +228,21 @@
           <div><dt class="text-xs text-gray-500 dark:text-gray-400">Agent</dt><dd class="truncate text-gray-900 dark:text-gray-100">{{ task.agent || '—' }}</dd></div>
           <div><dt class="text-xs text-gray-500 dark:text-gray-400">Priority</dt><dd class="uppercase text-gray-900 dark:text-gray-100">{{ task.priority }}</dd></div>
           <div><dt class="text-xs text-gray-500 dark:text-gray-400">Updated</dt><dd class="text-gray-900 dark:text-gray-100" :title="formatLocalDateTime(task.updated_at)">{{ formatRelativeTime(task.updated_at) }}</dd></div>
+          <div><dt class="text-xs text-gray-500 dark:text-gray-400">Created by</dt><dd class="truncate text-gray-900 dark:text-gray-100" data-testid="project-task-creator">{{ creatorOf(task) || '—' }}</dd></div>
+          <div><dt class="text-xs text-gray-500 dark:text-gray-400">Subtask of</dt><dd class="font-mono text-gray-900 dark:text-gray-100">{{ task.parent || '—' }}</dd></div>
+          <div><dt class="text-xs text-gray-500 dark:text-gray-400">Subtasks</dt><dd class="tabular-nums text-gray-900 dark:text-gray-100">{{ subtaskLabel(task) || '—' }}</dd></div>
+          <div><dt class="text-xs text-gray-500 dark:text-gray-400">Waits on</dt><dd class="truncate font-mono text-gray-900 dark:text-gray-100">{{ (task.blocked_by || []).join(', ') || '—' }}</dd></div>
         </dl>
+        <p v-if="waitingLabel(task)" class="text-sm text-gray-600 dark:text-gray-300" data-testid="project-task-waiting">
+          {{ waitingLabel(task) }} — it is ready once {{ task.waiting_for.length === 1 ? 'that task is' : 'those tasks are' }} done.
+        </p>
+        <p v-if="task.closed_without_claim" class="text-sm text-gray-600 dark:text-gray-300" data-testid="project-task-closed-without-claim">
+          Done without its agent's done claim: {{ UNCLAIMED_MEANING }}
+        </p>
+        <p v-if="(task.blockers_closed_without_claim || []).length" class="text-sm text-gray-600 dark:text-gray-300" data-testid="project-task-blockers-unclaimed">
+          {{ task.blockers_closed_without_claim.join(', ') }} {{ task.blockers_closed_without_claim.length === 1 ? 'was' : 'were' }} done without a done claim: {{ UNCLAIMED_MEANING }}
+        </p>
+        <p v-if="subtaskLabel(task)" class="text-xs text-gray-600 dark:text-gray-300">Finishing every subtask does not finish this task: mark it done yourself.</p>
         <div v-if="task.objective && showRead">
           <h3 class="text-xs font-semibold text-gray-500 dark:text-gray-400">Objective</h3>
           <div class="mt-1 text-sm text-gray-800 dark:text-gray-200" data-testid="project-task-objective"><PortalMarkdown :content="task.objective" /></div>
@@ -242,8 +274,11 @@
         />
 
         <!-- trinity-enterprise#1195: pick the agent, see what it gets, start the task's chat. -->
+        <p v-if="task.for_person" class="text-sm text-gray-600 dark:text-gray-300" data-testid="project-task-for-person">
+          This task is for a person: {{ task.owner ? ownerLabel(task.owner) : 'its owner' }} does it, so no agent is started for it.
+        </p>
         <ProjectTaskStart
-          v-if="canContribute"
+          v-if="canContribute && !task.for_person"
           :project-id="projectId"
           :task-id="task.id"
           :can-contribute="canContribute"
@@ -306,7 +341,35 @@
             :help="task.status === 'done' ? 'Reopen the task to change its owner.' : 'Leave blank for no owner.'"
             data-testid="project-task-owner"
           />
-          <BaseTextarea id="task-note" v-model="edit.note" label="Note (optional — added to the task's log)" :rows="2" />
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <BaseInput
+              id="task-parent-edit"
+              v-model="edit.parent"
+              label="Subtask of"
+              placeholder="T-001"
+              :disabled="locked"
+              :error="editError.parent"
+              help="Blank: a top-level task. One level deep."
+              data-testid="project-task-parent-edit"
+            />
+            <BaseInput
+              id="task-blocked-by-edit"
+              v-model="edit.blocked_by"
+              label="Waits on"
+              placeholder="T-002, T-004"
+              :disabled="locked"
+              :error="editError.blocked_by"
+              help="Tasks that must be done first."
+              data-testid="project-task-blocked-by-edit"
+            />
+          </div>
+          <BaseTextarea
+            id="task-note"
+            v-model="edit.note"
+            :label="needsNote ? 'Note (required — its agent never claimed it done; say how it was finished)' : 'Note (optional — added to the task\'s log)'"
+            :rows="2"
+            :error="editError.note"
+          />
           <InlineError v-if="actionError" :message="actionError" @dismiss="actionError = ''" />
           <div class="flex justify-end">
             <BaseButton type="submit" size="sm" :loading="busy" loading-label="Saving…" :disabled="!dirty" data-testid="project-task-save">Save</BaseButton>
@@ -346,6 +409,7 @@ import BasePeopleInput from '@/components/base/BasePeopleInput.vue'
 import BaseModal from '@/components/base/BaseModal.vue'
 import BaseSelect from '@/components/base/BaseSelect.vue'
 import BaseTextarea from '@/components/base/BaseTextarea.vue'
+import BaseToggle from '@/components/base/BaseToggle.vue'
 import SkeletonLoader from '@/components/SkeletonLoader.vue'
 import LoadFailed from '@/components/LoadFailed.vue'
 import InlineError from '@/components/InlineError.vue'
@@ -357,8 +421,9 @@ import ProjectTaskRefs from './ProjectTaskRefs.vue'
 import { viewState } from '@/utils/loadingState'
 import { formatRelativeTime, formatLocalDateTime } from '@/utils/timestamps'
 import {
-  TASK_FIELD_ERROR_CODES, TASK_STATUS_BADGE, authorLabel, groupTasks, projectErrorMessage, taskLogKindLabel,
-  taskStatusLabel, taskStatusOptions, validateTaskFields, verificationRule, withheldLine,
+  TASK_FIELD_ERROR_CODES, TASK_STATUS_BADGE, assignedLabel, authorLabel, creatorLabel, groupTasks, parseTaskIds,
+  projectErrorMessage, subtaskLabel, taskLogKindLabel, taskStatusLabel, taskStatusOptions, validateTaskFields,
+  verificationRule, waitingLabel, withheldLine, doneWithoutClaim, UNCLAIMED_MEANING,
   boardColumns, boardMinWidth, boardMove, readTasksView, writeTasksView, TASK_TEXT_MAX } from './projectsUtils'
 
 const props = defineProps({
@@ -381,9 +446,10 @@ const taskOpen = ref(false)
 const task = ref(null)
 const busy = ref(false)
 const actionError = ref('')
-const form = reactive({ title: '', objective: '', done_definition: '', owner: '', priority: 'p2' })
+const EMPTY_FORM = { title: '', objective: '', done_definition: '', owner: '', priority: 'p2', parent: '', blocked_by: '', for_person: false }
+const form = reactive({ ...EMPTY_FORM })
 const formError = ref({})
-const edit = reactive({ status: '', priority: 'p2', owner: '', note: '', title: '', objective: '', done_definition: '' })
+const edit = reactive({ status: '', priority: 'p2', owner: '', note: '', title: '', objective: '', done_definition: '', parent: '', blocked_by: '' })
 const editError = ref({})
 // The three editable text fields, and the key each one sends.
 const EDIT_TEXT = ['title', 'objective', 'done_definition']
@@ -398,6 +464,7 @@ const isRoleOwner = (t) => /^role:\S+$/i.test(t)
 const isKeptOwner = (t) => isRoleOwner(t) || (!!task.value?.owner && t === task.value.owner)
 const member = (email) => props.members.find((m) => m.email === String(email || '').toLowerCase())
 const ownerLabel = (owner) => member(owner)?.label || owner
+const creatorOf = (t) => creatorLabel(t?.creator, props.myEmail, ownerLabel)
 // The owner a task opens with, as a chosen person when they are on the project.
 function ownerPerson(owner) {
   const m = owner && member(owner)
@@ -482,6 +549,7 @@ function onBoardConfirm(id) {
 // A done task is frozen until it is reopened — the server refuses every other
 // key with 409 `task_done`, so the form says so rather than letting a save fail.
 const locked = computed(() => task.value?.status === 'done')
+const needsNote = computed(() => doneWithoutClaim(task.value, edit.status))
 // The rendered objective / DoD show only when the editable fields do not.
 const showRead = computed(() => !(props.canContribute && !props.archived) || locked.value)
 
@@ -496,10 +564,31 @@ function changedText() {
   return out
 }
 
+/** ent#1232: the parent and blocked-by change this save sends, or the bad ids. */
+function changedShape() {
+  const out = {}
+  const errors = {}
+  if (!task.value || locked.value) return { out, errors }
+  const parent = parseTaskIds(edit.parent)
+  if (parent.bad.length || parent.ids.length > 1) errors.parent = `Give one task id, like T-001 (not “${edit.parent.trim()}”).`
+  else if ((parent.ids[0] || null) !== (task.value.parent || null)) out.parent = parent.ids[0] || null
+  const blockers = parseTaskIds(edit.blocked_by)
+  if (blockers.bad.length) errors.blocked_by = `“${blockers.bad.join('”, “')}” isn't a task id; use ids like T-004.`
+  else {
+    const before = task.value.blocked_by || []
+    const add = blockers.ids.filter((b) => !before.includes(b))
+    const remove = before.filter((b) => !blockers.ids.includes(b))
+    if (add.length) out.blocked_by_add = add
+    if (remove.length) out.blocked_by_remove = remove
+  }
+  return { out, errors }
+}
+
 const dirty = computed(() => task.value && (
   edit.status !== task.value.status || edit.priority !== task.value.priority || edit.note.trim() !== ''
   || (task.value.status !== 'done' && edit.owner.trim() !== (task.value.owner || ''))
-  || Object.keys(changedText()).length > 0))
+  || Object.keys(changedText()).length > 0
+  || edit.parent.trim() !== (task.value.parent || '') || edit.blocked_by.trim() !== (task.value.blocked_by || []).join(', ')))
 
 // One missed background read is not worth a banner that shifts the page: the
 // rows on screen are at most one interval old. A second miss in a row, or a
@@ -523,7 +612,7 @@ useVisiblePolling(poll, {
 })
 
 function openCreate() {
-  Object.assign(form, { title: '', objective: '', done_definition: '', owner: '', priority: 'p2' })
+  Object.assign(form, EMPTY_FORM)
   createPicked.value = null
   formError.value = {}
   actionError.value = ''
@@ -533,6 +622,10 @@ function openCreate() {
 async function create() {
   // The same limits as an edit, from the one validator (ent#1133).
   formError.value = validateTaskFields(form)
+  const parent = parseTaskIds(form.parent)
+  const blockers = parseTaskIds(form.blocked_by)
+  if (parent.bad.length || parent.ids.length > 1) formError.value.parent = 'Give one task id, like T-001.'
+  if (blockers.bad.length) formError.value.blocked_by = `“${blockers.bad.join('”, “')}” isn't a task id; use ids like T-004.`
   const ownerOk = !!createOwnerField.value?.validate()
   if (Object.keys(formError.value).length || !ownerOk) return
   busy.value = true
@@ -540,10 +633,15 @@ async function create() {
   try {
     const body = { title: form.title.trim(), priority: form.priority }
     for (const f of ['objective', 'done_definition', 'owner']) if (form[f].trim()) body[f] = form[f].trim()
+    if (parent.ids.length) body.parent = parent.ids[0]
+    if (blockers.ids.length) body.blocked_by = blockers.ids
+    if (form.for_person) body.for_person = true
     await store.createTask(props.projectId, body)
     createOpen.value = false
   } catch (err) {
-    actionError.value = projectErrorMessage(err)
+    const field = TASK_FIELD_ERROR_CODES[err?.response?.data?.detail?.code]
+    if (field === 'parent' || field === 'blocked_by') formError.value = { [field]: projectErrorMessage(err) }
+    else actionError.value = projectErrorMessage(err)
   } finally {
     busy.value = false
   }
@@ -597,6 +695,7 @@ function resetEdit() {
     status: task.value.status, priority: task.value.priority, owner: task.value.owner || '', note: '',
     title: task.value.title || '', objective: task.value.objective || '',
     done_definition: task.value.done_definition || '',
+    parent: task.value.parent || '', blocked_by: (task.value.blocked_by || []).join(', '),
   })
 }
 
@@ -605,7 +704,11 @@ async function saveTask() {
   // Only the fields this save sends are checked: a legacy stored value over
   // the limit must not block a status, owner or note change.
   const text = changedText()
-  editError.value = validateTaskFields(edit, Object.keys(text))
+  const shape = changedShape()
+  editError.value = { ...validateTaskFields(edit, Object.keys(text)), ...shape.errors }
+  if (needsNote.value && !edit.note.trim()) {
+    editError.value.note = "Add a note: its agent never claimed this task done, so say how it was finished."
+  }
   if (Object.keys(editError.value).length) return
   const body = {}
   if (edit.status !== task.value.status) body.status = edit.status
@@ -615,6 +718,7 @@ async function saveTask() {
   if (edit.note.trim()) body.note = edit.note.trim()
   // Blank clears a long field; a title is required, so it is never sent blank.
   for (const [f, v] of Object.entries(text)) body[f] = f === 'title' ? v : (v || null)
+  Object.assign(body, shape.out)
   busy.value = true
   actionError.value = ''
   try {
