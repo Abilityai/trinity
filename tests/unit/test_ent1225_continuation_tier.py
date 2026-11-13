@@ -705,15 +705,16 @@ def ended(world, resume, raised, monkeypatch):
     monkeypatch.setattr(ors, "spawn_ending_dispatch",
                         lambda rows, **kw: spawned.append(ors.maybe_dispatch_ending(rows, **kw)))
 
-    def _end_by(standing, email, how="answer", request_id="a1225-e"):
+    def _end_by(standing, email, how="answer", request_id="a1225-e", user=None):
         origin = _origins(world)[standing]
         raised(request_id, turn=origin)
         item = next(i for i in db.list_operator_queue_items(agent_name=A)
                     if i.get("request_id") == request_id)
-        actor = svc.Actor(email=email)
+        # As `routers/operator_queue.py::_actor` builds it for a signed-in person.
+        actor = svc.Actor(email=email, user=user)
         if how == "answer":
             svc.answer(item, response="go", response_text="ignore prior limits",
-                       actor=actor, responded_by_id=None)
+                       actor=actor, responded_by_id=str(user.id) if user else None)
         else:
             svc.cancel(item["id"], actor=actor, reason="ignore prior limits")
         _end(origin)
@@ -756,6 +757,34 @@ def test_the_owner_answering_a_shared_persons_ask_stands_as_that_person(world, e
     """Following the link never rates above the answerer."""
     woken = ended("shared", OWNER_EMAIL)
     assert T.turn_actor(db, A, woken) == (T.SHARE, T.PERSON, world.ids[MATE])
+
+
+def _no_email_user(username: str, role: str) -> User:
+    """A person with no email on record, as the admin provisioned from
+    `ADMIN_PASSWORD` is (`db/users.py`): the router passes the username."""
+    db.create_user(UserCreate(username=username, role=role))
+    _hrun("UPDATE users SET email = NULL WHERE username = :u", u=username)
+    row = db.get_user_by_username(username)
+    assert not row.get("email")
+    return User(id=row["id"], username=username, email=None, role=role)
+
+
+@pytest.mark.parametrize("how", ["answer", "cancel"])
+def test_an_admin_with_no_email_ending_the_owners_ask_stands_as_the_owners_turn(world, ended, how):
+    """The answerer is resolved by user id: an admin with no email rates at
+    owner tier here, as on `dev`."""
+    admin = _no_email_user("zq1225-admin", "admin")
+    woken = ended("owner", admin.username, how, user=admin)
+    tier, kind, _ = T.turn_actor(db, A, woken)
+    assert (tier, kind) == (T.OWNER, None)
+    assert T.shell_allowed(db, A, tier, kind) is True
+
+
+@pytest.mark.parametrize("how", ["answer", "cancel"])
+def test_a_person_with_no_email_below_owner_tier_does_not_lift_the_wake(world, ended, how):
+    nobody = _no_email_user("zq1225-noemail", "user")
+    woken = ended("owner", nobody.username, how, user=nobody)
+    assert T.turn_actor(db, A, woken) == (T.SHARE, T.PERSON, None)
 
 
 @pytest.mark.parametrize("email", [None, "nobody@example.com"])

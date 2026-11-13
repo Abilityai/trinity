@@ -323,19 +323,26 @@ def continuation_origin(db, agent_name: str, execution_id: Optional[str]) -> Opt
 
 
 def person_may_continue(db, agent_name: str, origin_execution_id: str,
-                        email: Optional[str]) -> bool:
-    """Whether a continuation whose words came from the person `email` (an
-    ask's answerer or canceller) may stand as `origin_execution_id`
-    (trinity-enterprise#1225). Yes when that person rates at owner tier here
-    (owner or admin: the origin is never above them), or rates exactly as the
-    origin turn (its own person). Anyone else, an unknown email, or an
-    unreadable lookup → no: the continuation must not run above the person
-    whose words drive it."""
-    if not isinstance(email, str) or "@" not in email:
-        return False
+                        email: Optional[str], user_id=None) -> bool:
+    """Whether a continuation whose words came from a person (an ask's answerer
+    or canceller) may stand as `origin_execution_id`
+    (trinity-enterprise#1225). The person is `user_id` when the caller has it
+    (a signed-in person, who may have no email: the `ADMIN_PASSWORD` admin),
+    else the user whose email is `email`. Yes when that person rates at owner
+    tier here (owner or admin: the origin is never above them), or rates
+    exactly as the origin turn (its own person). Anyone else, an unknown
+    person, or an unreadable lookup → no: the continuation must not run above
+    the person whose words drive it."""
     try:
-        user = db.get_user_by_email(email.strip().lower())
-        person = _int_or_none((user or {}).get("id"))
+        person = _int_or_none(user_id)
+        if person is not None:
+            if not db.get_user_by_id(person):
+                return False
+        else:
+            if not isinstance(email, str) or "@" not in email:
+                return False
+            user = db.get_user_by_email(email.strip().lower())
+            person = _int_or_none((user or {}).get("id"))
         if person is None:
             return False
         mine = _person_tier(db, person, agent_name)

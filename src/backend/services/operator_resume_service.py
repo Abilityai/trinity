@@ -247,7 +247,8 @@ def _workspace_destination(item: Dict[str, Any], responded_by_email: Optional[st
     return {}
 
 
-def _continuation_of(items, actor_email: Optional[str] = None) -> Dict[str, str]:
+def _continuation_of(items, actor_email: Optional[str] = None,
+                     actor_id: Optional[str] = None) -> Dict[str, str]:
     """`{"continues_execution_id": …}` for the wake of `items`
     (trinity-enterprise#1225): the turn that raised them, as the platform
     recorded it at raise time (`_CONTINUES_TURN_KEY`). No item recorded one →
@@ -255,8 +256,10 @@ def _continuation_of(items, actor_email: Optional[str] = None) -> Dict[str, str]
     turns, or some with no record) → `NO_SINGLE_ORIGIN`, which rates fail
     closed: one wake cannot stand as two turns.
 
-    The person whose words drive the wake (`actor_email`, else the row's
-    answerer or canceller) must be able to stand as that turn
+    The person whose words drive the wake (by user id — `actor_id`, else the
+    row's `responded_by_id` — when there is one, since a signed-in person may
+    have no email; else `actor_email` or the row's answerer or canceller email)
+    must be able to stand as that turn
     (`turn_tier_service.person_may_continue`): a shared person answering the
     owner's ask would otherwise drive an owner-tier turn with the shell. When
     they cannot, the link is `NO_SINGLE_ORIGIN` too. An ending the platform
@@ -279,9 +282,11 @@ def _continuation_of(items, actor_email: Optional[str] = None) -> Dict[str, str]
         value = value if isinstance(value, str) and value else None
         if value is not None:
             email = actor_email or item.get("responded_by_email") or item.get("disposed_by_email")
-            platform_ended = not email and item.get("disposed_by") == "platform"
+            user_id = actor_id or item.get("responded_by_id")
+            platform_ended = (not email and not user_id
+                              and item.get("disposed_by") == "platform")
             if not platform_ended and not turn_tier_service.person_may_continue(
-                    db, item.get("agent_name"), value, email):
+                    db, item.get("agent_name"), value, email, user_id=user_id):
                 value = NO_SINGLE_ORIGIN
         seen.add(value)
     if seen == {None} or not seen:
@@ -926,6 +931,7 @@ async def maybe_dispatch_ending(
     *,
     disposition: str,
     disposed_by_email: Optional[str] = None,
+    disposed_by_id: Optional[str] = None,
     reason: Optional[str] = None,
     batch_id: Optional[str] = None,
 ) -> Optional[str]:
@@ -1043,7 +1049,7 @@ async def maybe_dispatch_ending(
                 queue_on_capacity=True,
                 # trinity-enterprise#1225: the ending stands as the asking turn
                 # when the canceller may (`_continuation_of`).
-                **_continuation_of(items, disposed_by_email),
+                **_continuation_of(items, disposed_by_email, disposed_by_id),
             )
     except Exception as exc:
         if idem is not None:
