@@ -2065,7 +2065,8 @@ def _gated_posts(shown: list[dict], gates) -> list[dict]:
 def _room_gate_card(agent_name: str, shown: list[dict], ask_request_text: str,
                     requester: tuple[str, str]):
     """trinity#4505: (the card's posts, the `gate_replay` keys) for this wake.
-    The card holds the gated posts and every post of the requester's, each line
+    The card holds the gated posts and the requester's posts (the oldest ungated
+    ones dropped while the card is over the size limit), each line
     naming its sender as the transcript does, plus the ask answer; the keys carry
     it as the replay message and the scanned parts for the gate's coverage check. The card is what the approver reads,
     what is size-checked and what Approve runs, so another participant's long
@@ -2089,10 +2090,23 @@ def _room_gate_card(agent_name: str, shown: list[dict], ask_request_text: str,
     # PR #4552 review 4: each post (and the ask answer) is sanitised by itself
     # before it is labelled, so a redaction never reaches across into the next
     # post or its sender label. The card is not sanitised again: Approve runs
-    # it as shown. Every post of the requester's is on it, for context.
-    posts = [{**m, "content": sanitize_text(m.get("content") or "")} for m in shown
-             if m in gated or (m.get("sender_kind"), m.get("sender_identity")) == requester]
-    card = _format_card(posts, sanitize_text(ask_request_text or ""))
+    # it as shown. The requester's posts are on it, for context.
+    mine = [m for m in shown if (m.get("sender_kind"), m.get("sender_identity")) == requester]
+    pairs = [(m, {**m, "content": sanitize_text(m.get("content") or "")}) for m in shown
+             if m in gated or m in mine]
+    answer = sanitize_text(ask_request_text or "")
+    # PR #4552: the requester's ungated posts are context. The oldest leave the
+    # card first until it fits, so an old long post to another agent cannot make
+    # every gated ask too long. Gated posts and the requester's latest stay.
+    from services.skill_gate_service import CARD_INPUT_MAX_BYTES, _json_bytes
+    droppable = [m for m in mine[:-1] if m not in gated]
+    while True:
+        posts = [p for _, p in pairs]
+        card = _format_card(posts, answer)
+        if not droppable or _json_bytes(card) <= CARD_INPUT_MAX_BYTES:
+            break
+        oldest = droppable.pop(0)
+        pairs = [(m, p) for m, p in pairs if m is not oldest]
     return posts, {skill_gate_service.REPLAY_MESSAGE: card,
                    skill_gate_service.REQUEST_PARTS: _gate_parts(shown, ask_request_text)}
 

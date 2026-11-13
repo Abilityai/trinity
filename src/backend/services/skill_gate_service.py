@@ -244,11 +244,13 @@ async def enforce(
     # receives (#3274). A name the sanitizer redacts (`MY_TOKEN=/pay-invoice`)
     # is carded as redacted, and Approve runs that (`room_card_misses`). A room
     # wake whose own map read failed sends no card text: refuse, so no card
-    # carries the raw, unlabelled slice.
+    # carries the raw, unlabelled slice. A match only in the context text (the
+    # waker's email, say) names no post, so the room sends no card: the normal
+    # card path below cards it with `_card_context`.
     if triggered_by == "room":
         replayed = "\n".join(t for t in ((dispatch or {}).get(REPLAY_MESSAGE),
                                           (dispatch or {}).get(REPLAY_SYSTEM_PROMPT)) if t)
-        if not replayed:
+        if not replayed and set(names) - set(beside):
             logger.warning("[SkillGate] room wake for %s sent no card — refusing", agent_name)
             raise SkillGateRefused(
                 503, "gate_unavailable",

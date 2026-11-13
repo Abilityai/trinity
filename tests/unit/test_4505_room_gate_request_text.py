@@ -518,3 +518,42 @@ def test_no_room_input_leaves_its_card_short_of_the_scan(world, monkeypatch):
                                          replay[_GATE.REPLAY_MESSAGE], gates)
         assert not missing, (case, missing, shown, ask, replay[_GATE.REPLAY_MESSAGE])
     assert checked > 1000
+
+
+# ---------------------------------------------------------------------------
+# PR #4552 liveness: the requester's own context and a context-only match
+# ---------------------------------------------------------------------------
+
+def test_the_requesters_old_long_post_is_dropped_so_the_ask_is_carded(room):
+    """A long ungated post of the requester's, addressed to another agent, stays
+    in FIN's unread slice. It is context: the oldest such posts leave the card
+    until it fits, so the short gated ask is carded."""
+    log = "log line " * 800   # ~7.2k, ungated
+    _post(room, f"@{REQ} please read: {log}")
+
+    _post(room, f"@{FIN} /pay-invoice #0")
+
+    assert not any("too long" in n for n in _notices(room)), _notices(room)
+    card = _pending()[0]["request_text"]
+    assert "log line" not in card
+    assert f"{_me(room)}: @{FIN} /pay-invoice #0" in card.splitlines(), card
+
+
+def test_the_requesters_context_that_fits_stays_on_the_card(room):
+    _post(room, f"@{REQ} the ACME invoice is INV-77")
+
+    _post(room, f"@{FIN} /pay-invoice")
+
+    assert "INV-77" in _pending()[0]["request_text"]
+
+
+def test_a_gated_name_only_in_the_wakers_context_raises_a_card(room):
+    """The waker's email spells a gated invocation and no post does: the room
+    sends no card text, and the gate cards the context line."""
+    p = room["person"]
+    weird = User(id=p.id, username=p.username, email="1/pay-invoice@example.com", role="user")
+    for _ in range(3):
+        _run(room["service"].post_message(weird, room["room"], f"@{FIN} what's 2+2?"))
+
+    assert not any("Could not check" in n for n in _notices(room)), _notices(room)
+    assert _pending(), _notices(room)
