@@ -281,7 +281,6 @@ def wake(world, monkeypatch):
     monkeypatch.setattr(_WAKE, "_resolve_policy", _policy)
     monkeypatch.setattr(_WAKE, "_begin_idempotency",
                         lambda scope, key: SimpleNamespace(replay=False, enabled=True, in_flight=False))
-    monkeypatch.setattr(_WAKE, "_complete_idempotency", lambda *a, **k: None)
     monkeypatch.setattr(_WAKE, "_fail_idempotency", lambda *a, **k: None)
     monkeypatch.setattr(_WAKE, "_wake_budget_redis", lambda: fakeredis.FakeRedis(decode_responses=True))
     return SimpleNamespace(sent=sent)
