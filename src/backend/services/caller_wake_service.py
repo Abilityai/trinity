@@ -42,16 +42,19 @@ plainly that other runs may have ended in the same window — so the caller read
 ``list_recent_executions`` rather than being told a half-truth.
 
 **A collision is parked, never dropped (#4536).** That collapse is true only for
-runs that had ended when the wake claimed the window — the wake lists them. A
-run the wake turn itself started, and that ended while the wake still ran, is
-not on that list, and collapsing it stalls a fast delegate→wake loop. So:
-the window is released when its wake ends (an ending after it wakes at once);
-an in-flight collision whose run ended after the claim is parked in Redis and
-delivered once when the wake ends, on the follow-on key
-``caller_wake:{caller}:after:{wake_id}``, drained both from the wake row's own
-terminal (every terminal writer reaches it, restart included) and from the
-holder after it releases. One running wake plus one pending per caller per
-window; Redis trouble on the park is audited ``skipped_window``.
+runs that had ended when the running wake claimed the window — the wake lists
+them. A run the wake turn itself started, and that ended while the wake still
+ran, is not on that list, and collapsing it stalls a fast delegate→wake loop.
+So: the window is held only while its wake runs and is released when it ends,
+so an ending after a finished wake wakes at once; an ending that ended after
+the running wake's claim is parked in Redis (``trinity:wake_missed:{caller}``,
+latest wins) and delivered once when the wake ends, on the follow-on key
+``caller_wake:{caller}:after:{wake_id}`` (released when the follow-on ends).
+Two drains: the wake row's own terminal (every terminal writer reaches it,
+restart included) and the holder after it returns or raises an ``Exception``.
+A holder cancelled or closed with its loop leaves the marker for the wake row's
+terminal. Bound: one running wake plus one pending per caller. Redis trouble on
+the park is audited ``skipped_window``.
 
 **The wake stands where the delegator stood (#4357).** A wake continues the
 delegator's own work, so it carries the delegator's standing, not one more hop:
@@ -142,10 +145,6 @@ ASK_IDS_MAX = 10
 # so no wake turn outlives its marker.
 _MISSED_KEY_PREFIX = "trinity:wake_missed:"
 _MISSED_TTL_SECONDS = 86400
-# The claim time of the latest wake whose turn ran. An ending from before it is
-# in that turn's `list_recent_executions`, so a sweep still fanning out after
-# the wake returned stays one wake (#4536).
-_LAST_CLAIM_KEY_PREFIX = "trinity:wake_claimed:"
 
 # Strong references to follow-on wakes until they finish.
 _FOLLOW_ONS: set = set()
@@ -393,33 +392,6 @@ def _covered(row, idem) -> bool:
     return _ended_by(row, getattr(idem, "claimed_at", None))
 
 
-def _last_claim(caller: str):
-    try:
-        value = _wake_budget_redis().get(f"{_LAST_CLAIM_KEY_PREFIX}{caller}")
-    except Exception as e:  # noqa: BLE001 — unknown is "not covered": wake
-        logger.warning("#4536: last wake claim for %s unreadable: %s", caller, e)
-        return None
-    return value.decode() if isinstance(value, bytes) else value
-
-
-def _note_claim(caller: str, idem) -> None:
-    """Record the claim of a wake whose turn ran, if it is the latest (#4536)."""
-    claimed = _as_utc(getattr(idem, "claimed_at", None))
-    if claimed is None:
-        return
-    try:
-        client = _wake_budget_redis()
-        key = f"{_LAST_CLAIM_KEY_PREFIX}{caller}"
-        prev = client.get(key)
-        prev = _as_utc(prev.decode() if isinstance(prev, bytes) else prev)
-        # ponytail: read-then-write; two workers racing can keep the older
-        # claim, which costs one extra wake. A Lua max-set if that matters.
-        if prev is None or claimed > prev:
-            client.set(key, claimed.isoformat(), ex=_MISSED_TTL_SECONDS)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("#4536: could not record the wake claim for %s: %s", caller, e)
-
-
 async def _park(caller: str, callee: str, execution_id: str, scope: str, key: str,
                 policy_source) -> None:
     """Hold an ending for the running wake to deliver when it ends (#4536)."""
@@ -630,13 +602,6 @@ async def maybe_wake_caller(
                      policy_source=verdict.source)
         return None
 
-    if _ended_by(row, _last_claim(caller)):
-        # #4536: a wake claimed after this run ended has already run and
-        # listed it. The storm bound once that wake has returned.
-        logger.info("ent#1102: %s already woken after %s ended — no second wake",
-                    caller, execution_id)
-        return None
-
     idem = None
     scope = _agent_scope(caller)
     key = _key or _idempotency_key(caller)
@@ -664,7 +629,9 @@ async def maybe_wake_caller(
         # #4536: a stopping loop would never run the follow-on, and GETDEL
         # would lose the marker. Leave it for the wake row's terminal.
         raise
-    except BaseException:
+    except Exception:
+        # GeneratorExit (a coroutine closed with its loop) passes through: the
+        # wake row's terminal drains, as for a cancel.
         await _drain_missed(caller, None)
         raise
     # #4536: deliver what was parked while this claim was held (the wake
@@ -721,7 +688,6 @@ async def _claimed_wake(row, caller, callee, execution_id, verdict, idem):
         return None
 
     if idem is not None:
-        _note_claim(caller, idem)
         try:
             # #4536: a finished wake covers nothing that ends after it, so its
             # key (window or follow-on) is released and the next ending wakes

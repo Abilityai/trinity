@@ -191,7 +191,7 @@
         "agent-collaboration",
         "reliability"
       ],
-      "description": "#4536: an ending that collides with a held 15 s wake window is parked (Redis trinity:wake_missed:{caller}) and delivered once when that wake ends, from the wake row's own terminal and from the holder after it releases; a finished wake releases its window, so twelve fast delegate->wake rounds are twelve wakes; endings from before the claim still collapse (300-row sweep = one wake); many endings during one wake give one follow-on; a holder releasing before the park still delivers; Redis down on the park audits skipped_window. Real idempotency claim, fakeredis."
+      "description": "#4536: an ending that collides with a held 15 s wake window is parked (Redis trinity:wake_missed:{caller}) and delivered once when that wake ends, from the wake row's own terminal and from the holder after it releases; a finished wake releases its window, so twelve fast delegate->wake rounds are twelve wakes; endings from before the claim still collapse (300-row sweep = one wake); many endings during one wake give one follow-on; a holder releasing before the park still delivers; Redis down on the park audits skipped_window; a holder cancelled or closed (GeneratorExit) leaves the marker for the wake row's terminal, one that raises or returns FAILED still drains; a released follow-on key delivers a second parked ending; a drain wakes only its own caller; a finished wake covers nothing after it (a back-dated recovered run, a parked ending drained by a later window's wake, a FAILED wake in an earlier window all still wake). 19 tests. Real idempotency claim, fakeredis."
     },
     {
       "file": "unit/test_4357_wake_chain_depth.py",
