@@ -2,8 +2,13 @@
   The Steward card (trinity-enterprise#896): who moves this project, and the
   state behind that — in place of the bare header label.
 
-  An agent steward acts through its OWN scheduled sweep (Trinity does not run
-  it), so the card says honestly what the read carries: the last sweep (the
+  Trinity wakes an agent steward (trinity-enterprise#1236) once a person starts
+  it — when someone else changes a task, an ask on the project is answered, and
+  daily while work is open. The card says whether it is woken, the one reason
+  it is not (not started, paused, autonomy off …), the last run, what wakes it
+  next, and offers Start / Pause to the creator and the agent's owner. Before
+  that, an agent steward acted through its OWN scheduled sweep, so the card
+  still says what the read carries besides: the last sweep (the
   agent's last digest read, stamped server-side), its schedule (`none` → "No
   sweep scheduled", `scheduled` → the next run, `hidden` → "Scheduled" without
   a time the viewer may not read, `unknown` → the read failed), and health.
@@ -117,8 +122,40 @@
         <li v-if="!health">No health update yet</li>
         <li v-if="rollup.health_due" class="font-medium text-status-warning-700 dark:text-status-warning-300" data-testid="project-steward-health-due">Health update due</li>
       </ul>
-      <p class="mt-3 text-xs text-gray-500 dark:text-gray-400">
-        It reads this project's digest on its own schedule, verifies finished tasks and records health. Trinity doesn't run it.
+      <!-- trinity-enterprise#1236: whether Trinity wakes it, the one reason it
+           doesn't, its last run and what wakes it next. Off until a person
+           starts it. An older backend sends no `wake`: the old line stays. -->
+      <div v-if="wake" class="mt-3 border-t border-gray-200 dark:border-gray-750 pt-3" data-testid="project-steward-wake">
+        <p
+          class="text-sm font-medium"
+          :class="wake.state === 'on' ? 'text-gray-900 dark:text-gray-100' : 'text-status-warning-700 dark:text-status-warning-300'"
+          data-testid="project-steward-wake-state"
+        >{{ wakeLine }}</p>
+        <ul class="mt-1 space-y-1 text-sm text-gray-700 dark:text-gray-300">
+          <li v-if="wakeNext" data-testid="project-steward-wake-next">{{ wakeNext.text }}<span v-if="wakeNext.at" :title="absolute(wakeNext.at)"> {{ relative(wakeNext.at) }}</span></li>
+          <li v-if="wake.last_run" data-testid="project-steward-last-run">
+            Last run <span :title="absolute(wake.last_run.at)">{{ relative(wake.last_run.at) }}</span><template v-if="runStatus"> · {{ runStatus }}</template>
+          </li>
+          <li v-if="skipLine" data-testid="project-steward-wake-skip">{{ skipLine }}</li>
+        </ul>
+        <p v-if="wake.reason === 'autonomy_off' && wake.is_agent_owner" class="mt-2 text-xs text-gray-600 dark:text-gray-300" data-testid="project-steward-autonomy">
+          <router-link :to="agentRoute" :class="INBOX_LINK_CLASS" class="font-medium" data-testid="project-steward-autonomy-link">Turn on autonomy for {{ steward.ref }}</router-link>.
+          Autonomy also lets its schedules and reminders run.
+        </p>
+        <BaseButton
+          v-if="wake.can_change && wakeVerb"
+          class="mt-2" size="sm" variant="secondary" :disabled="changingWake"
+          :data-testid="`project-steward-wake-${wakeVerb}`"
+          @click="changeWake"
+        >{{ changingWake ? (wakeVerb === 'start' ? 'Starting…' : 'Pausing…') : (wakeVerb === 'start' ? 'Start waking the steward' : 'Pause') }}</BaseButton>
+        <p v-if="wake.can_change && wakeVerb === 'start'" class="mt-1 text-xs text-gray-600 dark:text-gray-300" data-testid="project-steward-wake-start-hint">
+          Changes made before you start get one catch-up turn when you do, within the hourly limit.
+        </p>
+        <p v-if="wakeError" class="mt-1 text-xs text-status-danger-700 dark:text-status-danger-400" role="alert">{{ wakeError }}</p>
+      </div>
+      <p class="mt-3 text-xs text-gray-500 dark:text-gray-400" data-testid="project-steward-how">
+        <template v-if="wake">Trinity wakes it when someone else changes a task, when an ask on this project is answered, and once a day while work is open. It keeps the record and starts no task runs.</template>
+        <template v-else>It reads this project's digest on its own schedule, verifies finished tasks and records health. Trinity doesn't run it.</template>
       </p>
     </template>
 
@@ -135,7 +172,7 @@
       </p>
       <!-- ent#1169 (R5 on ent#1137): what having no steward AGENT means. -->
       <p class="mt-2 text-xs text-gray-500 dark:text-gray-400" data-testid="project-steward-no-agent">
-        No steward agent: nothing reads this project's digest or checks done claims between visits.<template v-if="project.can?.edit"> Pick an agent as steward in Edit project to have that done on a schedule.</template>
+        No steward agent: nothing reads this project's digest or checks done claims between visits.<template v-if="project.can?.edit"> Pick an agent as steward in Edit project to have that done.</template>
       </p>
       <BaseButton v-if="isMe" class="mt-3" size="sm" variant="secondary" data-testid="project-steward-open-stewarding" @click="$emit('open-stewarding')">Open I steward</BaseButton>
     </template>
@@ -151,7 +188,10 @@ import PortalAvatar from '@/components/portal/PortalAvatar.vue'
 import { formatRelativeTime, formatLocalDateTime } from '@/utils/timestamps'
 import { askInboxRoute } from '../portalRailAsks'
 import { INBOX_LINK_CLASS } from '../portalUtils'
-import { HEALTH_BADGE, healthLabel, attentionLines, stewardScheduleLine, projectErrorMessage } from './projectsUtils'
+import {
+  HEALTH_BADGE, healthLabel, attentionLines, stewardScheduleLine, projectErrorMessage,
+  stewardWakeLine, stewardWakeNext, stewardWakeSkipLine, stewardRunStatus,
+} from './projectsUtils'
 import { useProjectsStore } from '@/stores/projects'
 
 const props = defineProps({
@@ -189,7 +229,38 @@ const inboxRoute = computed(() => {
   const p = proposal.value
   return p ? askInboxRoute({ id: p.ask_id, agent_name: p.proposed_by }) : null
 })
-const scheduleLine = computed(() => stewardScheduleLine(steward.value?.schedule))
+// trinity-enterprise#1236: the read's `wake` block; absent on an older backend.
+const wake = computed(() => steward.value?.wake || null)
+const scheduleLine = computed(() => stewardScheduleLine(steward.value?.schedule, wake.value))
+const wakeLine = computed(() => stewardWakeLine(wake.value, steward.value?.ref))
+const wakeNext = computed(() => stewardWakeNext(wake.value?.next))
+const skipLine = computed(() => (wake.value?.state === 'on' ? stewardWakeSkipLine(wake.value.last_skip) : ''))
+const runStatus = computed(() => stewardRunStatus(wake.value?.last_run?.status))
+const agentRoute = computed(() => ({ path: `/agents/${encodeURIComponent(steward.value?.ref || '')}` }))
+// Start when nobody started it or a person paused it; Pause while it is started.
+// No verb for a project that isn't running: Start would not change what the card says.
+const wakeVerb = computed(() => {
+  const w = wake.value
+  if (!w || w.reason === 'project_not_running' || w.reason === 'not_agent_steward') return ''
+  if (w.reason === 'not_started' || w.reason === 'paused') return 'start'
+  return w.started ? 'pause' : ''
+})
+const changingWake = ref(false)
+const wakeError = ref('')
+
+async function changeWake() {
+  const verb = wakeVerb.value
+  changingWake.value = true
+  wakeError.value = ''
+  try {
+    const store = useProjectsStore()
+    await (verb === 'start' ? store.startStewardWake(props.project.id) : store.pauseStewardWake(props.project.id))
+  } catch (err) {
+    wakeError.value = projectErrorMessage(err)
+  } finally {
+    changingWake.value = false
+  }
+}
 // ent#1169: the read's `skill_set` ({held, available}); absent on an older backend → no line.
 const skillSet = computed(() => steward.value?.skill_set || null)
 // The outcome names WHY nothing was assigned; it is shown only while it still

@@ -1744,6 +1744,21 @@ is the edition-agnostic surface it plugs into:
   `tabPassesDoor` checks a declared capability fail-closed against
   `session.capabilities`, so a session without it — including a platform
   session on a build without the module — sees exactly the tabs it saw before.
+- **Tasks board (trinity-enterprise#957)** — the Tasks tab is one task surface
+  with two views, List | Board (`BaseSegmented`, remembered per person in
+  `localStorage`). `ProjectTaskBoard.vue` only draws and emits; the columns and
+  every rule are pure data in `projectsUtils.js` (`BOARD_COLUMNS`, `columnOf`,
+  `boardColumns`, `boardMove`), so a new step of the path is one array entry and
+  a status no column names lands in the first column instead of vanishing.
+  `ProjectTasks.vue` owns the writes: a move is the existing status-only task
+  update (`store.moveTask` — the answer is merged into the rows at once and the
+  re-reads reconcile in the background), tracked in ONE in-flight map
+  (`useTaskBoardMoves`) shared with Confirm. The dragged task is component
+  state; the drag payload is never read back, because task ids repeat across
+  projects. Tasks are re-read while the tab is visible (`useVisiblePolling`),
+  `fetchTasks` lets only the newest read of a project write (success and error
+  alike), and fresh rows are held while a drag or a keyboard pick is in
+  progress. Under `boardMinWidth()` of container width the list renders.
 - **Project page (v2)** — `OverflowTabs` over Overview / Tasks
   (`ProjectTasks.vue`) / Log (`ProjectLog.vue`) / Files & reports
   (`ProjectMaterial.vue`, reusing `ReportRenderer`). An invited guest gets one

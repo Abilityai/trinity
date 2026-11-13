@@ -1723,8 +1723,10 @@ async def _end_not_run(record, decider, why: str) -> str:
 #: The ask-resume and ask-ending wakes (ent#329, ent#611) — mirrors
 #: `operator_resume_service.TRIGGERED_BY{,_ENDING}` — and the delegation-ending
 #: wake (trinity-enterprise#1102, `caller_wake_service.TRIGGERED_BY_CALLER_WAKE`):
-#: all three are platform-framed turns no person wrote.
-_PERSONLESS_REPLAY_TRIGGERS = frozenset({"operator_response", "operator_ending", "caller_wake"})
+#: all three are platform-framed turns no person wrote — and so is the project
+#: steward wake (trinity-enterprise#1236).
+_PERSONLESS_REPLAY_TRIGGERS = frozenset({"operator_response", "operator_ending", "caller_wake",
+                                         "project_steward"})
 
 
 async def _dispatch_approved(record: Dict[str, Any], execution_id: str) -> str:

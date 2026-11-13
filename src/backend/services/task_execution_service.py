@@ -334,9 +334,13 @@ _AUTONOMOUS_TRIGGERS = frozenset(
     # trinity-enterprise#1102: `caller_wake` is the `operator_ending` shape for
     # a delegation — the platform wakes the agent that delegated a run when
     # that run ends, from the terminal fan-out, with nobody reading its reply.
+    #
+    # trinity-enterprise#1236: `project_steward` is the platform waking a
+    # project's steward agent, the turn a schedule used to start, with nobody
+    # reading its reply.
     {"schedule", "webhook", "loop", "event", "fan_out", "agent", "reminder",
      "a2a", "operator_response", "operator_ending", "retry", "self_task",
-     "skill_gate", "caller_wake"}
+     "skill_gate", "caller_wake", "project_steward"}
 )
 
 

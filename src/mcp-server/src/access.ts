@@ -564,6 +564,7 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   add_project_log_entry: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
   link_to_project: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only for a project the calling agent is active on (ent#661)" },
   get_steward_digest: { kind: "in-tool", how: ACT_AS + " — the calling agent's own stewarded projects (ent#661 v3)" },
+  start_project_task: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only when the calling agent is the project's steward, in the mode a person set (ent#1235)" },
   set_project_health: { kind: "in-tool", how: ACT_AS + " — a project id; the backend answers only when the calling agent is its active steward (ent#661 v3)" },
   create_project: { kind: "in-tool", how: ACT_AS + " — creates on the calling agent's OWN owner's behalf; the backend gates it on projects.manage (ent#588)" },
   import_project: { kind: "in-tool", how: ACT_AS + " — a path in the calling agent's OWN files; the backend gates it on projects.manage (ent#588)" },
@@ -571,6 +572,11 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   // the agent's primary contacts, nothing happens until one of them approves, and adding one
   // someone else owns still raises that owner's consent ask (R39). The gate is projects.manage.
   propose_project_changes: { kind: "baselined", owner: "trinity-enterprise#1089: projects/proposals.py — the agent's primary approves (ent#816 first answer wins) + the agent owner's consent ask" },
+  // --- platform_files.ts ---
+  list_platform_files: { kind: "in-tool", how: ACT_AS + " — a space id; the backend resolves the space's access for the calling agent on every call (uniform 404 otherwise) (ent#1237)" },
+  read_platform_file: { kind: "in-tool", how: ACT_AS + " — a space id and a file name; the backend resolves the space's and the file's access for the calling agent on every call (ent#1237)" },
+  write_platform_file: { kind: "in-tool", how: ACT_AS + " — a space id and a file name; the backend resolves write access for the calling agent on every call (ent#1237)" },
+  remove_platform_file: { kind: "in-tool", how: ACT_AS + " — a space id and a file name; the backend resolves write access for the calling agent on every call (ent#1237)" },
   // --- assignments.ts ---
   get_agent_assignments: { kind: "in-tool", how: ASSIGNMENTS_SELF },
   // --- permissions.ts ---

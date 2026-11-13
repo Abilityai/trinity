@@ -4394,9 +4394,10 @@ export class TrinityClient {
     return this.projectRequest("GET", this.projectPath(projectId), turn);
   }
 
-  async listProjectTasks(projectId: string, status = "open", turn?: string): Promise<Array<Record<string, unknown>>> {
+  async listProjectTasks(projectId: string, status = "open", turn?: string, view?: string): Promise<Array<Record<string, unknown>>> {
+    const viewQuery = view ? `&view=${encodeURIComponent(view)}` : "";
     const res = await this.projectRequest<{ tasks: Array<Record<string, unknown>> }>(
-      "GET", this.projectPath(projectId, `/tasks?status=${encodeURIComponent(status)}`), turn);
+      "GET", this.projectPath(projectId, `/tasks?status=${encodeURIComponent(status)}${viewQuery}`), turn);
     return res.tasks;
   }
 
@@ -4424,6 +4425,31 @@ export class TrinityClient {
       this.projectPath(projectId, `/context/${encodeURIComponent(itemId)}?offset=${offset}`), turn);
   }
 
+  // trinity-enterprise#1237: the platform's file spaces (`<kind>:<id>`), agent door.
+  private spaceFilesPath(space: string, name?: string): string {
+    const base = `/api/enterprise/files/agent/spaces/${encodeURIComponent(space)}/files`;
+    return name === undefined ? base : `${base}/${encodeURIComponent(name)}`;
+  }
+
+  async listPlatformFiles(space: string, cursor?: string, turn?: string): Promise<Record<string, unknown>> {
+    const q = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
+    return this.projectRequest("GET", this.spaceFilesPath(space) + q, turn);
+  }
+
+  async readPlatformFile(space: string, name: string, offset = 0, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("GET", `${this.spaceFilesPath(space, name)}?offset=${offset}`, turn);
+  }
+
+  async writePlatformFile(space: string, name: string, content: string, ifRevision?: number, turn?: string): Promise<Record<string, unknown>> {
+    const body: Record<string, unknown> = { content };
+    if (ifRevision !== undefined) body.if_revision = ifRevision;
+    return this.projectRequest("PUT", this.spaceFilesPath(space, name), turn, body);
+  }
+
+  async removePlatformFile(space: string, name: string, ifRevision: number, turn?: string): Promise<void> {
+    await this.projectRequest("DELETE", `${this.spaceFilesPath(space, name)}?if_revision=${ifRevision}`, turn);
+  }
+
   async addProjectLogEntry(projectId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
     return this.projectRequest("POST", this.projectPath(projectId, "/log"), turn, body);
   }
@@ -4441,6 +4467,19 @@ export class TrinityClient {
 
   async setProjectHealth(projectId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
     return this.projectRequest("POST", this.projectPath(projectId, "/health"), turn, body);
+  }
+
+  /**
+   * trinity-enterprise#1235: the steward starts a task's run on a named agent.
+   * `idempotencyKey` is derived by the tool from its arguments (Invariant #18).
+   */
+  async startProjectTask(projectId: string, taskId: string, agent: string, turn?: string,
+                         idempotencyKey?: string): Promise<Record<string, unknown>> {
+    const headers: Record<string, string> = {};
+    if (turn) headers["X-Trinity-Execution-Id"] = turn;
+    if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
+    return this.request("POST", this.projectPath(projectId, `/tasks/${encodeURIComponent(taskId)}/runs`),
+      { agent }, false, undefined, headers);
   }
 
   /** trinity-enterprise#588: create a project on the agent's OWNER's behalf (projects.manage). */
