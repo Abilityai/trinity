@@ -356,6 +356,30 @@ class TestReaddressByRule:
         assert _readdress(as_user(**ADMIN), ask).status_code == 200
         assert real_db.get_operator_queue_item(ask)["resolved_to"] == [people["bob"]]
 
+    def test_a_rule_that_raises_is_a_409_rule_refused(self, as_user, agent, people, decider,
+                                                      real_db):
+        def _broken(agent_name):
+            raise RuntimeError("the rule's lookup failed")
+        _svc().register_readdress_resolver(CONSENT, _broken)
+        ask = _consent(agent, [people["alice"]], seat="owner")
+        res = _readdress(as_user(**ADMIN), ask)
+        assert res.status_code == 409, res.text
+        assert res.json()["detail"]["code"] == "rule_refused"
+        assert "lookup failed" not in res.text
+        row = real_db.get_operator_queue_item(ask)
+        assert row["resolved_to"] == [people["alice"]] and row["context"][SEAT] == "owner"
+
+    @pytest.mark.parametrize("seat", ["primary", "owner"])
+    def test_a_person_seat_with_nobody_on_it_is_a_409_rule_refused(self, as_user, agent, people,
+                                                                  decider, real_db, seat):
+        ask = _consent(agent, [people["alice"]], seat="owner")
+        decider["d"] = Decider([], None, seat)
+        res = _readdress(as_user(**ADMIN), ask)
+        assert res.status_code == 409, res.text
+        assert res.json()["detail"]["code"] == "rule_refused"
+        row = real_db.get_operator_queue_item(ask)
+        assert row["resolved_to"] == [people["alice"]] and row["context"][SEAT] == "owner"
+
     def test_a_named_family_without_a_rule_is_a_422(self, as_user, agent, people, decider):
         ask = _note(agent, people["alice"])
         res = _readdress(as_user(**ADMIN), ask)

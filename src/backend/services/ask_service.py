@@ -1228,7 +1228,8 @@ def admin_readdress(item_id: str, *, to: str, reason: str, actor: Actor) -> Dict
     the audit row and `has_reason` (the reason's text is never stored there).
     Raises `AskNotFound`, or `ReaddressRefused`: 409 `not_pending`, 422
     `unknown_family` (no rule to re-run), 422 `admin_seat_unsupported`, 409
-    `rule_refused` (the role refuses today), 409 `audience_unchanged` naming
+    `rule_refused` (the role refuses today, the family's rule raises, or it
+    names a person seat with nobody on it), 409 `audience_unchanged` naming
     who the card waits for. The caller (the route) has already applied the
     admin + person gate and the row's visibility.
     """
@@ -1252,11 +1253,25 @@ def admin_readdress(item_id: str, *, to: str, reason: str, actor: Actor) -> Dict
             stamps = {oqs._WORKSPACE_DECIDER_SEAT_KEY: ADMIN_SEAT,
                       oqs._WORKSPACE_OPERATORS_REASON_KEY: None}
         else:
-            decider = resolver(agent_name)
+            try:
+                decider = resolver(agent_name)
+            except Exception:
+                # L3: a rule that fails is a refusal the admin can act on, not a 500.
+                logger.warning("[AskService] readdress resolver failed for %s", item_id, exc_info=True)
+                raise ReaddressRefused(409, "rule_refused",
+                                       "The rule that raised this card could not be run right now, "
+                                       "so the card stays as it is; end it with a reason instead.")
             seat = _decider_value(decider, "seat")
             if seat not in DECIDER_SEATS:
                 raise ValueError(f"readdress resolver returned seat {seat!r}")
             people = _people_list(_decider_value(decider, "people"))
+            if not people and seat != ADMIN_SEAT:
+                # L3: only the admin seat may be empty — a person seat with
+                # nobody on it would strand the card the admin is fixing.
+                raise ReaddressRefused(409, "rule_refused",
+                                       "The rule that raised this card finds nobody to decide it "
+                                       "right now, so the card stays as it is; move it to the admin "
+                                       "seat (to: admin) or end it with a reason.")
             single = (_decider_value(decider, "single") or "").strip().lower() or None
             if single is None and len(people) == 1:
                 single = people[0]
