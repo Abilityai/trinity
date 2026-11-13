@@ -12,6 +12,12 @@
   deterministic Idempotency-Key, so a double click or a retry runs ONE turn
   (Invariant #18). Each preview read takes a ticket, so a slower reply for an
   agent the person has since switched away from never lands (the #1194 rule).
+
+  trinity-enterprise#1235: no run starts on a project that isn't running, so
+  on one that is not started, stopped or done the page says why in place of
+  Start — the task's chats stay reachable. A Start the server refuses
+  (a run already under way, the project stopped meanwhile, a task waiting on
+  a decision) shows that refusal by name.
 -->
 <template>
   <section class="space-y-2 rounded-lg border border-gray-200 dark:border-gray-750 p-3" data-testid="project-task-start">
@@ -29,6 +35,7 @@
       </ul>
 
       <p v-if="archived" class="text-sm text-gray-600 dark:text-gray-300">The project is archived, so no new run can start.</p>
+      <p v-else-if="notRunning" class="text-sm text-gray-600 dark:text-gray-300" data-testid="project-task-start-not-running">{{ notRunning }}</p>
       <p v-else-if="preview.done" class="text-sm text-gray-600 dark:text-gray-300" data-testid="project-task-start-done">This task is done. Reopen it before starting a new run.</p>
       <template v-else-if="canContribute && !preview.done">
         <div v-if="!available.length" class="text-sm text-gray-700 dark:text-gray-300" data-testid="project-task-start-none">
@@ -68,13 +75,15 @@ import BaseButton from '@/components/base/BaseButton.vue'
 import BaseSelect from '@/components/base/BaseSelect.vue'
 import { useProjectsStore } from '@/stores/projects'
 import { useClientPortalStore } from '@/stores/clientPortal'
-import { projectErrorMessage } from './projectsUtils'
+import { notRunningLine, projectErrorMessage } from './projectsUtils'
 
 const props = defineProps({
   projectId: { type: String, required: true },
   taskId: { type: String, required: true },
   canContribute: { type: Boolean, default: false },
   archived: { type: Boolean, default: false },
+  // ent#1235: the project's state; '' when the caller doesn't know it (no gate here).
+  projectState: { type: String, default: '' },
 })
 const emit = defineEmits(['open-thread'])
 
@@ -88,6 +97,7 @@ const shown = ref(false)
 const starting = ref(false)
 let ticket = 0
 
+const notRunning = computed(() => (props.projectState && props.projectState !== 'running' ? notRunningLine(props.projectState) : ''))
 const available = computed(() => preview.value?.agents?.available || [])
 
 async function load(agentName = null) {

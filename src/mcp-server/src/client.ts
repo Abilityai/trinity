@@ -4469,6 +4469,19 @@ export class TrinityClient {
     return this.projectRequest("POST", this.projectPath(projectId, "/health"), turn, body);
   }
 
+  /**
+   * trinity-enterprise#1235: the steward starts a task's run on a named agent.
+   * `idempotencyKey` is derived by the tool from its arguments (Invariant #18).
+   */
+  async startProjectTask(projectId: string, taskId: string, agent: string, turn?: string,
+                         idempotencyKey?: string): Promise<Record<string, unknown>> {
+    const headers: Record<string, string> = {};
+    if (turn) headers["X-Trinity-Execution-Id"] = turn;
+    if (idempotencyKey) headers["Idempotency-Key"] = idempotencyKey;
+    return this.request("POST", this.projectPath(projectId, `/tasks/${encodeURIComponent(taskId)}/runs`),
+      { agent }, false, undefined, headers);
+  }
+
   /** trinity-enterprise#588: create a project on the agent's OWNER's behalf (projects.manage). */
   async createProjectAsAgent(body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
     return this.projectRequest("POST", "/api/enterprise/projects/agent/projects", turn, body);
