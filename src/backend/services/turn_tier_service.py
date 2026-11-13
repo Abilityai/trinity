@@ -322,6 +322,30 @@ def continuation_origin(db, agent_name: str, execution_id: Optional[str]) -> Opt
     return execution_id
 
 
+def person_may_continue(db, agent_name: str, origin_execution_id: str,
+                        email: Optional[str]) -> bool:
+    """Whether a continuation whose words came from the person `email` (an
+    ask's answerer or canceller) may stand as `origin_execution_id`
+    (trinity-enterprise#1225). Yes when that person rates at owner tier here
+    (owner or admin: the origin is never above them), or rates exactly as the
+    origin turn (its own person). Anyone else, an unknown email, or an
+    unreadable lookup → no: the continuation must not run above the person
+    whose words drive it."""
+    if not isinstance(email, str) or "@" not in email:
+        return False
+    try:
+        user = db.get_user_by_email(email.strip().lower())
+        person = _int_or_none((user or {}).get("id"))
+        if person is None:
+            return False
+        mine = _person_tier(db, person, agent_name)
+        if mine == (OWNER, None, None):
+            return True
+        return mine == turn_actor(db, agent_name, origin_execution_id)
+    except Exception:  # noqa: BLE001 - fail closed: an unreadable answer lifts nobody
+        return False
+
+
 def turn_actor(db, agent_name: str, execution_id: Optional[str] = None, *,
                execution=None) -> Tuple[str, Optional[str], Optional[int]]:
     """(tier, kind, person id) for a turn, by `execution_id` or by the row itself

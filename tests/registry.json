@@ -9130,7 +9130,7 @@
         "agent-collaboration",
         "security"
       ],
-      "description": "ent#1225: caller_wake, operator_response, operator_ending and skill_gate rows name the turn they continue (continues_execution_id) and are rated exactly as it: owner, shared person, visitor, delegated. Only a running turn of the same agent is recorded; an agent-written context key is stripped; a link that cannot be followed, or one ending over asks from different turns, fails closed to (share, person, None). Real /task and /chat admission, real maybe_wake_caller, maybe_dispatch_resume/maybe_dispatch_ending, raise_ask, the gate notice, the ledger and acting_turn_user_id on a real DB."
+      "description": "ent#1225: caller_wake, operator_response, operator_ending and skill_gate rows name the turn they continue (continues_execution_id) and are rated exactly as it: owner, shared person, visitor, delegated. Only a running turn of the same agent is recorded; an agent-written context key is stripped; a link that cannot be followed, or one ending over asks from different turns, fails closed to (share, person, None). An answer or ending wake follows the link only when the answerer or canceller is owner tier or the asking turn's own person; a shared person ending the owner's ask fails closed (real ask_service.answer/cancel and wake filer). The pull claim carries the link for auto-memory. Real /task and /chat admission, real maybe_wake_caller, maybe_dispatch_resume/maybe_dispatch_ending, raise_ask, the gate notice, the ledger and acting_turn_user_id on a real DB."
     }
   ]
 }
