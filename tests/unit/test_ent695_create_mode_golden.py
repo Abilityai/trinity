@@ -737,7 +737,7 @@ def test_first_run_seed_on_fresh_install(install):
     monkeypatch = install
     seams = _Seams()
     _wire(monkeypatch, seams)
-    monkeypatch.setattr(sss, "docker_client", object())  # Docker reachable
+    monkeypatch.setattr("services.docker_service.get_docker_client", lambda _c=object(): _c)  # Docker reachable
     monkeypatch.setattr(
         sss, "get_breaker_redis", lambda: None
     )  # no Redis: locks fail open

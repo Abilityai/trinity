@@ -122,7 +122,7 @@ def test_cornelius_seeds_under_the_configured_admin(monkeypatch):
     monkeypatch.setattr(cas.db, "set_setting", settings.set)
     monkeypatch.setattr(cas.db, "count_non_system_agents", lambda: 0)
     monkeypatch.setattr(cas.db, "get_user_by_username", users)
-    monkeypatch.setattr(cas, "docker_client", object())
+    monkeypatch.setattr("services.docker_service.get_docker_client", lambda _c=object(): _c)
     monkeypatch.setattr(cas, "get_breaker_redis", lambda: None)
     provision = AsyncMock()
     monkeypatch.setattr(cas.cornelius_agent_service, "_provision", provision)
@@ -143,7 +143,7 @@ def test_system_seed_looks_up_the_configured_admin(monkeypatch):
     monkeypatch.setattr(sss.db, "set_setting", settings.set)
     monkeypatch.setattr(sss.db, "count_non_system_agents", lambda: 0)
     monkeypatch.setattr(sss.db, "get_user_by_username", users)
-    monkeypatch.setattr(sss, "docker_client", object())
+    monkeypatch.setattr("services.docker_service.get_docker_client", lambda _c=object(): _c)
     monkeypatch.setattr(sss, "get_breaker_redis", lambda: None)
     # Stop right after the owner check: an unresolvable manifest is the next step.
     monkeypatch.setattr(
@@ -174,7 +174,7 @@ def _orchestrate(monkeypatch, settings, users, agents):
         monkeypatch.setattr(module.db, "set_setting", settings.set)
         monkeypatch.setattr(module.db, "count_non_system_agents", lambda: agents)
         monkeypatch.setattr(module.db, "get_user_by_username", users)
-        monkeypatch.setattr(module, "docker_client", object())
+        monkeypatch.setattr("services.docker_service.get_docker_client", lambda _c=object(): _c)
         monkeypatch.setattr(module, "get_breaker_redis", lambda: None)
     monkeypatch.setattr(
         cas.cornelius_agent_service, "_provision",

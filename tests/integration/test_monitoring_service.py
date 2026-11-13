@@ -142,7 +142,7 @@ _fake_database.db = MagicMock()
 sys.modules["database"] = _fake_database
 
 _fake_docker_service = types.ModuleType("services.docker_service")
-_fake_docker_service.docker_client = None
+_fake_docker_service.get_docker_client = lambda: None
 _fake_docker_service.get_agent_container = MagicMock(return_value=None)
 _fake_docker_service.list_all_agents_fast = MagicMock(return_value=[])
 sys.modules["services.docker_service"] = _fake_docker_service

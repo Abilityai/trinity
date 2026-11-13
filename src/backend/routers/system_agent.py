@@ -26,7 +26,8 @@ from dependencies import (
     reject_agent_principal,
 )
 from services.agent_auth import agent_httpx_client
-from services.docker_service import get_agent_container, docker_client
+from services import docker_service
+from services.docker_service import get_agent_container
 from services.docker_utils import (
     container_reload, container_stop, container_start,
     container_exec_run, api_exec_create, api_exec_start
@@ -539,7 +540,7 @@ async def system_agent_terminal(
                                 # Resize the PTY
                                 cols = ctrl.get("cols", 80)
                                 rows = ctrl.get("rows", 24)
-                                docker_client.api.exec_resize(
+                                docker_service.get_docker_client().api.exec_resize(
                                     exec_id,
                                     height=rows,
                                     width=cols

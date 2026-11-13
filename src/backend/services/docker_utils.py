@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Set
 
 import docker
 
-from services.docker_service import docker_client
+from services import docker_service
 
 logger = logging.getLogger(__name__)
 
@@ -160,8 +160,7 @@ async def container_get(container_id: str) -> Any:
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
         _docker_executor,
-        docker_client.containers.get,
-        container_id
+        lambda: docker_service.get_docker_client().containers.get(container_id),
     )
 
 
@@ -256,7 +255,9 @@ async def image_get(name: str) -> Any:
         docker.errors.ImageNotFound: If the image doesn't exist
     """
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(_docker_executor, docker_client.images.get, name)
+    return await loop.run_in_executor(
+        _docker_executor, lambda: docker_service.get_docker_client().images.get(name)
+    )
 
 
 # =============================================================================
@@ -276,7 +277,9 @@ async def network_get(name: str) -> Any:
         docker.errors.NotFound: If the network doesn't exist
     """
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(_docker_executor, docker_client.networks.get, name)
+    return await loop.run_in_executor(
+        _docker_executor, lambda: docker_service.get_docker_client().networks.get(name)
+    )
 
 
 # =============================================================================
@@ -296,7 +299,9 @@ async def volume_get(name: str) -> Any:
         docker.errors.NotFound: If volume doesn't exist
     """
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(_docker_executor, docker_client.volumes.get, name)
+    return await loop.run_in_executor(
+        _docker_executor, lambda: docker_service.get_docker_client().volumes.get(name)
+    )
 
 
 async def volume_create(name: str, labels: Optional[Dict[str, str]] = None) -> Any:
@@ -312,7 +317,7 @@ async def volume_create(name: str, labels: Optional[Dict[str, str]] = None) -> A
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(
         _docker_executor,
-        lambda: docker_client.volumes.create(name=name, labels=labels or {})
+        lambda: docker_service.get_docker_client().volumes.create(name=name, labels=labels or {})
     )
 
 
@@ -448,7 +453,7 @@ async def remove_agent_volumes(volume_base: str, instance_id: Optional[str] = No
     Every removal is logged at WARNING as unrecoverable — it destroys the
     agent's data, so no instance of it is routine (#1638).
     """
-    if docker_client is None:
+    if not await _docker_client_present():
         return 0
     if instance_id is None:
         instance_id = _resolve_instance_id()
@@ -501,11 +506,12 @@ async def list_attached_volume_names() -> Optional[Set[str]]:
     destroy it. Fail-closed — the None on error means "unknown", and the caller
     must skip the cycle rather than reclaim on a blind guess.
     """
-    if docker_client is None:
-        return None
     loop = asyncio.get_event_loop()
 
-    def _collect() -> Set[str]:
+    def _collect() -> Optional[Set[str]]:
+        docker_client = docker_service.get_docker_client()
+        if docker_client is None:
+            return None
         names: Set[str] = set()
         # Mounts come back on the list payload itself (/containers/json), so
         # this is one API call — no per-container inspect.
@@ -533,11 +539,12 @@ async def get_agent_workspace_volume_map() -> Dict[str, str]:
     `agent_ownership.volume_base_name` existed, which is what the boot-time
     heal reconstructs it from.
     """
-    if docker_client is None:
-        return {}
     loop = asyncio.get_event_loop()
 
     def _collect() -> Dict[str, str]:
+        docker_client = docker_service.get_docker_client()
+        if docker_client is None:
+            return {}
         mapping: Dict[str, str] = {}
         for container in docker_client.containers.list(
             all=True, filters={"label": "trinity.platform=agent"}
@@ -582,7 +589,7 @@ async def list_agent_data_volumes(instance_id: str) -> List[Any]:
     like from this stack's database. Returns raw volume objects — callers read
     ``.name`` / ``.attrs`` (``Labels['trinity.agent-name']``, ``CreatedAt``).
     """
-    if docker_client is None or not instance_id:
+    if not instance_id or not await _docker_client_present():
         return []
     return await _list_volumes(
         [_AGENT_VOLUME_LABEL_KEY, f"{AGENT_VOLUME_INSTANCE_LABEL}={instance_id}"]
@@ -596,9 +603,18 @@ async def list_all_agent_data_volumes() -> List[Any]:
     NAME legacy unlabelled volumes for a human. Reclaiming from it is the bug
     #3214 fixed.
     """
-    if docker_client is None:
+    if not await _docker_client_present():
         return []
     return await _list_volumes([_AGENT_VOLUME_LABEL_KEY])
+
+
+async def _docker_client_present() -> bool:
+    """True when a Docker client is available. Acquisition (which may attempt a
+    reconnect, #4406) runs in the executor, never on the event loop."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        _docker_executor, lambda: docker_service.get_docker_client() is not None
+    )
 
 
 async def _list_volumes(label_filters: List[str]) -> List[Any]:
@@ -606,7 +622,7 @@ async def _list_volumes(label_filters: List[str]) -> List[Any]:
     try:
         return await loop.run_in_executor(
             _docker_executor,
-            lambda: docker_client.volumes.list(filters={"label": label_filters}),
+            lambda: docker_service.get_docker_client().volumes.list(filters={"label": label_filters}),
         )
     except Exception as e:
         logger.error(f"[#1581] listing agent data volumes failed: {e}")
@@ -638,6 +654,7 @@ async def containers_run(
     loop = asyncio.get_event_loop()
 
     def _run():
+        docker_client = docker_service.get_docker_client()
         _cap_nano_cpus_to_host(kwargs)
         return docker_client.containers.run(image, command=command, **kwargs)
 
@@ -655,7 +672,7 @@ def _cap_nano_cpus_to_host(kwargs: Dict[str, Any]) -> None:
     if not requested:
         return
     try:
-        host_nano = int(docker_client.info()["NCPU"]) * 1_000_000_000
+        host_nano = int(docker_service.get_docker_client().info()["NCPU"]) * 1_000_000_000
     except Exception as e:  # noqa: BLE001 — unknown host size: let Docker decide
         logger.warning(f"[#2318] could not read host CPU count, CPU limit not capped: {e}")
         return
@@ -771,6 +788,7 @@ async def api_exec_create(
     loop = asyncio.get_event_loop()
 
     def _create():
+        docker_client = docker_service.get_docker_client()
         return docker_client.api.exec_create(
             container_id,
             cmd,
@@ -800,6 +818,7 @@ async def api_exec_start(exec_id: str, socket: bool = False, tty: bool = True) -
     loop = asyncio.get_event_loop()
 
     def _start():
+        docker_client = docker_service.get_docker_client()
         return docker_client.api.exec_start(exec_id, socket=socket, tty=tty)
 
     return await loop.run_in_executor(_docker_executor, _start)

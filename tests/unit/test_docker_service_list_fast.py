@@ -34,15 +34,21 @@ def restore_docker_client():
     ``_last_socket_warn_monotonic`` is module-level state; without the reset a
     prior test's warning would throttle this test's first warning and the
     assertion would flake under pytest-randomly ordering.
+
+    #4406: with no client, get_docker_client() tries docker.from_env() again.
+    Pinning the next attempt to never keeps these tests off the real daemon.
     """
     original = ds.docker_client
     original_throttle = ds._last_socket_warn_monotonic
+    original_next_attempt = ds._next_docker_attempt_monotonic
     ds._last_socket_warn_monotonic = None
+    ds._next_docker_attempt_monotonic = float("inf")
     try:
         yield
     finally:
         ds.docker_client = original
         ds._last_socket_warn_monotonic = original_throttle
+        ds._next_docker_attempt_monotonic = original_next_attempt
 
 
 def test_list_fast_warns_and_returns_empty_on_socket_error(restore_docker_client, caplog):

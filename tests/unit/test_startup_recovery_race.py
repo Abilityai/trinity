@@ -50,7 +50,7 @@ def _stub_docker_and_database(monkeypatch):
         monkeypatch.setitem(sys.modules, "docker", MagicMock(name="docker_stub"))
     if "services.docker_service" not in sys.modules:
         _ds_stub = types.ModuleType("services.docker_service")
-        _ds_stub.docker_client = MagicMock()
+        _ds_stub.get_docker_client = MagicMock(return_value=MagicMock())
         _ds_stub.get_agent_container = lambda *a, **kw: None
         _ds_stub.get_agent_status_from_container = lambda *a, **kw: "stopped"
         _ds_stub.list_all_agents = lambda *a, **kw: []

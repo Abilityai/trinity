@@ -803,7 +803,7 @@ def test_the_real_exec_helper_without_docker_is_not_cached(agent, monkeypatch):
 
     real = docker_service.execute_command_in_container
     assert real.__globals__ is vars(docker_service)
-    monkeypatch.setattr(docker_service, "docker_client", None)
+    monkeypatch.setattr(docker_service, "get_docker_client", lambda: None)  # #4406: Docker unreachable
     monkeypatch.setattr(files, "execute_command_in_container", real)
     assert asyncio.run(files._agent_reads_without_links(agent.container, AGENT)) is False
     assert files._READ_POLICY_PROBE_CACHE == {}

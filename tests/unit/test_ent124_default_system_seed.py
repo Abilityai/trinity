@@ -126,7 +126,7 @@ def env(monkeypatch, tmp_path):
         sss.db, "get_user_by_username",
         lambda u: {"id": 1, "username": "admin", "email": "a@example.com", "role": "admin"},
     )
-    monkeypatch.setattr(sss, "docker_client", object())          # Docker available
+    monkeypatch.setattr("services.docker_service.get_docker_client", lambda _c=object(): _c)          # Docker available
     monkeypatch.setattr(sss, "get_breaker_redis", lambda: None)  # lock fail-open
     monkeypatch.delenv(sss.MANIFEST_ENV_VAR, raising=False)
 
@@ -262,7 +262,7 @@ def test_noop_when_already_seeded(env):
 
 
 def test_skip_when_docker_unavailable(env):
-    env.monkeypatch.setattr(sss, "docker_client", None)
+    env.monkeypatch.setattr("services.docker_service.get_docker_client", lambda _c=None: _c)
     result = _run()
     env.deploy.assert_not_awaited()
     assert env.settings.get("default_system_seeded") is None

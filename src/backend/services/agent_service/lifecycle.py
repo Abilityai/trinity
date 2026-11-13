@@ -17,7 +17,6 @@ from fastapi import HTTPException
 
 from database import db
 from services.docker_service import (
-    docker_client,
     get_agent_container,
     get_next_available_port,
     reserve_port_for_recreate,

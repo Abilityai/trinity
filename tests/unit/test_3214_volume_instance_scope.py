@@ -42,8 +42,9 @@ def _load_docker_utils():
     with patch.dict("sys.modules", {"services.docker_service": Mock(docker_client=mock_client)}):
         spec = importlib.util.spec_from_file_location("docker_utils", f"{_backend}/services/docker_utils.py")
         mod = importlib.util.module_from_spec(spec)
-        mod.docker_client = mock_client
         spec.loader.exec_module(mod)
+        # #4406: docker_utils reaches the client through docker_service.get_docker_client().
+        mod.docker_service = Mock(get_docker_client=Mock(return_value=mock_client))
     return mod, mock_client
 
 

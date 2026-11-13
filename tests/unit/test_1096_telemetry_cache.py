@@ -93,12 +93,15 @@ def _make_psutil_stub():
     return stub
 
 
+_TRUTHY_CLIENT = object()
+
+
 def _load_telemetry_router():
     _deps = types.ModuleType("dependencies")
     _deps.get_current_user = lambda: None
 
     _docker_svc = types.ModuleType("services.docker_service")
-    _docker_svc.docker_client = object()          # truthy → not the 503 branch
+    _docker_svc.get_docker_client = lambda: _TRUTHY_CLIENT  # truthy → not the 503 branch
     _docker_svc.list_all_agents_fast = MagicMock(return_value=[])
 
     # trinity-enterprise#872: the handler scopes the payload to the caller's
@@ -130,6 +133,8 @@ def _load_telemetry_router():
         "psutil": _make_psutil_stub(),
     }):
         spec.loader.exec_module(mod)
+    # #4406: telemetry reaches the client through docker_service.get_docker_client().
+    mod.docker_service = _docker_svc
     return mod
 
 
@@ -315,7 +320,7 @@ async def test_stale_cache_serves_old_data_and_refreshes(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_docker_unavailable_returns_503(monkeypatch):
-    monkeypatch.setattr(telemetry, "docker_client", None)
+    monkeypatch.setattr(telemetry.docker_service, "get_docker_client", lambda: None)
     with pytest.raises(HTTPException) as exc:
         await telemetry.get_container_stats(current_user=None)
     assert exc.value.status_code == 503

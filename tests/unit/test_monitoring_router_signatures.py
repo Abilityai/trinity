@@ -205,7 +205,7 @@ class TestGetAccessibleAgentsSignature:
         )
         _hmod = importlib.util.module_from_spec(_spec)
         _docker_stub = types.SimpleNamespace(
-            docker_client=MagicMock(),
+            get_docker_client=MagicMock(return_value=MagicMock()),
             list_all_agents=MagicMock(),
             list_all_agents_fast=MagicMock(),
             get_agent_container=MagicMock(),
