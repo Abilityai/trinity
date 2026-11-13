@@ -104,7 +104,8 @@ idna>=3.10
 slack_sdk[socket-mode]>=3.41.0
 slackify-markdown>=0.2.0
 twilio>=9.10.0
-Pillow>=11.1.0
+# Floor matches docker/backend/Dockerfile's exact pin (trinity-enterprise#1124).
+Pillow>=13.0.0
 tenacity>=9.0.0
 passlib[bcrypt]>=1.7.4
 # Cap bcrypt <5: bcrypt 5.0.0 removed the `__about__` shim passlib 1.7.4 reads at
