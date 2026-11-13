@@ -494,12 +494,21 @@ def readdressed_detail(row: Mapping[str, Any], *, name_people: bool = True) -> D
     (trinity-enterprise#1096, R5): who the card waits for now. The Operations
     door names the people (its caller reads them on the card anyway); the
     Workspace door passes `name_people=False` — the person it moved away from
-    is no longer on it, and never learns who is."""
+    is no longer on it, and never learns who is. A role, approver or project
+    row names its role and seat only, on every door (R7)."""
     e = not_addressee(row)
     if not name_people:
         return {"code": "readdressed",
                 "message": "This ask was moved to someone else before your answer landed; "
                            "it no longer waits for you. Nothing was recorded."}
+    if e.role is not None:
+        # R7: a role, approver or project row names its role and seat, never a
+        # person — the `AskNotAddressee.detail` shape (the text reaches a model
+        # through MCP).
+        return {"code": "readdressed",
+                "message": "This card was re-addressed before your answer landed. "
+                           f"{e.role_message()} Nothing was recorded.",
+                "seat": e.seat}
     if e.seat == ADMIN_SEAT and not e.waiting_on:
         who = "an instance admin"
     elif e.waiting_on:

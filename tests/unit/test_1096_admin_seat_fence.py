@@ -493,6 +493,30 @@ class TestNamedRefusal:
         assert "@" not in repr(e.detail())
         assert e.detail()["seat"] == "role:finance"
 
+    def test_a_role_rows_readdressed_body_stays_person_free(self, real_db, agent, people):
+        """The 409 an answer gets when a role row moved under it names the
+        role and its seat, never a person: the text reaches a model through
+        MCP, the same contract as the role row's 403."""
+        body = {"request_id": f"gate-{uuid.uuid4().hex[:8]}", "type": "approval",
+                "title": "t", "question": "q", "options": ["Approve", "Decline"]}
+        ask = _svc().raise_ask(agent, body, raised_by="gate", channel="gate",
+                               addressees=[people["alice"]], to_role_override="role:cfo",
+                               attach_chat=False)["id"]
+        stale = _row(real_db, ask)
+        assert _svc().readdress_item(ask, [people["bob"]], people["bob"],
+                                     reason=_svc().ASSIGNMENT_CHANGED, attach_chat=False)
+        with pytest.raises(_svc().AskConflict) as exc:
+            _svc().answer(stale, response="Approve", response_text=None,
+                          actor=_svc().Actor(email=people["alice"]))
+        assert exc.value.code == "readdressed"
+        d = _svc().readdressed_detail(exc.value.item)
+        assert d["code"] == "readdressed"
+        assert d["seat"] == "role:cfo"
+        assert "waiting_on" not in d
+        assert "@" not in d["message"]
+        assert "Cfo role" in d["message"]
+        assert _row(real_db, ask)["status"] == "pending"
+
     def test_the_detail_carries_the_structured_fields(self, real_db, agent, people):
         row = _row(real_db, _consent(agent, [people["alice"]], seat="primary"))
         e = _svc().not_addressee(row)
