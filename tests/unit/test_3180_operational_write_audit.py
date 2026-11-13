@@ -539,13 +539,12 @@ class TestExecutionTerminate:
         _assert_terminate_row(rows[0], None, eid, "terminated")
         assert rows[0]["mcp_key_id"] != repeat_key_id
 
-    def test_a_container_terminate_of_a_turn_already_terminal_writes_no_row(
+    def test_a_container_terminate_of_a_turn_already_terminal_writes_one_row(
         self, world
     ):
-        """The agent kills a process whose row is already FAILED (a watchdog's
-        terminal): the CANCELLED CAS loses and the FAILED terminal stands, so
-        this call did not end the turn and writes no row. This is the accepted
-        cost of gating the row on the CAS rather than on the agent's answer."""
+        """The agent kills a live process whose row is already FAILED (a
+        watchdog's terminal): the CANCELLED CAS loses and the FAILED terminal
+        stands, but the kill ended the work, so the row is written (#4475)."""
         eid = _seed("s2-3180-already-failed", "failed")
 
         res = world.client.post(_terminate_path(eid), headers=_session(OWNER))
@@ -554,7 +553,9 @@ class TestExecutionTerminate:
         assert res.json()["status"] == "terminated"
         assert len(world.agent.calls) == 1
         assert _status_of(eid) == "failed"
-        assert _rows(TERMINATE) == []
+        rows = _rows(TERMINATE)
+        assert len(rows) == 1
+        _assert_terminate_row(rows[0], None, eid, "terminated")
 
     def test_a_queued_cancel_that_loses_its_cas_writes_only_the_row_of_the_arm_that_ended_it(
         self, world, monkeypatch

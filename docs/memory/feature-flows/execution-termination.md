@@ -475,6 +475,15 @@ await activity_service.track_activity(
 )
 ```
 
+### Audit Row (#3180, #4475)
+
+The operator route (`POST /api/agents/{name}/executions/{execution_id}/terminate`) writes one `audit_log` row per ended turn: `event_type=execution`, `event_action=execution_terminate`, the principal as actor, the agent as target, and `execution_id` / `task_execution_id` / `status` in `details`. The service calls the route's `on_ended` hook when:
+- the queued cancel wins its CAS (`cancelled_while_queued`),
+- the parked cancel finds the turn parked (`cancelled_while_parked`), or
+- the agent answers `terminated`.
+
+The parked and container arms do not wait on their CANCELLED CAS. The request that started the turn usually writes the terminal row first (the agent's terminate waits up to 7 s for the process to exit). `chat_execution_service._audit_terminate_once` deduplicates repeats with a Redis first-claim `terminate_audit:{agent}:{execution_id}` (`SET NX`, 24 h TTL) on the id the agent or the call limiter verified. It fails open: with Redis unreachable the row is written. If the audit write raises, the claim is released. `already_finished` and every error arm write no row. The public-link and Workspace terminate routes pass no hook and write none.
+
 ### Queue State
 
 The execution queue is force-released after successful termination to allow new executions:

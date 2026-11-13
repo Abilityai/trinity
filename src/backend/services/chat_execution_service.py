@@ -3332,6 +3332,54 @@ async def _cancel_queued_if_queued(
     return None
 
 
+# #4475: one audit row per ended turn. The CANCELLED CAS cannot decide it:
+# the request that started the turn sees the agent stop and usually writes the
+# terminal first, so the terminate that ended the work loses the CAS. The row
+# is decided on the arm's own outcome instead, and this first-claim keeps a
+# repeat or concurrent terminate from writing a second row. When two people
+# terminate the same turn at once, only the first is recorded.
+_TERMINATE_AUDIT_KEY_PREFIX = "terminate_audit:"
+_TERMINATE_AUDIT_TTL_SECONDS = 86400
+
+
+def _terminate_audit_key(name, execution_id):
+    return f"{_TERMINATE_AUDIT_KEY_PREFIX}{name}:{execution_id}"
+
+
+async def _audit_terminate_once(name, execution_id, on_ended, outcome):
+    """Await ``on_ended(outcome)`` unless another call already recorded this
+    turn. ``execution_id`` must be an id this arm verified belongs to ``name``.
+
+    Fail-open: with Redis unreachable the row is written, because a duplicate
+    security record costs less than a missing one. If the write raises, the
+    claim is released so a later terminate can still record the turn.
+    """
+    if on_ended is None:
+        return
+    from redis_breaker_util import get_breaker_redis
+
+    key = _terminate_audit_key(name, execution_id)
+    client = None
+    try:
+        client = get_breaker_redis()
+        if client is not None and not client.set(
+            key, "1", nx=True, ex=_TERMINATE_AUDIT_TTL_SECONDS
+        ):
+            return
+    except Exception as e:  # noqa: BLE001
+        client = None
+        logger.warning(f"[Terminate] audit claim for {execution_id} failed ({e}); writing the row")
+    try:
+        await on_ended(outcome)
+    except BaseException:
+        if client is not None:
+            try:
+                client.delete(key)
+            except Exception:  # noqa: BLE001
+                pass
+        raise
+
+
 async def _close_dispatch_activity_cancelled(task_execution_id, cancel_won):
     """#1332 (Path B): close the still-open dispatch activity as CANCELLED
     immediately (operator-terminate writes the CANCELLED row first and never
@@ -3443,12 +3491,9 @@ async def _proxy_terminate_and_finalize(
         # the agent's own terminal already ran its own release, and firing an
         # emergency clear on a no-op branch was the part with no defensible
         # reading at all.
-        # #3180: set only by the CANCELLED CAS below, and the audit hook reads
-        # it rather than the agent's answer. The agent answers `terminated`
-        # again for a turn it accepted but has not started (its pending entry
-        # is kept), and two terminates of a live process may both get it, so
-        # only the call that wins the CAS ended the turn. Cost, accepted: a kill
-        # of a process whose row is already terminal writes no row.
+        # Set by the CANCELLED CAS below; it decides the status row and the
+        # activity close only. The audit row is decided on the agent's
+        # `terminated` answer (#4475, see `_audit_terminate_once`).
         cancel_won = False
         if result.get("status") == "terminated" and task_execution_id:
             try:
@@ -3503,8 +3548,10 @@ async def _proxy_terminate_and_finalize(
                 "actor_kind": actor_kind,
             },
         )
-        if cancel_won and on_ended is not None:
-            await on_ended("terminated")
+        # #4475: keyed on `execution_id`, the id the agent just answered for.
+        # `task_execution_id` is caller-supplied and never seen by the agent.
+        if result.get("status") == "terminated":
+            await _audit_terminate_once(name, execution_id, on_ended, "terminated")
         return result
 
     except httpx.ConnectError:
@@ -3534,12 +3581,13 @@ async def terminate_execution(
     cancel that lands after the row is already terminal loses and leaves the
     real terminal alone.
 
-    #3180: `on_ended`, when given, is awaited once with the arm's status, and
-    only when THIS call ended work: the queued cancel won its CAS, the parked
-    cancel won its CAS, or the agent answered `terminated` and the CANCELLED CAS
-    that follows was won. A repeat terminate (of a still-parked turn, or one the
-    agent answers `terminated` again) gives the same answer but does not call
-    it, and neither does `already_finished` or any error arm. The response is
+    #3180/#4475: `on_ended`, when given, is awaited once per ended turn with
+    the arm's status: the queued cancel won its CAS, the parked cancel found the
+    turn parked, or the agent answered `terminated`. The parked and container
+    arms do not wait on their CANCELLED CAS, which the request that started the
+    turn often wins; a first-claim per agent and execution id
+    (`_audit_terminate_once`) keeps a repeat terminate from calling it again.
+    `already_finished` and every error arm do not call it. The response is
     unchanged either way.
     """
     # ent#551 QA: two voice-dispatched turns were cancelled ~3 s after their
@@ -3696,8 +3744,8 @@ async def _cancel_inflight_if_parked(
             "actor_kind": actor_kind,
         },
     )
-    # #3180: only the call that won the CANCELLED CAS ended the turn; a repeat
-    # while the dispatcher is still parked answers the same but ended nothing.
-    if cancel_won and on_ended is not None:
-        await on_ended("cancelled_while_parked")
+    # #4475: the parked dispatcher reads the cancel key and writes CANCELLED
+    # itself, so it can win the CAS; this cancel still ended the turn. A repeat
+    # while still parked answers the same and is deduplicated by the claim.
+    await _audit_terminate_once(name, eid, on_ended, "cancelled_while_parked")
     return {"status": "cancelled_while_parked", "execution_id": execution_id}
