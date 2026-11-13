@@ -206,6 +206,31 @@
       "description": "#4357: the MCP server's fallback depth-reset sentence (client.ts DEPTH_RESETS, used when a refusal body carries no resets) equals the backend's InterAgentDepthExceeded.RESETS, and the backend's refusal body sends that sentence, so the two copies cannot drift."
     },
     {
+      "file": "unit/test_ent165_guardrail_spool.py",
+      "feature": "trinity-enterprise#165",
+      "added": "2026-11-08",
+      "categories": [
+        "agent",
+        "unit",
+        "security",
+        "guardrails"
+      ],
+      "description": "trinity-enterprise#165 S2: the guardrail spool record. lib.log_event adds v, event_id (uuid4), kind and hook derived through the frozen legacy-event table and the script name (closed sets EVENT_KINDS / EVENT_HOOKS), code (the event name when absent), execution_id from /proc/<ppid>/environ (null outside a turn or past 128 chars, never the hook's own env), and session_id/tool_use_id from read_stdin_json; existing fields unchanged; derived fields beat a caller's; a derivation fault still writes the legacy record. Every shipped hook denies with its code when run as its own script (bash, file, read-only, turn-tier incl. turn_kind, skill gate); an AST guard fails any deny without code= or any call passing a reserved field; the image smoke's deny-record check fails a record without the contract. Reverting the change turns 63 red."
+    },
+    {
+      "file": "unit/test_ent165_guardrail_forwarder.py",
+      "feature": "trinity-enterprise#165",
+      "added": "2026-11-08",
+      "categories": [
+        "agent",
+        "unit",
+        "security",
+        "guardrails",
+        "reliability"
+      ],
+      "description": "trinity-enterprise#165 S2: the agent server's guardrail event forwarder (agent_server/guardrail_events.py) on a fake clock and a fake backend. Allowlist projection (command_prefix/traceback/error/reason never leave; a fake key a command carried never reaches a POST body; bounds; overlong ids nulled); records without v, with kind/hook null, and unparseable lines (counted as dropped); delivery within 2 s of an append; one POST per burst; count and byte batch caps; envelope; 5-min keepalive; 413 split and single-event drop; 422 drop counted in the next accepted post; 404 keeps the spool and retries hourly, logging once; resend carries the same event_ids; 5xx backoff 2/4/8/16/32 s capped; 429 Retry-After; a failing step never kills the loop; offset resume across a restart; partial last line; rotation race inside the 2 s grace with no busy loop; a never-drained spool stays bounded with delivered + dropped == written; gated on URL + key; main.py wires it; posts under the agent's own key to its own route. 15/15 mutants killed."
+    },
+    {
       "file": "unit/test_1168_agent_ssh_bind.py",
       "feature": "trinity-enterprise#1168",
       "added": "2026-11-07",
@@ -9039,6 +9064,124 @@
         "unit"
       ],
       "description": "trinity#4302: a mention chain stopped at ROOM_MAX_CHAIN_DEPTH writes a typed `chain_paused` system row (mentions = who was next; plain words, no UI verb) and the room payload carries `paused_chain` {seq, next} while the offer stands (survives bookkeeping lines; ends on a conversational row, a later pause/continue row, a closed room, or every named agent having left; a collaborator seated above the row still gets it). POST /api/rooms/{id}/continue through the real router, service, db and idempotency layers over a temp SQLite DB: wakes `next` at depth 1 (a fresh count that may pause again), posts a `chain_continued` receipt that spends no message budget, hands the woken agent what it was owed; a seated collaborator, a person's user key and a Workspace client may continue, an agent key and the system key get 403 not_a_person, a non-member the uniform 404 with no key claimed, an unreachable `next` a 403 with nothing consumed, a departed `next` 409 no_one_to_wake; a closed room / a room at its message budget 410 with stop_reason and the budget named. Once per stop: a double click with an Idempotency-Key is 409 in-flight then a replay under scope room-continue:{room_id}; two workers without a key wake once (the second gets 409 room_moved_on); a stale offer_stands read is not the guard (the receipt insert is); two simultaneous receipt inserts land exactly one; a repeat after a restart (key rows gone) is 409 room_moved_on."
+    },
+    {
+      "file": "unit/test_ent165_guardrail_event_store.py",
+      "feature": "trinity-enterprise#165",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "unit",
+        "guardrails",
+        "database"
+      ],
+      "description": "GUARD-005 store against real rows (SQLite + PostgreSQL): each event validated on its own (unknown kind/hook kept as 'other' with the raw value, open code, a malformed event counted in rejected and never failing the batch, an over-long execution_id nulled, only allowlisted fields kept and free text sanitized); event_id makes a resend a duplicate, per agent; reporting state never/reporting/stale with the DB fallback and teardown-only clear; first_report_at is first-write-wins, falls back to the oldest row, never after last_report_at, and is read before the counts; a future ts is stored at the receive time with the reported value kept; keyset paging and filters; count_by_execution / count_by_agent shapes filtered by the authenticated agent; the retention count and prune share the received_at predicate; rename and hard delete follow AGENT_REFS."
+    },
+    {
+      "file": "../src/frontend/tests/unit/guardrailEventsSection.mount.spec.js",
+      "feature": "trinity-enterprise#165",
+      "added": "2026-11-08",
+      "categories": [
+        "frontend",
+        "guardrails",
+        "unit"
+      ],
+      "description": "Settings > Guardrails > Recent events mounted over the real store: asks for the agent's last 24 h (since, limit 50); skeleton before the first read; 'No guardrail events in the last 24 h' only while reporting; never -> older-image copy; stale -> 'Not reporting since <time>' with the earlier rows kept; Codex/Gemini (page runtime or the report's) -> Claude-Code-only copy even while keepalives read reporting; a failed read is LoadFailed and a failed refresh keeps the rows with the stale banner; rows show kind, hook . code and a <time> with an absolute title; a late read for the previous agent never lands."
+    },
+    {
+      "file": "../src/frontend/tests/unit/guardrailStatsCard.mount.spec.js",
+      "feature": "trinity-enterprise#165",
+      "added": "2026-11-08",
+      "categories": [
+        "frontend",
+        "guardrails",
+        "unit"
+      ],
+      "description": "Operations > Health 'Guardrails (24 h)' card mounted over the real store: reads /api/ops/guardrail-stats?hours=24; total and per-kind badges; 'no events' only when some agent reports; with nobody reporting the total is a dash and the card says why; every never / stopped / no-hooks agent named with its own words and tallied; failed first read is LoadFailed, a failed refresh keeps the counts with the stale banner, a refresh never re-flashes the skeleton; an empty instance says so."
+    },
+    {
+      "file": "../src/frontend/tests/unit/guardrailEventsUtils.spec.js",
+      "feature": "trinity-enterprise#165",
+      "added": "2026-11-08",
+      "categories": [
+        "frontend",
+        "guardrails",
+        "unit"
+      ],
+      "description": "utils/guardrailEvents.js: the coverage rule's order (no hooks first, from the page runtime or the report's; then reporting / stale / never; unknown runtime = Claude Code), one distinct notice per non-reporting state, the stale copy names its time, kind labels and the largest-first breakdown."
+    },
+    {
+      "file": "unit/test_ent165_guardrail_stats.py",
+      "feature": "trinity-enterprise#165",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "unit",
+        "guardrails",
+        "security",
+        "api"
+      ],
+      "description": "GET /api/ops/guardrail-stats (S4) over the real router and a real DB: an admin sees every live agent, anyone else only the agents they own (not shared, not soft-deleted); a person only (agent/system/ops/connector/portal-delegate keys 403 even on an admin owner); per-kind and per-agent counts over the requested window, totals the sum of the rows, loudest first; every agent in scope listed with one coverage state (no_hooks from the container label or the forwarder's report, never, stale, reporting); hours bounded 1..2160 at the route and the service; the batch reporting read equals the per-agent one, DB fallback included."
+    },
+    {
+      "file": "unit/test_ent165_guardrail_event_route.py",
+      "feature": "trinity-enterprise#165",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "unit",
+        "guardrails",
+        "security",
+        "api"
+      ],
+      "description": "POST/GET /api/agents/{name}/guardrail-events over the real router and a real DB: only the agent's own key (or the system agent's own system key) is accepted, sibling/user/connector/none 403 with nothing stored; 413 past 500 events or 256 KiB; 422 only for a malformed envelope; a newer schema number is read event by event; 429 + Retry-After past the per-agent cap; GET is owner tier (owner, admin) with the uniform 404 for a non-owner, a shared person and a missing agent; named 422 on a bad query."
+    },
+    {
+      "file": "unit/test_ent165_guardrail_event_retention.py",
+      "feature": "trinity-enterprise#165",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "unit",
+        "retention"
+      ],
+      "description": "guardrail_event_retention_days: a registered retention window defaulting to 90 (not a community-floor key); the cleanup sweep guards on its literal key, prunes past 90 days by receive time with no setting row, deletes nothing when the guard refuses, is disabled by 0, and runs in the cycle."
+    },
+    {
+      "file": "unit/test_ent165_guardrail_event_contract.py",
+      "feature": "trinity-enterprise#165",
+      "added": "2026-11-08",
+      "categories": [
+        "backend",
+        "unit",
+        "guardrails",
+        "contract"
+      ],
+      "description": "The section-6 closed kind/hook sets: the backend copy equals the contract literal, and equals the hook library's EVENT_KINDS / EVENT_HOOKS once slice S2 adds them (skips loudly until then)."
+    },
+    {
+      "file": "unit/test_ent165_output_scanner.py",
+      "feature": "trinity-enterprise#165",
+      "added": "2026-11-08",
+      "categories": [
+        "agent",
+        "unit",
+        "security",
+        "docker"
+      ],
+      "description": "GUARD-004: the Bash output scanner (`docker/base-image/hooks/output-scanner.py`) run under its registered `env -i ... -I -S` invocation hides credentials from the model. A hit returns a shape-preserving `updatedToolOutput` (`[REDACTED:<shape>]` in stdout, stderr, `structuredContent`; every key and boolean kept; a failed Bash call's string response, as observed on CLI 2.1.281, rewritten as a Bash object since a string fails the schema); clean and benign output (pod/package/branch names, `xoxb-test` fixtures, `.env.example` placeholders, a FILES-001 `?sig=` link) prints nothing, with the precondition that the untightened sanitizer shapes damage that corpus. A forced exception, unloadable shapes, unreadable input or output over 8 MiB withholds every top-level text field and exits 0, never 2; 8 MiB scans in under 10 s. The persisted large-output file is redacted in place, left alone when clean, cut to the notice over its cap, and refused (whole result withheld) when outside a `tool-results` dir or reached by a symlink. A failing command (`PostToolUseFailure`) gets an `additionalContext` warning and a `credential_unredacted` event. The baseline shapes are pinned as a three-class partition of `SECRET_VALUE_PATTERNS` (named, tightened, excluded) with the composer guard's names; `AIza` is in both sanitizer copies (D9) without breaking the Google consent exemption; the scanner is registered on `PostToolUseFailure`; no managed file sets `allowManagedHooksOnly` (D11); `OUTPUT_SCANNER_CLI_VERIFIED` equals the Dockerfile pin; Write/Edit/MultiEdit/NotebookEdit content and Bash commands holding `[REDACTED:` are refused (`redaction_writeback_refused`); and the build smoke passes the shipped scanner and fails a log-only one."
+    },
+    {
+      "file": "unit/test_ent165_scanner_other_tools.py",
+      "feature": "trinity-enterprise#165",
+      "added": "2026-11-08",
+      "categories": [
+        "agent",
+        "unit",
+        "security",
+        "docker"
+      ],
+      "description": "GUARD-004 S5: the output scanner covers Read, Grep, WebFetch and owner MCP tools. Each case runs the hook only when the managed file's matchers select it, judged by a port of CLI 2.1.281's matcher rule (letters, digits, `_` and `|` = exact list; anything else = unanchored regex), so an unregistered tool reads as unscanned. Pins: the registration reaches Read/Grep/WebFetch/`mcp__*` (and an MCP error result on `PostToolUseFailure`) but not NotebookRead, ReadMcpResourceTool, Glob or Write; a Read file's `file.content` is redacted with the line counts kept, including the agent's own `.env`, `.mcp.json` and credentials file and a background Bash `tasks/*.output` file; a source file with fixtures and prefixes is byte-identical; binary payloads (Read image/pdf/parts `base64`, a notebook output's `image_data`, an MCP image's `source.data`) are never rewritten nor counted against the scan cap, with the precondition that the base64 fixture matches two shapes; Grep content, WebFetch `result` and MCP text blocks are redacted with numbers and images kept; an MCP error string stays a string; the platform `trinity` MCP server is not scanned on either event, by the same predicate as turn-tier-guard (parity-tested) while `trinity_`/`trinity__x` servers are; a withhold has each tool's shape (Read as a text read, Grep as content, WebFetch keeping its numbers, MCP keeping list or string); the write-back refusals steer to Edit on only the needed lines instead of dropping the value; Write/Edit to the agent's own credential files stays refused by the path rule; and the build smoke checks Read/MCP redaction, the platform exemption and the registration coverage."
     },
     {
       "file": "unit/test_ent1174_member_seat.py",

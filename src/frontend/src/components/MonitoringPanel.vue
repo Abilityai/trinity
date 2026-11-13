@@ -271,6 +271,12 @@
       </div>
     </div>
 
+    <!-- trinity-enterprise#165 S4: guardrail events across the fleet, last 24 h.
+         Below the health grid, so its bounded agent list never moves it. -->
+    <div class="mt-6">
+      <GuardrailStatsCard />
+    </div>
+
     <!-- Last updated -->
     <div v-if="monitoringStore.lastCheck" class="mt-4 text-center text-xs text-gray-400">
       Last updated: {{ formatTime(monitoringStore.lastCheck) }}
@@ -286,6 +292,8 @@ import { useAuthStore } from '../stores/auth'
 import { useAgentsStore } from '../stores/agents'
 import { agentNameTooltip } from '../utils/agentName'
 import BaseBadge from './base/BaseBadge.vue'
+import GuardrailStatsCard from './GuardrailStatsCard.vue'
+import { useGuardrailEventsStore } from '../stores/guardrailEvents'
 import {
   ArrowPathIcon,
   BellAlertIcon,
@@ -302,6 +310,7 @@ const router = useRouter()
 const monitoringStore = useMonitoringStore()
 const authStore = useAuthStore()
 const agentsStore = useAgentsStore()
+const guardrailEventsStore = useGuardrailEventsStore()
 
 // Admin status drives the per-action buttons (Check All, per-agent check)
 // and gates the fleet-wide alerts fetch. Read from the auth store getter
@@ -366,7 +375,10 @@ onUnmounted(() => {
 async function refreshAll() {
   await Promise.all([
     monitoringStore.fetchStatus(),
-    isAdmin.value ? monitoringStore.fetchAlerts() : Promise.resolve()
+    isAdmin.value ? monitoringStore.fetchAlerts() : Promise.resolve(),
+    // The card loads itself on mount; the panel's refresh keeps it current
+    // (in place — the store never re-flashes a loaded card).
+    guardrailEventsStore.fleetHasLoaded ? guardrailEventsStore.loadFleet() : Promise.resolve()
   ])
   refreshCountdown.value = 30
 }

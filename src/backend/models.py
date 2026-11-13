@@ -3300,6 +3300,83 @@ class HeartbeatPayload(BaseModel):
 
 
 # =============================================================================
+# Guardrail Event Models (routers/guardrail_events.py, trinity-enterprise#165)
+# =============================================================================
+
+
+class GuardrailEventBatch(BaseModel):
+    """The forwarder's envelope. Only the ENVELOPE is validated here: each event
+    is validated on its own by the service (one bad event never fails a batch),
+    so `events` is a plain list. Unknown top-level keys are ignored, and a newer
+    `schema` number is read event by event rather than refused (version skew).
+    """
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
+
+    schema_version: StrictInt = Field(alias="schema", ge=1)
+    runtime: Optional[str] = Field(default=None, max_length=64)
+    events: List[Any]
+    dropped: StrictInt = Field(default=0, ge=0, le=1_000_000_000)
+
+
+class GuardrailEventIngestResponse(BaseModel):
+    accepted: int
+    duplicates: int
+    rejected: int
+
+
+class GuardrailReportingState(BaseModel):
+    """`never` | `reporting` | `stale` — so "no events" is never mistaken for
+    "not reporting". `first_report_at` is the coverage start (ISO-8601 UTC,
+    `Z`): events before it were never reported, so history before it is not
+    "clean". Null exactly when `state` is `never`."""
+    state: str
+    last_report_at: Optional[str] = None
+    first_report_at: Optional[str] = None
+    runtime: Optional[str] = None
+    dropped_total: int = 0
+
+
+class GuardrailEventItem(BaseModel):
+    event_id: str
+    occurred_at: str
+    received_at: str
+    kind: str
+    hook: str
+    tool: Optional[str] = None
+    code: Optional[str] = None
+    execution_id: Optional[str] = None
+    details: Dict[str, Any] = Field(default_factory=dict)
+
+
+class GuardrailEventsPage(BaseModel):
+    events: List[GuardrailEventItem]
+    next_cursor: Optional[str] = None
+    reporting: GuardrailReportingState
+
+
+class GuardrailStatsAgent(BaseModel):
+    """One agent in the fleet read. `coverage` is `no_hooks` | `never` |
+    `stale` | `reporting`: an agent with no events is still listed, so silence
+    is visible."""
+    agent_name: str
+    runtime: Optional[str] = None
+    coverage: str
+    events: int
+    by_kind: Dict[str, int] = Field(default_factory=dict)
+    reporting: GuardrailReportingState
+
+
+class GuardrailStatsResponse(BaseModel):
+    """`GET /api/ops/guardrail-stats` (trinity-enterprise#165 S4)."""
+    hours: int
+    since: str
+    events: int
+    by_kind: Dict[str, int] = Field(default_factory=dict)
+    coverage: Dict[str, int] = Field(default_factory=dict)
+    agents: List[GuardrailStatsAgent]
+
+
+# =============================================================================
 # Audit Log Models (routers/audit_log.py)
 # =============================================================================
 

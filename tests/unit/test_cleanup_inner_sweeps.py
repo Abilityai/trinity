@@ -131,6 +131,11 @@ def _configure_db(db):
     # sum, so a bare MagicMock here raises on the first `> 0`.
     db.count_metric_points_candidates.return_value = 0
     db.prune_metric_points.return_value = 0
+    # trinity-enterprise#165 guardrail_events: same shape. `prune` returns 0 so
+    # the pinned `report.total` literal stays correct; the happy-path test
+    # asserts the prune is reached.
+    db.count_guardrail_event_candidates.return_value = 2
+    db.prune_guardrail_events.return_value = 0
 
 
 def _run(svc):
@@ -169,6 +174,7 @@ def test_happy_path_runs_all_sweeps_and_populates_report():
     # unconfigured MagicMock until this PR, so the guard aborted before the
     # prune and this "runs all sweeps" test quietly did not).
     db.prune_agent_reminders.assert_called_once()
+    db.prune_guardrail_events.assert_called_once()  # trinity-enterprise#165
     assert report.total == 8 + 9 + 1 + 2 + 3 + 4 + 2 + 5 + 6 + 7 + 1 + 2 + 11 + 3 + 8 + 12  # +12 #1449
     # retention reclaimed rows ⇒ WAL checkpoint fires
     wal.assert_called_once()

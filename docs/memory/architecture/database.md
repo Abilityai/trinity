@@ -144,6 +144,8 @@ Access-control flow (#311): `ChannelAdapter.resolve_verified_email()` maps nativ
 
 **channel_client_blocks** (trinity-enterprise#21 — an owner's per-agent block on one channel client): `id`, `agent_name`, `channel`, `client_id` (the channel-native sender id the router sees), `blocked_at`, `blocked_by_id`, `blocked_by_email`, `reason`; `UNIQUE(agent_name, channel, client_id)`. Read by `message_router` before every other gate step; CASCADE in the agent-cleanup registry.
 
+**guardrail_events** (trinity-enterprise#165, GUARD-005 — one row per guardrail event an agent's own key reported): `id`, `agent_name`, `event_id`, `occurred_at` (agent-reported), `received_at` (server), `kind`, `hook`, `tool`, `code`, `execution_id` (attribution only, **no FK** — execution rows have their own retention), `details` (JSON object of the allowlisted fields); `UNIQUE(agent_name, event_id)` (idempotent resend). Indexes `(agent_name, occurred_at)` (the read), `(execution_id)` (the counts), `(received_at)` (the sweep — keyed on the server clock so an agent-reported far-future time cannot make a row immortal). Dual-track: SQLite `guardrail_events_table` + Alembic `0124_guardrail_events`. CASCADE in the agent-cleanup registry; `guardrail_event_retention_days` (default 90).
+
 **mcp_api_keys:**
 ```sql
 CREATE TABLE mcp_api_keys (

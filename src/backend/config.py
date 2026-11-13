@@ -751,6 +751,10 @@ RETENTION_OPS_KEYS = (
     # remembered). Deliberately NOT a community-floor key: the 5-day floor
     # would gut a feature whose whole point is a year of history.
     "metrics_retention_days",
+    # trinity-enterprise#165 (ruling D10): guardrail events. A row sweep with
+    # its own `_guard_allows` site. Not a community-floor key: trinity#4281
+    # joins an event to its execution row, and both default to 90 days.
+    "guardrail_event_retention_days",
 )
 
 # The RETENTION_OPS_KEYS members whose prune is NOT a #1644 row sweep (#2216).
@@ -853,6 +857,12 @@ OPS_SETTINGS_DEFAULTS = {
     # the question a business metric exists to answer. "0" disables the sweep
     # (keep forever), as on every row window above. Wide/safe per #1638.
     "metrics_retention_days": "365",
+    # trinity-enterprise#165 (ruling D10): how long a guardrail event is kept,
+    # counted from when the backend received it. 90 matches agent_reports and
+    # execution_row_retention_days, so trinity#4281's join to the execution row
+    # lasts as long as the event. "0" disables the sweep. Wide/safe per #1638:
+    # never lower it, it is read at prune time for every install with no row.
+    "guardrail_event_retention_days": "90",
     # trinity-enterprise#478: per-agent per-UTC-day WRITE budget for recorded
     # points. "0" is unlimited, following `ops_cost_limit_daily_usd` and the
     # `max_agents_*` convention — an operator must be able to lift a cap
@@ -920,6 +930,7 @@ OPS_SETTINGS_VALIDATION = {
     # trinity-enterprise#478. The window follows the row convention (`0`
     # disables). The cap's `0` means UNLIMITED, so its bounds are its own.
     "metrics_retention_days": ("int", 0, _DAYS_MAX),
+    "guardrail_event_retention_days": ("int", 0, _DAYS_MAX),  # trinity-enterprise#165
     "metrics_daily_point_cap": ("int", 0, 10_000_000),
     # #2806: the floor is 1, not 0 — no value may refuse every agent call.
     "inter_agent_max_chain_depth": ("int", 1, 32),

@@ -311,6 +311,10 @@ AGENT_REFS: List[AgentRef] = [
     # clients: re-keyed on rename, gone on purge (a new same-name agent must
     # not inherit another owner's blocklist).
     AgentRef("channel_client_blocks",        "agent_name",        Policy.CASCADE),
+    # trinity-enterprise#165 — the agent's guardrail events: re-keyed on rename,
+    # gone on purge (a recycled name must not inherit another agent's refusals).
+    # The retention sweep bounds them on a live agent.
+    AgentRef("guardrail_events",             "agent_name",        Policy.CASCADE),
 
     # --- MCP keys (scope='agent' only — user/system keys are not per-agent)
     AgentRef("mcp_api_keys",                 "agent_name",        Policy.CASCADE,

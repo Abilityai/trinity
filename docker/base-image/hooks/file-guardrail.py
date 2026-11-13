@@ -3,7 +3,8 @@
 
 Denies writes to credential files, SSH/AWS/cloud config, and Trinity's own
 settings directories. Per-agent extra_path_deny adds literal substring rules.
-Fail-closed.
+Also refuses new content holding the output scanner's `[REDACTED:` placeholder
+(trinity-enterprise#165). Fail-closed.
 """
 import fnmatch
 import os
@@ -50,6 +51,25 @@ def _matches_glob(path: str, patterns: list, allow: list = ()) -> str:
     return ""
 
 
+# The output scanner's placeholder (output-scanner.py PLACEHOLDER). Written
+# back, it would replace a real credential in the file (trinity-enterprise#165).
+REDACTION_MARK = "[REDACTED:"
+WRITEBACK_REFUSED = (
+    "this holds `[REDACTED:`, the placeholder Trinity puts where it hid a credential from you; "
+    "writing it would replace the real value. To change a file that holds one, use Edit on only the lines "
+    "you need, keeping the hidden value's line out of old_string and new_string; do not rewrite the whole "
+    "file, which would lose the value. If the value itself must change, ask the owner to set it")
+
+
+def _new_content(tool_input: dict) -> list:
+    """The text a Write/Edit/MultiEdit/NotebookEdit call would put in the file."""
+    parts = [tool_input.get(k) for k in ("content", "new_string", "new_source")]
+    edits = tool_input.get("edits")
+    if isinstance(edits, list):
+        parts += [e.get("new_string") for e in edits if isinstance(e, dict)]
+    return [p for p in parts if isinstance(p, str)]
+
+
 # trinity-enterprise#1158: a `.env` denial names the way forward, the same
 # pointer as the protected-paths sentence in platform_prompt_service.
 _ENV_PATTERNS = (".env", ".env.*")
@@ -82,6 +102,8 @@ def main() -> None:
             tool=tool_name,
             path=path,
             pattern=match,
+            rule=match,
+            code="protected_path",
         )
 
     for literal in extras:
@@ -91,7 +113,11 @@ def main() -> None:
                 tool=tool_name,
                 path=path,
                 rule=literal[:80],
+                code="path_agent_rule",
             )
+
+    if any(REDACTION_MARK in part for part in _new_content(tool_input)):
+        deny(WRITEBACK_REFUSED, tool=tool_name, path=path, code="redaction_writeback_refused")
 
     allow()
 

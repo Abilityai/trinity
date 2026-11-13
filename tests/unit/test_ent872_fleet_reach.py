@@ -795,6 +795,10 @@ _ALLOW = {
         "decides about the PERSON row being mentioned (looked up by email), never a principal's fleet",
     ("services/ws_identity_service.py", "resolve_ws_identity"):
         "a /ws ticket subject is a person (the ticket route is require_person)",
+    ("services/guardrail_event_service.py", "fleet_agent_names"):
+        "trinity-enterprise#165: its one caller is GET /api/ops/guardrail-stats, which is "
+        "require_person and decides the fleet-wide roster with dependencies.is_fleet_admin; "
+        "returns guardrail counts and coverage per agent, no event bodies",
     ("routers/fleet.py", "fleet_sync_audit"):
         "trinity-enterprise#706 D12: agent fleet sweeps (corbin) see the owner's accessible agents; returns git/health state, no task text or emails",
     ("routers/monitoring.py", "get_fleet_status"):
