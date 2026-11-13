@@ -191,12 +191,19 @@ def test_a_reconnect_attempt_never_blocks_the_caller(docker_down, monkeypatch):
     async def main():
         return await asyncio.gather(caller(), tick())
 
-    got, _ = asyncio.run(main())
-    assert got is None
+    try:
+        got, _ = asyncio.run(main())
+        assert got is None
 
-    with ds._docker_connect_lock:  # the attempt releases it when done
-        pass
-    assert state["calls"] == 1, "no connect attempt was made"
-    assert seen["loop_ran_meanwhile"] is True
-    assert seen["thread"] is not seen["caller"]
-    assert ds.get_docker_client() is state["client"]
+        with ds._docker_connect_lock:  # the attempt releases it when done
+            pass
+        assert state["calls"] == 1, "no connect attempt was made"
+        assert seen["loop_ran_meanwhile"] is True
+        assert seen["thread"] is not seen["caller"]
+        assert ds.get_docker_client() is state["client"]
+    finally:
+        # Never leave a worker behind to write the module state after teardown.
+        ticked.set()
+        for t in threading.enumerate():
+            if t.name == "docker-reconnect":
+                t.join(timeout=10)
