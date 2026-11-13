@@ -9119,6 +9119,16 @@
         "security"
       ],
       "description": "ent#1216: a caller_wake turn carries the delegation's person when that person is owner tier on the delegator, so the agent's key keeps its execution reads while the wake runs. Real /task admission -> real maybe_wake_caller -> real ledger and acting_turn_user_id / viewer_row_scope on a real DB. A shared person's, a visitor's, a deleted user's and a cannot-open person's wake carry nobody, as before; the audit names the standing; auto-memory follows the owner rule."
+    },
+    {
+      "file": "unit/test_4541_proxy_listener_wait.py",
+      "feature": "#4541",
+      "added": "2026-11-13",
+      "categories": [
+        "unit",
+        "deploy"
+      ],
+      "description": "A hosted upgrade waits up to 90 s for the web container's PROXY-protocol listener before re-rendering Caddy: provision_wait_for_proxy_listener run with probe, sleep and date stubbed (retry count, 90 s default), and the real start.sh --hosted run (ent#873 harness) with the listener published from the 10th check ends on the protected listener in one run; never published falls back to 8081 with the warning after the full wait."
     }
   ]
 }
