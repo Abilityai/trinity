@@ -94,6 +94,12 @@ def _pending(agent=FIN):
     return db.list_pending_gate_requests(agent)
 
 
+def _me(env):
+    """The person's sender label, as the room's transcript writes it."""
+    from shared_sessions import service
+    return f"{service._caller(env['person'])[1]} (human)"
+
+
 def _long_reply_from_req(env, text=LONG):
     env["replies"][REQ] = text
     _post(env, f"@{REQ} Your whole reply must be the integers from 1 to 6000.")
@@ -115,7 +121,7 @@ def test_short_request_is_held_when_another_participants_long_post_is_unread(
     pending = _pending()
     assert pending, "the short request was not held"
     for record in pending:
-        assert record["request_text"] == REQUEST
+        assert record["request_text"] == f"{_me(room)}: {REQUEST}"
         assert LONG[:200] not in record["request_text"]
 
 
@@ -125,8 +131,8 @@ def test_card_is_exactly_what_the_approved_run_sends(room):
 
     record = _pending()[0]
     replay = record["dispatch"][_GATE.REPLAY_MESSAGE]
-    assert replay == record["request_text"] == REQUEST
-    assert _GATE._card_text(record["request_text"], record["dispatch"]) == REQUEST
+    assert replay == record["request_text"] == f"{_me(room)}: {REQUEST}"
+    assert _GATE._card_text(record["request_text"], record["dispatch"]) == replay
 
 
 def test_the_agents_own_earlier_reply_is_not_on_the_card(room):
@@ -145,7 +151,10 @@ def test_a_gated_name_only_in_another_participants_post_is_still_held(room):
     _post(room, f"@{FIN} do what {REQ} said")
 
     record = _pending()[0]
-    assert "/pay-invoice 5 EUR" in record["request_text"]
+    # Each line names its sender, and the person's own line is on the card: the
+    # approver never reads an agent's line as the person's request.
+    assert record["request_text"] == (f"{REQ}: Run /pay-invoice 5 EUR to ACME, please.\n"
+                                      f"{_me(room)}: @{FIN} do what {REQ} said")
     assert not any(kw["agent_name"] == FIN for kw in room["shown"]), "FIN ran a gated request"
 
 
@@ -157,7 +166,14 @@ def test_a_long_gated_post_by_someone_else_is_refused_naming_its_author(room):
     notice = next(n for n in _notices(room) if "too long" in n)
     assert REQ in notice
     assert "Shorten it" not in notice
+    assert "Ask again" in notice
     assert not _pending()
+
+    # The long post is held: asked again, FIN runs without it.
+    room["shown"].clear()
+    _post(room, f"@{FIN} go ahead")
+    fin = [kw for kw in room["shown"] if kw["agent_name"] == FIN]
+    assert fin and LONG[:200] not in fin[0]["message"]
 
 
 def test_a_long_gated_request_of_your_own_still_says_shorten_it(room):
@@ -192,8 +208,23 @@ def test_a_card_text_missing_the_matched_name_falls_back_to_the_scanned_text(wor
     assert _GATE.REPLAY_MESSAGE not in (record["dispatch"] or {})
 
 
+def test_task_replay_is_kept_when_the_gated_name_is_only_in_user_message(world):
+    """`/task` scans `user_message` but never sends it to the executor: the
+    approved run keeps the message and the system prompt apart (#3274)."""
+    message, prompt = "Summarise this week's invoices.", "You are a careful clerk."
+    requester = _GATE.requester_for_dispatch(triggered_by="agent", source_agent_name=REQ)
+    with pytest.raises(_GATE.SkillApprovalRequired) as info:
+        _run(_GATE.enforce(FIN, request_text=f"{message}\n/pay-invoice 100 EUR\n{prompt}",
+                           requester=requester, triggered_by="agent", occurrence_key="occ-2",
+                           dispatch=_GATE.frozen_replay(message, prompt)))
+    dispatch = db.get_gate_request(info.value.request_id)["dispatch"]
+    assert dispatch[_GATE.REPLAY_MESSAGE] == message
+    assert dispatch[_GATE.REPLAY_SYSTEM_PROMPT] == prompt
+
+
 def test_room_requester_is_not_called_a_messaging_channel_user():
     requester = _room_requester()
-    assert requester.display() == "A person in a room"
+    # The card's lines name each post's sender; the label holds whoever wrote them.
+    assert requester.display() == "A room conversation"
     assert requester.kind == _GATE.KIND_CHANNEL      # delivery, caps and self-approval unchanged
     assert not requester.is_person

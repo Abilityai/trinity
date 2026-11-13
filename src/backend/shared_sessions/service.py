@@ -2061,14 +2061,16 @@ def _gated_posts(shown: list[dict], gates) -> list[dict]:
             if m.get("sender_kind") != "system" and find_gated_invocations(m.get("content"), gates)]
 
 
-def _room_gate_card(agent_name: str, shown: list[dict], ask_request_text: str):
-    """trinity#4505: (the gated posts, the card text) for this wake — the gated
-    posts plus the ask answer. The card is what the approver reads, what is
-    size-checked and what Approve runs, so another participant's long post (or
-    this agent's own reply) never makes a short request refusable. The scan
-    still reads the whole slice. ([], None) when the map is unreadable or
-    empty, or nothing names a gated skill: the gate then cards the scanned
-    text, as before."""
+def _room_gate_card(agent_name: str, shown: list[dict], ask_request_text: str,
+                    requester: tuple[str, str]):
+    """trinity#4505: (the card's posts, the card text) for this wake — the gated
+    posts and the requester's latest post, each line naming its sender as the
+    transcript does, plus the ask answer. The card is what the approver reads,
+    what is size-checked and what Approve runs, so another participant's long
+    post (or this agent's own reply) never makes a short request refusable, and
+    an agent's gated line never reads as the person's. The scan still reads the
+    whole slice. ([], None) when the map is unreadable or empty, or nothing
+    names a gated skill: the gate then cards the scanned text, as before."""
     from services import skill_gate_service
 
     try:
@@ -2077,16 +2079,20 @@ def _room_gate_card(agent_name: str, shown: list[dict], ask_request_text: str):
         return [], None
     if not gates:
         return [], None
-    posts = _gated_posts(shown, gates)
-    card = "\n".join([m.get("content") or "" for m in posts]
-                      + ([ask_request_text] if ask_request_text else []))
-    return posts, card or None
+    gated = _gated_posts(shown, gates)
+    if not gated:
+        return [], None
+    mine = [m for m in shown if (m.get("sender_kind"), m.get("sender_identity")) == requester]
+    posts = [m for m in shown if m in gated or (mine and m is mine[-1])]
+    card = "\n".join([_format_delta(posts)] + ([ask_request_text] if ask_request_text else []))
+    return posts, card
 
 
 def _too_long_notice(posts: list[dict], requester_identity: str, exc: SkillGateError) -> str:
     """trinity#4505 AC3: a too-long refusal names text the requester can change.
-    When a gated post on the card is someone else's, say whose; only they can
-    shorten it."""
+    When a gated post on the card is someone else's, say whose. Every gated post
+    on the card is recorded as held (`_record_gate_hold`), so asking again
+    leaves it out."""
     others = sorted({m.get("sender_identity") for m in posts
                      if m.get("sender_identity") and m.get("sender_identity") != requester_identity})
     message = getattr(exc, "message", None) or str(exc)
@@ -2095,7 +2101,7 @@ def _too_long_notice(posts: list[dict], requester_identity: str, exc: SkillGateE
     from services.skill_gate_service import CARD_INPUT_MAX_BYTES
     return (f"This request is too long for an approver to read in full (over "
             f"{CARD_INPUT_MAX_BYTES} bytes). It includes a post by {', '.join(others)} "
-            f"that names a skill needing approval. Only its author can shorten that post.")
+            f"that names a skill needing approval; that post is not passed on again. Ask again.")
 
 
 def _record_gate_hold(room_id: str, agent_name: str, shown: list[dict],
@@ -2227,7 +2233,8 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
 
     try:
         # Inside the `try`: the `finally` below clears the working state.
-        gated_posts, card_text = _room_gate_card(agent_name, shown, ask_request_text)
+        gated_posts, card_text = _room_gate_card(agent_name, shown, ask_request_text,
+                                                 _caller(current_user))
         # #3114: on a pull pilot the turn is queued under this room's key and
         # awaited here.
         result = await dispatch_and_await_terminal(
