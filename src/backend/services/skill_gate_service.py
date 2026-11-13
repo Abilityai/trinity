@@ -38,7 +38,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from config import PORTAL_SOURCE_CHANNEL
+from config import PORTAL_SOURCE_CHANNEL, ROOM_SOURCE_CHANNEL
 from database import db
 from db.skill_gates import ORIGIN_CLEARED
 from models import TaskExecutionStatus
@@ -234,6 +234,16 @@ async def enforce(
             f"{_skill_list(names)} on {agent_name} needs approval, which "
             "can't be requested from here. Ask in chat instead.", skills=names)
 
+    # trinity#4505: a card text narrower than the scan (a room's gated posts)
+    # must still name every skill the request matched — else the approver reads
+    # a request that names none, and Approve runs it. The gate map can change
+    # between the producer's read and this one. Fall back to the scanned text.
+    if dispatch and REPLAY_MESSAGE in dispatch:
+        replayed = "\n".join(t for t in (dispatch[REPLAY_MESSAGE],
+                                          dispatch.get(REPLAY_SYSTEM_PROMPT)) if t)
+        if set(names) - set(beside) - set(find_gated_invocations(replayed, gates)):
+            dispatch = {k: v for k, v in dispatch.items()
+                        if k not in (REPLAY_MESSAGE, REPLAY_SYSTEM_PROMPT)}
     clean_text = _card_text(request_text, dispatch)
     # The context lines go on the card only when a skill was named nowhere else
     # — otherwise the approver would read a request that names no gated skill.
@@ -957,8 +967,11 @@ def requester_for_dispatch(*, triggered_by: str, source_user_email: Optional[str
                          email=source_user_email)
     if triggered_by in _CHANNEL_TRIGGERS or source_channel:
         who = source_user_email or source_channel_chat_id or "unknown"
+        # trinity#4505: a room's poster is a person, not a channel user. Generic:
+        # the email is the room client's, not always the gated post's author.
         return Requester(kind=KIND_CHANNEL, key=f"channel:{source_channel or triggered_by}:{who}",
-                         email=source_user_email)
+                         email=source_user_email,
+                         label="A person in a room" if source_channel == ROOM_SOURCE_CHANNEL else None)
     if triggered_by == "public":
         return Requester(kind=KIND_PUBLIC, key=f"public:{(source_user_email or 'anonymous').casefold()}",
                          email=source_user_email)
