@@ -450,7 +450,7 @@ describe("ent#1232 — task shape: todo, subtasks, blocked-by, tasks for people"
     "list_projects", "get_project", "list_project_tasks", "create_project_task", "update_project_task",
     "add_project_task_note", "read_project_context", "get_project_log", "add_project_log_entry",
     "link_to_project", "get_steward_digest", "create_project", "import_project",
-    "propose_project_changes", "set_project_health",
+    "propose_project_changes", "set_project_health", "start_project_task",
   ] as const;
 
   it("every project tool description stays under 2048 characters", () => {
@@ -616,6 +616,65 @@ describe("ent#1232 — task shape: todo, subtasks, blocked-by, tasks for people"
     for (const word of ["view", "next", "waiting_for", "unblocked", "subtasks", "creator", "assigned_to"]) {
       assert.ok(list.includes(word), `list_project_tasks: missing ${word}`);
     }
+  });
+});
+
+describe("ent#1235 — start_project_task", () => {
+  const session = { session: { executionId: "exec-7" } } as never;
+  it("sends the agent with the turn and a deterministic Idempotency-Key", async () => {
+    const calls: unknown[][] = [];
+    const tools = makeTools({
+      startProjectTask: (async (pid: string, tid: string, agent: string, turn?: string, key?: string) => {
+        calls.push([pid, tid, agent, turn, key]);
+        return { state: "proposed", run: { id: "R-1", state: "proposed" } };
+      }) as never,
+    });
+    const args = { project_id: PROJECT.id, task_id: "T-003", agent: "a-worker" };
+    const out = JSON.parse(await tools.start_project_task.execute(args, session));
+    assert.equal(out.success, true);
+    assert.equal(out.state, "proposed");
+    assert.equal(out.run.id, "R-1");
+    await tools.start_project_task.execute(args, session);
+    assert.deepEqual(calls[0].slice(0, 4), [PROJECT.id, "T-003", "a-worker", "exec-7"]);
+    assert.ok(String(calls[0][4]).startsWith("mcp:"));
+    assert.equal(calls[0][4], calls[1][4], "a retried call carries the same key");
+    await tools.start_project_task.execute({ ...args, task_id: "T-004" }, session);
+    assert.notEqual(calls[2][4], calls[0][4], "another task is another key");
+  });
+
+  it("a refusal comes back structured with its code", async () => {
+    const tools = makeTools({
+      startProjectTask: (async () => {
+        throw apiError(409, { code: "mode_track", message: "In Track a person starts each task's run." });
+      }) as never,
+    });
+    const out = JSON.parse(await tools.start_project_task.execute(
+      { project_id: PROJECT.id, task_id: "T-003", agent: "a-worker" }, session));
+    assert.equal(out.success, false);
+    assert.equal(out.code, "mode_track");
+    assert.match(out.error, /In Track/);
+  });
+
+  it("the client posts to the run route with both headers", async () => {
+    const client = new RealClient("http://backend");
+    const seen: unknown[][] = [];
+    (client as unknown as { request: (...a: unknown[]) => Promise<unknown> }).request = async (...a: unknown[]) => {
+      seen.push(a);
+      return { state: "started" };
+    };
+    await client.startProjectTask("prj_1", "T-003", "a-worker", "exec-9", "mcp:k");
+    assert.deepEqual(seen[0], ["POST", "/api/enterprise/projects/agent/projects/prj_1/tasks/T-003/runs",
+      { agent: "a-worker" }, false, undefined, { "X-Trinity-Execution-Id": "exec-9", "Idempotency-Key": "mcp:k" }]);
+  });
+
+  it("names the modes and the refusals in its description", () => {
+    const d = (makeTools({} as Partial<TrinityClient>) as Record<string, { description: string }>)
+      .start_project_task.description;
+    for (const word of ["Track", "Propose", "Auto", "mode_track", "project_stopped", "task_is_for_a_person",
+                        "only_the_steward_starts", "auto_origin_unavailable", "context.run_id"]) {
+      assert.ok(d.includes(word), word);
+    }
+    assert.ok(d.length <= 2048, `start_project_task is ${d.length} characters`);
   });
 });
 
