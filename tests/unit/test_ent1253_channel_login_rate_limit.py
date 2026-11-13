@@ -2,7 +2,8 @@
 
 Telegram ``/login <email>``, WhatsApp ``/login <email>`` and the Slack
 ``require_email`` email step each emailed a code on every request. They are now
-capped per address (3 / 10 min, shared with web + MCP login), per sender
+capped per address (3 / 10 min, one budget shared with web + MCP login, which
+charge it before their whitelist / known-address check), per sender
 (5 / 10 min) and per bot / binding / workspace (20 / 10 min). Over the limit the
 bot says so and sends nothing. The check runs before the ent#849 membership
 branch, so the reply is the same for members and outsiders.
@@ -79,13 +80,110 @@ class TestHelper:
 
     def test_web_code_rows_do_not_change_the_reply(self):
         """Web login writes code rows only for whitelisted addresses. A channel
-        cap that read them would tell an attacker which addresses are whitelisted."""
+        cap that read them would tell an attacker which addresses are whitelisted.
+        Patched on the shared ``db`` object, so a module-level ``from database
+        import db`` is caught as well as an import inside the function."""
+        import database
         from services import channel_login_limit as m
-        db = MagicMock()
-        db.count_recent_code_requests.return_value = 3
-        with patch("database.db", db):
+        with patch.object(database.db, "count_recent_code_requests",
+                          side_effect=AssertionError("code rows read")) as count:
             assert m.login_code_request_allowed("telegram", "bot1", "u1", "whitelisted@x.com")
-        db.count_recent_code_requests.assert_not_called()
+        count.assert_not_called()
+
+    def test_bot_cap_refusal_spends_no_sender_or_address_budget(self):
+        from services import channel_login_limit as m
+        for i in range(20):
+            assert m.login_code_request_allowed("telegram", "bot1", f"u{i}", f"a{i}@x.com")
+        for _ in range(5):
+            assert not m.login_code_request_allowed("telegram", "bot1", "s", "v@x.com")
+        # Sender "s" still has 5, address v@x.com still has 3, on another bot.
+        got = [m.login_code_request_allowed("telegram", "bot2", "s", e)
+               for e in ["v@x.com", "v@x.com", "v@x.com", "b@x.com", "c@x.com"]]
+        assert got == [True] * 5
+        assert not m.login_code_request_allowed("telegram", "bot2", "s", "d@x.com")
+
+    def test_address_refusal_spends_no_sender_budget(self):
+        from services import channel_login_limit as m
+        for i in range(3):
+            m.login_code_request_allowed("telegram", "bot1", f"u{i}", "v@x.com")
+        for _ in range(5):
+            assert not m.login_code_request_allowed("telegram", "bot1", "s", "v@x.com")
+        assert [m.login_code_request_allowed("telegram", "bot1", "s", f"a{i}@x.com")
+                for i in range(6)] == [True] * 5 + [False]
+
+
+# ------------------------------------------- one address budget with web + MCP
+
+class _FakeRequest:
+    def __init__(self, body):
+        self._body = body
+
+    async def json(self):
+        return self._body
+
+
+def _web_request(email, *, whitelisted, monkeypatch):
+    """Drive the web request handler once; return the codes it dispatched."""
+    import routers.auth as auth_mod
+    import services.email_service as email_service_mod
+
+    sent = []
+
+    class _FakeEmailService:
+        async def send_verification_code(self, target, code, context_label=None):
+            sent.append(target)
+            return True
+
+    monkeypatch.setattr(auth_mod, "is_setup_completed", lambda: True)
+    monkeypatch.setattr(auth_mod.db, "get_setting_value", lambda *a, **k: "true")
+    monkeypatch.setattr(auth_mod.db, "is_email_whitelisted", lambda e: whitelisted)
+    monkeypatch.setattr(auth_mod.db, "count_recent_code_requests", lambda e, minutes=10: 0)
+    monkeypatch.setattr(auth_mod.db, "create_login_code",
+                        lambda e, expiry_minutes=10: {"code": "123456"})
+    monkeypatch.setattr(email_service_mod, "EmailService", _FakeEmailService)
+
+    async def _go():
+        await auth_mod.request_email_login_code(_FakeRequest({"email": email}))
+        await asyncio.sleep(0.05)
+
+    asyncio.run(_go())
+    return sent
+
+
+class TestSharedAddressBudget:
+    def test_web_requests_for_unlisted_address_use_the_channel_budget(self, monkeypatch):
+        """Charged before the whitelist check, so it counts every address alike."""
+        from services import channel_login_limit as m
+        for _ in range(3):
+            _web_request("V@x.com", whitelisted=False, monkeypatch=monkeypatch)
+        assert not m.login_code_request_allowed("telegram", "bot1", "u1", "v@x.com")
+
+    def test_channel_requests_use_the_web_budget(self, monkeypatch):
+        from services import channel_login_limit as m
+        for i in range(3):
+            assert m.login_code_request_allowed("slack", "T1", f"T1:U{i}", "v@x.com")
+        assert _web_request("v@x.com", whitelisted=True, monkeypatch=monkeypatch) == []
+
+    def test_mcp_requests_for_unknown_address_use_the_channel_budget(self):
+        from services import channel_login_limit as m
+        from services import mcp_auth_service as svc
+        db = MagicMock()
+        db.count_recent_code_requests.return_value = 0
+        with patch.object(svc, "db", db), patch.object(svc, "_email_is_known", return_value=False):
+            for _ in range(3):
+                assert svc._resolve_and_create_code("v@x.com", "s1") is None
+        assert not m.login_code_request_allowed("telegram", "bot1", "u1", "v@x.com")
+
+    def test_mcp_over_budget_mints_nothing(self):
+        from services import channel_login_limit as m
+        from services import mcp_auth_service as svc
+        for i in range(3):
+            m.login_code_request_allowed("telegram", "bot1", f"u{i}", "v@x.com")
+        db = MagicMock()
+        db.count_recent_code_requests.return_value = 0
+        with patch.object(svc, "db", db), patch.object(svc, "_email_is_known", return_value=True):
+            assert svc._resolve_and_create_code("v@x.com", "s1") is None
+        db.create_login_code.assert_not_called()
 
 
 # ----------------------------------------------------- Telegram / WhatsApp
@@ -221,3 +319,22 @@ class TestSlack:
         assert emailed == ["v@example.com"] * 3
         assert "Too many" in sent[3]
         assert "Too many" not in sent[2]
+
+
+# ------------------------------------------------- rate_limiter fallback
+
+def test_inprocess_fallback_is_bounded(monkeypatch):
+    """Channel login keys on user input, so the fallback must not grow without bound."""
+    from services import rate_limiter
+    monkeypatch.setattr(rate_limiter, "_INPROCESS_MAX_KEYS", 3)
+    for i in range(5):
+        rate_limiter.check(f"k{i}", 1, 600)
+    assert list(rate_limiter._inprocess_buckets) == ["k2", "k3", "k4"]
+
+
+def test_refund_returns_the_hit():
+    from services import rate_limiter
+    r = rate_limiter.check("k", 1, 600)
+    assert not rate_limiter.check("k", 1, 600).allowed
+    rate_limiter.refund("k", r)
+    assert rate_limiter.check("k", 1, 600).allowed

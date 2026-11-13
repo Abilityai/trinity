@@ -6,11 +6,11 @@ asks ``login_code_request_allowed``. Three caps, each over 10 minutes:
 
 * per sender (5): ``{channel}:{sender_id}``, not the adapter's message rate key,
   which in Telegram is per group and per bot.
-* per address (3): shared by all channels. Telegram/WhatsApp codes are rows
-  in ``email_login_codes``, so they also count against the web login's cap.
-  The reverse is deliberately NOT read here: the web login writes rows only
-  for whitelisted addresses, so a channel reply that depended on that count
-  would tell an attacker which addresses are whitelisted.
+* per address (3): one budget shared by the channels, the web login and MCP
+  inline auth (``address_allowed``). Web and MCP charge it BEFORE their
+  whitelist / known-address check, so it counts every address alike and its
+  refusal says nothing about membership; the web reply is uniform anyway and
+  the MCP send runs after the response.
 * per bot / WhatsApp binding / Slack workspace (20): new Telegram/WhatsApp
   accounts cost nothing, so the sender cap alone leaves volume unbounded.
 
@@ -20,9 +20,20 @@ the web; outsiders while the ent#849 policy refuses members), and a cap derived
 from them leaks which callers those are. Callers run this BEFORE the ent#849
 membership branch for the same reason.
 
-Order: sender, then address, then bot. A request refused by an earlier cap is
-not charged to a later one, so a sender over its cap cannot burn a victim's
-address budget, and requests for a flooded address do not use up the bot's.
+Order: sender, then address, then bot. A refused request spends nothing: the
+caps it passed before the refusing one are refunded. So a sender over its cap
+cannot burn a victim's address budget, and requests refused by a flooded bot
+do not use up the sender's or the address's.
+
+Accepted risks:
+* Named-victim lockout: any per-address cap lets one sender (within its own
+  cap) request codes for ``victim@corp.com`` 3 times per 10 minutes and keep
+  that address from getting a code on every channel, the web login and MCP.
+  Slack had no per-address cap before ent#1253, so this is new there.
+* With Redis down the in-process fallback is per worker, so caps multiply by
+  the worker count.
+* Plus-addressing gets around the address cap; the sender and bot caps hold.
+* 4 throwaway accounts can block ``/login`` on one bot for 10 minutes.
 """
 import hashlib
 import logging
@@ -44,22 +55,32 @@ def _sender_tag(sender_id: str) -> str:
     return hashlib.sha256(sender_id.encode()).hexdigest()[:12]
 
 
+def _address_key(email: str) -> str:
+    return f"login_code_email:{(email or '').strip().lower()}"
+
+
+def address_allowed(email: str) -> bool:
+    """Charge one request to the shared per-address budget (web and MCP login)."""
+    return rate_limiter.check(_address_key(email), PER_ADDRESS, WINDOW_SECONDS).allowed
+
+
 def login_code_request_allowed(channel: str, bot_key: str, sender_id: str, email: str) -> bool:
-    """Record one code request and return False if any cap is exceeded."""
+    """Record one code request and return False if any cap is exceeded.
+    A refused request is charged to no cap."""
     email = (email or "").strip().lower()
-
-    if not rate_limiter.check(f"channel_login_sender:{channel}:{sender_id}",
-                              PER_SENDER, WINDOW_SECONDS).allowed:
-        logger.warning("[ent#1253] %s login code suppressed: sender rate limit (sender=%s)",
-                       channel, _sender_tag(sender_id))
-        return False
-
-    if not rate_limiter.check(f"channel_login_email:{email}", PER_ADDRESS, WINDOW_SECONDS).allowed:
-        logger.warning("[ent#1253] %s login code suppressed: rate limit for %r", channel, email)
-        return False
-
-    if not rate_limiter.check(f"channel_login_bot:{channel}:{bot_key}", PER_BOT, WINDOW_SECONDS).allowed:
-        logger.warning("[ent#1253] %s login code suppressed: bot rate limit (%r)", channel, bot_key)
-        return False
-
+    caps = [
+        (f"channel_login_sender:{channel}:{sender_id}", PER_SENDER,
+         f"sender rate limit (sender={_sender_tag(sender_id)})"),
+        (_address_key(email), PER_ADDRESS, f"rate limit for {email!r}"),
+        (f"channel_login_bot:{channel}:{bot_key}", PER_BOT, f"bot rate limit ({bot_key!r})"),
+    ]
+    charged = []
+    for key, limit, reason in caps:
+        result = rate_limiter.check(key, limit, WINDOW_SECONDS)
+        if not result.allowed:
+            for k, r in charged:
+                rate_limiter.refund(k, r)
+            logger.warning("[ent#1253] %s login code suppressed: %s", channel, reason)
+            return False
+        charged.append((key, result))
     return True

@@ -662,5 +662,7 @@ class TestGlobalRequestRateLimit:
         client.post("/api/internal/mcp-auth/request",
                     json={"email": _UNKNOWN}, headers=_HDR)
 
-        assert seen == ["mcp_inline_auth:request"], \
+        # ent#1253: the shared per-address budget is charged too, also before
+        # the known-check.
+        assert seen == ["mcp_inline_auth:request", f"login_code_email:{_UNKNOWN}"], \
             "the global limiter must run for an unknown address, not be skipped"
