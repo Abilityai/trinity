@@ -929,10 +929,14 @@ _readdress_resolvers: Dict[str, Callable[[str], Any]] = {}
 def register_readdress_resolver(prefix: str, fn: Callable[[str], Any]) -> Callable[[str], Any]:
     """Register the rule that re-addresses the platform family whose request
     ids start with `prefix`. A prefix outside the reserved `gate-` family is a
-    programming error: only the platform mints those ids (R13)."""
+    programming error: only the platform mints those ids (R13). So is a prefix
+    of hex digits only: it could prefix a skill-gate id (`gate-` + 40 hex),
+    and that approval must never reach the admin seat (T3)."""
     from services import operator_queue_service as oqs
     if not prefix or not prefix.startswith(oqs.GATE_ASK_ID_PREFIX) or prefix == oqs.GATE_ASK_ID_PREFIX:
         raise ValueError(f"readdress resolver prefix must extend {oqs.GATE_ASK_ID_PREFIX!r}, got {prefix!r}")
+    if _SKILL_GATE_PREFIX.fullmatch(prefix):
+        raise ValueError(f"readdress resolver prefix {prefix!r} could prefix a skill-gate id")
     _readdress_resolvers[prefix] = fn
     return fn
 
@@ -1163,6 +1167,8 @@ def _fresh_audience(agent_name: str, role: str, *, gate: bool) -> Optional[Tuple
 # The skill gate's id shape (`skill_gate_service._request_id`) — the gate
 # approvals `readdress_role` moves (`db.list_pending_role_addressed`'s twin).
 _SKILL_GATE_ID = re.compile(r"gate-[0-9a-f]{40}")
+# trinity-enterprise#1096 (L1): a resolver prefix that could start a skill-gate id.
+_SKILL_GATE_PREFIX = re.compile(r"gate-[0-9a-f]*")
 READDRESS_TARGETS = ("rule", "admin")
 
 

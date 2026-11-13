@@ -577,3 +577,12 @@ class TestResolverRegistry:
     def test_only_a_platform_family_may_register(self, prefix):
         with pytest.raises(ValueError):
             _svc().register_readdress_resolver(prefix, lambda a: None)
+
+    @pytest.mark.parametrize("prefix", ["gate-a", "gate-0f", "gate-" + "a" * 40])
+    def test_a_prefix_a_skill_gate_id_could_carry_is_refused(self, prefix):
+        """A prefix of hex digits only could prefix a skill-gate id
+        (`gate-` + 40 hex), and its resolver would then put a skill-gate
+        approval on the admin seat, which its resume refuses (T3)."""
+        with pytest.raises(ValueError):
+            _svc().register_readdress_resolver(prefix, lambda a: None)
+        assert _svc().readdress_resolver_for("gate-" + "a" * 40) is None
