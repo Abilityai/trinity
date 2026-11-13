@@ -279,8 +279,12 @@ def test_hosted_refusal_pulls_the_image_that_has_the_tool(tmp_path: Path) -> Non
 
 @_BASH
 def test_dev_refusal_builds_the_image_that_has_the_tool(tmp_path: Path) -> None:
+    """All four platform images (#4479): `start.sh` builds nothing, so a backend-only
+    build leaves the scheduler and MCP server on the previous release's code."""
     proc = _run(tmp_path, hosted="0", dev_db=True)
-    assert proc.stderr.index(" build backend") < proc.stderr.index("db.sqlite_to_postgres")
+    assert proc.stderr.index(" build backend frontend mcp-server scheduler") < proc.stderr.index(
+        "db.sqlite_to_postgres"
+    )
 
 
 @_BASH

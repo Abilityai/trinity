@@ -265,11 +265,20 @@ class TestTheMail:
 
     def test_with_no_known_url_it_still_says_where_and_has_no_link(self, world, monkeypatch):
         monkeypatch.delenv("FRONTEND_URL")
-        monkeypatch.setattr(world.svc, "get_public_chat_url", lambda: "")
         assert world.resend().status_code == 200
         mail = world.sent[0]
         assert "Workspace" in mail.body
         assert "href=" not in mail.html
+
+    def test_it_never_links_to_the_public_chat_host(self, world, monkeypatch):
+        # ent#1255: the public host serves only chat; /workspace there is a 403.
+        monkeypatch.delenv("FRONTEND_URL")
+        monkeypatch.setenv("PUBLIC_CHAT_URL", "https://public.example.com")
+        assert world.resend().status_code == 200
+        mail = world.sent[0]
+        assert "public.example.com" not in mail.body + mail.html
+        assert "href=" not in mail.html
+        assert "Workspace" in mail.body
 
 
 class TestLimits:

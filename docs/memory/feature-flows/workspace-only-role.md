@@ -124,6 +124,34 @@ sends a held portal token before the platform JWT. An address the platform login
 admit keeps the client door unchanged. Residual: a portal session minted for a platform
 address before #3922 keeps the client view until it ends or a `/login` supersedes it.
 
+**A deactivated account has no door (trinity-enterprise#1258).** The code page decided on two
+questions, "is an agent shared with this address" and "would `/login` admit it", and neither
+reads `users.suspended_at` (#995). A suspended account whose email also held a share was
+handled as an outside client: a code, a portal session and turns on the shared agent, while
+`/login` refused the same person. Ruling: suspension wins on every door. A share made before
+or after it does not re-open the account; an admin reactivates it.
+
+- **Sign-in.** `client_portal.service.email_account_suspended(email)` reads the account by
+  email. It is checked inside `email_has_access` (so the code request, the code verify and the
+  delegated exchange all inherit it, as they do the block) and first in `portal_signin_request`
+  and `portal_signin_verify`, before a code is issued or redeemed and before the #3922 hand-off.
+  The answers are the ones a stranger gets: the generic 200 at `/auth/request`, 401 at
+  `/auth/verify`, 403 at `/auth/exchange`.
+- **A live session.** A portal session knows an email, not an account, so one minted before the
+  suspension would outlive it. `portal_auth._reject_if_blocked` now refuses a suspended account
+  with the block's own 403 "Access has been revoked." Every consumer of a portal session calls
+  it (`get_portal_principal`, `workspace_email_from_request`, `routers/terms.py::terms_caller`),
+  so the session stops on its next request and works again after reactivation.
+- **Who is unaffected.** An address with no `users` row (an outside client) and an active
+  account. Both are pinned as controls.
+- **Failure direction.** A lookup that cannot answer denies, like the block.
+- **A revoked or expired invitation** suspends an account that never accepted. That account is
+  refused here too, including when an agent is shared with its email afterwards.
+- **Not covered.** A public chat link and the channel sign-ins (Telegram, Slack, WhatsApp)
+  identify a person by a verified email of their own and do not read the account either.
+
+Tests: `tests/unit/test_ent1258_suspended_workspace_door.py`.
+
 **One code, not two (#4157).** The first code is correct and spent at the portal door, so
 the 409 also carries `handoff` — a one-time token from `services/login_handoff_service.py`
 (`secrets.token_urlsafe(32)`, held in Redis as `login_handoff:<sha256>` bound to the
