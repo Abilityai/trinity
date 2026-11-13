@@ -8,8 +8,9 @@
 
 import { askUrgencyCompare } from '../portalInbox'
 
-export const STATUS_BADGE = Object.freeze({ active: 'success', paused: 'warning', done: 'neutral' })
-const STATUS_LABEL = { active: 'Active', paused: 'Paused', done: 'Done' }
+// ent#1235: the stored status keeps its values; people read Running / Stopped.
+export const STATUS_BADGE = Object.freeze({ not_started: 'neutral', active: 'success', paused: 'warning', done: 'neutral' })
+const STATUS_LABEL = { not_started: 'Not started', active: 'Running', paused: 'Stopped', done: 'Done' }
 const VISIBILITY_LABEL = { members: 'Members only', company: 'Company' }
 const AGENT_STATE_LABEL = {
   active: 'Can work on it', pending: 'Waiting for owner', declined: 'Owner declined', off: 'Not on the project',
@@ -271,6 +272,18 @@ const CODE_MESSAGE = {
   too_many_links: 'This project has reached its link limit.',
   creator_is_permanent: "The project's creator can't be removed.",
   project_not_found: "This project isn't available to you.",
+  // ent#1235: why a task's run doesn't start, in the words of the page.
+  project_not_started: "This project hasn't been started, so no run starts yet. Someone with edit rights starts it.",
+  project_stopped: 'This project is stopped, so no new run starts. Someone with edit rights starts it again.',
+  project_done: 'This project is done. Reopen it before starting a run.',
+  task_run_live: 'A run is already under way on this task. Open it from the task, or wait for it to end.',
+  start_already_proposed: 'A run for this task is already waiting for a go.',
+  task_needs_decision: 'This task was rejected twice and needs a person\'s decision first.',
+  task_is_for_a_person: "This task is a person's, so no agent is started for it.",
+  needs_go_is_human_only: "Only a person holds a task for their go.",
+  lifecycle_is_a_persons: 'Only a person starts or stops a project.',
+  mode_is_a_persons: "Only a person sets the project's mode.",
+  cannot_unstart: "A started project can't go back to not started. Stop it instead.",
 }
 
 /** What happened and what to do, in the user's words (principle 25). */
@@ -815,6 +828,148 @@ export function joinRequestState(project) {
   if (!mine.can_ask_to_join) return null
   if (last && last.state === 'declined') return { kind: 'declined', reason: last.reason || null }
   return { kind: 'ask' }
+}
+
+// --- ent#1235: the lifecycle, the mode and a task's run -----------------------------
+// Read tolerantly: a value this page doesn't know never breaks it — it reads as
+// "Unknown" and offers nothing, rather than guessing a state that lets work start.
+
+const STATE_OF_STATUS = { not_started: 'not_started', active: 'running', paused: 'stopped', done: 'done' }
+const STATE_LABEL = { not_started: 'Not started', running: 'Running', stopped: 'Stopped', done: 'Done', archived: 'Archived' }
+export const STATE_BADGE = Object.freeze({
+  not_started: 'neutral', running: 'success', stopped: 'warning', done: 'neutral', archived: 'locked',
+})
+
+/** `not_started | running | stopped | done | archived`, or `unknown`. */
+export function projectState(project) {
+  if (!project) return 'unknown'
+  if (project.archived_at) return 'archived'
+  if (STATE_LABEL[project.state]) return project.state
+  return STATE_OF_STATUS[project.status] || 'unknown'
+}
+
+export function stateLabel(state) {
+  return STATE_LABEL[state] || 'Unknown'
+}
+
+const STATUS_VERB = { active: 'Started', paused: 'Stopped', done: 'Marked done' }
+
+/** Who last changed the lifecycle, as "Started by you" — '' when no one has yet. */
+export function stateBy(project, myEmail) {
+  const by = project?.status_by
+  const verb = STATUS_VERB[project?.status]
+  if (!by || !verb) return ''
+  const who = sameEmail(by, myEmail) ? 'you' : String(by).startsWith('agent:') ? String(by).slice(6) : String(by)
+  return `${verb} by ${who}`
+}
+
+/** What the header offers a person with edit rights: Start or Stop, and Mark done.
+ *  An unknown state OR mode offers nothing — never a guess that lets work start. */
+export function lifecycleActions(project) {
+  if (!project?.can?.edit || project.archived_at) return { primary: null, markDone: false }
+  if (!PROJECT_MODES.includes(projectMode(project))) return { primary: null, markDone: false }
+  const state = projectState(project)
+  const primary = {
+    not_started: { verb: 'start', label: 'Start project' },
+    running: { verb: 'stop', label: 'Stop project' },
+    stopped: { verb: 'start', label: 'Start project' },
+    done: { verb: 'start', label: 'Reopen project' },
+  }[state] || null
+  return { primary, markDone: ['not_started', 'running', 'stopped'].includes(state) }
+}
+
+/** The stop dialog's words: the runs still finishing, named, or said honestly when unknown. */
+export function stopMessage(project) {
+  const head = 'Nothing new starts until someone starts it again.'
+  const live = project?.runs_live
+  if (!Array.isArray(live)) return `${head} Runs already under way finish.`
+  if (!live.length) return `${head} No run is under way.`
+  const named = live.map((r) => `${r.task_id || 'a task'}${r.agent_name ? ` on ${r.agent_name}` : ''}`).join(', ')
+  return `${head} ${live.length === 1 ? 'This run is' : 'These runs are'} still finishing: ${named}.`
+}
+
+/** Why a task's run can't start on a project that isn't running, or ''. */
+export function notRunningLine(state) {
+  return {
+    not_started: "This project hasn't been started, so no run starts yet. Someone with edit rights starts it.",
+    stopped: 'This project is stopped, so no new run starts. Runs already under way finish.',
+    done: 'This project is done. Reopen it to start a run.',
+    unknown: "This project's state isn't known here, so no run is offered. Reload the page.",
+  }[state] || ''
+}
+
+export const PROJECT_MODES = ['track', 'propose', 'auto']
+const MODE_LABEL = { track: 'Track', propose: 'Propose', auto: 'Auto' }
+const MODE_HINT = {
+  track: "A person starts each task's run. The steward keeps the record.",
+  propose: 'The steward proposes runs; each one waits for a person\'s go.',
+  auto: "The steward starts runs itself, except tasks held for a person's go.",
+}
+
+/** The project's mode; a project read without one is Track (the safe default). */
+export function projectMode(project) {
+  return project?.mode == null ? 'track' : String(project.mode)
+}
+
+export function modeLabel(mode) {
+  return MODE_LABEL[mode] || 'Unknown'
+}
+
+export function modeHint(mode) {
+  return MODE_HINT[mode] || ''
+}
+
+const RUN_STATE_LABEL = {
+  proposed: 'Waiting for a go', started: 'Running', declined: 'Declined', withdrawn: 'Withdrawn', ended: 'Ended',
+}
+const RUN_END_LABEL = {
+  completed: 'Finished', failed: 'Failed', skipped: 'Skipped', gated: 'Stopped by a gate',
+  dispatch_lost: 'Never started', dispatch_failed: "Couldn't start",
+}
+export const RUN_BADGE = Object.freeze({
+  proposed: 'warning', started: 'info', declined: 'neutral', withdrawn: 'neutral', ended: 'neutral',
+})
+
+/** A run in words: its state, or how it ended. */
+export function runLabel(run) {
+  if (!run) return ''
+  if (run.state === 'ended') return RUN_END_LABEL[run.end_status] || 'Ended'
+  return RUN_STATE_LABEL[run.state] || 'Unknown'
+}
+
+/** A task's run that is still live (proposed or running), or null. */
+export function liveRun(task) {
+  const run = task?.run
+  return run && (run.state === 'proposed' || run.state === 'started') ? run : null
+}
+
+const RUN_OUTCOME = {
+  started: 'Started', declined: 'Declined', proposed: 'Still waiting',
+  run_not_found: 'Not found on this project', already_decided: 'Already decided by someone else',
+  mode_track: 'The project is in Track now, so a person starts it',
+  agent_not_on_project: 'Its agent is no longer on the project',
+  origin_cannot_view: "You can't see this project's work for that agent",
+  agent_consent_predates_runs: "Its agent's owner hasn't approved runs yet",
+  dispatch_failed: "Couldn't start right now; try again",
+  task_waiting: 'The task waits on another task', task_blocked: 'The task is blocked',
+  task_done: 'The task is done', task_awaiting_check: 'The task is waiting for its check',
+  archived: 'The project is archived',
+}
+
+/** One id's outcome from Approve / Decline, in words — every code has a line. */
+export function runOutcomeLabel(outcome) {
+  if (!outcome) return ''
+  return RUN_OUTCOME[outcome] || CODE_MESSAGE[outcome] || `Not done (${outcome})`
+}
+
+/** Why a task needs a person's decision: the steward's last send-back, or the rule. */
+export function needsDecisionReason(task) {
+  if (!task?.needs_decision) return ''
+  const line = [...(task.log || [])].reverse().find((l) => /needs a decision/i.test(l.body || ''))
+  const why = line?.body?.replace(/\s*\(rejected twice — needs a decision\)\s*$/i, '').trim()
+  return why
+    ? `Rejected twice. The last reason: ${why}`
+    : 'Rejected twice. A person decides what happens next.'
 }
 
 // --- trinity-enterprise#1240: a task's GitHub issues and PRs ---------------------
