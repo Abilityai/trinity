@@ -46,6 +46,8 @@ Requires Node.js ≥ 18 (`npx` ships with it).
 |---------|---------|---------|
 | `ASK_TRINITY_ENDPOINT` | the public Trinity docs Q&A endpoint | Point at a self-hosted mirror of the answer API. Logged to stderr when set. |
 
+This package runs on your own machine and exists to ask that endpoint questions, so it has no off switch of its own: to send nothing, do not install it. A Trinity instance's own `ask_trinity` tool is switched off on the instance with `ASK_TRINITY_ENABLED=false` or `DO_NOT_TRACK=1`.
+
 ## Troubleshooting
 
 - **"server disconnected" immediately** — check Node version: `node --version`

@@ -106,6 +106,7 @@ RESERVED_TRIGGERS = frozenset({
     "event",              # event_dispatch_service.RESERVED_EVENT_TRIGGER
     "operator_response",  # operator_resume_service.TRIGGERED_BY
     "operator_ending",    # operator_resume_service.TRIGGERED_BY_ENDING
+    "project_steward",    # trinity-enterprise#1236: the platform's project steward wake
 })
 
 # One wake per caller per window. 15s is short enough that a caller waiting on

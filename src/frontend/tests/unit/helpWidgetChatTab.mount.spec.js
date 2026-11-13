@@ -19,6 +19,13 @@ import { createPinia, setActivePinia } from 'pinia'
 import { h } from 'vue'
 
 vi.mock('../../src/utils/websocket', () => ({ useWebSocket: () => ({ followToken: vi.fn() }) }))
+// #4499: the widget shows only when the backend's run-time switches say a help
+// channel is on (`GET /api/version` → `help`); here both are.
+vi.mock('../../src/composables/useBuildInfo', async () => {
+  const { ref } = await import('vue')
+  const info = ref({ version: 'test', help: { docs_qa: true, bug_reporting: true } })
+  return { useBuildInfo: () => ({ info, load: async () => info.value }) }
+})
 
 import App from '../../src/App.vue'
 import { routes } from '../../src/router'
