@@ -167,10 +167,24 @@ describe('columns and cards', () => {
   })
 
   it('a status the board does not know is still on it', async () => {
-    seed([{ id: 'T-9', title: 'New kind', status: 'todo', priority: 'p2' }])
+    seed([{ id: 'T-9', title: 'New kind', status: 'triage', priority: 'p2' }])
     await tasksTab()
     expect(within('active', 'T-9')).not.toBeNull()
-    expect(byTestId('board-flag-T-9').textContent).toBe('todo')
+    expect(byTestId('board-flag-T-9').textContent).toBe('triage')
+  })
+
+  it('ent#1232: a todo task, one waiting on another, and a done without a claim each say so', async () => {
+    seed([
+      { id: 'T-1', title: 'Draft', status: 'todo', priority: 'p2', waiting_for: ['T-2'] },
+      { id: 'T-2', title: 'Brief', status: 'done', priority: 'p2', agent: 'scout', closed_without_claim: true, updated_at: '2026-11-10T00:00:00Z' },
+    ])
+    await tasksTab()
+    expect(within('active', 'T-1')).not.toBeNull()
+    expect(byTestId('board-flag-T-1').textContent).toBe('To do')
+    expect(byTestId('board-shape-T-1').textContent).toContain('Waiting on T-2')
+    expect(within('done', 'T-2')).not.toBeNull()
+    expect(byTestId('board-unclaimed-T-2').textContent).toBe('Done without a done claim')
+    expect(byTestId('board-unclaimed-T-1')).toBeNull()
   })
 
   it('a long Done column shows the newest and says how many there are', async () => {
