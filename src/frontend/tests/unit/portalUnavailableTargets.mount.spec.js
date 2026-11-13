@@ -211,6 +211,25 @@ describe('#3140 — an agent URL that is not shared with you', () => {
   })
 })
 
+describe('#4517 — an unshared agent link when you have no chats yet', () => {
+  // The route is already set when the shell mounts. The roster verdict arrives
+  // afterwards, and the thread list comes back empty, so its length never
+  // changes. The #3140 tests above all have one chat, which is what used to
+  // re-arm the watcher.
+  it('shows you don\'t have access, and does not open your own agent', async () => {
+    arm()
+    store.fetchAllSessions = vi.fn(async () => [])
+    const { w, router } = await boot('/workspace/a/stranger')
+    expect(store.fetchAllSessions).toHaveBeenCalled()
+    expect(router.currentRoute.value.path).toBe('/workspace/a/stranger')
+    expect(w.text()).toContain("You don't have access to")
+    expect(w.text()).toContain('stranger')
+    expect(conversation(w).exists()).toBe(false)
+    expect(w.find('textarea').exists()).toBe(false)
+    expect(w.get('[data-testid="agent-unreachable-back"]').exists()).toBe(true)
+  })
+})
+
 describe('#3140 — a refused agent page offers no retry', () => {
   // The band and the details panel read `denied` from this composable.
   function harness(status) {
