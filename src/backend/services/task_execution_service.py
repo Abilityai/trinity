@@ -2244,6 +2244,8 @@ class TaskExecutionService:
                 schedule_name=(schedule_context or {}).get("name"),
                 loop_id=loop_id,
             )
+            replay = dict(gate_replay or {})
+            request_parts = replay.pop(skill_gate_service.REQUEST_PARTS, None)
             frozen = skill_gate_service.frozen_dispatch(
                 triggered_by=triggered_by,
                 **{k: v for k, v in fields.items() if k != "schedule_id"})
@@ -2260,8 +2262,9 @@ class TaskExecutionService:
                 triggered_by=triggered_by,
                 occurrence_key=execution_id,
                 origin_execution_id=execution_id,
-                dispatch={**frozen, **(gate_replay or {})},
+                dispatch={**frozen, **replay},
                 gates=gates,
+                request_parts=request_parts,
             )
             # Only reachable with a producer-supplied, proven `gate_requester`.
             # trinity-enterprise#752: the row this call created or was given is

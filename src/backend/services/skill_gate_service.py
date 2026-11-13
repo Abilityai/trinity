@@ -177,6 +177,7 @@ async def enforce(
     refuse_only: bool = False,
     gates: Optional[Mapping[str, SkillGate]] = None,
     context_text: Optional[str] = None,
+    request_parts: Optional[List[str]] = None,
 ) -> GateDecision:
     """Decide whether a request to `agent_name` may be dispatched now.
 
@@ -239,27 +240,32 @@ async def enforce(
     # approver reads a request that names none, and Approve runs it. The gate
     # map can change between the room's read and this one. The scanned text has
     # no sender labels, so a post's newline could forge a sender line on it: raise
-    # no card. `gate_unavailable` is transient, so the room delivers the post
-    # again and the next wake builds a labelled card. Room only: `/task` scans
-    # `user_message`, which its executor never receives (#3274).
-    # PR #4552 review 3: the card is sanitised, the scan is not. A name the
-    # sanitizer redacts (`MY_TOKEN=/pay-invoice`) is carded as redacted, and
-    # Approve runs that; requiring it on the card refused every wake. And a
-    # room wake whose own map read failed sends no card text: refuse, so no
-    # card carries the raw, unlabelled slice.
+    # no card. Room only: `/task` scans `user_message`, which its executor never
+    # receives (#3274). A name the sanitizer redacts (`MY_TOKEN=/pay-invoice`)
+    # is carded as redacted, and Approve runs that (`room_card_misses`). A room
+    # wake whose own map read failed sends no card text: refuse, so no card
+    # carries the raw, unlabelled slice.
     if triggered_by == "room":
         replayed = "\n".join(t for t in ((dispatch or {}).get(REPLAY_MESSAGE),
                                           (dispatch or {}).get(REPLAY_SYSTEM_PROMPT)) if t)
-        required = set(find_gated_invocations(sanitize_text(request_text or ""), gates))
-        if (not replayed
-                or (set(names) - set(beside)) & required
-                - set(find_gated_invocations(replayed, gates))):
-            logger.warning("[SkillGate] room card for %s misses %s — refusing",
-                           agent_name, names)
+        if not replayed:
+            logger.warning("[SkillGate] room wake for %s sent no card — refusing", agent_name)
             raise SkillGateRefused(
                 503, "gate_unavailable",
                 f"Could not check whether this request to {agent_name} needs approval; "
                 "nothing was run. Try again shortly.")
+        # PR #4552 review 4: a card that misses a scanned name is a standing
+        # refusal. The room holds the gated posts, so a mismatch costs one wake.
+        if room_card_misses(set(names) - set(beside),
+                            request_parts if request_parts is not None else [request_text or ""],
+                            replayed, gates):
+            logger.warning("[SkillGate] room card for %s misses %s — refusing",
+                           agent_name, names)
+            raise SkillGateRefused(
+                409, "room_card_incomplete",
+                f"{_skill_list(names)} on {agent_name} needs approval, and this request "
+                "could not be put to an approver. Nothing was run, and it is not passed "
+                "on again. Ask again in a new message.", skills=names)
     clean_text = _card_text(request_text, dispatch)
     # The context lines go on the card only when a skill was named nowhere else
     # — otherwise the approver would read a request that names no gated skill.
@@ -457,6 +463,7 @@ STANDING_REFUSALS = frozenset({
     "gated_skill_not_installed",
     "gated_skill_ambiguous",
     "gated_skill_unreadable",
+    "room_card_incomplete",
 })
 
 
@@ -1562,6 +1569,28 @@ def _requester_chat(requester: Requester) -> Dict[str, Dict[str, str]]:
         return {REQUESTER_CHAT: {k: v for k, v in chat.items() if v is not None}}
     except Exception:  # noqa: BLE001 — provenance never fails the gate
         return {}
+
+
+# trinity#4505: a room wake's scanned parts (each post the agent is shown, and
+# the ask answer), passed beside the replay keys in `gate_replay` for the
+# coverage check. Read by the backstop, never stored in the record.
+REQUEST_PARTS = "request_parts"
+
+
+def room_card_misses(names, request_parts: List[str], card: str, gates) -> set:
+    """The skills in `names` a room card must name and does not.
+
+    The card carries each gated part sanitised by itself, so what it must name
+    is what each gated part still names once sanitised by itself. Sanitising the
+    join lets a credential pattern reach across the line into the next part and
+    spell a name no part holds (PR #4552 review 4). A part the gate map read here
+    finds and the room's read did not (the map changed between them) is
+    required too."""
+    required = set()
+    for part in request_parts:
+        if find_gated_invocations(part, gates):
+            required.update(find_gated_invocations(sanitize_text(part), gates))
+    return set(names) & required - set(find_gated_invocations(card, gates))
 
 
 def frozen_replay(message: Optional[str], system_prompt: Optional[str] = None) -> Dict[str, str]:

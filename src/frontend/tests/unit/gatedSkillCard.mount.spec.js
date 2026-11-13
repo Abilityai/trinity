@@ -128,7 +128,7 @@ describe('the card itself', () => {
     const lines = tid(w, 'gate-card-input').findAll('[data-testid="gate-card-input-line"]')
     expect(lines.map(l => l.text())).toEqual(input.split('\n').map(l => l.trim()))
     for (const line of lines) {
-      expect(line.classes()).toEqual(expect.arrayContaining(['pl-[2ch]', '-indent-[2ch]', 'whitespace-pre-wrap', 'break-words']))
+      expect(line.classes()).toEqual(expect.arrayContaining(['pl-[4ch]', '-indent-[4ch]', 'whitespace-pre-wrap', 'break-words']))
       expect(line.element.textContent.startsWith(forged)).toBe(false)
     }
     expect(lines[0].element.textContent).toBe(input.split('\n')[0])

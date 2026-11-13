@@ -24,6 +24,7 @@ from config import ROOM_SOURCE_CHANNEL
 from services import person_mention_service
 from services.platform_prompt_service import build_user_facing_room_prompt
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError, hold_marker
+from utils.credential_sanitizer import sanitize_text
 from utils.helpers import utc_now_iso
 from utils.skill_invocation import find_gated_invocations
 
@@ -2063,15 +2064,16 @@ def _gated_posts(shown: list[dict], gates) -> list[dict]:
 
 def _room_gate_card(agent_name: str, shown: list[dict], ask_request_text: str,
                     requester: tuple[str, str]):
-    """trinity#4505: (the card's posts, the card text) for this wake — the gated
-    posts and the requester's latest post, each line naming its sender as the
-    transcript does, plus the ask answer. The card is what the approver reads,
+    """trinity#4505: (the card's posts, the `gate_replay` keys) for this wake.
+    The card holds the gated posts and every post of the requester's, each line
+    naming its sender as the transcript does, plus the ask answer; the keys carry
+    it as the replay message and the scanned parts for the gate's coverage check. The card is what the approver reads,
     what is size-checked and what Approve runs, so another participant's long
     post (or this agent's own reply) never makes a short request refusable, and
     an agent's gated line never reads as the person's. The scan still reads the
     whole slice. ([], None) when the map is unreadable or empty, or nothing
     names a gated skill. A gated name only in the ask answer still gets this
-    card (the answer under its label, plus the requester's latest post), so
+    card (the answer under its label, plus the requester's posts), so
     every room card goes through `_format_card`."""
     from services import skill_gate_service
 
@@ -2084,9 +2086,22 @@ def _room_gate_card(agent_name: str, shown: list[dict], ask_request_text: str,
     gated = _gated_posts(shown, gates)
     if not gated and not find_gated_invocations(ask_request_text, gates):
         return [], None
-    mine = [m for m in shown if (m.get("sender_kind"), m.get("sender_identity")) == requester]
-    posts = [m for m in shown if m in gated or (mine and m is mine[-1])]
-    return posts, _format_card(posts, ask_request_text)
+    # PR #4552 review 4: each post (and the ask answer) is sanitised by itself
+    # before it is labelled, so a redaction never reaches across into the next
+    # post or its sender label. The card is not sanitised again: Approve runs
+    # it as shown. Every post of the requester's is on it, for context.
+    posts = [{**m, "content": sanitize_text(m.get("content") or "")} for m in shown
+             if m in gated or (m.get("sender_kind"), m.get("sender_identity")) == requester]
+    card = _format_card(posts, sanitize_text(ask_request_text or ""))
+    return posts, {skill_gate_service.REPLAY_MESSAGE: card,
+                   skill_gate_service.REQUEST_PARTS: _gate_parts(shown, ask_request_text)}
+
+
+def _gate_parts(shown: list[dict], ask_request_text: str) -> list[str]:
+    """What the skill gate scans on a room wake: each post the agent is shown,
+    then the ask answer."""
+    return ([m.get("content") or "" for m in shown if m.get("sender_kind") != "system"]
+            + ([ask_request_text] if ask_request_text else []))
 
 
 # PR #4552 review: what starts each continuation line of a post on the card.
@@ -2260,13 +2275,12 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
         surface="room", agent_name=agent_name, chat_id=room_id,
         person_email=client_email, internal_audience=not user_facing))
 
-    from services.skill_gate_service import frozen_replay
     gated_posts: list[dict] = []
 
     try:
         # Inside the `try`: the `finally` below clears the working state.
-        gated_posts, card_text = _room_gate_card(agent_name, shown, ask_request_text,
-                                                 _caller(current_user))
+        gated_posts, gate_replay = _room_gate_card(agent_name, shown, ask_request_text,
+                                                   _caller(current_user))
         # #3114: on a pull pilot the turn is queued under this room's key and
         # awaited here.
         result = await dispatch_and_await_terminal(
@@ -2277,12 +2291,10 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
             # wrote that this agent is SHOWN (the #3210 budget-fitted delta),
             # never the transcript scaffolding.
             # ent#1135: plus the person's answer to the ask this turn continues.
-            request_text="\n".join([m.get("content") or "" for m in shown
-                                     if m.get("sender_kind") != "system"]
-                                    + ([ask_request_text] if ask_request_text else [])),
+            request_text="\n".join(_gate_parts(shown, ask_request_text)),
             # trinity#4505: what the card shows and Approve runs — the posts
             # that name a gated skill, never the whole slice.
-            gate_replay=frozen_replay(card_text) if card_text else None,
+            gate_replay=gate_replay,
             triggered_by="room",
             conversation_key=f"room:{room_id}",
             system_prompt=room_prompt,

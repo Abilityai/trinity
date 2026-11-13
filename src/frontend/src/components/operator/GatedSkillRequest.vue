@@ -38,7 +38,9 @@
           <!-- Bounded either way: folded to a few lines, or scrolling in its own box.
                PR #4552 review 3: one block per line with a hanging indent, so a
                wrapped segment (a long line, a run of spaces) never starts at the
-               left edge, where only a real line start (a sender line) sits. -->
+               left edge, where only a real line start (a sender line) sits.
+               4ch: a wrapped segment also sits right of the `  | ` marker
+               that starts a post's further lines. -->
           <div
             class="font-mono text-gray-900 dark:text-gray-100 overflow-y-auto"
             :class="foldable && folded ? 'max-h-24' : 'max-h-80'"
@@ -46,7 +48,7 @@
           ><div
             v-for="(line, i) in inputLines"
             :key="i"
-            class="min-h-[1lh] whitespace-pre-wrap break-words pl-[2ch] -indent-[2ch]"
+            class="min-h-[1lh] whitespace-pre-wrap break-words pl-[4ch] -indent-[4ch]"
             data-testid="gate-card-input-line"
           >{{ line }}</div></div>
           <BaseButton
