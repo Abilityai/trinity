@@ -1,0 +1,24 @@
+{
+  "version": "1.2.3",
+  "date": "2026-11-13",
+  "mode": "daily",
+  "scope": "diff",
+  "issue": 4479,
+  "counts_as_full_run": false,
+  "files": [
+    "docs/migrations/SQLITE_TO_POSTGRES.md",
+    "scripts/deploy/start.sh",
+    "tests/unit/test_3159_hosted_postgres.py"
+  ],
+  "phases_run": [0, 1, 2, 8, 12, 13, 14],
+  "findings": [],
+  "hypotheses": [],
+  "coverage_gaps": [
+    "phases outside the diff not run (no file in their scope changed)",
+    "no Docker pass, no independent verifier (no finding to verify)",
+    "full unit suite not run locally; only the changed test file",
+    "shellcheck not installed"
+  ],
+  "supply_chain_summary": {"scanner": "not run (no dependency change)"},
+  "totals": {"critical": 0, "high": 0, "medium": 0, "low": 0}
+}

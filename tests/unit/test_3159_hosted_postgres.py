@@ -283,6 +283,26 @@ def test_dev_refusal_builds_the_image_that_has_the_tool(tmp_path: Path) -> None:
     assert proc.stderr.index(" build backend") < proc.stderr.index("db.sqlite_to_postgres")
 
 
+_BUILT_SERVICES = " build backend frontend mcp-server scheduler"
+
+
+@_BASH
+def test_dev_refusal_builds_every_platform_image(tmp_path: Path) -> None:
+    """#4479: start.sh builds nothing on a source-built install, so a refusal that
+    names only the backend leaves the scheduler and MCP server on the old release."""
+    proc = _run(tmp_path, hosted="0", dev_db=True)
+    assert _BUILT_SERVICES in proc.stderr
+
+
+def test_guide_builds_every_platform_image_and_rollback_rebuilds() -> None:
+    """#4479: the guide's image step and its rollback, the same gap in both directions."""
+    guide = (_ROOT / "docs" / "migrations" / "SQLITE_TO_POSTGRES.md").read_text(encoding="utf-8")
+    assert _BUILT_SERVICES in guide
+    rollback = guide.split("**Rolling back:**", 1)[1].split("\n\n", 1)[0]
+    assert _BUILT_SERVICES in rollback
+    assert "TRINITY_IMAGE_TAG" in rollback
+
+
 @_BASH
 def test_copied_install_starts_on_postgres(tmp_path: Path) -> None:
     """The guide keeps trinity.db after the copy, so the file alone cannot mean "refuse"."""

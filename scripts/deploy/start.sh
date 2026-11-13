@@ -1772,7 +1772,9 @@ ensure_database() {
             if [ "$HOSTED" = "1" ]; then
                 echo "       docker compose ${COMPOSE_FILES[*]:-} pull backend" >&2
             else
-                echo "       docker compose ${COMPOSE_FILES[*]:-} build backend" >&2
+                # All four, not the backend alone: nothing below builds on a source-built
+                # install, so the others would stay on the previous release (#4479).
+                echo "       docker compose ${COMPOSE_FILES[*]:-} build backend frontend mcp-server scheduler" >&2
             fi
             echo "       docker compose ${COMPOSE_FILES[*]:-} run --rm backend python -m db.sqlite_to_postgres" >&2
             echo "   then re-run this script. Details: docs/migrations/SQLITE_TO_POSTGRES.md" >&2
