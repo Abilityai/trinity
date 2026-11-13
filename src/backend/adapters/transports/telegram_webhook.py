@@ -25,6 +25,7 @@ from fastapi import Request
 from adapters.transports.base import ChannelTransport
 from adapters.transports.inbound_coalescer import InboundCoalescer, get_async_redis
 from database import db
+from utils.log_masking import masked_traceback
 
 logger = logging.getLogger(__name__)
 
@@ -243,7 +244,7 @@ async def set_webhook(agent_name: str, public_url: str) -> Optional[str]:
         logger.error(f"Could not decrypt bot token for agent {agent_name}")
         return "could not decrypt the bot token"
 
-    webhook_url = f"{public_url}/api/telegram/webhook/{binding['webhook_secret']}"
+    webhook_url = webhook_url_for(public_url, binding["webhook_secret"])
     secret_token = binding.get("telegram_secret_token", "")
 
     url = f"https://api.telegram.org/bot{bot_token}/setWebhook"
@@ -266,10 +267,31 @@ async def set_webhook(agent_name: str, public_url: str) -> Optional[str]:
                 logger.error(f"Telegram setWebhook failed: {result.get('description')}")
                 return f"Telegram rejected {public_url}: {result.get('description') or 'unknown error'}"
     except Exception as e:
-        logger.error(f"Telegram setWebhook error: {e}", exc_info=True)
+        logger.error("Telegram setWebhook error: %s", masked_traceback(e, bot_token))
         # Type name only: httpx error text can carry the request URL, which
         # embeds the bot token, and this string is returned to the UI.
         return f"could not reach Telegram ({type(e).__name__})"
+
+
+def webhook_url_for(public_url: str, webhook_secret: str) -> str:
+    return f"{public_url}/api/telegram/webhook/{webhook_secret}"
+
+
+async def get_webhook_info(bot_token: str) -> tuple[Optional[dict], Optional[str]]:
+    """Telegram's record of the bot's webhook: ``(info, None)``, or
+    ``(None, reason)`` when it cannot be read."""
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(f"https://api.telegram.org/bot{bot_token}/getWebhookInfo")
+            result = resp.json()
+    except Exception as e:
+        logger.error("Telegram getWebhookInfo error: %s", masked_traceback(e, bot_token))
+        return None, f"could not reach Telegram ({type(e).__name__})"
+    if not result.get("ok"):
+        return None, f"Telegram getWebhookInfo failed: {result.get('description') or 'unknown error'}"
+    return result.get("result") or {}, None
 
 
 async def delete_webhook(agent_name: str) -> bool:
@@ -286,5 +308,5 @@ async def delete_webhook(agent_name: str) -> bool:
             resp = await client.post(url)
             return resp.json().get("ok", False)
     except Exception as e:
-        logger.error(f"Telegram deleteWebhook error: {e}", exc_info=True)
+        logger.error("Telegram deleteWebhook error: %s", masked_traceback(e, bot_token))
         return False

@@ -5137,6 +5137,8 @@ class TelegramBindingResponse(BaseModel):
     warning: Optional[str] = None
     # ent#264: in-progress indicator toggle (default ON); None when unconfigured.
     progress_indicator_enabled: Optional[bool] = None
+    # ent#1189: whether a Public URL is set, so the panel names the right fix.
+    public_url_set: Optional[bool] = None
 
 
 class TelegramConfigureRequest(BaseModel):

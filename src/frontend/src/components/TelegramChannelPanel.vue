@@ -67,10 +67,19 @@
         </div>
       </div>
 
-      <!-- Webhook Warning -->
-      <div v-if="!binding.webhook_url" class="p-3 rounded-lg text-sm bg-status-warning-50 dark:bg-status-warning-900/30 text-status-warning-700 dark:text-status-warning-300">
-        <p class="font-medium">Bot connected, but it can't receive messages yet.</p>
-        <p class="mt-1">Telegram delivers messages to Trinity over the internet, so Trinity needs a public HTTPS address. Set it under <router-link to="/settings?tab=general" class="underline font-medium hover:text-status-warning-800 dark:hover:text-status-warning-200">Settings → General → Public URL</router-link>. Once saved, this bot registers automatically; nothing to redo here.</p>
+      <!-- Webhook Warning: after Verify, Verify's answer (Telegram's own
+           record); before, the stored webhook under the current Public URL. -->
+      <div v-if="webhookDown" data-testid="telegram-webhook-warning" class="p-3 rounded-lg text-sm bg-status-warning-50 dark:bg-status-warning-900/30 text-status-warning-700 dark:text-status-warning-300">
+        <p class="font-medium">Bot connected, but Telegram can't deliver messages to it yet.</p>
+        <p v-if="!binding.public_url_set" class="mt-1">
+          Telegram delivers messages to Trinity over the internet, so Trinity needs a public HTTPS address.
+          <template v-if="isAdmin">Set it under <router-link to="/settings?tab=general" class="underline font-medium hover:text-status-warning-800 dark:hover:text-status-warning-200">Settings → General → Public URL</router-link>.</template>
+          <template v-else>Ask an admin to set the Public URL under Settings → General.</template>
+          Once saved, this bot registers automatically; nothing to redo here.
+        </p>
+        <p v-else class="mt-1">
+          Trinity's Public URL is set, but Telegram has not accepted this bot's webhook. Check that the Public URL is reachable from the internet over HTTPS, then press Verify to retry.
+        </p>
         <p v-if="verifyResult?.reason" class="mt-2" data-testid="telegram-webhook-error">
           Last attempt: {{ verifyResult.reason }}
         </p>
@@ -281,11 +290,12 @@
 </template>
 
 <script setup>
-import { ref, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import api from '../api'
 import VoiceChannelToggle from './VoiceChannelToggle.vue'
 import BaseBadge from './base/BaseBadge.vue'
 import BaseToggle from './base/BaseToggle.vue'
+import { useRole } from '../composables/useRole'
 
 // ent#600: one badge per context state; the hint text comes from the backend
 // so the "next action" wording lives in one place.
@@ -320,6 +330,10 @@ const groups = ref([])
 const botToken = ref('')
 const message = ref(null)
 const verifyResult = ref(null)
+const { isAdmin } = useRole()
+const webhookDown = computed(() =>
+  verifyResult.value?.webhookOk !== undefined ? !verifyResult.value.webhookOk : !binding.value.webhook_url
+)
 
 async function loadBinding() {
   loading.value = true
@@ -353,6 +367,7 @@ async function loadGroups() {
 async function connectBot() {
   connecting.value = true
   message.value = null
+  verifyResult.value = null
   try {
     const response = await api.put(`/api/agents/${props.agentName}/telegram`, {
       bot_token: botToken.value.trim()
@@ -372,6 +387,7 @@ async function connectBot() {
 async function disconnectBot() {
   disconnecting.value = true
   message.value = null
+  verifyResult.value = null
   try {
     await api.delete(`/api/agents/${props.agentName}/telegram`)
     message.value = { type: 'success', text: 'Bot disconnected' }
@@ -402,9 +418,9 @@ async function verifyBot() {
     // context status in place so a BotFather change shows without a reload.
     await loadGroups()
     verifyResult.value = data.ok
-      ? { ok: true }
+      ? { ok: true, webhookOk: true }
       : data.webhook_registered === false
-        ? { ok: false, short: 'Webhook not registered', reason: data.webhook_error }
+        ? { ok: false, webhookOk: false, short: 'Not receiving messages', reason: data.webhook_error }
         : { ok: false, short: data.message || 'Verification failed' }
   } catch (e) {
     verifyResult.value = { ok: false, short: e.response?.data?.detail || 'Failed to verify bot' }
