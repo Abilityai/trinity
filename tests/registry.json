@@ -9121,6 +9121,32 @@
       "description": "ent#1216: a caller_wake turn carries the delegation's person when that person is owner tier on the delegator, so the agent's key keeps its execution reads while the wake runs. Real /task admission -> real maybe_wake_caller -> real ledger and acting_turn_user_id / viewer_row_scope on a real DB. A shared person's, a visitor's, a deleted user's and a cannot-open person's wake carry nobody, as before; the audit names the standing; auto-memory follows the owner rule."
     },
     {
+      "file": "unit/test_ent1258_suspended_workspace_door.py",
+      "feature": "trinity-enterprise#1258",
+      "added": "2026-11-13",
+      "categories": [
+        "unit",
+        "backend",
+        "workspace",
+        "auth",
+        "security"
+      ],
+      "description": "ent#1258: a deactivated platform account (users.suspended_at) gets no code, no session and no /login hand-off at the Workspace door, with or without a share; the delegated exchange refuses it; the per-request gate refuses a session minted before the suspension and serves it again after reactivation. An outside client and an active account are unchanged (controls); a failed lookup denies; every decode_portal_session consumer goes through the gate."
+    },
+    {
+      "file": "unit/test_4501_approver_reach.py",
+      "feature": "#4501",
+      "added": "2026-11-12",
+      "categories": [
+        "unit",
+        "operator-queue",
+        "asks",
+        "role-addressing",
+        "security"
+      ],
+      "description": "#4501: an ask addressed to: approver records only the seated approvers who can open the agent and is refused 422 role_cannot_open_agent when none can, so the answer fence never names a person who cannot see the ask. Real sink and real route on a real DB: nothing is written on the refusal (with a positive control), the refusal names the role and is logged, an admin approver and a replay are unaffected, primary and viewer are not filtered, and re-addressing to an unreachable approver leaves the row as it was."
+    },
+    {
       "file": "unit/test_ent1225_continuation_tier.py",
       "feature": "trinity-enterprise#1225",
       "added": "2026-11-13",
