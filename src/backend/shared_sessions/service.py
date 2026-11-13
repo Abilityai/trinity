@@ -2084,22 +2084,30 @@ def _room_gate_card(agent_name: str, shown: list[dict], ask_request_text: str,
         return [], None
     mine = [m for m in shown if (m.get("sender_kind"), m.get("sender_identity")) == requester]
     posts = [m for m in shown if m in gated or (mine and m is mine[-1])]
-    card = "\n".join([_format_card(posts)] + ([ask_request_text] if ask_request_text else []))
-    return posts, card
+    return posts, _format_card(posts, ask_request_text)
 
 
 # PR #4552 review: what starts each continuation line of a post on the card.
 CARD_CONTINUATION = "  | "
+# What starts the ask reply's first line on the card: the answer (or the
+# cancel reason) to the ask this turn continues. The responder is withheld
+# from the agent (ent#715), and the replay is the agent's message. No agent
+# name or email starts with "(", so no post's sender line reads as this.
+CARD_ASK_ANSWER = "(ask reply): "
 
 
-def _format_card(posts: list[dict]) -> str:
-    """The gate card's posts: `_format_delta`'s sender lines, with every further
-    line of a post (on any line break a renderer honours) prefixed by
-    `CARD_CONTINUATION`, so a newline inside a post cannot start a line that
-    reads as another sender's. The agent transcript keeps `_format_delta`."""
+def _format_card(posts: list[dict], ask_answer: str = "") -> str:
+    """The gate card's posts: `_format_delta`'s sender lines, then the ask
+    reply under `CARD_ASK_ANSWER`, with every further line of each (on any
+    line break a renderer honours) prefixed by `CARD_CONTINUATION`, so a
+    newline inside one cannot start a line that reads as a sender's. The agent
+    transcript keeps `_format_delta`."""
+    entries = [_format_delta([m]) for m in posts]
+    if ask_answer:
+        entries.append(CARD_ASK_ANSWER + ask_answer)
     lines = []
-    for m in posts:
-        first, *rest = _format_delta([m]).splitlines() or [""]
+    for entry in entries:
+        first, *rest = entry.splitlines() or [""]
         lines += [first] + [CARD_CONTINUATION + line for line in rest]
     return "\n".join(lines)
 

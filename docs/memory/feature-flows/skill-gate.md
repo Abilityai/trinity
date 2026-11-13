@@ -93,7 +93,7 @@ The 202's notice sentence stays role-free (#3274: the requester is told it waits
 | Channels | the sender's text, after the quote line in a Telegram group (`[Replying to …: "…"]`, the line the agent reads — #3274) |
 | Workspace | the quoted reply + what the client typed |
 | Public links | the visitor's message |
-| Rooms | the participants' new messages, plus the ask answer. The card, the size check and the approved run read only the posts that themselves invoke a gated skill and the requester's latest post, each post's first line prefixed with its sender and every further line of a post prefixed with `  | ` (`_format_card`), so a newline inside a post cannot start a line that reads as another sender's, plus the ask answer (trinity#4505) |
+| Rooms | the participants' new messages, plus the ask answer. The card, the size check and the approved run read only the posts that themselves invoke a gated skill and the requester's latest post, each post's first line prefixed with its sender and every further line of a post prefixed with `  | ` (`_format_card`), plus the ask answer on a line starting `(ask reply): `, its further lines prefixed the same way, so a newline inside a post or the answer cannot start a line that reads as a sender's (trinity#4505) |
 | Operator resumes | the chosen answer + the free text |
 | Operator endings | the reason |
 | Validation | the operator's custom prompt |
