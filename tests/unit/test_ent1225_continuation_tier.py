@@ -619,3 +619,64 @@ def test_the_fan_out_router_resolves_the_callers_running_turn(world):
     person = User(id=world.ids[OWNER], username=OWNER, email=OWNER_EMAIL, role="operator")
     person._acting_execution_id = origin
     assert T.turn_origin_execution_id(db, person) is None
+
+
+# ---------------------------------------------------------------------------
+# review fixes (PR #4546)
+# ---------------------------------------------------------------------------
+
+
+def test_a_resume_reported_to_the_workspace_keeps_the_workspace_rule(world, resume, monkeypatch):
+    """The person who answered in the Workspace reads the resume's reply and
+    files, so it is never rated as the asking turn's owner tier."""
+    from config import PORTAL_SOURCE_CHANNEL
+    monkeypatch.setattr(resume.svc, "_workspace_destination", lambda item, email: {
+        "source_channel": PORTAL_SOURCE_CHANNEL, "source_channel_chat_id": "chat-1",
+        "source_channel_client": "client@example.com"})
+    origin = _origins(world)["owner"]
+    sent = {}
+
+    async def _adapter(**kwargs):
+        sent.update(kwargs)
+        row = db.create_task_execution(
+            agent_name=kwargs["agent_name"], message=kwargs["message"],
+            triggered_by=kwargs["triggered_by"],
+            fields=TaskExecutionFields(**{k: kwargs[k] for k in (
+                *_ROW_KWARGS, "source_channel", "source_channel_chat_id", "source_channel_client")
+                if k in kwargs}),
+        )
+        return SimpleNamespace(execution_id=row.id, status="running", error=None)
+
+    import services.task_execution_service as tes
+    monkeypatch.setattr(tes, "dispatch_and_await_terminal", _adapter)
+    woken = asyncio.run(resume.svc.maybe_dispatch_resume(
+        _item(origin), response="yes", responded_by_email="client@example.com"))
+    assert "continues_execution_id" not in sent
+    tier, kind, _ = T.turn_actor(db, A, woken)
+    assert (tier, kind) == (T.SHARE, T.PERSON)
+    assert T.shell_allowed(db, A, tier, kind) is False
+
+
+@pytest.mark.parametrize("standing,keeps", [("owner", True), ("shared", False),
+                                            ("visitor", False), ("delegated", False)])
+def test_auto_memory_follows_the_continued_turn(world, standing, keeps):
+    from services import memory_subject
+    cont = _row(A, "operator_response", continues_execution_id=_origins(world)[standing])
+    assert memory_subject.keeps_shared_auto_memory(
+        db.get_execution(cont), OWNER_EMAIL, owner_id=world.ids[OWNER]) is keeps
+
+
+def test_a_gated_task_delegation_freezes_the_callers_turn(world, wake, monkeypatch):
+    """`/task`'s own gate call freezes the link, so an approved run's wake
+    still continues the delegating turn."""
+    from services import skill_gate_service as G
+    seen = {}
+
+    async def _enforce(name, **kw):
+        seen.update(kw.get("dispatch") or {})
+        return G.GateDecision()
+
+    monkeypatch.setattr(_CE.skill_gate_service, "enforce", _enforce)
+    origin = _origins(world)["shared"]
+    _delegate_from(world, acting=origin)
+    assert seen.get("continues_execution_id") == origin

@@ -3136,6 +3136,7 @@ async def dispatch_parallel_task(
                     source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
                     chain_depth=chain_depth,
                     max_turns=request.max_turns,
+                    continues_execution_id=turn_tier_service.turn_origin_execution_id(db, current_user),
                 ),
                 **skill_gate_service.frozen_replay(request.message, request.system_prompt),
             },

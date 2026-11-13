@@ -485,8 +485,12 @@ async def maybe_dispatch_resume(
                 # a slot frees, and the adapter waits out the queue. A rejected wake
                 # was a FAILED row under a completed idempotency key: never retried.
                 queue_on_capacity=True,
-                # trinity-enterprise#1225: the resume stands as the asking turn.
-                **_continuation_of([item]),
+                # trinity-enterprise#1225: the resume stands as the asking turn —
+                # except a resume whose result goes to the person who answered in
+                # the Workspace (`destination`): that person reads its reply and
+                # files, so it keeps the Workspace rule (a shared person with
+                # nobody behind them), never the asking turn's owner tier.
+                **({} if destination else _continuation_of([item])),
                 **destination,
             )
     except Exception as exc:
