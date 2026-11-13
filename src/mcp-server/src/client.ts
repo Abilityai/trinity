@@ -4425,6 +4425,31 @@ export class TrinityClient {
       this.projectPath(projectId, `/context/${encodeURIComponent(itemId)}?offset=${offset}`), turn);
   }
 
+  // trinity-enterprise#1237: the platform's file spaces (`<kind>:<id>`), agent door.
+  private spaceFilesPath(space: string, name?: string): string {
+    const base = `/api/enterprise/files/agent/spaces/${encodeURIComponent(space)}/files`;
+    return name === undefined ? base : `${base}/${encodeURIComponent(name)}`;
+  }
+
+  async listPlatformFiles(space: string, cursor?: string, turn?: string): Promise<Record<string, unknown>> {
+    const q = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
+    return this.projectRequest("GET", this.spaceFilesPath(space) + q, turn);
+  }
+
+  async readPlatformFile(space: string, name: string, offset = 0, turn?: string): Promise<Record<string, unknown>> {
+    return this.projectRequest("GET", `${this.spaceFilesPath(space, name)}?offset=${offset}`, turn);
+  }
+
+  async writePlatformFile(space: string, name: string, content: string, ifRevision?: number, turn?: string): Promise<Record<string, unknown>> {
+    const body: Record<string, unknown> = { content };
+    if (ifRevision !== undefined) body.if_revision = ifRevision;
+    return this.projectRequest("PUT", this.spaceFilesPath(space, name), turn, body);
+  }
+
+  async removePlatformFile(space: string, name: string, ifRevision: number, turn?: string): Promise<void> {
+    await this.projectRequest("DELETE", `${this.spaceFilesPath(space, name)}?if_revision=${ifRevision}`, turn);
+  }
+
   async addProjectLogEntry(projectId: string, body: Record<string, unknown>, turn?: string): Promise<Record<string, unknown>> {
     return this.projectRequest("POST", this.projectPath(projectId, "/log"), turn, body);
   }

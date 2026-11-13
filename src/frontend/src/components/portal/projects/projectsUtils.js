@@ -121,13 +121,74 @@ export function continueChoice(options) {
   return { primary, others: actionable.filter((o) => o !== primary) }
 }
 
-/** The Steward card's schedule line for the server's `{state, next_run_at}`. */
-export function stewardScheduleLine(schedule) {
+/**
+ * The Steward card's schedule line for the server's `{state, next_run_at}`.
+ * With a `wake` block (trinity-enterprise#1236) Trinity wakes the steward, so
+ * having no schedule of its own is not news: no line, never "No sweep scheduled".
+ */
+export function stewardScheduleLine(schedule, wake = null) {
   if (!schedule) return ''
-  if (schedule.state === 'none') return 'No sweep scheduled'
+  if (schedule.state === 'none') return wake ? '' : 'No sweep scheduled'
   if (schedule.state === 'scheduled') return schedule.next_run_at ? 'Next run' : 'Scheduled'
   if (schedule.state === 'hidden') return 'Scheduled'
   return "Schedule couldn't be read"
+}
+
+/**
+ * trinity-enterprise#1236 — the Steward card's wake line: whether Trinity wakes
+ * the agent steward, or the one named reason it does not. `agent` is the
+ * steward agent's name.
+ */
+export function stewardWakeLine(wake, agent) {
+  if (!wake) return ''
+  if (wake.state === 'on') return 'Trinity wakes it'
+  switch (wake.reason) {
+    case 'not_started': return 'Not started. A person starts waking the steward.'
+    case 'paused': return wake.paused_by ? `Paused by ${wake.paused_by}` : 'Paused'
+    case 'autonomy_off': return `${agent} has autonomy off, so it isn't woken.`
+    case 'project_not_running': return "This project isn't active, so the steward isn't woken."
+    case 'steward_not_on_project': return `${agent} isn't active on this project yet, so it isn't woken.`
+    case 'unknown': return "Couldn't check whether Trinity wakes it."
+    default: return "Trinity isn't waking it."
+  }
+}
+
+const WAKE_REASON_LABEL = { task: 'a task changed', ask: 'an ask was answered', daily: 'the daily check' }
+
+/** What wakes the steward next: `{text, at}` for the server's `wake.next`, or null. */
+export function stewardWakeNext(next) {
+  if (!next) return null
+  if (next.kind === 'running') return { text: 'Running now', at: null }
+  if (next.kind === 'owed') {
+    const why = (next.reasons || []).map((r) => WAKE_REASON_LABEL[r]).filter(Boolean).join(', ')
+    return { text: why ? `Next wake soon (${why})` : 'Next wake soon', at: next.at || null }
+  }
+  if (next.kind === 'daily') {
+    return next.at
+      ? { text: 'Next daily check', at: next.at }
+      : { text: 'Next: when a task changes or an ask is answered, and daily while work is open', at: null }
+  }
+  return null
+}
+
+const WAKE_SKIP_LABEL = {
+  agent_stopped: 'the agent was stopped',
+  budget: 'this hour\'s wakes were used up',
+  nothing_open: 'nothing was open',
+  dispatch_error: "the run couldn't be started",
+}
+
+/** The last wake Trinity did not run, when that is worth saying. */
+export function stewardWakeSkipLine(skip) {
+  const label = skip && WAKE_SKIP_LABEL[skip.reason]
+  return label ? `Last wake skipped: ${label}` : ''
+}
+
+const RUN_STATUS_LABEL = { success: 'finished', failed: 'failed', cancelled: 'cancelled', skipped: 'skipped' }
+
+/** "Last run 2 h ago · finished" — the status word for the recorded run. */
+export function stewardRunStatus(status) {
+  return RUN_STATUS_LABEL[status] || (status ? String(status) : '')
 }
 
 /** The one-time "how a project moves" line (ent#896): remembered per browser. */

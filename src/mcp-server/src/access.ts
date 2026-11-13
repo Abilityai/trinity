@@ -572,6 +572,11 @@ export const TOOL_ACCESS_POLICY: Readonly<Record<string, ToolAccessPolicy>> = {
   // the agent's primary contacts, nothing happens until one of them approves, and adding one
   // someone else owns still raises that owner's consent ask (R39). The gate is projects.manage.
   propose_project_changes: { kind: "baselined", owner: "trinity-enterprise#1089: projects/proposals.py — the agent's primary approves (ent#816 first answer wins) + the agent owner's consent ask" },
+  // --- platform_files.ts ---
+  list_platform_files: { kind: "in-tool", how: ACT_AS + " — a space id; the backend resolves the space's access for the calling agent on every call (uniform 404 otherwise) (ent#1237)" },
+  read_platform_file: { kind: "in-tool", how: ACT_AS + " — a space id and a file name; the backend resolves the space's and the file's access for the calling agent on every call (ent#1237)" },
+  write_platform_file: { kind: "in-tool", how: ACT_AS + " — a space id and a file name; the backend resolves write access for the calling agent on every call (ent#1237)" },
+  remove_platform_file: { kind: "in-tool", how: ACT_AS + " — a space id and a file name; the backend resolves write access for the calling agent on every call (ent#1237)" },
   // --- assignments.ts ---
   get_agent_assignments: { kind: "in-tool", how: ASSIGNMENTS_SELF },
   // --- permissions.ts ---

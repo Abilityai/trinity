@@ -41,7 +41,7 @@ _VALID_STATUSES = {"running", "queued", "success", "failed", "error", "cancelled
 # `self_task` is an agent's `POST /task` to itself (#4105). `caller_wake` is
 # the turn that tells a delegating agent its delegated run ended
 # (trinity-enterprise#1102) — the `operator_ending` shape, agent-to-agent.
-_VALID_TRIGGERS = {"schedule", "manual", "agent", "mcp", "chat", "session", "public", "webhook", "fan_out", "loop", "reminder", "room", "a2a", "operator_response", "operator_ending", "retry", "skill_gate", "self_task", "caller_wake"}
+_VALID_TRIGGERS = {"schedule", "manual", "agent", "mcp", "chat", "session", "public", "webhook", "fan_out", "loop", "reminder", "room", "a2a", "operator_response", "operator_ending", "retry", "skill_gate", "self_task", "caller_wake", "project_steward"}
 _VALID_HOURS = {0, 1, 6, 24, 168, 720}  # 0 = all-time
 
 # ent#326. `hour`/`day` are gap-filled; `trigger`/`agent` are categorical and

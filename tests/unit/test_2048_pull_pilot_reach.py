@@ -132,7 +132,10 @@ def test_reachable_set_is_what_the_two_queueing_producers_can_actually_emit():
     adapter_served = {"a2a", "operator_response", "operator_ending", "caller_wake"}
     # #4105: `skill_gate_service` wakes the requester through `execute_task`
     # and ignores the result, so nothing reads the dispatch's return value.
-    result_ignored = {"skill_gate"}
+    # trinity-enterprise#1236: the project steward wake is the same shape — the
+    # private module dispatches through `execute_task` without awaiting it and
+    # reads the terminal back from the execution row.
+    result_ignored = {"skill_gate", "project_steward"}
     assert PULL_REACHABLE_TRIGGERS == (
         (task_route_can_emit | scheduler_async_polled | db_joined | adapter_served
          | result_ignored)
