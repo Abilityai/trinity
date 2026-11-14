@@ -9237,6 +9237,20 @@
         "security"
       ],
       "description": "ent#1225: caller_wake, operator_response, operator_ending and skill_gate rows name the turn they continue (continues_execution_id) and are rated exactly as it: owner, shared person, visitor, delegated. Only a running turn of the same agent is recorded; an agent-written context key is stripped; a link that cannot be followed, or one ending over asks from different turns, fails closed to (share, person, None). An answer or ending wake follows the link only when the answerer or canceller is owner tier or the asking turn's own person; a shared person ending the owner's ask fails closed (real ask_service.answer/cancel and wake filer). The pull claim carries the link for auto-memory. Real /task and /chat admission, real maybe_wake_caller, maybe_dispatch_resume/maybe_dispatch_ending, raise_ask, the gate notice, the ledger and acting_turn_user_id on a real DB."
+    },
+    {
+      "file": "unit/test_4579_credential_primary_reach.py",
+      "feature": "#4579",
+      "added": "2026-11-14",
+      "categories": [
+        "unit",
+        "operator-queue",
+        "asks",
+        "role-addressing",
+        "credentials",
+        "security"
+      ],
+      "description": "#4579: a credential ask is recorded only for a reader who can open its Workspace secret field: the agent's primary person when the agent is on their roster, else its owner, else the raise is refused 422 role_cannot_open_agent and nothing is filed. Real sink, real door (_owned_ask) and real route on a real DB: a primary off the roster hands the ask to the owner, an admin or a deactivated account off the roster is not a reader, the owner is reached through the owned roster on real account, ownership and share rows, an unreadable roster fails closed and the log names nobody, a question ask and a replay are unchanged, and a seat change re-addresses a pending credential row by the same chain."
     }
   ]
 }

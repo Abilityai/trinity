@@ -744,7 +744,9 @@ export function createOperatorQueueTools(
         "A dismissed ask means the person chose not to give it: do not ask again " +
         "straight away. If you no longer need it, withdraw_ask. Refusals come back " +
         "as {success: false, status, code, message}: 422 no_person (no single person " +
-        "to ask — ask from a chat with them), 422 invalid_credential_name (a malformed " +
+        "to ask — ask from a chat with them), 422 role_cannot_open_agent (neither your " +
+        "primary person nor your owner can open you in their Workspace — an admin " +
+        "shares you with them), 422 invalid_credential_name (a malformed " +
         "or reserved name; reason says which), 429 rate_limited or queue_full. Acts " +
         "as the agent your key belongs to; there is no agent parameter. For an " +
         "agent on another Trinity, set destination with the registered instance (see the parameter).",

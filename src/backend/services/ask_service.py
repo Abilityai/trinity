@@ -1098,7 +1098,9 @@ def readdress_role(agent_name: str, role: str, *, reason: str) -> Dict[str, int]
     again. A refused role (`approver`/`viewer` unfilled, nobody seated who can
     open the agent) leaves the rows AS THEY WERE: an empty snapshot on an
     approver row would un-fence it (ent#1053). A credential row keeps exactly
-    one reader (ent#1066): it moves only to a single person.
+    one reader (ent#1066): it moves only to a single person, and an agent's
+    credential row only to one who can open its secret field (#4579,
+    `_fresh_credential_audience`).
 
     `role` is one of `ASK_ROLES`; anything else is a programming error. One
     audit row per changed row (`readdress_item`), and ONE agent-keyed `/ws`
@@ -1113,13 +1115,18 @@ def readdress_role(agent_name: str, role: str, *, reason: str) -> Dict[str, int]
     out = {"readdressed": 0, "unchanged": 0}
     if not rows:
         return out
-    fresh: Dict[bool, Optional[Tuple[List[str], Optional[str]]]] = {}
+    fresh: Dict[Tuple[bool, bool], Optional[Tuple[List[str], Optional[str]]]] = {}
     first_changed: Optional[str] = None
     for row in rows:
         gate = row.get("raised_by") == "gate"
-        if gate not in fresh:
-            fresh[gate] = _fresh_audience(agent_name, role, gate=gate)
-        audience = fresh[gate]
+        # #4579: an agent's credential row follows the rule its raise used —
+        # the reader must be able to open the secret field.
+        own_credential = row.get("type") == "credential" and role == "primary" and not gate
+        key = (gate, own_credential)
+        if key not in fresh:
+            fresh[key] = (_fresh_credential_audience(agent_name) if own_credential
+                          else _fresh_audience(agent_name, role, gate=gate))
+        audience = fresh[key]
         if audience is None:
             out["unchanged"] += 1
             continue
@@ -1142,6 +1149,22 @@ def readdress_role(agent_name: str, role: str, *, reason: str) -> Dict[str, int]
         except Exception:  # noqa: BLE001 — the writes are committed; they must stand
             logger.warning("[AskService] could not schedule the readdressed trigger", exc_info=True)
     return out
+
+
+def _fresh_credential_audience(agent_name: str) -> Optional[Tuple[List[str], Optional[str]]]:
+    """`_fresh_audience` for an agent's `credential` row (#4579): the reader a
+    fresh raise would record NOW (`role_addressing.resolve_credential_reader`),
+    or None when nobody can open the secret field, so the row stays as it was."""
+    from services import role_addressing
+
+    try:
+        r = role_addressing.resolve_credential_reader(agent_name, owner_lookup=_owner_email)
+    except role_addressing.RoleRefused as e:
+        logger.info("[AskService] the credential asks on %s are not re-addressed: %s",
+                    agent_name, e.code)
+        return None
+    people = _people_list(r.people)
+    return people, (people[0] if len(people) == 1 else None)
 
 
 def _fresh_audience(agent_name: str, role: str, *, gate: bool) -> Optional[Tuple[List[str], Optional[str]]]:
@@ -1297,7 +1320,13 @@ def admin_readdress(item_id: str, *, to: str, reason: str, actor: Actor) -> Dict
         raise ReaddressRefused(422, "unknown_family",
                                "This card has no rule to re-address it by; end it with a reason instead.")
     elif _role_family(row):
-        audience = _fresh_audience(agent_name, row["to_role"], gate=row.get("raised_by") == "gate")
+        gate = row.get("raised_by") == "gate"
+        # #4579: an agent's credential row is re-addressed by the rule its
+        # raise used, so "by its rule" cannot hand the secret field to a
+        # primary who cannot open it.
+        audience = (_fresh_credential_audience(agent_name)
+                    if row.get("type") == "credential" and row["to_role"] == "primary" and not gate
+                    else _fresh_audience(agent_name, row["to_role"], gate=gate))
         if audience is None:
             raise ReaddressRefused(409, "rule_refused",
                                    f"Nobody can be found for the {row['to_role']} role on this agent "
@@ -1511,6 +1540,10 @@ def raise_ask(
         # turn it knows — the agent supplied the word, nothing else.
         people, addressee, resolved, project_id, seat = _address_target(
             agent_name, norm["to"], turn)
+    elif norm["type"] == "credential":
+        # #4579: the secret field is this kind's only door, so its reader is
+        # resolved by the rule that asks who can open it.
+        people, addressee, resolved = _address_credential(agent_name)
     else:
         people, addressee, resolved = _address(agent_name, norm["to"])
     if norm["type"] == "credential" and not addressee:
@@ -2285,6 +2318,26 @@ def _address(agent_name: str, role: str) -> Tuple[List[str], Optional[str], bool
         raise AskRejected(422, "role_unassigned",
                           f"Nobody fills the {role} role for this agent yet; address the ask to "
                           "primary or operator.", role=role)
+    return r.people, r.single, r.resolved
+
+
+def _address_credential(agent_name: str) -> Tuple[List[str], Optional[str], bool]:
+    """`(resolved_to, addressed_to_email, resolved)` for a `credential` ask
+    (#4579): `role_addressing.resolve_credential_reader` — the agent's primary
+    person when they can open the Workspace secret field, else its owner when
+    they can, else refused `role_cannot_open_agent`. A credential ask is
+    answered through that field alone (`answer` refuses anything else), so a
+    reader who cannot open it would leave an ask nobody can fill. Nobody or
+    several is returned as it is and refused `no_person` by the caller. A
+    refusal files nothing, so it is logged: the agent, never a person."""
+    from services import role_addressing
+
+    try:
+        r = role_addressing.resolve_credential_reader(agent_name, owner_lookup=_owner_email)
+    except role_addressing.RoleRefused as e:
+        logger.warning("[AskService] a credential ask from %s was refused: neither its primary "
+                       "person nor its owner can open the agent in their Workspace", agent_name)
+        raise AskRejected(422, e.code, e.message, role=e.role)
     return r.people, r.single, r.resolved
 
 
