@@ -482,6 +482,67 @@ class TestReaddress:
 
 
 # ---------------------------------------------------------------------------
+# An admin re-addressing a credential ask "by its rule" reads the same rule
+# ---------------------------------------------------------------------------
+
+class TestAdminReaddress:
+    """`admin_readdress(to="rule")` re-runs the rule that raised the card. For
+    an agent's credential ask that rule is the reader chain, not the plain
+    role: the plain role would hand the secret field to a seated primary who
+    cannot open it, which is the state the raise refuses to create."""
+
+    def _admin(self):
+        from models import User
+        from services import ask_service
+        return ask_service.Actor(email="root@example.com",
+                                 user=User(id=3, username="root", email="root@example.com", role="admin"))
+
+    def _readdress(self, row):
+        from services import ask_service as svc
+        return svc.admin_readdress(row["id"], to="rule", reason="check", actor=self._admin())
+
+    def test_by_its_rule_does_not_move_the_ask_to_a_primary_off_the_roster(
+            self, agent, people, shared, owner):
+        from services import ask_service as svc
+        shared.add(owner)
+        _seat(primary=[people["alice"]])
+        _raise(agent)
+        [row] = _pending_credential_rows(agent)
+        assert _resolved(row) == [owner]
+        with pytest.raises(svc.ReaddressRefused) as exc:
+            self._readdress(row)
+        assert (exc.value.status, exc.value.code) == (409, "audience_unchanged")
+        [row] = _pending_credential_rows(agent)
+        assert _resolved(row) == [owner] and _door_opens(row)
+
+    def test_control_by_its_rule_moves_the_ask_to_a_primary_on_the_roster(
+            self, agent, people, shared, owner):
+        shared.add(owner)
+        _seat(primary=[people["alice"]])
+        _raise(agent)
+        [row] = _pending_credential_rows(agent)
+        shared.add(people["alice"])
+        out = self._readdress(row)
+        assert out["waiting_on"] == [people["alice"]]
+        [row] = _pending_credential_rows(agent)
+        assert _resolved(row) == [people["alice"]] and _door_opens(row)
+
+    def test_by_its_rule_is_refused_when_nobody_can_open_the_field(
+            self, agent, people, shared):
+        from services import ask_service as svc
+        shared.add(people["alice"])
+        _seat(primary=[people["alice"]])
+        _raise(agent)
+        [row] = _pending_credential_rows(agent)
+        _seat(primary=[people["bob"]])
+        with pytest.raises(svc.ReaddressRefused) as exc:
+            self._readdress(row)
+        assert (exc.value.status, exc.value.code) == (409, "rule_refused")
+        [row] = _pending_credential_rows(agent)
+        assert _resolved(row) == [people["alice"]]
+
+
+# ---------------------------------------------------------------------------
 # The real route (the MCP `ask_for_credential` tool proxies to it)
 # ---------------------------------------------------------------------------
 

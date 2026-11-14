@@ -1320,7 +1320,13 @@ def admin_readdress(item_id: str, *, to: str, reason: str, actor: Actor) -> Dict
         raise ReaddressRefused(422, "unknown_family",
                                "This card has no rule to re-address it by; end it with a reason instead.")
     elif _role_family(row):
-        audience = _fresh_audience(agent_name, row["to_role"], gate=row.get("raised_by") == "gate")
+        gate = row.get("raised_by") == "gate"
+        # #4579: an agent's credential row is re-addressed by the rule its
+        # raise used, so "by its rule" cannot hand the secret field to a
+        # primary who cannot open it.
+        audience = (_fresh_credential_audience(agent_name)
+                    if row.get("type") == "credential" and row["to_role"] == "primary" and not gate
+                    else _fresh_audience(agent_name, row["to_role"], gate=gate))
         if audience is None:
             raise ReaddressRefused(409, "rule_refused",
                                    f"Nobody can be found for the {row['to_role']} role on this agent "

@@ -161,7 +161,7 @@ receiving instance: POST /api/agents/{name}/credentials/inject mode "merge"
 | Layer | File | Role |
 |---|---|---|
 | MCP | `src/mcp-server/src/tools/operator_queue.ts` → `ask_for_credential` | Self-acting; builds the ask from declared fields only; derives `request_id` from name + turn when left out |
-| Backend | `services/ask_service.py` | `credential` in `ASK_TYPES`; options refused; `to` other than `primary` refused (`invalid_to`); the reader is `role_addressing.resolve_credential_reader` — the primary person when the agent is on their Workspace roster, else the owner, else `role_cannot_open_agent` (#4579; `readdress_role` moves a pending row by the same rule); `no_person`; `CredentialAnswerRefused` unless `via_credential_sink` |
+| Backend | `services/ask_service.py` | `credential` in `ASK_TYPES`; options refused; `to` other than `primary` refused (`invalid_to`); the reader is `role_addressing.resolve_credential_reader` — the primary person when the agent is on their Workspace roster, else the owner, else `role_cannot_open_agent` (#4579; `readdress_role` and an admin's re-address by rule, `admin_readdress`, move a pending row by the same rule); `no_person`; `CredentialAnswerRefused` unless `via_credential_sink` |
 | Backend | `services/operator_queue_service::_clamp_ingested_item` | File channel: a credential entry keeps its addressee only when that is the agent's single primary person |
 | Backend | `services/credential_ask_policy.py` | Name charset, ≤64, reserved names (agent-side mirror, parity-tested) |
 | Backend | `client_portal/asks/router.py` → `POST /{id}/credential` | Person-only door, rate-limited, uniform 404 |
