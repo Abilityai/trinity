@@ -18,6 +18,7 @@ import {
   QUEUE_RESPONSE_NOT_RECORDED,
   QUEUE_RESPONSE_DIVERGED,
   QUEUE_RESPONSE_NOT_ADDRESSEE,
+  notAddresseeMessage,
   respondRefusedAsNotPending,
   respondRefusedAsDiverged,
   respondRefusedAsNotAddressee,
@@ -75,6 +76,8 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
   // addressed to this person. Its own ref, not `error`: `fetchItems` clears
   // `error` on every poll, and a failed verb must persist beside its control (p18).
   const notAddresseeItemId = ref(null)
+  // trinity-enterprise#1096: the server's words for that refusal (who it waits for)
+  const notAddresseeText = ref(null)
   // #3302: every header's counts (NavBar badge, subtitle, tab badge). Written
   // by the list read from the complete pending set, by the count read off the
   // Operations page, and by an answer — never derived from a window.
@@ -300,6 +303,7 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
     } catch (err) {
       if (respondRefusedAsNotAddressee(err)) {
         notAddresseeItemId.value = id
+        notAddresseeText.value = notAddresseeMessage(err)
         return false
       }
       if (respondRefusedAsDiverged(err)) {
@@ -479,6 +483,7 @@ export const useOperatorQueueStore = defineStore('operatorQueue', () => {
     divergedItemId,
     QUEUE_RESPONSE_DIVERGED,
     notAddresseeItemId,
+    notAddresseeText,
     QUEUE_RESPONSE_NOT_ADDRESSEE,
     openItems,
     resolvedItems,

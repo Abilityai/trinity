@@ -9191,6 +9191,29 @@
       "description": "#4501: an ask addressed to: approver records only the seated approvers who can open the agent and is refused 422 role_cannot_open_agent when none can, so the answer fence never names a person who cannot see the ask. Real sink and real route on a real DB: nothing is written on the refusal (with a positive control), the refusal names the role and is logged, an admin approver and a replay are unaffected, primary and viewer are not filtered, and re-addressing to an unreachable approver leaves the row as it was."
     },
     {
+      "file": "unit/test_1096_admin_seat_fence.py",
+      "feature": "abilityai/trinity-enterprise#1096",
+      "added": "2026-11-13",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1096 (OSS sink): the admin decider seat on a gate approval — an empty audience raised only with the platform's admin stamp (R1); the admin arm admits an admin-gate person only, never an agent/connector/ops/system/loopback/stand-in principal (R8); addressed_view equals may_end; a re-address compares and clears stamps (R4) and an admin re-address is audited with its actor; an answer or cancel read before a re-address loses `readdressed` (R5); a bulk sweep skips fenced rows (R6); the refusal names seat and people for gate approvals only (R7); admin:<username> for an admin without email (R9); the per-family re-address resolver registry."
+    },
+    {
+      "file": "unit/test_1096_readdress_route.py",
+      "feature": "abilityai/trinity-enterprise#1096",
+      "added": "2026-11-13",
+      "categories": [
+        "backend",
+        "operator-queue",
+        "api",
+        "unit"
+      ],
+      "description": "trinity-enterprise#1096 (OSS routes): POST /api/operator-queue/{id}/readdress {to: rule|admin, reason} — admin + person only (agent, connector, ops and non-admin principals refused, nothing written), body validated, a registered family moved by its resolver (audit: admin actor + has_reason, no address or reason text), the rule landing on the admin seat, unchanged → 409 naming who it waits for, a role-addressed ask follows its role, a named family → 422 unknown_family, a skill-gate approval refused the admin seat (T3), an admin-seat card then decided by the admin; cancel by an admin on someone else's card needs a reason (422 reason_required); bulk-cancel reports skipped_fenced; the 403 not_addressee carries waiting_on + seat on the Operations and Workspace doors (admin verbs on Operations only); an answer read before a re-address is a 409 readdressed (people named on Operations, never on the Workspace); route registration, the require_admin + require_person gates and the R14 `# mcp:` header pinned."
+    },
+    {
       "file": "unit/test_4475_terminate_audit_race.py",
       "feature": "abilityai/trinity#4475",
       "added": "2026-11-13",
