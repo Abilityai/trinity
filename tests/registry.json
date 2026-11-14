@@ -1,6 +1,16 @@
 {
   "test_files": [
     {
+      "file": "unit/test_4564_capacity_db_bound.py",
+      "feature": "#4564",
+      "added": "2026-11-13",
+      "categories": [
+        "backend",
+        "capacity"
+      ],
+      "description": "#4564: set_max_parallel_tasks stores any value >= 1 (the upper bound is the fleet ceiling enforced by the router), no longer capped at a hardcoded 10."
+    },
+    {
       "file": "unit/test_4482_person_safe_failure.py",
       "feature": "#4482",
       "added": "2026-11-13",
