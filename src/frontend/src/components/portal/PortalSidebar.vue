@@ -133,7 +133,7 @@
           :aria-keyshortcuts="AGENT_KEY_SHORTCUTS"
           @click="onAgentClick(a.name)"
         >
-          <PortalAvatar :name="a.name" :avatar-url="a.avatar_url" :size="26" />
+          <PortalAvatar :name="agentLabel(a)" :avatar-url="a.avatar_url" :size="26" />
           <span class="min-w-0 text-left flex-1">
             <!-- #2159: the human-facing name leads; the slug is the subtitle.
                  The description was here and is not identity — two agents can
