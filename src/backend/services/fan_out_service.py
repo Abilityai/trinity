@@ -316,6 +316,8 @@ class FanOutService:
         # #2806: stamped on every subtask row; captured by the router at
         # request time. None for a non-agent principal (a root).
         chain_depth: Optional[int] = None,
+        # ent#1225: the caller's running turn, recorded on every subtask row.
+        continues_execution_id: Optional[str] = None,
     ) -> FanOutResult:
         """Dispatch tasks in parallel and (unless *async_mode*) collect results.
 
@@ -379,6 +381,7 @@ class FanOutService:
             source_mcp_key_id=source_mcp_key_id,
             source_mcp_key_name=source_mcp_key_name,
             chain_depth=chain_depth,
+            continues_execution_id=continues_execution_id,
         ))
 
         if async_mode:
@@ -472,6 +475,7 @@ class FanOutService:
         source_mcp_key_id: Optional[str],
         source_mcp_key_name: Optional[str],
         chain_depth: Optional[int] = None,
+        continues_execution_id: Optional[str] = None,
     ) -> None:
         """Dispatch every subtask, paced by the semaphore. The batch's outcome
         is read from the rows, not from here — this only records the
@@ -504,6 +508,7 @@ class FanOutService:
                         fan_out_task_id=task.id,
                         subscription_id=subscription_id,
                         chain_depth=chain_depth,
+                        continues_execution_id=continues_execution_id,
                     ),
                 )
                 if execution is None:

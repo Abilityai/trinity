@@ -726,6 +726,19 @@ provision_proxy_listener_ready() {
     ./scripts/deploy/probe-proxy-listener.sh "$port" >/dev/null 2>&1
 }
 
+# Wait up to $2 seconds (default 90) for the protected listener on port $1, the
+# same budget the ordinary listener gets. A recreated web container publishes
+# 8081 before its PROXY listener answers, so a short grace loses that race and
+# Caddy stays on the plain listener until the next start.sh run (#4541).
+provision_wait_for_proxy_listener() {
+    local port="$1" deadline=$(( $(date +%s) + ${2:-90} ))
+    [ -n "$port" ] || return 1
+    until provision_proxy_listener_ready "$port"; do
+        [ "$(date +%s)" -lt "$deadline" ] || return 1
+        sleep 2
+    done
+}
+
 # Prints "<port> proxy" when Caddy should pass client addresses over PROXY
 # protocol to the protected listener, else "8081 plain" — the ordinary listener,
 # exactly as every install before trinity-enterprise#873 rendered it.
@@ -1772,7 +1785,7 @@ ensure_database() {
             if [ "$HOSTED" = "1" ]; then
                 echo "       docker compose ${COMPOSE_FILES[*]:-} pull backend" >&2
             else
-                echo "       docker compose ${COMPOSE_FILES[*]:-} build backend" >&2
+                echo "       docker compose ${COMPOSE_FILES[*]:-} build backend frontend mcp-server scheduler" >&2
             fi
             echo "       docker compose ${COMPOSE_FILES[*]:-} run --rm backend python -m db.sqlite_to_postgres" >&2
             echo "   then re-run this script. Details: docs/migrations/SQLITE_TO_POSTGRES.md" >&2
@@ -1935,11 +1948,7 @@ if [ "$MANAGED_CADDY" = "1" ]; then
         done
         if [ "$_web_ready" = "1" ]; then
             # Give the protected listener the same grace the ordinary one had.
-            _p_port="$(provision_proxy_port)"
-            for _try in 1 2 3 4 5; do
-                [ -n "$_p_port" ] && provision_proxy_listener_ready "$_p_port" && break
-                sleep 2
-            done
+            provision_wait_for_proxy_listener "$(provision_proxy_port)" || true
             echo "Reconfiguring Caddy for this release..."
             provision_caddyfile "$(cat /etc/trinity/public-ip)" "$(env_value TRINITY_INSTALL_SOURCE)" \
                 || echo "⚠️  Caddy was not reconfigured (see above); the previous configuration is still serving." >&2

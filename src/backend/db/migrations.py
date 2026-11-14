@@ -5039,6 +5039,25 @@ def _migrate_execution_chat_session_id(cursor, conn):
     conn.commit()
 
 
+def _migrate_execution_continues_execution_id(cursor, conn):
+    """trinity-enterprise#1225 — a continuation turn names the turn it continues.
+
+    One nullable column on `schedule_executions`. A wake, an ask resume or
+    ending and a gate notice carry nobody on the row; the platform records the
+    turn they continue so they are rated as that turn, and a delegated callee
+    row records the caller's turn the wake later continues. Nullable, no
+    backfill: old rows stay NULL and are rated as before.
+    PostgreSQL half: Alembic `0124_execution_continues_execution_id`.
+    """
+    _safe_add_column(
+        cursor,
+        "schedule_executions",
+        "continues_execution_id",
+        "ALTER TABLE schedule_executions ADD COLUMN continues_execution_id TEXT",
+    )
+    conn.commit()
+
+
 def _migrate_idempotency_claim_token(cursor, conn):
     """#3298 — an idempotency claim names its owner.
 
@@ -6517,4 +6536,5 @@ MIGRATIONS = [
     ("agent_ownership_wake_on_ending", _migrate_agent_ownership_wake_on_ending),
     ("channel_client_blocks", _migrate_channel_client_blocks),
     ("agent_ownership_default_model", _migrate_agent_ownership_default_model),
+    ("execution_continues_execution_id", _migrate_execution_continues_execution_id),
 ]

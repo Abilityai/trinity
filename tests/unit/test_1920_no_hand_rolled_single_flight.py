@@ -125,6 +125,10 @@ _ALLOWED = {
     "flag (#2973) — a once-guard, not a mutex: no release, no token, TTL-expiry with the budget window only",
     "services/caller_wake_service.py": "{wake budget key}:alerted once-per-window 'wakes capped' notification "
     "marker (#4357) — a once-guard, not a mutex: no release, no token, TTL-expiry with the wake window only",
+    "services/chat_execution_service.py": "terminate_audit:{agent}:{execution_id} audit-row DEDUP claim (#4475) — "
+    "a once-guard, not a mutex: nothing waits on or renews it, it expires after 24 h, and it is deleted only when "
+    "the audit write fails so a repeat terminate can record the turn. Fails OPEN by design (a duplicate audit "
+    "row costs less than a missing one)",
 }
 
 # The sync-lock files #1920 adopted MUST no longer hand-roll a nx=True set.

@@ -662,11 +662,17 @@ export const useClientPortalStore = defineStore('clientPortal', {
 
     // Accept `version` — the one the person read. Rejects with the server's
     // error (409 `version_stale`, 403 a closed invitation); on success the
-    // roster refusal is over and the shell re-bootstraps.
+    // screen emits `accepted` and the shell re-bootstraps.
+    //
+    // #4515: `termsRefusal` is deliberately NOT cleared here. It is what keeps
+    // `PortalTerms` mounted (`Portal.vue`'s `v-else-if`), and clearing it lets
+    // the scheduler flush unmount the screen before its `emit('accepted')`
+    // runs — Vue drops an emit from an unmounted instance, so the shell never
+    // re-bootstrapped and the refusal's message stayed on the stage. The
+    // re-bootstrap's own roster read clears it (`fetchRoster`, on success).
     async acceptTerms(version) {
       const { data } = await portalHttp.post('/api/terms/accept', { version }, { headers: this.authHeader })
       if (this.terms) this.terms = { ...this.terms, version: data.version, accepted: true }
-      this.termsRefusal = null
       return data
     },
 

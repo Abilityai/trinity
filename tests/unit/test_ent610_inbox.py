@@ -704,11 +704,13 @@ async def test_a_completion_row_is_never_the_resumed_turns_cursor(inbox_db, monk
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status, head", [
-    ("success", "**Finished**"), ("failed", "**Didn't finish** — failed"),
+@pytest.mark.parametrize("status, head, detail", [
+    ("success", "**Finished**", "The leads are in."),
+    # #4482: a failure reports a person-safe sentence, never the row's error.
+    ("failed", "**Didn't finish** — failed", "The agent couldn't finish this."),
 ])
 async def test_a_resumed_turn_is_told_its_background_task_came_back(
-        inbox_db, monkeypatch, status, head):
+        inbox_db, monkeypatch, status, head, detail):
     from client_portal import db as pdb
     from client_portal import service as portal_service
     monkeypatch.setattr(portal_service, "get_turn_inflight", lambda sid: None)
@@ -722,7 +724,7 @@ async def test_a_resumed_turn_is_told_its_background_task_came_back(
         pdb.get_platform_rows_since_last_reply(AGENT, ALICE, "s-a"))
     lines = delta.splitlines()
     assert lines[0] == portal_service.VOICE_DELTA_HEADER
-    assert lines[1:] == [f"[Background task report: {head} The leads are in.]"]
+    assert lines[1:] == [f"[Background task report: {head} {detail}]"]
     # A platform note, never the agent's own words or a spoken line.
     body = "\n".join(lines[1:])
     assert "You:" not in body and "(voice)" not in body

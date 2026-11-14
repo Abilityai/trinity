@@ -21,7 +21,7 @@ from typing import Optional
 
 from database import db
 from config import SLACK_AUTO_VERIFY_EMAIL
-from services import login_policy_gate
+from services import channel_login_limit, login_policy_gate
 from services.slack_service import slack_service
 from services.email_service import email_service
 from adapters.base import ChannelAdapter, FileAttachment, NormalizedMessage, ChannelResponse
@@ -516,6 +516,16 @@ class SlackAdapter(ChannelAdapter):
                     bot_token, channel,
                     "That doesn't look like a valid email address. "
                     "Please reply with your email to continue."
+                )
+                return False
+
+            # ent#1253: cap code requests per sender, address and workspace before
+            # the ent#849 branch. Pending stays awaiting_email so the user can retry.
+            if not channel_login_limit.login_code_request_allowed(
+                "slack", str(team_id), f"{team_id}:{user_id}", email
+            ):
+                await slack_service.send_message(
+                    bot_token, channel, channel_login_limit.OVER_LIMIT_REPLY
                 )
                 return False
 

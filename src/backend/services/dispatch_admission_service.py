@@ -382,6 +382,7 @@ async def admit_chat_request(
             source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
             source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
             chain_depth=chain_depth,
+            continues_execution_id=turn_tier_service.turn_origin_execution_id(db, current_user),
         ),
     )
 

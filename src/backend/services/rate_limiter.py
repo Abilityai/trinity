@@ -33,7 +33,7 @@ import time
 import uuid
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Dict, Optional
+from typing import Any, Deque, Dict, Optional
 
 from fastapi import HTTPException, status
 
@@ -46,6 +46,8 @@ class RateLimitResult:
     remaining: int
     retry_after: int  # seconds until the caller may retry (0 when allowed)
     limit: int
+    # The hit recorded by an allowed check(), for refund(). None when refused.
+    member: Any = None
 
 
 # ---------------------------------------------------------------------------
@@ -126,13 +128,22 @@ def _get_redis():
 
 # ---------------------------------------------------------------------------
 # In-process fallback — per-key sliding window of timestamps, per worker.
-# Used only when Redis is unreachable. Cardinality is bounded by the number of
-# distinct keys the caller passes (DB-resolved tokens etc.), so this can't grow
-# from random-key spam. Best-effort: each worker enforces independently, so the
-# effective fleet limit during a Redis outage is (workers x limit).
+# Used only when Redis is unreachable. Some callers key on user input (channel
+# login keys on emails and sender ids, ent#1253), so buckets are grouped by key
+# prefix (the text before the first ':') and each group is capped at
+# _INPROCESS_MAX_KEYS: past it the group's oldest-created key is dropped. A
+# flood of one prefix (anonymous web login addresses) evicts only its own
+# group, never another limiter's bucket. Best-effort: each worker enforces
+# independently, so the effective fleet limit during a Redis outage is
+# (workers x limit).
 # ---------------------------------------------------------------------------
 
+# ponytail: a >10k-key flood of one prefix may forget a live bucket of that same
+# prefix while Redis is down; switch to per-key expiry if that ever matters.
+_INPROCESS_MAX_KEYS = 10_000
 _inprocess_buckets: Dict[str, Deque[float]] = {}
+# prefix -> its keys in creation order (dict as ordered set), for eviction.
+_inprocess_order: Dict[str, Dict[str, None]] = {}
 _inprocess_lock = threading.Lock()
 
 
@@ -140,20 +151,29 @@ def clear_inprocess() -> None:
     """Reset the in-process fallback buckets (test hook)."""
     with _inprocess_lock:
         _inprocess_buckets.clear()
+        _inprocess_order.clear()
 
 
 def _check_inprocess(key: str, limit: int, window_seconds: int) -> RateLimitResult:
     now = time.monotonic()
     cutoff = now - window_seconds
     with _inprocess_lock:
-        bucket = _inprocess_buckets.setdefault(key, deque())
+        bucket = _inprocess_buckets.get(key)
+        if bucket is None:
+            group = _inprocess_order.setdefault(key.split(":", 1)[0] if ":" in key else "", {})
+            if len(group) >= _INPROCESS_MAX_KEYS:
+                oldest = next(iter(group))
+                del group[oldest]
+                del _inprocess_buckets[oldest]
+            group[key] = None
+            bucket = _inprocess_buckets[key] = deque()
         while bucket and bucket[0] < cutoff:
             bucket.popleft()
         if len(bucket) >= limit:
             retry_after = max(1, int(bucket[0] + window_seconds - now) + 1)
             return RateLimitResult(False, 0, retry_after, limit)
         bucket.append(now)
-        return RateLimitResult(True, max(0, limit - len(bucket)), 0, limit)
+        return RateLimitResult(True, max(0, limit - len(bucket)), 0, limit, member=now)
 
 
 # ---------------------------------------------------------------------------
@@ -197,13 +217,33 @@ def check(key: str, limit: int, window_seconds: int) -> RateLimitResult:
                 pass
             return RateLimitResult(False, 0, retry_after, limit)
 
-        return RateLimitResult(True, max(0, limit - count), 0, limit)
+        return RateLimitResult(True, max(0, limit - count), 0, limit, member=member)
     except Exception as e:
         # Stale cached client (server restart, network blip) or other error —
         # drop it so the next call rebuilds, and fall back in-process.
         logger.warning("Rate limiter primary check failed (%s) — using in-process fallback", e)
         reset_redis_client()
         return _check_inprocess(key, limit, window_seconds)
+
+
+def refund(key: str, result: RateLimitResult) -> None:
+    """Remove the hit an allowed ``check(key, ...)`` recorded, for a caller
+    whose request a later check refused. Best-effort; a refused result is a
+    no-op."""
+    if result.member is None:
+        return
+    if isinstance(result.member, float):  # recorded by the in-process fallback
+        with _inprocess_lock:
+            bucket = _inprocess_buckets.get(key)
+            if bucket is not None and result.member in bucket:
+                bucket.remove(result.member)
+        return
+    r = _get_redis()
+    if r is not None:
+        try:
+            r.zrem(f"ratelimit:{key}", result.member)
+        except Exception as e:
+            logger.warning("Rate limiter refund failed (%s)", e)
 
 
 def enforce(

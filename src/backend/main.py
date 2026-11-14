@@ -25,7 +25,7 @@ from starlette.websockets import WebSocketState
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
 
-from config import CORS_ORIGINS, VOICE_ENABLED
+from config import ASK_TRINITY_ENABLED, BUG_REPORTING_ENABLED, CORS_ORIGINS, VOICE_ENABLED
 from models import User
 from dependencies import get_current_user, is_workspace_only_role, owner_is_suspended, owner_is_workspace_only, scope_may_open_event_stream, terms_route, workspace_route
 from services.docker_service import docker_client, list_all_agents_fast
@@ -2116,10 +2116,16 @@ async def get_version(current_user: User = Depends(get_current_user)):
     # #2380: resolved here, not inside the builder — that function is
     # exec-sliced by its own tests and must stay stdlib-only.
     install_source = _settings_service.get_install_source()
-    return _build_version_payload(
+    payload = _build_version_payload(
         VOICE_ENABLED and bool(_settings_service.get_gemini_api_key()),
         edition, features, install_source,
     )
+    # #4499: the help widget's two vendor-hosted channels, decided at RUN time
+    # (`BUG_REPORTING_ENABLED` / `ASK_TRINITY_ENABLED` / `DO_NOT_TRACK`). Added
+    # here, not in the builder: that function is exec-sliced by its tests and
+    # reads no module state. The widget shows a tab only for a literal `true`.
+    payload["help"] = {"docs_qa": ASK_TRINITY_ENABLED, "bug_reporting": BUG_REPORTING_ENABLED}
+    return payload
 
 
 # User info endpoint
