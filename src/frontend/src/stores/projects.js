@@ -404,6 +404,33 @@ export const useProjectsStore = defineStore('projects', () => {
     }
   }
 
+  // ent#1105: a project's runs. Keyed by project; `filters` is what the rows
+  // were fetched with, so a filter change replaces them and "Load more"
+  // (`{ more: true }`) appends the next page via `next_cursor`. A failed
+  // refetch keeps what is on screen and sets `error` (stale, never empty).
+  const runs = ref({})     // id → { rows, totals, window, retention_days, next_cursor, filters, loaded, loading, error }
+
+  async function fetchRuns(id, filters = {}, { more = false } = {}) {
+    const prev = runs.value[id] || { rows: [], totals: null, next_cursor: null, filters: {}, loaded: false, loading: false, error: null }
+    const params = {}
+    for (const [k, v] of Object.entries(filters)) {
+      if (v !== undefined && v !== null && v !== '') params[k] = v
+    }
+    if (more && prev.next_cursor) params.cursor = prev.next_cursor
+    runs.value = { ...runs.value, [id]: { ...prev, loading: true } }
+    try {
+      const { data } = await portalHttp.get(url(id, '/executions'), { headers: headers(), params })
+      const rows = more ? [...prev.rows, ...(data.rows || [])] : (data.rows || [])
+      runs.value = { ...runs.value, [id]: {
+        rows, totals: data.totals || null, window: data.window || null,
+        retention_days: data.retention_days ?? null, next_cursor: data.next_cursor || null,
+        filters: { ...filters }, loaded: true, loading: false, error: null,
+      } }
+    } catch (err) {
+      runs.value = { ...runs.value, [id]: { ...prev, loading: false, error: projectErrorMessage(err) } }
+    }
+  }
+
   return {
     list, listLoaded, listLoading, listError, stewardOutcomes,
     fetchList, pageState, fetchProject, forLink, fetchForLink,
@@ -416,5 +443,6 @@ export const useProjectsStore = defineStore('projects', () => {
     startPreview, startTask,
     writeContext, readContext, updateContext, deleteContext, markItemForAgents,
     fetchProjectPeople, fetchCompanyPeople, fetchStewardOptions,
+    runs, fetchRuns,
   }
 })

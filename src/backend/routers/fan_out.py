@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Header
 from fastapi.responses import JSONResponse
 
 from dependencies import get_current_user, get_authorized_agent, resolve_source_agent, viewer_row_scope
+from dependencies import check_requested_project  # ent#1105
 from database import db
 from services import turn_tier_service  # ent#926: a dispatched turn is no higher than its parent
 from models import (
@@ -37,6 +38,7 @@ from services.fan_out_service import (
     get_fan_out_service,
 )
 from services import dispatch_admission_service, idempotency_service
+from services import execution_attribution  # ent#1105
 from services.chat_execution_service import ERROR_CODE_HEADER
 from services.chat_signals import InterAgentDepthExceeded
 from services.platform_audit_service import platform_audit_service, AuditEventType
@@ -78,6 +80,10 @@ async def fan_out(
             status_code=400,
             detail=f"Fan-out target must be 'self' or '{name}'. Cross-agent fan-out is not yet supported.",
         )
+
+    # ent#1105: a named project_id is checked before anything is claimed or
+    # dispatched (422 project_attribution_unavailable when no edition attributes).
+    check_requested_project(request, current_user, name)
 
     # #2806: chain-depth guard, after target access (the path dependency's
     # uniform 404) and before the idempotency claim — a refused batch burns no
@@ -159,6 +165,13 @@ async def fan_out(
     # (trinity-enterprise#1148).
     source_agent = getattr(current_user, "agent_name", None) or x_source_agent
 
+    # ent#1105: resolved ONCE here; children are created when slots free. A
+    # named project that passed the check but did not resolve is reported.
+    project_id = execution_attribution.resolve(
+        agent_name=name, principal=current_user,
+        requested_project_id=request.project_id, triggered_by="fan_out")
+    attribution_failed = bool(request.project_id) and project_id != request.project_id
+
     try:
         result = await service.execute(
             async_mode=bool(request.async_mode),
@@ -176,6 +189,7 @@ async def fan_out(
             source_mcp_key_id=getattr(current_user, "mcp_key_id", None),
             source_mcp_key_name=getattr(current_user, "mcp_key_name", None),
             chain_depth=chain_depth,
+            project_id=project_id,
             # ent#1225: the caller's running turn, which each subtask's wake continues.
             continues_execution_id=turn_tier_service.turn_origin_execution_id(db, current_user),
             # #2670: record the batch id on the idempotency claim as soon as it
@@ -212,6 +226,8 @@ async def fan_out(
             )
             for r in result.results
         ],
+        project_attribution=(execution_attribution.FAILED if attribution_failed
+                             else result.project_attribution),
     )
 
     # Store the aggregated batch result so a duplicate replays it (#525). On the
