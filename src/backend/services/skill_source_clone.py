@@ -437,7 +437,14 @@ class SkillSourceClone:
 
     def _update_branch(self) -> Dict[str, Any]:
         fetch = self._git(
-            [*_GIT_HTTP_UA_ARGS, "fetch", "origin", self.ref], timeout=_FETCH_TIMEOUT
+            [
+                *_GIT_HTTP_UA_ARGS, "fetch", "origin",
+                # Explicit tracking ref: the clone's refspec covers only the ref
+                # it started on, so a plain `fetch origin <ref>` lands in
+                # FETCH_HEAD and `origin/<ref>` never exists after a ref change.
+                f"+refs/heads/{self.ref}:refs/remotes/origin/{self.ref}",
+            ],
+            timeout=_FETCH_TIMEOUT,
         )
         if fetch.returncode != 0:
             return {"success": False, "error": f"fetch failed: {redact(fetch.stderr)}"}
