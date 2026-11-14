@@ -294,6 +294,13 @@ export const useProjectsStore = defineStore('projects', () => {
     return data
   }
 
+  // ent#1163 — a GitHub epic becomes a project, once (its sub-issues the tasks).
+  async function importEpic(epic) {
+    const { data } = await portalHttp.post(`${BASE}/import/epic`, { epic: String(epic || '').trim() }, { headers: headers() })
+    void fetchList()
+    return data
+  }
+
   // --- v3: health, linked metrics, the steward digest --------------------------------
   const setHealth = (id, state, note) =>
     _write(id, () => portalHttp.post(url(id, '/health'), { state, note }, { headers: headers() }))
@@ -403,7 +410,7 @@ export const useProjectsStore = defineStore('projects', () => {
     create, update, setArchived, startProject, stopProject, setMode, fetchRunsWaiting, decideRuns, addMember, removeMember, addAgent, removeAgent, link, unlink,
     tasks, logs, fetchTasks, fetchTask, createTask, updateTask, moveTask, addTaskNote, fetchLog, addLogEntry,
     addTaskRefs, removeTaskRef,
-    addGuest, addItem, setItemAudience, removeItem, fetchReport, myItems, importCandidates, importProject,
+    addGuest, addItem, setItemAudience, removeItem, fetchReport, myItems, importCandidates, importProject, importEpic,
     setHealth, linkMetric, unlinkMetric, metricOptions, stewarding, fetchStewarding,
     requestStewardAccess, grantStewardAccess, startStewardWake, pauseStewardWake, requestToJoin, requestAgent,
     startPreview, startTask,
