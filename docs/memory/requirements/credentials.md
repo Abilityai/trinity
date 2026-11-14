@@ -315,6 +315,14 @@ AES-256-GCM envelopes. What changed is how git *reads* one.
     (`services/credential_ask_policy.py`, mirrored from the agent image and held
     in parity by test). With no single person to ask it is refused (422
     `no_person`).
+  - The reader must be able to open the secret field, the only way a
+    credential ask is answered (#4579): the agent's primary person when the
+    agent is on their Workspace roster (shared with them, or theirs), else
+    the agent's owner when it is on the owner's; a deactivated account is
+    not a reader. When neither can open it the ask is refused (422
+    `role_cannot_open_agent`, naming roles and never a person) and nothing
+    is filed (`role_addressing.resolve_credential_reader`). A pending
+    credential ask is re-addressed by the same rule.
   - The person sees a **masked secret field** in the thread (and wherever the
     ask card renders: Inbox, rail, agent page) and types the value there. It is
     posted once to `POST /api/enterprise/client-portal/asks/{id}/credential`

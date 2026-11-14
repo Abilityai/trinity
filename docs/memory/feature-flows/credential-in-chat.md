@@ -21,7 +21,7 @@ the thread, the execution log and the agent's next prompt.
 ```
 agent ──ask_for_credential(name, why)──▶ MCP operator_queue.ts
         POST /api/agents/{self}/operator-queue  {type: credential, context.credential_name, to: primary}
-        └─ ask_service.raise_ask → _validated_ask (name policy, no options, to: primary only) → exactly one person (else 422 no_person)
+        └─ ask_service.raise_ask → _validated_ask (name policy, no options, to: primary only) → exactly one person who can open the field: the primary, else the owner (else 422 no_person / role_cannot_open_agent, #4579)
 file channel ── _clamp_ingested_item: a credential entry not addressed to the agent's primary person is ingested unaddressed
 
 person's Workspace thread ── PortalAsks → PortalCredentialField (masked)
@@ -161,7 +161,7 @@ receiving instance: POST /api/agents/{name}/credentials/inject mode "merge"
 | Layer | File | Role |
 |---|---|---|
 | MCP | `src/mcp-server/src/tools/operator_queue.ts` → `ask_for_credential` | Self-acting; builds the ask from declared fields only; derives `request_id` from name + turn when left out |
-| Backend | `services/ask_service.py` | `credential` in `ASK_TYPES`; options refused; `to` other than `primary` refused (`invalid_to`); `no_person`; `CredentialAnswerRefused` unless `via_credential_sink` |
+| Backend | `services/ask_service.py` | `credential` in `ASK_TYPES`; options refused; `to` other than `primary` refused (`invalid_to`); the reader is `role_addressing.resolve_credential_reader` — the primary person when the agent is on their Workspace roster, else the owner, else `role_cannot_open_agent` (#4579; `readdress_role` moves a pending row by the same rule); `no_person`; `CredentialAnswerRefused` unless `via_credential_sink` |
 | Backend | `services/operator_queue_service::_clamp_ingested_item` | File channel: a credential entry keeps its addressee only when that is the agent's single primary person |
 | Backend | `services/credential_ask_policy.py` | Name charset, ≤64, reserved names (agent-side mirror, parity-tested) |
 | Backend | `client_portal/asks/router.py` → `POST /{id}/credential` | Person-only door, rate-limited, uniform 404 |
@@ -199,6 +199,7 @@ receiving instance: POST /api/agents/{name}/credentials/inject mode "merge"
 |---|---|---|---|
 | `invalid_to` | 422 | raise | A credential ask is addressed to `primary` only |
 | `no_person` | 422 | raise | No single person to ask |
+| `role_cannot_open_agent` | 422 | raise | Neither the primary person nor the owner has the agent on their Workspace roster, so nobody could open the field (#4579). Names roles, never a person |
 | `invalid_credential_name` | 422 | raise / sink | Malformed or reserved name (`reason`) |
 | `invalid_options` | 422 | raise | A credential ask offers no options |
 | `credential_answer_via_field` | 422 | operator respond / Workspace answer | Only the field answers the kind |
@@ -258,6 +259,7 @@ receiving instance: POST /api/agents/{name}/credentials/inject mode "merge"
 
 ## Testing
 
+- `tests/unit/test_4579_credential_primary_reach.py` — the reader chain on the real sink, door and route: a primary off the roster hands the ask to the owner, nobody who can open the field refuses it by name and files nothing, an admin or a deactivated account off the roster is not a reader, the owned roster on real rows, and re-addressing by the same rule.
 - `tests/unit/test_ent1066_credential_ask_kind.py` — the kind, the name policy and parity, primary-only on the REST door and the file channel, `no_person`, the answer refusal on both doors, the wake.
 - `tests/unit/test_ent1066_credential_sink.py` — round-trip through the agent's parser, the agent image's real read/inject over a tmp home (non-UTF-8 and unreadable `.env` keep every byte), fail-closed staging and unstaging on refusal, stopped agent, lease, CAS after write, value absent from logs, audit and refusals.
 - `tests/unit/test_ent1066_credential_route_gates.py` — agent, system and connector keys refused; Workspace-only person admitted; stranger 404.
