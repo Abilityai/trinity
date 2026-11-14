@@ -87,10 +87,10 @@ Two routers are registered in `main.py:523-524`:
 - `POST /webhook/{webhook_secret}` (line 54) — Receives Telegram updates. No JWT auth; validated by webhook secret in URL + `X-Telegram-Bot-Api-Secret-Token` header. Always returns 200 to prevent Telegram retries.
 
 **Authenticated router** (`/api/agents`):
-- `GET /{agent_name}/telegram` (line 95) — Returns binding status (bot_username, bot_id, webhook_url, bot_link, configured flag). No token decryption.
+- `GET /{agent_name}/telegram` (line 95) — Returns binding status (bot_username, bot_id, webhook_url, bot_link, configured flag, `public_url_set`). No token decryption. The stored `webhook_url` column is never cleared, so it is returned only when it sits under the current normalised Public URL (`get_public_chat_url_setting()`); otherwise `webhook_url` is `null`.
 - `PUT /{agent_name}/telegram` (line 116) — Configure bot. Validates token format (`id:secret`), calls `getMe` API, checks bot_id uniqueness across agents, creates encrypted binding, registers webhook if `public_chat_url` is set. If `public_chat_url` is unset, the binding is still created (the UI "Connected (no webhook)" state handles this), and the response includes a `warning` field explaining that delivery will start automatically once the URL is saved. Back-fill is triggered by saving the setting — see "Back-fill on setting save" below.
 - `DELETE /{agent_name}/telegram` (line 190) — Calls Telegram `deleteWebhook`, then deletes binding + chat links from DB.
-- `POST /{agent_name}/telegram/test` (line 211) — Without `chat_id`: verifies bot via `getMe`. With `chat_id`: sends test message.
+- `POST /{agent_name}/telegram/test` (line 211) — Without `chat_id`: verifies the bot via `getMe`, then checks delivery via `_ensure_webhook` (ent#1189): reads Telegram's `getWebhookInfo`; when Telegram holds no webhook or one for another URL, registers it under the current normalised Public URL (`set_webhook`); a matching webhook with `last_error_message` and pending updates counts as not delivering. Returns `ok`, `message`, `webhook_registered`, `webhook_error` (reason string, never the bot token) and `bot_info`. With `chat_id`: sends test message.
 
 ### Transport: `src/backend/adapters/transports/telegram_webhook.py`
 
@@ -362,13 +362,13 @@ binding = {
 | Access denied (403) | "Only the agent owner can manage..." |
 | Disconnected | Token input (`type="password"`) + "Connect Bot" button + BotFather link |
 | Connected | Green dot, `@bot_username`, t.me link, Verify + Disconnect buttons |
-| Connected (no webhook) | Yellow warning: "Bot connected but webhook not registered..." with `router-link` to `/settings` |
+| Connected (not delivering) | Warning when, after Verify, `webhook_registered` is false (Telegram's record), or before Verify, `webhook_url` is null. No Public URL: admins get a link to Settings → General, other users are told to ask an admin. Public URL set: asks to check it is reachable over HTTPS and press Verify. Shows Verify's `webhook_error` as "Last attempt". The Verify result is cleared on connect and disconnect. |
 
 **API calls** (via `api.js` — Invariant #7):
 - `GET /api/agents/{name}/telegram` → load binding status
 - `PUT /api/agents/{name}/telegram` → connect bot (sends `{ bot_token }`)
 - `DELETE /api/agents/{name}/telegram` → disconnect bot
-- `POST /api/agents/{name}/telegram/test` → verify bot (calls getMe)
+- `POST /api/agents/{name}/telegram/test` → verify bot (getMe, then getWebhookInfo; registers the webhook when missing or stale)
 
 **Security**:
 - Token input is `type="password"` (masked in DOM)

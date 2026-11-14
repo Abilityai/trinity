@@ -24,6 +24,7 @@ from config import ROOM_SOURCE_CHANNEL
 from services import person_mention_service
 from services.platform_prompt_service import build_user_facing_room_prompt
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError, hold_marker
+from utils.credential_sanitizer import sanitize_text
 from utils.helpers import utc_now_iso
 from utils.skill_invocation import find_gated_invocations
 
@@ -2053,6 +2054,117 @@ def _without_gate_holds(room_id: str, agent_name: str, delta: list[dict]) -> lis
     return delta if len(kept) == len(delta) else kept
 
 
+def _gated_posts(shown: list[dict], gates) -> list[dict]:
+    """The shown posts whose OWN text invokes a skill gated on this agent — the
+    gate's own matcher, which cannot match across the line the transcript joins
+    posts with. What a hold records and what the approver's card shows."""
+    return [m for m in shown
+            if m.get("sender_kind") != "system" and find_gated_invocations(m.get("content"), gates)]
+
+
+def _room_gate_card(agent_name: str, shown: list[dict], ask_request_text: str,
+                    requester: tuple[str, str]):
+    """trinity#4505: (the card's posts, the `gate_replay` keys) for this wake.
+    The card holds the gated posts and the requester's posts (the oldest ungated
+    ones dropped while the card is over the size limit), each line
+    naming its sender as the transcript does, plus the ask answer; the keys carry
+    it as the replay message and the scanned parts for the gate's coverage check. The card is what the approver reads,
+    what is size-checked and what Approve runs, so another participant's long
+    post (or this agent's own reply) never makes a short request refusable, and
+    an agent's gated line never reads as the person's. The scan still reads the
+    whole slice. ([], None) when the map is unreadable or empty, or nothing
+    names a gated skill. A gated name only in the ask answer still gets this
+    card (the answer under its label, plus the requester's posts), so
+    every room card goes through `_format_card`."""
+    from services import skill_gate_service
+
+    try:
+        gates = skill_gate_service.read_gates(agent_name)
+    except Exception:  # noqa: BLE001 — the backstop's own read refuses gate_unavailable
+        return [], None
+    if not gates:
+        return [], None
+    gated = _gated_posts(shown, gates)
+    if not gated and not find_gated_invocations(ask_request_text, gates):
+        return [], None
+    # PR #4552 review 4: each post (and the ask answer) is sanitised by itself
+    # before it is labelled, so a redaction never reaches across into the next
+    # post or its sender label. The card is not sanitised again: Approve runs
+    # it as shown. The requester's posts are on it, for context.
+    mine = [m for m in shown if (m.get("sender_kind"), m.get("sender_identity")) == requester]
+    pairs = [(m, {**m, "content": sanitize_text(m.get("content") or "")}) for m in shown
+             if m in gated or m in mine]
+    answer = sanitize_text(ask_request_text or "")
+    # PR #4552: the requester's ungated posts are context. The oldest leave the
+    # card first until it fits, so an old long post to another agent cannot make
+    # every gated ask too long. Gated posts and the requester's latest stay.
+    from services.skill_gate_service import CARD_INPUT_MAX_BYTES, _json_bytes
+    droppable = [m for m in mine[:-1] if m not in gated]
+    while True:
+        posts = [p for _, p in pairs]
+        card = _format_card(posts, answer)
+        if not droppable or _json_bytes(card) <= CARD_INPUT_MAX_BYTES:
+            break
+        oldest = droppable.pop(0)
+        pairs = [(m, p) for m, p in pairs if m is not oldest]
+    return posts, {skill_gate_service.REPLAY_MESSAGE: card,
+                   skill_gate_service.REQUEST_PARTS: _gate_parts(shown, ask_request_text)}
+
+
+def _gate_parts(shown: list[dict], ask_request_text: str) -> list[str]:
+    """What the skill gate scans on a room wake: each post the agent is shown,
+    then the ask answer."""
+    return ([m.get("content") or "" for m in shown if m.get("sender_kind") != "system"]
+            + ([ask_request_text] if ask_request_text else []))
+
+
+# PR #4552 review: what starts each continuation line of a post on the card.
+CARD_CONTINUATION = "  | "
+# What starts the ask reply's first line on the card: the answer (or the
+# cancel reason) to the ask this turn continues. The responder is withheld
+# from the agent (ent#715), and the replay is the agent's message. No agent
+# name or email starts with "(", so no post's sender line reads as this.
+CARD_ASK_ANSWER = "(ask reply): "
+
+
+def _format_card(posts: list[dict], ask_answer: str = "") -> str:
+    """The gate card's posts: `_format_delta`'s sender lines, then the ask
+    reply under `CARD_ASK_ANSWER`, with every further line of each (on any
+    line break a renderer honours) prefixed by `CARD_CONTINUATION`, so a
+    newline inside one cannot start a line that reads as a sender's. The agent
+    transcript keeps `_format_delta`."""
+    entries = [_format_delta([m]) for m in posts]
+    if ask_answer:
+        entries.append(CARD_ASK_ANSWER + ask_answer)
+    lines = []
+    for entry in entries:
+        first, *rest = entry.splitlines() or [""]
+        lines += [first] + [CARD_CONTINUATION + line for line in rest]
+    return "\n".join(lines)
+
+
+def _too_long_notice(posts: list[dict], requester_identity: str, exc: SkillGateError) -> str:
+    """trinity#4505 AC3: a too-long refusal names text the requester can change.
+    When a gated post on the card is someone else's and the requester's own
+    post is not what overflows, say whose. Every gated post
+    on the card is recorded as held (`_record_gate_hold`), so asking again
+    leaves it out."""
+    theirs = [m for m in posts
+              if m.get("sender_identity") and m.get("sender_identity") != requester_identity]
+    others = sorted({m["sender_identity"] for m in theirs})
+    message = getattr(exc, "message", None) or str(exc)
+    if not others:
+        return message
+    from services.skill_gate_service import CARD_INPUT_MAX_BYTES, _json_bytes
+    # The requester's own post is on the card too: when the others' posts fit
+    # by themselves, the requester's post is what to shorten.
+    if _json_bytes(_format_card(theirs)) <= CARD_INPUT_MAX_BYTES:
+        return message
+    return (f"This request is too long for an approver to read in full (over "
+            f"{CARD_INPUT_MAX_BYTES} bytes). It includes a post by {', '.join(others)} "
+            f"that names a skill needing approval; that post is not passed on again. Ask again.")
+
+
 def _record_gate_hold(room_id: str, agent_name: str, shown: list[dict],
                       notice_seq: Optional[int], exc: SkillGateError) -> None:
     """trinity#3402: never put this request to this agent again. Without it the
@@ -2070,9 +2182,7 @@ def _record_gate_hold(room_id: str, agent_name: str, shown: list[dict],
         gates = skill_gate_service.read_gates(agent_name)
     except Exception:  # noqa: BLE001 — unreadable now: the next wake re-holds it once
         gates = {}
-    seqs = [m["seq"] for m in shown
-            if m.get("seq") is not None and m.get("sender_kind") != "system"
-            and find_gated_invocations(m.get("content"), gates)]
+    seqs = [m["seq"] for m in _gated_posts(shown, gates) if m.get("seq") is not None]
     seqs.append(notice_seq)
     try:
         db.record_gate_holds(room_id, agent_name, seqs, hold_marker(exc), utc_now_iso())
@@ -2179,7 +2289,12 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
         surface="room", agent_name=agent_name, chat_id=room_id,
         person_email=client_email, internal_audience=not user_facing))
 
+    gated_posts: list[dict] = []
+
     try:
+        # Inside the `try`: the `finally` below clears the working state.
+        gated_posts, gate_replay = _room_gate_card(agent_name, shown, ask_request_text,
+                                                   _caller(current_user))
         # #3114: on a pull pilot the turn is queued under this room's key and
         # awaited here.
         result = await dispatch_and_await_terminal(
@@ -2190,9 +2305,10 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
             # wrote that this agent is SHOWN (the #3210 budget-fitted delta),
             # never the transcript scaffolding.
             # ent#1135: plus the person's answer to the ask this turn continues.
-            request_text="\n".join([m.get("content") or "" for m in shown
-                                     if m.get("sender_kind") != "system"]
-                                    + ([ask_request_text] if ask_request_text else [])),
+            request_text="\n".join(_gate_parts(shown, ask_request_text)),
+            # trinity#4505: what the card shows and Approve runs — the posts
+            # that name a gated skill, never the whole slice.
+            gate_replay=gate_replay,
             triggered_by="room",
             conversation_key=f"room:{room_id}",
             system_prompt=room_prompt,
@@ -2228,7 +2344,10 @@ async def _wake_agent_locked(current_user, room_id: str, agent_name: str,
         raise
     except SkillGateError as e:
         # trinity-enterprise#751: nothing ran; say why in the room.
-        notice_seq = _post_system(room_id, getattr(e, "message", None) or str(e))
+        notice = (_too_long_notice(gated_posts, _caller(current_user)[1], e)
+                  if getattr(e, "code", None) == "request_too_long"
+                  else getattr(e, "message", None) or str(e))
+        notice_seq = _post_system(room_id, notice)
         # trinity#3402: and never put that request to this agent again. The
         # cursor keeps its rule — it moves on a reply — so anything else in
         # this delta is delivered on the next wake.

@@ -2093,6 +2093,10 @@ class DatabaseManager:
     def get_execution(self, execution_id: str):
         return self._schedule_ops.get_execution(execution_id)
 
+    def get_turn_attribution(self, execution_id: str):
+        """One execution's rating columns and status (trinity-enterprise#1225)."""
+        return self._schedule_ops.get_turn_attribution(execution_id)
+
     def get_execution_gate_state(self, execution_id: str):
         return self._schedule_ops.get_execution_gate_state(execution_id)
 

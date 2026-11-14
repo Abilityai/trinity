@@ -820,7 +820,8 @@ class TestWakeObserverRouting:
         assert resume == [] and len(ending) == 1
         got_rows, kw = ending[0]
         assert [r["request_id"] for r in got_rows] == ["e1", "e2"]
-        assert kw == {"disposition": disposition, "disposed_by_email": None, "reason": "r", "batch_id": "b-1"}
+        assert kw == {"disposition": disposition, "disposed_by_email": None, "disposed_by_id": None,
+                      "reason": "r", "batch_id": "b-1"}
 
     def test_an_expiry_wakes_nobody(self, monkeypatch):
         """abilityai/trinity-enterprise#1108 (merge-train ruling): the sweep

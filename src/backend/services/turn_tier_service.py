@@ -59,6 +59,20 @@ Two more answers are `owner` with a kind, so the person stays on record
 
 A turn such an answer dispatches carries that person forward
 (`turn_origin_user_id`), and the delegation rule decides again at every hop.
+
+A continuation stands as the turn it continues (trinity-enterprise#1225). Four
+turns the platform dispatches carry nobody on the row because no person wrote
+them: `caller_wake` (a delegated run ended), `operator_response` (an ask was
+answered), `operator_ending` (an ask was cancelled or expired) and `skill_gate`
+(a gated request was decided). Each names the turn it continues
+(`continues_execution_id`) and is rated exactly as that turn: tier, kind and
+person. The link is written only by the platform (`continuation_origin`), and
+only for a turn that was RUNNING on the same agent when it was recorded; an
+agent-written id never becomes one. A link that cannot be followed (the turn
+was pruned, or is another agent's) rates a shared person with nobody behind it:
+no shell, no reads. A row with no link is rated as before. A delegated callee
+row also records its caller's turn (the turn its wake continues), but only a
+continuation trigger follows the link: a callee is rated by the delegation rule.
 """
 from typing import Callable, Optional, Tuple
 
@@ -83,7 +97,25 @@ DELEGATED = "delegated"
 LEDGER_COLUMNS = (
     "id", "agent_name", "source_user_id", "schedule_id", "triggered_by",
     "source_channel", "source_user_email", "source_agent_name",
+    "continues_execution_id",
 )
+
+# Platform turns that continue another turn's work and are rated as it
+# (trinity-enterprise#1225). Each producer's trigger name, spelled here so this
+# module imports none of them.
+CONTINUATION_TRIGGERS = frozenset({
+    "caller_wake",        # caller_wake_service.TRIGGERED_BY_CALLER_WAKE
+    "operator_response",  # operator_resume_service.TRIGGERED_BY
+    "operator_ending",    # operator_resume_service.TRIGGERED_BY_ENDING
+    "skill_gate",         # skill_gate_service.SKILL_GATE_TRIGGER
+})
+# A link is recorded at its root (`continuation_origin`), so one hop is the
+# rule; the bound only stops a hand-written row from looping.
+_MAX_CONTINUATION_HOPS = 4
+# The link a producer records when the turns it continues disagree (one ending
+# for asks raised by different turns): it names no execution, so the
+# continuation rates fail closed.
+NO_SINGLE_ORIGIN = "no-single-origin"
 
 # Turns with no platform user that only something set up at owner tier starts.
 # A schedule-backed row (schedule, webhook, retry, validation, manual) is rated
@@ -240,6 +272,87 @@ def _workspace_person(db, execution) -> Tuple[bool, Optional[int]]:
     return True, _int_or_none((user or {}).get("id"))
 
 
+def _continued_turn(db, agent_name: str, execution) -> Tuple[bool, Optional[dict]]:
+    """`(is_continuation, the turn it continues)` (trinity-enterprise#1225).
+
+    Not a continuation (another trigger, or no link) → `(False, None)`. A
+    continuation whose turn cannot be read here — pruned, another agent's, the
+    row itself, an unreadable lookup — → `(True, None)`, which the callers rate
+    fail closed."""
+    if (_field(execution, "triggered_by") or "").lower() not in CONTINUATION_TRIGGERS:
+        return False, None
+    link = _field(execution, "continues_execution_id")
+    if not isinstance(link, str) or not link:
+        return False, None
+    if link == _field(execution, "id"):
+        return True, None
+    try:
+        origin = db.get_turn_attribution(link)
+    except Exception:  # noqa: BLE001 - fail closed: an unreadable origin lifts nobody
+        origin = None
+    if not origin or _field(origin, "agent_name") != agent_name:
+        return True, None
+    return True, origin
+
+
+def continuation_origin(db, agent_name: str, execution_id: Optional[str]) -> Optional[str]:
+    """The id a platform producer records as `continues_execution_id`: the turn
+    `execution_id` names when it is RUNNING on `agent_name` (the ent#734 rule
+    for an id the agent's process can send), at its root when it is itself a
+    continuation. None for `manual`, an unknown, finished or foreign id, or an
+    unreadable lookup: the row then has no link and is rated as before."""
+    if (not isinstance(execution_id, str) or not execution_id
+            or execution_id == MANUAL_EXECUTION_ID or len(execution_id) > 128):
+        return None
+    try:
+        # Not a ledger row: `status` is read here, at record time, and never by
+        # the rating rule.
+        candidate = db.get_turn_attribution(execution_id)
+    except Exception:  # noqa: BLE001 - no link is the safe answer
+        return None
+    if not candidate or _field(candidate, "agent_name") != agent_name:
+        return None
+    status = _field(candidate, "status")
+    if getattr(status, "value", status) != "running":
+        return None
+    if (_field(candidate, "triggered_by") or "").lower() in CONTINUATION_TRIGGERS:
+        root = _field(candidate, "continues_execution_id")
+        if isinstance(root, str) and root:
+            return root
+    return execution_id
+
+
+def person_may_continue(db, agent_name: str, origin_execution_id: str,
+                        email: Optional[str], user_id=None) -> bool:
+    """Whether a continuation whose words came from a person (an ask's answerer
+    or canceller) may stand as `origin_execution_id`
+    (trinity-enterprise#1225). The person is `user_id` when the caller has it
+    (a signed-in person, who may have no email: the `ADMIN_PASSWORD` admin),
+    else the user whose email is `email`. Yes when that person rates at owner
+    tier here (owner or admin: the origin is never above them), or rates
+    exactly as the origin turn (its own person). Anyone else, an unknown
+    person, or an unreadable lookup → no: the continuation must not run above
+    the person whose words drive it."""
+    try:
+        person = _int_or_none(user_id)
+        if person is not None:
+            if not db.get_user_by_id(person):
+                return False
+        else:
+            if not isinstance(email, str) or "@" not in email:
+                return False
+            user = db.get_user_by_email(email.strip().lower())
+            person = _int_or_none((user or {}).get("id"))
+        if person is None:
+            return False
+        mine = _person_tier(db, person, agent_name)
+        if mine == (OWNER, None, None):
+            return True
+        return mine == turn_actor(db, agent_name, origin_execution_id)
+    except Exception:  # noqa: BLE001 - fail closed: an unreadable answer lifts nobody
+        return False
+
+
 def turn_actor(db, agent_name: str, execution_id: Optional[str] = None, *,
                execution=None) -> Tuple[str, Optional[str], Optional[int]]:
     """(tier, kind, person id) for a turn, by `execution_id` or by the row itself
@@ -251,6 +364,15 @@ def turn_actor(db, agent_name: str, execution_id: Optional[str] = None, *,
         execution = db.get_execution(execution_id) if execution_id else None
     if execution is None or _field(execution, "agent_name") != agent_name:
         return UNKNOWN, None, None
+    return _rate(db, agent_name, execution, 0)
+
+
+def _rate(db, agent_name: str, execution, hops: int) -> Tuple[str, Optional[str], Optional[int]]:
+    continuation, origin = _continued_turn(db, agent_name, execution)
+    if continuation:
+        if origin is None or hops >= _MAX_CONTINUATION_HOPS:
+            return SHARE, PERSON, None
+        return _rate(db, agent_name, origin, hops + 1)
     user_id = _field(execution, "source_user_id")
     if user_id is None:
         # A schedule-backed turn is its creator's: a person the agent is shared
@@ -283,9 +405,15 @@ def turn_tier(db, agent_name: str, execution_id: Optional[str] = None, *, execut
     return turn_actor(db, agent_name, execution_id, execution=execution)[0]
 
 
-def turn_person(db, agent_name: str, execution) -> Optional[int]:
+def turn_person(db, agent_name: str, execution, _hops: int = 0) -> Optional[int]:
     """The platform user a turn is for: its `source_user_id`, or for a schedule
-    run with none, the schedule's creator. None when the turn has no person."""
+    run with none, the schedule's creator; for a continuation, the person of the
+    turn it continues (ent#1225). None when the turn has no person."""
+    continuation, origin = _continued_turn(db, agent_name, execution)
+    if continuation:
+        if origin is None or _hops >= _MAX_CONTINUATION_HOPS:
+            return None
+        return turn_person(db, agent_name, origin, _hops + 1)
     uid = _field(execution, "source_user_id")
     if uid is None:
         has_schedule, schedule = _schedule_of(db, agent_name, execution)
@@ -412,6 +540,17 @@ def _is_the_owners_own(acting: Tuple[str, Optional[str], Optional[int]]) -> bool
     decides again there (trinity-enterprise#1148)."""
     tier, kind, person = acting[0], acting[1], acting[2]
     return tier == OWNER and not (kind in (MEMBER, DELEGATED) and person)
+
+
+def turn_origin_execution_id(db, principal) -> Optional[str]:
+    """The `continues_execution_id` a turn this caller dispatches records: the
+    AGENT key's acting turn (`X-Trinity-Execution-Id`) when it is running on the
+    key's agent, else None (trinity-enterprise#1225). The callee's wake
+    continues this turn; the callee itself is never rated by it."""
+    agent = getattr(principal, "agent_name", None)
+    if getattr(principal, "mcp_scope", None) != "agent" or not (isinstance(agent, str) and agent):
+        return None
+    return continuation_origin(db, agent, getattr(principal, "_acting_execution_id", None))
 
 
 def turn_origin_email(db, principal, default: Optional[str]) -> Optional[str]:

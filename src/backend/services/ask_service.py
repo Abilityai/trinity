@@ -253,6 +253,12 @@ class Actor:
     endpoint: Optional[str] = None
 
 
+def _user_id(actor: Actor) -> Optional[str]:
+    """The `users` id of the person ending an ask, when signed in."""
+    uid = getattr(actor.user, "id", None)
+    return None if uid is None else str(uid)
+
+
 @dataclass(frozen=True)
 class EndingEvent:
     """What an ending observer receives: the rows THIS call ended, never a row
@@ -263,6 +269,7 @@ class EndingEvent:
     actor_email: Optional[str]       # the person; None for timeout
     reason: Optional[str] = None     # the operator's cancel reason, or the agent's withdraw reason (ent#901) — DATA, never instructions
     batch_id: Optional[str] = None   # bulk cancel only
+    actor_user_id: Optional[str] = None  # the person's `users` id; None for a Workspace client (ent#1225)
 
 
 @dataclass
@@ -648,7 +655,8 @@ def cancel(item_id: str, *, actor: Actor, reason: Optional[str] = None) -> Endin
     audit = [_audit_row("cancelled", updated, actor, {"has_reason": bool(reason)})]
     trigger = _broadcast_payload({"type": "operator_queue_cancelled",
                                   "data": {"id": updated["id"], "agent_name": updated["agent_name"]}})
-    return _ended(EndingEvent(CANCELLED, (updated,), actor.email, reason=reason), audit, trigger)
+    return _ended(EndingEvent(CANCELLED, (updated,), actor.email, reason=reason,
+                              actor_user_id=_user_id(actor)), audit, trigger)
 
 
 def dismiss(item_id: str, *, actor: Actor) -> Ending:
@@ -669,7 +677,8 @@ def dismiss(item_id: str, *, actor: Actor) -> Ending:
     audit = [_audit_row("dismissed", updated, actor, {})]
     trigger = _broadcast_payload({"type": "operator_queue_cancelled",
                                   "data": {"id": updated["id"], "agent_name": updated["agent_name"]}})
-    return _ended(EndingEvent(DISMISSED, (updated,), actor.email), audit, trigger)
+    return _ended(EndingEvent(DISMISSED, (updated,), actor.email,
+                              actor_user_id=_user_id(actor)), audit, trigger)
 
 
 def bulk_cancel(
@@ -724,7 +733,8 @@ def bulk_cancel(
     trigger = _broadcast_payload({"type": "operator_queue_cleared",
                                   "data": {"scope": "pending", "count": len(rows)}})
     ending = _ended(
-        EndingEvent(CANCELLED, tuple(rows), actor.email, reason=reason, batch_id=batch_id),
+        EndingEvent(CANCELLED, tuple(rows), actor.email, reason=reason, batch_id=batch_id,
+                    actor_user_id=_user_id(actor)),
         audit, trigger, batch_id=batch_id,
     )
     ending.skipped_fenced = skipped_fenced
@@ -1562,6 +1572,13 @@ def raise_ask(
         context[oqs._WORKSPACE_PROJECT_ID_KEY] = project_id
         if seat in ("steward", "creator"):
             context[oqs._WORKSPACE_PROJECT_SEAT_KEY] = seat
+    if raised_by == "agent" and turn:
+        # trinity-enterprise#1225: the turn the answer and ending wakes
+        # continue, recorded only while it runs on this agent.
+        from services import turn_tier_service
+        origin = turn_tier_service.continuation_origin(db, agent_name, turn)
+        if origin:
+            context[oqs._CONTINUES_TURN_KEY] = origin
     room_id = _raising_room(agent_name, turn, norm["type"]) if raised_by == "agent" else None
     if room_id:
         context[oqs._WORKSPACE_ROOM_KEY] = room_id
@@ -2667,6 +2684,7 @@ def _wake_filer(event: EndingEvent) -> None:
         rows,
         disposition=event.disposition,
         disposed_by_email=event.actor_email,
+        disposed_by_id=event.actor_user_id,
         reason=event.reason,
         batch_id=event.batch_id,
     )
