@@ -47,6 +47,7 @@ import config
 # `config.PORTAL_SOURCE_CHANNEL` for why it exists and why it is not a channel.
 from config import PORTAL_SOURCE_CHANNEL
 from services import login_policy_gate, skill_gate_map_service, turn_context
+from services import execution_attribution  # ent#1105
 from services.skill_gate_errors import SkillApprovalRequired, SkillGateError
 from services.channel_completion_report import (
     COMPLETION_SOURCE_DONE, COMPLETION_SOURCE_FAILED, COMPLETION_SOURCE_NOTICE,
@@ -3080,6 +3081,8 @@ def _precreate_sync_execution(
                 open_canvas_id=open_canvas_id,
             ),
         )
+        # ent#1105: an edition may attribute this turn to its chat's project.
+        execution_attribution.record_row(execution)
         return execution.id if execution else None
     except Exception:  # noqa: BLE001
         logger.warning("portal: could not pre-create the sync turn's execution row")
@@ -4552,6 +4555,8 @@ async def start_portal_turn(agent_name: str, message: str, email: str,
             open_canvas_id=open_canvas_id,
         ),
     )
+    # ent#1105: an edition may attribute this turn to its chat's project.
+    execution_attribution.record_row(execution)
     execution_id = execution.id if execution else None
     if not execution_id:
         # No id means no stream to subscribe to. Fail loudly rather than hand
