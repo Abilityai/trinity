@@ -1112,6 +1112,69 @@ async def test_2693_corrupt_bundled_avatar_keeps_prompt_seed(crud_env, monkeypat
     ctx["docker_utils"].containers_run.assert_awaited()
 
 
+async def _create_github_with_bundled_avatar(crud, ctx, monkeypatch, tmp_path, name,
+                                             metadata, avatar_bytes):
+    """#4570: drive a `github:` create whose repo ships `avatar.png`. The fetch
+    is the only network edge stubbed; the install and the DB stamp are real crud."""
+    _patch_repo_validation(monkeypatch, crud)
+    ctx["template_service"].fetch_template_metadata_result_for_create.return_value = (
+        metadata, None)
+
+    def _fake_fetch(repo, pat, ref, filename, max_bytes):
+        return avatar_bytes if filename == "avatar.png" else None
+
+    monkeypatch.setattr(crud, "_fetch_github_file_bytes", _fake_fetch)
+    monkeypatch.setattr(crud.avatar_paths, "AVATAR_DIR", tmp_path / "avatars")
+    await crud.create_agent_internal(
+        _github_config(name, template="github:someowner/somerepo@v1.2.0"), _user(), None)
+
+
+@pytest.mark.asyncio
+async def test_4570_github_bundled_avatar_is_stamped_as_default(crud_env, monkeypatch, tmp_path):
+    """#4570: the bundled file was installed but nothing pointed at it, so
+    `avatar_url` stayed null and every surface showed initials. The install must
+    be followed by the same default-avatar stamp a `local:` template gets, seeded
+    with the template's own `avatar_prompt`."""
+    crud, ctx = crud_env
+    await _create_github_with_bundled_avatar(
+        crud, ctx, monkeypatch, tmp_path, "gh-av", {"avatar_prompt": "a small owl"}, _png_bytes())
+
+    installed = (tmp_path / "avatars" / "gh-av.webp").read_bytes()
+    assert installed[:4] == b"RIFF" and installed[8:12] == b"WEBP"
+    ctx["db"].set_default_avatar.assert_called_once()
+    assert ctx["db"].set_default_avatar.call_args.args[:2] == ("gh-av", "a small owl")
+
+
+@pytest.mark.asyncio
+async def test_4570_github_bundled_avatar_without_prompt_still_stamped(crud_env, monkeypatch, tmp_path):
+    """A template may ship the file without an `avatar_prompt`. `get_avatar_identity`
+    drops a row whose prompt is empty, so the stamp needs a non-empty prompt or
+    `avatar_url` stays null all the same."""
+    crud, ctx = crud_env
+    await _create_github_with_bundled_avatar(
+        crud, ctx, monkeypatch, tmp_path, "gh-noprompt", {}, _png_bytes())
+
+    assert (tmp_path / "avatars" / "gh-noprompt.webp").exists()
+    ctx["db"].set_default_avatar.assert_called_once()
+    name, prompt = ctx["db"].set_default_avatar.call_args.args[:2]
+    assert name == "gh-noprompt"
+    assert isinstance(prompt, str) and prompt.strip()
+
+
+@pytest.mark.asyncio
+async def test_4570_failed_github_avatar_install_is_not_stamped(crud_env, monkeypatch, tmp_path):
+    """No file, no stamp: a URL pointing at an avatar that was never written would
+    break the image on every surface instead of falling back to initials."""
+    crud, ctx = crud_env
+    await _create_github_with_bundled_avatar(
+        crud, ctx, monkeypatch, tmp_path, "gh-badav", {"avatar_prompt": "a small owl"},
+        b"not an image")
+
+    assert not (tmp_path / "avatars" / "gh-badav.webp").exists()
+    ctx["db"].set_default_avatar.assert_not_called()
+    ctx["docker_utils"].containers_run.assert_awaited()
+
+
 def test_2693_first_run_fleet_ships_bundled_avatars():
     """AC4: every agent in the bundled first-run manifest carries both a bundled
     image and the `avatar_prompt` that makes it installable + regenerable."""

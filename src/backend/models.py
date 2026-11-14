@@ -568,6 +568,9 @@ class ChatMessageRequest(BaseModel):
     """Request model for chat messages."""
     message: str
     model: Optional[str] = None  # Model alias: sonnet, opus, haiku, or full model name
+    # ent#1105: an edition may attribute this execution to a project. Checked
+    # before the row exists; refused 422 project_attribution_unavailable in OSS.
+    project_id: Optional[str] = Field(None, min_length=1, max_length=64)
 
 
 class ReportBackRequest(BaseModel):
@@ -611,6 +614,9 @@ class ParallelTaskRequest(BaseModel):
     # can be reported back to the Slack thread the work actually came from.
     # Optional and fail-open — absent means "no channel context to inherit".
     parent_execution_id: Optional[str] = None
+    # ent#1105: an edition may attribute this execution to a project. Checked
+    # before the row exists; refused 422 project_attribution_unavailable in OSS.
+    project_id: Optional[str] = Field(None, min_length=1, max_length=64)
 
 
 # ============================================================================
@@ -3649,6 +3655,9 @@ class FanOutRequest(BaseModel):
     # `GET /api/agents/{name}/fan-out/{fan_out_id}`. Default False keeps the
     # blocking contract every existing caller depends on.
     async_mode: Optional[bool] = False
+    # ent#1105: an edition may attribute this execution to a project. Checked
+    # before the row exists; refused 422 project_attribution_unavailable in OSS.
+    project_id: Optional[str] = Field(None, min_length=1, max_length=64)
 
     @field_validator("tasks")
     @classmethod
@@ -3713,6 +3722,9 @@ class FanOutResponse(BaseModel):
     results: List[FanOutTaskResponse]
     # trinity-enterprise#751: subtasks held by the skill gate (neither run nor failed).
     pending_approval: int = 0
+    # ent#1105: "failed" when a named project_id passed the check but the batch
+    # (or, on a sync batch, one of its subtasks) was not attributed to it.
+    project_attribution: Optional[str] = None
 
 
 # --- #2670: the batch's read surface ----------------------------------------
@@ -4848,6 +4860,9 @@ class ExecutionResponse(BaseModel):
     # trinity-enterprise#754 — as on ExecutionSummary.
     gate_self_approved: bool = False
     gate_self_approved_by_viewer: bool = False
+    # ent#1105: the project an edition attributed this execution to, present
+    # only when the reader may see that project (the attribution seam's annotate).
+    project_id: Optional[str] = None
 
     class Config:
         from_attributes = True

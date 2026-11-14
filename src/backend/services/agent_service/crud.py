@@ -432,6 +432,10 @@ class _TemplateResolution:
     # or avatar.png). None when no such file exists or fetch failed. Installed
     # after `_register_agent` via `_install_bundled_avatar_bytes`.
     bundled_avatar_bytes: Optional[bytes] = None
+    # #4570: the GitHub template's own `avatar_prompt` (its template.yaml, read
+    # as `source_metadata`), seeded with the installed file so `avatar_url`
+    # resolves. None when the template declares none.
+    bundled_avatar_prompt: Optional[str] = None
 
 
 @dataclass
@@ -2108,6 +2112,9 @@ async def _resolve_template(
                         _avatar_bytes = None
                     if _avatar_bytes:
                         tr.bundled_avatar_bytes = _avatar_bytes
+                        _declared_prompt = (source_metadata or {}).get("avatar_prompt")
+                        if isinstance(_declared_prompt, str) and _declared_prompt.strip():
+                            tr.bundled_avatar_prompt = _declared_prompt.strip()
                         break
         elif config.template.startswith("local:"):
             tr.template_data, tr.template_shared_folders = _resolve_local_template(config)
@@ -2884,6 +2891,22 @@ def _fetch_github_file_bytes(
     except Exception as e:
         logger.debug("[AVATAR-003] could not fetch %s from %s: %s", filename, repo, e)
         return None
+
+
+def _stamp_bundled_avatar(agent_name: str, prompt: Optional[str]) -> None:
+    """#4570: point the agent at a just-installed GitHub bundled avatar.
+
+    `db.get_avatar_identity` ignores a row whose identity prompt is empty, so a
+    template that ships the file without an `avatar_prompt` still needs a
+    prompt for `avatar_url` to resolve; it is also what Regenerate starts from.
+    Log-and-continue: the agent is registered and works without an avatar.
+    """
+    identity_prompt = prompt or f"an AI agent named {agent_name}"
+    try:
+        db.set_default_avatar(agent_name, identity_prompt, datetime.now(timezone.utc).isoformat())
+        logger.info(f"[AVATAR-003] Stamped GitHub bundled avatar as default for {agent_name}")
+    except Exception as e:
+        logger.warning(f"[AVATAR-003] Failed to stamp GitHub bundled avatar for {agent_name}: {e}")
 
 
 def _install_bundled_avatar_bytes(agent_name: str, data: bytes) -> None:
@@ -4127,6 +4150,14 @@ async def create_agent_internal(
                     _install_bundled_avatar_bytes(config.name, tr.bundled_avatar_bytes)
                 except Exception as _e:
                     logger.warning(f"[AVATAR-003] Failed to install GitHub avatar for {config.name}: {_e}")
+                else:
+                    # #4570: the file alone is invisible — `avatar_url` is built
+                    # only from a row with a non-empty identity prompt and a
+                    # timestamp. Stamp it as a DEFAULT avatar, like the `local:`
+                    # path, so Generate Default Avatars may still replace it.
+                    # Only after a successful install: a URL to a file that was
+                    # never written breaks the image instead of showing initials.
+                    _stamp_bundled_avatar(config.name, tr.bundled_avatar_prompt)
             await _materialize_agent_files(
                 config,
                 tr.template_data,
