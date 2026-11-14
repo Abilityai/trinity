@@ -323,6 +323,8 @@ class FanOutService:
         # attribute executions to a project); children are created later, when
         # a slot frees, so it is carried rather than re-derived. None in OSS.
         project_id: Optional[str] = None,
+        # ent#1225: the caller's running turn, recorded on every subtask row.
+        continues_execution_id: Optional[str] = None,
     ) -> FanOutResult:
         """Dispatch tasks in parallel and (unless *async_mode*) collect results.
 
@@ -389,6 +391,7 @@ class FanOutService:
             source_mcp_key_name=source_mcp_key_name,
             chain_depth=chain_depth,
             project_id=project_id,
+            continues_execution_id=continues_execution_id,
         ))
 
         if async_mode:
@@ -486,6 +489,7 @@ class FanOutService:
         chain_depth: Optional[int] = None,
         project_id: Optional[str] = None,
         attribution_failed: Optional[List[str]] = None,
+        continues_execution_id: Optional[str] = None,
     ) -> None:
         """Dispatch every subtask, paced by the semaphore. The batch's outcome
         is read from the rows, not from here — this only records the
@@ -519,6 +523,7 @@ class FanOutService:
                         fan_out_task_id=task.id,
                         subscription_id=subscription_id,
                         chain_depth=chain_depth,
+                        continues_execution_id=continues_execution_id,
                     ),
                 )
                 # ent#1105: the request-time project, carried to the child.

@@ -37,7 +37,7 @@ from fastapi import BackgroundTasks, HTTPException
 
 from database import db
 from models import McpInlineAgent, McpInlineVerifyResponse
-from services import login_policy_gate, rate_limiter
+from services import channel_login_limit, login_policy_gate, rate_limiter
 from services.connector_service import fetch_live_playbooks, resolve_exposed_playbooks
 
 logger = logging.getLogger(__name__)
@@ -119,6 +119,12 @@ def _resolve_and_create_code(email: str, session_id: Optional[str]) -> Optional[
         logger.info("[ent#849] inline login code suppressed: email-code sign-in disabled")
         return None
 
+    # ent#1253: the per-address budget shared with the web login and the
+    # channels, charged before the known-address check like the web's.
+    if not channel_login_limit.address_allowed(email):
+        logger.warning("[ent#1253] inline login code suppressed: shared rate limit for %r", email)
+        return None
+
     if not _email_is_known(email):
         logger.info("[#848] inline login code suppressed: unknown address (session=%s)", session_id)
         return None
@@ -192,9 +198,9 @@ def schedule_login_code(
     if not email:
         return
 
-    # Coarse global bound (#848 H3). The per-address cap lives behind the
-    # known-check, so an UNKNOWN address is never counted by it — leaving an
-    # unauthenticated caller free to pump unlimited lookups. This bounds the
+    # Coarse global bound (#848 H3). The per-address caps count one address
+    # at a time, so a caller rotating addresses could pump unlimited lookups.
+    # This bounds the
     # whole surface regardless of which branch a request takes, and is
     # deliberately checked BEFORE the branch so it cannot itself become a
     # differential. Over-limit is a silent skip: the caller still gets the same

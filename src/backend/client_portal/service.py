@@ -295,10 +295,45 @@ def email_has_access(email: str | None) -> bool:
     if len(db.get_shared_roster(email)) == 0:
         return False
     try:
-        return not db.is_client_blocked(email)
+        if db.is_client_blocked(email):
+            return False
     except Exception as exc:  # noqa: BLE001 — a block must not evaporate on error
         logger.error("[#281] block lookup failed during portal sign-in; denying: %s", exc)
         return False
+    # trinity-enterprise#1258: a share does not re-open a deactivated account.
+    return not email_account_suspended(email)
+
+
+def email_account_suspended(email: str | None) -> bool:
+    """trinity-enterprise#1258 — True when this address belongs to a platform
+    account that is deactivated (`users.suspended_at`, the #995 primitive).
+
+    The Workspace door decided on two questions only — is an agent shared with
+    the address, and would `/login` admit it — and neither reads the column. So
+    a suspended account with a share fell through to the outside-client path:
+    a code, a session, and turns on the shared agent, while `/login` refused
+    the same person. Suspension wins on every door (ruling on the issue): a
+    share made before or after it does not re-open the account, and the remedy
+    is an admin reactivating it.
+
+    An address with no account is not suspended: an outside client has no
+    `users` row and is governed by the share and the block (ent#281) alone.
+
+    Fail-closed, like the block: a lookup that cannot answer denies. Every
+    caller reads the same database for the share or the session one line away,
+    so a database that cannot answer this could not have served the request.
+    """
+    addr = (email or "").strip().lower()
+    if not addr:
+        return False
+    from database import db as core_db
+    try:
+        user = core_db.get_user_by_email(addr)
+    except Exception as exc:  # noqa: BLE001 — a deactivation must not evaporate on error
+        logger.error("[ent#1258] account lookup failed at the Workspace door; denying: %s",
+                     type(exc).__name__)
+        return True
+    return bool(user and user.get("suspended_at"))
 
 
 # #3922 — what `portal_signin_verify` returns instead of a token for a platform
@@ -387,6 +422,11 @@ def portal_signin_request(email: str | None) -> str | None:
     email = (email or "").strip().lower()
     if not email or not (email_has_access(email) or platform_login_admits(email)):
         return None
+    # trinity-enterprise#1258: no code for a deactivated account, whichever of
+    # the two reasons above would have issued one. The router's body is the
+    # same either way, so this tells a caller nothing (#186).
+    if email_account_suspended(email):
+        return None
     # ent#849: members of an SSO-only org sign in with SSO; outsiders keep codes.
     if not login_policy_gate.email_code_allowed_for(email):
         return None
@@ -404,6 +444,12 @@ def portal_signin_verify(email: str | None, code: str | None, *, interactive: bo
     email = (email or "").strip().lower()
     # ent#849: before redeeming, so a refused member's code is not consumed.
     if not login_policy_gate.email_code_allowed_for(email):
+        return None
+    # trinity-enterprise#1258: a deactivated account gets no session and no
+    # hand-off to `/login`. Before redeeming, like the policy check above, so
+    # the answer is the same 401 as a wrong code (#186). No code is issued to
+    # such an account, but one issued just before the suspension is still live.
+    if email_account_suspended(email):
         return None
     from database import db as core_db
     if not core_db.verify_login_code(email, code or ""):
@@ -3599,9 +3645,9 @@ async def portal_chat(agent_name: str, message: str, email: str,
                 isinstance(switch, dict) and switch.get("switched")
                 and not switch.get("retried") and not switch.get("exhausted")
             ):
-                where = switch.get("new_subscription")
+                # #4482: a subscription's name is operator data — never shown.
                 moved = (
-                    f"moved onto '{where}'" if where
+                    "moved onto another subscription" if switch.get("new_subscription")
                     else "moved onto the platform API key"
                 )
                 raise ClientPortalError(

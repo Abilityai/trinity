@@ -234,6 +234,9 @@ class ScheduleQueueMixin:
                 schedule_executions.c.schedule_id,
                 schedule_executions.c.source_channel,
                 schedule_executions.c.source_channel_client,
+                # ent#1225: a continuation's auto-memory follows the turn it
+                # continues (`memory_subject.keeps_shared_auto_memory`).
+                schedule_executions.c.continues_execution_id,
             )
         )
         # A lost race on one conversation (#2843) raises IntegrityError on the

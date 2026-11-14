@@ -413,7 +413,7 @@ A share to an address with no account emails them, and **Resend invite** on thei
 1. **Is it one address?** The share field is free text, and this makes it a recipient, so a list or a header is `invalid_address`. The share itself is unchanged.
 2. **Can it be delivered?** Email sign-in on, `email_service.can_deliver()` (so `console` is no), and `login_policy_gate.email_code_allowed_for(email)`. The same verdict reaches the roster as `invite_available`, which disables the button and states the reason.
 3. **Quota.** 3 an hour per (agent, address) and 30 an hour per inviter, in `rate_limiter`, shared by both paths. Steps 1 and 2 run first, so a refused call spends none.
-4. **Send.** `email_service.send_html`, bounded by a timeout. The mail names the inviter and agent, and links to `/workspace`. It has no code; the person requests one there.
+4. **Send.** `email_service.send_html`, bounded by a timeout. The mail names the inviter and agent, and links to `<FRONTEND_URL>/workspace`. It has no code; the person requests one there. With `FRONTEND_URL` empty the mail has no link and says to sign in on the Trinity sign-in page; it never falls back to the public chat URL, whose host serves only chat (ent#1255).
 
 The share stands whatever happens to its mail: the response's `invitation` is `sent`, `not_needed`, `invalid_address`, `unavailable`, `rate_limited` or `failed`, and the panel says so. Every attempt writes an `agent_invite` audit row. Test: `tests/unit/test_ent459_operator_invite.py`.
 

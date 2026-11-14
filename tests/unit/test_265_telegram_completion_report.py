@@ -242,7 +242,16 @@ class TestTelegramDelivery:
                        summary_or_error="boom: <class 'ValueError'>") is True
         text = tg[0]["text"]
         assert "⚠️" in text and "failed" in text
-        assert "&lt;class 'ValueError'&gt;" in text
+        # #4482: the row's error is never posted, only a person-safe sentence.
+        assert "ValueError" not in text
+
+    def test_telegram_html_is_escaped_intact(self, wired):
+        """D5/M2: escaped `<class 'ValueError'>` stays INTACT — unescaped it
+        trips 'can't parse entities' and the strip-HTML fallback deletes it."""
+        tg, _, _ = wired
+        assert _report(status="success",
+                       summary_or_error="boom: <class 'ValueError'>") is True
+        assert "&lt;class 'ValueError'&gt;" in tg[0]["text"]
 
     def test_telegram_report_capped_after_html_conversion(self, wired):
         """D5/M2: entity escaping inflates the text (& → &amp;) — the cap must

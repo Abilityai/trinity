@@ -38,11 +38,12 @@ a release that has both. The release notes name the last one.
 2. Make sure `.env` has `POSTGRES_PASSWORD` and no `DATABASE_URL=` line. `start.sh` writes the password,
    even when it refuses. Otherwise generate one with `openssl rand -hex 24`. Every compose command stops
    at a render error until it is set.
-3. Get the image for that release. Without this, `run` uses the old local image, which has no copy command
-   and no refusal.
+3. Get the images for that release. Without this, `run` uses the old local image, which has no copy
+   command and no refusal. `start.sh` builds nothing, so on prod and dev build all four platform images
+   here. A backend-only build leaves the scheduler, MCP server and frontend on the previous release.
    ```bash
-   docker compose -f docker-compose.hosted.yml pull backend     # hosted
-   docker compose <your -f files> build backend                 # prod and dev
+   docker compose -f docker-compose.hosted.yml pull backend                               # hosted
+   docker compose <your -f files> build backend frontend mcp-server scheduler             # prod and dev
    ```
 4. Stop the stack and back up:
    ```bash
@@ -69,7 +70,11 @@ Keep `trinity.db` and the snapshot until you have checked the result. Writes mad
 exist only in PostgreSQL.
 
 **Rolling back:** check out the previous release, set `DATABASE_URL=` (empty), delete
-`trinity.db.copied-to-postgres`, and start the stack. `trinity.db` is unchanged.
+`trinity.db.copied-to-postgres`, and get that release's images before you start the stack: on prod and
+dev `docker compose <your -f files> build backend frontend mcp-server scheduler`; on hosted set
+`TRINITY_IMAGE_TAG` back to the previous release and `docker compose -f docker-compose.hosted.yml pull`.
+Without this the old compose file starts the newer backend image, which refuses SQLite. `trinity.db` is
+unchanged. `update.sh --rollback` does the rebuild for you.
 
 | Exit code | Meaning | Action |
 |---|---|---|

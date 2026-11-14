@@ -195,7 +195,10 @@ placeholder's clock, for the window before the feed has read the turn, and
 - `agents` is set-membership tested against the roster; an unknown or
   off-roster name is dropped, never answered (Invariant #8). More than 50 names
   is a named 422 before the limiter.
-- `title`/`error` pass `sanitize_text` and are bounded; `response`,
+- `title` passes `sanitize_text` and is bounded; `error` is the person-safe
+  sentence from `channel_completion_report.person_safe_failure`, never the row's
+  error (#4482 — that text carries the subscription walk trail); `outcome` still
+  reads the raw error to tell a timeout; `response`,
   `execution_log`, `tool_calls` are never on the payload; only a `portal` stamp
   becomes a `chat_id` (a Telegram destination is not the client's business).
 - `can_stop` is computed once, server-side, as exactly what

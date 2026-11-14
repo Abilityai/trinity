@@ -138,8 +138,16 @@ def whatsapp_binding(created_agent) -> dict:
         print(f"[whatsapp_binding teardown] {e}")
 
 
+@pytest.fixture
+def user_phone():
+    """A sender number of this test's own. /login is capped at 5 code requests
+    per sender per 10 minutes (ent#1253), in Redis, so a number shared across
+    tests or re-runs runs into the cap."""
+    return f"whatsapp:+1415{uuid.uuid4().int % 10**7:07d}"
+
+
 @pytest.fixture(autouse=True)
-def reset_chat_state_between_tests(whatsapp_binding):
+def reset_chat_state_between_tests(whatsapp_binding, user_phone):
     """Clear per-user verification + pending state between tests so each test
     sees a clean starting point."""
     binding_id = whatsapp_binding["id"]
@@ -148,9 +156,9 @@ def reset_chat_state_between_tests(whatsapp_binding):
     def _reset():
         script = (
             "from database import db; "
-            f"db.clear_whatsapp_verified_email({binding_id}, {_TEST_USER_PHONE!r}); "
+            f"db.clear_whatsapp_verified_email({binding_id}, {user_phone!r}); "
             "from adapters.whatsapp_adapter import _clear_pending_login; "
-            f"_clear_pending_login({binding_id}, {_TEST_USER_PHONE!r}); "
+            f"_clear_pending_login({binding_id}, {user_phone!r}); "
             "import sqlite3; c = sqlite3.connect('/data/trinity.db'); "
             f"c.execute(\"DELETE FROM access_requests WHERE agent_name = ?\", ({agent_name!r},)); "
             f"c.execute(\"UPDATE agent_ownership SET require_email=0, open_access=0 "
@@ -288,18 +296,18 @@ def _set_policy(agent_name: str, require_email: int, open_access: int):
 class TestWhatsAppLoginFlow:
     """End-to-end /login flow: email → code → verified."""
 
-    def test_login_email_creates_code_and_pending(self, whatsapp_binding):
+    def test_login_email_creates_code_and_pending(self, whatsapp_binding, user_phone):
         """POST /login <email> creates an email_login_codes row."""
         test_email = f"login-ok-{uuid.uuid4().hex[:6]}@example.com"
 
-        status = _post_webhook(whatsapp_binding, f"/login {test_email}")
+        status = _post_webhook(whatsapp_binding, f"/login {test_email}", from_phone=user_phone)
         assert status == 200, f"webhook rejected: HTTP {status}"
 
         # A code row should appear shortly
         code = _wait_for(lambda: _latest_login_code(test_email))
         assert code and len(code) == 6 and code.isdigit(), f"no code row: {code!r}"
 
-    def test_login_code_verifies_and_writes_email(self, whatsapp_binding):
+    def test_login_code_verifies_and_writes_email(self, whatsapp_binding, user_phone):
         """Full round-trip: /login email → /login code → verified_email set."""
         agent_name = whatsapp_binding["agent_name"]
         binding_id = whatsapp_binding["id"]
@@ -307,38 +315,38 @@ class TestWhatsAppLoginFlow:
 
         # Step 1 — request code, wait for pending-login in Redis to avoid
         # the known race where the DB has the code but Redis not yet.
-        assert _post_webhook(whatsapp_binding, f"/login {test_email}") == 200
+        assert _post_webhook(whatsapp_binding, f"/login {test_email}", from_phone=user_phone) == 200
         assert _wait_for(
-            lambda: _pending_login_matches(binding_id, _TEST_USER_PHONE, test_email),
+            lambda: _pending_login_matches(binding_id, user_phone, test_email),
             timeout_s=10.0,
         ), "pending-login Redis key never appeared"
         code = _latest_login_code(test_email)
         assert code, "no login code generated"
 
         # Step 2 — submit code
-        assert _post_webhook(whatsapp_binding, f"/login {code}") == 200
+        assert _post_webhook(whatsapp_binding, f"/login {code}", from_phone=user_phone) == 200
 
         # verified_email should now be set for this phone
         verified = _wait_for(
-            lambda: _verified_email_for(binding_id, _TEST_USER_PHONE)
+            lambda: _verified_email_for(binding_id, user_phone)
         )
         assert verified == test_email.lower(), f"expected {test_email!r}, got {verified!r}"
 
-    def test_login_invalid_code_does_not_verify(self, whatsapp_binding):
+    def test_login_invalid_code_does_not_verify(self, whatsapp_binding, user_phone):
         """A wrong 6-digit code must NOT write verified_email."""
         binding_id = whatsapp_binding["id"]
         test_email = f"badcode-{uuid.uuid4().hex[:6]}@example.com"
 
-        _post_webhook(whatsapp_binding, f"/login {test_email}")
+        _post_webhook(whatsapp_binding, f"/login {test_email}", from_phone=user_phone)
         _wait_for(
-            lambda: _pending_login_matches(binding_id, _TEST_USER_PHONE, test_email),
+            lambda: _pending_login_matches(binding_id, user_phone, test_email),
             timeout_s=10.0,
         )
 
         # Submit an obviously-wrong code
-        assert _post_webhook(whatsapp_binding, "/login 000000") == 200
+        assert _post_webhook(whatsapp_binding, "/login 000000", from_phone=user_phone) == 200
         time.sleep(1)  # allow processing
-        assert _verified_email_for(binding_id, _TEST_USER_PHONE) is None
+        assert _verified_email_for(binding_id, user_phone) is None
 
 
 @pytest.mark.slow
@@ -346,7 +354,7 @@ class TestWhatsAppAccessGate:
     """Post-verification gate — inlined into /login so user learns status immediately."""
 
     def test_verified_on_restrictive_policy_creates_access_request(
-        self, whatsapp_binding
+        self, whatsapp_binding, user_phone
     ):
         """require_email + not-shared → verification creates a pending access_requests row."""
         agent_name = whatsapp_binding["agent_name"]
@@ -355,25 +363,25 @@ class TestWhatsAppAccessGate:
 
         _set_policy(agent_name, require_email=1, open_access=0)
 
-        _post_webhook(whatsapp_binding, f"/login {test_email}")
+        _post_webhook(whatsapp_binding, f"/login {test_email}", from_phone=user_phone)
         assert _wait_for(
-            lambda: _pending_login_matches(binding_id, _TEST_USER_PHONE, test_email),
+            lambda: _pending_login_matches(binding_id, user_phone, test_email),
             timeout_s=10.0,
         ), "pending-login Redis key never appeared"
         code = _latest_login_code(test_email)
         assert code, "no code generated"
-        _post_webhook(whatsapp_binding, f"/login {code}")
+        _post_webhook(whatsapp_binding, f"/login {code}", from_phone=user_phone)
 
         # verified_email written
         assert _wait_for(
-            lambda: _verified_email_for(binding_id, _TEST_USER_PHONE)
+            lambda: _verified_email_for(binding_id, user_phone)
         ) == test_email.lower()
 
         # access_requests row created with channel='whatsapp'
         req = _wait_for(lambda: _access_request(agent_name, test_email.lower()))
         assert req == {"channel": "whatsapp", "status": "pending"}
 
-    def test_verified_on_open_access_no_request(self, whatsapp_binding):
+    def test_verified_on_open_access_no_request(self, whatsapp_binding, user_phone):
         """open_access=1 → verification does NOT create an access_requests row."""
         agent_name = whatsapp_binding["agent_name"]
         binding_id = whatsapp_binding["id"]
@@ -381,17 +389,17 @@ class TestWhatsAppAccessGate:
 
         _set_policy(agent_name, require_email=0, open_access=1)
 
-        _post_webhook(whatsapp_binding, f"/login {test_email}")
+        _post_webhook(whatsapp_binding, f"/login {test_email}", from_phone=user_phone)
         assert _wait_for(
-            lambda: _pending_login_matches(binding_id, _TEST_USER_PHONE, test_email),
+            lambda: _pending_login_matches(binding_id, user_phone, test_email),
             timeout_s=10.0,
         ), "pending-login Redis key never appeared"
         code = _latest_login_code(test_email)
         assert code
-        _post_webhook(whatsapp_binding, f"/login {code}")
+        _post_webhook(whatsapp_binding, f"/login {code}", from_phone=user_phone)
 
         assert _wait_for(
-            lambda: _verified_email_for(binding_id, _TEST_USER_PHONE)
+            lambda: _verified_email_for(binding_id, user_phone)
         ) == test_email.lower()
 
         # Give the handler time; there should still be NO access_requests row
@@ -403,7 +411,7 @@ class TestWhatsAppAccessGate:
 class TestWhatsAppLogoutWhoami:
     """/logout + /whoami don't crash, and /logout clears verified_email."""
 
-    def test_logout_clears_verified_email(self, whatsapp_binding):
+    def test_logout_clears_verified_email(self, whatsapp_binding, user_phone):
         agent_name = whatsapp_binding["agent_name"]
         binding_id = whatsapp_binding["id"]
         test_email = f"logout-{uuid.uuid4().hex[:6]}@example.com"
@@ -411,23 +419,23 @@ class TestWhatsAppLogoutWhoami:
         _set_policy(agent_name, require_email=0, open_access=1)
 
         # Verify
-        _post_webhook(whatsapp_binding, f"/login {test_email}")
+        _post_webhook(whatsapp_binding, f"/login {test_email}", from_phone=user_phone)
         assert _wait_for(
-            lambda: _pending_login_matches(binding_id, _TEST_USER_PHONE, test_email),
+            lambda: _pending_login_matches(binding_id, user_phone, test_email),
             timeout_s=10.0,
         ), "pending-login Redis key never appeared"
         code = _latest_login_code(test_email)
-        _post_webhook(whatsapp_binding, f"/login {code}")
+        _post_webhook(whatsapp_binding, f"/login {code}", from_phone=user_phone)
         assert _wait_for(
-            lambda: _verified_email_for(binding_id, _TEST_USER_PHONE)
+            lambda: _verified_email_for(binding_id, user_phone)
         ) == test_email.lower()
 
         # Logout
-        assert _post_webhook(whatsapp_binding, "/logout") == 200
+        assert _post_webhook(whatsapp_binding, "/logout", from_phone=user_phone) == 200
 
         # verified_email should now be NULL
         def _gone():
-            return _verified_email_for(binding_id, _TEST_USER_PHONE) is None
+            return _verified_email_for(binding_id, user_phone) is None
 
         assert _wait_for(_gone), "verified_email was not cleared by /logout"
 
