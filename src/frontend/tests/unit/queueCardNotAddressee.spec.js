@@ -92,6 +92,28 @@ describe('QueueCard — an answer refused because it was not addressed to you (m
     expect(notice(wrapper).exists()).toBe(true)
   })
 
+  // trinity-enterprise#1096: the server's refusal names who the card waits for.
+  it("shows the server's named refusal on the card", async () => {
+    const named = "This approval waits for the agent's owner: alice@example.com. Only they can decide it."
+    const { wrapper, store } = await mountExpanded()
+    axios.post.mockRejectedValueOnce({
+      response: { status: 403, data: { detail: { code: 'not_addressee', message: named, seat: 'owner', waiting_on: ['alice@example.com'] } } },
+    })
+    await approve(wrapper)
+
+    expect(notice(wrapper).text()).toContain(named)
+    expect(notice(wrapper).text()).not.toContain(QUEUE_RESPONSE_NOT_ADDRESSEE)
+    expect(store.items[0].status).toBe('pending')
+  })
+
+  it('keeps the generic line when the server names nobody', async () => {
+    const { wrapper } = await mountExpanded()
+    axios.post.mockRejectedValueOnce({ response: { status: 403, data: { detail: { code: 'not_addressee' } } } })
+    await approve(wrapper)
+
+    expect(notice(wrapper).text()).toContain(QUEUE_RESPONSE_NOT_ADDRESSEE)
+  })
+
   it('is cleared when dismissed', async () => {
     const { wrapper } = await mountExpanded()
     axios.post.mockRejectedValueOnce(REFUSED)
