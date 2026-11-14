@@ -445,13 +445,19 @@ _WORKSPACE_OPERATORS_REASON_KEY = "workspace_operators_reason"
 # raising execution (`shared_sessions.service.room_for_execution`); read by the
 # room's ending observer and the answer wake, which return the ask to the room.
 _WORKSPACE_ROOM_KEY = "workspace_room_id"
+# trinity-enterprise#1225: the turn that raised the ask, as the platform saw it
+# RUNNING (`turn_tier_service.continuation_origin` over the native raise's
+# `X-Trinity-Execution-Id`). The answer and ending wakes continue that turn and
+# are rated as it. Never `execution_id`: the file channel takes that from the
+# agent's own text.
+_CONTINUES_TURN_KEY = "continues_execution_id"
 # Every context key the platform writes and no agent may author: stripped at both
 # ingestion boundaries and ignored when comparing an agent's content.
 _PLATFORM_CONTEXT_KEYS = frozenset({
     _WORKSPACE_THREAD_KEY, _WORKSPACE_TURN_KEY, _WORKSPACE_DISCUSSION_KEY,
     _WORKSPACE_PROJECT_ID_KEY, _WORKSPACE_PROJECT_TASK_KEY, _WORKSPACE_PROJECT_EVENT_KEY,
     _WORKSPACE_PROJECT_SEAT_KEY, _WORKSPACE_OPERATORS_REASON_KEY,
-    _WORKSPACE_ROOM_KEY,
+    _WORKSPACE_ROOM_KEY, _CONTINUES_TURN_KEY,
 })
 
 

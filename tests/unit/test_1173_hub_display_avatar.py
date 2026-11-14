@@ -369,3 +369,40 @@ class TestInstallBundledAvatarBytes:
                     fn("test-agent", b"big_image_bytes")
         finally:
             patcher.stop()
+
+
+# ---------------------------------------------------------------------------
+# Tests: _install_bundled_avatar_bytes through the real Pillow decoder
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("source_format", ["PNG", "WEBP"])
+def test_install_decodes_a_real_bundled_image_into_a_webp_avatar(
+        source_format: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The two formats a template may bundle (`avatar.png`, `avatar.webp`) are
+    decoded, resized and re-encoded by the Pillow the backend image pins, with
+    nothing mocked between the raw bytes and the file on disk. The tests above
+    stub `Image.open` and `optimize_avatar`, so a Pillow upgrade that broke the
+    header read, `thumbnail` or the WebP encoder would leave them green."""
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (1024, 768), (40, 90, 160)).save(buf, format=source_format)
+    dest = tmp_path / "agent.webp"
+
+    crud, patcher = _load_crud(monkeypatch)
+    avatar_paths_mod = crud.avatar_paths
+    try:
+        with patch.object(avatar_paths_mod, "avatar_path_or_none", return_value=dest), \
+             patch.object(avatar_paths_mod, "ensure_avatar_store"):
+            crud._install_bundled_avatar_bytes("test-agent", buf.getvalue())
+    finally:
+        patcher.stop()
+
+    with Image.open(dest) as installed:
+        assert installed.format == "WEBP"
+        assert installed.size == (512, 384)
+        pixel = installed.convert("RGB").getpixel((256, 192))
+    assert isinstance(pixel, tuple)
+    assert all(abs(got - want) <= 8 for got, want in zip(pixel, (40, 90, 160), strict=True))

@@ -1,0 +1,9 @@
+{"version":"1.2.3","date":"2026-11-13","mode":"diff-daily","scope":"trinity#4505","counts_as_full_run":false,
+ "phases_run":[0,1,2,7,9,12,13,14],
+ "stack_cve_quicklist":[{"row":"all","verdict":"not reachable (no diff overlap)"}],
+ "attack_surface":{"new_endpoints":0,"new_inputs":0,"new_mcp_tools":0,"new_columns":0},
+ "findings":[],"hypotheses":[],
+ "coverage_gaps":["Docker pass not run (Docker down); diff has no image/dependency change"],
+ "supply_chain_summary":{"scanner":"none (no dependency change in diff)"},
+ "filter_stats":{"candidates":0,"reported":0},"totals":{"critical":0,"high":0,"medium":0,"low":0},
+ "trend":"n/a (diff run)"}

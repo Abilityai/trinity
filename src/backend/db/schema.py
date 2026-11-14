@@ -311,6 +311,12 @@ TABLES = {
             -- #3380: the /chat thread this turn answers, so a watchdog-claimed
             -- result can still write its reply there. NULL = not a /chat turn.
             chat_session_id TEXT,
+            -- ent#1225: the turn this row continues, written by the platform
+            -- only for a turn RUNNING on that agent when it was recorded. A
+            -- continuation trigger (caller_wake, operator_response,
+            -- operator_ending, skill_gate) is rated as that turn; a delegated
+            -- callee row records the caller's turn. NULL = none.
+            continues_execution_id TEXT,
             FOREIGN KEY (schedule_id) REFERENCES agent_schedules(id)
         )
     """,

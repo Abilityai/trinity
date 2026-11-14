@@ -38,7 +38,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from config import PORTAL_SOURCE_CHANNEL
+from config import PORTAL_SOURCE_CHANNEL, ROOM_SOURCE_CHANNEL
 from database import db
 from db.skill_gates import ORIGIN_CLEARED
 from models import TaskExecutionStatus
@@ -177,6 +177,7 @@ async def enforce(
     refuse_only: bool = False,
     gates: Optional[Mapping[str, SkillGate]] = None,
     context_text: Optional[str] = None,
+    request_parts: Optional[List[str]] = None,
 ) -> GateDecision:
     """Decide whether a request to `agent_name` may be dispatched now.
 
@@ -234,6 +235,39 @@ async def enforce(
             f"{_skill_list(names)} on {agent_name} needs approval, which "
             "can't be requested from here. Ask in chat instead.", skills=names)
 
+    # trinity#4505: a room's card text (its gated posts) is narrower than the
+    # scan, and must still name every skill the request matched — else the
+    # approver reads a request that names none, and Approve runs it. The gate
+    # map can change between the room's read and this one. The scanned text has
+    # no sender labels, so a post's newline could forge a sender line on it: raise
+    # no card. Room only: `/task` scans `user_message`, which its executor never
+    # receives (#3274). A name the sanitizer redacts (`MY_TOKEN=/pay-invoice`)
+    # is carded as redacted, and Approve runs that (`room_card_misses`). A room
+    # wake whose own map read failed sends no card text: refuse, so no card
+    # carries the raw, unlabelled slice. A match only in the context text (the
+    # waker's email, say) names no post, so the room sends no card: the normal
+    # card path below cards it with `_card_context`.
+    if triggered_by == "room":
+        replayed = "\n".join(t for t in ((dispatch or {}).get(REPLAY_MESSAGE),
+                                          (dispatch or {}).get(REPLAY_SYSTEM_PROMPT)) if t)
+        if not replayed and set(names) - set(beside):
+            logger.warning("[SkillGate] room wake for %s sent no card — refusing", agent_name)
+            raise SkillGateRefused(
+                503, "gate_unavailable",
+                f"Could not check whether this request to {agent_name} needs approval; "
+                "nothing was run. Try again shortly.")
+        # PR #4552 review 4: a card that misses a scanned name is a standing
+        # refusal. The room holds the gated posts, so a mismatch costs one wake.
+        if room_card_misses(set(names) - set(beside),
+                            request_parts if request_parts is not None else [request_text or ""],
+                            replayed, gates):
+            logger.warning("[SkillGate] room card for %s misses %s — refusing",
+                           agent_name, names)
+            raise SkillGateRefused(
+                409, "room_card_incomplete",
+                f"{_skill_list(names)} on {agent_name} needs approval, and this request "
+                "could not be put to an approver. Nothing was run, and it is not passed "
+                "on again. Ask again in a new message.", skills=names)
     clean_text = _card_text(request_text, dispatch)
     # The context lines go on the card only when a skill was named nowhere else
     # — otherwise the approver would read a request that names no gated skill.
@@ -287,7 +321,8 @@ async def enforce(
         requester_mcp_key_id=requester.mcp_key_id,
         origin_execution_id=origin_execution_id,
         triggered_by=triggered_by,
-        dispatch={**dict(dispatch or {}), **_requester_chat(requester)},
+        dispatch={**dict(dispatch or {}), **_requester_chat(requester),
+                  **_requester_continues(requester)},
     )
     if not created:   # a concurrent call for the same occurrence won
         raise _answer_for_record(record, role)
@@ -431,6 +466,7 @@ STANDING_REFUSALS = frozenset({
     "gated_skill_not_installed",
     "gated_skill_ambiguous",
     "gated_skill_unreadable",
+    "room_card_incomplete",
 })
 
 
@@ -957,8 +993,11 @@ def requester_for_dispatch(*, triggered_by: str, source_user_email: Optional[str
                          email=source_user_email)
     if triggered_by in _CHANNEL_TRIGGERS or source_channel:
         who = source_user_email or source_channel_chat_id or "unknown"
+        # trinity#4505: not a channel user. Not "a person" either: the gated
+        # post may be an agent's. The card's lines name each post's sender.
         return Requester(kind=KIND_CHANNEL, key=f"channel:{source_channel or triggered_by}:{who}",
-                         email=source_user_email)
+                         email=source_user_email,
+                         label="A room conversation" if source_channel == ROOM_SOURCE_CHANNEL else None)
     if triggered_by == "public":
         return Requester(kind=KIND_PUBLIC, key=f"public:{(source_user_email or 'anonymous').casefold()}",
                          email=source_user_email)
@@ -1447,6 +1486,10 @@ DISPATCH_FIELDS: Dict[str, str] = {
     # trinity#2328: the caller's per-task turn cap is a property of the task,
     # like its model and timeout — the approved run keeps it.
     "max_turns": FREEZE,
+    # trinity-enterprise#1225: the turn the request continues, recorded by the
+    # platform while it ran. The approved run is rated as that turn, as the
+    # request would have been.
+    "continues_execution_id": FREEZE,
     # trinity#3653: set on a requester's wake-up only; an approved run is the
     # requester's own request and never carries a binding agent of its own.
     "source_channel_agent": DROP,
@@ -1502,6 +1545,23 @@ REPLAY_SYSTEM_PROMPT = "replay_system_prompt"
 # in the record's `dispatch` beside the frozen fields and read only by the
 # requester's wake-up — never replayed to the approved run.
 REQUESTER_CHAT = "requester_chat"
+# trinity-enterprise#1225: the requesting AGENT's turn, recorded while it ran
+# (`turn_tier_service.continuation_origin`). The notice that wakes the
+# requester when the request is decided (`skill_gate`) continues that turn and
+# is rated as it. Never a dispatch field: the approved run is another agent's.
+REQUESTER_CONTINUES = "requester_continues"
+
+
+def _requester_continues(requester) -> Dict[str, str]:
+    """`{REQUESTER_CONTINUES: id}` for an agent requester whose named turn is
+    running on it now; empty otherwise (a person, `manual`, a finished or
+    foreign turn, an unreadable lookup)."""
+    agent = getattr(requester, "agent_name", None)
+    if not agent:
+        return {}
+    from services import turn_tier_service
+    origin = turn_tier_service.continuation_origin(db, agent, getattr(requester, "execution_id", None))
+    return {REQUESTER_CONTINUES: origin} if origin else {}
 
 
 def _requester_chat(requester: Requester) -> Dict[str, Dict[str, str]]:
@@ -1533,6 +1593,28 @@ def _requester_chat(requester: Requester) -> Dict[str, Dict[str, str]]:
         return {REQUESTER_CHAT: {k: v for k, v in chat.items() if v is not None}}
     except Exception:  # noqa: BLE001 — provenance never fails the gate
         return {}
+
+
+# trinity#4505: a room wake's scanned parts (each post the agent is shown, and
+# the ask answer), passed beside the replay keys in `gate_replay` for the
+# coverage check. Read by the backstop, never stored in the record.
+REQUEST_PARTS = "request_parts"
+
+
+def room_card_misses(names, request_parts: List[str], card: str, gates) -> set:
+    """The skills in `names` a room card must name and does not.
+
+    The card carries each gated part sanitised by itself, so what it must name
+    is what each gated part still names once sanitised by itself. Sanitising the
+    join lets a credential pattern reach across the line into the next part and
+    spell a name no part holds (PR #4552 review 4). A part the gate map read here
+    finds and the room's read did not (the map changed between them) is
+    required too."""
+    required = set()
+    for part in request_parts:
+        if find_gated_invocations(part, gates):
+            required.update(find_gated_invocations(sanitize_text(part), gates))
+    return set(names) & required - set(find_gated_invocations(card, gates))
 
 
 def frozen_replay(message: Optional[str], system_prompt: Optional[str] = None) -> Dict[str, str]:
@@ -1790,6 +1872,7 @@ async def _dispatch_approved(record: Dict[str, Any], execution_id: str) -> str:
             source_channel_chat_id=frozen.get("source_channel_chat_id"),
             source_channel_thread=frozen.get("source_channel_thread"),
             source_channel_client=frozen.get("source_channel_client"),
+            continues_execution_id=frozen.get("continues_execution_id"),
         ),
         execution_id=execution_id,
     )
@@ -2302,6 +2385,8 @@ async def _wake_requester_agent(record: Dict[str, Any], text: str, *,
                 message=text,
                 triggered_by=SKILL_GATE_TRIGGER,
                 chain_depth=frozen.get("chain_depth"),
+                # trinity-enterprise#1225: the notice stands as the requesting turn.
+                continues_execution_id=frozen.get(REQUESTER_CONTINUES),
                 **chat,
             )
         except Exception:  # noqa: BLE001 — a stopped requester misses it; the record stands
